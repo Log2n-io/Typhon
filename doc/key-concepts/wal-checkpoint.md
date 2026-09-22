@@ -10,7 +10,7 @@ description: 'The write-ahead log is what makes a commit durable — a change is
 
 A commit is written to the append-only WAL, and becomes **durable the instant its record is `fsync`'d** — *when* that happens is set by the [durability mode](xref:concept-durability). The checkpoint runs in the background, draining dirty [pages](xref:concept-page-cache) into the data file and marking consumed WAL segments recyclable. Crucially, the checkpoint **doesn't add durability** — a change is equally safe whether recovered by WAL replay or already on the data pages; the checkpoint only moves *where* the durable copy lives.
 
-WAL and checkpoint are **mandatory** (a whole-database no-WAL mode was removed); to run without disk I/O you inject an in-memory WAL backend rather than disabling it. On crash, recovery replays the WAL and reconstructs every transaction whose commit record reached disk, atomically.
+WAL and checkpoint are **mandatory** — there is no whole-database no-WAL mode; to run without disk I/O you inject an in-memory WAL backend rather than disabling it. On crash, recovery replays the WAL and reconstructs every transaction whose commit record reached disk, atomically.
 
 ## How it relates
 

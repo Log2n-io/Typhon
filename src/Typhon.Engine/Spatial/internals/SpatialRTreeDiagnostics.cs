@@ -8,7 +8,8 @@ namespace Typhon.Engine.Internals;
 /// Always-on diagnostics for the spatial R-Tree query DFS traversal (issue #422, Tier-0).
 ///
 /// <para>
-/// The DFS stack (<see cref="QueryStackBuffer"/>, 256 slots) bounds the number of pending sibling nodes across a query.
+/// The DFS stack bounds the number of pending sibling nodes across a query, at <see cref="QueryStackPool.Capacity"/> slots — a buffer rented from
+/// <see cref="QueryStackPool"/> for the AABB path (#916 O1), still the inline <see cref="QueryStackBuffer"/> for the frustum and count paths.
 /// With realistic fan-out and a tree depth capped at <see cref="SpatialRTreeConstants.MaxTreeDepth"/>, it can never fill —
 /// so an overflow means a degenerate/corrupt tree and would silently drop children (incomplete results). In Release the old
 /// <c>Debug.Fail</c> was compiled out, hiding this. This helper makes the overflow an <b>always-on record</b>:

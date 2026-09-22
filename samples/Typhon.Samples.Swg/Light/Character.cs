@@ -68,7 +68,7 @@ public struct Transform
 [StructLayout(LayoutKind.Sequential)]
 public struct Bounds
 {
-    [Field] [SpatialIndex(2.0f, Mode = SpatialMode.Dynamic)] public AABB2F Box;
+    [Field] [SpatialIndex(Mode = SpatialMode.Dynamic)] public AABB2F Box;
 }
 
 /// <summary>SingleVersion HAM — Star Wars Galaxies' signature stat model: three parallel pools, Health (physical),

@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 780" width="1200" height="780" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    .t   { font-size: 21px; font-weight: 700; fill: #18181b; }
+    .st  { font-size: 13.5px; fill: #52525b; }
+    .h   { font-size: 15px; font-weight: 700; fill: #18181b; }
+    .sn  { font-size: 13px; font-weight: 700; fill: #18181b; }
+    .b   { font-size: 11.5px; fill: #52525b; }
+    .lm  { font-size: 11.5px; fill: #71717a; }
+    .lb  { font-size: 13px; font-weight: 700; fill: #3f3f46; }
+    .mono{ font-size: 11.5px; font-family: ui-monospace, Consolas, monospace; fill: #3f3f46; }
+    .badge{ font-size: 11.5px; font-weight: 700; fill: #ffffff; }
+    .tick{ font-size: 10.5px; fill: #a1a1aa; }
+    .vg  { font-size: 11.5px; font-weight: 700; fill: #15803d; }
+    .vr  { font-size: 11.5px; font-weight: 700; fill: #b91c1c; }
+  </style>
+  <rect width="1200" height="780" fill="#ffffff"/>
+  <defs>
+    <marker id="dn" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#a1a1aa"/></marker>
+  </defs>
+
+  <text class="t"  x="40" y="38">Detect broadly, relocate narrowly</text>
+  <text class="st" x="40" y="60">Two gates stand between &#8220;an entity moved&#8221; and &#8220;an entity is moved to another cluster&#8221;. The first is per cluster, and it is what keeps a settled world free.</text>
+
+  <!-- ══ funnel ══ -->
+  <text class="h" x="40" y="106">The funnel, top to bottom</text>
+
+  <rect x="40" y="122" width="620" height="86" fill="#f4f4f5" stroke="#d4d4d8" rx="4"/>
+  <circle cx="62" cy="146" r="11" fill="#71717a"/><text class="badge" x="62" y="150" text-anchor="middle">1</text>
+  <text class="sn" x="82" y="150">Every entity in the archetype</text>
+  <text class="b"  x="82" y="170">Clusters nothing wrote to are skipped entirely, so a settled region of the</text>
+  <text class="b"  x="82" y="186">world costs nothing at all this tick.</text>
+  <rect x="82" y="194" width="560" height="7" fill="#a1a1aa" rx="3"/>
+
+  <path d="M 350 208 L 350 224" stroke="#a1a1aa" stroke-width="1.4" marker-end="url(#dn)"/>
+
+  <rect x="40" y="228" width="620" height="86" fill="#eff6ff" stroke="#2563eb" rx="4"/>
+  <circle cx="62" cy="252" r="11" fill="#2563eb"/><text class="badge" x="62" y="256" text-anchor="middle">2</text>
+  <text class="sn" x="82" y="256">Clusters written this tick</text>
+  <text class="b"  x="82" y="276">One consolidated slot walk per cluster caches every entity centre and totals</text>
+  <text class="b"  x="82" y="292">the centroid, for the bound, the guard and the drift test at once.</text>
+  <rect x="82" y="300" width="230" height="7" fill="#2563eb" rx="3"/>
+  <text class="lm" x="322" y="307">budgeted at 0.576 ns per entity</text>
+
+  <path d="M 350 314 L 350 330" stroke="#a1a1aa" stroke-width="1.4" marker-end="url(#dn)"/>
+
+  <rect x="40" y="334" width="620" height="86" fill="#fffbeb" stroke="#d97706" rx="4"/>
+  <circle cx="62" cy="358" r="11" fill="#d97706"/><text class="badge" x="62" y="362" text-anchor="middle">3</text>
+  <text class="sn" x="82" y="362">Clusters whose widest axis exceeds <tspan class="mono">cellSize &#215; 0.25</tspan></text>
+  <text class="b"  x="82" y="382">The per-cluster gate. A healthy world stops here, having done no per-entity</text>
+  <text class="b"  x="82" y="398">work whatsoever.</text>
+  <rect x="82" y="406" width="72" height="7" fill="#d97706" rx="3"/>
+
+  <path d="M 350 420 L 350 436" stroke="#a1a1aa" stroke-width="1.4" marker-end="url(#dn)"/>
+
+  <rect x="40" y="440" width="620" height="86" fill="#fef2f2" stroke="#dc2626" rx="4"/>
+  <circle cx="62" cy="464" r="11" fill="#dc2626"/><text class="badge" x="62" y="468" text-anchor="middle">4</text>
+  <text class="sn" x="82" y="468">Entities outside the target region by more than the margin</text>
+  <text class="b"  x="82" y="488">Per-entity test, against a region centred on the cluster&#8217;s <tspan font-weight="700">centroid</tspan>. Entities</text>
+  <text class="b"  x="82" y="504">inside the margin are counted, not moved.</text>
+  <rect x="82" y="512" width="26" height="7" fill="#dc2626" rx="3"/>
+
+  <path d="M 350 526 L 350 542" stroke="#a1a1aa" stroke-width="1.4" marker-end="url(#dn)"/>
+
+  <rect x="40" y="546" width="620" height="86" fill="#f0fdf4" stroke="#16a34a" rx="4"/>
+  <circle cx="62" cy="570" r="11" fill="#16a34a"/><text class="badge" x="62" y="574" text-anchor="middle">5</text>
+  <text class="sn" x="82" y="574">Drifters the budget admits, each with a destination</text>
+  <text class="b"  x="82" y="594">Placement asks the cell for the cluster whose bound grows least. What the</text>
+  <text class="b"  x="82" y="610">budget refuses is dropped, not deferred &#8212; next tick will detect it again.</text>
+  <rect x="82" y="618" width="13" height="7" fill="#16a34a" rx="3"/>
+
+  <!-- ══ inset A: centroid ══ -->
+  <text class="h" x="700" y="106">Why the centroid, and not the centre of the box</text>
+  <text class="lm" x="700" y="126">Thirty entities near x = 12, one outlier at x = 90. Same population, two choices of centre.</text>
+
+  <rect x="700" y="140" width="460" height="126" fill="#fef2f2" stroke="#dc2626" stroke-width="1.3" rx="4"/>
+  <text class="lb" x="716" y="162" fill="#b91c1c">Centred on the centre of the bound</text>
+  <rect x="880" y="182" width="100" height="44" fill="#dc2626" fill-opacity="0.10" stroke="#dc2626" stroke-width="1.6" stroke-dasharray="5 3"/>
+  <line x1="730" y1="204" x2="1130" y2="204" stroke="#d4d4d8" stroke-width="1.2"/>
+  <g fill="#a1a1aa">
+    <circle cx="762" cy="204" r="3.4"/><circle cx="770" cy="197" r="3.4"/><circle cx="778" cy="211" r="3.4"/><circle cx="786" cy="199" r="3.4"/>
+    <circle cx="794" cy="209" r="3.4"/><circle cx="802" cy="200" r="3.4"/><circle cx="768" cy="212" r="3.4"/><circle cx="788" cy="212" r="3.4"/>
+    <circle cx="776" cy="195" r="3.4"/><circle cx="798" cy="195" r="3.4"/><circle cx="758" cy="200" r="3.4"/><circle cx="766" cy="205" r="3.4"/><circle cx="774" cy="203" r="3.4"/><circle cx="782" cy="206" r="3.4"/><circle cx="790" cy="202" r="3.4"/><circle cx="798" cy="206" r="3.4"/><circle cx="764" cy="192" r="3.4"/><circle cx="780" cy="192" r="3.4"/><circle cx="792" cy="193" r="3.4"/><circle cx="800" cy="211" r="3.4"/><circle cx="806" cy="204" r="3.4"/><circle cx="760" cy="209" r="3.4"/><circle cx="772" cy="207" r="3.4"/><circle cx="784" cy="203" r="3.4"/><circle cx="796" cy="211" r="3.4"/><circle cx="804" cy="196" r="3.4"/><circle cx="810" cy="208" r="3.4"/><circle cx="752" cy="203" r="3.4"/><circle cx="756" cy="196" r="3.4"/><circle cx="810" cy="199" r="3.4"/>
+  </g>
+  <circle cx="1090" cy="204" r="4.6" fill="#dc2626"/>
+  <line x1="930" y1="178" x2="930" y2="230" stroke="#dc2626" stroke-width="1.6"/>
+  <text class="tick" x="898" y="242">centre = 50</text>
+  <text class="tick" x="756" y="242">the actual population</text>
+  <text class="tick" x="1062" y="242">outlier</text>
+  <text class="vr"  x="716" y="260">Every entity is flagged &#8212; the core is relocated away from where the cluster is.</text>
+
+  <rect x="700" y="278" width="460" height="126" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.3" rx="4"/>
+  <text class="lb" x="716" y="300" fill="#15803d">Centred on the centroid</text>
+  <rect x="738" y="320" width="100" height="44" fill="#16a34a" fill-opacity="0.12" stroke="#16a34a" stroke-width="1.6" stroke-dasharray="5 3"/>
+  <line x1="730" y1="342" x2="1130" y2="342" stroke="#d4d4d8" stroke-width="1.2"/>
+  <g fill="#22c55e">
+    <circle cx="762" cy="342" r="3.4"/><circle cx="770" cy="335" r="3.4"/><circle cx="778" cy="349" r="3.4"/><circle cx="786" cy="337" r="3.4"/>
+    <circle cx="794" cy="347" r="3.4"/><circle cx="802" cy="338" r="3.4"/><circle cx="768" cy="350" r="3.4"/><circle cx="788" cy="350" r="3.4"/>
+    <circle cx="776" cy="333" r="3.4"/><circle cx="798" cy="333" r="3.4"/><circle cx="758" cy="338" r="3.4"/><circle cx="766" cy="343" r="3.4"/><circle cx="774" cy="341" r="3.4"/><circle cx="782" cy="344" r="3.4"/><circle cx="790" cy="340" r="3.4"/><circle cx="798" cy="344" r="3.4"/><circle cx="764" cy="330" r="3.4"/><circle cx="780" cy="330" r="3.4"/><circle cx="792" cy="331" r="3.4"/><circle cx="800" cy="349" r="3.4"/><circle cx="806" cy="342" r="3.4"/><circle cx="760" cy="347" r="3.4"/><circle cx="772" cy="345" r="3.4"/><circle cx="784" cy="341" r="3.4"/><circle cx="796" cy="349" r="3.4"/><circle cx="804" cy="334" r="3.4"/><circle cx="810" cy="346" r="3.4"/><circle cx="752" cy="341" r="3.4"/><circle cx="756" cy="334" r="3.4"/><circle cx="810" cy="337" r="3.4"/>
+  </g>
+  <circle cx="1090" cy="342" r="4.6" fill="#dc2626"/>
+  <line x1="788" y1="316" x2="788" y2="368" stroke="#15803d" stroke-width="1.6"/>
+  <text class="tick" x="750" y="380">centroid = 14.5</text>
+  <text class="tick" x="1062" y="380">outlier</text>
+  <text class="vg"  x="716" y="398">Only the outlier is flagged. The centroid moves by 1/N, not by 1/2.</text>
+
+  <!-- ══ inset B: three outcomes ══ -->
+  <text class="h" x="700" y="440">Three outcomes for one entity</text>
+  <rect x="700" y="454" width="460" height="178" fill="#fafafa" stroke="#d4d4d8" rx="4"/>
+
+  <rect x="716" y="470" width="12" height="34" fill="#22c55e" rx="2"/>
+  <text class="sn" x="740" y="484">Inside the target region</text>
+  <text class="b"  x="740" y="500">Nothing happens. The common case in a merely lopsided cluster.</text>
+
+  <rect x="716" y="518" width="12" height="34" fill="#f59e0b" rx="2"/>
+  <text class="sn" x="740" y="532">Outside it, but within the drift margin</text>
+  <text class="b"  x="740" y="548">Counted as absorbed, not moved. An entity jittering across the boundary</text>
+  <text class="b"  x="740" y="564">would otherwise pay a full migration every tick to travel a few units.</text>
+
+  <rect x="716" y="578" width="12" height="42" fill="#dc2626" rx="2"/>
+  <text class="sn" x="740" y="592">Beyond the margin</text>
+  <text class="b"  x="740" y="608">A drifter. It takes the destination cluster whose bound grows least; if no</text>
+  <text class="b"  x="740" y="624">cluster is better it stays put and is counted as unplaced, which is a</text>
+  <text class="b"  x="740" y="640">different signal from &#8220;the budget refused it&#8221;.</text>
+
+  <!-- ══ bottom ══ -->
+  <rect x="40" y="660" width="1120" height="98" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4" rx="4"/>
+  <text class="lb" x="60" y="686">The asymmetry is the design: you can afford to look at everything, and you cannot afford to move everything.</text>
+  <text class="b"  x="60" y="710">Detection is a sequential scan of clusters that were written, at a budget of 0.576 ns per entity &#8212; 100 000 entities in about 58 &#181;s on one thread, less across the fence workers.</text>
+  <text class="b"  x="60" y="728">Relocation is hundreds of nanoseconds per entity, because it copies component bytes, claims and releases slots, and patches the entity map and every secondary index.</text>
+  <text class="lm" x="60" y="748">Three orders of magnitude separate the two, so every gate above exists to keep the expensive side small while leaving the cheap side free to see everything.</text>
+</svg>

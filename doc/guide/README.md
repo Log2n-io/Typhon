@@ -56,6 +56,7 @@ Read **chapter 1** to get productive. Come back for the rest when the moment arr
 | **4** | [Querying & views](04-querying.md) | find entities, build reactive views, subscribe to changes |
 | **5** | [Systems & the tick loop](05-systems.md) | run logic over your data every tick, in parallel |
 | **6** | [Operating & going deeper](06-operating.md) | observe, set resource budgets, handle errors, find the deep docs |
+| **★** | [Embedding without the runtime](embedding-without-the-runtime.md) | drive the engine from your own loop — and the one call you must not forget |
 | **★** | [Isolation & durability cheat sheet](isolation-durability-cheatsheet.md) | reassure yourself about a guarantee — the one-page reference to keep open (not a chapter; visit any time) |
 
 > 📦 **Run it, don't just read it.** The guide is backed by one maintained sample schema in two tiers, both of which compile in the repo ([`samples/Typhon.Samples.Swg`](https://github.com/Log2n-io/Typhon/tree/main/samples/Typhon.Samples.Swg)):

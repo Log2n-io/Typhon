@@ -19,7 +19,7 @@ class FenceChunkSizingDiagnosticTests : TestBase<FenceChunkSizingDiagnosticTests
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClMigPos>();
         dbe.RegisterComponentFromAccessor<ClMigScratch>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(1000, 1000),
             cellSize: 100f));
@@ -88,7 +88,7 @@ class FenceChunkSizingDiagnosticTests : TestBase<FenceChunkSizingDiagnosticTests
     }
 
     [Test]
-    public void AntHill_550Clusters_W16O2_Should_Reach_28_Chunks()
+    public void AntHill_550Clusters_W16O2_PrintsPlanStats()
     {
         using var dbe = SetupSpatialEngine();
         SpawnSpread(dbe, 1100); // ensure cluster state has enough capacity
@@ -106,16 +106,21 @@ class FenceChunkSizingDiagnosticTests : TestBase<FenceChunkSizingDiagnosticTests
         TestContext.WriteLine($"  TARGET: ~28 chunks at ~200µs each");
     }
 
+    /// <summary>
+    /// The chunk count follows the worker-aware grain (#889): 1 100 µs on 16 × 2 would be 34 µs a chunk, but a one-word AABB item cannot be split, so the
+    /// fattest item sets the grain and the count is <c>ceil(total / maxAtomic)</c>. Before #889 the same plan was six chunks of ~200 µs, ten workers idle.
+    /// </summary>
     [Test]
-    public void AntHill_550Clusters_W16O2_Hits_6_Chunks()
+    public void AntHill_550Clusters_W16O2_SpreadsOverTheWorkers()
     {
         using var dbe = SetupSpatialEngine();
         SpawnSpread(dbe, 1100);
 
         var r = DriveBuild(dbe, 550, 16, 2, 2f);
-        // After the 1-word-per-slice fix: 16 items (1 per word), ChunkCount = ceil(1100/200) = 6.
-        Assert.That(r.chunks, Is.EqualTo(6), $"expected 6 chunks for 1100µs total at 200µs floor; got {r.chunks}");
+        var grain = System.Math.Max(FenceWorkPlan.TargetChunkCost(r.totalCost, 16, 2), r.maxAtomic);
+        var expected = System.Math.Min(r.items, (int)System.Math.Ceiling(r.totalCost / grain));
+        Assert.That(r.chunks, Is.EqualTo(expected), $"chunks follow the grain max(target, fattest item) = {grain:F1} µs over {r.totalCost:F1} µs");
+        Assert.That(r.chunks, Is.GreaterThan(6), "the 200 µs rule's six chunks left ten of sixteen workers idle; the phase must be wider than that now");
         Assert.That(r.items, Is.GreaterThanOrEqualTo(r.chunks), "ItemCount must not bind ChunkCount");
-        Assert.That(r.totalCost / r.chunks, Is.InRange(150f, 220f), "per-chunk cost should be ~200µs");
     }
 }

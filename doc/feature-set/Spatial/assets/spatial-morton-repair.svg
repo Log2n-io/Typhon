@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 730" width="1200" height="730" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    .t   { font-size: 21px; font-weight: 700; fill: #18181b; }
+    .st  { font-size: 13.5px; fill: #52525b; }
+    .h   { font-size: 15px; font-weight: 700; fill: #18181b; }
+    .hs  { font-size: 12px; fill: #71717a; }
+    .l   { font-size: 12.5px; fill: #3f3f46; }
+    .lm  { font-size: 12px; fill: #71717a; }
+    .lb  { font-size: 13px; font-weight: 700; fill: #3f3f46; }
+    .met { font-size: 13px; font-weight: 700; }
+    .mono{ font-size: 11.5px; font-family: ui-monospace, Consolas, monospace; fill: #3f3f46; }
+    .step{ font-size: 10.5px; font-family: ui-monospace, Consolas, monospace; fill: #0369a1; }
+  </style>
+  <rect width="1200" height="730" fill="#ffffff"/>
+  <defs>
+    <marker id="ar" markerWidth="10" markerHeight="10" refX="9" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+  </defs>
+
+  <text class="t"  x="40" y="38">Repair &#8212; sort the cell along a Z-order curve, then re-pack in sort order</text>
+  <text class="st" x="40" y="60">The rare path, not the per-tick one. It rebuilds every cluster in a degraded cell from scratch, which is why it recovers tightness that incremental relocation cannot reach.</text>
+
+  <!-- ══ 1 · before ══ -->
+  <text class="h"  x="60" y="110">Before &#8212; a degraded cell</text>
+  <text class="hs" x="60" y="128">four clusters, members scattered, bounds overlapping</text>
+  <g transform="translate(60,145)">
+    <rect x="0" y="0" width="300" height="300" fill="#eff6ff" stroke="#2563eb" stroke-width="2.5"/>
+    <rect x="18" y="22" width="264" height="258" fill="#fef3c7" fill-opacity="0.3" stroke="#d97706" stroke-width="1.5"/>
+    <rect x="18" y="43" width="264" height="237" fill="#dcfce7" fill-opacity="0.3" stroke="#16a34a" stroke-width="1.5"/>
+    <rect x="45" y="22" width="210" height="258" fill="#ede9fe" fill-opacity="0.3" stroke="#7c3aed" stroke-width="1.5"/>
+    <rect x="18" y="22" width="264" height="237" fill="#ffe4e6" fill-opacity="0.3" stroke="#e11d48" stroke-width="1.5"/>
+    <g fill="#f59e0b"><circle cx="24" cy="28" r="4"/><circle cx="276" cy="49" r="4"/><circle cx="201" cy="124" r="4"/><circle cx="99" cy="178" r="4"/><circle cx="201" cy="199" r="4"/><circle cx="99" cy="253" r="4"/><circle cx="276" cy="274" r="4"/><circle cx="51" cy="124" r="4"/></g>
+    <g fill="#22c55e"><circle cx="126" cy="49" r="4"/><circle cx="201" cy="49" r="4"/><circle cx="99" cy="103" r="4"/><circle cx="24" cy="178" r="4"/><circle cx="276" cy="199" r="4"/><circle cx="126" cy="274" r="4"/><circle cx="201" cy="274" r="4"/><circle cx="249" cy="103" r="4"/></g>
+    <g fill="#8b5cf6"><circle cx="51" cy="49" r="4"/><circle cx="249" cy="28" r="4"/><circle cx="126" cy="124" r="4"/><circle cx="51" cy="199" r="4"/><circle cx="174" cy="178" r="4"/><circle cx="51" cy="274" r="4"/><circle cx="249" cy="253" r="4"/><circle cx="174" cy="103" r="4"/></g>
+    <g fill="#f43f5e"><circle cx="99" cy="28" r="4"/><circle cx="174" cy="28" r="4"/><circle cx="24" cy="103" r="4"/><circle cx="276" cy="124" r="4"/><circle cx="126" cy="199" r="4"/><circle cx="249" cy="178" r="4"/><circle cx="24" cy="253" r="4"/><circle cx="174" cy="253" r="4"/></g>
+  </g>
+  <text class="met" x="60" y="472" fill="#b91c1c">mean cluster extent 87.0</text>
+  <text class="lm"  x="60" y="490">every bound overlaps every other</text>
+
+  <path d="M 374 295 L 438 295" stroke="#2563eb" stroke-width="1.8" marker-end="url(#ar)"/>
+  <text class="lm" x="374" y="287">sort</text>
+
+  <!-- ══ 2 · the curve ══ -->
+  <text class="h"  x="450" y="110">Sort &#8212; one 63-bit key per entity</text>
+  <text class="hs" x="450" y="128">21 bits per axis, interleaved, X in the low bit of each triple</text>
+  <g transform="translate(450,145)">
+    <rect x="0" y="0" width="300" height="300" fill="#f8fafc" stroke="#2563eb" stroke-width="2.5"/>
+    <g stroke="#e2e8f0" stroke-width="1">
+      <line x1="75" y1="0" x2="75" y2="300"/><line x1="150" y1="0" x2="150" y2="300"/><line x1="225" y1="0" x2="225" y2="300"/>
+      <line x1="0" y1="75" x2="300" y2="75"/><line x1="0" y1="150" x2="300" y2="150"/><line x1="0" y1="225" x2="300" y2="225"/>
+    </g>
+    <polyline points="37.5,37.5 112.5,37.5 37.5,112.5 112.5,112.5 187.5,37.5 262.5,37.5 187.5,112.5 262.5,112.5 37.5,187.5 112.5,187.5 37.5,262.5 112.5,262.5 187.5,187.5 262.5,187.5 187.5,262.5 262.5,262.5"
+              fill="none" stroke="#0ea5e9" stroke-width="2.4" stroke-linejoin="round"/>
+    <g fill="#0ea5e9"><circle cx="37.5" cy="37.5" r="4.5"/><circle cx="262.5" cy="262.5" r="4.5"/></g>
+    <text class="step" x="44" y="30">first</text>
+    <text class="step" x="228" y="284">last</text>
+    <g fill="#a1a1aa">
+      <circle cx="24" cy="28" r="3.2"/><circle cx="51" cy="49" r="3.2"/><circle cx="99" cy="28" r="3.2"/><circle cx="126" cy="49" r="3.2"/>
+      <circle cx="174" cy="28" r="3.2"/><circle cx="201" cy="49" r="3.2"/><circle cx="249" cy="28" r="3.2"/><circle cx="276" cy="49" r="3.2"/>
+      <circle cx="24" cy="103" r="3.2"/><circle cx="51" cy="124" r="3.2"/><circle cx="99" cy="103" r="3.2"/><circle cx="126" cy="124" r="3.2"/>
+      <circle cx="174" cy="103" r="3.2"/><circle cx="201" cy="124" r="3.2"/><circle cx="249" cy="103" r="3.2"/><circle cx="276" cy="124" r="3.2"/>
+      <circle cx="24" cy="178" r="3.2"/><circle cx="51" cy="199" r="3.2"/><circle cx="99" cy="178" r="3.2"/><circle cx="126" cy="199" r="3.2"/>
+      <circle cx="174" cy="178" r="3.2"/><circle cx="201" cy="199" r="3.2"/><circle cx="249" cy="178" r="3.2"/><circle cx="276" cy="199" r="3.2"/>
+      <circle cx="24" cy="253" r="3.2"/><circle cx="51" cy="274" r="3.2"/><circle cx="99" cy="253" r="3.2"/><circle cx="126" cy="274" r="3.2"/>
+      <circle cx="174" cy="253" r="3.2"/><circle cx="201" cy="274" r="3.2"/><circle cx="249" cy="253" r="3.2"/><circle cx="276" cy="274" r="3.2"/>
+    </g>
+  </g>
+  <text class="met" x="450" y="472" fill="#0369a1">a 3D position becomes one sortable integer</text>
+  <text class="lm"  x="450" y="490">positions are cell-relative, so the key resolves</text>
+  <text class="lm"  x="450" y="506">the cell into 2 097 152 steps per axis</text>
+
+  <path d="M 764 295 L 828 295" stroke="#2563eb" stroke-width="1.8" marker-end="url(#ar)"/>
+  <text class="lm" x="764" y="287">re-pack</text>
+
+  <!-- ══ 3 · after ══ -->
+  <text class="h"  x="840" y="110">After &#8212; each cluster is a run of the curve</text>
+  <text class="hs" x="840" y="128">take the next N along the sort order, into a fresh cluster</text>
+  <g transform="translate(840,145)">
+    <rect x="0" y="0" width="300" height="300" fill="#eff6ff" stroke="#2563eb" stroke-width="2.5"/>
+    <rect x="18"  y="22"  width="114" height="108" fill="#fef3c7" fill-opacity="0.85" stroke="#d97706" stroke-width="1.6"/>
+    <rect x="168" y="22"  width="114" height="108" fill="#dcfce7" fill-opacity="0.85" stroke="#16a34a" stroke-width="1.6"/>
+    <rect x="18"  y="172" width="114" height="108" fill="#ede9fe" fill-opacity="0.85" stroke="#7c3aed" stroke-width="1.6"/>
+    <rect x="168" y="172" width="114" height="108" fill="#ffe4e6" fill-opacity="0.85" stroke="#e11d48" stroke-width="1.6"/>
+    <g fill="#f59e0b"><circle cx="24" cy="28" r="4"/><circle cx="51" cy="49" r="4"/><circle cx="99" cy="28" r="4"/><circle cx="126" cy="49" r="4"/><circle cx="24" cy="103" r="4"/><circle cx="51" cy="124" r="4"/><circle cx="99" cy="103" r="4"/><circle cx="126" cy="124" r="4"/></g>
+    <g fill="#22c55e"><circle cx="174" cy="28" r="4"/><circle cx="201" cy="49" r="4"/><circle cx="249" cy="28" r="4"/><circle cx="276" cy="49" r="4"/><circle cx="174" cy="103" r="4"/><circle cx="201" cy="124" r="4"/><circle cx="249" cy="103" r="4"/><circle cx="276" cy="124" r="4"/></g>
+    <g fill="#8b5cf6"><circle cx="24" cy="178" r="4"/><circle cx="51" cy="199" r="4"/><circle cx="99" cy="178" r="4"/><circle cx="126" cy="199" r="4"/><circle cx="24" cy="253" r="4"/><circle cx="51" cy="274" r="4"/><circle cx="99" cy="253" r="4"/><circle cx="126" cy="274" r="4"/></g>
+    <g fill="#f43f5e"><circle cx="174" cy="178" r="4"/><circle cx="201" cy="199" r="4"/><circle cx="249" cy="178" r="4"/><circle cx="276" cy="199" r="4"/><circle cx="174" cy="253" r="4"/><circle cx="201" cy="274" r="4"/><circle cx="249" cy="253" r="4"/><circle cx="276" cy="274" r="4"/></g>
+  </g>
+  <text class="met" x="840" y="472" fill="#15803d">mean cluster extent 23.0</text>
+  <text class="lm"  x="840" y="490">bounds are disjoint again, in one pass</text>
+
+  <!-- ══ bottom ══ -->
+  <line x1="40" y1="514" x2="1160" y2="514" stroke="#e4e4e7"/>
+
+  <rect x="40" y="534" width="352" height="176" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.4" rx="4"/>
+  <text class="lb" x="58" y="558">What it recovers</text>
+  <text class="l"  x="58" y="580">A cell of 2 000 entities in 41 clusters: mean extent</text>
+  <text class="l"  x="58" y="598">87.0 &#8594; 23.0 in a single pass.</text>
+  <text class="l"  x="58" y="622">Zone-map total width falls to 22 % of what it was.</text>
+  <text class="lm" x="58" y="640">This is the only thing in the engine that narrows a</text>
+  <text class="lm" x="58" y="657">zone map; every other path can only widen one.</text>
+  <text class="lm" x="58" y="682">Theoretical optimum for that cell is 15.6, so the</text>
+  <text class="lm" x="58" y="699">result sits at 1.47&#215; optimum &#8212; see right.</text>
+
+  <rect x="412" y="534" width="352" height="176" fill="#fffbeb" stroke="#d97706" stroke-width="1.4" rx="4"/>
+  <text class="lb" x="430" y="558">Why it does not reach the optimum</text>
+  <text class="l"  x="430" y="580">A contiguous stretch of a Z-order curve is a union of</text>
+  <text class="l"  x="430" y="598">quadtree cells, not a square. Here every run happened</text>
+  <text class="l"  x="430" y="616">to land on a quadrant; in general a run is L-shaped or</text>
+  <text class="l"  x="430" y="634">straddles a split, and its bound covers the join.</text>
+  <text class="lm" x="430" y="660">That 1.47&#215; is intrinsic to sorting along a space-filling</text>
+  <text class="lm" x="430" y="677">curve. It is the price of turning three dimensions into</text>
+  <text class="lm" x="430" y="694">one comparable key, and it is a good price.</text>
+
+  <rect x="784" y="534" width="376" height="176" fill="#fef2f2" stroke="#dc2626" stroke-width="1.4" rx="4"/>
+  <text class="lb" x="802" y="558">Why it cannot be the per-tick path</text>
+  <text class="l"  x="802" y="580">Measured on a warm engine, in Release: 1 331 to</text>
+  <text class="l"  x="802" y="598">6 992 ns per entity moved. A 100 000-entity cell</text>
+  <text class="l"  x="802" y="616">projects to about 133 ms &#8212; not 6 ms, as first modelled.</text>
+  <text class="lm" x="802" y="642">So a repair is admitted in whole units, worst cell first,</text>
+  <text class="lm" x="802" y="659">and a unit the remaining budget cannot finish is never</text>
+  <text class="lm" x="802" y="676">started: a half-sorted cell is worse than an untouched</text>
+  <text class="lm" x="802" y="693">one. The default unit is a cell&#8217;s eight worst clusters.</text>
+</svg>

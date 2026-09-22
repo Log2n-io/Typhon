@@ -135,6 +135,13 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     private int _inflightCount;
 
     /// <summary>
+    /// #937 — the highest LSN any frame was PUBLISHED with, as opposed to the highest LSN claimed (<see cref="NextLsn"/>).
+    /// Deliberately on the publish-hot line beside <see cref="_inflightCount"/>: <see cref="Publish"/> already takes that line
+    /// exclusive for its decrement, so the added max-CAS rides a line this core owns rather than costing a second bounce.
+    /// </summary>
+    private long _lastPublishedLsn;
+
+    /// <summary>
     /// Monotonic count of completed buffer swaps. This — not <see cref="_activeBufferIndex"/> — is what a producer parked in the back-pressure loop waits on.
     /// </summary>
     /// <remarks>
@@ -263,6 +270,13 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     public long NextLsn => _lsnBase + LsnOffsetOf(Interlocked.Read(ref _claim));
 
     /// <summary>
+    /// #937 — highest LSN carried by a frame that reached <see cref="Publish"/>. Unlike <see cref="NextLsn"/> this can
+    /// only name an LSN some frame owns, so a wait for it always has something that will drain: an abandoned claim publishes a skip
+    /// frame and never moves it, and a producer that times out over the buffer boundary never published at all.
+    /// </summary>
+    public long LastPublishedLsn => Interlocked.Read(ref _lastPublishedLsn);
+
+    /// <summary>
     /// Seeds the LSN allocator so the next record claimed gets LSN == <paramref name="lsn"/>. Called once from <see cref="WalManager.Initialize"/> BEFORE the
     /// writer thread starts (single-threaded — plain write, no barrier needed for a ≤64-bit field), to continue the global LSN sequence past the durability
     /// frontier on reopen. Without it the counter restarts at 1 every session; a reopened session's records then fall below a prior session's persisted
@@ -277,6 +291,15 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
         if (lsn > _lsnBase + offset)
         {
             _lsnBase = lsn - offset;
+        }
+
+        // #937: the published frontier has to be seeded with the LSN base, or a reopened engine reports a published
+        // frontier of 0 while DurableLsn is seeded to the replayed frontier — DurableLsn > LastPublishedLsn, which inverts WP-01's
+        // ordering and makes the first checkpoint's barrier read as already satisfied for the wrong reason. Same call, same
+        // single-threaded pre-Start window as the base itself (#712).
+        if (lsn - 1 > Interlocked.Read(ref _lastPublishedLsn))
+        {
+            Interlocked.Exchange(ref _lastPublishedLsn, lsn - 1);
         }
     }
 
@@ -540,8 +563,28 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
 
         // Write record count + the frame's highest LSN first (plain stores — consumer reads these after seeing FrameLength). LastLsn is the honest per-frame
         // watermark source (LOG-05): the consumer takes the max over drained frames so DurableLsn cannot advance past an unwritten record's LSN.
+        var lastLsn = claim.FirstLSN + claim.RecordCount - 1;
         frameHeader->RecordCount = claim.RecordCount;
-        frameHeader->LastLsn = claim.FirstLSN + claim.RecordCount - 1;
+        frameHeader->LastLsn = lastLsn;
+
+        // #937: publish the frame's high LSN into the buffer-wide published frontier. Publishes complete out of claim
+        // order, so this is a max, not a store. The Volatile.Read pre-check is what keeps the common case to one pass and one
+        // uncontended CAS; the loop only spins when two publishes race and the loser has the higher LSN.
+        //
+        // BEFORE the FrameLength release, not after, and that order is load-bearing for CK-02. AP-01 puts every page effect
+        // strictly after the append returns, so a frontier read taken after this method returns covers every record a captured
+        // page can reflect. Moving the max after the release would open a window where the frame is drainable — and its page
+        // effects therefore imminent — while the frontier still omits it, which is exactly the gap CK-02 forbids.
+        var published = Volatile.Read(ref _lastPublishedLsn);
+        while (lastLsn > published)
+        {
+            var seen = Interlocked.CompareExchange(ref _lastPublishedLsn, lastLsn, published);
+            if (seen == published)
+            {
+                break;
+            }
+            published = seen;
+        }
 
         // Release fence: Interlocked.Exchange ensures all prior writes (record data + RecordCount + LastLsn) are visible to the consumer before it sees the
         // non-zero FrameLength.
@@ -771,8 +814,10 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
             spinWait.SpinOnce();
         }
 
-        // Drain any remaining published frames that arrived while we were waiting
-        DrainRemaining(oldBuffer);
+        // Nothing may remain: a swap is only ever entered with the drain position AT the padding sentinel or at capacity, and every
+        // frame below it has therefore been drained and WRITTEN (CompleteDrain runs after the write). This asserts that rather than
+        // assuming it, because the reset below discards the buffer.
+        AssertNothingLeftToDrain(oldBuffer);
 
         // Perform the buffer swap
         var newIndex = 1 - _activeBufferIndex;
@@ -811,28 +856,35 @@ internal sealed unsafe class WalCommitBuffer : IDisposable
     }
 
     /// <summary>
-    /// Drains any remaining published frames from the old buffer after inflight count reaches zero. These are frames that late publishers finished after
-    /// the swap was requested.
+    /// Verifies that the old buffer holds no published frame the writer has not yet written, immediately before the swap discards it.
     /// </summary>
-    private void DrainRemaining(byte* buffer)
+    /// <remarks>
+    /// This replaces a loop that ADVANCED <see cref="_drainPosition"/> over any such frame (#937). Advancing is the one thing that must
+    /// never happen here: the writer only writes what <see cref="TryDrain"/> hands it, so stepping over a published frame drops a
+    /// committed record on the floor while nothing downstream can notice — WP-15's exact failure mode, and it would have been silent.
+    /// <para>
+    /// It never fired, and by construction it cannot: both call paths enter <see cref="PerformSwap"/> only with the drain position at a
+    /// padding sentinel or at <see cref="BufferCapacity"/>, a sentinel is never overwritten, and <see cref="_drainPosition"/> is
+    /// writer-thread-only — so the loop's first iteration always broke. That is precisely why it was worth removing rather than leaving:
+    /// dead code that reads as a safety net is how a later change acquires a silent data-loss path without anyone reviewing one.
+    /// </para>
+    /// </remarks>
+    private void AssertNothingLeftToDrain(byte* buffer)
     {
-        while (_drainPosition < BufferCapacity)
+        if (_drainPosition >= BufferCapacity)
         {
-            var frameHeader = (WalFrameHeader*)(buffer + _drainPosition);
-            var frameLength = Volatile.Read(ref frameHeader->FrameLength);  // acquire: pairs with the producer's Interlocked.Exchange release on FrameLength
-
-            if (frameLength == 0)
-            {
-                break;
-            }
-
-            if (frameLength == WalFrameHeader.PaddingSentinel)
-            {
-                break;
-            }
-
-            _drainPosition += frameLength;
+            return;
         }
+
+        var frameLength = Volatile.Read(ref ((WalFrameHeader*)(buffer + _drainPosition))->FrameLength);  // acquire: pairs with the producer's release on FrameLength
+        if (frameLength == 0 || frameLength == WalFrameHeader.PaddingSentinel)
+        {
+            return;
+        }
+
+        ThrowHelper.ThrowInvalidOp(
+            $"WAL buffer swap reached a published frame at drain position {_drainPosition} (length {frameLength}): its bytes have not been "
+            + "written and the swap is about to discard them (WP-15).");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -132,7 +132,7 @@ public class SpatialQueryTests
         var treeResults = new HashSet<long>();
         foreach (var hit in tree.QueryRadius(center, radius))
         {
-            treeResults.Add(hit.EntityId);
+            treeResults.Add(hit.PayloadId);
         }
 
         var oracleResults = oracle.QueryRadius(center, radius);
@@ -179,7 +179,7 @@ public class SpatialQueryTests
         var treeResults = new HashSet<long>();
         foreach (var hit in tree.QueryRay(origin, direction, maxDist))
         {
-            treeResults.Add(hit.EntityId);
+            treeResults.Add(hit.PayloadId);
         }
 
         var oracleResults = oracle.QueryRay(origin, direction, maxDist);
@@ -239,7 +239,7 @@ public class SpatialQueryTests
         var treeResults = new HashSet<long>();
         foreach (var hit in tree.QueryFrustum(planes, 4))
         {
-            treeResults.Add(hit.EntityId);
+            treeResults.Add(hit.PayloadId);
         }
 
         var oracleResults = oracle.QueryFrustum(planes, 4);
@@ -540,40 +540,6 @@ public class SpatialQueryTests
 
     [Test]
     [CancelAfter(5000)]
-    public void QueryResult_ExposesComponentChunkId()
-    {
-        using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
-        using var em = _serviceProvider.GetRequiredService<EpochManager>();
-        var guard = EpochGuard.Enter(em);
-
-        var desc = SpatialNodeDescriptor.ForVariant(SpatialVariant.R2Df32);
-        var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 64, desc.Stride);
-        var tree = new SpatialRTree<PersistentStore>(segment, SpatialVariant.R2Df32);
-
-        // Insert entities with known componentChunkIds
-        var accessor = segment.CreateChunkAccessor();
-        try
-        {
-            tree.Insert(entityId: 100, componentChunkId: 42, stackalloc double[] { 10, 10, 20, 20 }, ref accessor);
-            tree.Insert(entityId: 200, componentChunkId: 99, stackalloc double[] { 50, 50, 60, 60 }, ref accessor);
-        }
-        finally { accessor.Dispose(); }
-
-        // Query should return both EntityId and ComponentChunkId
-        var results = new List<(long entityId, int compChunkId)>();
-        foreach (var hit in tree.QueryAABB(stackalloc double[] { 0, 0, 100, 100 }))
-        {
-            results.Add((hit.EntityId, hit.ComponentChunkId));
-        }
-
-        Assert.That(results, Has.Count.EqualTo(2));
-        Assert.That(results, Has.Some.Matches<(long entityId, int compChunkId)>(r => r.entityId == 100 && r.compChunkId == 42));
-        Assert.That(results, Has.Some.Matches<(long entityId, int compChunkId)>(r => r.entityId == 200 && r.compChunkId == 99));
-        guard.Dispose();
-    }
-
-    [Test]
-    [CancelAfter(5000)]
     public void CompoundQuery_TwoPassPattern_CategoryMaskThenComponentFilter()
     {
         using var pmmf = _serviceProvider.GetRequiredService<ManagedPagedMMF>();
@@ -598,14 +564,15 @@ public class SpatialQueryTests
                 double x = rng.NextDouble() * 1000, y = rng.NextDouble() * 1000;
                 uint mask = (i % 3 == 0) ? 0x01u : 0x02u; // 1/3 enemies, 2/3 allies
                 box[0] = x; box[1] = y; box[2] = x + 5; box[3] = y + 5;
-                tree.Insert(i + 1, i + 1, box, ref accessor, categoryMask: mask);
+                tree.Insert(i + 1, box, ref accessor, categoryMask: mask);
             }
         }
         finally { accessor.Dispose(); }
 
         // Two-pass compound query: "enemies near center with health > 50"
         // Pass 1: spatial + category mask (done by the tree)
-        // Pass 2: component predicate on the reduced set (done by caller using ComponentChunkId)
+        // Pass 2: component predicate on the reduced set, resolved by the caller from the payload id. Until #872 step 13 the leaf also carried the owning
+        // component's chunk id so pass 2 could reach component storage without a lookup; that column served only the entity-level tree, which is gone.
         Span<double> queryCoords = stackalloc double[] { 200, 200, 800, 800 };
 
         int spatialHits = 0;
@@ -615,11 +582,8 @@ public class SpatialQueryTests
         {
             spatialHits++;
 
-            // Pass 2: simulate reading component data via ComponentChunkId
-            // In real code: byte* compData = componentCBS.GetChunkAddress(hit.ComponentChunkId);
-            // Here we simulate: "health > 50" as entityId % 100 > 50
-            Assert.That(hit.ComponentChunkId, Is.GreaterThan(0), "ComponentChunkId should be set");
-            int simulatedHealth = (int)(hit.EntityId % 100);
+            // Pass 2: simulate "health > 50" as payloadId % 100 > 50.
+            int simulatedHealth = (int)(hit.PayloadId % 100);
             if (simulatedHealth > 50)
             {
                 postFilterHits++;

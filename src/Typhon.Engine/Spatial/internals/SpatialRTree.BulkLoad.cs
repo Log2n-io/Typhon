@@ -11,24 +11,31 @@ internal unsafe partial class SpatialRTree<TStore>
     /// </summary>
     /// <param name="segment">Pre-allocated CBS with stride matching the variant's descriptor</param>
     /// <param name="variant">Spatial variant (2D/3D × f32/f64)</param>
-    /// <param name="entityIds">EntityId for each entry</param>
-    /// <param name="componentChunkIds">Component CBS chunk ID for each entry</param>
+    /// <param name="payloadIds">Opaque 64-bit identity for each entry</param>
     /// <param name="coords">Flat array: entityCount × coordCount doubles, ordered [min0, min1, ..., max0, max1, ...] per entity</param>
     /// <param name="categoryMasks">Category bitmask for each entry</param>
     /// <param name="changeSet">ChangeSet for WAL participation (null for non-WAL)</param>
     /// <returns>A fully constructed tree. Returns an empty tree if input is empty.</returns>
-    internal static SpatialRTree<TStore> BulkLoad(ChunkBasedSegment<TStore> segment, SpatialVariant variant, ReadOnlySpan<long> entityIds,
-        ReadOnlySpan<int> componentChunkIds, ReadOnlySpan<double> coords, ReadOnlySpan<uint> categoryMasks, ChangeSet changeSet = null)
+    internal static SpatialRTree<TStore> BulkLoad(ChunkBasedSegment<TStore> segment, SpatialVariant variant, ReadOnlySpan<long> payloadIds,
+        ReadOnlySpan<double> coords, ReadOnlySpan<uint> categoryMasks, ChangeSet changeSet = null)
     {
         // Phase 3: Spatial:RTree:BulkLoad span. EntityCount/LeafCount filled at exit.
-        var bulkScope = TyphonEvent.BeginSpatialRTreeBulkLoad(entityIds.Length);
+        var bulkScope = TyphonEvent.BeginSpatialRTreeBulkLoad(payloadIds.Length);
         try
         {
 
             // Create an empty tree first (reserves chunk 0 for metadata)
             var tree = new SpatialRTree<TStore>(segment, variant, false, changeSet);
 
-            int entityCount = entityIds.Length;
+            // BulkLoad packs leaves directly and reports no per-entry positions, so a handle-holding owner would end up with an array of handles that name
+            // nothing. Refusing is the honest option: silently building such a tree hands the caller the stale-handle bug the back-pointer array exists to
+            // remove, and it would surface as wrong query answers rather than as anything pointing here (#872 step 9).
+            if (tree.PayloadBackPointers != null)
+            {
+                ThrowHelper.ThrowInvalidOp("SpatialRTree.BulkLoad does not maintain PayloadBackPointers; build the tree with Insert, or extend BulkLoad.");
+            }
+
+            int entityCount = payloadIds.Length;
             if (entityCount == 0)
             {
                 bulkScope.LeafCount = 0;
@@ -82,8 +89,7 @@ internal unsafe partial class SpatialRTree<TStore>
                             for (int j = 0; j < count; j++)
                             {
                                 int srcIdx = sortIndex[start + j];
-                                tree.WriteLeafEntry(leafBase, j, entityIds[srcIdx], componentChunkIds[srcIdx],
-                                    coords.Slice(srcIdx * coordCount, coordCount), categoryMasks[srcIdx]);
+                                tree.WriteLeafEntry(leafBase, j, payloadIds[srcIdx], coords.Slice(srcIdx * coordCount, coordCount), categoryMasks[srcIdx]);
                             }
 
                             SpatialNodeHelper.SetCount(leafBase, count);

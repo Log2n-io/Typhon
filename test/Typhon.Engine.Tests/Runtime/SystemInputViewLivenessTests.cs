@@ -25,7 +25,11 @@ namespace Typhon.Engine.Tests.Runtime;
 [NonParallelizable]
 class SystemInputViewLivenessTests : TestBase<SystemInputViewLivenessTests>
 {
+    // Quarantined against #893: the spawn below is committed from the TEST thread against a runtime ticking at 1 kHz, which is an EW-01 violation by
+    // construction — 5 runs in 40 in Release, green in Debug only because the timing rarely overlaps there. The guard is right and the fixture is the
+    // messenger: there is no handshake today for an outside committer to be admitted between ticks. Un-quarantine when #893 settles which way that goes.
     [Test]
+    [Category("Quarantine")]
     [VerifiesRule("BIND-04")]
     public void SystemInputView_SeesEntitiesSpawnedWhileTheRuntimeIsRunning()
     {

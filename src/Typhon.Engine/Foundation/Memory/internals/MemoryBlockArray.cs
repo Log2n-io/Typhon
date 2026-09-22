@@ -2,15 +2,17 @@ using JetBrains.Annotations;
 using System;
 using System.Buffers;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
 
+/// <summary>A block of GC-managed memory, addressed as a span or <see cref="Memory{T}"/> — never by pointer.</summary>
+/// <remarks>
+/// Raw pointers address page-cache and engine-allocator memory only (CLAUDE.md, Unsafe Code). <see cref="Pin"/> used to pin the array with a
+/// <c>GCHandle</c> and hand out its address. A block that must be addressed by pointer comes from <see cref="IMemoryAllocator.AllocatePinned"/>.
+/// </remarks>
 [PublicAPI]
 internal class MemoryBlockArray : MemoryBlockBase
 {
-    private int _pinCount;
-    private GCHandle _handle;
     public byte[] DataAsArray { get; private set; }
     internal MemoryBlockArray(MemoryAllocator allocator, byte[] block, string resourceId, IResource parent, ushort sourceTag = 0) :
         base(allocator, resourceId ?? Guid.NewGuid().ToString(), parent, sourceTag)
@@ -32,26 +34,12 @@ internal class MemoryBlockArray : MemoryBlockBase
 
     public override Span<byte> GetSpan() => DataAsSpan;
 
-    public unsafe override MemoryHandle Pin(int elementIndex = 0)
-    {
-        if (_pinCount == 0)
-        {
-            _handle = GCHandle.Alloc(DataAsArray, GCHandleType.Pinned);
-        }
-
-        _pinCount++;
-
-        return new MemoryHandle((byte*)_handle.AddrOfPinnedObject() + elementIndex, _handle, this);
-    }
+    public override MemoryHandle Pin(int elementIndex = 0) =>
+        throw new NotSupportedException("A MemoryBlockArray is GC memory and is never addressed by pointer. Allocate with IMemoryAllocator.AllocatePinned "
+            + "for a block that must be.");
 
     public override void Unpin()
     {
-        --_pinCount;
-        if (_pinCount == 0)
-        {
-            _handle.Free();
-            _handle = default;
-        }
     }
 
     public override IEnumerable<IResource> Children => [];
@@ -63,6 +51,5 @@ internal class MemoryBlockArray : MemoryBlockBase
             ["IsDisposed"] = IsDisposed,
             ["Allocator"] = Allocator.Id,
             ["Kind"] = "Array",
-            ["IsPinned"] = _pinCount > 0,
         };
 }

@@ -114,10 +114,9 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         _memPagesBaseAddr = store.MemPagesBaseAddress;
 
         // Initialize page indices to invalid (-1). Other arrays are zero-initialized by struct init.
-        fixed (int* pageIndices = _pageIndices)
-        {
-            Unsafe.InitBlockUnaligned(pageIndices, 0xFF, Capacity * sizeof(int));
-        }
+        // All bits set, every slot empty. Through a ref, not a pinned pointer: an accessor is often a field of a class. InitBlockUnaligned, not
+        // Span.Fill: inlined into a caller, Fill unrolls into one scalar store per slot, where a constant-size initblk is two vector stores.
+        Unsafe.InitBlockUnaligned(ref Unsafe.As<int, byte>(ref _pageIndices[0]), 0xFF, Capacity * sizeof(int));
 
     }
 
@@ -227,7 +226,7 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         // Setting ACW > 0 here ensures the clear is atomic w.r.t. checkpoint snapshots: the snapshot either runs entirely BEFORE this method (sees the chunk's
         // PREVIOUS content, but that's OK because the bitmap bit is also still =0 if FreeChunk's snapshot hasn't yet fsync'd) or entirely AFTER (sees cleared
         // content).
-        var addr = GetChunkAddress(index, dirty: true);
+        var addr = GetChunkAddress(index, true);
         new Span<long>(addr, _stride / 8).Clear();
     }
 
@@ -238,20 +237,18 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     {
         (int si, _) = _segment.GetChunkLocation(index);
 
-        fixed (int* indices = _pageIndices)
-        {
-            var target = Vector256.Create(si);
+        ref int indices = ref _pageIndices[0];   // a ref, not a pinned pointer: an accessor is often a field of a class
+        var target = Vector256.Create(si);
 
-            // Const-trip loop over the window in Vector256<int> (8-slot) strides — JIT-unrolled under AggressiveOptimization.
-            for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
+        // Const-trip loop over the window in Vector256<int> (8-slot) strides — JIT-unrolled under AggressiveOptimization.
+        for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
+        {
+            var v = Vector256.LoadUnsafe(ref indices, (nuint)baseSlot);
+            var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
+            if (mask != 0)
             {
-                var v = Vector256.Load(indices + baseSlot);
-                var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
-                if (mask != 0)
-                {
-                    MarkSlotDirty(baseSlot + BitOperations.TrailingZeroCount(mask));
-                    return;
-                }
+                MarkSlotDirty(baseSlot + BitOperations.TrailingZeroCount(mask));
+                return;
             }
         }
     }
@@ -309,18 +306,16 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     {
         (int pageIndex, _) = _segment.GetChunkLocation(chunkId);
 
-        fixed (int* indices = _pageIndices)
-        {
-            var target = Vector256.Create(pageIndex);
+        ref int indices = ref _pageIndices[0];   // a ref, not a pinned pointer: an accessor is often a field of a class
+        var target = Vector256.Create(pageIndex);
 
-            for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
+        for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
+        {
+            var v = Vector256.LoadUnsafe(ref indices, (nuint)baseSlot);
+            var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
+            if (mask != 0)
             {
-                var v = Vector256.Load(indices + baseSlot);
-                var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
-                if (mask != 0)
-                {
-                    return _store.TryLatchPageExclusive(GetMemPageIndexFromSlot(baseSlot + BitOperations.TrailingZeroCount(mask)));
-                }
+                return _store.TryLatchPageExclusive(GetMemPageIndexFromSlot(baseSlot + BitOperations.TrailingZeroCount(mask)));
             }
         }
 
@@ -334,19 +329,17 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
     {
         (int pageIndex, _) = _segment.GetChunkLocation(chunkId);
 
-        fixed (int* indices = _pageIndices)
-        {
-            var target = Vector256.Create(pageIndex);
+        ref int indices = ref _pageIndices[0];   // a ref, not a pinned pointer: an accessor is often a field of a class
+        var target = Vector256.Create(pageIndex);
 
-            for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
+        for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
+        {
+            var v = Vector256.LoadUnsafe(ref indices, (nuint)baseSlot);
+            var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
+            if (mask != 0)
             {
-                var v = Vector256.Load(indices + baseSlot);
-                var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
-                if (mask != 0)
-                {
-                    _store.UnlatchPageExclusive(GetMemPageIndexFromSlot(baseSlot + BitOperations.TrailingZeroCount(mask)));
-                    return;
-                }
+                _store.UnlatchPageExclusive(GetMemPageIndexFromSlot(baseSlot + BitOperations.TrailingZeroCount(mask)));
+                return;
             }
         }
     }
@@ -400,20 +393,18 @@ public unsafe struct ChunkAccessor<TStore> : IDisposable where TStore : struct, 
         }
 
         // === FAST PATH: SIMD search through cache ===
-        fixed (int* indices = _pageIndices)
-        {
-            var target = Vector256.Create(pageIndex);
+        ref int indices = ref _pageIndices[0];   // a ref, not a pinned pointer: an accessor is often a field of a class
+        var target = Vector256.Create(pageIndex);
 
-            // Const-trip loop over the window in Vector256<int> (8-slot) strides — JIT-unrolled under AggressiveOptimization.
-            for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
+        // Const-trip loop over the window in Vector256<int> (8-slot) strides — JIT-unrolled under AggressiveOptimization.
+        for (int baseSlot = 0; baseSlot < Capacity; baseSlot += Vector256<int>.Count)
+        {
+            var v = Vector256.LoadUnsafe(ref indices, (nuint)baseSlot);
+            var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
+            if (mask != 0)
             {
-                var v = Vector256.Load(indices + baseSlot);
-                var mask = Vector256.Equals(v, target).ExtractMostSignificantBits();
-                if (mask != 0)
-                {
-                    var slot = baseSlot + BitOperations.TrailingZeroCount(mask);
-                    return GetFromSlot(slot, pageIndex, offset, dirty);
-                }
+                var slot = baseSlot + BitOperations.TrailingZeroCount(mask);
+                return GetFromSlot(slot, pageIndex, offset, dirty);
             }
         }
 

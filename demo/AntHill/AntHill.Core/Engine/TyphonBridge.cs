@@ -401,7 +401,7 @@ public sealed class TyphonBridge : IDisposable
         DBE.RegisterComponentFromAccessor<NestInfo>();
         DBE.RegisterComponentFromAccessor<Obstacle>();
 
-        DBE.ConfigureSpatialGrid(new SpatialGridConfig(
+        DBE.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: Vector2.Zero,
             worldMax: new Vector2(WorldSize, WorldSize),
             cellSize: CellSize,
@@ -472,9 +472,10 @@ public sealed class TyphonBridge : IDisposable
         FoodPickedUpQueue   = schedule.CreateEventQueue<FoodPickedUpEvent>("FoodPickedUp", capacity: 4096);
         FoodDeliveredQueue  = schedule.CreateEventQueue<FoodDeliveredEvent>("FoodDelivered", capacity: 4096);
 
-        // The whole simulation is one DAG on the Public track. Its four DAG-local phases form a total order — every
-        // system in phase N completes before any system in phase N+1. The Workbench's System DAG view uses this skeleton
-        // as the swim-lane structure.
+        // The whole simulation is one DAG on the Public track. Its four DAG-local phases form a total order that binds
+        // through the access declarations and explicit edges, not as a barrier: a system in phase N+1 waits for a phase-N
+        // system only when a declared conflict or an explicit edge connects them, directly or through other systems. The
+        // Workbench's System DAG view uses this skeleton as the swim-lane structure.
         var dag = schedule.PublicTrack.DeclareDag("AntHill")
             .Phases(Phase.Input, AntPhases.Simulation, AntPhases.Trail, AntPhases.Render)
             .DefaultPhase(AntPhases.Render);
@@ -584,7 +585,7 @@ public sealed class TyphonBridge : IDisposable
                     continue;
                 }
 
-                grid.SetCellTier(cx, cy, tier);
+                grid.SetCellTier(cx, cy, 0, tier);
                 _tierMirror[cy * GridCells + cx] = (byte)BitOperations.TrailingZeroCount((uint)(byte)tier);
             }
         }
@@ -612,7 +613,7 @@ public sealed class TyphonBridge : IDisposable
                         var mi = cy * GridCells + cx;
                         if (_tierMirror[mi] > 0)   // worse than T0
                         {
-                            grid.SetCellTier(cx, cy, SimTier.Tier0);
+                            grid.SetCellTier(cx, cy, 0, SimTier.Tier0);
                             _tierMirror[mi] = 0;
                         }
                     }
@@ -934,7 +935,7 @@ public sealed class TyphonBridge : IDisposable
             var rockCountLocal = _rockCount;
             if (rockCountLocal > 0)
             {
-                ref readonly var caabb = ref cluster.SpatialBounds;
+                var caabb = cluster.SpatialBounds;
                 const float expandMargin = RockCollisionRadius + 50f;
                 var rMinX = caabb.MinX - expandMargin;
                 var rMaxX = caabb.MaxX + expandMargin;
@@ -1686,7 +1687,7 @@ public sealed class TyphonBridge : IDisposable
             var liveCount = cluster.LiveCount;
 
             // Fast reject: cluster tight AABB fully outside camera (with margin)
-            ref readonly var bounds = ref cluster.SpatialBounds;
+            var bounds = cluster.SpatialBounds;
             if (bounds.MaxX < clipMinX || bounds.MinX > clipMaxX || bounds.MaxY < clipMinY || bounds.MinY > clipMaxY)
             {
                 continue;
@@ -2096,16 +2097,16 @@ public sealed class TyphonBridge : IDisposable
                                     // Phase 6 polish — Fight alarm phero (3×3 stamp) at the victim
                                     // position so the colony "hears the scream". Drives workers to flee
                                     // and soldiers to converge on the spider's neighbourhood.
-                                    PheromoneGrid.DepositArea(_pheromones.Fight, hit.MinX, hit.MinY, FightDeposit);
+                                    PheromoneGrid.DepositArea(_pheromones.Fight, (float)hit.MinX, (float)hit.MinY, FightDeposit);
                                     killsLeft--;
                                     killsDone++;
                                     continue;
                                 }
                                 if (d2 < bestD2)
                                 {
-                                    bestD2 = d2;
-                                    bestX = ax;
-                                    bestY = ay;
+                                    bestD2 = (float)d2;
+                                    bestX = (float)ax;
+                                    bestY = (float)ay;
                                     foundTarget = true;
                                 }
                             }

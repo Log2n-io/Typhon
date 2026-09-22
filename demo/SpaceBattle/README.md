@@ -25,7 +25,7 @@ every rendering decision below, because it means a ship is **0.09 pixels** with 
 | | | |
 |---|---|---|
 | World | 100 000 m | 100 km square |
-| Cell | 2 000 m | 51×51 grid, Morton-padded to 4 096 |
+| Cell | 2 000 m | 51×51×1 grid (a flat world is one cell deep on Z) |
 | Ship | 5 m radius | 10 m hull |
 | Station | 150 m radius | 300 m structure |
 | Asteroid | 400 m radius | a landmark, visible one LOD tier after ships vanish |
@@ -208,7 +208,7 @@ around with the right mouse button.
 
 | Overlay | Meaning |
 |---|---|
-| Grey grid | **Level 1** — the spatial grid. `cellCount` is Morton-padded to a power of two, so it exceeds `GridWidth × GridHeight` |
+| Grey grid | **Level 1** — the spatial grid. `cellCount` is `GridWidth × GridHeight × GridDepth`; a flat world has `GridDepth == 1` |
 | Blue cell fill | per-cell `EntityCount` (cross-archetype, from the internal `CellState`) |
 | **Green boxes** | **Level 2** — ship cluster AABBs. The overlap you see *is* the problem |
 | Yellow boxes | projectile cluster AABBs |

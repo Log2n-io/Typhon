@@ -45,12 +45,12 @@ component re-declared inside one inheritance chain is rejected the same way (`TP
 consume a second component slot that nothing can address.
 
 > [!IMPORTANT]
-> **Within a tree, the constraint is still enforced per archetype today.** Each archetype owns its own B+Tree for the
+> **Within a tree, the constraint is enforced per archetype.** Each archetype owns its own B+Tree for the
 > indexed field and the duplicate check is a lookup in *that* tree, so two entities in different archetypes of one
-> subtree can still hold the same key, and a query over the ancestor returns both. The schema rule above closes the
-> half that can be settled at declaration time; enforcing the subtree scope itself needs a subtree-scoped structure and
-> is tracked by [#678](https://github.com/Log2n-io/Typhon/issues/678). The per-archetype trees and the storage layout
-> described above are unaffected by that work.
+> subtree can hold the same key, and a query over the ancestor returns both. The schema rule above closes the
+> half that can be settled at declaration time; enforcing the subtree scope itself would need a subtree-scoped
+> structure, which does not exist. The per-archetype trees and the storage layout described above are independent
+> of it.
 
 ## 💻 Usage
 
@@ -91,17 +91,17 @@ using (var tx = dbe.CreateQuickTransaction())
 
 ## ⚠️ Guarantees & limits
 
-- Zero storage overhead beyond the field itself — no hidden `ElementId`, and no TAIL history segment is allocated
-  on account of this index.
+- Zero storage overhead beyond the field itself — no hidden `ElementId`, and no buffer store of any kind: the
+  value sits directly in the B+Tree node.
 - `Move` is the commit-time operation for a value change: one descent, at most two leaf write-locks, never a
   separate remove-then-insert pair.
 - A duplicate key **within one archetype** on create or update throws `UniqueConstraintViolationException`
   (`TyphonErrorCode.UniqueConstraintViolation`, 4001; non-transient) at `Commit()`, not at `Spawn`/`Write` time — the
   key is only resolved against the B+Tree at commit.
 - **A duplicate key across two archetypes sharing the component is accepted, and both entities remain reachable.**
-  The scope of the constraint is the archetype, not the archetype tree — see the note above and
-  [#678](https://github.com/Log2n-io/Typhon/issues/678). Model a field as unique only when the entities carrying it
-  all live in one archetype, or accept that the check does not span siblings.
+  The scope of the constraint is the archetype, not the archetype tree — see the note above. Model a field as
+  unique only when the entities carrying it all live in one archetype, or accept that the check does not span
+  siblings.
 - `Transaction.EnumerateIndex` is the only read path; there is no separate `TryGet`-style point-lookup entry point
   in the public API — pass `minKey == maxKey` for a point lookup.
 - Switching a field to `AllowMultiple` later is a schema change: it adds the 4-byte `ElementId` overhead to every
@@ -117,7 +117,7 @@ using (var tx = dbe.CreateQuickTransaction())
 - Parent feature: [Secondary Index Storage Modes](./README.md)
 - Sibling: [Multi-value secondary index (AllowMultiple)](./multi-value-secondary-index.md)
 
-<!-- Deep dive: claude/design/Indexing/index-scope-and-uniqueness.md — subtree scope, #678 -->
+<!-- Deep dive: claude/design/Indexing/index-scope-and-uniqueness.md — subtree scope -->
 <!-- Deep dive: claude/overview/04-data.md §4.7 B+Tree Indexes -->
 <!-- Deep dive: claude/design/Indexing/public-api.md -->
 <!-- Deep dive: claude/design/Errors/05-public-exception-catalog.md — Index chain -->

@@ -24,10 +24,10 @@ scanning it, every `AllowMultiple`-indexed field carries a hidden 4-byte `Elemen
 within the HEAD buffer) added to the component's storage overhead — this is paid by every component instance with
 such a field, not just ones currently sharing a key with others. Commit-time mutation runs `MoveValue` (value
 change) and `RemoveValue` (deletion) instead of the unique path's `Move`/`Remove`, both addressed directly by that
-`ElementId`. On `Versioned` components, every gain or loss additionally appends to a per-key TAIL history buffer
-— a single `TailVSBS` segment shared by all `AllowMultiple` indexes on the table, allocated once if any exist and
-populated lazily per key on that key's first mutation. `SingleVersion`/`Transient` components get the HEAD buffer
-only — no revision chain means there is no history to keep.
+`ElementId`. The HEAD buffers live in the same chunk segment as the index's own B+Tree nodes, as a variable-sized
+buffer store over that segment; a key's buffer is allocated when the key is first inserted and released once its
+last element is removed. The shape is identical under every component storage mode — `SingleVersion`, `Versioned`
+and `Transient` all get the HEAD buffer and nothing besides it.
 
 ## 💻 Usage
 
@@ -70,15 +70,13 @@ using (var tx = dbe.CreateQuickTransaction())
 
 - Every `AllowMultiple`-indexed field costs +4 bytes (`ElementId`) per component instance, regardless of storage
   mode — paid even while the field's current value happens to be unique to one entity.
-- TAIL history exists only for `AllowMultiple` indexes on `Versioned` components (see the Storage Mode Feature
-  Matrix in `claude/overview/04-data.md`); `SingleVersion`/`Transient` carry the HEAD buffer only, with no history.
+- HEAD buffer membership is current state only, on `Versioned` components as much as on `SingleVersion` or
+  `Transient` ones: the buffer records which entities hold a key now, and keeps no record of which held it before.
 - `MoveValue`/`RemoveValue` do strictly more commit-time work than the unique path's `Move`/`Remove`: they splice
-  an entry into and/or out of a HEAD buffer, and on `Versioned` tables also append TAIL entries — cost is
-  proportional to the change being made, not to the group's size.
+  an entry into and/or out of a HEAD buffer — cost is proportional to the change being made, not to the group's
+  size.
 - HEAD buffer membership order is not guaranteed (an unordered set with swap-compact removal); only the ordering
   of keys across a range scan is guaranteed ascending.
-- TAIL entries are pruned once no active transaction's snapshot can still need them (the `MinTSN` boundary); one
-  boundary entry per chain is retained so a reader exactly at the prune point still resolves correctly.
 
 ## 🧪 Tests
 

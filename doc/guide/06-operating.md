@@ -93,7 +93,7 @@ The engine manages its own memory: a paged, memory-mapped store with a cache, th
 });
 ```
 
-The page cache defaults to **256 MiB** (`PagedMMFOptions.DefaultCacheSizeBytes`) — a production-shaped default, not a development one. Size it to your workload's transaction working set; the permitted range is 8 MiB to 4 GiB. Every wired `Resources` knob is **range-checked automatically at DI resolution** by `DatabaseEngineOptionsValidator`, so an out-of-range configuration fails at startup rather than at first use — there is no manual validation step to remember.
+The page cache defaults to **256 MiB** (`PagedMMFOptions.DefaultCacheSizeBytes`) — a production-shaped default, not a development one. Size it to your workload's transaction working set; the permitted range is 8 MiB to 2 GiB minus one page. Every wired `Resources` knob is **range-checked automatically at DI resolution** by `DatabaseEngineOptionsValidator`, so an out-of-range configuration fails at startup rather than at first use — there is no manual validation step to remember.
 
 > 💡 **Cache size is not a database-size cap.** `DatabaseCacheSize` bounds the *resident working set*, not how much you can store — the on-disk database can be many times the cache; cold pages live on disk and page in on demand (persistent data, indexes, and the entity map all page out — only *Transient* components stay RAM-resident). Size the cache for throughput/latency, not capacity. This is the SQL/SQLite model, and it's what sets Typhon apart from in-memory ECS frameworks.
 
@@ -155,7 +155,7 @@ This guide is the *task-oriented* layer. When you need struct layouts, algorithm
 | ECS storage internals, generated accessors, archetype layout | [06-ecs](../in-depth-overview/06-ecs.md) |
 | Schema diffing & the migration engine | [04-schema](../in-depth-overview/04-schema.md) |
 | Index structures (B+Tree) and the query planner | [03-indexing](../in-depth-overview/03-indexing.md) · [09-querying](../in-depth-overview/09-querying.md) |
-| The spatial grid + R-tree, broad-phase, margins | [07-spatial](../in-depth-overview/07-spatial.md) |
+| The spatial grid + R-tree, broad-phase, cluster bounds | [07-spatial](../in-depth-overview/07-spatial.md) |
 | Transaction/UoW mechanics, conflict detection | [08-transactions](../in-depth-overview/08-transactions.md) |
 | The scheduler in full — DAG derivation, overload, fence | [10-runtime](../in-depth-overview/10-runtime.md) |
 | WAL, checkpoint, crash recovery (FPI) | [11-durability](../in-depth-overview/11-durability.md) |

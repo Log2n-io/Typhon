@@ -20,10 +20,13 @@ expensive (full-grid passes).
 
 ## ⚙️ How it works (in brief)
 
-Each cell is colored Red or Black from the parity of its grid coordinates, `(cellX + cellY) % 2`. No two
-orthogonally-adjacent cells share a color, so the engine can dispatch all Red clusters in parallel, wait
-for them to finish, then dispatch all Black clusters in parallel — a system that only touches
-face-adjacent neighbors never observes a half-written neighbor. This is implemented as a single DAG node
+Each cell is colored Red or Black from the parity of its grid coordinates, `(cellX + cellY + cellZ) % 2`.
+The grid is three-dimensional, so face adjacency includes the Z axis: each of a cell's six orthogonal
+neighbors differs from it in exactly one coordinate and so carries the opposite color. No two face-sharing
+cells share a color, so the engine can dispatch all Red clusters in parallel, wait for them to finish,
+then dispatch all Black clusters in parallel — a system that only touches face-adjacent neighbors never
+observes a half-written neighbor. A flat world has `cellZ = 0` throughout, so its split is exactly the
+familiar 2D checkerboard. This is implemented as a single DAG node
 with two internal phases, not two DAG nodes: after the Red phase's chunks all complete, the scheduler's
 cleanup hook signals "re-dispatch," the same node runs again scoped to Black, and only then do successors
 fire. From the DAG's perspective — and from every other system's perspective — checkerboard dispatch is

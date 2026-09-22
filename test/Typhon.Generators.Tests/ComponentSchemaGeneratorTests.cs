@@ -29,7 +29,7 @@ namespace Typhon.Schema.Definition
     public sealed class FieldAttribute : System.Attribute { public int? FieldId { get; set; } public string Name { get; set; } public string PreviousName { get; set; } }
     public sealed class IndexAttribute : System.Attribute { public bool AllowMultiple { get; set; } public CascadeAction OnParentDelete { get; set; } }
     public sealed class ForeignKeyAttribute : System.Attribute { public ForeignKeyAttribute(System.Type t) { } }
-    public sealed class SpatialIndexAttribute : System.Attribute { public SpatialIndexAttribute(float margin, float cellSize = 0f) { } public SpatialMode Mode { get; set; } public uint Category { get; set; } }
+    public sealed class SpatialIndexAttribute : System.Attribute { public SpatialIndexAttribute(float cellSize = 0f) { } public SpatialMode Mode { get; set; } public uint Category { get; set; } }
     public enum StorageMode { Versioned = 0, SingleVersion = 1, Transient = 2 }
     public enum CommitDiscipline { TickFence = 0, Commit = 1 }
     public enum SpatialMode : byte { Dynamic = 0, Static = 1 }
@@ -45,7 +45,7 @@ namespace Typhon.Schema.Definition
     {
         public ComponentFieldSpec(string name, System.Type dotNetType, int offset, string previousName = null, int? explicitFieldId = null,
             bool isStatic = false, int arrayLength = 0, bool hasIndex = false, bool indexAllowMultiple = false, bool isForeignKey = false,
-            System.Type foreignKeyTargetType = null, bool hasSpatialIndex = false, float spatialMargin = 0f, float spatialCellSize = 0f,
+            System.Type foreignKeyTargetType = null, bool hasSpatialIndex = false, float spatialCellSize = 0f,
             SpatialMode spatialMode = SpatialMode.Dynamic, uint spatialCategory = 4294967295u) { }
     }
     public struct AABB2F { public float MinX, MinY, MaxX, MaxY; }
@@ -119,7 +119,7 @@ namespace Game
         [Index]
         public long ParentLink;
 
-        [SpatialIndex(2.0f, cellSize: 4.0f, Mode = SpatialMode.Static, Category = 7)]
+        [SpatialIndex(cellSize: 4.0f, Mode = SpatialMode.Static, Category = 7)]
         public AABB2F Bounds;
     }
 }
@@ -156,7 +156,6 @@ namespace Game
             Assert.That(reg, Does.Contain("hasIndex: true, indexAllowMultiple: true"));
             Assert.That(reg, Does.Contain("isForeignKey: true, foreignKeyTargetType: typeof(global::Game.Fk)"));
             Assert.That(reg, Does.Contain("hasSpatialIndex: true"));
-            Assert.That(reg, Does.Contain("spatialMargin: 2f"));
             Assert.That(reg, Does.Contain("spatialCellSize: 4f"));
             Assert.That(reg, Does.Contain("spatialMode: (global::Typhon.Schema.Definition.SpatialMode)1"));
             Assert.That(reg, Does.Contain("spatialCategory: 7u"));

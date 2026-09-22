@@ -25,7 +25,6 @@ namespace Typhon.Engine.Tests.Runtime;
 [Category("Nightly")]
 class SubscriptionStressTests : TestBase<SubscriptionStressTests>
 {
-    private const int StressPort = 19900;
 
     [OneTimeSetUp]
     public void OneTimeSetup()
@@ -87,7 +86,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
     {
         const int clientCount = 50;
         const int ticksToRun = 30;
-        var port = StressPort;
+        var port = TestPortAllocator.NextFreePort();
 
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
@@ -200,7 +199,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
     public void RapidConnectDisconnect_NoServerCrash()
     {
         const int iterations = 200;
-        var port = StressPort + 1;
+        var port = TestPortAllocator.NextFreePort();
 
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
@@ -285,7 +284,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
     public void HighEntityChurn_SpawnDestroy_DeltasConsistent()
     {
         const int entitiesPerTick = 20;
-        var port = StressPort + 20; // Unique port for this test
+        var port = TestPortAllocator.NextFreePort();
 
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
@@ -393,7 +392,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
     [Explicit("Stress test — backpressure and resync, run manually")]
     public void Backpressure_SlowClient_TriggersResync()
     {
-        var port = StressPort + 3;
+        var port = TestPortAllocator.NextFreePort();
 
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();
@@ -492,7 +491,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
     public void ConcurrentSetSubscriptions_LastWriterWins_NoCorruption()
     {
         const int ticksToRun = 100;
-        var port = StressPort + 4;
+        var port = TestPortAllocator.NextFreePort();
 
         using var dbe = SetupEngine();
         using var viewTx1 = dbe.CreateQuickTransaction();
@@ -606,7 +605,7 @@ class SubscriptionStressTests : TestBase<SubscriptionStressTests>
         const int clientCount = 10;
         const int ticksToRun = 100;
         const int entitiesPerTick = 5;
-        var port = StressPort + 5;
+        var port = TestPortAllocator.NextFreePort();
 
         using var dbe = SetupEngine();
         using var viewTx = dbe.CreateQuickTransaction();

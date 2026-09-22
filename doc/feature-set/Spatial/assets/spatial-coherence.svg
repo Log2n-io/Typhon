@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 760" width="1200" height="760" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    .t   { font-size: 21px; font-weight: 700; fill: #18181b; }
+    .st  { font-size: 13.5px; fill: #52525b; }
+    .h   { font-size: 16px; font-weight: 700; fill: #18181b; }
+    .hs  { font-size: 12.5px; fill: #71717a; }
+    .l   { font-size: 12.5px; fill: #3f3f46; }
+    .lm  { font-size: 12px; fill: #71717a; }
+    .lb  { font-size: 13.5px; font-weight: 700; fill: #3f3f46; }
+    .tag { font-size: 12px; font-weight: 700; }
+    .big { font-size: 28px; font-weight: 700; }
+    .mid { font-size: 12.5px; fill: #52525b; }
+  </style>
+  <rect width="1200" height="760" fill="#ffffff"/>
+  <defs>
+    <marker id="l" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#a1a1aa"/></marker>
+    <marker id="r" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#a1a1aa"/></marker>
+  </defs>
+
+  <text class="t"  x="40" y="38">What &#8220;spatially coherent&#8221; means</text>
+  <text class="st" x="40" y="60">One cell, 24 entities, four clusters of six. The positions are identical in both panels. Only the assignment of entity to cluster differs.</text>
+
+  <!-- ══════════ LEFT: coherent ══════════ -->
+  <text class="h"  x="60" y="104">Coherent &#8212; neighbours share a cluster</text>
+  <text class="hs" x="60" y="124">what re-clustering maintains</text>
+  <g transform="translate(60,140) scale(1.2)">
+    <rect x="0" y="0" width="340" height="340" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+
+    <rect x="32"  y="32"  width="102" height="108" fill="#fef3c7" fill-opacity="0.85" stroke="#d97706" stroke-width="1.5"/>
+    <rect x="198" y="30"  width="120" height="106" fill="#dcfce7" fill-opacity="0.85" stroke="#16a34a" stroke-width="1.5"/>
+    <rect x="36"  y="200" width="122" height="104" fill="#ede9fe" fill-opacity="0.85" stroke="#7c3aed" stroke-width="1.5"/>
+    <rect x="196" y="196" width="118" height="112" fill="#ffe4e6" fill-opacity="0.85" stroke="#e11d48" stroke-width="1.5"/>
+
+    <g fill="#f59e0b"><circle cx="48" cy="52" r="3.6"/><circle cx="92" cy="40" r="3.6"/><circle cx="66" cy="96" r="3.6"/><circle cx="126" cy="72" r="3.6"/><circle cx="40" cy="132" r="3.6"/><circle cx="108" cy="124" r="3.6"/></g>
+    <g fill="#22c55e"><circle cx="206" cy="48" r="3.6"/><circle cx="252" cy="38" r="3.6"/><circle cx="292" cy="70" r="3.6"/><circle cx="224" cy="110" r="3.6"/><circle cx="276" cy="128" r="3.6"/><circle cx="310" cy="96" r="3.6"/></g>
+    <g fill="#8b5cf6"><circle cx="44" cy="208" r="3.6"/><circle cx="96" cy="230" r="3.6"/><circle cx="58" cy="282" r="3.6"/><circle cx="134" cy="214" r="3.6"/><circle cx="112" cy="296" r="3.6"/><circle cx="150" cy="262" r="3.6"/></g>
+    <g fill="#f43f5e"><circle cx="204" cy="222" r="3.6"/><circle cx="250" cy="204" r="3.6"/><circle cx="298" cy="238" r="3.6"/><circle cx="222" cy="284" r="3.6"/><circle cx="272" cy="300" r="3.6"/><circle cx="306" cy="278" r="3.6"/></g>
+
+    <rect x="56" y="44" width="90" height="88" fill="#dc2626" fill-opacity="0.07" stroke="#dc2626" stroke-width="1.8" stroke-dasharray="5 3"/>
+  </g>
+  <text class="tag" x="130" y="188" fill="#b91c1c">query</text>
+
+  <!-- ══════════ middle ══════════ -->
+  <path d="M 560 300 L 486 300" stroke="#a1a1aa" stroke-width="1.4" marker-end="url(#l)"/>
+  <path d="M 610 300 L 684 300" stroke="#a1a1aa" stroke-width="1.4" marker-end="url(#r)"/>
+  <g text-anchor="middle">
+    <text class="mid" x="585" y="344">The same 24 entities,</text>
+    <text class="mid" x="585" y="362">in the same places,</text>
+    <text class="mid" x="585" y="380">tested by the same query.</text>
+    <text class="mid" x="585" y="412" font-weight="700" fill="#18181b">Only membership</text>
+    <text class="mid" x="585" y="430" font-weight="700" fill="#18181b">changed.</text>
+  </g>
+
+  <!-- ══════════ RIGHT: incoherent ══════════ -->
+  <text class="h"  x="672" y="104">Incoherent &#8212; membership by arrival order</text>
+  <text class="hs" x="672" y="124">what claim-time placement decays into</text>
+  <g transform="translate(672,140) scale(1.2)">
+    <rect x="0" y="0" width="340" height="340" fill="#eff6ff" stroke="#2563eb" stroke-width="2"/>
+
+    <rect x="36"  y="30" width="224" height="200" fill="#fef3c7" fill-opacity="0.4" stroke="#d97706" stroke-width="1.5"/>
+    <rect x="50"  y="62" width="256" height="228" fill="#dcfce7" fill-opacity="0.4" stroke="#16a34a" stroke-width="1.5"/>
+    <rect x="32"  y="64" width="252" height="228" fill="#ede9fe" fill-opacity="0.4" stroke="#7c3aed" stroke-width="1.5"/>
+    <rect x="100" y="88" width="218" height="220" fill="#ffe4e6" fill-opacity="0.4" stroke="#e11d48" stroke-width="1.5"/>
+
+    <g fill="#f59e0b"><circle cx="48" cy="52" r="3.6"/><circle cx="206" cy="48" r="3.6"/><circle cx="44" cy="208" r="3.6"/><circle cx="204" cy="222" r="3.6"/><circle cx="92" cy="40" r="3.6"/><circle cx="252" cy="38" r="3.6"/></g>
+    <g fill="#22c55e"><circle cx="96" cy="230" r="3.6"/><circle cx="250" cy="204" r="3.6"/><circle cx="66" cy="96" r="3.6"/><circle cx="292" cy="70" r="3.6"/><circle cx="58" cy="282" r="3.6"/><circle cx="298" cy="238" r="3.6"/></g>
+    <g fill="#8b5cf6"><circle cx="126" cy="72" r="3.6"/><circle cx="224" cy="110" r="3.6"/><circle cx="134" cy="214" r="3.6"/><circle cx="222" cy="284" r="3.6"/><circle cx="40" cy="132" r="3.6"/><circle cx="276" cy="128" r="3.6"/></g>
+    <g fill="#f43f5e"><circle cx="112" cy="296" r="3.6"/><circle cx="272" cy="300" r="3.6"/><circle cx="108" cy="124" r="3.6"/><circle cx="310" cy="96" r="3.6"/><circle cx="150" cy="262" r="3.6"/><circle cx="306" cy="278" r="3.6"/></g>
+
+    <rect x="56" y="44" width="90" height="88" fill="#dc2626" fill-opacity="0.07" stroke="#dc2626" stroke-width="1.8" stroke-dasharray="5 3"/>
+  </g>
+  <text class="tag" x="742" y="188" fill="#b91c1c">query</text>
+
+  <!-- ══════════ verdicts ══════════ -->
+  <rect x="60" y="572" width="408" height="82" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5" rx="4"/>
+  <text class="big" x="82" y="616" fill="#15803d">1 of 4</text>
+  <text class="l"   x="184" y="604">clusters opened</text>
+  <text class="lm"  x="184" y="624">6 entities scanned to answer the query,</text>
+  <text class="lm"  x="184" y="642">of the 24 in the cell</text>
+
+  <rect x="672" y="572" width="408" height="82" fill="#fef2f2" stroke="#dc2626" stroke-width="1.5" rx="4"/>
+  <text class="big" x="694" y="616" fill="#b91c1c">4 of 4</text>
+  <text class="l"   x="796" y="604">clusters opened</text>
+  <text class="lm"  x="796" y="624">all 24 scanned &#8212; the cluster layer</text>
+  <text class="lm"  x="796" y="642">bought nothing at all</text>
+
+  <!-- ══════════ closing ══════════ -->
+  <line x1="40" y1="684" x2="1160" y2="684" stroke="#e4e4e7"/>
+  <text class="lb" x="40" y="710">Coherence is not a property of the query. It is a property of who shares a cluster, and it decays on its own under motion.</text>
+  <text class="lm" x="40" y="732">The bound a query tests is the union of its members&#8217; positions, so scattered members produce a bound that overlaps everything.</text>
+  <text class="lm" x="40" y="750">Nothing in the query path can recover from that. Only moving entities between clusters can.</text>
+</svg>

@@ -1,0 +1,109 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 710" width="1200" height="710" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    .t   { font-size: 21px; font-weight: 700; fill: #18181b; }
+    .st  { font-size: 13.5px; fill: #52525b; }
+    .h   { font-size: 15px; font-weight: 700; fill: #18181b; }
+    .hs  { font-size: 12px; fill: #71717a; }
+    .l   { font-size: 12.5px; fill: #3f3f46; }
+    .lm  { font-size: 12px; fill: #71717a; }
+    .lb  { font-size: 13px; font-weight: 700; fill: #3f3f46; }
+    .met { font-size: 13px; font-weight: 700; }
+    .huge{ font-size: 42px; font-weight: 700; fill: #b91c1c; }
+    .mono{ font-size: 12px; font-family: ui-monospace, Consolas, monospace; fill: #3f3f46; }
+    .th  { font-size: 12px; font-weight: 700; fill: #18181b; }
+  </style>
+  <rect width="1200" height="710" fill="#ffffff"/>
+  <defs>
+    <marker id="m" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#71717a"/></marker>
+  </defs>
+
+  <text class="t"  x="40" y="38">Cluster bounds decay under motion, and the query then opens everything</text>
+  <text class="st" x="40" y="60">One cell, four clusters, fixed membership. Entities move; nobody moves them between clusters. Each bound is the union of its members, so it only ever grows.</text>
+
+  <!-- ═════ tick 0 ═════ -->
+  <text class="h"  x="70" y="106">Tick 0 &#8212; placed at claim time</text>
+  <text class="hs" x="70" y="124">each cluster took neighbouring entities</text>
+  <g transform="translate(70,140)">
+    <rect x="0" y="0" width="300" height="300" fill="#eff6ff" stroke="#2563eb" stroke-width="2.5"/>
+    <rect x="26"  y="26"  width="88"  height="92"  fill="#fef3c7" fill-opacity="0.8" stroke="#d97706" stroke-width="1.6"/>
+    <rect x="168" y="24"  width="106" height="94"  fill="#dcfce7" fill-opacity="0.8" stroke="#16a34a" stroke-width="1.6"/>
+    <rect x="30"  y="170" width="106" height="90"  fill="#ede9fe" fill-opacity="0.8" stroke="#7c3aed" stroke-width="1.6"/>
+    <rect x="166" y="166" width="104" height="98"  fill="#ffe4e6" fill-opacity="0.8" stroke="#e11d48" stroke-width="1.6"/>
+    <g fill="#f59e0b"><circle cx="40" cy="44" r="3.6"/><circle cx="78" cy="34" r="3.6"/><circle cx="56" cy="82" r="3.6"/><circle cx="106" cy="60" r="3.6"/><circle cx="34" cy="110" r="3.6"/><circle cx="90" cy="104" r="3.6"/></g>
+    <g fill="#22c55e"><circle cx="176" cy="42" r="3.6"/><circle cx="216" cy="32" r="3.6"/><circle cx="250" cy="60" r="3.6"/><circle cx="190" cy="94" r="3.6"/><circle cx="236" cy="110" r="3.6"/><circle cx="266" cy="82" r="3.6"/></g>
+    <g fill="#8b5cf6"><circle cx="38" cy="178" r="3.6"/><circle cx="82" cy="196" r="3.6"/><circle cx="50" cy="240" r="3.6"/><circle cx="114" cy="182" r="3.6"/><circle cx="96" cy="252" r="3.6"/><circle cx="128" cy="222" r="3.6"/></g>
+    <g fill="#f43f5e"><circle cx="174" cy="190" r="3.6"/><circle cx="214" cy="174" r="3.6"/><circle cx="256" cy="204" r="3.6"/><circle cx="190" cy="242" r="3.6"/><circle cx="232" cy="256" r="3.6"/><circle cx="262" cy="236" r="3.6"/></g>
+  </g>
+  <text class="met" x="70" y="470" fill="#15803d">mean bound &#8776; 33 % of the cell edge</text>
+  <text class="lm"  x="70" y="488">a narrow query opens one cluster</text>
+
+  <path d="M 382 290 L 436 290" stroke="#71717a" stroke-width="1.6" marker-end="url(#m)"/>
+  <text class="lm" x="382" y="282">motion</text>
+
+  <!-- ═════ tick N ═════ -->
+  <text class="h"  x="450" y="106">Tick N &#8212; drifting</text>
+  <text class="hs" x="450" y="124">members separate; bounds widen to cover them</text>
+  <g transform="translate(450,140)">
+    <rect x="0" y="0" width="300" height="300" fill="#eff6ff" stroke="#2563eb" stroke-width="2.5"/>
+    <rect x="26"  y="36"  width="132" height="118" fill="#fef3c7" fill-opacity="0.55" stroke="#d97706" stroke-width="1.6"/>
+    <rect x="142" y="24"  width="132" height="134" fill="#dcfce7" fill-opacity="0.55" stroke="#16a34a" stroke-width="1.6"/>
+    <rect x="30"  y="142" width="136" height="118" fill="#ede9fe" fill-opacity="0.55" stroke="#7c3aed" stroke-width="1.6"/>
+    <rect x="152" y="142" width="118" height="122" fill="#ffe4e6" fill-opacity="0.55" stroke="#e11d48" stroke-width="1.6"/>
+    <g fill="#f59e0b"><circle cx="40" cy="44" r="3.6"/><circle cx="118" cy="60" r="3.6"/><circle cx="56" cy="82" r="3.6"/><circle cx="150" cy="118" r="3.6"/><circle cx="34" cy="110" r="3.6"/><circle cx="96" cy="146" r="3.6"/></g>
+    <g fill="#22c55e"><circle cx="176" cy="42" r="3.6"/><circle cx="216" cy="32" r="3.6"/><circle cx="250" cy="60" r="3.6"/><circle cx="150" cy="120" r="3.6"/><circle cx="236" cy="150" r="3.6"/><circle cx="266" cy="82" r="3.6"/></g>
+    <g fill="#8b5cf6"><circle cx="38" cy="178" r="3.6"/><circle cx="82" cy="196" r="3.6"/><circle cx="120" cy="150" r="3.6"/><circle cx="114" cy="182" r="3.6"/><circle cx="96" cy="252" r="3.6"/><circle cx="158" cy="232" r="3.6"/></g>
+    <g fill="#f43f5e"><circle cx="174" cy="190" r="3.6"/><circle cx="214" cy="174" r="3.6"/><circle cx="256" cy="204" r="3.6"/><circle cx="160" cy="150" r="3.6"/><circle cx="232" cy="256" r="3.6"/><circle cx="262" cy="236" r="3.6"/></g>
+  </g>
+  <text class="met" x="450" y="470" fill="#b45309">mean bound &#8776; 44 % of the cell edge</text>
+  <text class="lm"  x="450" y="488">the same query now opens two or three</text>
+
+  <path d="M 762 290 L 816 290" stroke="#71717a" stroke-width="1.6" marker-end="url(#m)"/>
+  <text class="lm" x="762" y="282">motion</text>
+
+  <!-- ═════ tick 2N ═════ -->
+  <text class="h"  x="830" y="106">Tick 2N &#8212; the measured steady state</text>
+  <text class="hs" x="830" y="124">every bound covers nearly the whole cell</text>
+  <g transform="translate(830,140)">
+    <rect x="0" y="0" width="300" height="300" fill="#eff6ff" stroke="#2563eb" stroke-width="2.5"/>
+    <rect x="22" y="32" width="236" height="236" fill="#fef3c7" fill-opacity="0.35" stroke="#d97706" stroke-width="1.6"/>
+    <rect x="32" y="32" width="246" height="236" fill="#dcfce7" fill-opacity="0.35" stroke="#16a34a" stroke-width="1.6"/>
+    <rect x="30" y="42" width="246" height="226" fill="#ede9fe" fill-opacity="0.35" stroke="#7c3aed" stroke-width="1.6"/>
+    <rect x="36" y="36" width="228" height="242" fill="#ffe4e6" fill-opacity="0.35" stroke="#e11d48" stroke-width="1.6"/>
+    <g fill="#f59e0b"><circle cx="30" cy="40" r="3.6"/><circle cx="140" cy="58" r="3.6"/><circle cx="60" cy="200" r="3.6"/><circle cx="250" cy="120" r="3.6"/><circle cx="34" cy="260" r="3.6"/><circle cx="180" cy="240" r="3.6"/></g>
+    <g fill="#22c55e"><circle cx="176" cy="40" r="3.6"/><circle cx="40" cy="150" r="3.6"/><circle cx="250" cy="60" r="3.6"/><circle cx="150" cy="260" r="3.6"/><circle cx="270" cy="250" r="3.6"/><circle cx="60" cy="90" r="3.6"/></g>
+    <g fill="#8b5cf6"><circle cx="38" cy="50" r="3.6"/><circle cx="240" cy="196" r="3.6"/><circle cx="50" cy="260" r="3.6"/><circle cx="200" cy="60" r="3.6"/><circle cx="96" cy="252" r="3.6"/><circle cx="268" cy="120" r="3.6"/></g>
+    <g fill="#f43f5e"><circle cx="44" cy="60" r="3.6"/><circle cx="214" cy="44" r="3.6"/><circle cx="256" cy="250" r="3.6"/><circle cx="60" cy="240" r="3.6"/><circle cx="232" cy="140" r="3.6"/><circle cx="150" cy="270" r="3.6"/></g>
+  </g>
+  <text class="met" x="830" y="470" fill="#b91c1c">bound &#8776; 90 % of the cell by volume</text>
+  <text class="lm"  x="830" y="488">96.5 % of its edge &#8212; measured, not modelled</text>
+
+  <!-- ═════ bottom ═════ -->
+  <line x1="40" y1="512" x2="1160" y2="512" stroke="#e4e4e7"/>
+
+  <rect x="40" y="532" width="640" height="158" fill="#fafafa" stroke="#d4d4d8" rx="4"/>
+  <text class="lb" x="58" y="556">A query covering a quarter of each cell edge, in a cell of 100 000 entities</text>
+  <text class="lm" x="58" y="574">64 slots per cluster gives 1 563 clusters in that cell.</text>
+  <rect x="58" y="586" width="604" height="26" fill="#f4f4f5" stroke="#e4e4e7"/>
+  <text class="th" x="72"  y="604">Cluster bound, as a fraction of the cell edge</text>
+  <text class="th" x="470" y="604">Clusters the query opens</text>
+  <g class="l">
+    <text x="72"  y="632">8.6 %  &#8212; a perfect spatial partition</text>   <text x="470" y="632">about 64</text>
+    <text x="72"  y="658">96.5 % &#8212; measured, with no repair running</text><text x="470" y="658">1 563 &#8212; every one of them</text>
+  </g>
+  <line x1="58" y1="640" x2="662" y2="640" stroke="#e4e4e7"/>
+  <text class="lm" x="72" y="680">Occupancy, traversal order and broadphase layout, combined, are smaller than this one factor.</text>
+
+  <rect x="700" y="532" width="180" height="158" fill="#fef2f2" stroke="#dc2626" stroke-width="1.5" rx="4"/>
+  <text class="huge" x="722" y="602">24&#215;</text>
+  <text class="l"    x="722" y="628" fill="#b91c1c">more clusters opened,</text>
+  <text class="l"    x="722" y="646" fill="#b91c1c">for the same answer</text>
+
+  <rect x="900" y="532" width="260" height="158" fill="#eff6ff" stroke="#2563eb" stroke-width="1.5" rx="4"/>
+  <text class="lb" x="918" y="556">Nothing recovers on its own</text>
+  <text class="lm" x="918" y="578">A bound is a union, so it widens and</text>
+  <text class="lm" x="918" y="595">never narrows. Placement happens once,</text>
+  <text class="lm" x="918" y="612">when the entity claims its slot.</text>
+  <text class="lm" x="918" y="638">Recovering tightness means moving</text>
+  <text class="lm" x="918" y="655">entities between clusters inside the</text>
+  <text class="lm" x="918" y="672">cell &#8212; which is what the fence does.</text>
+</svg>

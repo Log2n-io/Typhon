@@ -511,6 +511,14 @@ internal abstract partial class BTree<TKey, TStore>
 
             if (index >= 0)
             {
+                // The caller emptied this key's buffer under an earlier acquisition of this latch and is back to drop the key. If the buffer has been refilled
+                // since — an appender got the latch in between — the key stays and nothing below runs (#887, IXW-06). Not found and not removed look the same
+                // to the caller, which is the point: it owns a decision it can no longer make, so it gets no removal to act on.
+                if (args.OnlyIfBufferEmpty && _storage.BufferElementCount(GetItem(index, ref accessor).Value, ref sibAccessor) != 0)
+                {
+                    return false;
+                }
+
                 args.SetRemovedValue(RemoveAtInternal(index, ref accessor).Value); // remove item
 
                 if (!GetIsHalfFull(ref accessor)) // borrow or merge
@@ -553,7 +561,7 @@ internal abstract partial class BTree<TKey, TStore>
                         // just consumed, and the re-read was split across TWO accessors — `accessor` for self, `sibAccessor` for siblings — so one could serve a
                         // cached view of a page the other had just written through. Reading once, before any write, closes that.
                         //
-                        // 🔴 This is NOT the fix for #739, and saying so plainly because it was written as one. The crash survived it unchanged and simply moved
+                        // This is NOT the fix for #739, and saying so plainly because it was written as one. The crash survived it unchanged and simply moved
                         // to the `SetPrevious` below, which now consumes the value snapshotted BEFORE the merge — so the chain pointer was already corrupt when
                         // it was read, and read-after-consume was never the mechanism. Kept anyway because reading once before mutating is correct on its own
                         // terms and costs nothing, but it buys no correctness against #739.

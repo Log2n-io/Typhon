@@ -84,7 +84,6 @@ internal static class ProfilerStaticDataBuilder
                     SpatialFieldType = (byte)field.SpatialFieldType,
                     SpatialMode = (byte)field.SpatialMode,
                     SpatialCellSize = field.SpatialCellSize,
-                    SpatialMargin = field.SpatialMargin,
                     SpatialCategory = field.SpatialCategory,
                     ForeignKeyTargetType = field.ForeignKeyTargetType?.FullName ?? string.Empty,
                 });
@@ -351,7 +350,7 @@ internal static class ProfilerStaticDataBuilder
 
         var nodes = new List<ResourceGraphNodeRecord>();
         var visited = new HashSet<IResource>(ReferenceEqualityComparer.Instance);
-        WalkResource(root, parentId: -1, nodes, visited);
+        WalkResource(root, -1, nodes, visited);
         return nodes.ToArray();
     }
 

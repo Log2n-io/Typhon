@@ -207,9 +207,6 @@ public enum SpatialMode : byte
 [PublicAPI]
 public sealed class SpatialIndexAttribute : Attribute
 {
-    /// <summary>Fat-AABB expansion margin, in world units, added to each dynamic entry so small movements don't force a re-insert. Only meaningful for <see cref="SpatialMode.Dynamic"/>.</summary>
-    public float Margin { get; }
-
     /// <summary>Cell size, in world units, for the coarse-grid broadphase occupancy filter. <c>0</c> (default) disables the filter — queries go straight to the tree.</summary>
     public float CellSize { get; }
 
@@ -236,12 +233,10 @@ public sealed class SpatialIndexAttribute : Attribute
     /// </remarks>
     public uint Category { get; set; } = uint.MaxValue;
 
-    /// <summary>Marks a spatial field with the given fat-AABB <paramref name="margin"/> and optional broadphase <paramref name="cellSize"/>.</summary>
-    /// <param name="margin">Fat-AABB expansion margin in world units (see <see cref="Margin"/>).</param>
+    /// <summary>Marks a spatial field, with an optional broadphase <paramref name="cellSize"/>.</summary>
     /// <param name="cellSize">Broadphase grid cell size in world units, or <c>0</c> to disable the coarse filter (see <see cref="CellSize"/>).</param>
-    public SpatialIndexAttribute(float margin, float cellSize = 0f)
+    public SpatialIndexAttribute(float cellSize = 0f)
     {
-        Margin = margin;
         CellSize = cellSize;
     }
 }

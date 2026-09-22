@@ -50,6 +50,11 @@ export const enum TraceEventKind {
 
   ClusterMigration = 60,
 
+  // #911 — spatial maintenance attribution. 64 is a span, 65 and 66 are instants (mirrored in `isInstantKind`).
+  SpatialRepairUnit = 64,
+  SpatialRelocationOutcome = 65,
+  SpatialArchetypeTelemetry = 66,
+
   WalFlush = 80,
   WalSegmentRotate = 81,
   WalWait = 82,
@@ -282,6 +287,21 @@ export const enum GaugeId {
   UowRegistryCreatedTotal = 0x0412,
   UowRegistryCommittedTotal = 0x0413,
   TxChainCreatedTotal = 0x0414,
+
+  // Spatial grid (#911 O3). Engine-wide, so these ride the gauge channel rather than the per-archetype telemetry event.
+  // Absent from a trace whose engine had no spatial grid — the emitter skips the group rather than sending five zero series.
+  SpatialGridBlockCount = 0x0500,
+  SpatialGridOccupiedCells = 0x0501,
+  /** Occupied cells as hundredths of a percent of the blocks' addressable capacity — divide by 100 for a percentage. */
+  SpatialGridIntraBlockFill = 0x0502,
+  SpatialGridResidentBytes = 0x0503,
+  /** What a DENSE grid over the same world would have cost. Read against resident bytes — that comparison is the sparse grid's whole argument. */
+  SpatialGridDenseEquivalentBytes = 0x0504,
+  /**
+   * The previous tick's partitioning-fence SPAN, in MICROSECONDS — what the host waited, as against every other
+   * spatial timing on the wire, which is summed across workers. Absent when the host drove the fence serially.
+   */
+  ClusterFenceSpanUs = 0x0505,
 }
 
 /** On-wire value kind for a single gauge — mirrors <c>GaugeValueKind</c>. Not directly used on the client (the server already decoded); included for reference. */
@@ -492,6 +512,11 @@ export const SpanKindNames: Record<number, string> = {
   61: 'Runtime.WriteTickFence.Cluster',
   62: 'Runtime.WriteTickFence.Cluster.Shadow',
   63: 'Runtime.WriteTickFence.Cluster.Spatial',
+  // #911 — the three kinds a spatial-maintenance trace was missing: which cell was repaired, what the throttle did with
+  // the relocations, and the per-archetype counter snapshot the Spatial panel reads.
+  64: 'Spatial.Repair.Unit',
+  65: 'Spatial.Relocation.Outcome',
+  66: 'Spatial.Archetype.Telemetry',
   // 243 (RuntimePhaseSpan) is a real span but its display name comes from `PHASE_NAMES[evt.phase]`
   // in `traceModel.ts` — this entry is only the `Kind[N]`-fallback safety net.
   243: 'Runtime.Phase',
@@ -703,6 +728,45 @@ export interface TraceEvent {
 
   // Cluster migration span
   migrationCount?: number;
+
+  // ClusterMigration (kind 60) optional outcomes, added by #911 O1: the three migration kinds a slice mixes, told apart.
+  // Wire-additive — a trace captured before #911 has no optional-mask byte and the decoder leaves these undefined.
+  crossingCount?: number;
+  relocationCount?: number;
+  repairCount?: number;
+
+  // SpatialRepairUnit (kind 64) — one admitted repair unit. Begin params: archetypeId, cellKey, clusterCount, entityCount.
+  cellKey?: number;
+  clusterCount?: number;
+  // `entityCount` is NOT redeclared here — the Statistics block below already owns it, and a second declaration of the
+  // same optional number is a TS2300 duplicate rather than a merge. Kind 64's entity count lands in that field.
+  degradation?: number;           // the cell's max-axis extent / cell size — the term it was RANKED on
+  valveFired?: number;            // 0/1 — admitted despite insufficient budget
+  movedCount?: number;            // entities the plan actually moved; 0 means the cell was already packed
+
+  // SpatialRelocationOutcome (kind 65) — the throttle's per-tick outcome split. Every field is required on the wire.
+  relocationsAdmitted?: number;
+  relocationsThrottled?: number;
+  relocationsSuperseded?: number;
+  driftersUnplaced?: number;
+  driftersUnplacedNoCandidate?: number;
+  driftersSpilled?: number;
+  pinsRejected?: number;
+  crossingsQueued?: number;
+
+  // SpatialArchetypeTelemetry (kind 66) — the per-archetype counter snapshot the Spatial panel reads. All required.
+  activeClusters?: number;
+  migrationCpuMs?: number;        // CPU-ms SUMMED ACROSS WORKERS, never a duration — see the field's own remarks
+  driftersDetected?: number;
+  repairUnits?: number;
+  repairUnitsRefused?: number;
+  repairQueueDepth?: number;
+  budgetUsedMs?: number;
+  tightnessSamples?: number;      // zero means the fence wrote nothing, NOT that clusters are points
+  extentRatio?: number;
+  packingBound?: number;
+  cellTreePromotions?: number;
+  cellTreeDemotions?: number;
 
   // SpatialClusterMigrationDetectScan (kind 249) — fence-time scan span. Begin params:
   // archetypeId, scanSlotCount. Optional outcomes published at dispose.

@@ -90,30 +90,28 @@ public class SpatialFieldTypeTests
 
     private struct TestSpatialComponent
     {
-        [SpatialIndex(5.0f)]
+        [SpatialIndex]
         public AABB3F Bounds;
 
-        [SpatialIndex(3.0f, 100f)]
+        [SpatialIndex(100f)]
         public AABB2F Zone;
     }
 
     [Test]
-    public void SpatialIndexAttribute_MarginOnly_DefaultCellSize()
+    public void SpatialIndexAttribute_NoArguments_LeavesCellSizeDisabled()
     {
         var field = typeof(TestSpatialComponent).GetField("Bounds");
         var attr = field.GetCustomAttribute<SpatialIndexAttribute>();
         Assert.That(attr, Is.Not.Null, "Attribute should be found via reflection");
-        Assert.That(attr.Margin, Is.EqualTo(5.0f));
-        Assert.That(attr.CellSize, Is.EqualTo(0f), "Default CellSize should be 0");
+        Assert.That(attr.CellSize, Is.EqualTo(0f), "Default CellSize should be 0 — the coarse filter is off unless asked for");
     }
 
     [Test]
-    public void SpatialIndexAttribute_WithCellSize_BothSet()
+    public void SpatialIndexAttribute_WithCellSize_IsCarried()
     {
         var field = typeof(TestSpatialComponent).GetField("Zone");
         var attr = field.GetCustomAttribute<SpatialIndexAttribute>();
         Assert.That(attr, Is.Not.Null);
-        Assert.That(attr.Margin, Is.EqualTo(3.0f));
         Assert.That(attr.CellSize, Is.EqualTo(100f));
     }
 

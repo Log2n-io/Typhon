@@ -32,6 +32,9 @@ public sealed partial class TyphonRuntime
         // (test harness) contributes 0, which is treated as "skip the gauge" inside the emitter.
         long transientBytesUsed = Engine?.GetTransientBytesTotal() ?? 0L;
 
-        GaugeSnapshotEmitter.EmitSnapshot((uint)scheduler.CurrentTickNumber, allocator, mmf, tx, uow, wal, staging, transientBytesUsed, 
-            ref _firstGaugeSnapshotEmitted); }
+        // Default when there is no engine: an all-zero occupancy, whose BlockCount of 0 makes the emitter skip the group entirely.
+        var gridOccupancy = Engine?.GetSpatialGridOccupancy() ?? default;
+
+        GaugeSnapshotEmitter.EmitSnapshot((uint)scheduler.CurrentTickNumber, allocator, mmf, tx, uow, wal, staging, transientBytesUsed, gridOccupancy,
+            Engine?.LastFenceSpanMs ?? 0d, ref _firstGaugeSnapshotEmitted); }
 }

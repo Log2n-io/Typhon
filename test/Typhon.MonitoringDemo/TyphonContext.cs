@@ -102,7 +102,7 @@ public sealed class TyphonContext : IDisposable
 
         // Spatial archetypes (Player/Deposit/Harvester/Factory positions) are cluster-eligible, so a configured grid
         // is REQUIRED before InitializeArchetypes (see FixtureDatabase.cs). All positions are placed within [0, 10000].
-        Engine.ConfigureSpatialGrid(new SpatialGridConfig(
+        Engine.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             new Vector2(0f, 0f), new Vector2(10000f, 10000f), cellSize: 100f));
 
         // Initialize archetype storage (LinearHash, etc.)

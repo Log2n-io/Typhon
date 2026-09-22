@@ -32,7 +32,7 @@ class SpatialTriggerTests : TestBase<SpatialTriggerTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<SpatialShip>();
         dbe.RegisterComponentFromAccessor<SpatialName>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new System.Numerics.Vector2(-1000f, -1000f),
             worldMax: new System.Numerics.Vector2(1000f, 1000f),
             cellSize: 100f));
@@ -49,7 +49,7 @@ class SpatialTriggerTests : TestBase<SpatialTriggerTests>
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<SpatialTerrain>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new System.Numerics.Vector2(-1000f, -1000f),
             worldMax: new System.Numerics.Vector2(1000f, 1000f),
             cellSize: 100f));
@@ -410,11 +410,19 @@ class SpatialTriggerTests : TestBase<SpatialTriggerTests>
         }
     }
 
-    // ── Static Cache ────────────────────────────────────────────────────
+    // ── Static-mode archetypes ──────────────────────────────────────────
+    //
+    // These two used to be "static cache" tests: the trigger system kept a per-region bitmap of the STATIC entity R-Tree's results, rebuilt only when that
+    // tree's MutationVersion moved. The tree, the cache and the TargetTreeMode selector that reached them all went with #872 step 13 — a cell's static and
+    // dynamic halves are both walked by the cluster query, so there is nothing to select and nothing to cache across.
+    //
+    // What they assert is still worth asserting, and is now about the mechanism that remains: a static-mode entity enters its region once and then STAYS
+    // rather than re-entering, and destroying it produces a leave. Those were the observable consequences of the cache being correct; they are now the
+    // observable consequences of the occupant-set diff being correct.
 
     [Test]
     [CancelAfter(5000)]
-    public void StaticCache_CachedAfterFirstEval()
+    public void StaticEntity_EntersOnceThenStays()
     {
         using var dbe = SetupEngineWithTerrain();
         var terrainTable = dbe.GetComponentTable<SpatialTerrain>();
@@ -432,23 +440,28 @@ class SpatialTriggerTests : TestBase<SpatialTriggerTests>
         }
 
         double[] regionBounds = { 0, 0, -10, 30, 30, 30 };
-        var handle = ts.CreateRegion(regionBounds, targetTree: TargetTreeMode.Both);
+        var handle = ts.CreateRegion(regionBounds);
 
-        // First eval — should query static tree and cache
+        // First eval — the entity is new to the region
         var r1 = ts.EvaluateRegion(handle, 1);
         Assert.That(r1.Entered.Length, Is.EqualTo(1));
 
-        // Second eval — static cache should be used (entity still there)
+        // Second eval — it is still there, so it stays rather than entering again
         var r2 = ts.EvaluateRegion(handle, 2);
-        Assert.That(r2.Entered.Length, Is.EqualTo(0));
-        Assert.That(r2.StayCount, Is.EqualTo(1));
+        var enteredAgain = r2.Entered.Length;
+        var stayed = r2.StayCount;
+        Assert.Multiple(() =>
+        {
+            Assert.That(enteredAgain, Is.EqualTo(0), "an occupant already in the previous set must not be reported as entering again");
+            Assert.That(stayed, Is.EqualTo(1));
+        });
 
         ts.DestroyRegion(handle);
     }
 
     [Test]
     [CancelAfter(5000)]
-    public void StaticCache_InvalidatedOnTreeMutation()
+    public void DestroyingAStaticEntity_ReportsItAsLeaving()
     {
         using var dbe = SetupEngineWithTerrain();
         var terrainTable = dbe.GetComponentTable<SpatialTerrain>();
@@ -466,7 +479,7 @@ class SpatialTriggerTests : TestBase<SpatialTriggerTests>
         }
 
         double[] regionBounds = { 0, 0, -10, 30, 30, 30 };
-        var handle = ts.CreateRegion(regionBounds, targetTree: TargetTreeMode.Both);
+        var handle = ts.CreateRegion(regionBounds);
 
         // First eval — entity enters
         var r1 = ts.EvaluateRegion(handle, 1);
@@ -479,7 +492,7 @@ class SpatialTriggerTests : TestBase<SpatialTriggerTests>
             t.Commit();
         }
 
-        // Second eval — cache should be invalidated, entity should leave
+        // Second eval — the destroyed entity is gone from the occupant set, so it leaves
         var r2 = ts.EvaluateRegion(handle, 2);
         Assert.That(r2.Left.Length, Is.EqualTo(1));
 

@@ -304,6 +304,20 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         /// </summary>
         public bool Removed { get; private set; }
 
+        /// <summary>
+        /// Remove the key only if its buffer still holds no element when the removing leaf is latched; otherwise leave it and report
+        /// <see cref="Removed"/> false. For an <c>AllowMultiple</c> index only.
+        /// </summary>
+        /// <remarks>
+        /// The second half of "the last element left, so the key goes" made atomic against the appenders it used to race (#887). The element removal happens
+        /// under the leaf's write latch and the key removal under a later acquisition of it, and in between a peer can append to the buffer under its own —
+        /// <c>AddOrUpdateCorePessimistic</c>'s duplicate branch, the OLC insert's, <c>MoveValue</c>'s same-leaf path — so an unconditional removal dropped a
+        /// key that had just been repopulated and freed the buffer the peer had just written into. Re-checking the count under the latch closes it: an append
+        /// is either already visible, in which case the key stays, or has not happened yet, in which case the appender re-finds under its own latch, sees no
+        /// key, and inserts a fresh one.
+        /// </remarks>
+        public bool OnlyIfBufferEmpty;
+
         public RemoveArguments(in TKey key, in IComparer<TKey> comparer, ref ChunkAccessor<TStore> accessor, ref ChunkAccessor<TStore> sibAccessor)
         {
             Key = key;
@@ -311,6 +325,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
             Value = 0;
             Removed = false;
+            OnlyIfBufferEmpty = false;
             Accessor = ref accessor;
             SiblingAccessor = ref sibAccessor;
         }
@@ -1196,12 +1211,19 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     #region Public API
     
+    /// <summary>This tree's engine-scoped <c>EW-01</c> guard, or <c>null</c> for a segment with no epoch manager.</summary>
+    private readonly ExclusiveWindow _fenceWindow;
+
     public override ChunkBasedSegment<TStore> Segment => _segment;
 
     protected BTree(ChunkBasedSegment<TStore> segment, bool load, BTreeStableKey key = default, ChangeSet changeSet = null)
     {
         Comparer = Comparer<TKey>.Default;
         _segment = segment;
+
+        // Resolved once here rather than per mutation: the lookup walks segment -> store -> EpochManager, and the guard has to be free enough on the closed
+        // path that nobody is tempted to compile it out of Release (see ExclusiveWindow).
+        _fenceWindow = segment?.FenceWindow;
 
         // ReSharper disable once VirtualMemberCallInConstructor
         _storage = GetStorage();
@@ -1411,6 +1433,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public int Add(TKey key, int value, ref ChunkAccessor<TStore> accessor, out int bufferRootId)
     {
+        _fenceWindow?.NoteMutation("BTree.Add");
         // The outer `using var` was adding a second EH region on a per-key hot path; we keep the inner try/finally for accessor return and rely on the body
         // being throw-free in practice.
         var scope = TyphonEvent.BeginBTreeInsert();
@@ -1442,6 +1465,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public bool Remove(TKey key, out int value, ref ChunkAccessor<TStore> accessor)
     {
+        _fenceWindow?.NoteMutation("BTree.Remove");
         var scope = TyphonEvent.BeginBTreeDelete();
 
         // Per-operation accessor for thread safety under OLC (thread-local warm cache)
@@ -2201,6 +2225,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
 
     public bool RemoveValue(TKey key, int elementId, int value, ref ChunkAccessor<TStore> accessor)
     {
+        _fenceWindow?.NoteMutation("BTree.RemoveValue");
         var scope = TyphonEvent.BeginBTreeDelete();
 
         // Per-operation accessor for thread safety under OLC (thread-local warm cache)
@@ -2211,68 +2236,14 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         {
             // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. FindLeaf, latch lock/unlock, _storage.* and RemoveCorePessimistic are all engine-internal
             // storage manipulation.
-            // FindLeaf traversal is safe under OLC: internal nodes are stable.
-            // #716: FindLeaf can land on a leaf a concurrent merge has since detached. Writing into it would remove the value from a node unreachable from the
-            // root — the removal reports success and the value stays visible. Re-descend instead; the retry is unbounded for the same reason
-            // TryGetMultiplePessimistic's is: it terminates as long as writers make progress, and each pass sees a tree one merge closer to settled.
-            NodeWrapper leaf;
-            PureSpin descentSpin = default;
-            while (true)
-            {
-                leaf = FindLeaf(key, out _, ref opAccessor);
-                if (!leaf.IsValid)
-                {
-                    break;
-                }
-                // WriteLock leaf for consistent index and to prevent concurrent OLC modification
-                leaf.PreDirtyForWrite(ref opAccessor);
-                if (SpinWriteLock(leaf.GetLatch(ref opAccessor)) != WriteLockOutcome.Obsolete)
-                {
-                    break;
-                }
-                Interlocked.Increment(ref _obsoleteRestarts);
-                descentSpin.Once();
-            }
-
-            if (!leaf.IsValid)
+            var remaining = RemoveElementLatched(key, elementId, value, ref opAccessor, ref sibAccessor, out _);
+            if (remaining < 0)
             {
                 result = false;
             }
-            else
+            else if (remaining == 0)
             {
-                // Re-find under lock (index might have shifted due to concurrent OLC fast path remove)
-                var index = leaf.Find(key, Comparer, ref opAccessor);
-                if (index < 0)
-                {
-                    leaf.GetLatch(ref opAccessor).WriteUnlock();
-                    result = false;
-                }
-                else
-                {
-                    var bufferId = leaf.GetItem(index, ref opAccessor).Value;
-                    var res = _storage.RemoveFromBuffer(bufferId, elementId, value, ref sibAccessor);
-
-                    // WriteUnlock leaf — buffer manipulation is done, version bumped for OLC readers
-                    leaf.GetLatch(ref opAccessor).WriteUnlock();
-
-                    if (res == -1)
-                    {
-                        result = false;
-                    }
-                    else if (res == 0)
-                    {
-                        // Remove the key if we no longer have values stored there.
-                        var args = new RemoveArguments(key, Comparer, ref opAccessor, ref sibAccessor);
-                        RemoveCorePessimistic(ref args);
-
-                        if (args.Removed)
-                        {
-                            _storage.DeleteBuffer(args.Value, ref sibAccessor);
-                        }
-
-                        SyncHeader(ref opAccessor);
-                    }
-                }
+                RemoveKeyIfBufferStillEmpty(key, ref opAccessor, ref sibAccessor);
             }
             // PROFILING-SPAN-NO-THROW-END
         }
@@ -2283,6 +2254,155 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         }
         scope.Dispose();
         return result;
+    }
+
+    /// <summary>
+    /// Removes one element from <paramref name="key"/>'s buffer under the write latch of the leaf that holds the key, and returns how many the buffer still
+    /// holds — or -1 when the key or the element is not there. <paramref name="bufferId"/> is the buffer as read UNDER that latch.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is the only way a buffer id may be obtained for mutation (IXW-06). <c>MoveValuePessimistic</c> used to read it through an unlatched
+    /// <c>FindLeaf</c> + <c>GetItem</c> and call <c>RemoveFromBuffer</c> on the result — while a latched peer could empty the key, remove it, free the buffer
+    /// and let the chunk be re-issued to another key. The element then went into, or came out of, somebody else's buffer, or nobody's (#887).
+    /// </para>
+    /// <para>
+    /// The leaf comes from <see cref="TryLatchAuthoritativeLeaf"/>, so a miss on it IS absence — see there for why a bare <c>FindLeaf</c> + <c>Find</c>
+    /// is not enough. The buffer step runs under try/finally because <c>RemoveFromBuffer</c> can throw (its buffer lock times out into
+    /// <c>ThrowLockTimeout</c>), and a leaf left write-locked is a leaf every reader sees as version 0 and every writer refuses, for the life of the process.
+    /// <c>WriteUnlock</c> either way, as <c>TryUpdateValueAtPessimistic</c> reasons: once storage has been touched, "nothing was modified" is not available.
+    /// </para>
+    /// </remarks>
+    private int RemoveElementLatched(TKey key, int elementId, int value, ref ChunkAccessor<TStore> opAccessor, ref ChunkAccessor<TStore> sibAccessor,
+        out int bufferId)
+    {
+        bufferId = -1;
+        if (!TryLatchAuthoritativeLeaf(key, ref opAccessor, out var leaf))
+        {
+            return -1;
+        }
+
+        // Re-find under lock (index might have shifted due to a concurrent OLC fast-path remove). This leaf owns the key's range, so a miss IS absence.
+        var index = leaf.Find(key, Comparer, ref opAccessor);
+        if (index < 0)
+        {
+            leaf.GetLatch(ref opAccessor).AbortWriteLock();   // nothing modified — no version bump (IXW-04)
+            return -1;
+        }
+
+        bufferId = leaf.GetItem(index, ref opAccessor).Value;
+        var leafId = leaf.ChunkId;
+        try
+        {
+            return _storage.RemoveFromBuffer(bufferId, elementId, value, ref sibAccessor);
+        }
+        finally
+        {
+            // Re-resolved through the node id: the buffer reads in between can evict the leaf's page from the accessor window and reuse the slot.
+            _storage.LoadNode(leafId).GetLatch(ref opAccessor).WriteUnlock();
+        }
+    }
+
+    /// <summary>
+    /// Descends to the leaf that OWNS <paramref name="key"/>'s range and returns it write-latched, or returns false for an empty tree. The one way a
+    /// pessimistic writer may reach a leaf it intends to read a miss from (IXW-06).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>FindLeaf</c> descends internal nodes with no version validation and right-walks on the upper bound alone, so under concurrent merges and borrows
+    /// — which shift keys LEFT — it lands one leaf too far right about once in a thousand moves on a three-level tree, and <c>Find</c> on that leaf honestly
+    /// says the key is not there. Reading that as "not in the tree" is #739's shape — IXS-07's second parent validation closed it for the optimistic descent,
+    /// and nothing had closed it for this one — and it is what #887's second face was: <c>MoveValue</c> returning -1 for a present key, the tick fence
+    /// writing -1 into the elementId tail and leaving the index on the old key. So the latched leaf must pass <c>KeyOutsideLeafAuthority</c> — IXW-04's
+    /// predicate, both bounds — and must not be an EMPTY linked leaf, which those bounds cannot judge (both return false at count 0, so an empty leaf would
+    /// claim every key; <c>RemoveIterative</c> treats it as inconclusive for the same reason). Otherwise abort the latch and re-descend.
+    /// </para>
+    /// <para>
+    /// <b>Bounded, and it throws.</b> Authority is a STATE test, not a version test: a stale separator that nobody is fixing sends every descent to the same
+    /// wrong leaf, and an unbounded loop here would be a silent livelock — IXW-01's exact "never". <c>RemoveIterative</c> makes the same bail
+    /// (<c>RemoveLeafNotAuthoritative</c>) under <see cref="MaxPessimisticRestarts"/> and throws when it is exhausted; so does this.
+    /// </para>
+    /// </remarks>
+    private bool TryLatchAuthoritativeLeaf(TKey key, ref ChunkAccessor<TStore> accessor, out NodeWrapper leaf)
+    {
+        PureSpin spin = default;
+        int obsolete = 0, empty = 0, below = 0, above = 0;
+        for (var attempt = 0; ; attempt++)
+        {
+            leaf = FindLeaf(key, out _, ref accessor);
+            if (!leaf.IsValid)
+            {
+                return false;
+            }
+
+            // WriteLock the leaf for a consistent index and against concurrent OLC modification. #716: a leaf a concurrent merge has detached is Obsolete
+            // and holds no lock on return — re-descend rather than write into a node unreachable from the root.
+            leaf.PreDirtyForWrite(ref accessor);
+            if (SpinWriteLock(leaf.GetLatch(ref accessor)) == WriteLockOutcome.Obsolete)
+            {
+                Interlocked.Increment(ref _obsoleteRestarts);
+                obsolete++;
+            }
+            else
+            {
+                var emptyAndLinked = leaf.GetCount(ref accessor) == 0 && (leaf.GetPrevious(ref accessor).IsValid || leaf.GetNext(ref accessor).IsValid);
+                var isBelow = KeyBelowLeafLowerBound(leaf, key, Comparer, ref accessor);
+                var isAbove = KeyAboveLeafUpperBound(leaf, key, Comparer, ref accessor);
+                if (!emptyAndLinked && !isBelow && !isAbove)
+                {
+                    return true;
+                }
+
+                if (emptyAndLinked) { empty++; }
+                if (isBelow) { below++; }
+                if (isAbove) { above++; }
+
+                // Latched, live, and not the key's leaf: nothing was modified, so no version bump.
+                leaf.GetLatch(ref accessor).AbortWriteLock();
+            }
+
+            Interlocked.Increment(ref _pessimisticRestarts);
+            if (attempt >= MaxAuthorityRestarts)
+            {
+                var count = leaf.GetCount(ref accessor);
+                var prev = leaf.GetPrevious(ref accessor);
+                var next = leaf.GetNext(ref accessor);
+                ThrowHelper.ThrowInvalidOp(
+                    $"B+Tree pessimistic descent made no progress in {MaxAuthorityRestarts} retries for key {key}: every pass lands on a leaf that is obsolete "
+                    + "or does not own the key's range, which no further retrying resolves "
+                    + $"(obsolete={obsolete} emptyLinked={empty} below={below} above={above}). Last leaf #{leaf.ChunkId}: count={count}"
+                    + (count > 0 ? $" first={leaf.GetFirst(ref accessor).Key} last={leaf.GetLast(ref accessor).Key}" : "")
+                    + $" highKey={leaf.GetHighKey(ref accessor)} prev={(prev.IsValid ? $"#{prev.ChunkId} highKey={prev.GetHighKey(ref accessor)}" : "none")}"
+                    + $" next={(next.IsValid ? $"#{next.ChunkId}" : "none")}. This is a liveness defect in the tree, not contention (IXW-01, IXW-06).");
+            }
+
+            spin.Once();
+        }
+    }
+
+    /// <summary>
+    /// How many re-descents <see cref="TryLatchAuthoritativeLeaf"/> tolerates before it declares the tree's bounds stale. Far below
+    /// <see cref="MaxPessimisticRestarts"/> on purpose: authority is a STATE test, so a pass that fails it after the peers have gone quiet will fail it
+    /// forever, and each pass costs a full descent plus a <see cref="PureSpin"/> back-off — 10 000 of them is minutes of silence before the throw, not the
+    /// milliseconds a lock-contention bound suggests. Two hundred is enough to outlast any live SMO and short enough to name the defect while the test is
+    /// still running.
+    /// </summary>
+    internal const int MaxAuthorityRestarts = 200;
+
+    /// <summary>
+    /// The second half of a multi-value removal that emptied its buffer: drop the key, but only if the buffer is STILL empty under the removing leaf's
+    /// latch, and free the buffer only once the key is gone and nobody can reach it. See <see cref="RemoveArguments.OnlyIfBufferEmpty"/>.
+    /// </summary>
+    private void RemoveKeyIfBufferStillEmpty(TKey key, ref ChunkAccessor<TStore> opAccessor, ref ChunkAccessor<TStore> sibAccessor)
+    {
+        var args = new RemoveArguments(key, Comparer, ref opAccessor, ref sibAccessor) { OnlyIfBufferEmpty = true };
+        RemoveCorePessimistic(ref args);
+        if (args.Removed)
+        {
+            _storage.DeleteBuffer(args.Value, ref sibAccessor);
+        }
+
+        SyncHeader(ref opAccessor);
     }
 
     public VariableSizedBufferAccessor<int, TStore> TryGetMultiple(TKey key, ref ChunkAccessor<TStore> accessor)
@@ -2555,6 +2675,20 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
         DeferredReclaim();
     }
 
+    /// <summary>
+    /// The pessimistic writers' descent: the leaf the separators route <paramref name="key"/> to, and <c>Find</c>'s index of the key in it (negative for the
+    /// insertion point). Version-validated at every hop; restarts on any contention and throws when restarts run out.
+    /// </summary>
+    /// <remarks>
+    /// This used to be its own loop — <c>while (!node.IsLeaf) node = node.GetNearestChild(key)</c> — under a comment saying "internal nodes are stable",
+    /// which was true when the tree had one lock and false ever since it had OLC. A peer shifting an internal node's items (<c>PopFirstInternal</c> during a
+    /// promotion spill, a merge) can be mid-write when this reads the node: the descent then reads a slot that has just been CLEARED, takes chunk #0 as its
+    /// child, reads "not a leaf" from the segment header there, and walks whatever chunk #0's bytes route to — a cycle it never leaves, because the loop had
+    /// no bound and never went back to the root. #887's fourth face: one thread alone in a quiescent tree, forever in this loop; 3 hangs in 13 runs of the
+    /// unique-to-fresh census on the tree as it stood before the fix, so pre-existing and merely exposed. <c>OptimisticDescendToLeaf</c> is the descent that
+    /// already answers this — it validates the parent's version after reading the child and again after taking the child's version (IXS-07), treats an
+    /// invalid child as "restart", and its right-walk is validated too — so this delegates to it rather than growing a second copy of that protocol.
+    /// </remarks>
     private NodeWrapper FindLeaf(TKey key, out int index, ref ChunkAccessor<TStore> accessor)
     {
         index = -1;
@@ -2563,38 +2697,31 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
             return default;
         }
 
-        var node = Root;
-        while (!node.GetIsLeaf(ref accessor))
+        PureSpin spin = default;
+        for (var attempt = 0; ; attempt++)
         {
-            node = node.GetNearestChild(key, Comparer, ref accessor);
-        }
-        index = node.Find(key, Comparer, ref accessor);
-
-        // B-link: follow right links if key is beyond this leaf's range (stale parent separator).
-        // Multiple hops may be needed when consecutive forceSplit operations left unpropagated separators.
-        // The HighKey read is OLC-validated: during a concurrent split, HighKey is updated after the key array,
-        // so a lock-free reader could see a stale HighKey and incorrectly break. If the node is write-locked or
-        // the version changed between read and validate, we conservatively follow the right link.
-        for (int hop = 0; hop < 16 && index < 0 && node.GetCount(ref accessor) > 0; hop++)
-        {
-            var latch = node.GetLatch(ref accessor);
-            var version = latch.ReadVersion();
-            if (version != 0 && Comparer.Compare(key, node.GetHighKey(ref accessor)) < 0 && latch.ValidateVersion(version))
+            var (leafChunkId, _, keyIndex) = OptimisticDescendToLeaf(key, ref accessor);
+            if (leafChunkId != 0)
             {
-                break; // key is confirmed within this leaf's range (high key is stable)
+                index = keyIndex;
+                return _storage.LoadNode(leafChunkId);
             }
 
-            var next = node.GetNext(ref accessor);
-            if (!next.IsValid)
+            if (!Root.IsValid)
             {
-                break;
+                return default;   // emptied under us — the same answer IsEmpty() gives above
             }
 
-            node = next;
-            index = node.Find(key, Comparer, ref accessor);
-        }
+            Interlocked.Increment(ref _pessimisticRestarts);
+            if (attempt >= MaxPessimisticRestarts)
+            {
+                ThrowHelper.ThrowInvalidOp(
+                    $"B+Tree descent for key {key} could not complete a validated root-to-leaf walk in {MaxPessimisticRestarts} attempts: a node on the "
+                    + "path is modified on every pass. This is a liveness defect in the tree, not contention (IXW-01).");
+            }
 
-        return node;
+            spin.Once();
+        }
     }
 
     /// <summary>

@@ -85,11 +85,10 @@ query.WhereField<Position>(p => p.X >= 0)
 
 `OrderByField`/`OrderByFieldDescending` require a prior `WhereField` to identify the component table. The OrderBy field **must be indexed**. `Skip` / `Take` require `OrderBy` (without it the result set is unordered).
 
-Three ordered execution paths inside `ExecuteOrdered`:
+Two ordered execution paths inside `ExecuteOrdered`. The choice turns on whether **every** archetype in the query mask carries per-archetype indexes on the where-component — `HasClusterIndexes` set and a non-null `ClusterState.IndexSlots` — not on how its entities are stored:
 
-- **Pure non-cluster:** `PipelineExecutor.ExecuteOrdered` does the B+Tree range scan in sort order.
-- **Pure cluster archetypes:** K-way merge across each archetype's per-archetype B+Tree (`ExecuteOrderedClustered`). Each stream yields keys in sort order; the merge interleaves them. Early termination once `Skip + Take` entries are collected.
-- **Mixed cluster + non-cluster:** `ExecuteTargeted()` then sort by the OrderBy field (`ExecuteOrderedViaSortFallback`). O(n log n) — acceptable for the rare mixed case.
+- **Every archetype does:** K-way merge across each archetype's per-archetype B+Tree (`ExecuteOrderedClustered`). Each stream yields keys in sort order; the merge interleaves them. Early termination once `Skip + Take` entries are collected.
+- **Any archetype does not:** `ExecuteTargeted()` then sort by the OrderBy field (`ExecuteOrderedViaSortFallback`). O(n log n) — acceptable for a case the schema has to go out of its way to produce.
 
 ### `EcsNavigationQueryBuilder<TArch, TSource, TTarget>`
 
@@ -147,19 +146,19 @@ Singleton (`PlanBuilder.Instance`). Two stages:
 | `EstimatedCounts` | Per-evaluator cardinality (parallel array). |
 | `UsesSecondaryIndex` | `PrimaryFieldIndex >= 0`. |
 
-**On the "PK fallback" — non-cluster storage:** When `SelectPrimaryStream` cannot narrow a range — in practice an all-`!=` predicate, since `NotEqual` is excluded from range selection — `BuildPlanWithPrimarySelection` calls `SelectFullScanStream`, which picks any indexed field referenced by the predicate and scans its full type range, leaving every evaluator to filter. For the typical NE-only case the plan is therefore executable with a non-negative `PrimaryFieldIndex`. `PrimaryFieldIndex = -1` and a **non-executable plan** are still produced in two remaining cases: OrderBy PK (`orderByFieldIndex == -1`, because no secondary index reproduces PK order) and the degenerate case where no evaluator carries a usable index (unreachable in practice — `WhereField` rejects non-indexed fields). Against **non-cluster** archetypes such a plan yields nothing: `PipelineExecutor.ExecuteCore` runs the scan only when `UsesSecondaryIndex` is true, and `PipelineExecutor.Count` returns 0 outright. The PK B+Tree that the historical full-table-scan fallback used was removed; the engine relies on every non-cluster query reaching a secondary index.
+**When the planner cannot narrow a range.** `SelectPrimaryStream` picks a range where the predicate allows one; an all-`!=` predicate defeats it, because `NotEqual` is excluded from range selection. `BuildPlanWithPrimarySelection` then calls `SelectFullScanStream`, which picks any indexed field the predicate references and scans its full type range, leaving every evaluator to filter — so the typical NE-only query still comes out with a non-negative `PrimaryFieldIndex`. Two cases produce `-1`: OrderBy PK (`orderByFieldIndex == -1`, because no secondary index reproduces PK order) and the degenerate case where no evaluator carries a usable index, which `WhereField` makes unreachable by rejecting non-indexed fields.
 
-**Cluster storage never takes that path — ordered or unordered.** A `-1` plan *is* executable against cluster archetypes, because each one carries per-archetype B+Trees and `EcsQuery` dispatches to them before `PipelineExecutor` is consulted at all:
+**A `-1` plan is still executable, and `PrimaryFieldIndex` decides scan *shape*, not whether a scan happens.** Every archetype is cluster-backed and carries per-archetype B+Trees, and `EcsQuery` dispatches straight to them. `PipelineExecutor` holds only predicate evaluation (`EvaluateFilters`) and foreign-key ordinal lookup (`FindFKIndexOrdinal`); it runs no scan and counts nothing, so no plan shape can route a query into an empty result through it:
 
 | Query shape | Entry point |
 |---|---|
 | Unordered, plan proposes a stream and the primary index's fan-out is high enough (many rows per distinct key) | `ExecuteTargeted` → `ScanPerArchetypeBTreeSelective` — **Path A**: range-scan the archetype's B+Tree, then verify the remaining predicates on the matched slots only |
 | Unordered, otherwise | `ExecuteTargeted` → `ScanPerArchetypeBTree` — **Path B**: zone-map-prune each cluster and evaluate every predicate against the SoA column |
-| Ordered, every archetype clustered | `ExecuteOrderedClustered` — K-way merge over the OrderBy field's per-archetype B+Trees |
-| Ordered, mixed cluster + non-cluster | `ExecuteOrderedViaSortFallback` |
-| `Count()` with any cluster archetype in the mask | `ExecuteTargeted().Count` — `PipelineExecutor.Count` is never reached, so the `return 0` above does not apply |
+| Ordered, and every archetype in the mask carries per-archetype indexes on the where-component (`HasClusterIndexes`, non-null `IndexSlots`) | `ExecuteOrderedClustered` — K-way merge over the OrderBy field's per-archetype B+Trees |
+| Ordered, and any archetype in the mask lacks them | `ExecuteOrderedViaSortFallback` — scan, then sort |
+| `Count()` | `ExecuteTargeted().Count` — the same scan, then its size |
 
-All of them scan real data and return correct results (`src/Typhon.Engine/Ecs/public/EcsQuery.cs`). In particular, a cluster query is never empty and `Count` is never 0 *merely because of plan shape*.
+All of them scan real data and return correct results (`src/Typhon.Engine/Ecs/public/EcsQuery.cs`). In particular, a query is never empty and `Count` is never 0 *merely because of plan shape*.
 
 **Path A vs Path B is a performance decision only.** Both return the same entities, including the same MVCC born/died visibility gate on a `Versioned` archetype, and the planner chooses between them on the primary index's **fan-out** (rows per distinct key): Path A is taken when fan-out is high enough that per-key tree cost beats the per-cluster zone-map pass; at low fan-out Path B wins on every layout measured. A Transient index home always takes Path B, whose body never touches a tree and is therefore correct for either home. The equality of the two paths is asserted rather than assumed — `QueryPathEquivalenceTests` runs a key-type × operator × sign matrix through both with the choice forced, because while they agreed only by convention no end-to-end test could have told the difference.
 
@@ -256,7 +255,7 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
 }
 ```
 
-The XML doc comment on `ViewBase` (line 10) still references `View<T>`, `View<T1,T2>`, and `OrView<T>` — **those types are deleted**. Don't propagate the names. The single concrete derived type today is `EcsView<TArchetype>`.
+The XML doc comment on `ViewBase` (line 10) references `View<T>`, `View<T1,T2>` and `OrView<T>` — **no such types exist**. Don't propagate the names. The single concrete derived type is `EcsView<TArchetype>`.
 
 `_entityIds` is the maintained working set. `_deltas` accumulates per-tick `DeltaKind` (Added / Removed / Modified) per PK; `ClearDelta()` drops the map. Idempotent compaction is done inline in `CompactDelta`: Added+Removed cancels, Modified+Removed promotes to Removed, Removed+Added becomes Modified.
 
@@ -349,7 +348,7 @@ The planner can't pick the most selective index without per-field cardinality es
 
 [`Querying/internals/StatisticsWorker.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/StatisticsWorker.cs)
 
-Dedicated background thread. Wakes every `PollIntervalMs`. For each archetype with a `ClusterState`: if `ArchetypeClusterState.MutationsSinceRebuild` exceeds `MutationThreshold` and the estimated live entity count ≥ `MinEntitiesForRebuild`, it triggers a `StatisticsRebuilder.RebuildClusterAll(...)` pass. Page-granularity sampling kicks in above `SamplingMinEntities`. (The per-`ComponentTable` sweep was removed in #629 — cluster-backed archetypes store no entities in `ComponentSegment`, so that path scanned nothing useful.)
+Dedicated background thread. Wakes every `PollIntervalMs`. For each archetype with a `ClusterState`: if `ArchetypeClusterState.MutationsSinceRebuild` exceeds `MutationThreshold` and the estimated live entity count ≥ `MinEntitiesForRebuild`, it triggers a `StatisticsRebuilder.RebuildClusterAll(...)` pass. Page-granularity sampling kicks in above `SamplingMinEntities`. There is no per-`ComponentTable` sweep: cluster-backed archetypes store no entities in `ComponentSegment`, so such a pass would scan nothing.
 
 ### `StatisticsOptions`
 

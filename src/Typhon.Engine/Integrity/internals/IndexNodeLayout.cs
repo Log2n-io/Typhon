@@ -98,7 +98,7 @@ internal readonly struct IndexNodeLayout
         sizeof(short),
         OffsetOf<Index16Chunk>(nameof(Index16Chunk.HighKey)),
         keyType,
-        isString: false);
+        false);
 
     private static IndexNodeLayout Medium(KeyType keyType) => new(
         Index32Chunk.Capacity,
@@ -107,7 +107,7 @@ internal readonly struct IndexNodeLayout
         sizeof(int),
         OffsetOf<Index32Chunk>(nameof(Index32Chunk.HighKey)),
         keyType,
-        isString: false);
+        false);
 
     private static IndexNodeLayout Wide(KeyType keyType) => new(
         Index64Chunk.Capacity,
@@ -116,7 +116,7 @@ internal readonly struct IndexNodeLayout
         sizeof(long),
         OffsetOf<Index64Chunk>(nameof(Index64Chunk.HighKey)),
         keyType,
-        isString: false);
+        false);
 
     private static IndexNodeLayout Text() => new(
         IndexString64Chunk.Capacity,
@@ -125,7 +125,7 @@ internal readonly struct IndexNodeLayout
         64,
         OffsetOf<IndexString64Chunk>(nameof(IndexString64Chunk.HighKey)),
         KeyType.Bool,
-        isString: true);
+        true);
 
     private static int OffsetOf<T>(string field) => Marshal.OffsetOf<T>(field).ToInt32();
 

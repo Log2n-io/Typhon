@@ -20,13 +20,18 @@ parallelism for exactly the systems most likely to be expensive (full-grid diffu
 
 ## ⚙️ How it works (in brief)
 
-Each cell is colored Red or Black from the parity of its grid coordinates: `(cellX + cellY) % 2`. No two
-orthogonally-adjacent (face-sharing) cells share a color, so all Red clusters can run in parallel safely,
-then all Black clusters can run in parallel safely, and a system that only touches face-adjacent neighbors
-never sees a half-written neighbor. `checkerboard: true` turns this into two sequential dispatch phases
-inside the same DAG node — your callback runs twice per tick (once per phase), with `ctx.Entities` scoped
-to that phase's clusters only. Downstream systems see one node and wait for both phases; nothing else in
-the DAG needs to know dispatch happened twice.
+Each cell is colored Red or Black from the parity of its grid coordinates: `(cellX + cellY + cellZ) % 2`.
+The grid is three-dimensional, so face adjacency includes the Z axis: a cell's six orthogonal neighbors —
+±X, ±Y and ±Z — all differ from it in exactly one coordinate, and therefore all carry the opposite color.
+No two face-sharing cells share a color, so all Red clusters can run in parallel safely, then all Black
+clusters can run in parallel safely, and a system that only touches face-adjacent neighbors never sees a
+half-written neighbor. A flat world has `cellZ = 0` throughout, so its Red/Black split is exactly the
+familiar 2D checkerboard. `checkerboard: true` turns this into two sequential dispatch phases inside the
+same DAG node — your callback runs twice per tick (once per phase), with `ctx.Entities` scoped to that
+phase's clusters only. Downstream systems see one node and wait for both phases; nothing else in the DAG
+needs to know dispatch happened twice.
+
+<a href="assets/spatial-checkerboard-3d.svg"><img src="assets/spatial-checkerboard-3d.svg" width="1200" alt="A 2x2x2 block of grid cells two-colored by (x + y + z) % 2, with one cell's six face neighbors highlighted in the opposite color and its diagonal neighbors shown sharing its own color"></a>
 
 ## 💻 Usage
 

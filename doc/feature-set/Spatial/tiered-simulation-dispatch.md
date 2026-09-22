@@ -43,8 +43,13 @@ game.CallbackSystem("TierAssignment", ctx =>
     if (!grid.IsValid) return;
 
     grid.ResetAllTiers(SimTier.Tier3);
-    grid.SetTierInAABB(camera.Tier0MinX, camera.Tier0MinY, camera.Tier0MaxX, camera.Tier0MaxY, SimTier.Tier0);
-    grid.SetTierInAABB(camera.Tier1MinX, camera.Tier1MinY, camera.Tier1MaxX, camera.Tier1MaxY, SimTier.Tier1);
+
+    // The box is six floats — (minX, minY, minZ, maxX, maxY, maxZ) — because the grid is 3D.
+    // A flat world passes 0f for both Z bounds.
+    grid.SetTierInAABB(camera.Tier0MinX, camera.Tier0MinY, 0f,
+                       camera.Tier0MaxX, camera.Tier0MaxY, 0f, SimTier.Tier0);
+    grid.SetTierInAABB(camera.Tier1MinX, camera.Tier1MinY, 0f,
+                       camera.Tier1MaxX, camera.Tier1MaxY, 0f, SimTier.Tier1);
 
     // Adapt next tick's radius to this tick's measured cost.
     if (ctx.TierBudgetMetrics.UtilizationRatio > 0.85f)

@@ -346,13 +346,14 @@ public sealed partial class StorageMapService
         float clusterCellSize = 0;
         var clusterGridWidth = 0;
         var clusterGridHeight = 0;
+        var clusterGridDepth = 0;
         var clusterSpatialMode = "";
         if (seg.Kind == StorageSegmentKind.Cluster)
         {
             engine.TryGetClusterStats(seg.RootPageIndex, out entityCount, out activeClusterCount, out clusterSize);
             // Spatial context — explains low slot occupancy (per-cell bucketing) vs flags it as fragmentation (non-spatial). Cheap, in-memory only.
             engine.TryGetClusterSpatialInfo(seg.RootPageIndex, out clusterSpatial, out clusterCellSize, out clusterGridWidth, out clusterGridHeight,
-                out clusterSpatialMode);
+                out clusterGridDepth, out clusterSpatialMode);
         }
 
         EntityMapStatsDto entityMap = null;
@@ -366,7 +367,7 @@ public sealed partial class StorageMapService
             segmentId, seg.RootPageIndex, seg.Kind.ToString(), pageCount, seg.Stride,
             seg.AllocatedChunkCount, seg.FreeChunkCount, seg.ChunkCapacity,
             entityCount, activeClusterCount, clusterSize, entityMap,
-            clusterSpatial, clusterCellSize, clusterGridWidth, clusterGridHeight, clusterSpatialMode);
+            clusterSpatial, clusterCellSize, clusterGridWidth, clusterGridHeight, clusterGridDepth, clusterSpatialMode);
     }
 
     /// <summary>Decodes one chunk's L4 content — <c>GET /dbmap/chunk/{segId}/{chunkId}</c>. Returns <c>null</c> for an unknown id.</summary>
@@ -446,10 +447,12 @@ public sealed partial class StorageMapService
             // Slot-ordered component names label the client's per-component overlay picker (bit c of each cell's enabledMask ↔ clusterComponents[c]).
             engine.TryGetClusterComponentNames(seg.RootPageIndex, out clusterComponents);
             // Spatial-cell context (spatial archetypes only) — the per-cluster "why mostly empty" answer: the cell this cluster buckets into + that cell's totals.
-            if (engine.TryGetClusterChunkSpatialInfo(seg.RootPageIndex, chunkId, out var cellKey, out var cellX, out var cellY,
-                    out var entitiesInCell, out var clustersInCell, out var aabbMinX, out var aabbMinY, out var aabbMaxX, out var aabbMaxY))
+            if (engine.TryGetClusterChunkSpatialInfo(seg.RootPageIndex, chunkId, out var cellKey, out var cellX, out var cellY, out var cellZ,
+                    out var entitiesInCell, out var clustersInCell, out var aabbMinX, out var aabbMinY, out var aabbMinZ,
+                    out var aabbMaxX, out var aabbMaxY, out var aabbMaxZ))
             {
-                clusterCell = new StorageClusterCellDto(cellKey, cellX, cellY, entitiesInCell, clustersInCell, aabbMinX, aabbMinY, aabbMaxX, aabbMaxY);
+                clusterCell = new StorageClusterCellDto(cellKey, cellX, cellY, cellZ, entitiesInCell, clustersInCell,
+                    aabbMinX, aabbMinY, aabbMinZ, aabbMaxX, aabbMaxY, aabbMaxZ);
             }
         }
         else if ((seg.Kind == StorageSegmentKind.Vsbs || seg.Kind == StorageSegmentKind.ComponentCollection)

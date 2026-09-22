@@ -37,7 +37,7 @@ public readonly struct SpatialGridAccessor
     // Grid metadata
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>Total number of cells in the grid.</summary>
+    /// <summary>Number of cells that actually exist — the grid is sparse, so this counts occupied cells rather than the whole world.</summary>
     public int CellCount { get { ThrowIfInvalid(); return _grid.CellCount; } }
 
     /// <summary>Grid width in cells.</summary>
@@ -46,11 +46,22 @@ public readonly struct SpatialGridAccessor
     /// <summary>Grid height in cells.</summary>
     public int GridHeight { get { ThrowIfInvalid(); return _grid.Config.GridHeight; } }
 
-    /// <summary>Cell size in world units.</summary>
-    public float CellSize { get { ThrowIfInvalid(); return _grid.Config.CellSize; } }
+    /// <summary>Grid depth in cells. <c>1</c> for a flat world — see <see cref="SpatialGridConfig.Flat"/>.</summary>
+    public int GridDepth { get { ThrowIfInvalid(); return _grid.Config.GridDepth; } }
 
-    /// <summary>Compute the flat cell key for the given cell coordinates. Accounts for Morton encoding when enabled.</summary>
-    public int ComputeCellKey(int cellX, int cellY) { ThrowIfInvalid(); return _grid.ComputeCellKey(cellX, cellY); }
+    /// <summary>Cell size in world units.</summary>
+    /// <remarks>f64 since #914, with the world frame it belongs to — an f64 world may configure a cell size no f32 can hold exactly.</remarks>
+    public double CellSize { get { ThrowIfInvalid(); return _grid.Config.CellSize; } }
+
+    /// <summary>
+    /// The cell key for the given cell coordinates, or <c>-1</c> when no cell exists there. Cell keys are pool slots handed out when a cell is first
+    /// occupied (#872 step 8), so an empty region has no key — game code reading grid state must handle <c>-1</c>.
+    /// </summary>
+    public int ComputeCellKey(int cellX, int cellY, int cellZ)
+    {
+        ThrowIfInvalid();
+        return _grid.TryGetCellKey(cellX, cellY, cellZ, out int cellKey) ? cellKey : -1;
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // Cell access
@@ -59,39 +70,79 @@ public readonly struct SpatialGridAccessor
     /// <summary>Access a cell descriptor by cell key. Internal because <see cref="CellState"/> is an internal type.</summary>
     internal ref CellState GetCell(int cellKey) { ThrowIfInvalid(); return ref _grid.GetCell(cellKey); }
 
-    /// <summary>Access a cell descriptor by grid coordinates. Internal because <see cref="CellState"/> is an internal type.</summary>
-    internal ref CellState GetCell(int cellX, int cellY) { ThrowIfInvalid(); return ref _grid.GetCell(_grid.ComputeCellKey(cellX, cellY)); }
+    /// <summary>
+    /// Access a cell descriptor by grid coordinates, creating the cell if it does not exist. Internal because <see cref="CellState"/> is internal.
+    /// </summary>
+    internal ref CellState GetCell(int cellX, int cellY, int cellZ) { ThrowIfInvalid(); return ref _grid.GetCell(_grid.ComputeCellKey(cellX, cellY, cellZ)); }
 
     // ═══════════════════════════════════════════════════════════════
     // Tier assignment
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>Set a cell's tier by grid coordinates. Requires a single-bit <see cref="SimTier"/> flag.</summary>
-    public void SetCellTier(int cellX, int cellY, SimTier tier) { ThrowIfInvalid(); _grid.SetCellTier(_grid.ComputeCellKey(cellX, cellY), tier); }
+    /// <summary>
+    /// Set a cell's tier by grid coordinates. Requires a single-bit <see cref="SimTier"/> flag. <b>A coordinate with no cell is a no-op</b>, not an error:
+    /// tier assignment sweeps whole regions, most of which are empty, and a tier on a clusterless cell is inert anyway — <c>TierClusterIndex</c> reads only
+    /// the cells clusters are actually attached to. Creating one per swept coordinate would rebuild the dense grid a tier call at a time.
+    /// </summary>
+    public void SetCellTier(int cellX, int cellY, int cellZ, SimTier tier)
+    {
+        ThrowIfInvalid();
+        if (_grid.TryGetCellKey(cellX, cellY, cellZ, out int cellKey))
+        {
+            _grid.SetCellTier(cellKey, tier);
+        }
+    }
 
     /// <summary>
     /// Set a cell's tier using min (promote-only) semantics (Q7). If the cell already has a higher-priority tier (lower flag value),
     /// the call is a no-op. Enables multi-observer union: <c>ResetAllTiers(Tier3)</c> then <c>SetCellTierMin</c> per observer.
     /// </summary>
-    public void SetCellTierMin(int cellX, int cellY, SimTier tier) { ThrowIfInvalid(); _grid.SetCellTierMin(_grid.ComputeCellKey(cellX, cellY), tier); }
+    public void SetCellTierMin(int cellX, int cellY, int cellZ, SimTier tier)
+    {
+        ThrowIfInvalid();
+        if (_grid.TryGetCellKey(cellX, cellY, cellZ, out int cellKey))
+        {
+            _grid.SetCellTierMin(cellKey, tier);
+        }
+    }
 
     /// <summary>Bulk-set all cells to the specified tier. Typically called at the start of <c>TierAssignment</c>.</summary>
     public void ResetAllTiers(SimTier tier) { ThrowIfInvalid(); _grid.ResetAllTiers(tier); }
 
     /// <summary>Set tiers for all cells overlapping a world-space AABB, using min (promote-only) semantics.</summary>
-    public void SetTierInAABB(float minX, float minY, float maxX, float maxY, SimTier tier)
+    /// <remarks>f64 since #914, with the world frame it addresses. An f32 call site is unchanged — widening is exact — but an observer box in a world
+    /// past ~1.7 × 10⁷ could not have been expressed at all before.</remarks>
+    public void SetTierInAABB(double minX, double minY, double minZ, double maxX, double maxY, double maxZ, SimTier tier)
     {
         ThrowIfInvalid();
-        _grid.SetTierInAABB(minX, minY, maxX, maxY, tier);
+        _grid.SetTierInAABB(minX, minY, minZ, maxX, maxY, maxZ, tier);
     }
 
     // ═══════════════════════════════════════════════════════════════
     // Coordinate conversion
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>Convert a world-space 2D point to a grid cell key. Points outside bounds are clamped.</summary>
-    public int WorldToCell(float worldX, float worldY) { ThrowIfInvalid(); return _grid.WorldToCellKey(worldX, worldY); }
+    /// <summary>Convert a world-space point to a grid cell key, or <c>-1</c> when no cell exists there. Points outside bounds are clamped.</summary>
+    /// <remarks>f64 since #914 — see <see cref="SetTierInAABB"/>.</remarks>
+    public int WorldToCell(double worldX, double worldY, double worldZ)
+    {
+        ThrowIfInvalid();
+        return _grid.TryGetCellKeyAt(worldX, worldY, worldZ, out int cellKey) ? cellKey : -1;
+    }
 
-    /// <summary>Convert a cell key back to grid coordinates (x, y).</summary>
-    public (int x, int y) GetCellCoords(int cellKey) { ThrowIfInvalid(); return _grid.CellKeyToCoords(cellKey); }
+    /// <summary>
+    /// Convert a cell key back to grid coordinates (x, y, z). Throws for a key that names no live cell — including the <c>-1</c> that
+    /// <see cref="ComputeCellKey"/> and <see cref="WorldToCell"/> return for an empty region, which is the easiest one to forward here by accident.
+    /// </summary>
+    public (int x, int y, int z) GetCellCoords(int cellKey)
+    {
+        ThrowIfInvalid();
+        if ((uint)cellKey >= (uint)_grid.CellCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(cellKey), cellKey,
+                $"Cell key {cellKey} names no live cell — the grid holds {_grid.CellCount}. A coordinate with no cell resolves to -1.");
+        }
+
+        return _grid.CellKeyToCoords(cellKey);
+    }
 }

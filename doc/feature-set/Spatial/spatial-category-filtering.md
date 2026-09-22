@@ -1,21 +1,29 @@
 ---
 uid: feature-spatial-spatial-category-filtering
 title: 'Category Filtering'
-description: 'Bitmask pruning skips whole subtrees and clusters before geometry tests — AND-conjunctive at the R-Tree, any-bit-overlap at the cluster broadphase.'
+description: 'Bitmask pruning skips whole clusters before geometry tests — one archetype-level mask, any-bit-overlap, and the same answer whether a cell is a linear scan or a promoted tree.'
 ---
 
 # Category Filtering
-> Bitmask pruning skips whole subtrees and clusters before geometry tests — AND-conjunctive at the R-Tree, any-bit-overlap at the cluster broadphase.
+> Bitmask pruning skips whole clusters before geometry tests — one archetype-level mask, any-bit-overlap, and the same answer whether a cell is a linear scan or a promoted tree.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Spatial](./README.md)
 
 ## 🎯 What it solves
 
-Most spatial queries only want a subset of what's geometrically nearby — an AI perception check wants enemies, not props; a capture-zone trigger wants players, not projectiles. Without a category filter, every query visits all geometrically matching entities and discards the irrelevant ones afterward, wasting the bulk of the traversal on data the caller never wanted. Category Filtering pushes a 32-bit bitmask test into the index itself so non-matching subtrees and clusters are skipped before any per-entity work happens.
+Most spatial queries only want a subset of what is geometrically nearby — an AI perception check wants enemies, not props; a capture-zone trigger wants players, not projectiles. Without a category filter, every query opens each geometrically matching cluster and discards the irrelevant entities afterward, paying the chunk read and the per-entity bounds test for data the caller never wanted. Category Filtering pushes a 32-bit bitmask test into the index itself, so a non-matching cluster is skipped before its chunk is ever touched.
 
 ## ⚙️ How it works (in brief)
 
-Two independent mechanisms exist, with different semantics — know which one you're using. **R-Tree (per-component index):** each leaf entry carries a 32-bit `CategoryMask`, and each internal node carries a `UnionCategoryMask` (the OR of its subtree's entry masks). Traversal prunes a subtree when `node.UnionCategoryMask & queryMask == 0`; surviving leaf entries are tested exactly with `(entry.CategoryMask & queryMask) == queryMask` — **AND-conjunctive**, every requested bit must be present. **Per-cluster broadphase:** category is an *archetype-level* constant set on the `[SpatialIndex]` field, not per-entity — every entity in the archetype contributes the same value, so a cluster's mask is just that constant once occupied. A cluster is admitted when `(clusterMask & queryMask) != 0` — **any-bit-overlap**, not AND. Both layers never produce false negatives; a removed entity's bit can linger in an ancestor's union mask until the next refit, causing extra (never missing) traversal.
+**One index, one mask, cluster granularity.** There is exactly one spatial index and it is the per-cell cluster index — no `SpatialRTree` is held outside that layer, a `[SpatialIndex]` component allocates no spatial storage segment, and every query shape resolves through the cluster path. Category filtering therefore has one home too. Nothing in the engine stores a per-entity category mask.
+
+**The mask is an archetype constant.** It is declared on the schema field as `[SpatialIndex(Category = ...)]` and reaches the engine as `SpatialFieldInfo.Category`. Spawn (`Transaction.ECS.cs`) and cluster migration (`DatabaseEngine.ClusterMigration.cs`) OR that one value into `ClusterSpatialAabb.CategoryMask`, so a cluster's mask is the OR of N identical values — the archetype's own. The tick-fence recompute pass reads the stored mask back rather than re-deriving it (`ArchetypeClusterState.ReadStoredCategoryMask`), so it survives every AABB refresh and never changes after the first entity lands.
+
+**Where the value is kept.** Three copies, all cluster-level and all equal. `ArchetypeClusterState.ClusterAabbs[clusterChunkId].CategoryMask` is the authority. `CellSpatialIndex.CategoryMasks[slot]` mirrors it in the per-cell linear structure-of-arrays list of cluster bounds. When a cell half is promoted above `CellTreePromoteThreshold`, `CellClusterTree` writes the same value into each R-Tree leaf entry and refits the ancestors' `UnionCategoryMask`.
+
+**Where it prunes, and with what test.** At the cluster, before the cluster chunk is opened: a cluster is admitted when `(clusterMask & queryMask) != 0` — **any-bit-overlap**. A query mask of `0` is a sentinel meaning "no filter, accept every cluster". Because the mask is archetype-constant, every entity in an admitted cluster shares it, which makes the cluster-level decision **exact** — there is no per-entity re-filter after it, and none is needed.
+
+**Promotion does not change the answer.** Every cluster query hands the R-Tree a mask of `0` and applies the any-bit test itself on the results: AABB and radius in `AabbClusterEnumerator`, ray and frustum in `ArchetypeClusterState.Ray`/`.Frustum`, kNN over `CellClusterTree.EnumerateClusterIds`. That is deliberate and commented at the call sites. The R-Tree's own leaf test is AND-conjunctive, so handing the mask down would make a promoted cell answer a different question from an unpromoted one — a false negative visible only above the promotion threshold, which is the hardest place to notice one. A cell promotes only past a density most deployments never reach, so most never build a tree at all — but the ones that do must not get a different answer, which is why the mask is applied above the tree rather than inside it.
 
 ## 💻 Usage
 
@@ -30,47 +38,57 @@ public enum Faction : uint
 
 public struct Position
 {
-    [SpatialIndex(margin: 0f, Category = (uint)(Faction.Enemy | Faction.Alive))]
+    [SpatialIndex(Category = (uint)(Faction.Enemy | Faction.Alive))]
     public AABB2F Bounds;
 }
 
-// dbe.ConfigureSpatialGrid(...) must run before InitializeArchetypes — see the cluster broadphase setup.
+// dbe.ConfigureSpatialGrid(...) must run before InitializeArchetypes.
 
 var box = new AABB2F { MinX = 0, MinY = 0, MaxX = 50, MaxY = 50 };
 
 foreach (var hit in dbe.ClusterSpatialQuery<UnitArch>().AABB(box, categoryMask: (uint)Faction.Enemy))
 {
-    // hit.EntityId — cluster's mask shared at least one bit with Faction.Enemy
+    // hit.EntityId — this archetype's mask shares at least one bit with Faction.Enemy
 }
 ```
 
-| `[SpatialIndex]` arg | Default | Effect |
-|---|---|---|
-| `Category` | `uint.MaxValue` | Archetype-constant bitmask; cluster admitted when `(Category & queryCategoryMask) != 0` |
-| `categoryMask` (query param) | `uint.MaxValue` | `0` disables the filter entirely (accept all clusters) |
+| Surface | Parameter | Default | Effect |
+|---|---|---|---|
+| `[SpatialIndex]` | `Category` | `uint.MaxValue` | The archetype's constant mask, stored on every cluster it owns |
+| `ClusterSpatialQuery<T>.AABB` / `.Radius` | `categoryMask` | `uint.MaxValue` | Cluster admitted when `(Category & categoryMask) != 0`; `0` disables the filter |
+| `SpatialObservers<T>().RegisterObserver` | `categoryMask` | `0` | Same cluster admit, plus a stricter per-archetype test (see limits) |
+| `SpatialTriggers<T>().CreateRegion` | `categoryMask` | `0` | Same cluster admit; mutable afterwards via `UpdateRegionCategoryMask` |
 
 ## ⚠️ Guarantees & limits
 
-- **R-Tree per-entry filtering is engine-internal today** — `SpatialNodeHelper`'s `CategoryMask`/`UnionCategoryMask` storage, pruning, and the AND-conjunctive leaf test are fully implemented and exercised by every R-Tree query enumerator (AABB/Radius/Ray/Frustum/kNN/Count), but reachable only via the internal `SpatialQuery<T>` handle — the public `EcsQuery.WhereInAABB`/`WhereNearby`/`WhereRay` predicates do not yet expose a `categoryMask` parameter, and there is no public API to assign a per-entity category. Use the two-pass pattern (spatial query → component post-filter) until that lands.
-- **Cluster broadphase is the publicly usable path today** — `[SpatialIndex(Category = ...)]` plus `ClusterSpatialQuery<TArch>.AABB`/`.Radius`, both fully public.
-- **Cluster category is archetype-level, not per-entity** — it cannot vary entity-to-entity within an archetype, and there is no runtime mutator; reclassifying requires a schema-level `Category` change.
-- **Semantics differ by layer** — R-Tree is AND-conjunctive (`entry.CategoryMask & queryMask == queryMask`); cluster broadphase is OR/any-bit-overlap (`clusterMask & queryMask != 0`). Mixing up the two produces wrong filtering, not a crash.
-- **No false negatives** — union-mask staleness after a remove only causes extra (unnecessary) traversal, never a missed match, at either layer.
-- **Zero-cost when unused** — default `Category`/`categoryMask` of `uint.MaxValue` and the `0` "no filter" sentinel mean queries that never opt in pay no extra branch cost beyond the mask compare.
+- **The filter is cluster-granular, and that is exact rather than approximate.** Category is archetype-level, so every entity in a cluster carries the same bits and admitting the cluster admits precisely the right entities. This is why no narrowphase category test exists.
+- **The stored mask cannot be changed at runtime.** It comes from the schema attribute; there is no per-entity assignment and no mutator for a cluster's mask. Reclassifying an archetype is a schema change. The *query* side is mutable — `UpdateRegionCategoryMask` changes what a trigger region asks for, not what any cluster is.
+- **Promoted and unpromoted cells answer identically**, because the mask cannot be handed to the tree: every `CellClusterTree` query wrapper — `Query`, `QueryWith`, `QueryF32`, `QueryF32With`, `QueryRay`, `QueryFrustum` — takes no `categoryMask` parameter, so the guarantee is structural rather than a convention held by comments. See `AabbClusterEnumerator.TryStartCellHalf` and the tree branch of its `MoveNext`, which carry the reasoning inline. The price is that the R-Tree's node-level union prune is unreachable for cluster queries: a promoted cell descends to every geometrically overlapping cluster and filters on the way out.
+- **The AND-conjunctive test still exists inside the R-Tree, and no query reaches it.** `SpatialNodeHelper` still stores a per-entry `CategoryMask` and a per-node `UnionCategoryMask`, and every `SpatialRTree` enumerator still tests `(entry.CategoryMask & queryMask) == queryMask` — every requested bit present. But every production call site passes `0`, so those masks are written and refit and never read. No engine type hands a caller's mask down to a tree: the one spatial index lives at the cluster layer, and every query applies the any-bit test above it. The AND-conjunctive semantics hold at the R-Tree enumerators, and no query resolves through that layer.
+- **Observers apply a second, stricter test that trigger regions do not.** After the any-bit cluster admit, `SpatialInterestSystem` skips a changed entity unless `(archetypeCategory & observerMask) == observerMask` — all requested bits present, tested against the archetype's constant. An observer asking for `Player | Alive` therefore sees nothing from an archetype declaring only `Player`, while a trigger region with the same mask would see it. This is the one place both mask semantics run in production, and they run at two levels of one query rather than as alternatives to pick between.
+- **The default query mask differs by surface, and it matters in exactly one case.** `ClusterSpatialQuery` defaults to `uint.MaxValue`; observers and trigger regions default to `0`. Both accept everything, unless an archetype explicitly declares `Category = 0` — then `uint.MaxValue` rejects its clusters (`0 & 0xFFFFFFFF == 0`) while a query mask of `0` accepts them. Leave `Category` at its default, or give it at least one bit.
+- **No category parameter on the `EcsQuery` spatial predicates.** `WhereInAABB`, `WhereNearby` and `WhereRay` take no `categoryMask`. Use `ClusterSpatialQuery`, or post-filter on a component.
+- **Cluster ray, frustum and kNN accept a mask but are not publicly reachable.** They live on `ArchetypeClusterState`, which is `internal`; only AABB and radius are exposed through `ClusterSpatialQuery`.
+- **No false negatives from mask staleness.** The mask is set once from the archetype constant and preserved across every fence recompute, so the ancestor-union staleness that afflicts a mutable per-entry mask cannot arise here.
+- **Cost when unused is one branch.** A `categoryMask` of `0` short-circuits before the mask load; `uint.MaxValue` costs one AND and one compare per cluster considered, never per entity.
 
 ## 🧪 Tests
 
-- [SpatialRTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialRTreeTests.cs) — R-Tree AND-conjunctive leaf test and union-mask pruning (`Query_WithCategoryMask_FiltersCorrectly`, `CategoryMask_WithBruteForce_RandomData`, `SetEntryCategoryMask_UpdatesLeafAndAncestors`)
-- [CellSpatialIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialGrid/CellSpatialIndexTests.cs) — per-cluster `CategoryMask` storage and any-bit-overlap union computation for the cluster broadphase
+- [CellSpatialIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialGrid/CellSpatialIndexTests.cs) — per-cell mask storage across add, `UpdateAt_OverwritesAabbAndMask`, and the swap-with-last removal path; plus `ClusterSpatialAabb_Union_MultipleEntities_EnclosesAllAndCombinesMasks` for the OR
+- [ClusterSpatialAabbRecomputeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterSpatialAabbRecomputeTests.cs) — `TickFence_CategoryMaskPreservedAcrossRecompute` stamps a non-default mask and asserts the fence does not clobber it
+- [SpatialRTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialRTreeTests.cs) — the tree-internal AND-conjunctive machinery (`Query_WithCategoryMask_FiltersCorrectly`, `CategoryMask_WithBruteForce_RandomData`, `SetEntryCategoryMask_UpdatesLeafAndAncestors`). These drive the tree directly rather than through a query path, so they cover storage and refit rather than any behaviour a caller can observe
+- [ClusterCategoryFilterTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialGrid/ClusterCategoryFilterTests.cs) — two archetypes with **different** categories on identical geometry, separated by the mask alone through the public `AABB` and `Radius` surfaces in both the linear and the promoted arm; `ThePromotedAndUnpromotedArmsAnswerIdentically_UnderEveryMask` compares entity sets either side of the promotion threshold, which is what would fail if a mask were ever handed to a tree; `EveryShapeAppliesTheSameAnyBitTest` covers ray, frustum and kNN; and `NoCellClusterTreeQueryTakesACategoryMask` asserts by reflection that the tree wrappers take no mask at all. Alpha's category deliberately carries **two** bits, because any-bit and all-bits agree on a one-bit category and a fixture built on those would pass against either semantics
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialNodeHelper.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialNodeHelper.cs) (leaf/union mask storage and refit)
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialRTree.Query.cs) (per-enumerator pruning and leaf test)
-- Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs) (per-cluster category union)
+- Source: [src/Typhon.Schema.Definition/Attributes.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/Attributes.cs) (`SpatialIndexAttribute.Category`; the any-bit semantics are documented inline)
+- Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs) (the authoritative per-cluster mask and its union helpers)
+- Source: [src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs) (the per-cell linear mirror)
+- Source: [src/Typhon.Engine/Spatial/public/AabbClusterEnumerator.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/AabbClusterEnumerator.cs) (the any-bit test, on both the linear and the promoted path)
+- Source: [src/Typhon.Engine/Spatial/internals/CellClusterTree.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellClusterTree.cs) (writes the mask into leaf entries when a cell is promoted)
 - Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/ClusterSpatialQuery.cs) (public query entry point)
-- Source: [src/Typhon.Schema.Definition/Attributes.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Schema.Definition/Attributes.cs) (`SpatialIndexAttribute.Category`, OR-disjunctive semantics documented inline)
+- Source: [src/Typhon.Engine/Spatial/public/SpatialObservers.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialObservers.cs) (the observer and trigger surfaces that also take a mask)
 - Related catalog entry: [Spatial Query API](./spatial-query-api.md), [Spatial Query Predicates](../Querying/spatial-predicates.md)
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F1 — Category Filtering: design rationale, bit-width choice, node-layout impact) -->
-<!-- Rules: rules/spatial.md (ST-02 union mask correctness, SQ-01/SQ-02 query completeness and AND-conjunctive semantics) -->
+<!-- Rules: rules/spatial.md (SH-01 one index and it is the cluster index; CA-01 cluster AABB + mask maintenance; SQ-01 query completeness; SQ-02 any-bit cluster semantics, the all-bits tree machinery no query reaches, and the prohibition on handing a mask to a promoted cell's tree) -->

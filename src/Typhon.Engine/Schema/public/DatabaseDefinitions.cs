@@ -233,7 +233,7 @@ public class DatabaseDefinitions
             var spa = fieldInfo.GetCustomAttribute<SpatialIndexAttribute>();
 
             fields.Add(new ComponentFieldSpec(
-                name: fa?.Name ?? fieldInfo.Name,
+                fa?.Name ?? fieldInfo.Name,
                 dotNetType: fieldInfo.FieldType,
                 offset: Marshal.OffsetOf(t, fieldInfo.Name).ToInt32(),
                 previousName: fa?.PreviousName,
@@ -241,7 +241,6 @@ public class DatabaseDefinitions
                 isForeignKey: fka != null,
                 foreignKeyTargetType: fka?.TargetComponentType,
                 hasSpatialIndex: spa != null,
-                spatialMargin: spa?.Margin ?? 0f,
                 spatialCellSize: spa?.CellSize ?? 0f,
                 spatialMode: spa?.Mode ?? SpatialMode.Dynamic,
                 spatialCategory: spa?.Category ?? uint.MaxValue,
@@ -337,12 +336,7 @@ public class DatabaseDefinitions
                 {
                     throw new InvalidOperationException($"[SpatialIndex] on field '{field.Name}' requires a spatial type (AABB/BSphere), but found {field.Type}.");
                 }
-                if (f.SpatialMargin < 0)
-                {
-                    throw new InvalidOperationException($"[SpatialIndex] margin must be non-negative on field '{field.Name}'.");
-                }
                 field.HasSpatialIndex = true;
-                field.SpatialMargin = f.SpatialMargin;
                 field.SpatialCellSize = f.SpatialCellSize;
                 field.SpatialMode = f.SpatialMode;
                 field.SpatialCategory = f.SpatialCategory;

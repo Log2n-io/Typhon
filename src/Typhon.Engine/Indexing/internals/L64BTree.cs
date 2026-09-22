@@ -216,7 +216,7 @@ internal abstract class L64BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
 
         public override ref int GetOlcVersionRef(int chunkId, ref ChunkAccessor<TStore> accessor)
         {
-            ref var chunk = ref accessor.GetChunk<Index64Chunk>(chunkId, false);
+            ref var chunk = ref accessor.GetChunk<Index64Chunk>(chunkId);
             return ref chunk.OlcVersion;
         }
 
@@ -262,6 +262,194 @@ internal abstract class L64BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
             var i = adjust ? Index64Chunk.Adjust(chunk.Start + index) : index;
             long chunkKey = chunk.Keys[i];
             return new KeyValueItem(*(TKey*)&chunkKey, chunk.Values[i]);
+        }
+
+        public override void SetValueOnly(NodeWrapper node, int index, int value, ref ChunkAccessor<TStore> accessor)
+        {
+            ref var chunk = ref accessor.GetChunk<Index64Chunk>(node.ChunkId, true);
+            Volatile.Write(ref chunk.Values[Index64Chunk.Adjust(chunk.Start + index)], value);
+        }
+
+        /// <summary>
+        /// #872 step 5 - the whole of one leaf's sub-batch against a single chunk resolution. Mirrors <c>L32NodeStorage</c>'s override.
+        /// </summary>
+        /// <remarks>
+        /// <c>Start</c> and <c>Count</c> are hoisted because this writes only the value array: nothing in the loop can move an item, change the count or
+        /// rotate the node. Non-SIMD key types (double) fall back to the base implementation rather than restating the rotated-node comparer search.
+        /// </remarks>
+        public override int ApplyValuesInLeaf(NodeWrapper node, ReadOnlySpan<BTreeValueUpdate<TKey>> batch, IComparer<TKey> comparer,
+            ref ChunkAccessor<TStore> accessor)
+        {
+            if (typeof(TKey) != typeof(long))
+            {
+                return base.ApplyValuesInLeaf(node, batch, comparer, ref accessor);
+            }
+
+            // Resolved WITHOUT the dirty flag, and the page is marked only when a value is actually written. GetChunkAddress(id, true) marks the slot dirty
+            // unconditionally, so dirtying here would charge a page write and an ACW (which blocks the checkpoint on that page) to a leaf the batch turns out
+            // not to touch at all - the documented "absent keys are skipped" case. The base implementation dirties through SetValueOnly, i.e. only on a real
+            // write, and an override of the same virtual must not have a different side effect. PreDirtyChunk re-resolves the same id in the same accessor,
+            // so `chunk` stays valid across it.
+            ref var chunk = ref accessor.GetChunk<Index64Chunk>(node.ChunkId);
+            var start = chunk.Start;
+            var count = chunk.Count;
+            if (count == 0)
+            {
+                return 0;
+            }
+
+            var applied = 0;
+            var dirtied = false;
+
+            fixed (long* keys = chunk.Keys)
+            {
+                // Dense sub-batch: merge a cursor through the leaf, about one comparison per entry. Sparse: search per entry, because the cursor would have to
+                // scan past every slot it skips. See L32NodeStorage.ApplyValuesInLeaf for the reasoning. The 4x threshold is CARRIED OVER from there rather
+                // than derived for this width - Index64Chunk holds fewer keys per node, so the crossover is not the same constant and has not been measured
+                // here. It is a defensible default, not a tuned one.
+                if (batch.Length * 4 >= count)
+                {
+                    var j = 0;
+                    for (var i = 0; i < batch.Length; i++)
+                    {
+                        var probe = batch[i].Key;
+                        var key = *(long*)&probe;
+
+                        while (j < count && keys[Wrap(start + j)] < key)
+                        {
+                            j++;
+                        }
+
+                        if (j >= count)
+                        {
+                            break;   // the leaf is exhausted and every remaining entry sorts at or above this one: all absent
+                        }
+
+                        var phys = Wrap(start + j);
+                        if (keys[phys] != key)
+                        {
+                            continue;
+                        }
+
+                        // The cursor is NOT advanced past a match: a batch may carry the same key twice, and both entries address this slot.
+                        if (!dirtied)
+                        {
+                            accessor.PreDirtyChunk(node.ChunkId);
+                            dirtied = true;
+                        }
+
+                        Volatile.Write(ref chunk.Values[phys], batch[i].NewValue);
+                        applied++;
+                    }
+
+                    return applied;
+                }
+
+                for (var i = 0; i < batch.Length; i++)
+                {
+                    var key = batch[i].Key;
+                    var index = SimdSearch(keys, start, count, *(long*)&key);
+                    if (index < 0)
+                    {
+                        continue;
+                    }
+
+                    if (!dirtied)
+                    {
+                        accessor.PreDirtyChunk(node.ChunkId);
+                        dirtied = true;
+                    }
+
+                    Volatile.Write(ref chunk.Values[Index64Chunk.Adjust(start + index)], batch[i].NewValue);
+                    applied++;
+                }
+            }
+
+            return applied;
+        }
+
+        /// <summary>Ring-buffer wrap for an index already known to be in <c>[0, 2 * Capacity)</c> — one compare and a subtract, no sign handling.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static int Wrap(int index) => index >= Index64Chunk.Capacity ? index - Index64Chunk.Capacity : index;
+
+        public override bool TryFindValueInLeaf(NodeWrapper node, TKey key, IComparer<TKey> comparer, out int value, ref ChunkAccessor<TStore> accessor)
+        {
+            if (typeof(TKey) != typeof(long))
+            {
+                return base.TryFindValueInLeaf(node, key, comparer, out value, ref accessor);
+            }
+
+            ref readonly var chunk = ref accessor.GetChunkReadOnly<Index64Chunk>(node.ChunkId);
+            var start = chunk.Start;
+            int index;
+            fixed (long* keys = chunk.Keys)
+            {
+                index = SimdSearch(keys, start, chunk.Count, *(long*)&key);
+            }
+
+            if (index < 0)
+            {
+                value = 0;
+                return false;
+            }
+
+            value = chunk.Values[Index64Chunk.Adjust(start + index)];
+            return true;
+        }
+
+        public override void ReadNodeHeader(NodeWrapper node, out bool isLeaf, out int count, ref ChunkAccessor<TStore> accessor)
+        {
+            ref readonly var chunk = ref accessor.GetChunkReadOnly<Index64Chunk>(node.ChunkId);
+            isLeaf = (chunk.StateFlags & NodeStates.IsLeaf) != 0;
+            count = chunk.Count;
+        }
+
+        public override int FindChildAndBound(NodeWrapper node, TKey key, int count, IComparer<TKey> comparer, out int childChunkId, out TKey rightBound,
+            out bool hasRightBound, ref ChunkAccessor<TStore> accessor)
+        {
+            if (typeof(TKey) != typeof(long))
+            {
+                return base.FindChildAndBound(node, key, count, comparer, out childChunkId, out rightBound, out hasRightBound, ref accessor);
+            }
+
+            ref readonly var chunk = ref accessor.GetChunkReadOnly<Index64Chunk>(node.ChunkId);
+            // GetChild returns an INVALID node for a leaf, and this override must not quietly lose that: a leaf's value slots hold ClusterLocations, so
+            // without the check a caller that reached a leaf would be handed one as a chunk id and descend into it. The flag is in the chunk already being
+            // read, so the guard costs one AND and a predictable branch. Chunk id 0 is not a valid node, so a caller that ignores the -1 still fails loudly.
+            if ((chunk.StateFlags & NodeStates.IsLeaf) != 0)
+            {
+                childChunkId = 0;
+                rightBound = default;
+                hasRightBound = false;
+                return -1;
+            }
+
+            var start = chunk.Start;
+            int childIndex;
+            fixed (long* keys = chunk.Keys)
+            {
+                childIndex = SimdSearch(keys, start, chunk.Count, *(long*)&key);
+            }
+
+            if (childIndex < 0)
+            {
+                childIndex = ~childIndex - 1;
+            }
+
+            childChunkId = childIndex < 0 ? chunk.LeftValue : chunk.Values[Index64Chunk.Adjust(start + childIndex)];
+
+            hasRightBound = childIndex + 1 < count;
+            if (hasRightBound)
+            {
+                var bound = chunk.Keys[Index64Chunk.Adjust(start + childIndex + 1)];
+                rightBound = *(TKey*)&bound;
+            }
+            else
+            {
+                rightBound = default;
+            }
+
+            return childIndex;
         }
 
         public override void SetItem(NodeWrapper node, int index, KeyValueItem value, bool adjust, ref ChunkAccessor<TStore> accessor)
@@ -378,11 +566,14 @@ internal abstract class L64BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
             chunk.Count++;
         }
 
-        public override int CreateBuffer(ref ChunkAccessor<TStore> bufferAccessor) => default;
+        public override int CreateBuffer(ref ChunkAccessor<TStore> bufferAccessor) => 0;
 
         public override VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId, ref ChunkAccessor<TStore> accessor) => default;
         public override VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId) => default;
-        public override int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor) => default;
+        public override int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor) => 0;
+        public override bool UpdateInBuffer(int bufferId, int elementId, int oldValue, int newValue, ref ChunkAccessor<TStore> bufferAccessor)
+            => false;   // unique index: values live in the node, not in a buffer
+        public override int BufferElementCount(int bufferId, ref ChunkAccessor<TStore> bufferAccessor) => 0;
         public override void DeleteBuffer(int bufferId, ref ChunkAccessor<TStore> bufferAccessor) { }
 
         public override NodeWrapper GetFirstChild(NodeWrapper node, ref ChunkAccessor<TStore> accessor)
@@ -495,10 +686,8 @@ internal abstract class L64BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
             return pos;
         }
 
-        public override NodeWrapper SplitRight(NodeWrapper node, NodeStates states, ref ChunkAccessor<TStore> accessor)
-        {
-            return SplitRight(node.ChunkId, states, ref accessor);
-        }
+        public override NodeWrapper SplitRight(NodeWrapper node, NodeStates states, ref ChunkAccessor<TStore> accessor) 
+            => SplitRight(node.ChunkId, states, ref accessor);
 
         public override KeyValueItem RemoveAt(NodeWrapper node, int index, ref ChunkAccessor<TStore> accessor)
         {
@@ -788,7 +977,7 @@ internal abstract class L64BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
             }
         }
 
-        public NodeWrapper SplitRight(int leftChunkId, NodeStates states, ref ChunkAccessor<TStore> accessor)
+        private NodeWrapper SplitRight(int leftChunkId, NodeStates states, ref ChunkAccessor<TStore> accessor)
         {
             ref var left = ref accessor.GetChunk<Index64Chunk>(leftChunkId, true);
             var oldHighKey = left.HighKey; // save before split — right inherits original upper bound
@@ -858,7 +1047,7 @@ internal abstract class L64BTree<TKey, TStore> : BTree<TKey, TStore> where TStor
 
 internal class L64MultipleBTree<TKey, TStore> : L64BTree<TKey, TStore> where TStore : struct, IPageStore where TKey : unmanaged
 {
-    public L64MultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
+    protected L64MultipleBTree(ChunkBasedSegment<TStore> segment, bool load = false, BTreeStableKey key = default, ChangeSet changeSet = null)
         : base(segment, load, key, changeSet)
     {
     }
@@ -866,7 +1055,7 @@ internal class L64MultipleBTree<TKey, TStore> : L64BTree<TKey, TStore> where TSt
     public override bool AllowMultiple => true;
     protected override BaseNodeStorage GetStorage() => new L64MultipleNodeStorage();
 
-    public sealed class L64MultipleNodeStorage : L64NodeStorage
+    private sealed class L64MultipleNodeStorage : L64NodeStorage
     {
         private VariableSizedBufferSegment<int, TStore> _valueStore;
 
@@ -885,6 +1074,11 @@ internal class L64MultipleBTree<TKey, TStore> : L64BTree<TKey, TStore> where TSt
 
         public override int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor)
             => _valueStore.DeleteElement(bufferId, elementId, value, ref bufferAccessor);
+        public override bool UpdateInBuffer(int bufferId, int elementId, int oldValue, int newValue, ref ChunkAccessor<TStore> bufferAccessor)
+            => _valueStore.UpdateElement(bufferId, elementId, oldValue, newValue, ref bufferAccessor);
+
+        public override int BufferElementCount(int bufferId, ref ChunkAccessor<TStore> bufferAccessor)
+            => _valueStore.GetElementCount(bufferId, ref bufferAccessor);
         public override void DeleteBuffer(int bufferId, ref ChunkAccessor<TStore> bufferAccessor) => _valueStore.DeleteBuffer(bufferId, ref bufferAccessor);
     }
 }

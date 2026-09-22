@@ -21,8 +21,8 @@ no per-system spatial bookkeeping.
 ## ⚙️ How it works (in brief)
 
 Game code assigns one of four `SimTier` flags (`Tier0`..`Tier3`) to each spatial grid cell, once per
-tick, via `TickContext.SpatialGrid`. At tick start the engine rebuilds — per cluster-eligible archetype,
-skipped whenever nothing changed — a compact list of active clusters grouped by tier
+tick, via `TickContext.SpatialGrid`. At tick start the engine rebuilds — per archetype, skipped
+whenever nothing changed — a compact list of active clusters grouped by tier
 (`TierClusterIndex`). Three runtime mechanisms read that index to scope dispatch: a system's `Tier(...)`
 filter restricts it to matching clusters and can add `CellAmortize(N)` to process only `1/N` of them per
 tick; `Checkerboard()` splits a tier-filtered cluster set into two conflict-free Red/Black dispatch

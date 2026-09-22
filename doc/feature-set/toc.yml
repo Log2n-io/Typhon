@@ -411,40 +411,50 @@
 - name: Spatial
   href: Spatial/README.md
   items:
-    - name: Checkerboard Dispatch
-      href: Spatial/checkerboard-dispatch.md
-    - name: Cluster Dormancy (Sleep / Wake)
-      href: Spatial/cluster-dormancy.md
-    - name: Cluster Spatial Queries
-      href: Spatial/cluster-spatial-queries.md
-    - name: Fat-AABB Incremental Update
-      href: Spatial/fat-aabb-update.md
     - name: Spatial Architecture Overview
       href: Spatial/spatial-architecture-overview.md
-    - name: Category Filtering
-      href: Spatial/spatial-category-filtering.md
-    - name: Spatially-Coherent Entity Clustering
-      href: Spatial/spatial-coherent-clustering.md
-    - name: 'Spatial Grid Configuration & Tier Control'
-      href: Spatial/spatial-grid-config.md
-    - name: Interest Management (Delta Spatial Queries)
-      href: Spatial/spatial-interest-management.md
+      items:
+        - name: What Spatial Costs You
+          href: Spatial/spatial-cost-model.md
+        - name: Spatially-Coherent Entity Clustering
+          href: Spatial/spatial-coherent-clustering.md
+        - name: Cluster-Bound Motion Hysteresis
+          href: Spatial/cluster-bound-hysteresis.md
+        - name: Per-Cell Cluster Index Internals
+          href: Spatial/spatial-rtree-index/README.md
+          items:
+            - name: Static / Dynamic Separation
+              href: Spatial/spatial-rtree-index/spatial-rtree-static-dynamic.md
     - name: Spatial Query API (AABB / Radius / Ray / Frustum / kNN / Count)
       href: Spatial/spatial-query-api.md
-    - name: Trigger Volumes (Enter / Leave / Stay)
-      href: Spatial/spatial-trigger-volumes.md
+      items:
+        - name: Category Filtering
+          href: Spatial/spatial-category-filtering.md
+        - name: Cluster Spatial Queries
+          href: Spatial/cluster-spatial-queries.md
+        - name: Interest Management (Delta Spatial Queries)
+          href: Spatial/spatial-interest-management.md
+        - name: Trigger Volumes (Enter / Leave / Stay)
+          href: Spatial/spatial-trigger-volumes.md
     - name: Tiered Simulation Dispatch
       href: Spatial/tiered-simulation-dispatch.md
+      items:
+        - name: Checkerboard Dispatch
+          href: Spatial/checkerboard-dispatch.md
+        - name: Cluster Dormancy (Sleep / Wake)
+          href: Spatial/cluster-dormancy.md
+    - name: 'Spatial Grid Configuration & Tier Control'
+      href: Spatial/spatial-grid-config.md
+      items:
+        - name: Tuning the Spatial Grid
+          href: Spatial/spatial-tuning.md
+        - name: Reading Spatial Telemetry
+          href: Spatial/spatial-telemetry.md
     - name: 'Field Attribute & Schema Integration'
       href: Spatial/spatial-field-attribute/README.md
       items:
         - name: Storage-Mode Compatibility (SingleVersion / Versioned)
           href: Spatial/spatial-field-attribute/spatial-storage-mode-compat.md
-    - name: Spatial R-Tree Index
-      href: Spatial/spatial-rtree-index/README.md
-      items:
-        - name: Static / Dynamic Tree Separation
-          href: Spatial/spatial-rtree-index/spatial-rtree-static-dynamic.md
 - name: Storage
   href: Storage/README.md
   items:

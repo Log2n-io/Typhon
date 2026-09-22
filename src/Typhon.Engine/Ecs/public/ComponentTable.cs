@@ -481,10 +481,11 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
         ViewRegistry = new ViewRegistry(IndexedFieldInfos.Length);
         BuildComponentCollectionInfo(changeSet);
 
-        // Allocate spatial index segments and construct R-Tree if [SpatialIndex] is present
+        // Derive spatial field metadata if [SpatialIndex] is present. Allocates nothing: the entities themselves are indexed by the per-cell cluster trees
+        // the SpatialGrid owns, not by anything hanging off this table (#872 step 13).
         if (definition.SpatialField != null)
         {
-            BuildSpatialIndex(false, changeSet);
+            BuildSpatialIndex();
         }
 
         if (storageMode == StorageMode.SingleVersion)
@@ -712,58 +713,24 @@ public unsafe class ComponentTable : ResourceNode, IMetricSource, IDebugProperti
     }
 
     /// <summary>
-    /// Allocate spatial index segments and construct the R-Tree + SpatialIndexState.
-    /// Called from both the create constructor and the load constructor.
+    /// Derive the spatial field's layout metadata into <see cref="SpatialIndex"/>. Called from the create constructor and, on the load path, by
+    /// <c>DatabaseEngine</c> once the table is constructed — the load constructors do not call it themselves, which is the same shape as the
+    /// <c>LoadSpatialBootstrap</c> call it replaced.
     /// </summary>
-    private void BuildSpatialIndex(bool load, ChangeSet changeSet = null, ChunkBasedSegment<PersistentStore> existingTreeSegment = null,
-        ChunkBasedSegment<PersistentStore> existingBackPtrSegment = null, PagedHashMap<long, int, PersistentStore> existingOccupancyMap = null)
+    /// <remarks>
+    /// <para><b>Allocation-free since #872 step 13, and identical on both paths for the same reason.</b> This method used to allocate up to three persisted
+    /// <c>StorageSegmentKind.Spatial</c> segments per spatial component — an entity R-Tree, its back-pointer segment and a Layer-1 occupancy hashmap — for an
+    /// index nothing had written since #666. Everything it produces now is derived from the schema attribute, so there is nothing to persist and nothing to
+    /// reload: the load path calls this with no arguments exactly as the create path does, and the <c>spatial.&lt;component&gt;</c> bootstrap entry that used
+    /// to carry the segment roots is gone with it.</para>
+    /// </remarks>
+    internal void BuildSpatialIndex()
     {
         var sf = Definition.SpatialField;
         var fieldInfo = new SpatialFieldInfo(ComponentOverhead + sf.OffsetInComponentStorage, sf.SizeInComponentStorage, sf.SpatialFieldType,
-            sf.SpatialMargin, sf.SpatialCellSize, sf.SpatialMode, sf.SpatialCategory);
+            sf.SpatialCellSize, sf.SpatialMode, sf.SpatialCategory);
 
-        var variant = fieldInfo.ToVariant();
-        var descriptor = SpatialNodeDescriptor.ForVariant(variant);
-
-        ChunkBasedSegment<PersistentStore> treeSegment;
-        ChunkBasedSegment<PersistentStore> backPtrSegment;
-        PagedHashMap<long, int, PersistentStore> occupancyMap = null;
-
-        if (!load)
-        {
-            var mmf = DBE.MMF;
-            treeSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, descriptor.Stride, changeSet, 
-                StorageSegmentKind.Spatial);
-            backPtrSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, ComponentSegmentStartingSize, 8, changeSet, StorageSegmentKind.Spatial);
-
-            // Allocate Layer 1 occupancy hashmap when CellSize > 0
-            if (fieldInfo.CellSize > 0)
-            {
-                int hmStride = PagedHashMap<long, int, PersistentStore>.RecommendedStride();
-                var hmSegment = mmf.AllocateChunkBasedSegment(PageBlockType.None, MainIndexSegmentStartingSize, hmStride, changeSet, StorageSegmentKind.Spatial);
-                occupancyMap = PagedHashMap<long, int, PersistentStore>.Create(hmSegment, initialBuckets: 64, changeSet: changeSet);
-            }
-        }
-        else
-        {
-            treeSegment = existingTreeSegment;
-            backPtrSegment = existingBackPtrSegment;
-            occupancyMap = existingOccupancyMap;
-        }
-
-        var tree = new SpatialRTree<PersistentStore>(treeSegment, variant, load, changeSet);
-        tree.BackPointerSegment = backPtrSegment;
-
-        SpatialRTree<PersistentStore> staticTree = null, dynamicTree = null;
-        if (fieldInfo.Mode == SpatialMode.Static)
-        {
-            staticTree = tree;
-        }
-        else
-        {
-            dynamicTree = tree;
-        }
-        SpatialIndex = new SpatialIndexState(staticTree, dynamicTree, backPtrSegment, fieldInfo, descriptor, occupancyMap);
+        SpatialIndex = new SpatialIndexState(fieldInfo, SpatialNodeDescriptor.ForVariant(fieldInfo.ToVariant()));
     }
 
     /// <summary>

@@ -87,9 +87,6 @@ public sealed class FieldDefinitionRecord
     /// <summary>Spatial cell size (units of the spatial axis). Populated only when <see cref="Flags"/> &amp; 0x08.</summary>
     public float SpatialCellSize { get; init; }
 
-    /// <summary>Spatial margin (extra coverage). Populated only when <see cref="Flags"/> &amp; 0x08.</summary>
-    public float SpatialMargin { get; init; }
-
     /// <summary>Spatial category (uint.MaxValue = unset). Populated only when <see cref="Flags"/> &amp; 0x08.</summary>
     public uint SpatialCategory { get; init; }
 

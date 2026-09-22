@@ -202,7 +202,7 @@ using Typhon.Schema.Definition;
 [Archetype] public class HarvesterArch : Archetype<HarvesterArch, StructureArch> { public static readonly Comp<Pos> P = Register<Pos>(); }
 [Archetype] public class FactoryArch : Archetype<FactoryArch, StructureArch> { public static readonly Comp<Pos> P = Register<Pos>(); }
 
-[Component(""Game.Pos"", 1)] public struct Pos { [SpatialIndex(1.0f)] public long Bounds; public int Pad; }
+[Component(""Game.Pos"", 1)] public struct Pos { [SpatialIndex] public long Bounds; public int Pad; }
 [Component(""Game.Owner"", 1)] public struct Owner { public int V; public int Pad; }
 ");
 

@@ -157,13 +157,16 @@ internal sealed class SegmentGeometryPersistenceTests : IntegrityFixtureBase
             _ = scope.ServiceProvider.GetRequiredService<ManagedPagedMMF>();
         });
 
+        // The expected revision is read from the engine's own constant rather than typed as a literal: this assertion is about the SHAPE of the message,
+        // and hard-coding the current revision made it a test that every format bump reddens for a reason unrelated to what it checks.
+        //
         // Positive evidence, not the absence of a word. The first version of this assertion required the message not
         // to mention "checksum" — and matched the bundle path, which contains the test's own name. An assertion that
         // can be satisfied or broken by what a test is called is not measuring the product.
         var message = Flatten(ex);
         Assert.That(message, Does.Contain("Incompatible database format"),
             "the open must be refused by the version gate rather than by a corrupted page:\n" + message);
-        Assert.That(message, Does.Contain("file version 6").And.Contain("engine version 7"),
+        Assert.That(message, Does.Contain("file version 6").And.Contain($"engine version {PagedMMF.DatabaseFormatRevision}"),
             "the refusal must name the revision found and the one expected, so an operator knows which build to use:\n" + message);
     }
 

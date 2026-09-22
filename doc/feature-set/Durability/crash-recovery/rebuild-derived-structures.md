@@ -28,8 +28,8 @@ archetypes), occupancy from actual page ownership. A torn page that happened to 
 structures needs no special handling — it's simply part of what gets discarded. Primary data (component
 content, cluster slots, and the rare EntityMap that has no cluster/chain source to rebuild from) follows a
 different rule: heal silently if no longer referenced by anything live, or fail the open loudly if it still
-backs live data. There is no Full-Page-Image repair anywhere in the engine — that mechanism was retired in
-favor of this rebuild-or-loud-fail net.
+backs live data. There is no Full-Page-Image repair anywhere in the engine — this rebuild-or-loud-fail net
+stands in its place.
 
 ## 💻 Usage
 
@@ -66,15 +66,13 @@ catch (CorruptionException ex)
   The occupancy bitmap rebuild specifically runs after recovery's own seal checkpoint, since that checkpoint can
   still grow segments — page ownership is only final afterward.
 - **Heal-or-loud-fail is reserved for primary data** — component/revision content, collections and cluster slots.
-  The "rare non-rebuildable EntityMap" this list used to name is gone: it described a *non-cluster* archetype, and
-  since [#629](https://github.com/Log2n-io/Typhon/issues/629) there is no such thing — every archetype is
-  cluster-backed, so every EntityMap has a persisted source (the cluster occupancy walk) to rebuild from.
-  A torn primary page heals only if it no longer backs any live chunk (the
-  entity was re-created within the recovery window); otherwise the open fails with `CorruptionException` rather
-  than silently opening over corrupt data.
-- **No Full-Page-Image anywhere** — the mechanism that historically repaired pages byte-for-byte (a before-image
-  written per dirty page per checkpoint cycle) has been removed entirely; this rebuild net is the sole torn-page
-  protection for derived structures, at zero steady-state cost — a clean reopen never enters the rebuild phase.
+  No EntityMap is exempt: every archetype is cluster-backed, so every EntityMap has a persisted source (the
+  cluster occupancy walk) to rebuild from. A torn primary page heals only if it no longer backs any live chunk
+  (the entity was re-created within the recovery window); otherwise the open fails with `CorruptionException`
+  rather than silently opening over corrupt data.
+- **No Full-Page-Image anywhere** — Typhon does not repair pages byte-for-byte, so nothing writes a before-image
+  per dirty page per checkpoint cycle; this rebuild net is the sole torn-page protection for derived structures,
+  at zero steady-state cost — a clean reopen never enters the rebuild phase.
 - **Cost scales with live data, not WAL size** — rebuild is a full scan of the post-recovery primary data (a few
   ms for typical entity/index counts), not an incremental repair of only the torn pages.
 

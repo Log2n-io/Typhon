@@ -14,10 +14,10 @@ description: 'Atomic remove+insert for indexed-field updates — one traversal, 
 Updating an indexed field's value (a position changing, a status enum flipping) requires the index to
 relocate the entity from its old key to its new key. A naive implementation does this as two independent
 operations — remove the old key, insert the new key — each paying its own lock acquisition and full
-root-to-leaf traversal. For `AllowMultiple` indexes with version-history (TAIL) tracking, the naive path is
-worse still: two extra lookups to recover the HEAD buffer IDs needed for TAIL linking. Most field updates are
-small (a counter increment, a position nudge), so the old and new keys frequently land in the same leaf —
-making the second traversal pure waste.
+root-to-leaf traversal. For `AllowMultiple` indexes the naive path is worse still: each half also has to
+resolve its own HEAD buffer before it can splice the entity out of one key's set and into the other's. Most
+field updates are small (a counter increment, a position nudge), so the old and new keys frequently land in the
+same leaf — making the second traversal pure waste.
 
 ## ⚙️ How it works (in brief)
 
@@ -72,15 +72,15 @@ new keys land.
 - If a cross-leaf move would overflow the destination leaf or underflow the source leaf, it bails out of the
   optimistic path and falls back to a pessimistic, structurally-aware move (handles split/merge correctly);
   this fallback is rare in practice.
-- For `AllowMultiple` indexes, `MoveValue` returns both the old and new HEAD buffer IDs in one call, used
-  inline for TAIL (version-history) maintenance — no standalone lookups are issued.
+- For `AllowMultiple` indexes, both HEAD buffers are resolved and spliced under the leaf write-lock the descent
+  already holds — the buffer work issues no lookup of its own.
 - Design-time estimate: ~57-62% faster than Remove+Add for same-leaf moves, ~30-41% faster cross-leaf, and
   ~64-71% faster than the four-operation multi-value path; actual savings depend on how often field updates
   keep the entity in the same leaf.
 
 ## 🧪 Tests
 
-- [OlcBTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcBTreeTests.cs) — `#114 — Compound Move/MoveValue` region: same-leaf/cross-leaf `Move`, deadlock-free opposite-direction moves, `MoveValue` same-leaf/cross-leaf/last-element-removes-key, and the old-key-not-found/new-key-exists failure paths
+- [OlcBTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcBTreeTests.cs) — the `Compound Move/MoveValue` section: same-leaf/cross-leaf `Move`, deadlock-free opposite-direction moves, `MoveValue` same-leaf/cross-leaf/last-element-removes-key, and the old-key-not-found/new-key-exists failure paths
 - [ClusterIndexTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/ECS/ClusterIndexTests.cs) — `TickFence_FieldMutation_BTreeMoveExecuted`: end-to-end exercise of the same `Move` operation via the cluster/SV tick-fence deferred commit path
 
 ## 🔗 Related

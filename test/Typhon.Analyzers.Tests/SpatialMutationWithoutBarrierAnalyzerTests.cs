@@ -73,7 +73,7 @@ using Typhon.Schema.Definition;
 
 public struct DirectComp
 {
-    [SpatialIndex(1.0f)]
+    [SpatialIndex]
     public int Bounds;
 }
 
@@ -98,7 +98,7 @@ using Typhon.Schema.Definition;
 
 public struct SpatialPayload
 {
-    [SpatialIndex(1.0f)]
+    [SpatialIndex]
     public int Bounds;
 }
 
@@ -130,7 +130,7 @@ using Typhon.Schema.Definition;
 
 public struct Inner
 {
-    [SpatialIndex(1.0f)]
+    [SpatialIndex]
     public int Bounds;
 }
 

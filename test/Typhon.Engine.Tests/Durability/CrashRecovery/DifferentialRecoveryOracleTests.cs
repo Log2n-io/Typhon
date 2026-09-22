@@ -289,8 +289,7 @@ internal sealed class DifferentialRecoveryOracleTests
             // Consolidate phase 1 BELOW the checkpoint frontier: its entities now live in the data file, so a later record for one of them carries no Spawn in
             // the window — the `!agg.HasSpawn` branch #569 is about.
             dbe.WriteTickFence(1);
-            dbe.ForceCheckpoint();
-            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
 
             // Snapshot the ids: AliveIds is a live view over the shadow's dictionary, and the updater will be reading it while the shadow is in scope.
             var updater = makeUpdater([.. shadow.AliveIds]);
@@ -344,8 +343,7 @@ internal sealed class DifferentialRecoveryOracleTests
             }
 
             // Consolidate phase 1 into the data file: its entities + indexes now live below the checkpoint frontier (CheckpointLSN advances past their LSNs).
-            dbe.ForceCheckpoint();
-            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
 
             using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
             {
@@ -1151,8 +1149,7 @@ internal sealed class DifferentialRecoveryOracleTests
 
             // Consolidate the index into the data file with valid CRCs, then resolve a NON-ROOT index node page (the directory chunks 0-3 live on the root page and
             // must survive — only a pure-node page is torn).
-            dbe.ForceCheckpoint();
-            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
             tornFilePage = ResolveNonRootIndexNodeFilePage(dbe);
             Assert.That(tornFilePage, Is.GreaterThan(0), "test needs a checkpointed non-root index node page to tear (workload too small?)");
 
@@ -1299,8 +1296,7 @@ internal sealed class DifferentialRecoveryOracleTests
             }
             dbe.WriteTickFence(1);
 
-            dbe.ForceCheckpoint();
-            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
             tornFilePage = ResolveNonRootClusterIndexNodeFilePage(dbe);
             Assert.That(tornFilePage, Is.GreaterThan(0), "test needs a checkpointed non-root cluster-index node page to tear (workload too small?)");
 
@@ -1413,8 +1409,7 @@ internal sealed class DifferentialRecoveryOracleTests
             }
 
             // Consolidate so the occupancy L0 page is checkpointed with a valid CRC, then resolve it.
-            dbe.ForceCheckpoint();
-            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
             tornFilePage = ResolveOccupancyDataFilePage(dbe);
             Assert.That(tornFilePage, Is.GreaterThan(0), "test needs a checkpointed occupancy L0 data page to tear");
 
@@ -1519,8 +1514,7 @@ internal sealed class DifferentialRecoveryOracleTests
                 uow.Flush();
             }
 
-            dbe.ForceCheckpoint();
-            dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(10));
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True, "the checkpoint must cover what was written");
             tornFilePage = ResolveLivePrimaryContentFilePage(dbe);
             Assert.That(tornFilePage, Is.GreaterThan(0), "need a checkpointed component content page backing a live chunk to tear");
 

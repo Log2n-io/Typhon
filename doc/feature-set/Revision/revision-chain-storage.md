@@ -15,7 +15,7 @@ MVCC needs somewhere to put the multiple concurrently-live revisions a `Versione
 
 ## ⚙️ How it works (in brief)
 
-Each entity's component history for a given `Versioned` component type lives in a singly-linked chain of fixed 64-byte chunks — a circular buffer, so the oldest slot is reused once a chunk fills and its entries are no longer needed. The first chunk carries a small header (lock, item/chain counts, owning entity's primary key, a monotonic commit counter) plus a handful of revision entries; once those fill up, the chain grows by linking in additional 64-byte overflow chunks. Each revision entry is tiny — just enough to point at the actual component payload (stored separately, sized to the component) and to record when and by which transaction it was written. Capacity per chunk is derived from the entry's struct size at compile/runtime, not hardcoded, so the layout self-adjusts if the entry ever changes shape.
+Each entity's component history for a given `Versioned` component type lives in a singly-linked chain of fixed 64-byte chunks — a circular buffer, so the oldest slot is reused once a chunk fills and nothing still references its oldest entries. The first chunk carries a small header (lock, item/chain counts, owning entity's primary key, a monotonic commit counter) plus a handful of revision entries; once those fill up, the chain grows by linking in additional 64-byte overflow chunks. Each revision entry is tiny — just enough to point at the actual component payload (stored separately, sized to the component) and to record when and by which transaction it was written. Capacity per chunk is derived from the entry's struct size at compile/runtime, not hardcoded, so the layout self-adjusts if the entry ever changes shape.
 
 ## 💻 Usage
 

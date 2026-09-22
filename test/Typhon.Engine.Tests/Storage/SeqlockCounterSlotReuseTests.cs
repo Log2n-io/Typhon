@@ -32,7 +32,11 @@ class SeqlockCounterSlotReuseTests
         dbe.RegisterComponentFromAccessor<ItemData>();
     }
 
+    // Quarantined against #892: red on main, ~4 runs in 10, and its own docstring's claim that it has no timing dependence is what the issue disproves.
+    // The nightly still runs the category, which is where a known-red test is supposed to be observed; the merge gate does not, so it does not teach
+    // everyone to read a red gate as normal. Un-quarantine with the fix, not before.
     [Test]
+    [Category("Quarantine")]
     public void SlotReuseUnderCachePressure_LeavesNoQuiescentPageWithOddSeqlock()
     {
         // Pre-fix the invariant violation reproduced on a fraction of builds; loop so a regression is caught reliably. Each build overflows the min cache

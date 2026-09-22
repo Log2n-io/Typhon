@@ -92,7 +92,7 @@ public sealed class BulkLoadSession : IDisposable
         // Emit BulkBegin placeholder. Body is just the BulkManifestHeader with PageRangeCount=0 (allocation
         // tracking deferred to P3 where the recovery consumer is). The LSN claimed here anchors the bulk in
         // the WAL stream.
-        BulkBeginLsn = EmitBulkManifestChunk(isBegin: true, isFinal: false);
+        BulkBeginLsn = EmitBulkManifestChunk(true, false);
     }
 
     /// <summary>
@@ -241,30 +241,18 @@ public sealed class BulkLoadSession : IDisposable
     {
         ThrowIfClosed();
 
-        // Step 1: Commit the FINAL transaction in the recycle chain (whatever's open right now). With SuppressWalSerialization=true, this transitions
-        // revisions to Committed and marks pages dirty but emits ZERO Transaction WAL records (BL-01). Earlier transactions in the chain were already
-        // committed + disposed by RecycleTransactionIfNeeded — their revisions are stamped with the bulk's UoW ID, still Pending in UowRegistry, hence
-        // MVCC-invisible to other UoWs until uow.Flush below.
-        if (!_currentTransaction.Commit())
+        // Steps 1-2b run once. A retry after a checkpoint timeout, which leaves the session alive for exactly that, resumes at step 3: the final
+        // transaction is already committed and disposed.
+        if (_currentTransaction != null)
         {
-            throw new InvalidOperationException("bulk final transaction commit failed (concurrency conflict?) — recommend Dispose + retry");
+            CommitFinalTransaction();
         }
 
-        // Step 2: Flush the UoW. Waits for any pending WAL records (BulkBegin) durable and transitions the UoW to WalDurable (records the commit in
-        // UowRegistry).
-        _uow.Flush();
-
-        // Step 2b: Dispose the (already-committed) final transaction BEFORE forcing the checkpoint. Until the transaction is disposed it keeps its bulk-allocated
-        // pages pinned (the checkpoint capture finds them with active writers and skips them); with the coverage gate (CK-03) a skipped page blocks CheckpointLSN
-        // from advancing, so the step-4 assertion below would fail. Dispose does NOT discard the committed revisions (they live in the dirty cluster pages,
-        // which the forced checkpoint then writes); the UoW stays alive for BulkEnd emission.
-        _currentTransaction.Dispose();
-        _currentTransaction = null;
-
-        // Step 3: Force a checkpoint and block until at least one cycle completes. This drains every dirty page (including all bulk-allocated chunks) to disk
-        // + advances CheckpointLSN past the bulk anchor.
-        _engine.CheckpointManager.ForceCheckpoint();
-        if (!_engine.CheckpointManager.WaitForCheckpoint(Options.CheckpointTimeout))
+        // Step 3: Force a checkpoint and block until a cycle that STARTED after this call has written every page it collected (CK-12). That
+        // drains every dirty page (including all bulk-allocated chunks) to disk + advances CheckpointLSN past the bulk anchor. A cycle already in
+        // flight, or one the coverage gate stopped, does not count: either can leave bulk pages unwritten, and they have no WAL records (BL-01).
+        // It also holds out until CheckpointLSN passes the bulk anchor, which another thread's commit still mid-publish can delay (CK-13).
+        if (!_engine.CheckpointManager.ForceCheckpointAndWait(Options.CheckpointTimeout, BulkBeginLsn))
         {
             throw new BulkLoadCheckpointTimeoutException(BulkSessionId, Options.CheckpointTimeout);
         }
@@ -278,7 +266,7 @@ public sealed class BulkLoadSession : IDisposable
         }
 
         // Step 5: Emit BulkEnd chunk carrying the final manifest (entity counters; PageRangeCount=0 in v1).
-        var bulkEndLsn = EmitBulkManifestChunk(isBegin: false, isFinal: true);
+        var bulkEndLsn = EmitBulkManifestChunk(false, true);
 
         // Step 6: Wait for BulkEnd LSN to be durable.
         var wc = WaitContext.FromTimeout(Options.CheckpointTimeout);
@@ -289,6 +277,30 @@ public sealed class BulkLoadSession : IDisposable
         _uow.Dispose();
         IsClosed = true;
         _engine.ReleaseBulkSessionGate();
+    }
+
+    /// <summary>Steps 1-2b of <see cref="CompleteBulkLoad"/>: commit the final transaction, flush the UoW, then release the transaction.</summary>
+    private void CommitFinalTransaction()
+    {
+        // Step 1: Commit the FINAL transaction in the recycle chain (whatever's open right now). With SuppressWalSerialization=true, this transitions
+        // revisions to Committed and marks pages dirty but emits ZERO Transaction WAL records (BL-01). Earlier transactions in the chain were already
+        // committed + disposed by RecycleTransactionIfNeeded — their revisions are stamped with the bulk's UoW ID, still Pending in UowRegistry, hence
+        // MVCC-invisible to other UoWs until uow.Flush below.
+        if (!_currentTransaction.Commit())
+        {
+            throw new InvalidOperationException("bulk final transaction commit failed (concurrency conflict?) — recommend Dispose + retry");
+        }
+
+        // Step 2: Flush the UoW. Waits for any pending WAL records (BulkBegin) durable and transitions the UoW to WalDurable (records the commit in
+        // UowRegistry).
+        _uow.Flush();
+
+        // Step 2b: Dispose the (already-committed) final transaction BEFORE forcing the checkpoint. Until it is disposed it keeps its bulk-allocated
+        // pages pinned (the checkpoint capture finds them with active writers and skips them), and with the coverage gate (CK-03) a skipped page keeps
+        // any cycle from covering the bulk. Dispose does NOT discard the committed revisions (they live in the dirty cluster pages, which the forced
+        // checkpoint then writes); the UoW stays alive for BulkEnd emission.
+        _currentTransaction.Dispose();
+        _currentTransaction = null;
     }
 
     /// <summary>
@@ -387,7 +399,7 @@ public sealed class BulkLoadSession : IDisposable
     {
         // Manifest is emitted at most twice per session — a per-call arena is fine.
         var arena = new CommitBatchArena();
-        var batch = new CommitBatchBuilder(arena, tsn: 0, uowEpoch: 0, fenceMode: true);
+        var batch = new CommitBatchBuilder(arena, 0, 0, true);
         batch.AddBulkManifest(BulkSessionId, isBegin ? 0 : BulkBeginLsn, isFinal ? EntitiesSpawned : 0, isFinal ? EntitiesUpdated : 0);
 
         var wc = WaitContext.FromTimeout(Options.CheckpointTimeout);

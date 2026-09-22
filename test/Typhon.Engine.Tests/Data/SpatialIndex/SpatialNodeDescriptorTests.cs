@@ -14,25 +14,68 @@ internal class SpatialNodeDescriptorTests
         yield return new TestCaseData(SpatialNodeDescriptor.R3Df64).SetName("R3Df64");
     }
 
+    /// <summary>
+    /// The four variants' leaf and internal fan-outs, stated as literals so a layout change has to be acknowledged here.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Leaf entry layout: coords + payloadId(8B) + CategoryMask(4B).</b> A 4-byte <c>ComponentChunkId</c> sat between the last two until #872 step
+    /// 13 removed the entity-level tree that was its only consumer — the cluster trees passed zero. <c>AC-13.5</c> is the arithmetic below.</para>
+    /// <para><b>Only the f32 variants moved, and that is not an accident of rounding.</b> <c>LeafCapacity</c> is <c>EntryArea / entrySize</c> floored, so
+    /// four fewer bytes per entry buys a slot only when the division crosses an integer. R3Df64's 704-byte entry area gives <c>704/64 = 11</c> before and
+    /// <c>704/60 = 11</c> after — the freed bytes are not yet a whole entry. That is why AC-13.5 asks for the f32 numbers and states R3Df64 as unchanged
+    /// rather than quietly omitting it.</para>
+    /// </remarks>
     [Test]
+    [VerifiesRule("SH-02")]
     public void KnownCapacities_MatchDesignDoc()
     {
-        // Updated for leaf entry layout: coords + EntityId(8B) + ComponentChunkId(4B) + CategoryMask(4B)
-        Assert.That(SpatialNodeDescriptor.R2Df32.LeafCapacity, Is.EqualTo(15), "R2Df32 LeafCap");
-        Assert.That(SpatialNodeDescriptor.R2Df32.InternalCapacity, Is.EqualTo(24), "R2Df32 InternalCap");
-        Assert.That(SpatialNodeDescriptor.R2Df32.MinFill, Is.EqualTo(6), "R2Df32 MinFill");
+        Assert.Multiple(() =>
+        {
+            // 480 entry bytes / 28 = 17 (was 480 / 32 = 15).
+            Assert.That(SpatialNodeDescriptor.R2Df32.LeafCapacity, Is.EqualTo(17), "R2Df32 LeafCap");
+            Assert.That(SpatialNodeDescriptor.R2Df32.InternalCapacity, Is.EqualTo(24), "R2Df32 InternalCap");
+            Assert.That(SpatialNodeDescriptor.R2Df32.MinFill, Is.EqualTo(7), "R2Df32 MinFill");
 
-        Assert.That(SpatialNodeDescriptor.R3Df32.LeafCapacity, Is.EqualTo(11), "R3Df32 LeafCap");
-        Assert.That(SpatialNodeDescriptor.R3Df32.InternalCapacity, Is.EqualTo(16), "R3Df32 InternalCap");
-        Assert.That(SpatialNodeDescriptor.R3Df32.MinFill, Is.EqualTo(5), "R3Df32 MinFill");
+            // 472 / 36 = 13 (was 472 / 40 = 11).
+            Assert.That(SpatialNodeDescriptor.R3Df32.LeafCapacity, Is.EqualTo(13), "R3Df32 LeafCap");
+            Assert.That(SpatialNodeDescriptor.R3Df32.InternalCapacity, Is.EqualTo(16), "R3Df32 InternalCap");
+            Assert.That(SpatialNodeDescriptor.R3Df32.MinFill, Is.EqualTo(6), "R3Df32 MinFill");
 
-        Assert.That(SpatialNodeDescriptor.R2Df64.LeafCapacity, Is.EqualTo(9), "R2Df64 LeafCap");
-        Assert.That(SpatialNodeDescriptor.R2Df64.InternalCapacity, Is.EqualTo(12), "R2Df64 InternalCap");
-        Assert.That(SpatialNodeDescriptor.R2Df64.MinFill, Is.EqualTo(4), "R2Df64 MinFill");
+            // 464 / 44 = 10 (was 464 / 48 = 9).
+            Assert.That(SpatialNodeDescriptor.R2Df64.LeafCapacity, Is.EqualTo(10), "R2Df64 LeafCap");
+            Assert.That(SpatialNodeDescriptor.R2Df64.InternalCapacity, Is.EqualTo(12), "R2Df64 InternalCap");
+            Assert.That(SpatialNodeDescriptor.R2Df64.MinFill, Is.EqualTo(4), "R2Df64 MinFill");
 
-        Assert.That(SpatialNodeDescriptor.R3Df64.LeafCapacity, Is.EqualTo(11), "R3Df64 LeafCap");
-        Assert.That(SpatialNodeDescriptor.R3Df64.InternalCapacity, Is.EqualTo(13), "R3Df64 InternalCap");
-        Assert.That(SpatialNodeDescriptor.R3Df64.MinFill, Is.EqualTo(5), "R3Df64 MinFill");
+            // 704 / 60 = 11, unchanged from 704 / 64 = 11 — see the remarks.
+            Assert.That(SpatialNodeDescriptor.R3Df64.LeafCapacity, Is.EqualTo(11), "R3Df64 LeafCap");
+            Assert.That(SpatialNodeDescriptor.R3Df64.InternalCapacity, Is.EqualTo(13), "R3Df64 InternalCap");
+            Assert.That(SpatialNodeDescriptor.R3Df64.MinFill, Is.EqualTo(5), "R3Df64 MinFill");
+        });
+    }
+
+    /// <summary>
+    /// <c>AC-13.5</c> — the leaf entry is exactly the coordinates, an 8-byte payload id and a 4-byte category mask, with nothing between them.
+    /// </summary>
+    /// <remarks>
+    /// The capacities above are a CONSEQUENCE of the entry size; this asserts the entry size itself, so a future change that removes one field and adds
+    /// another of the same width cannot leave the fan-out numbers looking right. It is stated as offsets rather than as a size because that is what a reader
+    /// of the SOA arrays actually depends on: the category-mask array must begin exactly one payload-id array after the ids.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SH-02")]
+    [TestCaseSource(nameof(AllVariants))]
+    public void LeafSoaLayout_HasNoGapBetweenPayloadIdsAndCategoryMasks(SpatialNodeDescriptor desc)
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(desc.LeafIdOffset, Is.EqualTo(desc.LeafCoordOffsets + (desc.CoordCount * desc.LeafCoordStride)),
+                "the payload-id array must start immediately after the coordinate arrays");
+            Assert.That(desc.LeafCategoryMaskOffset, Is.EqualTo(desc.LeafIdOffset + (desc.LeafCapacity * desc.LeafIdSize)),
+                "the category-mask array must start immediately after the payload-id array — a gap here is a column that was removed from the arithmetic "
+                + "but not from the layout");
+            Assert.That(desc.LeafCategoryMaskOffset + (desc.LeafCapacity * desc.LeafCategoryMaskSize), Is.LessThanOrEqualTo(desc.Stride),
+                "the leaf entry area overruns the node stride");
+        });
     }
 
     [Test]

@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
 using System.IO;
+using System.Runtime.CompilerServices;
 
 namespace Typhon.Benchmark;
 
@@ -27,6 +28,8 @@ public class BTreeMicroBenchmarks
     private long _nextInsertKey = PreFillCount + 1;
     private long _deleteKeyToggle;
     private long _moveToggle;
+    private int _updateToggle;
+    private readonly BTreeValueUpdate<long>[] _singleEntryBatch = new BTreeValueUpdate<long>[1];
     private long _moveCrossToggle;
     private long[] _randomInsertKeys;
     private int _randomInsertIndex;
@@ -95,7 +98,11 @@ public class BTreeMicroBenchmarks
         _pmmf?.Dispose();
         _serviceProvider?.Dispose();
 
-        try { File.Delete($"{_databaseName}.bin"); } catch { }
+        try { File.Delete($"{_databaseName}.bin"); }
+        catch
+        {
+            // ignored
+        }
     }
 
     /// <summary>
@@ -162,6 +169,73 @@ public class BTreeMicroBenchmarks
         accessor.Dispose();
     }
 
+
+    /// <summary>
+    /// The pair #872 step 4 replaces: change a value under an UNCHANGED key by removing the entry and adding it back.
+    /// </summary>
+    /// <remarks>
+    /// Two full root-to-leaf descents plus a structural remove and a structural insert, to move four bytes. This is the baseline
+    /// <see cref="UpdateValue_SameKey"/> has to beat by 2x, and pairing them here — same tree, same key, same setup — is what makes the ratio mean
+    /// something. Toggling the value keeps the tree in its initial state every two invocations so neither benchmark drifts.
+    /// </remarks>
+    [Benchmark]
+    [BenchmarkCategory("Regression")]
+    public void RemoveAdd_SameKey()
+    {
+        var accessor = _segment.CreateChunkAccessor();
+        // Both halves are checked. Move_SameLeaf's own remarks are about exactly this hazard — a benchmark that quietly times a REJECTION reads as a very
+        // fast implementation — and a ratio between two operations is only meaningful if both of them did the work.
+        if (!_tree.Remove(5000, out _, ref accessor))
+        {
+            ThrowBenchmarkDidNoWork(nameof(RemoveAdd_SameKey));
+        }
+
+        _tree.Add(5000, (_updateToggle++ & 1) == 0 ? 50_000 : 50_001, ref accessor);
+        accessor.Dispose();
+    }
+
+    /// <summary>
+    /// In-place value update under an unchanged key — one descent and one 4-byte store (#872 step 4, AC-4.6).
+    /// </summary>
+    [Benchmark]
+    [BenchmarkCategory("Regression")]
+    public void UpdateValue_SameKey()
+    {
+        var accessor = _segment.CreateChunkAccessor();
+        if (!_tree.TryUpdateValue(5000, (_updateToggle++ & 1) == 0 ? 50_000 : 50_001, ref accessor))
+        {
+            ThrowBenchmarkDidNoWork(nameof(UpdateValue_SameKey));
+        }
+
+        accessor.Dispose();
+    }
+
+    /// <summary>
+    /// #872 step 5, AC-5.6 — the BULK entry point at N = 1, which must not be slower than the single-entry path it generalises.
+    /// </summary>
+    /// <remarks>
+    /// The pairing with <c>UpdateValue_SameKey</c> is the whole point: a batch of one walks the same nodes, so any difference is the bulk path's own overhead
+    /// — the span setup, the generic applier, and the extra indirection through the partition loop. It should be at or below the single-entry cost, because it
+    /// also skips that path's OLC version reads and validations.
+    /// </remarks>
+    [Benchmark]
+    [BenchmarkCategory("Regression")]
+    public void UpdateValues_SingleEntry()
+    {
+        var accessor = _segment.CreateChunkAccessor();
+        _singleEntryBatch[0] = new BTreeValueUpdate<long>(5000, (_updateToggle++ & 1) == 0 ? 50_000 : 50_001);
+        if (_tree.UpdateValues(_singleEntryBatch, ref accessor, out _) != 1)
+        {
+            ThrowBenchmarkDidNoWork(nameof(UpdateValues_SingleEntry));
+        }
+
+        accessor.Dispose();
+    }
+
+    /// <summary>Kept out of line so the check above is a predictable not-taken branch rather than inlined throw setup on the measured path.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowBenchmarkDidNoWork(string benchmark) =>
+        throw new InvalidOperationException($"{benchmark} measured a rejected operation, not the operation — the tree is not in the shape it assumes.");
 
     /// <summary>
     /// Move a key to a free adjacent slot and back. Both keys live in the same leaf, which is what a spatial or positional index does on almost every update.

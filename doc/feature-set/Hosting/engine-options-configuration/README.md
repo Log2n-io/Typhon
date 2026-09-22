@@ -27,7 +27,7 @@ your `configure` delegate via `.Configure(...)`. The resulting `IOptions<TOption
 inside that service's factory when the container first builds it, so values are effectively frozen
 at `BuildServiceProvider()` for singleton registrations. `DatabaseEngineOptions` is a composite: it
 groups per-subsystem option types (`Resources`, `Timeouts`, `DeferredCleanup`, `Wal`, `Transient`,
-`Statistics`) instead of one flat bag of properties, so you only touch the knobs you need.
+`Statistics`, `Spatial`) instead of one flat bag of properties, so you only touch the knobs you need.
 
 ## 💻 Usage
 
@@ -73,6 +73,11 @@ services
         engineOpts.Resources.MaxActiveTransactions = 2000;
         engineOpts.Wal.UseFUA       = false;          // GroupCommit workload, no per-write FUA
         engineOpts.Statistics       = null;           // disable background stats worker
+
+        // Where a dense cell stops scanning its clusters and starts descending a tree. The engine makes that switch
+        // itself, per cell, in both directions; this only moves the boundary. See the Spatial catalog for the crossover
+        // measurement behind the 1024 default.
+        engineOpts.Spatial.CellTreePromoteThreshold = 2048;
     });
 
 var provider = services.BuildServiceProvider();
@@ -81,7 +86,7 @@ var engine   = provider.GetRequiredService<DatabaseEngine>();
 
 | Options type | Registered by | Key knobs |
 |---|---|---|
-| `DatabaseEngineOptions` | `AddDatabaseEngine` | `Resources`, `Timeouts`, `DeferredCleanup`, `Wal`, `Transient`, `Statistics` |
+| `DatabaseEngineOptions` | `AddDatabaseEngine` | `Resources`, `Timeouts`, `DeferredCleanup`, `Wal`, `Transient`, `Statistics`, `Spatial` |
 | `PagedMMFOptions` / `ManagedPagedMMFOptions` | `AddPagedMemoryMappedFile` / `AddManagedPagedMMF` | `DatabaseName`, `DatabaseDirectory`, `DatabaseCacheSize` |
 | `MemoryAllocatorOptions` | `AddMemoryAllocator` | `Name` (diagnostics label only) |
 | `ResourceRegistryOptions` | `AddResourceRegistry` | `Name` (diagnostics label only) |

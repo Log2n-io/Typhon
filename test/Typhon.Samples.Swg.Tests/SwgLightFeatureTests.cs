@@ -66,7 +66,7 @@ public sealed class SwgLightFeatureTests
         _engine.RegisterComponentFromAccessor<Intent>();
 
         // Bounds is SingleVersion + spatial ⇒ Character is cluster-eligible ⇒ a grid is required before init (#230 Option B).
-        _engine.ConfigureSpatialGrid(new SpatialGridConfig(new Vector2(0f, 0f), new Vector2(WorldSize, WorldSize), cellSize: 100f));
+        _engine.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(0f, 0f), new Vector2(WorldSize, WorldSize), cellSize: 100f));
         _engine.InitializeArchetypes();
     }
 
@@ -131,7 +131,10 @@ public sealed class SwgLightFeatureTests
 
         using (var tx = _engine.CreateQuickTransaction())
         {
-            var all = tx.Query<Character>().WhereInAABB<Bounds>(0, 0, WorldSize, WorldSize, 0, 0).Execute();
+            // (minX, minY, minZ, maxX, maxY, maxZ) for both dimensions — the Z arguments are ignored for a 2D component. This used to be packed (minX,
+            // minY, maxX, maxY, _, _) to work around EcsQuery reading the max corner from the wrong slots; that defect was fixed in #872 step 13 and the
+            // workaround is now what would break the query.
+            var all = tx.Query<Character>().WhereInAABB<Bounds>(0, 0, 0, WorldSize, WorldSize, 0).Execute();
             Assert.That(all.Count, Is.EqualTo(3), "world-covering AABB query returns all 3 positioned characters");
         }
     }

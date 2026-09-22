@@ -111,6 +111,14 @@ public class MemoryAllocatorInstrumentationTests
     }
 
     [Test]
+    public void Array_block_Pin_throws()
+    {
+        // A managed block is never addressed by pointer (CLAUDE.md, Unsafe Code): AllocatePinned is the allocation for that.
+        using var array = Allocator.AllocateArray("test.array.pin", AllocatorTestServices.AllocationResource, size: 64);
+        Assert.Throws<System.NotSupportedException>(() => array.Pin());
+    }
+
+    [Test]
     public void Default_SourceTag_is_unattributed()
     {
         // Allocations that omit the tag parameter should fall back to MemoryAllocSource.Unattributed (0).

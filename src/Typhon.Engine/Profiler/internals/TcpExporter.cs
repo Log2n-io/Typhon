@@ -32,8 +32,9 @@ namespace Typhon.Engine.Internals;
 internal sealed class TcpExporter : ResourceNode, IProfilerExporter
 {
     private readonly int _port;
+    private readonly IPAddress _bindAddress;
     private readonly int _liveConnectTimeoutMs;
-    private readonly ManualResetEventSlim _firstClientConnected = new(initialState: false);
+    private readonly ManualResetEventSlim _firstClientConnected = new(false);
     private TcpListener _listener;
     private Thread _acceptThread;
     private bool _shutdown;
@@ -59,12 +60,14 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
     private static readonly long CatchupIntervalTicks = Stopwatch.Frequency;
 
     /// <summary>
-    /// Construct a TcpExporter listening on <paramref name="port"/>. Pass <paramref name="liveConnectTimeoutMs"/> &gt; 0
-    /// to make <see cref="Initialize"/> block until the first client connects (or the timeout elapses) — gives the
-    /// host an attach-the-viewer-before-startup window. <c>0</c> (default) preserves the original async behavior:
-    /// Initialize returns immediately, clients connect when they connect.
+    /// Construct a TcpExporter listening on <paramref name="port"/> at <paramref name="bindAddress"/>.
+    /// <see cref="IPAddress.Loopback"/> is the normal default supplied by <see cref="ProfilerLaunchConfig"/>; it is
+    /// IPv4-only (<c>127.0.0.1</c>), matching the Workbench's current IPv4 attach path. Pass
+    /// <paramref name="liveConnectTimeoutMs"/> &gt; 0 to make <see cref="Initialize"/> block until the first client
+    /// connects (or the timeout elapses) — gives the host an attach-the-viewer-before-startup window. <c>0</c>
+    /// preserves the original async behavior: Initialize returns immediately, clients connect when they connect.
     /// </summary>
-    public TcpExporter(int port, IResource parent, int liveConnectTimeoutMs = 0)
+    public TcpExporter(int port, IResource parent, int liveConnectTimeoutMs = 0, IPAddress bindAddress = null)
         : base("TcpExporter", ResourceType.Service, parent ?? throw new ArgumentNullException(nameof(parent)))
     {
         if (liveConnectTimeoutMs < 0)
@@ -72,6 +75,7 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
             throw new ArgumentOutOfRangeException(nameof(liveConnectTimeoutMs), "must be ≥ 0 (0 = don't wait)");
         }
         _port = port;
+        _bindAddress = bindAddress ?? IPAddress.Loopback;
         _liveConnectTimeoutMs = liveConnectTimeoutMs;
         // Match <see cref="FileExporter"/>'s capacity — 64 gives the socket-send path ~16 MB of slack, enough to absorb a single// gcChurn-class burst
         // without drop-newest firing. Previously 4, which was too tight for any workload with multi-tick-spanning// I/O pressure. See FileExporter ctor for
@@ -105,7 +109,7 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
         _compressedBuffer = new byte[LZ4Codec.MaximumOutputSize(TraceRecordBatchPool.MaxPayloadBytes)];
         _frameBuffer = new byte[LiveStreamProtocol.FrameHeaderSize + TraceBlockEncoder.BlockHeaderSize + _compressedBuffer.Length];
 
-        _listener = new TcpListener(IPAddress.Any, _port);
+        _listener = new TcpListener(_bindAddress, _port);
         _listener.Start(1);
 
         _acceptThread = new Thread(AcceptLoop)
@@ -416,7 +420,7 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
         // FileTable frame payload: [u32 entryCount][per entry: u16 fileId, u16 pathLen, UTF-8 bytes]
         byte[] fileTableFrame;
         using (var ms = new MemoryStream())
-        using (var bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: false))
+        using (var bw = new BinaryWriter(ms, Encoding.UTF8, false))
         {
             bw.Write((uint)files.Length);
             for (ushort i = 0; i < files.Length; i++)
@@ -437,7 +441,7 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
         // SourceLocationManifest frame payload: [u32 entryCount][per entry: u16 id, u16 fileId, u32 line, u8 kind, u8 methodLen, UTF-8 method bytes]
         byte[] manifestFrame;
         using (var ms = new MemoryStream())
-        using (var bw = new BinaryWriter(ms, Encoding.UTF8, leaveOpen: false))
+        using (var bw = new BinaryWriter(ms, Encoding.UTF8, false))
         {
             bw.Write((uint)entries.Length);
             foreach (var e in entries)

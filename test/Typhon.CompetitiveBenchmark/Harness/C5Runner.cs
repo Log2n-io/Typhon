@@ -75,7 +75,7 @@ public static class C5Runner
         sp.EnsureFileDeleted<ManagedPagedMMFOptions>();
         var dbe = sp.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<SpPos>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(new Vector2(0, 0), new Vector2(World, World), cellSize: 100f));
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(World, World), cellSize: 100f));
         dbe.InitializeArchetypes();
 
         const int LoadBatch = 8192;

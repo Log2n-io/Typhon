@@ -25,18 +25,23 @@ Spawning an entity with a `[SpatialIndex]` field places it in a cluster already 
 allocates a fresh one for that cell if none has room. As entities move, the engine detects when a new position
 exits the current cell by more than a small hysteresis margin (so walking along a boundary doesn't thrash) and
 queues a migration instead of moving it inline. All queued migrations for a tick are drained together at the
-tick fence, after every system has run: entity data (including any Transient components), index entries, and
-the spatial back-pointer are moved atomically into a cluster of the destination cell, and the per-cluster AABB
-is recomputed. None of this cell/cluster bookkeeping is persisted — it's derived from entity positions and
+tick fence, after every system has run: entity data (including any Transient components), its secondary index
+entries, and its EntityMap location record are moved atomically into a cluster of the destination cell. There is
+no per-entity spatial back-pointer to move — the migrant's bounds are unioned into the DESTINATION cluster's AABB,
+rebased into the destination cell's frame, and that cluster is added to or updated in the destination cell's
+cluster index. The source cluster's AABB is deliberately left conservative rather than shrunk on the spot; the
+fence's refresh pass retightens it. None of this cell/cluster bookkeeping is persisted — it's derived from entity positions and
 rebuilt on every startup.
 
 ## 💻 Usage
 
 ```csharp
+using System.Numerics;   // BitOperations, for the occupancy-bit walk below
+
 [Component("Game.AntPos", 1, StorageMode = StorageMode.SingleVersion)]
 public struct AntPos
 {
-    [SpatialIndex(1.0f)]
+    [SpatialIndex]
     public AABB2F Bounds;
 }
 
@@ -47,7 +52,7 @@ public partial class Ant : Archetype<Ant>
 }
 
 // Opt in once, before InitializeArchetypes (see Spatial Grid Configuration).
-dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
     worldMin: new Vector2(0, 0), worldMax: new Vector2(1000, 1000), cellSize: 100f));
 dbe.InitializeArchetypes();
 
@@ -56,14 +61,37 @@ using var t = dbe.CreateQuickTransaction();
 var id = t.Spawn<Ant>(Ant.Pos.Set(new AntPos { Bounds = new AABB2F { MinX = 5, MinY = 5, MaxX = 5, MaxY = 5 } }));
 t.Commit();
 
-// Move it across a cell boundary — migration is detected and executed automatically
-// at the next tick fence; no explicit migration call.
+// Move it across a cell boundary. Write the spatial field through the WriteSpatial barrier:
+// that is what lets the engine flag the cell crossing and grow the cluster AABB inline.
+// Migration is then executed automatically at the next tick fence; no explicit migration call.
 using var wt = dbe.CreateQuickTransaction();
-var ant = wt.OpenMut(id);
-ref var pos = ref ant.Write(Ant.Pos);
-pos.Bounds = new AABB2F { MinX = 105, MinY = 5, MaxX = 105, MaxY = 5 };
+foreach (var cluster in wt.GetClusterEnumerator<Ant>())
+{
+    var bits = cluster.OccupancyBits;
+    while (bits != 0)
+    {
+        int slot = BitOperations.TrailingZeroCount(bits);
+        bits &= bits - 1;
+        cluster.WriteSpatial(Ant.Pos, slot, new AntPos
+        {
+            Bounds = new AABB2F { MinX = 105, MinY = 5, MaxX = 105, MaxY = 5 }
+        });
+    }
+}
 wt.Commit();
 ```
+
+The plain `OpenMut(...).Write(...)` path is still correct, and it is the one to use when you are editing a single
+entity by id, when the component is `Versioned` (the barrier refuses those, since it would bypass the revision
+chain), or when you also need the slot marked dirty for the write-ahead log — `WriteSpatial` deliberately does not
+set the dirty bit. It costs the engine a wider fall-back scan at the fence, because a plain write leaves the
+per-cluster bitmaps untouched. The `TYPHON009` analyzer warning flags the raw-span form of that write so the choice
+is deliberate rather than accidental.
+
+> ⚠️ **`WriteSpatial` accepts `AABB2F` only today.** It throws `NotSupportedException` for the other seven field
+> shapes — `AABB3F`, the four `BSphere` types and the `f64` variants — so an archetype with a 3D or sphere spatial
+> field cannot use the barrier at all. Registration succeeds and the first write throws. Such an archetype
+> must write its spatial field the plain way and accept the wider fence-time scan.
 
 | Config field (`SpatialGridConfig`) | Default | Effect |
 |---|---|---|
@@ -74,7 +102,7 @@ wt.Commit();
 - **Cluster-cell invariant always holds** — every entity in a cluster belongs to that cluster's assigned cell; enforced at spawn (cell-aware slot claim) and re-enforced by migration, never violated mid-cluster.
 - **Migration is deferred and batched, not inline** — movement systems only write positions; the engine detects crossings and executes all of a tick's migrations together at the tick fence, after all systems complete and before the WAL flush, so migration writes are durable in the same fsync as normal commits.
 - **One tick of spatial staleness is accepted** — between a position write and the fence, entity data is always correct via direct lookup (EntityMap), but a per-cell spatial query may miss an entity that just crossed a boundary for that one tick.
-- **Migration moves everything atomically** — component data (Persistent and Transient), secondary index entries, and the spatial back-pointer move together inside one durability unit; a crash mid-tick can't leave an entity split across clusters.
+- **Migration moves everything atomically** — component data (Persistent and Transient), secondary index entries, and the EntityMap location record move together inside one durability unit; a crash mid-tick can't leave an entity split across clusters. Spatial bookkeeping is not per-entity: the destination cluster's AABB absorbs the migrant and the destination cell's cluster index is updated in the same pass.
 - **Hysteresis suppresses boundary thrash** — an entity oscillating within the margin around a cell edge never triggers a migration; only a true cross-and-stay does.
 - **No compaction policy** — an emptied cluster is deallocated immediately, but a cluster with internal gaps (e.g. 10/64 occupied) is never compacted or merged; occupancy-bit scanning makes gaps cheap to skip.
 - **Opt-in, all-or-nothing per engine** — clustering only engages for archetypes with a `[SpatialIndex]` field once `ConfigureSpatialGrid` has been called before `InitializeArchetypes`; non-spatial archetypes are entirely unaffected.

@@ -174,7 +174,7 @@ internal unsafe struct ArchetypeSortedStream : IDisposable
         // budget to the streams that lose every comparison and are read once.
         if (_count == _pageCapacity && _pageCapacity < MaxPageCapacity)
         {
-            GrowBuffers(_pageCapacity * 2, preserve: true);
+            GrowBuffers(_pageCapacity * 2, true);
         }
     }
 

@@ -51,7 +51,7 @@ tx.Rollback();    // infinite deadline (UnitOfWorkContext.None)
 
 ## ⚠️ Guarantees & limits
 - **Atomic commit** — the only cancellation check in `Commit` is at entry, before any component is touched; once the holdoff opens, every component's PREPARE/PUBLISH runs to completion, so a deadline can never produce a partially-committed transaction.
-- **Append before publish** — no change (isolation flag, index, entity map, cluster slot) becomes visible before its WAL record is appended; see [Commit Pipeline](../Durability/commit-pipeline.md) for the full ordering and the residual spawn-publish throw case (#396).
+- **Append before publish** — no change (isolation flag, index, entity map, cluster slot) becomes visible before its WAL record is appended; see [Commit Pipeline](../Durability/commit-pipeline.md) for the full ordering and the residual spawn-publish throw case.
 - **Rollback always completes** — runs entirely inside holdoff with no yield point; an expired deadline or cancelled token cannot abort cleanup partway through, by design (`Rollback()`'s wrapper uses `UnitOfWorkContext.None`).
 - **`bool` return, not an exception, for already-finished transactions** — both methods return `false` on an already-`Committed`/`Rollbacked` transaction and `true` on an empty (`Created`-state) one; only CRUD calls on a finished transaction throw `InvalidOperationException` (ADR-038).
 - **Conflict resolution is opt-in** — pass a `ConcurrencyConflictHandler` to `Commit` for anything other than last-writer-wins; see [Optimistic Conflict Resolution](./optimistic-conflict-resolution.md) for the handler API.

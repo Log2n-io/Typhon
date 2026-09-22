@@ -239,7 +239,7 @@ public unsafe class SpatialQueryBenchmarks
 /// <summary>
 /// Measures post-filter waste: spatial query with/without category mask → simulated component read.
 /// The two-pass pattern: (1) spatial+category query reduces candidates, (2) caller reads component data
-/// via ComponentChunkId and applies a predicate. Category masks cut the post-filter set dramatically.
+/// via the payload id and applies a predicate. Category masks cut the post-filter set dramatically.
 /// </summary>
 [SimpleJob(warmupCount: 3, iterationCount: 10)]
 [JsonExporterAttribute.Full]
@@ -290,7 +290,7 @@ public unsafe class SpatialCompoundQueryBenchmarks
             for (int i = 0; i < EntityCount; i++)
             {
                 double x = rng.NextDouble() * 10000, y = rng.NextDouble() * 10000;
-                _tree.Insert(i + 1, i + 1, stackalloc double[] { x, y, x + 5, y + 5 }, ref accessor,
+                _tree.Insert(i + 1, stackalloc double[] { x, y, x + 5, y + 5 }, ref accessor,
                     categoryMask: masks[i % 4]);
             }
         }
@@ -316,8 +316,8 @@ public unsafe class SpatialCompoundQueryBenchmarks
             foreach (var hit in _tree.QueryAABB(stackalloc double[] { 0, 0, 5000, 5000 }))
             {
                 // Simulate: "is this an enemy?" post-filter without category mask
-                // Uses ComponentChunkId to index into simulated component array
-                if (hit.ComponentChunkId % 4 == 0) // ~25% pass rate
+                // Uses the payload id to index into a simulated component array
+                if (hit.PayloadId % 4 == 0) // ~25% pass rate
                 {
                     accepted++;
                 }
@@ -339,7 +339,7 @@ public unsafe class SpatialCompoundQueryBenchmarks
             foreach (var hit in _tree.QueryAABB(stackalloc double[] { 0, 0, 5000, 5000 }, categoryMask: 0x01))
             {
                 // Pass 2: component-level predicate on the reduced set
-                if (hit.ComponentChunkId % 2 == 0) // ~50% of enemies pass
+                if (hit.PayloadId % 2 == 0) // ~50% of enemies pass
                 {
                     accepted++;
                 }
@@ -361,8 +361,8 @@ public unsafe class SpatialCompoundQueryBenchmarks
             // Only the enemy-category entities pass the tree filter
             foreach (var hit in _tree.QueryAABB(stackalloc double[] { 0, 0, 5000, 5000 }, categoryMask: 0x01))
             {
-                // Simulate reading health via ComponentChunkId and filtering
-                if (hit.ComponentChunkId > 10)
+                // Simulate reading health via the payload id and filtering
+                if (hit.PayloadId > 10)
                 {
                     accepted++;
                 }

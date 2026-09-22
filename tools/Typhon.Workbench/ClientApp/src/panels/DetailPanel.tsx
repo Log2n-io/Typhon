@@ -738,9 +738,9 @@ function DbMapSegmentDetail({
                 {summary.clusterSpatial && (summary.clusterCellSize ?? 0) > 0 && (
                   <Row
                     label="Spatial grid"
-                    value={`${summary.clusterCellSize}-unit cells · ${summary.clusterGridWidth}×${summary.clusterGridHeight}${
-                      summary.clusterSpatialMode ? ` · ${summary.clusterSpatialMode}` : ''
-                    }`}
+                    value={`${summary.clusterCellSize}-unit cells · ${summary.clusterGridWidth}×${summary.clusterGridHeight}×${
+                      summary.clusterGridDepth ?? 1
+                    }${summary.clusterSpatialMode ? ` · ${summary.clusterSpatialMode}` : ''}`}
                   />
                 )}
               </dl>
@@ -929,7 +929,7 @@ function ClusterCellBlock({ cell }: { cell: StorageClusterCellDto }) {
     <div className="mt-3 border-t border-border pt-2">
       <p className="mb-1 text-fs-xs uppercase tracking-wide text-muted-foreground">Spatial cell</p>
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-fs-sm">
-        <Row label="Cell" value={`(${cell.cellX}, ${cell.cellY}) · key ${cell.cellKey}`} />
+        <Row label="Cell" value={`(${cell.cellX}, ${cell.cellY}, ${cell.cellZ}) · key ${cell.cellKey}`} />
         <Row label="Entities here" value={cell.entitiesInCell.toLocaleString()} />
         <Row label="Clusters here" value={cell.clustersInCell.toLocaleString()} />
         {aabbValid && <Row label="Cluster AABB" value={`[${fmt(cell.aabbMinX)}, ${fmt(cell.aabbMinY)}]–[${fmt(cell.aabbMaxX)}, ${fmt(cell.aabbMaxY)}]`} />}

@@ -63,6 +63,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  // Vitest 4: restoreAllMocks no longer clears vi.fn() call history — without this, getSession's calls leak across tests.
+  vi.clearAllMocks();
   vi.restoreAllMocks();
   useSessionStore.getState().clearSession();
 });

@@ -5,6 +5,8 @@ using System;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests;
@@ -352,6 +354,128 @@ internal sealed class TrueCrashE2ETests
         }
     }
 
+    /// <summary>What the commit held between its append and its publish does.</summary>
+    public enum PausedOp { Destroy, Update, Spawn }
+
+    /// <summary>
+    /// A Versioned commit held between its WAL append and its publish, while a forced checkpoint runs, must survive a crash. Today the CK-03 gate is
+    /// what protects it: in each of these cases every cycle skips a page a live chunk writer holds, so it gates and CheckpointLSN stays below the
+    /// record. A regression guard for that, not a CK-13 verifier, since the floor is not what holds the watermark here;
+    /// <c>CommittedDisciplineRecoveryTests.CommitDiscipline_ACheckpointDuringAPublish_*</c> covers the commits the gate cannot protect.
+    /// </summary>
+    [Test]
+    [CancelAfter(30_000)]
+    public void ACheckpointDuringAPublish_KeepsTheCommitInTheRecoveryWindow([Values] PausedOp op)
+    {
+        EntityId id;
+        EntityId sibling;
+        EntityId spawned = default;
+        var updated = new CompA(42, 4.5f, 4.25);
+        string cycleReport;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope1.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+
+            using (var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate))
+            {
+                using var tx = uow.CreateTransaction();
+                var comp = new CompA(1, 1, 1);
+                var other = new CompA(5, 5, 5);
+                id = tx.Spawn<CompAArch>(CompAArch.A.Set(in comp));
+                sibling = tx.Spawn<CompAArch>(CompAArch.A.Set(in other));
+                tx.Commit();
+                uow.Flush();
+            }
+
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "the base entities must be checkpointed first");
+
+            // Hold the commit between its append and its publish. Only the committer's thread is held: the checkpoint commits too, at cycle start.
+            using var appended = new ManualResetEventSlim();
+            using var release = new ManualResetEventSlim();
+            var committerThread = 0;
+            dbe.CommitAfterAppendProbe = () =>
+            {
+                if (Environment.CurrentManagedThreadId == Volatile.Read(ref committerThread))
+                {
+                    appended.Set();
+                    release.Wait(TimeSpan.FromSeconds(10));
+                }
+            };
+
+            var committer = Task.Run(() =>
+            {
+                Volatile.Write(ref committerThread, Environment.CurrentManagedThreadId);
+                using var uow = dbe.CreateUnitOfWork(DurabilityMode.Immediate);
+                using var tx = uow.CreateTransaction();
+                switch (op)
+                {
+                    case PausedOp.Destroy:
+                        tx.Destroy(id);
+                        break;
+                    case PausedOp.Update:
+                        tx.OpenMut(id).Write(CompAArch.A) = updated;
+                        break;
+                    case PausedOp.Spawn:
+                        var comp = new CompA(7, 7.5f, 7.25);
+                        spawned = tx.Spawn<CompAArch>(CompAArch.A.Set(in comp));
+                        break;
+                }
+                tx.Commit();
+            });
+            bool committed;
+            try
+            {
+                Assert.That(appended.Wait(TimeSpan.FromSeconds(5)), Is.True, "the commit never reached its append");
+                var opLsn = dbe.DurabilityLog.LastAppendedLsn;
+
+                // The record is appended and the publish has not run. The cycle gates on a page the commit still holds, which keeps the watermark back.
+                var cm = dbe.CheckpointManager;
+                var before = cm.TotalCheckpoints;
+                var covered = cm.ForceCheckpointAndWait(TimeSpan.FromMilliseconds(300));
+                cycleReport = $"covered={covered}, cycles {before}->{cm.TotalCheckpoints}, gated={cm.ConsecutiveGatedCycles}, "
+                    + $"skipped=[{string.Join(",", cm.LastSkippedPages.ToArray())}], CheckpointLSN={cm.CheckpointLsn}, the commit's record={opLsn}";
+                Assert.That(cm.CheckpointLsn, Is.LessThan(opLsn), $"CheckpointLSN passed the record of a commit that has not published ({cycleReport})");
+            }
+            finally
+            {
+                dbe.CommitAfterAppendProbe = null;
+                release.Set();
+                committed = committer.Wait(TimeSpan.FromSeconds(10));
+            }
+
+            // Tearing the engine down under a live commit would free memory it is still using.
+            Assert.That(committed, Is.True, "the held commit must finish before the crash");
+            dbe.SimulateHardCrash();
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<CompA>();
+            dbe.InitializeArchetypes();
+
+            using var tx = dbe.CreateQuickTransaction();
+            switch (op)
+            {
+                case PausedOp.Destroy:
+                    Assert.That(tx.IsAlive(id), Is.False, $"the destroyed entity came back ({cycleReport})");
+                    break;
+                case PausedOp.Update:
+                    Assert.That(tx.Open(id).Read(CompAArch.A).A, Is.EqualTo(updated.A), $"the update was lost ({cycleReport})");
+                    break;
+                case PausedOp.Spawn:
+                    Assert.That(tx.IsAlive(spawned), Is.True, $"the spawned entity was lost ({cycleReport})");
+                    break;
+            }
+
+            Assert.That(tx.IsAlive(sibling) && tx.Open(sibling).Read(CompAArch.A).A == 5, Is.True,
+                "the untouched entity must come through the crash unchanged");
+        }
+    }
+
     /// <summary>
     /// Recovery must honour a delete of a CHECKPOINTED entity — the base-entity case. The spawn is checkpointed into the data
     /// file (so it falls below the recovery window); only the later Destroy lives in the WAL window. Recovery has no Spawn record
@@ -388,9 +512,7 @@ internal sealed class TrueCrashE2ETests
 
             // Persist the spawns to the data file and advance the checkpoint frontier past them, so the spawns are BELOW the
             // recovery window — only the destroys (below) remain in it. This is what makes the test exercise the base-entity path.
-            // ForceCheckpoint is asynchronous (signals the checkpoint thread); WaitForCheckpoint blocks until the cycle completes.
-            dbe.ForceCheckpoint();
-            Assert.That(dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
             var checkpointLsn = dbe.CheckpointManager.CheckpointLsn;
             Assert.That(checkpointLsn, Is.GreaterThanOrEqualTo(spawnHighLsn),
                 "the checkpoint must advance past the spawns so they fall below the recovery window (base-entity scenario)");
@@ -632,8 +754,7 @@ internal sealed class TrueCrashE2ETests
                 spawnHighLsn = dbe.DurabilityLog.LastAppendedLsn;
             }
 
-            dbe.ForceCheckpoint();
-            Assert.That(dbe.CheckpointManager.WaitForCheckpoint(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.True, "checkpoint cycle must complete");
             Assert.That(dbe.CheckpointManager.CheckpointLsn, Is.GreaterThanOrEqualTo(spawnHighLsn),
                 "the spawns must be checkpointed below the recovery window (base-entity scenario)");
 

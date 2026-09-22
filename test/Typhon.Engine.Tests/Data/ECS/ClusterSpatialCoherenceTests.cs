@@ -18,7 +18,7 @@ namespace Typhon.Engine.Tests;
 struct ClCohPos
 {
     [Field]
-    [SpatialIndex(1.0f)]
+    [SpatialIndex]
     public AABB2F Bounds;
 
     [Field]
@@ -37,7 +37,7 @@ partial class ClCohUnit : Archetype<ClCohUnit>
 struct ClCohPos2
 {
     [Field]
-    [SpatialIndex(1.0f)]
+    [SpatialIndex]
     public AABB2F Bounds;
 }
 
@@ -63,10 +63,13 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClCohPos>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(worldMax, worldMax),
-            cellSize: cellSize));
+            cellSize: cellSize,
+            // Step 15: batches of >= 128 identical points would be permuted by the ordering's unstable sort, and Destroy_ResetsScanCursor needs entity 0
+            // in cluster 0 — so the ordering is off. Placement is the shipped first fit.
+            batchSpawnSortThreshold: 0));
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -80,7 +83,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     {
         using var dbe = SetupEngineWithGrid();
         Assert.Throws<InvalidOperationException>(() =>
-            dbe.ConfigureSpatialGrid(new SpatialGridConfig(new Vector2(0, 0), new Vector2(500, 500), 50f)));
+            dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(500, 500), 50f)));
     }
 
     [Test]
@@ -125,7 +128,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         Assert.That(clusterState.ActiveClusterCount, Is.EqualTo(1));
 
         // That cluster is attached to exactly one cell (cell (1, 2))
-        int expectedCellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f);
+        int expectedCellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
         ref var cell = ref dbe.SpatialGrid.GetCell(expectedCellKey);
         Assert.That(cell.EntityCount, Is.EqualTo(5));
         Assert.That(cell.ClusterCount, Is.EqualTo(1));
@@ -152,8 +155,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         var clusterState = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
         Assert.That(clusterState.ActiveClusterCount, Is.EqualTo(2));
 
-        int cellA = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
-        int cellB = dbe.SpatialGrid.WorldToCellKey(550f, 350f);
+        int cellA = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+        int cellB = dbe.SpatialGrid.WorldToCellKey(550f, 350f, 0f);
         Assert.That(cellA, Is.Not.EqualTo(cellB));
         Assert.That(dbe.SpatialGrid.GetCell(cellA).ClusterCount, Is.EqualTo(1));
         Assert.That(dbe.SpatialGrid.GetCell(cellA).EntityCount, Is.EqualTo(1));
@@ -192,7 +195,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         Assert.That(clusterState.ActiveClusterCount, Is.EqualTo(2),
             "overflowing one cluster should allocate a second one in the same cell");
 
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
         ref var cell = ref dbe.SpatialGrid.GetCell(cellKey);
         Assert.That(cell.ClusterCount, Is.EqualTo(2));
         Assert.That(cell.EntityCount, Is.EqualTo(clusterSize + 3));
@@ -225,7 +228,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
 
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(4), "3 full clusters + 1 partial");
         Assert.That(cs.CellClusterPool.GetScanCursor(cellKey), Is.EqualTo(3),
@@ -252,7 +255,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
         Assert.That(cs.CellClusterPool.GetScanCursor(cellKey), Is.GreaterThan(0), "cursor advanced during spawn");
 
         using (var tx = dbe.CreateQuickTransaction())
@@ -286,7 +289,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
         int clusterCountBefore = cs.ActiveClusterCount;
         Assert.That(clusterCountBefore, Is.EqualTo(3), "exactly 3 full clusters spawned");
 
@@ -328,7 +331,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f);
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
         Assert.That(dbe.SpatialGrid.GetCell(cellKey).ClusterCount, Is.EqualTo(1));
         Assert.That(dbe.SpatialGrid.GetCell(cellKey).EntityCount, Is.EqualTo(1));
 
@@ -360,7 +363,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
         Assert.That(dbe.SpatialGrid.GetCell(cellKey).EntityCount, Is.EqualTo(5));
 
         using (var tx = dbe.CreateQuickTransaction())
@@ -381,8 +384,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     [Test]
     public void ValidateSupportedFieldType_F32Variants_Accepted()
     {
-        // Issue #230 Phase 3 extended support from 2D-only to all f32 tiers (2D and 3D). Cells are still 2D (XY) — 3D archetypes bucket into cells by their
-        // XY center and get Z filtering at the query narrowphase.
+        // Issue #230 Phase 3 extended support from 2D-only to all f32 tiers (2D and 3D). 3D archetypes bucket into cells by their centre on all three axes
+        // and get Z filtering at the query narrowphase.
         SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB2F, "MyArch");
         SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere2F, "MyArch");
         SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB3F, "MyArch");
@@ -390,17 +393,14 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
     }
 
     [Test]
-    public void ValidateSupportedFieldType_F64Variants_Throw()
+    public void ValidateSupportedFieldType_F64Variants_Accepted()
     {
-        // f64 spatial tiers are still deferred to a follow-up sub-issue of #228.
-        Assert.Throws<NotSupportedException>(
-            () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB2D, "MyArch"));
-        Assert.Throws<NotSupportedException>(
-            () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB3D, "MyArch"));
-        Assert.Throws<NotSupportedException>(
-            () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere2D, "MyArch"));
-        Assert.Throws<NotSupportedException>(
-            () => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere3D, "MyArch"));
+        // Inverted by #914: these four threw until the f64 write barrier and the f64 query API landed together. Kept as the positive assertion rather than
+        // deleted, because "the gate is open" is the precondition every other f64 test in the suite depends on.
+        Assert.DoesNotThrow(() => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB2D, "MyArch"));
+        Assert.DoesNotThrow(() => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.AABB3D, "MyArch"));
+        Assert.DoesNotThrow(() => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere2D, "MyArch"));
+        Assert.DoesNotThrow(() => SpatialGrid.ValidateSupportedFieldType(SpatialFieldType.BSphere3D, "MyArch"));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -425,8 +425,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
                 tx.Commit();
             }
 
-            cellKey1 = dbe.SpatialGrid.WorldToCellKey(150f, 250f);
-            cellKey2 = dbe.SpatialGrid.WorldToCellKey(550f, 750f);
+            cellKey1 = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
+            cellKey2 = dbe.SpatialGrid.WorldToCellKey(550f, 750f, 0f);
 
             var meta = Archetype<ClCohUnit>.Metadata;
             var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
@@ -478,7 +478,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         using var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClCohPos>();
         dbe.RegisterComponentFromAccessor<ClCohPos2>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(1000, 1000),
             cellSize: 100f));
@@ -494,7 +494,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f);
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
         ref var cell = ref dbe.SpatialGrid.GetCell(cellKey);
 
         // Global aggregation: both entities live in the same cell, cluster count is the sum across archetypes.
@@ -509,17 +509,20 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         Assert.That(cs1.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(1), "Archetype 1 pool sees its own cluster");
         Assert.That(cs2.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(1), "Archetype 2 pool sees its own cluster");
 
-        // Query isolation: querying each archetype returns only its own entity. WhereInAABB's 6-arg signature packs 2D bounds as (minX, minY, maxX, maxY, _, _)
+        // Query isolation: querying each archetype returns only its own entity. WhereInAABB takes
+        // (minX, minY, minZ, maxX, maxY, maxZ) for both dimensions; the Z arguments are ignored for a 2D component. It used to be packed
+        // (minX, minY, maxX, maxY, _, _) here to work around EcsQuery reading the max corner from the wrong slots — a defect fixed in #872 step 13, after
+        // which the workaround is the thing that breaks the query.
         // per the existing EcsQuery cluster 2D dispatch (CoordCount==4 path reads maxX from _spatialParams[2] and maxY from _spatialParams[3]).
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var r1 = tx.Query<ClCohUnit>().WhereInAABB<ClCohPos>(0, 0, 300, 300, 0, 0).Execute();
+            var r1 = tx.Query<ClCohUnit>().WhereInAABB<ClCohPos>(0, 0, 0, 300, 300, 0).Execute();
             Assert.That(r1, Does.Contain(id1));
             Assert.That(r1, Does.Not.Contain(id2));
         }
         using (var tx = dbe.CreateQuickTransaction())
         {
-            var r2 = tx.Query<ClCohUnit2>().WhereInAABB<ClCohPos2>(0, 0, 300, 300, 0, 0).Execute();
+            var r2 = tx.Query<ClCohUnit2>().WhereInAABB<ClCohPos2>(0, 0, 0, 300, 300, 0).Execute();
             Assert.That(r2, Does.Contain(id2));
             Assert.That(r2, Does.Not.Contain(id1));
         }
@@ -552,7 +555,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f);
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
         Assert.That(dbe.SpatialGrid.GetCell(cellKey).EntityCount, Is.EqualTo(1));
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
@@ -599,7 +602,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         var sp = sc.BuildServiceProvider();
         var dbe = sp.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClCohPos>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(1000, 1000),
             cellSize: 100f));

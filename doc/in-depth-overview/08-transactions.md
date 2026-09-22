@@ -158,7 +158,7 @@ Commit walks every modified component type and, per entity:
    - Optionally takes the per-entity revision chain exclusive lock when a `ConcurrencyConflictHandler` is provided.
    - Detects write-write conflicts via `CommitSequence` + invisible-commit TSN checks; with no handler, falls back to "last writer wins".
    - When a conflict fires, copies the read / committed / committing / to-commit pointers into a thread-local `ConcurrencyConflictSolver` and invokes the handler.
-   - Calls `Transaction.ReconcileClusterIndexAndViews` for per-archetype B+Tree maintenance and View-delta publication, from `PrepareClusterVersionedSlot` (Versioned) and `PublishStagedEntry` (staged/Committed), which also copy the committed value into the cluster slot. (`IndexMaintainer.UpdateIndices` / `RemoveSecondaryIndices` — the per-`ComponentTable` index path — was removed in #629; all archetypes are cluster-backed. `CommitClusterVersionedSlot` is gone too, surviving only in a comment.)
+   - Calls `Transaction.ReconcileClusterIndexAndViews` for per-archetype B+Tree maintenance and View-delta publication, from `PrepareClusterVersionedSlot` (Versioned) and `PublishStagedEntry` (staged/Committed), which also copy the committed value into the cluster slot. There is no per-`ComponentTable` index path: every archetype is cluster-backed, so index maintenance always runs through the cluster reconciler.
    - Updates `LastCommitRevisionIndex`, increments `CommitSequence`, clears the revision element's `IsolationFlag`.
 4. `FlushEcsPendingOperations` → `FinalizeSpawns` — walks pending spawns from `Transaction.ECS.cs`, allocates final `EntityRecord`s, stamps `BornTSN = TSN`, copies into the cluster layout for cluster-eligible archetypes.
 5. `PersistAndFinalize`:
@@ -192,7 +192,7 @@ One instance per `DatabaseEngine`. Owns the live set of `Transaction`s, the glob
 
 ### 4.1 Structure — **singly-linked Head → Tail with `Next` pointer**
 
-Yes, singly-linked. Earlier docs called this doubly-linked; the code has only `Transaction.Next`. New transactions are prepended at Head; the Tail is the oldest live transaction. `MinTSN = Tail.TSN` — this is the visibility horizon: no live transaction can be reading at a snapshot older than `MinTSN`, so revisions with `DeadTSN < MinTSN` are unreachable and can be cleaned up.
+Yes, singly-linked — the code has only `Transaction.Next`. New transactions are prepended at Head; the Tail is the oldest live transaction. `MinTSN = Tail.TSN` — this is the visibility horizon: no live transaction can be reading at a snapshot older than `MinTSN`, so revisions with `DeadTSN < MinTSN` are unreachable and can be cleaned up.
 
 ```
        newest                                       oldest
@@ -255,7 +255,7 @@ The chain stores live transactions in memory; the **registry** stores UoW slots 
 | `Reserved3` | 8 |
 | **Total** | **40** |
 
-Since the v4 *directory-only root*, there is one page layout, not two: page 0 is a pure page directory holding no entries, and every data page holds **`PerPageCapacity = 200`** entries (8000 / 40). Zero waste. The earlier `RootCapacity` / `OverflowCapacity` split no longer exists. **`MaxUowId = 32767`** — 15-bit ID space (the 16th bit on revision elements is the `IsolationFlag`).
+The v4 *directory-only root* gives one page layout, not two: page 0 is a pure page directory holding no entries, and every data page holds **`PerPageCapacity = 200`** entries (8000 / 40). Zero waste, and one capacity constant rather than a root/overflow split. **`MaxUowId = 32767`** — 15-bit ID space (the 16th bit on revision elements is the `IsolationFlag`).
 
 `State = 0 (Free)` means a zeroed page is interpreted as all-free, so growth doesn't need explicit initialization.
 
@@ -278,7 +278,7 @@ public void Release(ushort uowId, ChangeSet externalCs = null);
 
 ### 5.4 Recovery integration
 
-On engine start, `LoadFromDiskRaw` scans every entry up to `_currentCapacity`, rebuilds both bitmaps, counts `Pending`/`WalDurable`/`Committed`/`Void` slots. The surviving v1 `WalRecovery` scan then promotes `Pending → WalDurable` for UoWs whose commit marker survived; whatever's left in `Pending` gets voided via `VoidRemainingPending`. See [11-durability](11-durability.md) §7 for the full sequence. **This persisted-registry recovery path is the surviving v1 mechanism**, slated for removal as the registry is demoted to a volatile allocator ([11-durability §8](11-durability.md)); commit fate for the v2 logical records is already the WAL `TxCommit` marker.
+On engine start, `LoadFromDiskRaw` scans every entry up to `_currentCapacity`, rebuilds both bitmaps, counts `Pending`/`WalDurable`/`Committed`/`Void` slots. The `WalRecovery` segment scan then promotes `Pending → WalDurable` for UoWs whose commit marker survived; whatever's left in `Pending` gets voided via `VoidRemainingPending`. See [11-durability](11-durability.md) §7 for the full sequence. **This persisted-registry path does not decide commit fate** — that is the WAL `TxCommit` marker's job — and it is slated for removal as the registry is demoted to a volatile allocator ([11-durability §8](11-durability.md)).
 
 ---
 
@@ -366,4 +366,4 @@ Plus `PoolCount` (idle transactions in the pool, max 16) and `ActiveCount` (curr
 - [01-foundation](01-foundation.md) — `UnitOfWorkContext`, `WaitContext`, `Deadline`, `EpochManager` (the primitives every transaction operation sits on)
 - [05-revision](05-revision.md) — how `UowId` is encoded into revision elements and consumed by the visibility check
 - [06-ecs](06-ecs.md) — `Spawn` / `Destroy` live on `Transaction`; the commit pipeline calls `PrepareEcsDestroys` → `FlushEcsPendingOperations` → `FinalizeSpawns` → cluster-versioned slot commit
-- [11-durability](11-durability.md) — WAL integration (`DurabilityLog.Append`, `RequestFlush`, `WaitForDurable`), the checkpoint v2 cycle, the `Pending → WalDurable → Committed → Free` UoW state machine (transitional — being demoted, §8)
+- [11-durability](11-durability.md) — WAL integration (`DurabilityLog.Append`, `RequestFlush`, `WaitForDurable`), the checkpoint v2 cycle, the `Pending → WalDurable → Committed → Free` UoW state machine (§8)

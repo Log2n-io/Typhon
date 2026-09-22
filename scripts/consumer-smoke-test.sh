@@ -81,7 +81,7 @@ using Typhon.Samples.Swg.Shard;
 // Bounds carries a [SpatialIndex], so Character is cluster-eligible - a grid is required before the archetypes wire.
 using var dbe = DatabaseEngine.Open("smoke.typhon", o => o
     .Register<Transform>().Register<Bounds>().Register<Ham>().Register<Faction>().Register<Wallet>().Register<Intent>()
-    .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
+    .ConfigureSpatialGrid(SpatialGridConfig.Flat(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
     // archetypes self-register at assembly load (#514) - no RegisterArchetype call
 
 EntityId hero;

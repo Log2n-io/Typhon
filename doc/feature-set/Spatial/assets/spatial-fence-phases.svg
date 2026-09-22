@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 880" width="1200" height="880" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    .t    { font-size: 21px; font-weight: 700; fill: #18181b; }
+    .st   { font-size: 13.5px; fill: #52525b; }
+    .band { font-size: 13.5px; font-weight: 700; fill: #52525b; }
+    .fh   { font-size: 15px; font-weight: 700; fill: #1d4ed8; }
+    .pn   { font-size: 14px; font-weight: 700; fill: #18181b; }
+    .ps   { font-size: 11px; fill: #71717a; }
+    .b    { font-size: 11.5px; fill: #3f3f46; }
+    .edge { font-size: 11px; font-style: italic; fill: #b45309; }
+    .lm   { font-size: 12px; fill: #71717a; }
+    .lb   { font-size: 13px; font-weight: 700; fill: #3f3f46; }
+    .badge{ font-size: 12px; font-weight: 700; fill: #ffffff; }
+    .mono { font-size: 11.5px; font-family: ui-monospace, Consolas, monospace; fill: #3f3f46; }
+  </style>
+  <rect width="1200" height="880" fill="#ffffff"/>
+  <defs>
+    <marker id="d" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#71717a"/></marker>
+  </defs>
+
+  <text class="t"  x="40" y="38">Where the partitioning work happens &#8212; the six phases of the tick fence</text>
+  <text class="st" x="40" y="60">Order is a contract, not a convenience. Two of the five edges below exist because moving the work either way would produce a wrong answer.</text>
+
+  <!-- tick band -->
+  <rect x="48" y="84" width="1104" height="40" fill="#f4f4f5" stroke="#a1a1aa" stroke-dasharray="5 4" rx="4"/>
+  <text class="band" x="68" y="109">The tick &#8212; systems run in parallel, reading and writing the database</text>
+
+  <path d="M 88 124 L 88 160" stroke="#71717a" stroke-width="1.6" marker-end="url(#d)"/>
+  <text class="lm" x="102" y="148">the scheduler has finished the tick; every system is complete by construction</text>
+
+  <!-- fence container -->
+  <rect x="48" y="166" width="1104" height="524" fill="#fafafa" stroke="#2563eb" stroke-width="2" rx="6"/>
+  <text class="fh" x="68" y="192">WriteTickFence &#8212; the exclusive window</text>
+
+  <line x1="88" y1="214" x2="88" y2="676" stroke="#93c5fd" stroke-width="2.5"/>
+
+  <!-- row 1 -->
+  <rect x="108" y="214" width="1030" height="62" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4" rx="4"/>
+  <circle cx="88" cy="245" r="13" fill="#2563eb"/><text class="badge" x="88" y="250" text-anchor="middle">1</text>
+  <text class="pn" x="124" y="240">Prep</text>
+  <text class="ps" x="124" y="257">what moves</text>
+  <text class="ps" x="124" y="271">this tick</text>
+  <text class="b" x="300" y="234">Detects the entities that crossed a cell boundary since the last fence.</text>
+  <text class="b" x="300" y="251">The drift throttle decides how many relocations this tick&#8217;s budget can afford.</text>
+  <text class="b" x="300" y="268">The repair planner ranks degraded cells and nominates the worst of them.</text>
+
+  <!-- row 2 -->
+  <rect x="108" y="288" width="1030" height="62" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4" rx="4"/>
+  <circle cx="88" cy="319" r="13" fill="#2563eb"/><text class="badge" x="88" y="324" text-anchor="middle">2</text>
+  <text class="pn" x="124" y="314">Migrate</text>
+  <text class="ps" x="124" y="331">the entity</text>
+  <text class="ps" x="124" y="345">bytes move</text>
+  <text class="b" x="300" y="308">Claims the destination slot, copies the component bytes, releases the source slot.</text>
+  <text class="b" x="300" y="325">Index updates and entity-map patches are <tspan font-weight="700">staged here, not applied</tspan>.</text>
+  <text class="b" x="300" y="342">Each worker sorts its own chunk of the batch; the next phase merges the sorted runs.</text>
+
+  <text class="edge" x="300" y="366">a batch of (key, old value, new value), already sorted per worker</text>
+
+  <!-- row 3 -->
+  <rect x="108" y="376" width="1030" height="62" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4" rx="4"/>
+  <circle cx="88" cy="407" r="13" fill="#2563eb"/><text class="badge" x="88" y="412" text-anchor="middle">3</text>
+  <text class="pn" x="124" y="402">IndexMassUpdate</text>
+  <text class="ps" x="124" y="419">secondary</text>
+  <text class="ps" x="124" y="433">indexes</text>
+  <text class="b" x="300" y="396">One partitioning descent per B+Tree over the whole staged batch.</text>
+  <text class="b" x="300" y="413">Workers take contiguous key ranges, each snapped forward to a leaf boundary.</text>
+  <text class="b" x="300" y="430">The window lets it drop the latch, the version check and the B-link right-walk.</text>
+
+  <!-- row 4 -->
+  <rect x="108" y="450" width="1030" height="62" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4" rx="4"/>
+  <circle cx="88" cy="481" r="13" fill="#2563eb"/><text class="badge" x="88" y="486" text-anchor="middle">4</text>
+  <text class="pn" x="124" y="476">EntityMapUpdate</text>
+  <text class="ps" x="124" y="493">where each</text>
+  <text class="ps" x="124" y="507">entity lives</text>
+  <text class="b" x="300" y="470">The same treatment on a different axis: partitioned by <tspan font-weight="700">bucket</tspan> range, not key range.</text>
+  <text class="b" x="300" y="487">Carries the born / died fold and the orphan rollback, deferred out of Migrate.</text>
+  <text class="b" x="300" y="504">Picks the bulk path per tick, on the measured entries per bucket &#8212; a small batch has no sharing to exploit.</text>
+
+  <text class="edge" x="300" y="528">the died-side fold must land before any bound is recomputed from occupancy</text>
+
+  <!-- row 5 -->
+  <rect x="108" y="538" width="1030" height="62" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4" rx="4"/>
+  <circle cx="88" cy="569" r="13" fill="#2563eb"/><text class="badge" x="88" y="574" text-anchor="middle">5</text>
+  <text class="pn" x="124" y="564">AabbRefresh</text>
+  <text class="ps" x="124" y="581">bounds and</text>
+  <text class="ps" x="124" y="595">drift</text>
+  <text class="b" x="300" y="558">Recomputes the bound of every cluster written this tick, and only those.</text>
+  <text class="b" x="300" y="575">One consolidated slot walk carries the recompute, drift detection and the outlier guard.</text>
+  <text class="b" x="300" y="592">Updates the per-cell index; a promoted cell&#8217;s writes are buffered and replayed in cluster-id order.</text>
+
+  <!-- row 6 -->
+  <rect x="108" y="612" width="1030" height="62" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4" rx="4"/>
+  <circle cx="88" cy="643" r="13" fill="#2563eb"/><text class="badge" x="88" y="648" text-anchor="middle">6</text>
+  <text class="pn" x="124" y="638">Finalize</text>
+  <text class="ps" x="124" y="655">bookkeeping</text>
+  <text class="ps" x="124" y="669">and durability</text>
+  <text class="b" x="300" y="632">Frees the clusters migration drained to empty, re-checking occupancy first.</text>
+  <text class="b" x="300" y="649">Runs the dormancy sweep and the cell bookkeeping.</text>
+  <text class="b" x="300" y="666">Emits the WAL record and publishes the tick&#8217;s highest log sequence number.</text>
+
+  <!-- bottom -->
+  <rect x="48" y="716" width="546" height="140" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4" rx="4"/>
+  <text class="lb" x="66" y="740">Scheduler phases give no exclusivity. The fence does.</text>
+  <text class="lm" x="66" y="762">A phase is an ordering contract, not a barrier: a later phase&#8217;s</text>
+  <text class="lm" x="66" y="779">systems may start while an earlier phase&#8217;s are still running. On</text>
+  <text class="lm" x="66" y="796">real traces that eager dispatch is worth 30 to 50 % of pool use.</text>
+  <text class="lm" x="66" y="820">The fence is different because it runs <tspan font-style="italic">after</tspan> the tick, on the driver</text>
+  <text class="lm" x="66" y="837">thread. A host with no runtime gets the same window for free.</text>
+
+  <rect x="614" y="716" width="538" height="140" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.4" rx="4"/>
+  <text class="lb" x="632" y="740">What the window licenses</text>
+  <text class="lm" x="632" y="762">No optimistic version check, no write latch, no restart handling,</text>
+  <text class="lm" x="632" y="779">no B-link right-walk, no epoch guard, plain reads instead of</text>
+  <text class="lm" x="632" y="796">volatile ones, and plain increments on per-cell counters where</text>
+  <text class="lm" x="632" y="813">workers own disjoint cells. A degraded structure may be thrown</text>
+  <text class="lm" x="632" y="830">away and rebuilt rather than repaired in place.</text>
+  <text class="lm" x="632" y="850">The price is one rule: nothing may mutate the database concurrently with the fence.</text>
+</svg>

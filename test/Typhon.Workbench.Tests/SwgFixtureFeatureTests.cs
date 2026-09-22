@@ -83,7 +83,7 @@ public sealed class SwgFixtureFeatureTests
         _engine.RegisterComponentFromAccessor<DepositPosition>();
         _engine.RegisterComponentFromAccessor<StructurePosition>();
 
-        _engine.ConfigureSpatialGrid(new SpatialGridConfig(new Vector2(0f, 0f), new Vector2(WorldSize, WorldSize), cellSize: 100f));
+        _engine.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(0f, 0f), new Vector2(WorldSize, WorldSize), cellSize: 100f));
         _engine.InitializeArchetypes();
     }
 
@@ -308,12 +308,15 @@ public sealed class SwgFixtureFeatureTests
 
         using (var tx = _engine.CreateQuickTransaction())
         {
-            // WhereInAABB's 6-arg signature packs 2D bounds as (minX, minY, maxX, maxY, _, _) — the cluster 2D dispatch
+            // (minX, minY, minZ, maxX, maxY, maxZ) for both dimensions — the Z arguments are ignored for a 2D component. This used to be packed (minX,
+            // minY, maxX, maxY, _, _) to work around EcsQuery reading the max corner from the wrong slots; that defect was fixed in #872 step 13 and the
+            // workaround is now what would break the query.
+            // 2D dispatch
             // reads maxX from param[2] and maxY from param[3]. The trailing two are ignored for 2D spatial fields.
-            var all = tx.Query<PlayerArch>().WhereInAABB<PlayerPosition>(0, 0, WorldSize, WorldSize, 0, 0).Execute();
+            var all = tx.Query<PlayerArch>().WhereInAABB<PlayerPosition>(0, 0, 0, WorldSize, WorldSize, 0).Execute();
             Assert.That(all.Count, Is.EqualTo(3), "world-covering AABB query returns all 3 positioned players");
 
-            var near = tx.Query<PlayerArch>().WhereInAABB<PlayerPosition>(95, 95, 115, 105, 0, 0).Execute();
+            var near = tx.Query<PlayerArch>().WhereInAABB<PlayerPosition>(95, 95, 0, 115, 105, 0).Execute();
             Assert.That(near.Count, Is.GreaterThanOrEqualTo(1).And.LessThanOrEqualTo(3),
                 "a narrow AABB returns the players inside it (spatial index is queryable)");
         }

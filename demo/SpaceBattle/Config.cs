@@ -27,7 +27,7 @@ public sealed class Config
     public float WorldSize = 100000f;
 
     /// <summary>THE knob. Cells are meant to be huge relative to a cluster's footprint — see the research docs.</summary>
-    /// <remarks>2 km cells over a 100 km world = a 50x50 grid, Morton-padded to 64x64.</remarks>
+    /// <remarks>2 km cells over a 100 km world = a 50x50x1 grid (this demo is flat, so the grid is one cell deep on Z).</remarks>
     public float CellSize = 2000f;
 
     /// <summary>Fraction of CellSize an entity may stray past its cell boundary before migration is flagged.</summary>
@@ -1821,15 +1821,13 @@ public sealed class Config
         }
         if (CellSize > 0 && WorldSize > 0)
         {
-            var dim = (int)MathF.Ceiling(WorldSize / CellSize);
-            var pow2 = 1;
-            while (pow2 < dim)
+            // The engine's own limit, restated here so a bad config is caught before ConfigureSpatialGrid throws. It used to be a per-axis Morton bound of
+            // 32 768; #872 step 8 removed Morton cell keys, and the remaining constraint is that the cell count fits a 32-bit key. This demo's world is
+            // flat, so the depth term is 1.
+            var dim = (long)MathF.Ceiling(WorldSize / CellSize);
+            if (dim * dim > int.MaxValue)
             {
-                pow2 <<= 1;
-            }
-            if (pow2 > 32768)
-            {
-                errors.Add($"WorldSize/CellSize yields KeySpaceDim {pow2} > 32768 (32-bit Morton limit). Raise CellSize.");
+                errors.Add($"WorldSize/CellSize yields {dim} x {dim} = {dim * dim} cells, which does not fit a 32-bit cell key. Raise CellSize.");
             }
         }
         if (Factions is < 1 or > 4)

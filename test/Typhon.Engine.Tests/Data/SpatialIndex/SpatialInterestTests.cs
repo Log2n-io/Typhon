@@ -20,7 +20,7 @@ class SpatialInterestTests : TestBase<SpatialInterestTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<SpatialShip>();
         dbe.RegisterComponentFromAccessor<SpatialName>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-10_000, -10_000),
             worldMax: new Vector2(10_000, 10_000),
             cellSize: 100f));

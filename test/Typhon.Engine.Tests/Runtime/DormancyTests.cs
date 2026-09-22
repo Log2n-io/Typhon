@@ -14,12 +14,6 @@ namespace Typhon.Engine.Tests.Runtime;
 [TestFixture]
 class DormancyTests : TestBase<DormancyTests>
 {
-    public override void TearDown()
-    {
-        DormancyReporter.Reset();
-        base.TearDown();
-    }
-
     private static TierPos PointAt(float x, float y) =>
         new() { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Data = 1.0f };
 
@@ -27,7 +21,7 @@ class DormancyTests : TestBase<DormancyTests>
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<TierPos>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(100, 100),
             cellSize: 10f));
@@ -46,7 +40,7 @@ class DormancyTests : TestBase<DormancyTests>
             tx.Commit();
         }
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(x, y);
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(x, y, 0f);
         dbe.SpatialGrid.SetCellTier(cellKey, tier);
 
         // Find the chunkId for this entity
@@ -120,8 +114,8 @@ class DormancyTests : TestBase<DormancyTests>
         using var dbe = SetupEngineWithGrid();
 
         // Spawn two entities in two different Tier0 cells
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f);
+        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -223,11 +217,11 @@ class DormancyTests : TestBase<DormancyTests>
         Assert.That(cs.SleepingClusterCount, Is.EqualTo(1));
 
         // Two wake requests from "different threads"
-        DormancyReporter.RequestWake(cs.ArchetypeId, chunkId);
-        DormancyReporter.RequestWake(cs.ArchetypeId, chunkId);
+        cs.PendingWakeRequests.Enqueue(chunkId);
+        cs.PendingWakeRequests.Enqueue(chunkId);
 
         // Drain: both resolve to the same cluster, second is a no-op
-        DormancyReporter.DrainAll(dbe._archetypeStates);
+        dbe.DrainDormancyWakeRequests();
         Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.WakePending));
         // SleepingClusterCount decremented only once (in TransitionWakePendingToActive, not here)
     }
@@ -344,11 +338,12 @@ class DormancyTests : TestBase<DormancyTests>
         // Call SetDirty on an entity in the sleeping cluster
         cs.SetDirty(chunkId, 0);
 
-        // The DormancyReporter should have a pending wake request
-        Assert.That(DormancyReporter.HasPendingRequests, Is.True);
+        // The archetype's own queue holds the wake request — per engine, so no other fixture's fence can drain it before the assert (a process-wide
+        // reporter once could, and this test failed in parallel runs for exactly that reason).
+        Assert.That(cs.PendingWakeRequests, Is.Not.Empty);
 
         // Drain and verify WakePending
-        DormancyReporter.DrainAll(dbe._archetypeStates);
+        dbe.DrainDormancyWakeRequests();
         Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.WakePending));
     }
 
@@ -399,11 +394,11 @@ class DormancyTests : TestBase<DormancyTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f), SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f), SimTier.Tier0);
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier0);
 
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f);
+        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
         int chunkA = FindChunkIdForCell(cs, cellA);
         int chunkB = FindChunkIdForCell(cs, cellB);
 
@@ -431,9 +426,9 @@ class DormancyTests : TestBase<DormancyTests>
         using var dbe = SetupEngineWithGrid();
 
         // Spawn two entities in Tier0, one in Tier1
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f);
-        var cellC = dbe.SpatialGrid.WorldToCellKey(25f, 5f);
+        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
+        var cellC = dbe.SpatialGrid.WorldToCellKey(25f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -564,8 +559,8 @@ class DormancyTests : TestBase<DormancyTests>
     {
         using var dbe = SetupEngineWithGrid();
 
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f);
+        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {

@@ -15,7 +15,7 @@ Entity clusters (see [Entity Clusters](../Ecs/entity-clusters.md)) pack many ent
 
 ## ⚙️ How it works (in brief)
 
-Each grid cell (see [Spatial Grid & Cells](./spatial-grid-config.md)) holds a small linear array of cluster AABBs for each cluster-eligible archetype occupying it — typically 15-80 entries. A query first expands its region into the overlapping cells, scans each cell's cluster AABBs (broadphase), and for every cluster whose AABB overlaps, scans that cluster's live entities individually (narrowphase). Cluster AABBs are recomputed once per tick for clusters that changed, not on every entity write. Static and dynamic clusters are indexed separately and both are checked by every query. This path entirely replaces the legacy per-entity R-Tree for cluster-eligible archetypes — there is no fallback.
+Each grid cell (see [Spatial Grid & Cells](./spatial-grid-config.md)) holds a small linear array of cluster AABBs for each cluster-eligible archetype occupying it — typically 15-80 entries. A query first expands its region into the overlapping cells, scans each cell's cluster AABBs (broadphase), and for every cluster whose AABB overlaps, scans that cluster's live entities individually (narrowphase). Cluster AABBs are recomputed once per tick for clusters that changed, not on every entity write. Static and dynamic clusters are indexed separately and both are checked by every query. Every archetype is cluster-backed, so every spatial query takes this path: there is no fallback and no second index to choose between. The R-Tree machinery sits one level up, as the structure a dense cell can be promoted to (see the promotion note under *Guarantees & limits*); [Spatial Architecture Overview](./spatial-architecture-overview.md) places the grid and the tree against each other.
 
 ## 💻 Usage
 
@@ -23,7 +23,7 @@ Each grid cell (see [Spatial Grid & Cells](./spatial-grid-config.md)) holds a sm
 [Component("Game.Position", 1)]
 public struct Position
 {
-    [SpatialIndex(margin: 5.0f)]
+    [SpatialIndex]
     public AABB2F Bounds;
 }
 
@@ -43,6 +43,17 @@ foreach (var hit in dbe.ClusterSpatialQuery<Ant>().Radius(in sphere))
     // hit.DistanceSq is populated (closest point on entity AABB to sphere center)
 }
 
+// Bulk drains — the whole query in one call instead of one MoveNext per hit
+var e = dbe.ClusterSpatialQuery<Ant>().Radius(in sphere);
+try
+{
+    int inRange = e.Count();   // or Fill(Span<ClusterSpatialQueryResult>) repeatedly until it returns 0
+}
+finally
+{
+    e.Dispose();
+}
+
 // Equivalent Radius/Nearest access via the fluent ECS query (routes through the same cluster path)
 using var t = dbe.CreateQuickTransaction();
 var nearby = t.Query<AntArch>()
@@ -50,20 +61,21 @@ var nearby = t.Query<AntArch>()
     .Execute();
 ```
 
-`TBox` must be `AABB2F` or `AABB3F` and must match the archetype's declared spatial field dimensionality/precision exactly — a mismatch throws `InvalidOperationException` at the call site, not silently truncating coordinates.
+`TBox` must be `AABB2F`, `AABB3F`, `AABB2D` or `AABB3D` and must match the archetype's declared spatial field dimensionality/precision exactly — a mismatch throws `InvalidOperationException` at the call site, not silently truncating coordinates.
 
 ## ⚠️ Guarantees & limits
 
 - **Raw enumerator requires an `EpochGuard` scope** — `ClusterSpatialQuery<TArch>` reads cluster pages directly, so the caller must hold `EpochGuard.Enter(dbe.EpochManager)` for the call's duration. `EpochGuard` is `internal`; reaching it directly (as above) requires the same `InternalsVisibleTo` boundary as Cluster Dormancy. Application code without that access goes through `EcsQuery.WhereNearby`/`WhereInAABB`, which manages the epoch scope internally.
 - **Requires `ConfigureSpatialGrid`** before `InitializeArchetypes` — a cluster-eligible archetype with a `[SpatialIndex]` field and no configured grid throws at archetype initialization, not at first query.
-- **AABB and Radius only** — Ray and Frustum queries against cluster archetypes throw `NotSupportedException`; use the per-entity [Spatial Query API](./spatial-query-api.md) for non-cluster archetypes that need those shapes.
-- **f32 only** — `AABB2D`/`AABB3D` (f64) throw `NotSupportedException`; only `AABB2F`/`AABB3F` are implemented.
-- **No false negatives** — cluster AABBs always contain every live entity in the cluster (recomputed at the tick fence for dirty clusters), so a query never misses a geometrically-matching entity (rule CA-01).
+- **The raw enumerator exposes AABB and Radius only** — `ClusterSpatialQuery<TArch>` has no Ray or Frustum entry point. Both shapes *are* served on this same cluster path, through `EcsQuery.WhereRay` / `WhereFrustum` (see [Spatial Query API](./spatial-query-api.md)).
+- **All four tiers since #914** — `AABB2F`/`AABB3F` and the f64 `AABB2D`/`AABB3D`, with the matching `BSphere` radius shapes. The narrowphase compares in world f64 on every tier; an f32 bound is widened, which is exact.
+- **No false negatives** — cluster AABBs always contain every live entity in the cluster (recomputed at the tick fence for dirty clusters), so a query never misses a geometrically-matching entity.
 - **Category mask is "any bit overlaps"** — a non-zero mask skips a cluster only if none of its entities' OR'd category bits intersect the query mask; pass `uint.MaxValue` (default) for no filtering.
-- **Zero-allocation enumerator** — `AABB<TBox>` and `Radius` both return a `ref struct` enumerator; no heap allocation for the scan itself. `EcsQuery.WhereNearby`/`WhereInAABB` materialize results into a `HashSet<EntityId>` because the fluent API composes with archetype/Where filters.
-- **~2x slower per query than the old per-entity tree, but eliminates all per-entity index maintenance** — broadphase+narrowphase costs roughly 300-400ns for a typical 4-cell query vs ~150-200ns for the legacy tree traversal; the legacy tree's ~25ns-per-entity-per-tick update cost is gone entirely.
+- **Zero-allocation enumerator** — `AABB<TBox>` and `Radius` both return a `ref struct` enumerator; no heap allocation for the scan itself. Its `Count()` and `Fill(Span)` drain the query in one frame rather than one call per hit, and it reads entities through a per-thread page window kept warm across queries, so consecutive nearby queries on a worker find their pages resident. `EcsQuery.WhereNearby`/`WhereInAABB` materialize results into a `HashSet<EntityId>` because the fluent API composes with archetype/Where filters.
+- **Query cost is 300-400ns, and per-entity index maintenance is zero** — broadphase plus narrowphase costs roughly 300-400ns for a typical 4-cell query, and that walk is the whole cost: moving an entity updates no per-entity index, so nothing is charged per entity per tick.
 - **No public `Nearest`/kNN on `ClusterSpatialQuery<TArch>` yet** — k-nearest is only reachable internally (consumed by `EcsQuery.WhereNearby`'s radius-expansion path); a dedicated public `.Nearest()` wrapper is deferred.
-- **No overflow tree / SIMD narrowphase** — broadphase is always a linear scan regardless of cluster count; both are profiling-gated future optimizations, not current bottlenecks at typical cell populations (≤80 clusters).
+- **The broadphase changes shape with density, and the engine drives it** — above a per-cell cluster-count threshold a cell half swaps its linear array for a per-cell R-Tree (`CellClusterTree`), and falls back below half that count. The two are mutually exclusive, never both, so no cell pays for a tree and a scan at once. The threshold is `DatabaseEngineOptions.Spatial.CellTreePromoteThreshold`, and it defaults to `int.MaxValue` — never — because on a game-shaped workload a promoted cell made the tick slower at every density measured (its upkeep runs in the fence's serial tail, and the narrowphase dominates the query it speeds); set a count to opt in. A second gate, `CellTreePromoteTightness`, requires the cell's clusters to be tight enough for a tree to prune between them at all. Both structures were vectorised in September 2026 and the scan gained more than the tree did, so the crossover moved *away* from the tree: at 512 clusters a selective query costs about 102 ns scanned against 247 ns through the tree, and the tree first wins around 2 048 (403 ns scanned, 246 ns through the tree). An unselective query never favours the tree at any density, because it must test every internal-node box on top of every leaf entry. Most databases never reach that density and never build a tree; the ones that do stop paying a scan that grows without bound. Both structures answer the same question, which the differential fixtures assert directly.
+- **The narrowphase is scalar** — the broadphase is not: a cell holding at least 16 clusters is tested 64 at a time with `Vector256`, and the per-cell tree's leaf and internal nodes likewise. Below 16 the batch costs more than it saves and the scalar loop runs instead. Vectorising the per-entity narrowphase remains a profiling-gated future optimisation.
 
 ## 🧪 Tests
 
@@ -77,7 +89,7 @@ var nearby = t.Query<AntArch>()
 - Source: [src/Typhon.Engine/Spatial/public/AabbClusterEnumerator.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/AabbClusterEnumerator.cs)
 - Source: [src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/ClusterSpatialAabb.cs)
 - Source: [src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs)
-- Related catalog entry: [Spatial Query API](./spatial-query-api.md) (the per-entity R-Tree path for non-cluster archetypes)
+- Related catalog entry: [Spatial Query API](./spatial-query-api.md) (the fluent `EcsQuery` spatial predicates, including the ray and frustum shapes this enumerator does not expose)
 - Related catalog entry: [Entity Clusters](../Ecs/entity-clusters.md)
 
 <!-- Deep dive: claude/design/Spatial/SpatialTiers/02-cluster-rtree.md (full design + phase history) -->

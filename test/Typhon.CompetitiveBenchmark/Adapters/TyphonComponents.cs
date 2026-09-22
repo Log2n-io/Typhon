@@ -78,7 +78,7 @@ internal class TripArch : Archetype<TripArch>
 public struct SpPos
 {
     [Field]
-    [SpatialIndex(5.0f)] // margin = fat-AABB movement hysteresis
+    [SpatialIndex] // margin = fat-AABB movement hysteresis
     public AABB2F Bounds;
 }
 

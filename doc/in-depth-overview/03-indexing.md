@@ -35,7 +35,7 @@ The user-facing handle is [`IndexRef`](https://github.com/Log2n-io/Typhon/blob/m
 
 Every node is one segment chunk, and the segment's stride is exactly the node struct size. Nodes are 256 bytes for all numeric-keyed variants (filling four cache lines), asserted at `Initialize` time in each of `L16BTree.cs`, `L32BTree.cs` and `L64BTree.cs`.
 
-`String64BTree` is the exception: `IndexString64Chunk` is **356 bytes** — `4×5` header ints + a 64 B `HighKey` + `4×4` values + `4×64` keys. It carries no size assertion, only `segment.Stride == sizeof(IndexString64Chunk)`, so the stride follows the struct. The struct's own *"we want to keep this struct 64 bytes"* comment is a stale design aspiration: a 64-byte node cannot hold even one 64-byte key, and the B-link `HighKey` added in #297 put the question beyond doubt.
+`String64BTree` is the exception: `IndexString64Chunk` is **356 bytes** — `4×5` header ints + a 64 B `HighKey` + `4×4` values + `4×64` keys. It carries no size assertion, only `segment.Stride == sizeof(IndexString64Chunk)`, so the stride follows the struct. The struct's own *"we want to keep this struct 64 bytes"* comment cannot be satisfied: a 64-byte node cannot hold even one 64-byte key, and the B-link `HighKey` is itself a full 64 bytes.
 
 The 256 B size isn't arbitrary: modern CPUs (Zen 4+, recent Intel) have an **Adjacent Line Prefetcher** that pulls the paired 64 B cache line within a 128 B region. Two ALP triggers therefore cover the full node — a node descent fetches one entry's data with at most two cache-line latencies, not four.
 
@@ -227,8 +227,6 @@ Flow:
 5. WriteUnlock the leaf (version bump now visible to OLC readers).
 6. If the buffer is now empty, remove the BTree key entry too (via `RemoveCorePessimistic`) and delete the buffer.
 
-(`preserveEmptyBuffer` — a fifth parameter that kept the key alive for the HEAD→TAIL temporal-index link — was removed in #666 along with the TAIL architecture. `TemporalIndexQuery.cs` and `VersionedIndexEntry.cs` were deleted at the same time.)
-
 ### `Move(oldKey, newKey, value)` / `MoveValue(...)` — compound move
 
 [`BTree.Move.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTree.Move.cs)
@@ -269,11 +267,11 @@ Counted via `MergeCount`.
 
 ## 7. Multi-tree segments — the BTree directory
 
-A single `ChunkBasedSegment<TStore>` can host **multiple B+Trees** — most commonly all secondary indexes for an archetype's components share one segment (`ArchetypeClusterState.IndexSegment`), which keeps page-cache locality high. (The pre-#629 pattern of a per-component PK B+Tree plus secondary indexes sharing one `ComponentTable`-owned segment no longer applies: secondary indexes are per-archetype, and the PK B+Tree was removed.) The directory mechanism makes this work.
+A single `ChunkBasedSegment<TStore>` can host **multiple B+Trees** — most commonly all secondary indexes for an archetype's components share one segment (`ArchetypeClusterState.IndexSegment`), which keeps page-cache locality high. Secondary indexes are per-archetype, and there is no per-component primary-key B+Tree. The directory mechanism makes this work.
 
 ### Layout
 
-The first **4 chunks** of every BTree-bearing segment (`DirectoryChunkCount = 4`) are reserved for the directory. How many entries fit depends on the segment's node stride, so it is computed rather than hardcoded — [`BTreeBase.MaxDirectoryEntriesFor(stride)`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTreeBase.cs): chunk 0 loses `BTreeDirectoryHeader` (2 B) to its header and chunks 1-3 are pure entry storage, at `BTreeDirectoryEntry` = 12 B each. That gives **84** at the 256-byte numeric stride and **116** at `String64BTree`'s 356-byte stride. (A hardcoded `MaxDirectoryEntries = 20` — the figure for a 64-byte stride — was removed in #657; the cap must stay exactly what the reserved chunks hold, since entry *n+1* would land in the first node chunk.)
+The first **4 chunks** of every BTree-bearing segment (`DirectoryChunkCount = 4`) are reserved for the directory. How many entries fit depends on the segment's node stride, so it is computed rather than hardcoded — [`BTreeBase.MaxDirectoryEntriesFor(stride)`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/BTreeBase.cs): chunk 0 loses `BTreeDirectoryHeader` (2 B) to its header and chunks 1-3 are pure entry storage, at `BTreeDirectoryEntry` = 12 B each. That gives **84** at the 256-byte numeric stride and **116** at `String64BTree`'s 356-byte stride. The cap must be exactly what the reserved chunks hold and never a hardcoded figure, since entry *n+1* would land in the first node chunk.
 
 ```
 Chunk 0:  [ BTreeDirectoryHeader (2 B EntryCount) ] [ entry₀ ][ entry₁ ]...
@@ -339,5 +337,5 @@ These are **payload-less spans** — 37 B header, 53 B with trace context. The e
 - [01-foundation](01-foundation.md) — `OlcLatch`/`SpinWait`/`EpochManager` are described in their primitive form; this doc shows how the BTree composes them.
 - [`rules/indexing.md`](https://github.com/Log2n-io/Typhon/blob/main/rules/indexing.md) — what a range scan owes its caller under OLC: strictly monotonic keys, resume by key rather than by leaf position, and re-descend on an obsolete leaf rather than spin (`IXS-01..03`).
 - [02-storage](02-storage.md) — `IPageStore`, `ChunkBasedSegment`, `ChunkAccessor`. BTree nodes are chunks; everything here is built on top of those.
-- [05-revision](05-revision.md) — MVCC revision chains. They are **not** B+Tree-addressed: `CompRevTableSegment` is a plain `ChunkBasedSegment<PersistentStore>`, and the temporal index that once tied the two together was removed in #666, so point-in-time reads walk the chain directly. What the B+Tree contributes is `RemoveValue`, the element-precise delete that removes exactly one entity from a multi-value key's buffer without evicting its siblings.
+- [05-revision](05-revision.md) — MVCC revision chains. They are **not** B+Tree-addressed: `CompRevTableSegment` is a plain `ChunkBasedSegment<PersistentStore>`, and no temporal index ties the two together, so point-in-time reads walk the chain directly. What the B+Tree contributes is `RemoveValue`, the element-precise delete that removes exactly one entity from a multi-value key's buffer without evicting its siblings.
 - [12-observability](12-observability.md) — typed event kinds, gating, span shapes (`BTreeInsertEvent` et al.).

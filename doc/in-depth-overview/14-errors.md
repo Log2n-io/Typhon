@@ -255,7 +255,7 @@ public enum BTreeLookupStatus : byte
 }
 ```
 
-Lives in the `Indexing/public/` folder — *not* `Data/Index/...` (an older path that no longer exists). Two values: the key was either found or it wasn't.
+Lives in the `Indexing/public/` folder, *not* `Data/Index/...`. Two values: the key was either found or it wasn't.
 
 ### `RevisionReadStatus`
 
@@ -271,7 +271,7 @@ public enum RevisionReadStatus : byte
 }
 ```
 
-Lives in `Revision/public/` (again, not the old `Data/Revision/` path). Four values reflect the four cases that arise from MVCC visibility — see [05-revision](05-revision.md) for the visibility predicate. `Deleted` is particularly useful: a caller often wants to distinguish "never existed" from "existed but tombstoned" without comparing `BornTSN` / `DeadTSN` themselves.
+Lives in `Revision/public/`, *not* `Data/Revision/`. Four values reflect the four cases that arise from MVCC visibility — see [05-revision](05-revision.md) for the visibility predicate. `Deleted` is particularly useful: a caller often wants to distinguish "never existed" from "existed but tombstoned" without comparing `BornTSN` / `DeadTSN` themselves.
 
 ---
 

@@ -52,8 +52,6 @@ public static class TriggerDirect
         Console.WriteLine($"Spawn {entityCount} entities: {spawnTime.TotalMilliseconds:F1}ms ({spawnTime.TotalMilliseconds / entityCount * 1000:F1}us/entity)");
 
         var table = dbe.GetComponentTable<TrigShip>();
-        var tree = table.SpatialIndex.ActiveTree;
-        Console.WriteLine($"Tree: {tree.EntityCount} entities, depth {tree.Depth}, {tree.NodeCount} nodes");
 
         // --- Create trigger system + regions ---
         var ts = table.SpatialIndex.GetOrCreateTriggerSystem(table);

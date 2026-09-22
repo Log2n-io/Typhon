@@ -15,7 +15,7 @@ namespace Typhon.Engine.internals;
 internal sealed class PagedMMFOptionsValidator<TO> : IValidateOptions<TO> where TO : PagedMMFOptions
 {
     public ValidateOptionsResult Validate(string name, TO options) =>
-        options.Validate(silent: true, out var message) ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(message);
+        options.Validate(true, out var message) ? ValidateOptionsResult.Success : ValidateOptionsResult.Fail(message);
 }
 
 /// <summary>
@@ -67,6 +67,16 @@ internal sealed class DatabaseEngineOptionsValidator : IValidateOptions<Database
             failures.Add(
                 $"Resources.CheckpointDirtyPageThresholdPercent must be between 0 and 100 (was {resources.CheckpointDirtyPageThresholdPercent}). "
                 + "0 disables the dirty-page trigger.");
+        }
+
+        // A cell half promotes at this count and falls back at half of it, so anything below 2 leaves no gap between the two and a cell on the boundary
+        // rebuilds itself in both directions on alternating inserts. int.MaxValue is the documented "never promote" value and is deliberately in range.
+        var spatial = options.Spatial;
+        if (spatial != null && spatial.CellTreePromoteThreshold < 2)
+        {
+            failures.Add(
+                $"Spatial.CellTreePromoteThreshold must be >= 2 (was {spatial.CellTreePromoteThreshold}). "
+                + "Set it to int.MaxValue to keep every cell on the linear scan.");
         }
 
         // WalWriterOptions is the real WAL config (unlike the removed vestigial ResourceOptions budget knobs). Validate its

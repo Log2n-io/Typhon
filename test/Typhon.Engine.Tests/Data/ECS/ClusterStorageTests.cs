@@ -261,13 +261,14 @@ class ClusterStorageTests : TestBase<ClusterStorageTests>
         var meta = ArchetypeRegistry.GetMetadata<ClAnt>();
         var rootPage = dbe._archetypeStates[meta.ArchetypeId].ClusterState.ClusterSegment.RootPageIndex;
 
-        var found = dbe.TryGetClusterSpatialInfo(rootPage, out var isSpatial, out var cellSize, out _, out _, out _);
+        var found = dbe.TryGetClusterSpatialInfo(rootPage, out var isSpatial, out var cellSize, out _, out _, out _, out _);
         Assert.That(found, Is.True, "a cluster archetype owns the segment");
         Assert.That(isSpatial, Is.False);
         Assert.That(cellSize, Is.EqualTo(0f), "no grid fields for a non-spatial cluster");
 
         // No per-chunk cell context for a non-spatial cluster.
-        Assert.That(dbe.TryGetClusterChunkSpatialInfo(rootPage, 0, out _, out _, out _, out _, out _, out _, out _, out _, out _), Is.False);
+        Assert.That(dbe.TryGetClusterChunkSpatialInfo(rootPage, 0, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _, out _),
+            Is.False);
     }
 
     [Test]

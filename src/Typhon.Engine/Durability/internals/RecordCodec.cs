@@ -328,7 +328,7 @@ internal static class RecordCodec
 
             var recStart = writeOffset;
             writeOffset += WriteFenceBlockPrefix(
-                dest[writeOffset..], firstLsn + index, tsn, uowEpoch: 0, RecordFlags.FenceRecord,
+                dest[writeOffset..], firstLsn + index, tsn, 0, RecordFlags.FenceRecord,
                 archetypeId, b.ClusterChunkId, b.FirstSlot, b.SlotSpan, b.DirtyMask,
                 slotIndices, componentSizes, totalComponentSize);
 

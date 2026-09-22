@@ -7,7 +7,7 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Per-tick span around the body of the per-ComponentTable loop inside <c>DatabaseEngine.WriteTickFenceCore</c>:
-/// WAL serialize + ProcessShadowEntries + ProcessSpatialEntries + DirtyRing.Archive for one dirty SV/Transient table. Surfaces "which table dominated the fence
+/// WAL serialize + ProcessShadowEntries + DirtyRing.Archive for one dirty SV/Transient table. Surfaces "which table dominated the fence
 /// wall?" — the prerequisite breakdown for parallelizing the fence across the worker pool (whole fence runs single-threaded today on the scheduler thread).
 /// </summary>
 [TraceEvent(TraceEventKind.WriteTickFenceTable, EmitEncoder = true, Gate = "RuntimeWriteTickFenceTableActive")]
@@ -22,7 +22,13 @@ internal ref partial struct WriteTickFenceTableEvent
     [Optional(MaskValue = 0x01)] private byte _walPublished;
     /// <summary>Whether <c>ProcessShadowEntries</c> ran for this table (== <c>table.HasShadowableIndexes</c>).</summary>
     [Optional(MaskValue = 0x02)] private byte _hasShadow;
-    /// <summary>Whether <c>ProcessSpatialEntries</c> ran for this table (== <c>table.SpatialIndex.FieldInfo.Mode == Dynamic</c>).</summary>
+    /// <summary>
+    /// Whether this table's component carries a DYNAMIC spatial field (<c>table.SpatialIndex.FieldInfo.Mode == Dynamic</c>).
+    /// </summary>
+    /// <remarks>
+    /// It used to mean "the per-table spatial pass ran", and that pass is gone with the entity-level R-Tree (#872 step 13). The flag is kept because it still
+    /// answers a question a trace reader asks — is this table spatial at all — but it no longer gates any work in the fence body.
+    /// </remarks>
     [Optional(MaskValue = 0x04)] private byte _hasSpatial;
 }
 
@@ -40,22 +46,6 @@ internal ref partial struct WriteTickFenceShadowEvent
     /// <summary>Total shadow buffer entries drained this tick — sum of <c>buffer.Count</c> across all indexed fields.
     /// The real driver of shadow processing cost (per-field Move/MoveValue + view notify).</summary>
     [Optional(MaskValue = 0x01)] private int _totalShadowEntries;
-}
-
-/// <summary>
-/// Per-tick span around <c>ProcessSpatialEntries</c> for one ComponentTable — R-Tree position update for dirty entities.
-/// </summary>
-[TraceEvent(TraceEventKind.WriteTickFenceSpatial, EmitEncoder = true, Gate = "RuntimeWriteTickFenceSpatialActive")]
-internal ref partial struct WriteTickFenceSpatialEvent
-{
-    /// <summary>Component type id of the table being processed.</summary>
-    [BeginParam] public ushort ComponentTypeId;
-    /// <summary>Dirty entry count iterated by the scan (same snapshot as the WriteTickFenceTable wrapper sees).</summary>
-    [BeginParam] public int DirtyEntryCount;
-
-    /// <summary>Outcome: entities whose new position escaped their fat AABB and required a real tree reinsert (the expensive path; the cheap path just updates
-    /// the back-pointer leaf in place).</summary>
-    [Optional(MaskValue = 0x01)] private int _escapedCount;
 }
 
 /// <summary>

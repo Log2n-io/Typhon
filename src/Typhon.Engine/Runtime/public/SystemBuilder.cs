@@ -27,6 +27,7 @@ public sealed class SystemBuilder
     internal bool _parallel;
     internal bool _writesVersioned;
     internal float _chunksPerWorker = 1f;
+    internal int _minChunkSize;
     internal int _explicitChunkCount;       // > 0 → chunked-parallel CallbackSystem (no entity input)
     internal SimTier _tierFilter = SimTier.All;
     internal int _cellAmortize;
@@ -172,6 +173,24 @@ public sealed class SystemBuilder
     }
 
     /// <summary>
+    /// Override <see cref="RuntimeOptions.ParallelQueryMinChunkSize"/> for this system only — the smallest entity count
+    /// it will accept in a parallel chunk. Default <c>0</c> inherits the global value.
+    /// </summary>
+    /// <remarks>
+    /// <para>Set this when the system's cost PER ENTITY is far above the schedule's average, so that a chunk of the
+    /// global size is much more work than the dispatch it is sized against. The symptom is a system consuming a large
+    /// share of the tick while <c>SystemTelemetry.WorkersTouched</c> shows it running on a handful of workers, and
+    /// <see cref="ChunksPerWorker"/> having no effect — because the entity-count cap, not the worker cap, is binding.</para>
+    /// <para>Validated at <see cref="RuntimeSchedule.Build"/>: must be at least 1, and rejected on non-parallel systems
+    /// where it has no effect.</para>
+    /// </remarks>
+    public SystemBuilder MinChunkSize(int entities)
+    {
+        _minChunkSize = entities;
+        return this;
+    }
+
+    /// <summary>
     /// Set the simulation-tier dispatch filter (issue #231). Default <see cref="SimTier.All"/> matches pre-#231 behaviour (all clusters dispatched).
     /// Single-tier (e.g. <see cref="SimTier.Tier0"/>) or multi-tier flag combinations (<see cref="SimTier.Near"/>, <see cref="SimTier.Active"/>) are both
     /// supported.
@@ -201,8 +220,10 @@ public sealed class SystemBuilder
     }
 
     /// <summary>
-    /// Assign this system to a phase (RFC 07 / Q3). Phases form a DAG-local total order declared via <see cref="Dag.Phases"/> — all systems in phase N complete
-    /// before any system in phase N+1 of the same DAG. The phase must be one declared on the owning DAG. If not called, the system lands in the DAG's default phase.
+    /// Assign this system to a phase (RFC 07 / Q3). Phases form a DAG-local total order declared via <see cref="Dag.Phases"/>, and it binds through
+    /// declared access only: this system starts after a system of an earlier phase when their declarations conflict (rule ED-05), and may run alongside
+    /// it otherwise — so declare every component it reads, including through spatial queries. The phase must be one declared on the owning DAG. If not
+    /// called, the system lands in the DAG's default phase.
     /// </summary>
     public SystemBuilder Phase(Phase phase)
     {
@@ -436,6 +457,9 @@ public sealed class SystemBuilder<TContext> where TContext : class
     public SystemBuilder<TContext> WritesVersioned() { _inner.WritesVersioned(); return this; }
     /// <summary>Sets the oversubscription factor for parallel chunk dispatch (worker cap becomes <c>round(WorkerCount × factor)</c>). Must be in <c>[1.0, 64.0]</c>.</summary>
     public SystemBuilder<TContext> ChunksPerWorker(float factor) { _inner.ChunksPerWorker(factor); return this; }
+
+    /// <inheritdoc cref="SystemBuilder.MinChunkSize(int)"/>
+    public SystemBuilder<TContext> MinChunkSize(int entities) { _inner.MinChunkSize(entities); return this; }
     /// <summary>Sets the simulation-tier dispatch filter (this system only processes clusters whose cell matches the tier).</summary>
     public SystemBuilder<TContext> Tier(SimTier tier) { _inner.Tier(tier); return this; }
     /// <summary>Sets the cell-level amortization denominator — the system processes <c>1/N</c> of the tier's clusters per tick. Requires a non-<see cref="SimTier.All"/> tier.</summary>

@@ -180,7 +180,7 @@ struct AxVerColl
 struct AxSvSpatial
 {
     [Field]
-    [SpatialIndex(0.0f)]
+    [SpatialIndex]
     public AABB3F Bounds;
 
     [Field]
@@ -192,7 +192,7 @@ struct AxSvSpatial
 struct AxVerSpatial
 {
     [Field]
-    [SpatialIndex(0.0f)]
+    [SpatialIndex]
     public AABB3F Bounds;
 
     [Field]
@@ -729,7 +729,7 @@ public static class AxisArchetypes
                 break;
         }
 
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-WorldExtent, -WorldExtent),
             worldMax: new Vector2(WorldExtent, WorldExtent),
             cellSize: 100f));

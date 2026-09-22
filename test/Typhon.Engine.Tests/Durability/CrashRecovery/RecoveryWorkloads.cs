@@ -633,7 +633,7 @@ public struct PayloadBag
     public ComponentCollection<int> Items;
 
     [Field]
-    [SpatialIndex(0.0f)]
+    [SpatialIndex]
     public AABB3F Bounds;
 
     [Field]
@@ -674,7 +674,7 @@ internal sealed class PayloadPayloadWorkload : IRecoveryWorkload, ICollectionPro
 
         // A cluster-eligible archetype with a [SpatialIndex] field requires the grid BEFORE InitializeArchetypes (#230 Phase 3 Option B), and Register is the
         // workload hook that runs there — on both the pre-crash and the post-crash open, which is exactly what a reopen needs.
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-1000f, -1000f),
             worldMax: new Vector2(1000f, 1000f),
             cellSize: 100f));

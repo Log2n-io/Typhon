@@ -104,14 +104,6 @@ internal static unsafe class SpatialNodeHelper
         *(long*)(nodeBase + desc.LeafIdOffset + index * desc.LeafIdSize) = entityId;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static int ReadLeafCompChunkId(byte* nodeBase, int index, in SpatialNodeDescriptor desc) =>
-        *(int*)(nodeBase + desc.LeafCompChunkIdOffset + index * desc.LeafCompChunkIdSize);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void WriteLeafCompChunkId(byte* nodeBase, int index, int compChunkId, in SpatialNodeDescriptor desc) =>
-        *(int*)(nodeBase + desc.LeafCompChunkIdOffset + index * desc.LeafCompChunkIdSize) = compChunkId;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static uint ReadLeafCategoryMask(byte* nodeBase, int index, in SpatialNodeDescriptor desc) =>
         *(uint*)(nodeBase + desc.LeafCategoryMaskOffset + index * desc.LeafCategoryMaskSize);
 
@@ -196,7 +188,6 @@ internal static unsafe class SpatialNodeHelper
             WriteLeafCoord(nodeBase, dstIdx, c, ReadLeafCoord(nodeBase, srcIdx, c, desc), desc);
         }
         WriteLeafEntityId(nodeBase, dstIdx, ReadLeafEntityId(nodeBase, srcIdx, desc), desc);
-        WriteLeafCompChunkId(nodeBase, dstIdx, ReadLeafCompChunkId(nodeBase, srcIdx, desc), desc);
         WriteLeafCategoryMask(nodeBase, dstIdx, ReadLeafCategoryMask(nodeBase, srcIdx, desc), desc);
     }
 

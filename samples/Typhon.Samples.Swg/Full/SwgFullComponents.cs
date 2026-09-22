@@ -265,7 +265,7 @@ public struct ItemOwner
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerPosition
 {
-    [Field] [SpatialIndex(1.0f, Mode = SpatialMode.Dynamic, Category = SwgCategory.Player)] public AABB2F Bounds;
+    [Field] [SpatialIndex(Mode = SpatialMode.Dynamic, Category = SwgCategory.Player)] public AABB2F Bounds;
 }
 
 /// <summary>Deposit location — Static spatial (immobile, skips tick-fence), Category=Deposit. SingleVersion.</summary>
@@ -274,7 +274,7 @@ public struct PlayerPosition
 [StructLayout(LayoutKind.Sequential)]
 public struct DepositPosition
 {
-    [Field] [SpatialIndex(1.0f, Mode = SpatialMode.Static, Category = SwgCategory.Deposit)] public AABB2F Bounds;
+    [Field] [SpatialIndex(Mode = SpatialMode.Static, Category = SwgCategory.Deposit)] public AABB2F Bounds;
 }
 
 /// <summary>Structure location — Dynamic spatial, Category=Structure. SingleVersion. SHARED by Harvester + Factory
@@ -284,7 +284,7 @@ public struct DepositPosition
 [StructLayout(LayoutKind.Sequential)]
 public struct StructurePosition
 {
-    [Field] [SpatialIndex(1.0f, Mode = SpatialMode.Dynamic, Category = SwgCategory.Structure)] public AABB2F Bounds;
+    [Field] [SpatialIndex(Mode = SpatialMode.Dynamic, Category = SwgCategory.Structure)] public AABB2F Bounds;
 }
 
 /// <summary>Spatial category bitmask values — one bit per spatially-distinct entity kind, so broadphase queries can

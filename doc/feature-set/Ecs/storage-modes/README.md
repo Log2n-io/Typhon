@@ -40,7 +40,7 @@ without paying for a revision chain.
 
 ## ⚠️ Guarantees & limits
 
-- `StorageMode` is fixed for a given `(name, revision)`; changing a component's mode requires a new `[Component]` revision (there is no in-place mode migration yet — tracked in #546).
+- `StorageMode` is fixed for a given `(name, revision)`; changing a component's mode requires a new `[Component]` revision (there is no in-place mode migration).
 - An entity can freely mix component types across all three modes (`Spawn`/`Open`/`OpenMut`/`Destroy` work
   uniformly); rollback semantics differ per mode — the Rollback column above is the short answer, each
   sub-feature has the long one.

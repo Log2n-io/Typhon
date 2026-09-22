@@ -483,9 +483,11 @@ public static class QuerySpecCompiler
             case "aabb":
                 RequireSpatialParamCount(clause, parameters, 6);
                 methodName = "WhereInAABB";
-                args = Is2DSpatial(spatialField.Type)
-                    ? [parameters[0], parameters[1], parameters[3], parameters[4], 0d, 0d]   // 2D engine reads (minX, minY, maxX, maxY)
-                    : BoxDoubles(parameters);                                                // 3D: (minX, minY, minZ, maxX, maxY, maxZ)
+                // (minX, minY, minZ, maxX, maxY, maxZ) for both dimensions — the engine ignores Z for a 2D component rather than reading the max corner
+                // from different slots. The 2D branch that used to sit here re-packed to (minX, minY, maxX, maxY, 0, 0) to compensate for EcsQuery reading
+                // [2] and [3] as the max corner; that was a defect in EcsQuery, fixed in #872 step 13, and the workaround would now be the thing breaking
+                // 2D queries.
+                args = BoxDoubles(parameters);
                 break;
             default:
                 throw new WorkbenchException(400, "invalid_query_syntax",
@@ -522,10 +524,6 @@ public static class QuerySpecCompiler
         }
         return args;
     }
-
-    // 2D spatial field types (CoordCount 4): AABB / BSphere in f32 or f64. Anything else is 3D (CoordCount 6).
-    private static bool Is2DSpatial(FieldType t) =>
-        t is FieldType.AABB2F or FieldType.BSphere2F or FieldType.AABB2D or FieldType.BSphere2D;
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // ORDER BY

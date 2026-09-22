@@ -42,7 +42,7 @@ internal static class ComponentFamilyResolver
     public static string ResolveByAttribute(Type componentType)
     {
         ArgumentNullException.ThrowIfNull(componentType);
-        var attr = componentType.GetCustomAttribute<ComponentFamilyAttribute>(inherit: false);
+        var attr = componentType.GetCustomAttribute<ComponentFamilyAttribute>(false);
         return attr?.Name;
     }
 

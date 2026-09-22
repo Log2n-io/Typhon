@@ -505,7 +505,6 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
             bool isForeignKey = false;
             string fkTargetFqn = null;
             bool hasSpatial = false;
-            string spatialMargin = null;
             string spatialCellSize = null;
             string spatialModeCast = null;
             string spatialCategory = null;
@@ -560,11 +559,7 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
                         hasSpatial = true;
                         if (ad.ConstructorArguments.Length >= 1)
                         {
-                            spatialMargin = FloatLit(ad.ConstructorArguments[0].Value);
-                        }
-                        if (ad.ConstructorArguments.Length >= 2)
-                        {
-                            spatialCellSize = FloatLit(ad.ConstructorArguments[1].Value);
+                            spatialCellSize = FloatLit(ad.ConstructorArguments[0].Value);
                         }
                         foreach (var na in ad.NamedArguments)
                         {
@@ -601,7 +596,6 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
                 isForeignKey: isForeignKey,
                 foreignKeyTargetFqn: fkTargetFqn,
                 hasSpatialIndex: hasSpatial,
-                spatialMargin: spatialMargin,
                 spatialCellSize: spatialCellSize,
                 spatialModeCast: spatialModeCast,
                 spatialCategory: spatialCategory));
@@ -859,10 +853,6 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
             if (f.HasSpatialIndex)
             {
                 sb.Append(", hasSpatialIndex: true");
-                if (f.SpatialMargin != null)
-                {
-                    sb.Append(", spatialMargin: ").Append(f.SpatialMargin);
-                }
                 if (f.SpatialCellSize != null)
                 {
                     sb.Append(", spatialCellSize: ").Append(f.SpatialCellSize);
@@ -1533,14 +1523,13 @@ internal sealed class ComponentFieldGenModel : IEquatable<ComponentFieldGenModel
     public bool IsForeignKey { get; }
     public string ForeignKeyTargetFqn { get; }
     public bool HasSpatialIndex { get; }
-    public string SpatialMargin { get; }
     public string SpatialCellSize { get; }
     public string SpatialModeCast { get; }
     public string SpatialCategory { get; }
 
     public ComponentFieldGenModel(string memberName, string schemaName, string fieldTypeFqn, string previousName, int? explicitFieldId,
         bool hasIndex, bool indexAllowMultiple, bool isForeignKey, string foreignKeyTargetFqn, bool hasSpatialIndex,
-        string spatialMargin, string spatialCellSize, string spatialModeCast, string spatialCategory)
+        string spatialCellSize, string spatialModeCast, string spatialCategory)
     {
         MemberName = memberName;
         SchemaName = schemaName;
@@ -1552,7 +1541,6 @@ internal sealed class ComponentFieldGenModel : IEquatable<ComponentFieldGenModel
         IsForeignKey = isForeignKey;
         ForeignKeyTargetFqn = foreignKeyTargetFqn;
         HasSpatialIndex = hasSpatialIndex;
-        SpatialMargin = spatialMargin;
         SpatialCellSize = spatialCellSize;
         SpatialModeCast = spatialModeCast;
         SpatialCategory = spatialCategory;
@@ -1575,7 +1563,6 @@ internal sealed class ComponentFieldGenModel : IEquatable<ComponentFieldGenModel
             && IsForeignKey == other.IsForeignKey
             && ForeignKeyTargetFqn == other.ForeignKeyTargetFqn
             && HasSpatialIndex == other.HasSpatialIndex
-            && SpatialMargin == other.SpatialMargin
             && SpatialCellSize == other.SpatialCellSize
             && SpatialModeCast == other.SpatialModeCast
             && SpatialCategory == other.SpatialCategory;

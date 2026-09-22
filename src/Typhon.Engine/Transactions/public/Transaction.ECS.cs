@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -89,7 +90,7 @@ public unsafe partial class Transaction
         var chunkId = AllocateVersionedSlotContent(meta, table, slot, id, out _);
 
         var dst = info.CompContentAccessor.GetChunkAsSpan(chunkId, true);
-        Unsafe.AsRef<T>((byte*)Unsafe.AsPointer(ref dst.GetPinnableReference()) + table.ComponentOverhead) = value;
+        Unsafe.WriteUnaligned(ref dst[table.ComponentOverhead], value);
         return chunkId;
     }
 
@@ -244,17 +245,6 @@ public unsafe partial class Transaction
         [CallerMemberName] string sourceMethod = null)
         where TArchetype : class
         => new(this, false, sourceFile, sourceLine, sourceMethod);
-
-    /// <summary>
-    /// Create a zero-allocation spatial query handle for component type <typeparamref name="T"/>.
-    /// Requires <typeparamref name="T"/> to have a <c>[SpatialIndex]</c> field.
-    /// </summary>
-    internal SpatialQuery<T> SpatialQuery<T>() where T : unmanaged
-    {
-        var table = _dbe.GetComponentTable<T>();
-        CheckConfig.Require(CheckConfig.Enabled, table?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
-        return new SpatialQuery<T>(table!.SpatialIndex);
-    }
 
     /// <summary>
     /// O(1) metadata count of live entities for <typeparamref name="TArchetype"/> and descendants.
@@ -482,7 +472,9 @@ public unsafe partial class Transaction
                         dst = new Span<byte>(SpawnArena.Resolve(stage), overhead + table.ComponentStorageSize);
                     }
                     int copySize = Math.Min(sharedValues[sharedIndex].DataSize, dst.Length - overhead);
-                    new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in sharedValues[sharedIndex])) + 12, copySize)
+                    // A span, not a pointer: sharedValues is a managed array. The payload starts 12 bytes into a ComponentValue.
+                    MemoryMarshal.CreateReadOnlySpan(
+                            ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref sharedValues[sharedIndex]), 12), copySize)
                         .CopyTo(dst.Slice(overhead));
                     entry.EnabledBits |= (ushort)(1 << slot);
                 }
@@ -545,8 +537,8 @@ public unsafe partial class Transaction
 
         // O2: pre-extend list, then write entries in-place via span — avoids N copies of 138-byte SpawnEntry
         int baseIndex = _spawnedEntities.Count;
-        System.Runtime.InteropServices.CollectionsMarshal.SetCount(_spawnedEntities, baseIndex + count);
-        var writeSpan = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_spawnedEntities).Slice(baseIndex);
+        CollectionsMarshal.SetCount(_spawnedEntities, baseIndex + count);
+        var writeSpan = CollectionsMarshal.AsSpan(_spawnedEntities).Slice(baseIndex);
 
         for (int n = 0; n < count; n++)
         {
@@ -594,7 +586,7 @@ public unsafe partial class Transaction
         }
 
         // Resolve everything ONCE — no per-entity dictionary lookups
-        var span = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_spawnedEntities);
+        var span = CollectionsMarshal.AsSpan(_spawnedEntities);
         var meta = _dbe.GetMetaByRouting(span[baseIndex].Id.ArchetypeId);
         byte slot = meta.GetSlot(comp._componentTypeId);
         var engineState = _dbe._archetypeStates[meta.ArchetypeId];
@@ -712,7 +704,9 @@ public unsafe partial class Transaction
                     dst = new Span<byte>(SpawnArena.Resolve(stage), overhead + table.ComponentStorageSize);
                 }
                 int copySize = Math.Min(values[vi].DataSize, dst.Length - overhead);
-                new ReadOnlySpan<byte>((byte*)Unsafe.AsPointer(ref Unsafe.AsRef(in values[vi])) + 12, copySize)
+                // A span, not a pointer: values can be backed by a managed array. The payload starts 12 bytes into a ComponentValue.
+                MemoryMarshal.CreateReadOnlySpan(
+                        ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in values[vi])), 12), copySize)
                     .CopyTo(dst.Slice(overhead));
                 entry.EnabledBits |= (ushort)(1 << slot);
             }
@@ -1403,7 +1397,7 @@ public unsafe partial class Transaction
         // First write per entity inserts into SingleCache here. Read-only resolves no longer populate the cache (deferred-insert — the cache holds only
         // written/spawned entries, so commit/rollback/WAL iterate nothing for pure reads); the EntityRef carries the chain root captured at resolve time
         // so the CompRevInfo is re-resolved with a direct chain walk (single-entry fast path in the steady state).
-        ref var cri = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(info.SingleCache, pk, out var cached);
+        ref var cri = ref CollectionsMarshal.GetValueRefOrAddDefault(info.SingleCache, pk, out var cached);
 
         if (!cached)
         {
@@ -1559,7 +1553,7 @@ public unsafe partial class Transaction
                     {
                         continue;
                     }
-                    PublishMembershipEntry(entry.Id, isCreation: true);
+                    PublishMembershipEntry(entry.Id, true);
                 }
             }
 
@@ -1567,7 +1561,7 @@ public unsafe partial class Transaction
             {
                 foreach (var entityId in _pendingDestroys)
                 {
-                    PublishMembershipEntry(entityId, isCreation: false);
+                    PublishMembershipEntry(entityId, false);
                 }
             }
 
@@ -1604,7 +1598,7 @@ public unsafe partial class Transaction
         // Unguarded indexing would be a throw on the commit path for a routing id with no state; a membership notification is never worth that.
         var routing = entityId.ArchetypeId;
         var states = _dbe._stateByRouting;
-        var engineState = (uint)routing < (uint)states.Length ? states[routing] : null;
+        var engineState = routing < (uint)states.Length ? states[routing] : null;
         var registry = engineState?.MembershipViews;
 
         // The whole cost of this feature for a database that does not use it: one array index and one branch per structurally-changed entity.
@@ -1923,11 +1917,6 @@ public unsafe partial class Transaction
             }
         }
 
-        // Pre-size spatial tree segments to avoid CBS overflow during bulk insert.
-        // Each entity needs ~1/leafCapacity leaf chunks. Splits add ~30% overhead for internal nodes.
-        // Also pre-size the back-pointer segment (1 chunk per entity).
-        PreGrowSpatialSegments(_spawnedEntities.Count);
-
         using var guard = EpochGuard.Enter(_epochManager);
 
         // Hoist stackalloc outside the loop — cluster record is the largest: 19B base + 16 × 4B Versioned = 83B (≥ legacy 78B)
@@ -1948,10 +1937,17 @@ public unsafe partial class Transaction
         // Sized for 3D ([minX, minY, minZ, maxX, maxY, maxZ]); 2D reads only populate the first 4 slots. Issue #230 Phase 3 unified 2D/3D per-cell index paths.
         Span<double> spawnSpatialCoords = stackalloc double[6];
 
+        // Step 15 (D4): a batch of spatial spawns is placed in per-cell Morton order, so a bulk load is born at the packing bound instead of at ~100 %
+        // of every cell it touches. The list itself is left alone — _spawnedEntityIndex maps ids into it — and only the visiting order changes.
+        var sortThreshold = _dbe.SpatialGrid != null ? _dbe.SpatialGrid.Config.BatchSpawnSortThreshold : 0;
+        var spawnOrder = sortThreshold > 0 && _spawnedEntities.Count >= sortThreshold ? BuildSpatialSpawnOrder() : null;
+
         try
         {
-            foreach (var entry in _spawnedEntities)
+            var spawnCount = _spawnedEntities.Count;
+            for (var spawnIndex = 0; spawnIndex < spawnCount; spawnIndex++)
             {
+                var entry = _spawnedEntities[spawnOrder != null ? spawnOrder[spawnIndex] : spawnIndex];
                 // Skip entities that were also destroyed in this transaction — no EntityMap insert needed
                 if (_pendingDestroys != null && _pendingDestroys.Contains(entry.Id))
                 {
@@ -1994,7 +1990,11 @@ public unsafe partial class Transaction
                     // once per archetype switch (see SetupSpawnAccessors) so this hot branch is a single field read.
                     int spatialSlotIdx = ctx.SpatialSlotIndexCached;
                     bool useCellClaim = spatialSlotIdx >= 0;
+                    var rankedSpawn = false;
                     int computedCellKey = -1;
+                    float spawnPx = 0f;
+                    float spawnPy = 0f;
+                    float spawnPz = 0f;
                     if (useCellClaim)
                     {
                         // #839: the spatial payload is in the spawn arena unless the component is Versioned, in which case it still has a content chunk.
@@ -2023,6 +2023,22 @@ public unsafe partial class Transaction
                         }
                         byte* spatialFieldPtr = spatialSrcAddr + ctx.SpatialComponentOverheadCached + ctx.SpatialFieldOffsetCached;
                         computedCellKey = ctx.SpatialGridCached.WorldToCellKeyFromSpatialField(spatialFieldPtr, ctx.SpatialFieldTypeCached);
+
+                        // The same field, read once more for its centre and rebased into the cell's frame (C15): the claim ranks the cell's clusters by
+                        // how far each stored bound grows to admit it. Cheap — the field is in the line WorldToCellKeyFromSpatialField just read.
+                        // A Morton-ordered batch is placed first fit: the order IS the placement, and ranking each arrival against every open cluster
+                        // would let it join an older open cluster whose box happens to be nearer and mix the sorted runs (measured: fill clusters
+                        // spanning the cell with the cap on). The ranked overload is for spawns that arrive one at a time or in small batches.
+                        rankedSpawn = spawnOrder == null
+                            && (ctx.SpatialGridCached.Config.LeastEnlargementPlacement || ctx.SpatialGridCached.Config.GrowthCapPlacement);
+                        if (rankedSpawn)
+                        {
+                            SpatialGrid.ReadSpatialCenter3D(spatialFieldPtr, ctx.SpatialFieldTypeCached, out var worldX, out var worldY, out var worldZ);
+                            ctx.SpatialGridCached.CellOrigin(computedCellKey, out var originX, out var originY, out var originZ);
+                            spawnPx = (float)(worldX - originX);
+                            spawnPy = (float)(worldY - originY);
+                            spawnPz = (float)(worldZ - originZ);
+                        }
                     }
 
                     if (ctx.ClusterState.ClusterSegment != null)
@@ -2030,12 +2046,10 @@ public unsafe partial class Transaction
                         // Mixed or pure-SV/V: PersistentStore is primary
                         if (useCellClaim)
                         {
-                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlotInCell(
-                                computedCellKey,
-                                ref ctx.ClusterAccessor,
-                                _changeSet,
-                                ctx.SpatialGridCached,
-                                TSN);
+                            (clusterChunkId, slotIdx) = rankedSpawn
+                                ? ctx.ClusterState.ClaimSlotInCell(computedCellKey, spawnPx, spawnPy, spawnPz, ref ctx.ClusterAccessor, _changeSet,
+                                    ctx.SpatialGridCached, TSN)
+                                : ctx.ClusterState.ClaimSlotInCell(computedCellKey, ref ctx.ClusterAccessor, _changeSet, ctx.SpatialGridCached, TSN);
                         }
                         else
                         {
@@ -2052,11 +2066,10 @@ public unsafe partial class Transaction
                         // Pure-Transient: TransientStore is primary
                         if (useCellClaim)
                         {
-                            (clusterChunkId, slotIdx) = ctx.ClusterState.ClaimSlotInCell(
-                                computedCellKey,
-                                ref ctx.ClusterTransientAccessor,
-                                ctx.SpatialGridCached,
-                                TSN);
+                            (clusterChunkId, slotIdx) = rankedSpawn
+                                ? ctx.ClusterState.ClaimSlotInCell(computedCellKey, spawnPx, spawnPy, spawnPz, ref ctx.ClusterTransientAccessor,
+                                    ctx.SpatialGridCached, TSN)
+                                : ctx.ClusterState.ClaimSlotInCell(computedCellKey, ref ctx.ClusterTransientAccessor, ctx.SpatialGridCached, TSN);
                         }
                         else
                         {
@@ -2106,12 +2119,14 @@ public unsafe partial class Transaction
                     // Write full EntityId to cluster primary segment
                     *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) = (long)entry.Id.RawValue;
 
-                    // Set EnabledBits in cluster
+                    // Set EnabledBits in cluster. Interlocked, not |=: the word is one per component per CLUSTER, and two transactions committing spawns
+                    // into the same cluster (their claims are independent CASes on the occupancy word) each read-modify-write it — a plain |= lets one
+                    // drop the other's bit, and every clearing site (ReleaseSlot, the migration source release) already goes through Interlocked.And.
                     for (int slot = 0; slot < ctx.ComponentCount; slot++)
                     {
                         if ((enabledBits & (1 << slot)) != 0)
                         {
-                            *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIdx;
+                            Interlocked.Or(ref *(long*)(clusterBase + layout.EnabledBitsOffset(slot)), 1L << slotIdx);
                         }
                     }
 
@@ -2152,6 +2167,10 @@ public unsafe partial class Transaction
 
                     // Insert per-archetype B+Tree entries for cluster entity, in both index homes (#655). The elementId tail always lives on the PRIMARY
                     // (cluster) base even for a Transient slot, whose component bytes live in the Transient segment — see ProcessClusterShadowEntries.
+                    // Measured in Morton order and in arrival order (step 15 review, 4 K spawns of an archetype with one AllowMultiple index, warm,
+                    // Release): 16.6–18.6 ms inline against 18.4–20.0 ms deferred and replayed in key order — the tree does not care, and the
+                    // ordering itself costs nothing measurable warm (unsorted 17–18 ms). The matrix's "+90 % spawn" is a one-shot cold number paying
+                    // the ordering path's JIT. So the inserts stay where they are.
                     {
                         int clusterLocation = clusterChunkId * 64 + slotIdx;
                         InsertClusterIndexEntries(ref ctx, ctx.ClusterState.IndexSlots, clusterBase, clusterBase, layout, clusterChunkId, slotIdx,
@@ -2179,19 +2198,16 @@ public unsafe partial class Transaction
 
                         if (ctx.ClusterState.ClusterCellMap != null)
                         {
-                            if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(spatialFieldPtr, ss.FieldInfo, spawnSpatialCoords, ss.Descriptor))
+                            if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(spatialFieldPtr, ss.FieldInfo, spawnSpatialCoords))
                             {
                                 ctx.ClusterState.EnsureClusterAabbsCapacity(clusterChunkId + 1);
                                 ctx.ClusterState.EnsureClusterSpatialIndexSlotCapacity(clusterChunkId + 1);
 
-                                bool wasInIndex = ctx.ClusterState.ClusterSpatialIndexSlot[clusterChunkId] >= 0;
-                                ref var clusterAabb = ref ctx.ClusterState.ClusterAabbs[clusterChunkId];
-                                if (!wasInIndex)
-                                {
-                                    // First entity of (possibly reused) cluster — reset to Empty to drop any
-                                    // stale AABB left over from a prior life of this chunk id.
-                                    clusterAabb = ClusterSpatialAabb.Empty;
-                                }
+                                // Latched when a cell tree could be in flight (#940): PromoteCellHalf transiently retires every back-pointer, and a plain
+                                // read crossing that window answers "not indexed" for a cluster that is — which resets its box to Empty below, wiping
+                                // concurrent spawners' widening, and then re-adds it to a tree that already holds it.
+                                ctx.ClusterState.SpawnIndexReadProbe?.Invoke();
+                                bool wasInIndex = ctx.ClusterState.IsClusterIndexed(clusterChunkId);
                                 // Tier-dispatched union: 2D fields wrote [minX, minY, maxX, maxY] into the first 4 slots; 3D fields wrote the full
                                 // [minX, minY, minZ, maxX, maxY, maxZ] layout. Prior to issue #230 Phase 3 this site was hardcoded to the 2D layout
                                 // regardless of tier — a latent bug that was masked because 3D archetypes only reach this hook when ConfigureSpatialGrid
@@ -2200,36 +2216,79 @@ public unsafe partial class Transaction
                                 // for every entity in the archetype, so the cluster-level OR trivially converges to the archetype value. Defaults to
                                 // uint.MaxValue when the attribute doesn't set Category, matching pre-Phase-3 behavior.
                                 uint archetypeCategory = ss.FieldInfo.Category;
-                                if (ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F)
-                                {
-                                    clusterAabb.Union3F(
-                                        (float)spawnSpatialCoords[0], (float)spawnSpatialCoords[1], (float)spawnSpatialCoords[2],
-                                        (float)spawnSpatialCoords[3], (float)spawnSpatialCoords[4], (float)spawnSpatialCoords[5],
-                                        archetypeCategory);
-                                }
-                                else
-                                {
-                                    clusterAabb.Union2F(
-                                        (float)spawnSpatialCoords[0], (float)spawnSpatialCoords[1],
-                                        (float)spawnSpatialCoords[2], (float)spawnSpatialCoords[3],
-                                        archetypeCategory);
-                                }
+                                bool is3D = ss.FieldInfo.FieldType.Is3D();
 
+                                // C15 (#872 step 9): the union is built in the CELL's frame, so the cell has to be resolved before it rather than after.
+                                // A cluster with no cell has no frame to be expressed in — its AABB is left at Empty rather than filled with world-space
+                                // values that would be indistinguishable from cell-relative ones on read.
                                 int cellKey = ctx.ClusterState.ClusterCellMap[clusterChunkId];
+                                double cellOriginX = 0d, cellOriginY = 0d, cellOriginZ = 0d;
                                 if (cellKey >= 0)
                                 {
+                                    ctx.ClusterState.Grid.CellOrigin(cellKey, out cellOriginX, out cellOriginY, out cellOriginZ);
+
+                                    // Before the index widen below, which is what makes the entity queryable: every query must already reach as far past
+                                    // this cell as the entity does (SQ-01). Between fences a spawn is the only thing that can push that reach out.
+                                    ctx.ClusterState.RaiseClusterReachForSpawn(cellKey, cellOriginX, cellOriginY, cellOriginZ, spawnSpatialCoords, is3D);
+                                }
+
+                                // Stamped: a concurrent grow of ClusterAabbs copies the array, and a widen into the old one after the copy read this entry
+                                // would be lost — see ArchetypeClusterState._clusterAabbsGrowth. The reset and the widen are redone in the new array.
+                                int aabbsStamp;
+                                do
+                                {
+                                    aabbsStamp = ctx.ClusterState.BeginClusterAabbsWrite();
+                                    ref var clusterAabb = ref Volatile.Read(ref ctx.ClusterState.ClusterAabbs)[clusterChunkId];
                                     if (!wasInIndex)
                                     {
-                                        ctx.ClusterState.AddClusterToPerCellIndex(clusterChunkId, cellKey, clusterAabb);
+                                        // A cell-claimed cluster is indexed, with an empty box, by its allocation site under the latch (step 15 review), so
+                                        // this branch is for a cluster that reached here without one. The reset then has no concurrent widener to wipe.
+                                        clusterAabb = ClusterSpatialAabb.Empty;
+                                    }
+
+                                    if (cellKey < 0)
+                                    {
+                                        // No cell, no frame: the entry stays at Empty. Nothing to widen, but the reset above is still checked below.
+                                    }
+                                    else if (is3D)
+                                    {
+                                        ClusterSpatialAabb.WidenCas3F(ref clusterAabb,
+                                            ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[0], cellOriginX),
+                                            ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[1], cellOriginY),
+                                            ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[2], cellOriginZ),
+                                            ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[3], cellOriginX),
+                                            ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[4], cellOriginY),
+                                            ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[5], cellOriginZ),
+                                            archetypeCategory);
                                     }
                                     else
                                     {
-                                        int indexSlot = ctx.ClusterState.ClusterSpatialIndexSlot[clusterChunkId];
-                                        // Issue #230 Phase 3: route the UpdateAt to the correct sub-index based on archetype mode (Static → StaticIndex,
-                                        // Dynamic → DynamicIndex). Same split used by AddClusterToPerCellIndex.
-                                        var perCellSlot = ctx.ClusterState.PerCellIndex[cellKey];
-                                        var targetIndex = ss.FieldInfo.Mode == SpatialMode.Static ? perCellSlot.StaticIndex : perCellSlot.DynamicIndex;
-                                        targetIndex.UpdateAt(indexSlot, in clusterAabb);
+                                        ClusterSpatialAabb.WidenCas2F(ref clusterAabb,
+                                            ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[0], cellOriginX),
+                                            ClusterSpatialAabb.ToCellRelativeMin(spawnSpatialCoords[1], cellOriginY),
+                                            ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[2], cellOriginX),
+                                            ClusterSpatialAabb.ToCellRelativeMax(spawnSpatialCoords[3], cellOriginY),
+                                            archetypeCategory);
+                                    }
+                                }
+                                while (!ctx.ClusterState.ClusterAabbsWriteLanded(aabbsStamp));
+
+                                if (cellKey >= 0)
+                                {
+                                    // Read back from the LIVE array: a grow after the loop copied the widen, and the index must never hold a box its
+                                    // ClusterAabbs entry does not — RefreshClusterReach computes the reach from the entries (SQ-01).
+                                    ref var liveAabb = ref Volatile.Read(ref ctx.ClusterState.ClusterAabbs)[clusterChunkId];
+                                    if (!wasInIndex)
+                                    {
+                                        ctx.ClusterState.AddClusterToPerCellIndex(clusterChunkId, cellKey, liveAabb);
+                                    }
+                                    else
+                                    {
+                                        // Routed rather than dereferenced: the mode split (Static vs Dynamic) is only half of it since #872 step 9 — a
+                                        // promoted cell has no linear index at all, so reaching for one is a null deref above the threshold. WIDEN, not
+                                        // update: this runs on a user thread beside other spawns into the same cluster and a latched grow of the same
+                                        // cell's index, and only the CAS form survives both (step 15 review).
+                                        ctx.ClusterState.WidenClusterInPerCellIndex(clusterChunkId, cellKey, in liveAabb);
                                     }
                                 }
                             }
@@ -2298,6 +2357,128 @@ public unsafe partial class Transaction
         finally
         {
             DisposeSpawnAccessors(ref ctx);
+            if (spawnOrder != null)
+            {
+                ArrayPool<int>.Shared.Return(spawnOrder);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The order <see cref="FinalizeSpawns"/> visits <c>_spawnedEntities</c> in: grouped by archetype, then by destination cell, then along the
+    /// intra-cell Morton curve — so first fit fills each cluster with spatial neighbours and a random-order bulk load is born packed rather than at
+    /// the full extent of its cell. Rented from <see cref="ArrayPool{T}"/>; the caller returns it.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Accessor-free, on purpose.</b> The main loop rents chunk accessors per archetype; doing that twice per batch would double the setup
+    /// cost of every bulk spawn. The pre-pass reads only what it can reach without one: the archetype's spatial slot, the component's overhead and
+    /// field offset, and the staged bytes in the spawn arena. A <c>Versioned</c> spatial component stages through a cluster accessor instead, so
+    /// its entities keep their archetype-and-cell grouping and skip the Morton term — still better than arrival order, and never wrong.</para>
+    /// <para><b>Cells are resolved with create.</b> The main loop resolves the same key with create a moment later, so nothing is materialised that
+    /// would not have been. Grouping by archetype first is a free win in its own right: every archetype switch in the main loop re-rents accessors.</para>
+    /// </remarks>
+    private int[] BuildSpatialSpawnOrder()
+    {
+        var count = _spawnedEntities.Count;
+        var order = ArrayPool<int>.Shared.Rent(count);
+        var primary = ArrayPool<ulong>.Shared.Rent(count);
+        var morton = ArrayPool<ulong>.Shared.Rent(count);
+        var runKeys = ArrayPool<ulong>.Shared.Rent(count);
+        try
+        {
+            var grid = _dbe.SpatialGrid;
+            var lastArchId = -1;
+            var spatialSlot = -1;
+            var componentOverhead = 0;
+            var fieldOffset = 0;
+            var fieldType = SpatialFieldType.AABB2F;
+            var inverseCellSize = grid != null ? grid.Config.InverseCellSize : 0f;
+
+            for (var i = 0; i < count; i++)
+            {
+                var entry = _spawnedEntities[i];
+                int archId = entry.Id.ArchetypeId;
+                if (archId != lastArchId)
+                {
+                    lastArchId = archId;
+                    spatialSlot = -1;
+                    var meta = _dbe.GetMetaByRouting((ushort)archId);
+                    var engineState = meta != null && meta.IsClusterEligible ? _dbe._archetypeStates[meta.ArchetypeId] : null;
+                    ArchetypeClusterState clusterState = engineState?.ClusterState;
+                    if (grid != null && clusterState != null && clusterState.SpatialSlot.HasSpatialIndex)
+                    {
+                        ref readonly var ss = ref clusterState.SpatialSlot;
+                        var table = engineState.SlotToComponentTable[ss.Slot];
+                        if (table.StorageMode != StorageMode.Versioned)
+                        {
+                            spatialSlot = ss.Slot;
+                            componentOverhead = table.ComponentOverhead;
+                            fieldOffset = ss.FieldOffset;
+                            fieldType = ss.FieldInfo.FieldType;
+                        }
+                    }
+                }
+
+                order[i] = i;
+                var cellKey = 0;
+                var mortonKey = 0UL;
+                if (spatialSlot >= 0)
+                {
+                    var stage = entry.Stage[spatialSlot];
+                    if (stage != 0)
+                    {
+                        var fieldPtr = SpawnArena.Resolve(stage) + componentOverhead + fieldOffset;
+                        SpatialGrid.ReadSpatialCenter3D(fieldPtr, fieldType, out var x, out var y, out var z);
+                        cellKey = grid!.WorldToCellKey(x, y, z);
+                        grid.CellOrigin(cellKey, out var ox, out var oy, out var oz);
+                        mortonKey = ArchetypeClusterState.EncodeIntraCellMorton((float)(x - ox), (float)(y - oy), (float)(z - oz), (float)inverseCellSize);
+                    }
+                }
+
+                primary[i] = ((ulong)(uint)archId << 32) | (uint)cellKey;
+                morton[i] = mortonKey;
+            }
+
+            // Two-level: archetype-and-cell first, then the Morton curve inside each run. Both sorts carry the index array along.
+            Array.Sort(primary, order, 0, count);
+            var runStart = 0;
+            while (runStart < count)
+            {
+                var runEnd = runStart + 1;
+                while (runEnd < count && primary[runEnd] == primary[runStart])
+                {
+                    runEnd++;
+                }
+
+                if (runEnd - runStart > 1)
+                {
+                    // The Morton keys are in ORIGINAL index order; gather the run's keys through the permuted indices into a scratch, then sort the
+                    // scratch with the run's slice of the order array riding along.
+                    var span = order.AsSpan(runStart, runEnd - runStart);
+                    var keys = runKeys.AsSpan(0, span.Length);
+                    for (var k = 0; k < span.Length; k++)
+                    {
+                        keys[k] = morton[span[k]];
+                    }
+
+                    keys.Sort(span);
+                }
+
+                runStart = runEnd;
+            }
+
+            return order;
+        }
+        catch
+        {
+            ArrayPool<int>.Shared.Return(order);   // the caller never sees it, so the caller cannot return it
+            throw;
+        }
+        finally
+        {
+            ArrayPool<ulong>.Shared.Return(primary);
+            ArrayPool<ulong>.Shared.Return(morton);
+            ArrayPool<ulong>.Shared.Return(runKeys);
         }
     }
 
@@ -2604,76 +2785,6 @@ public unsafe partial class Transaction
             ctx.TrCompAccessors[ctx.TrSlotCount] = table.TransientComponentSegment.CreateChunkAccessor();
             trIdxAccessorBase[ctx.TrSlotCount] = ctx.TrIdxAccessorTotal;
             ctx.TrSlotCount++;
-        }
-    }
-
-    /// <summary>
-    /// Pre-grow spatial tree and back-pointer CBS segments to accommodate a bulk spawn.
-    /// Prevents CBS overflow when FinalizeSpawns inserts many entities in a single commit.
-    /// </summary>
-    private void PreGrowSpatialSegments(int spawnCount)
-    {
-        if (spawnCount < 64)
-        {
-            return; // Small batch — CBS can handle organic growth
-        }
-
-        // Scan archetypes for spatial-indexed component tables (same dedup pattern as EntityMap pre-size above)
-        Span<int> seenTableIds = stackalloc int[16];
-        int seenCount = 0;
-
-        foreach (var entry in _spawnedEntities)
-        {
-            var archId = entry.Id.ArchetypeId;
-            var es = _dbe._archetypeStates[archId];
-            if (es == null)
-            {
-                continue;
-            }
-
-            for (int slot = 0; slot < es.SlotToComponentTable.Length; slot++)
-            {
-                var table = es.SlotToComponentTable[slot];
-                if (table?.SpatialIndex == null)
-                {
-                    continue;
-                }
-
-                // Dedup by table identity (use RootPageIndex as stable ID)
-                int tableId = table.ComponentSegment.RootPageIndex;
-                bool alreadySeen = false;
-                for (int i = 0; i < seenCount; i++)
-                {
-                    if (seenTableIds[i] == tableId) { alreadySeen = true; break; }
-                }
-                if (alreadySeen)
-                {
-                    continue;
-                }
-                if (seenCount < 16)
-                {
-                    seenTableIds[seenCount++] = tableId;
-                }
-
-                var state = table.SpatialIndex;
-                var tree = state.ActiveTree;
-                int leafCapacity = state.Descriptor.LeafCapacity;
-
-                // Estimate chunks needed: entities/leafCapacity leaves + 30% for internal nodes from splits + 1 metadata chunk
-                int estimatedLeaves = (spawnCount + leafCapacity - 1) / leafCapacity;
-                int estimatedTotal = tree.EntityCount > 0 ? (int)((tree.EntityCount + spawnCount) / (leafCapacity * 0.7)) + 10 : (int)(estimatedLeaves * 1.3) + 10;
-                tree.Segment.EnsureCapacity(estimatedTotal, _changeSet);
-
-                // Back-pointer segment: addressed by componentChunkId (same as component segment)
-                // Must be large enough to cover the component segment's max chunkId after spawns
-                int compCapNeeded = table.ComponentSegment.AllocatedChunkCount + spawnCount + 10;
-                state.BackPointerSegment.EnsureCapacity(compCapNeeded, _changeSet);
-            }
-
-            // Issue #230 Phase 3 Option B: the per-archetype R-Tree + back-pointer segment pre-grow is gone (those segments no longer exist). The per-cell
-            // cluster index is grown lazily on first cluster insert into a cell (AddClusterToPerCellIndex), so there's nothing to pre-size here.
-
-            break; // All entries in a single spawn batch share the same archetype — one pass suffices
         }
     }
 
@@ -3048,12 +3159,10 @@ public unsafe partial class Transaction
 
                         // The per-ComponentTable index removal that stood here is gone (#629). Destroy removes per-archetype entries — including the view
                         // deletion delta — through FlushPendingDestroys / RemoveClusterIndexEntries, for both the persistent and the transient home.
-
-                        // Remove from spatial index immediately (no shadow needed — back-pointer provides O(1) lookup).
-                        if (table.SpatialIndex != null)
-                        {
-                            SpatialMaintainer.RemoveFromSpatial(pk, chunkId, table, _changeSet);
-                        }
+                        //
+                        // The entity-level spatial removal that stood beside it is gone too (#872 step 13): this branch is guarded on
+                        // `!meta.IsClusterEligible`, which #666 made unreachable by making every archetype cluster-backed, so the tree it removed from had
+                        // been empty for as long as this code could not run.
                     }
                 }
             }
@@ -3075,7 +3184,7 @@ public unsafe partial class Transaction
     {
         var info = GetComponentInfo(compType);
 
-        ref var cri = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(info.SingleCache, pk, out var cached);
+        ref var cri = ref CollectionsMarshal.GetValueRefOrAddDefault(info.SingleCache, pk, out var cached);
 
         if (cached)
         {

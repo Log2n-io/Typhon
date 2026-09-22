@@ -1,7 +1,7 @@
 <!--
   Preamble injected verbatim into the generated /llms.txt (see scripts/gen-llms-txt.py).
   Keep it short — it primes an agent BEFORE it reads the map. HTML comments are stripped.
-  The gotchas below are empirically ranked from an agent-consumption study (#498). Full
+  The gotchas below are empirically ranked from an agent-consumption study. Full
   guidance: doc/guide/using-with-ai-coding-agents.md.
 -->
 Typhon is an **ECS database, not SQL**. Load the mental model before writing code: read

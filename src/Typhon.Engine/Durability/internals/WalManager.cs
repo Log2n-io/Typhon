@@ -69,6 +69,26 @@ internal sealed class WalManager : ResourceNode
     /// barrier (CK-02) to flush the WAL through everything appended before capturing dirty pages.</summary>
     public long LastAppendedLsn => (CommitBuffer?.NextLsn ?? 1) - 1;
 
+    /// <summary>
+    /// #937 — highest LSN a WAL frame was actually PUBLISHED with, and the only sound target for a durability wait that means
+    /// "everything the WAL holds as of now". <see cref="LastAppendedLsn"/> is the ALLOCATION frontier and names LSNs no frame owns
+    /// whenever a claim is abandoned or its producer times out over the buffer boundary; on an idle engine a wait for one of those
+    /// can only end at its deadline. Ordering: <c>CheckpointLSN ≤ DurableLsn ≤ LastPublishedLsn ≤ LastAppendedLsn</c> (WP-01).
+    /// </summary>
+    public long LastPublishedLsn => FlushTargetProbe?.Invoke() ?? CommitBuffer?.LastPublishedLsn ?? 0;
+
+    /// <summary>
+    /// Test seam (WP-16): substitutes the flush target every waiter reads, so the rule's mutant can drive the pre-#937 behaviour —
+    /// a wait on the allocation frontier — and show that the verifier rejects it. Null in production.
+    /// </summary>
+    /// <remarks>
+    /// One null check per UoW flush and per checkpoint wait; neither is the per-commit publish path, and it is the same seam shape
+    /// <c>DurabilityLog.AfterFloorProbe</c> already uses on the per-append path for CK-13. A rule whose mutant needs a seam is
+    /// better served by the seam than by an unfalsifiable verifier: #937's own byte-frontier prototype shipped an ordering bug that
+    /// nothing but a rule mutant caught.
+    /// </remarks>
+    internal Func<long> FlushTargetProbe { get; set; }
+
     /// <summary>Whether the WAL writer thread is running.</summary>
     public bool IsRunning => _writer?.IsRunning ?? false;
 

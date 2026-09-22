@@ -176,4 +176,152 @@ unsafe class ZoneMapConcurrentGrowthTests
 
         Assert.That(sink, Is.GreaterThan(0), "premise: the reader thread actually ran");
     }
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // #926 — the batched write path the Migrate phase uses.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// <c>WidenInto</c> must refuse an index past the store the batch pinned, rather than writing through it.
+    /// </summary>
+    /// <remarks>
+    /// A batch holds the grow latch shared for its whole run and hands the caller ONE <see cref="ZoneMapArray.Store"/> generation. An index past that
+    /// generation is not a slow path to grow through — the caller cannot grow (it holds shared access, and taking exclusive would deadlock against its own
+    /// wait for the shared count to drain), and writing anyway is either out of range or a write into a generation a concurrent grow has abandoned. The
+    /// second is the lost widen this class promises cannot happen, so the refusal is the contract and the bool is how the caller learns of it.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("MD-03")]
+    public void WidenInto_RefusesAnIndexPastTheBatchStore_RatherThanWritingIntoAnAbandonedGeneration()
+    {
+        var map = new ZoneMapArray(16, sizeof(long), isFloat: false, isDouble: false);
+
+        var inside = 7L;
+        var outside = 999L;
+        var store = map.BeginBatchAtCapacity();
+        bool acceptedInside;
+        bool acceptedOutside;
+        try
+        {
+            acceptedInside = map.WidenInto(store, 7, (byte*)&inside);
+            acceptedOutside = map.WidenInto(store, 999, (byte*)&outside);
+        }
+        finally
+        {
+            map.EndBatch();
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(acceptedInside, Is.True, "7 is inside the 16-cluster store the batch pinned");
+            Assert.That(acceptedOutside, Is.False, "999 is past it, and the refusal is what stops a write into an abandoned generation");
+            Assert.That(map.TryGetBounds(7, out var min, out var max), Is.True);
+            Assert.That(min, Is.EqualTo(7L));
+            Assert.That(max, Is.EqualTo(7L));
+        });
+    }
+
+    /// <summary>
+    /// The refusal must hold for an index the MAP covers but the pinned batch does not — the only case that can actually lose a widen.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the load-bearing half, and the obvious version of it proves nothing.</b> Asserting <c>TryGetBounds</c> is false for an index past the
+    /// map's own capacity is tautological: it short-circuits on the capacity check whatever <c>WidenInto</c> did, so the assertion passes even against a
+    /// <c>WidenInto</c> that wrote out of bounds — which would have thrown — or one that silently did nothing correct. The case with teeth is an index the
+    /// map has SINCE grown to cover while a batch still pins the older, smaller generation: a write through the pinned store would land in an array nothing
+    /// reads again, and <c>TryGetBounds</c> — which reads the CURRENT generation — would report it absent. That is the lost widen, and it is observable.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("MD-03")]
+    public void WidenInto_RefusesAnIndexTheMapHasGrownToCover_WhileTheBatchStillPinsTheOlderGeneration()
+    {
+        var map = new ZoneMapArray(16, sizeof(long), isFloat: false, isDouble: false);
+
+        // Pin the small generation FIRST, then grow the map behind it from another thread — a grower needs exclusive access, so it cannot run while this
+        // batch is held; the batch is released, the grow lands, and the STALE store reference is what the write is then attempted through.
+        var pinned = map.BeginBatchAtCapacity();
+        var pinnedCapacity = pinned.Capacity;
+        map.EndBatch();
+
+        map.EnsureCapacity(512);
+
+        var value = 4242L;
+        var accepted = map.WidenInto(pinned, 300, (byte*)&value);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(pinnedCapacity, Is.EqualTo(16), "PRECONDITION: the pinned generation is the small one");
+            Assert.That(map.MayContain(300, long.MinValue, long.MaxValue), Is.True, "PRECONDITION: the map itself now covers 300");
+            Assert.That(accepted, Is.False, "300 is inside the map but outside the pinned generation — writing there is the lost widen");
+            Assert.That(map.TryGetBounds(300, out _, out _), Is.False,
+                "and nothing may have been recorded: a bound written through the abandoned generation would be invisible to every reader");
+        });
+    }
+
+    /// <summary>
+    /// Growth must be refused while this thread holds a batch, and allowed when it does not — the two halves are different conditions.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The refusal is a deadlock guard before it is a correctness guard.</b> <c>Grow</c> takes the latch exclusively, which waits for the shared
+    /// count to reach zero; the shared counter is not per-thread, so a thread holding a batch waits for itself, under an unbounded <c>WaitContext.Null</c>.
+    /// That is a permanent hang, not a slow path.</para>
+    /// <para><b>The second half is what stops the guard being written too broadly.</b> A Migrate slice that holds no batch may grow perfectly safely — it
+    /// exits shared first and the exclusive acquire excludes every sibling's shared window, which is how the engine worked before batching and how the
+    /// batching-off comparison arm still has to work. A guard keyed on "in a Migrate slice" rather than "holds a batch" breaks that arm.</para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("MD-03")]
+    public void Grow_IsRefusedWhileThisThreadHoldsABatch_ButAllowedInAMigrateSliceThatHoldsNone()
+    {
+        var map = new ZoneMapArray(16, sizeof(long), isFloat: false, isDouble: false);
+        ArchetypeClusterState.EnterMigrateSlice();
+        try
+        {
+            // No batch open: growth from a Migrate slice is sound and must stay available.
+            Assert.DoesNotThrow(() => map.EnsureCapacity(128), "a Migrate slice holding no batch may grow — that is the pre-batching path");
+
+            map.BeginBatchAtCapacity();
+            try
+            {
+                Assert.Throws<InvalidOperationException>(() => map.EnsureCapacity(4096),
+                    "growing while holding a batch would wait forever on this thread's own shared count");
+            }
+            finally
+            {
+                map.EndBatch();
+            }
+        }
+        finally
+        {
+            ArchetypeClusterState.ExitMigrateSlice();
+        }
+    }
+
+    /// <summary>
+    /// <c>BeginBatchAtCapacity</c> must not grow, whatever the map's capacity is — that is the whole difference from <c>BeginBatch</c>.
+    /// </summary>
+    /// <remarks>
+    /// The Migrate phase opens its batches from worker threads that run concurrently with siblings holding their own batches on the same field. Growing at
+    /// open would replace the store under them, which is the abandonment <c>ZoneMapArray.Grow</c> refuses outright inside a Migrate slice. Pinned here so the
+    /// two forms cannot be swapped back by someone reading them as synonyms.
+    /// </remarks>
+    [Test]
+    public void BeginBatchAtCapacity_DoesNotGrow_UnlikeBeginBatch()
+    {
+        var map = new ZoneMapArray(16, sizeof(long), isFloat: false, isDouble: false);
+
+        var store = map.BeginBatchAtCapacity();
+        var capacityAtOpen = store.Capacity;
+        map.EndBatch();
+
+        var grown = map.BeginBatch(200);
+        var capacityAfterBeginBatch = grown.Capacity;
+        map.EndBatch();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(capacityAtOpen, Is.EqualTo(16), "the grow-free form opens over exactly what the map already covers");
+            Assert.That(capacityAfterBeginBatch, Is.GreaterThanOrEqualTo(200), "PRECONDITION: BeginBatch does grow, so the two really are different");
+        });
+    }
 }

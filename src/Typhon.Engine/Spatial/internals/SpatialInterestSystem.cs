@@ -18,7 +18,12 @@ internal struct SpatialObserverConfig
     public uint CategoryMask;
     public byte Active;  // 0=destroyed/free, 1=active
     public byte _pad1, _pad2, _pad3;
+
+    /// <summary>Monotonic per-slot handle generation. Never reused as a free-list link — see <c>SpatialRegionConfig.NextFree</c> for what that cost.</summary>
     public int Generation;
+
+    /// <summary>Free-list link while <see cref="Active"/> is 0; meaningless while the slot is live.</summary>
+    public int NextFree;
 }
 
 /// <summary>Per-observer mutable state, separated from config for locality.</summary>
@@ -46,8 +51,6 @@ internal sealed unsafe class SpatialInterestSystem
     // Dirty bitmap ring buffer — archives tick fence snapshots
     private readonly DirtyBitmapRing _dirtyRing;
 
-    // Shared scratch — accumulated dirty bitmap (reused across GetSpatialChanges calls)
-    private long[] _accumScratch;
 
     // Shared scratch — per-archetype cluster dirty accumulation (reused across calls)
     private long[] _clusterAccumScratch;
@@ -83,7 +86,7 @@ internal sealed unsafe class SpatialInterestSystem
         if (_freeHead >= 0)
         {
             index = _freeHead;
-            _freeHead = _configs[index].Generation;
+            _freeHead = _configs[index].NextFree;
         }
         else
         {
@@ -126,7 +129,7 @@ internal sealed unsafe class SpatialInterestSystem
         config.Active = 0;
         _states[handle.Index] = null;
 
-        config.Generation = _freeHead;
+        config.NextFree = _freeHead;
         _freeHead = handle.Index;
         _activeCount--;
     }
@@ -174,9 +177,19 @@ internal sealed unsafe class SpatialInterestSystem
             return PerformFullSync(ref config, state, currentTick);
         }
 
-        // Compute effective head tick across per-table and per-archetype rings
+        // Effective head tick across the per-ARCHETYPE rings, which are the only rings anything reads the CONTENT of.
+        //
+        // The per-TABLE ring used to vote here, and must not. It is still archived every tick, but #872 step 13
+        // removed the walk that consumed it (it resolved dirty chunk ids through the entity tree's back-pointer
+        // segment). It is archived on every tick, so its head is always current; a cluster ring's head is NOT, because
+        // ClusterDirtyRing.Archive is skipped on the FenceBranchPath == 1 early return. Letting the always-current ring
+        // set `effectiveHeadTick` produced an `endTick` past a cluster ring's own head — and AccumulateDirty walks
+        // [startTick, endTick] indexing `_ring[t & RingMask]` with no per-tick availability check, so those slots hand
+        // back bitmaps from 64 ticks earlier. That is IM-02's "never stale (recycled) bitmaps used for dirty
+        // accumulation", verbatim, and it also let a genuinely stale cluster ring skip the full-sync fallback because
+        // the per-table ring voted `available` on its behalf.
         long startTick = lastTick + 1;
-        long effectiveHeadTick = _dirtyRing.HeadTick;
+        long effectiveHeadTick = 0;
         if (_spatialState.ClusterArchetypes != null)
         {
             foreach (var clSt in _spatialState.ClusterArchetypes)
@@ -201,7 +214,7 @@ internal sealed unsafe class SpatialInterestSystem
             return PerformFullSync(ref config, state, currentTick);
         }
 
-        bool anyRingAvailable = _dirtyRing.IsTickAvailable(startTick);
+        bool anyRingAvailable = false;
         if (_spatialState.ClusterArchetypes != null)
         {
             foreach (var clSt in _spatialState.ClusterArchetypes)
@@ -222,83 +235,15 @@ internal sealed unsafe class SpatialInterestSystem
         // Clamp endTick to what's actually in the ring
         long endTick = Math.Min(currentTick, effectiveHeadTick);
 
-        // Accumulate dirty bitmaps for the tick range (per-table ring)
-        int maxWords = _dirtyRing.MaxWordCount;
-        bool hasPerTableDirty = maxWords > 0;
-
-        int accumWords = 0;
-        if (hasPerTableDirty)
-        {
-            EnsureAccumCapacity(maxWords);
-            Array.Clear(_accumScratch, 0, maxWords);
-            accumWords = _dirtyRing.AccumulateDirty(startTick, endTick, _accumScratch);
-        }
-
-        // Inverted iteration: for each dirty entity, test containment against this observer
+        // The per-TABLE dirty ring is still archived every tick (DatabaseEngine.TickFence), but the walk that consumed it here read entity bounds out of
+        // the entity-level R-Tree through its back-pointer segment — both removed in #872 step 13, and both empty since #666 made every archetype
+        // cluster-backed. Deltas come from the per-ARCHETYPE cluster rings below, which is where the entities are.
         state.ChangeCount = 0;
-        var desc = _spatialState.Descriptor;
-        int coordCount = desc.CoordCount;
-        var tree = _spatialState.ActiveTree;
+        int coordCount = _spatialState.Descriptor.CoordCount;
 
         var guard = EpochGuard.Enter(_table.DBE.EpochManager);
         try
         {
-            var bpAccessor = hasPerTableDirty ? _spatialState.BackPointerSegment.CreateChunkAccessor() : default;
-            var treeAccessor = hasPerTableDirty ? tree.Segment.CreateChunkAccessor() : default;
-            try
-            {
-                Span<double> coords = stackalloc double[coordCount];
-
-                for (int wordIdx = 0; wordIdx < accumWords; wordIdx++)
-                {
-                    long word = _accumScratch[wordIdx];
-                    while (word != 0)
-                    {
-                        int bit = BitOperations.TrailingZeroCount((ulong)word);
-                        int chunkId = wordIdx * 64 + bit;
-                        word &= word - 1;
-
-                        // Read back-pointer
-                        var bp = SpatialBackPointerHelper.Read(ref bpAccessor, chunkId);
-                        if (bp.LeafChunkId == 0)
-                        {
-                            continue; // destroyed or never inserted
-                        }
-
-                        // Read leaf entry: coords + category mask + entityId (all from same page)
-                        byte* leafBase = treeAccessor.GetChunkAddress(bp.LeafChunkId);
-                        SpatialNodeHelper.ReadLeafEntryCoords(leafBase, bp.SlotIndex, coords, desc);
-                        uint category = SpatialNodeHelper.ReadLeafCategoryMask(leafBase, bp.SlotIndex, desc);
-
-                        // Category filter
-                        if (config.CategoryMask != 0 && (category & config.CategoryMask) != config.CategoryMask)
-                        {
-                            continue;
-                        }
-
-                        // AABB overlap test
-                        if (!OverlapsObserver(in config, coords, coordCount))
-                        {
-                            continue;
-                        }
-
-                        // Read EntityId directly from the leaf (stored alongside coords in SOA layout)
-                        long entityId = SpatialNodeHelper.ReadLeafEntityId(leafBase, bp.SlotIndex, desc);
-
-                        EnsureChangeBufferCapacity(state);
-                        state.ChangeBuffer[state.ChangeCount++] = entityId;
-                    }
-                }
-            }
-            finally
-            {
-                if (hasPerTableDirty)
-                {
-                    treeAccessor.Dispose();
-                    bpAccessor.Dispose();
-                }
-            }
-
             // Fan out to per-archetype cluster spatial index — delta path (issue #230 Phase 3 migration).
             // Cluster entities have their own DirtyBitmapRing indexed by ClusterLocation = clusterChunkId × 64 + slotIndex. For each dirty entity, we read
             // its bounds directly from the cluster SoA storage via the spatial field offset — no legacy tree back-pointer walk required. This is the
@@ -338,7 +283,17 @@ internal sealed unsafe class SpatialInterestSystem
                         _clusterAccumScratch = ArrayPool<long>.Shared.Rent(clMaxWords);
                     }
                     Array.Clear(_clusterAccumScratch, 0, clMaxWords);
-                    int clAccumWords = ring.AccumulateDirty(startTick, endTick, _clusterAccumScratch);
+
+                    // Clamped to THIS ring's head, not the maximum across rings. AccumulateDirty's contract is that
+                    // endTick "must equal HeadTick or earlier", and it walks every tick in the range without checking:
+                    // one tick past this ring's head reads a slot holding a bitmap from 64 ticks ago.
+                    long ringEndTick = Math.Min(endTick, ring.HeadTick);
+                    if (ringEndTick < startTick)
+                    {
+                        continue;
+                    }
+
+                    int clAccumWords = ring.AccumulateDirty(startTick, ringEndTick, _clusterAccumScratch);
 
                     ref var ss = ref clusterState.SpatialSlot;
                     var layout = clusterState.Layout;
@@ -347,7 +302,6 @@ internal sealed unsafe class SpatialInterestSystem
                     int spatialFieldOffset = ss.FieldOffset;
                     uint archetypeCategory = ss.FieldInfo.Category;
                     var fieldInfo = ss.FieldInfo;
-                    var descriptor = ss.Descriptor;
 
                     var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
                     try
@@ -380,7 +334,7 @@ internal sealed unsafe class SpatialInterestSystem
 
                                 // Read entity's tight bounds from the cluster SoA storage.
                                 byte* fieldPtr = clusterBase + spatialCompOffset + slotIndex * spatialCompSize + spatialFieldOffset;
-                                if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, fieldInfo, clCoords, descriptor))
+                                if (!SpatialMaintainer.ReadAndValidateBoundsFromPtr(fieldPtr, fieldInfo, clCoords))
                                 {
                                     continue;
                                 }
@@ -422,15 +376,10 @@ internal sealed unsafe class SpatialInterestSystem
         Span<double> queryCoords = stackalloc double[coordCount];
         BuildQueryCoords(in config, queryCoords, coordCount);
 
-        var tree = _spatialState.ActiveTree;
         var guard = EpochGuard.Enter(_table.DBE.EpochManager);
         try
         {
-            foreach (var hit in tree.QueryAABBOccupants(queryCoords, categoryMask: config.CategoryMask))
-            {
-                EnsureChangeBufferCapacity(state);
-                state.ChangeBuffer[state.ChangeCount++] = hit.EntityId;
-            }
+            // The entity-level R-Tree occupant scan that ran first here is gone (#872 step 13) — it had had no writer since #666.
 
             // Fan out to per-archetype cluster spatial index (issue #230 Phase 3 Option B — full-sync path).
             // Under Option B, cluster spatial archetypes require a configured SpatialGrid (enforced at init time in DatabaseEngine.InitializeArchetypes).
@@ -439,26 +388,28 @@ internal sealed unsafe class SpatialInterestSystem
             if (_spatialState.ClusterArchetypes != null)
             {
                 var grid = _table.DBE.SpatialGrid;
-                float qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ;
+                // f64 throughout since #919 — the region arrives as doubles and QueryAabb takes doubles, so nothing narrows in between. An interest
+                // region quantised to f32 admits and drops observers by up to an f32 step, which at 10^9 is ~128 units of silently wrong membership.
+                double qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ;
                 if (coordCount == 4)
                 {
                     // 2D region — [minX, minY, maxX, maxY] with infinite Z bounds so the Z overlap test trivially passes.
-                    qMinX = (float)queryCoords[0];
-                    qMinY = (float)queryCoords[1];
-                    qMinZ = float.NegativeInfinity;
-                    qMaxX = (float)queryCoords[2];
-                    qMaxY = (float)queryCoords[3];
-                    qMaxZ = float.PositiveInfinity;
+                    qMinX = queryCoords[0];
+                    qMinY = queryCoords[1];
+                    qMinZ = double.NegativeInfinity;
+                    qMaxX = queryCoords[2];
+                    qMaxY = queryCoords[3];
+                    qMaxZ = double.PositiveInfinity;
                 }
                 else
                 {
                     // 3D region — [minX, minY, minZ, maxX, maxY, maxZ].
-                    qMinX = (float)queryCoords[0];
-                    qMinY = (float)queryCoords[1];
-                    qMinZ = (float)queryCoords[2];
-                    qMaxX = (float)queryCoords[3];
-                    qMaxY = (float)queryCoords[4];
-                    qMaxZ = (float)queryCoords[5];
+                    qMinX = queryCoords[0];
+                    qMinY = queryCoords[1];
+                    qMinZ = queryCoords[2];
+                    qMaxX = queryCoords[3];
+                    qMaxY = queryCoords[4];
+                    qMaxZ = queryCoords[5];
                 }
 
                 foreach (var clusterState in _spatialState.ClusterArchetypes)
@@ -501,18 +452,6 @@ internal sealed unsafe class SpatialInterestSystem
         Array.Resize(ref _configs, newCapacity);
         Array.Resize(ref _states, newCapacity);
         _capacity = newCapacity;
-    }
-
-    private void EnsureAccumCapacity(int wordCount)
-    {
-        if (_accumScratch == null || _accumScratch.Length < wordCount)
-        {
-            if (_accumScratch != null)
-            {
-                ArrayPool<long>.Shared.Return(_accumScratch);
-            }
-            _accumScratch = ArrayPool<long>.Shared.Rent(wordCount);
-        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

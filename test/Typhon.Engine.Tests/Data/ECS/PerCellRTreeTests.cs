@@ -27,7 +27,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClCohPos>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(worldMax, worldMax),
             cellSize: cellSize));
@@ -230,7 +230,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
         // Cluster has one entity → per-cell index has 1 entry.
         var meta = Archetype<ClCohUnit>.Metadata;
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
+        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
         Assert.That(cs.PerCellIndex[cellKey].DynamicIndex.ClusterCount, Is.EqualTo(1));
 
         using (var tx = dbe.CreateQuickTransaction())
@@ -513,7 +513,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
                 while (en.MoveNext())
                 {
                     var c = en.Current;
-                    hits.Add((c.EntityId, c.MinX, c.MinY, c.MaxX, c.MaxY));
+                    hits.Add((c.EntityId, (float)c.MinX, (float)c.MinY, (float)c.MaxX, (float)c.MaxY));
                 }
             }
             finally { en.Dispose(); }
@@ -553,7 +553,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
                 while (en.MoveNext())
                 {
                     var c = en.Current;
-                    results.Add((c.EntityId, c.DistanceSq));
+                    results.Add((c.EntityId, (float)c.DistanceSq));
                 }
             }
             finally { en.Dispose(); }

@@ -506,10 +506,7 @@ internal sealed class WalSegmentManager : IDisposable
         header.ComputeAndSetCrc();
 
         var headerBytes = new byte[WalSegmentHeader.SizeInBytes];
-        fixed (byte* dst = headerBytes)
-        {
-            *(WalSegmentHeader*)dst = header;
-        }
+        MemoryMarshal.Write(headerBytes, in header);   // into the managed array through a span, not a pinned pointer
 
         _fileIO.WriteAligned(context.Handle, 0, headerBytes);
     }

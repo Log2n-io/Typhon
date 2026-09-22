@@ -198,7 +198,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
 
         dbe.RegisterComponentFromAccessor<ClMigPos>();
         dbe.RegisterComponentFromAccessor<ClMigScratch>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(1000, 1000),
             cellSize: 100f));
@@ -323,7 +323,7 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
 
         dbe.RegisterComponentFromAccessor<ClMigPos>();
         dbe.RegisterComponentFromAccessor<ClMigScratch>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(1000, 1000),
             cellSize: 100f));
@@ -341,8 +341,8 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
             tx.Commit();
         }
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
-        int dstCell = dbe.SpatialGrid.WorldToCellKey(350f, 450f);
+        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+        int dstCell = dbe.SpatialGrid.WorldToCellKey(350f, 450f, 0f);
         Assert.That(srcCell, Is.Not.EqualTo(dstCell));
 
         var meta = Archetype<ClMigUnit>.Metadata;

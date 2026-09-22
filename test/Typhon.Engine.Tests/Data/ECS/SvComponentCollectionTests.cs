@@ -39,7 +39,7 @@ partial class SvCcUnit : Archetype<SvCcUnit>
 struct SvCcSpatialBag
 {
     [Field]
-    [SpatialIndex(1.0f)]
+    [SpatialIndex]
     public AABB2F Bounds;
 
     [Field]
@@ -197,7 +197,7 @@ class SvComponentCollectionTests : TestBase<SvComponentCollectionTests>
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<SvCcSpatialBag>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0), worldMax: new Vector2(1000, 1000), cellSize: 100f));
         dbe.InitializeArchetypes();
         return dbe;
@@ -225,7 +225,7 @@ class SvComponentCollectionTests : TestBase<SvComponentCollectionTests>
             Assert.That(t.Commit(), Is.True, "spawn commit");
         }
 
-        Assert.That(dbe.SpatialGrid.WorldToCellKey(50f, 50f), Is.Not.EqualTo(dbe.SpatialGrid.WorldToCellKey(350f, 350f)));
+        Assert.That(dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f), Is.Not.EqualTo(dbe.SpatialGrid.WorldToCellKey(350f, 350f, 0f)));
 
         using (var t = dbe.CreateQuickTransaction())
         {

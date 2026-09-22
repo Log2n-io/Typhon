@@ -105,9 +105,6 @@ public readonly struct ComponentFieldSpec
     /// <summary>True when the field carries a spatial index (<see cref="SpatialIndexAttribute"/>). At most one spatial field is allowed per component.</summary>
     public bool HasSpatialIndex { get; }
 
-    /// <summary>Fat-AABB movement-hysteresis margin (from <see cref="SpatialIndexAttribute.Margin"/>). Meaningful when <see cref="HasSpatialIndex"/>.</summary>
-    public float SpatialMargin { get; }
-
     /// <summary>Broadphase cell size (from <see cref="SpatialIndexAttribute.CellSize"/>); <c>0</c> selects the engine default. Meaningful when <see cref="HasSpatialIndex"/>.</summary>
     public float SpatialCellSize { get; }
 
@@ -130,7 +127,6 @@ public readonly struct ComponentFieldSpec
     /// <param name="isForeignKey">Foreign-key flag (see <see cref="IsForeignKey"/>).</param>
     /// <param name="foreignKeyTargetType">Foreign-key target type (see <see cref="ForeignKeyTargetType"/>).</param>
     /// <param name="hasSpatialIndex">Spatial-index flag (see <see cref="HasSpatialIndex"/>).</param>
-    /// <param name="spatialMargin">Spatial margin (see <see cref="SpatialMargin"/>).</param>
     /// <param name="spatialCellSize">Spatial cell size (see <see cref="SpatialCellSize"/>).</param>
     /// <param name="spatialMode">Spatial mode (see <see cref="SpatialMode"/>).</param>
     /// <param name="spatialCategory">Spatial category bitmask (see <see cref="SpatialCategory"/>).</param>
@@ -147,7 +143,6 @@ public readonly struct ComponentFieldSpec
         bool isForeignKey = false,
         Type foreignKeyTargetType = null,
         bool hasSpatialIndex = false,
-        float spatialMargin = 0f,
         float spatialCellSize = 0f,
         SpatialMode spatialMode = SpatialMode.Dynamic,
         uint spatialCategory = uint.MaxValue)
@@ -164,7 +159,6 @@ public readonly struct ComponentFieldSpec
         IsForeignKey = isForeignKey;
         ForeignKeyTargetType = foreignKeyTargetType;
         HasSpatialIndex = hasSpatialIndex;
-        SpatialMargin = spatialMargin;
         SpatialCellSize = spatialCellSize;
         SpatialMode = spatialMode;
         SpatialCategory = spatialCategory;

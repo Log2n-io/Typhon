@@ -12,15 +12,16 @@ internal sealed class FenceContext
     public int ChunkOversubscription;
     public LiveFenceCostModel CostModel;
 
+    /// <summary>Mirror of <c>RuntimeOptions.EntityMapBulkMinEntriesPerBucket</c>, read by the Migrate phase's Prepare.</summary>
+    public float EntityMapBulkMinEntriesPerBucket;
+
     public long HighestTableLsn;
     public long HighestArchetypeLsn;
 
-    public bool HasMigrateWork;
-    public bool HasAabbRefreshWork;
-    public bool HasFinalizeWork;
-
-    public void Reset(long tickNumber, ChangeSet uowCs, int workerCount, int chunkOversub, LiveFenceCostModel cost)
+    public void Reset(long tickNumber, ChangeSet uowCs, int workerCount, int chunkOversub, LiveFenceCostModel cost,
+        float entityMapBulkMinEntriesPerBucket = 0f)
     {
+        EntityMapBulkMinEntriesPerBucket = entityMapBulkMinEntriesPerBucket;
         TickNumber = tickNumber;
         UowChangeSet = uowCs;
         WorkerCount = workerCount;
@@ -28,8 +29,5 @@ internal sealed class FenceContext
         CostModel = cost;
         HighestTableLsn = 0;
         HighestArchetypeLsn = 0;
-        HasMigrateWork = false;
-        HasAabbRefreshWork = false;
-        HasFinalizeWork = false;
     }
 }

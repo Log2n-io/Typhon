@@ -41,10 +41,10 @@ t.Commit();
 
 - **At least one valid copy always exists** — the trusted slot is never overwritten by a protected-page write, so torn-write exposure is limited to the alternate slot only.
 - **Both-slots-corrupt is a loud failure, never a silent fallback** — unlike ordinary data pages, these have no primary data to rebuild from; a confirmed double failure means restoring from backup.
-- **Doublewrite-free** — unlike the retired Full-Page-Image mechanism, this costs one extra page write only when a protected page actually changes (segment creation/growth, schema mutation) — not on every checkpoint cycle regardless of change.
+- **Doublewrite-free** — this costs one extra page write only when a protected page actually changes (segment creation/growth, schema mutation), not on every checkpoint cycle regardless of change.
 - **Cold path only** — segment-directory writes happen at segment create/grow time, not on steady-state entity reads/writes, so normal-operation hot paths pay zero extra cost from this mechanism.
 - **Generation is monotonic** — selection at open/recovery is unambiguous: the highest valid generation number wins, never a heuristic or timestamp comparison.
-- **Tied to the on-disk format version** — a database file written before this mechanism cannot be opened by an engine that expects it; older files are refused outright, not auto-migrated.
+- **Tied to the on-disk format version** — a database file whose format version does not carry paired protected pages is refused outright, not auto-migrated.
 
 ## 🧪 Tests
 

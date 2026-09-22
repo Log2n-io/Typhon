@@ -22,6 +22,15 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     internal override ushort QueriedArchetypeId => ArchetypeRegistry.GetMetadata<TArchetype>()?.ArchetypeId ?? ushort.MaxValue;
 
     private EcsQuery<TArchetype> _query;
+
+    /// <summary>
+    /// True while the retained query definition holds a borrowed <see cref="Transaction"/> — which, between operations, it never may (VIEW-01).
+    /// Exposed for the rule's verifier; the view itself never reads it.
+    /// </summary>
+    internal bool RetainedQueryHoldsATransaction => _query.HoldsTransaction;
+
+    private readonly DatabaseEngine _dbe;
+    // Null for pull/membership views by design; shared paths must use _dbe rather than assuming an indexed-field ComponentTable exists.
     private readonly ComponentTable _componentTable;
     private readonly ViewRegistry _registry;
 
@@ -87,6 +96,8 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             sourceFile, sourceLine, sourceMethod)
     {
         _query = query;
+        _query.DetachTransaction();
+        _dbe = componentTable.DBE;
         _componentTable = componentTable;
         _registry = componentTable.ViewRegistry;
         _evaluatorLookup = BuildEvaluatorLookup(evaluators);
@@ -107,6 +118,8 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         }
 
         _query = query;
+        _query.DetachTransaction();
+        _dbe = componentTable.DBE;
         _componentTable = componentTable;
         _registry = componentTable.ViewRegistry;
         _fieldReader = fieldReader;
@@ -116,11 +129,14 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     }
 
     /// <summary>Pull mode: created without FieldEvaluators (opaque WHERE or no WHERE).</summary>
-    internal EcsView(EcsQuery<TArchetype> query, IMemoryAllocator allocator, IResource resourceParent, int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity,
-        long baseTSN = 0, string sourceFile = null, int sourceLine = 0, string sourceMethod = null)
+    internal EcsView(EcsQuery<TArchetype> query, DatabaseEngine dbe, IMemoryAllocator allocator, IResource resourceParent,
+        int bufferCapacity = ViewDeltaRingBuffer.DefaultCapacity, long baseTSN = 0, string sourceFile = null, int sourceLine = 0,
+        string sourceMethod = null)
         : base([], [], allocator, resourceParent, bufferCapacity, baseTSN, sourceFile, sourceLine, sourceMethod)
     {
         _query = query;
+        _query.DetachTransaction();
+        _dbe = dbe;
         _reclaimerFromQuery = (resourceParent as ComponentTable)?.DBE?.ViewBufferReclaimer;
     }
 
@@ -445,7 +461,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             // canSettle must still respect pending work: this arm is checked FIRST, so when both hold it would otherwise settle the view over
             // state that exists only in this transaction's staging — the same permanent-phantom bug the arm below was fixed for. The differential
             // test uses this path as its ORACLE, so letting it settle would make the oracle silently become the thing under test.
-            RefreshMembershipResync(tx, ref scope, EcsViewRefreshMode.Pull, canSettle: !tx.HasPendingEcsWork);
+            RefreshMembershipResync(tx, ref scope, EcsViewRefreshMode.Pull, !tx.HasPendingEcsWork);
             return;
         }
 
@@ -460,7 +476,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             // so the epoch comparison at the end would find nothing changed, clear _needsResync, and mark the view clean over staged-only state: if
             // the transaction then rolls back, no commit ever publishes a matching entry, no epoch ever moves, and every later refresh takes the gate.
             // The phantoms are permanent — the exact failure _needsResync exists to prevent, arriving through the door opened to fix a different one.
-            RefreshMembershipResync(tx, ref scope, EcsViewRefreshMode.Pull, canSettle: false);
+            RefreshMembershipResync(tx, ref scope, EcsViewRefreshMode.Pull, false);
             return;
         }
 
@@ -476,7 +492,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
             // Report Overflow only for a REAL one. Every view's first refresh is a seed resync, so reporting the mode unconditionally would make
             // the profiler show an overflow per view per lifetime while EmitEcsViewDeltaBufferOverflow fires only for genuine ones — two signals
             // that disagree, and an overflow rate that looks catastrophic and is not.
-            RefreshMembershipResync(tx, ref scope, overflowed ? EcsViewRefreshMode.Overflow : EcsViewRefreshMode.Pull, canSettle: true);
+            RefreshMembershipResync(tx, ref scope, overflowed ? EcsViewRefreshMode.Overflow : EcsViewRefreshMode.Pull, true);
             return;
         }
 
@@ -685,6 +701,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         }
         finally
         {
+            _query.DetachTransaction();
             pullScope.Dispose();
         }
     }
@@ -704,7 +721,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
 
         // Check archetype mask: only process entities from matching archetypes
         var entityId = entry.EntityPK;
-        if (!_query.MaskTestPublicByRouting(entityId.ArchetypeId))
+        if (!_query.MaskTestPublicByRouting(_dbe, entityId.ArchetypeId))
         {
             return;
         }
@@ -726,7 +743,12 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool EvaluateKey(ref FieldEvaluator eval, ref KeyBytes8 key) => FieldEvaluator.Evaluate(ref eval, (byte*)Unsafe.AsPointer(ref key));
+    private static bool EvaluateKey(ref FieldEvaluator eval, ref KeyBytes8 key)
+    {
+        // A stack copy: the evaluator takes a pointer, and a pointer may address only the stack or engine memory, wherever the entry lives.
+        var local = key;
+        return FieldEvaluator.Evaluate(ref eval, (byte*)&local);
+    }
 
     private void ProcessMultiField(long pk, int fieldIndex, bool wasInView, bool shouldBeInView, Transaction tx)
     {
@@ -800,6 +822,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         }
         finally
         {
+            _query.DetachTransaction();
             fullScope.Dispose();
         }
     }
@@ -815,25 +838,32 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         if (plans == null) return;
 
         _query.UpdateTransaction(tx);
-        for (var b = 0; b < plans.Length; b++)
+        try
         {
-            var branchResult = new HashMap<long>();
-            // Cross-archetype: a cluster-backed archetype's indexes live on the archetype, so scanning only the ComponentTable tree leaves every OR branch
-            // empty (#663).
-            _query.ExecuteFullScanAcrossArchetypes(plans[b], plans[b].OrderedEvaluators, _componentTable, branchResult);
-            var bit = (ushort)(1 << b);
-            foreach (var pk in branchResult)
+            for (var b = 0; b < plans.Length; b++)
             {
-                var entityId = EntityId.FromRaw(pk);
-                if (!_query.MaskTestPublicByRouting(entityId.ArchetypeId))
+                var branchResult = new HashMap<long>();
+                // Cross-archetype: a cluster-backed archetype's indexes live on the archetype, so scanning only the ComponentTable tree leaves every OR branch
+                // empty (#663).
+                _query.ExecuteFullScanAcrossArchetypes(plans[b], plans[b].OrderedEvaluators, _componentTable, branchResult);
+                var bit = (ushort)(1 << b);
+                foreach (var pk in branchResult)
                 {
-                    continue;
-                }
+                    var entityId = EntityId.FromRaw(pk);
+                    if (!_query.MaskTestPublicByRouting(_dbe, entityId.ArchetypeId))
+                    {
+                        continue;
+                    }
 
-                _entityIds.TryAdd(pk);
-                ref var bitmapRef = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_branchBitmaps, pk, out _);
-                bitmapRef |= bit;
+                    _entityIds.TryAdd(pk);
+                    ref var bitmapRef = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(_branchBitmaps, pk, out _);
+                    bitmapRef |= bit;
+                }
             }
+        }
+        finally
+        {
+            _query.DetachTransaction();
         }
     }
 
@@ -841,7 +871,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
     private void ProcessEntryOr(ref ViewDeltaEntry entry, int fieldIndex, bool isCreation, bool isDeletion, Transaction tx)
     {
         var entityId = entry.EntityPK;
-        if (!_query.MaskTestPublicByRouting(entityId.ArchetypeId))
+        if (!_query.MaskTestPublicByRouting(_dbe, entityId.ArchetypeId))
         {
             return;
         }
@@ -947,7 +977,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
                     foreach (var pk in branchResult)
                     {
                         var eid = EntityId.FromRaw(pk);
-                        if (!_query.MaskTestPublicByRouting(eid.ArchetypeId))
+                        if (!_query.MaskTestPublicByRouting(_dbe, eid.ArchetypeId))
                         {
                             continue;
                         }
@@ -968,6 +998,7 @@ public unsafe class EcsView<TArchetype> : ViewBase where TArchetype : class
         }
         finally
         {
+            _query.DetachTransaction();
             fullOrScope.Dispose();
         }
     }

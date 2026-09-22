@@ -669,6 +669,78 @@ public class ConcurrentHashMapTests
     }
 
     [Test]
+    public void Concurrent_ManagedValues_ResizingStripes_NeverPairAKeyWithAnotherKeysValue()
+    {
+        // 64 entries across the stripes leaves each at its minimum capacity, so the writer resizes every stripe several times while both readers run.
+        using var map = CreateManagedMap(initialCapacity: 64);
+        const int N = 20_000;
+        var values = new string[N + 1];
+        for (int i = 1; i <= N; i++)
+        {
+            values[i] = "v" + i;
+        }
+
+        using var startEvent = new ManualResetEventSlim(false);
+        int writerDone = 0;
+        int wrongLookups = 0;
+        int wrongPairs = 0;
+
+        var writer = new Thread(() =>
+        {
+            startEvent.Wait();
+            for (int i = 1; i <= N; i++)
+            {
+                map.TryAdd(i, values[i]);
+            }
+            Volatile.Write(ref writerDone, 1);
+        });
+
+        var lookup = new Thread(() =>
+        {
+            startEvent.Wait();
+            while (Volatile.Read(ref writerDone) == 0)
+            {
+                for (int i = 1; i <= N; i += 7)
+                {
+                    if (map.TryGetValue(i, out var value) && !ReferenceEquals(value, values[i]))
+                    {
+                        Interlocked.Increment(ref wrongLookups);
+                    }
+                }
+            }
+        });
+
+        var enumerate = new Thread(() =>
+        {
+            startEvent.Wait();
+            while (Volatile.Read(ref writerDone) == 0)
+            {
+                foreach (var (key, value) in map)
+                {
+                    // A slot being filled can show its hash before its key (still 0) and its key before its value (still null): the partial state the
+                    // enumerator allows. Another key's value is never allowed.
+                    if (key != 0 && value != null && ((uint)key > N || !ReferenceEquals(value, values[key])))
+                    {
+                        Interlocked.Increment(ref wrongPairs);
+                    }
+                }
+            }
+        });
+
+        writer.Start();
+        lookup.Start();
+        enumerate.Start();
+        startEvent.Set();
+        writer.Join();
+        lookup.Join();
+        enumerate.Join();
+
+        Assert.That(wrongLookups, Is.Zero, "a validated lookup returned another key's value");
+        Assert.That(wrongPairs, Is.Zero, "the enumerator paired a key with another key's value");
+        Assert.That(map.Count, Is.EqualTo(N));
+    }
+
+    [Test]
     public void Concurrent_InsertAndRemove_CountConsistent()
     {
         using var map = CreateMap();

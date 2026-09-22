@@ -76,6 +76,6 @@ public partial class DatabaseEngine
         var changeSet = MMF.CreateChangeSet();
         var uowId = UowRegistry.AllocateUowId(ref wc, changeSet);
 
-        return new UnitOfWork(this, DurabilityMode.Deferred, uowId, effectiveTimeout, changeSet, suppressWalSerialization: true);
+        return new UnitOfWork(this, DurabilityMode.Deferred, uowId, effectiveTimeout, changeSet, true);
     }
 }

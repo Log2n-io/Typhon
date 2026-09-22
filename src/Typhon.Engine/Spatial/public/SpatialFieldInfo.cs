@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using JetBrains.Annotations;
 using System;
 using Typhon.Schema.Definition;
@@ -37,6 +38,31 @@ public enum SpatialFieldType : byte
 }
 
 /// <summary>
+/// Dimensionality and precision predicates over <see cref="SpatialFieldType"/>.
+/// </summary>
+/// <remarks>
+/// <b>Why these are methods rather than inline comparisons.</b> Nine sites in the engine spelled "is this field 3D?" as
+/// <c>FieldType == AABB3F || FieldType == BSphere3F</c>, which was exactly right while the f64 tiers were rejected at
+/// <c>ConfigureSpatialGrid</c> and became a silent misclassification the moment #914 accepted them: an <see cref="SpatialFieldType.AABB3D"/> archetype
+/// would have read as 2D, collapsing every query to the grid's flat plane (<c>SpatialGrid.FlatPlaneZ</c>) and answering nothing for entities anywhere
+/// else on Z. That is <c>SQ-01</c>'s silent direction, and a predicate that has to be updated in nine places when a tier lands is the mechanism that
+/// produces it.
+/// </remarks>
+[PublicAPI]
+public static class SpatialFieldTypeExtensions
+{
+    /// <summary>True when the field carries a Z extent — the four 3D variants, at either precision.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool Is3D(this SpatialFieldType fieldType) =>
+        fieldType is SpatialFieldType.AABB3F or SpatialFieldType.BSphere3F or SpatialFieldType.AABB3D or SpatialFieldType.BSphere3D;
+
+    /// <summary>True when the field stores double-precision coordinates — the four <c>*D</c> variants.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool IsF64(this SpatialFieldType fieldType) =>
+        fieldType is SpatialFieldType.AABB2D or SpatialFieldType.AABB3D or SpatialFieldType.BSphere2D or SpatialFieldType.BSphere3D;
+}
+
+/// <summary>
 /// Describes the spatial index field on a component: its layout within the component data, the type of spatial bounds, and the index parameters (margin, cell size).
 /// Stored in SpatialIndexState and set at component registration time.
 /// </summary>
@@ -51,9 +77,6 @@ public readonly struct SpatialFieldInfo
 
     /// <summary>Kind of spatial bounds stored in the field (dimensionality + precision).</summary>
     public readonly SpatialFieldType FieldType;
-
-    /// <summary>Fat-AABB margin, in world units, added around an entity's tight bounds so small movements don't force an index update.</summary>
-    public readonly float Margin;
 
     /// <summary>Grid cell size, in world units, used to bucket this field's entities.</summary>
     public readonly float CellSize;
@@ -75,16 +98,15 @@ public readonly struct SpatialFieldInfo
     /// <param name="fieldOffset">Byte offset of the bounds field within the component data.</param>
     /// <param name="fieldSize">Size, in bytes, of the bounds field.</param>
     /// <param name="fieldType">Kind of bounds stored (dimensionality + precision).</param>
-    /// <param name="margin">Fat-AABB margin in world units added around tight bounds.</param>
     /// <param name="cellSize">Grid cell size in world units; <see cref="InverseCellSize"/> is derived from it.</param>
     /// <param name="mode">Index mode: <see cref="SpatialMode.Dynamic"/> (default) or <see cref="SpatialMode.Static"/>.</param>
     /// <param name="category">Archetype-level category bitmask; defaults to <see cref="uint.MaxValue"/> (matches any query mask).</param>
-    public SpatialFieldInfo(int fieldOffset, int fieldSize, SpatialFieldType fieldType, float margin, float cellSize, SpatialMode mode = SpatialMode.Dynamic, uint category = uint.MaxValue)
+    public SpatialFieldInfo(int fieldOffset, int fieldSize, SpatialFieldType fieldType, float cellSize, SpatialMode mode = SpatialMode.Dynamic,
+        uint category = uint.MaxValue)
     {
         FieldOffset = fieldOffset;
         FieldSize = fieldSize;
         FieldType = fieldType;
-        Margin = margin;
         CellSize = cellSize;
         InverseCellSize = cellSize > 0 ? 1.0f / cellSize : 0;
         Mode = mode;

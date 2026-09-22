@@ -137,19 +137,19 @@ Every Public feature, one line each — the application-facing surface, complete
 
 | Feature | Summary | Status | Level | Link |
 |---|---|---|---|---|
-| Spatial Architecture Overview | Explains how the per-component R-Tree and the engine-wide spatial grid are two independent mechanisms, and which feature to read next. | ✅ Implemented | 🟢 Start Here | [→](Spatial/spatial-architecture-overview.md) |
+| Spatial Architecture Overview | One spatial index in two levels: the grid locates a cell, the cell's cluster broadphase answers the query. Which feature to read next. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-architecture-overview.md) |
 | Field Attribute & Schema Integration | Declare a component field as spatially indexed via [SpatialIndex], validated against schema rules at registration time. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-field-attribute/README.md) |
 | &nbsp;&nbsp;↳ Storage-Mode Compatibility (SingleVersion / Versioned) | The same [SpatialIndex] field works on both storage modes -- only when the tree catches up differs. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-field-attribute/spatial-storage-mode-compat.md) |
-| Spatial Query API (AABB / Radius / Ray / Frustum / kNN / Count) | Query entry points over the per-component R-Tree: engine-internal SpatialQuery\<T\> plus the public fluent EcsQuery WhereNearby/WhereInAABB/WhereRay. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-query-api.md) |
+| Spatial Query API (AABB / Radius / Ray / Frustum / kNN / Count) | Query entry points over the per-cell cluster index: the typed ClusterSpatialQuery\<TArch\> plus the public fluent EcsQuery WhereNearby/WhereInAABB/WhereRay/WhereFrustum. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-query-api.md) |
 | Spatial Grid Configuration & Tier Control | Engine-wide grid sizing plus the per-cell SimTier control surface for multi-resolution simulation. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-grid-config.md) |
 | Static / Dynamic Tree Separation | A spatial field lands in one of two independent trees -- tick-fence-exempt static, or fat-AABB-maintained dynamic -- chosen once at schema time. | ✅ Implemented | 🟣 Advanced | [→](Spatial/spatial-rtree-index/spatial-rtree-static-dynamic.md) |
-| Fat-AABB Incremental Update | Margin-enlarged bounds absorb small moves for ~25ns, with no tree mutation. | ✅ Implemented | 🟣 Advanced | [→](Spatial/fat-aabb-update.md) |
+| Cluster-Bound Motion Hysteresis | A cluster's bound already covers its members, so most moves cost a few float compares and no index write. | ✅ Implemented | 🟣 Advanced | [→](Spatial/cluster-bound-hysteresis.md) |
 | Category Filtering | Bitmask pruning skips whole subtrees and clusters before geometry tests -- AND-conjunctive at the R-Tree, any-bit-overlap at the cluster broadphase. | ✅ Implemented | 🟣 Advanced | [→](Spatial/spatial-category-filtering.md) |
 | Spatially-Coherent Entity Clustering | Every entity in a cluster shares one grid cell, so spatial bookkeeping is per-cluster, not per-entity. | ✅ Implemented | 🟣 Advanced | [→](Spatial/spatial-coherent-clustering.md) |
 | Tiered Simulation Dispatch | One simulation tier per spatial cell, four dispatch frequencies, zero per-entity distance checks. | ✅ Implemented | 🟣 Advanced | [→](Spatial/tiered-simulation-dispatch.md) |
 | Checkerboard Dispatch | Opt-in two-phase Red/Black cluster partitioning for systems that write across cell boundaries, dispatched as one DAG node with two internal phases. | ✅ Implemented | 🟣 Advanced | [→](Spatial/checkerboard-dispatch.md) |
 
-> Note: Static/Dynamic Tree Separation is a sub-feature of the (Internal) Spatial R-Tree Index — see the [Internal](#internal--engine-internals-for-contributors) section below for the tree itself.
+> Note: Static / Dynamic Separation is a sub-feature of the (Internal) Per-Cell Cluster Index Internals — see the [Internal](#internal--engine-internals-for-contributors) section below for the tree itself.
 
 ### Querying
 
@@ -238,20 +238,20 @@ Every Public feature, one line each — the application-facing surface, complete
 | &nbsp;&nbsp;↳ Cluster Dormancy (Sleep/Wake) | Clusters untouched for N ticks sleep and are skipped by every dispatch path, waking within one tick of being written to. | ✅ Implemented | 🟣 Advanced | [→](Runtime/spatial-tiers-adaptive-dispatch/cluster-dormancy.md) |
 | &nbsp;&nbsp;↳ Checkerboard (Red/Black) Dispatch | Two-phase Red/Black parallel dispatch so neighbor-touching systems never race across a cell boundary. | ✅ Implemented | 🟣 Advanced | [→](Runtime/spatial-tiers-adaptive-dispatch/checkerboard-dispatch.md) |
 | Data-Driven Timers / Scheduled Entities | Documented pattern for modeling respawns/expiries as entities with a time-of-expiry component and a CallbackSystem poll; no built-in timer/scheduling infrastructure exists yet. | 📋 Planned | 🟣 Advanced | [→](Runtime/data-driven-timers.md) |
-| Declarative Scheduling — Auto-DAG (RFC 07) | Directory-form restructuring of Declarative System Scheduling (above) into two sub-pages; exists on disk but was never linked from this table until now — see the flagging note below. | ✅ Implemented | 🟣 Advanced | [→](Runtime/declarative-scheduling/README.md) |
+| Declarative Scheduling — Auto-DAG (RFC 07) | Directory-form restructuring of Declarative System Scheduling (above) into two sub-pages; it duplicates content covered earlier in this table — see the flagging note below. | ✅ Implemented | 🟣 Advanced | [→](Runtime/declarative-scheduling/README.md) |
 | &nbsp;&nbsp;↳ Track → DAG → Phase Partitioning | Tracks order coarse execution stages, DAGs group independent dependency graphs, phases order systems within one DAG. | ✅ Implemented | 🟣 Advanced | [→](Runtime/declarative-scheduling/track-dag-phase-partitioning.md) |
 | &nbsp;&nbsp;↳ Access Declarations & Build-Time Conflict Detection | Reads/Writes/ReadsFresh/ReadsSnapshot declare what a system touches; Build() derives safe ordering and rejects unsafe overlaps. | ✅ Implemented | 🟣 Advanced | [→](Runtime/declarative-scheduling/access-conflict-detection.md) |
-| Tick Lifecycle & Transaction Management | Restructures content already covered above by Side-Transactions and the tick loop's Parallel Tick Fence into its own directory; exists on disk but was never linked from this table until now — see the flagging note below. | ✅ Implemented | 🟣 Advanced | [→](Runtime/tick-lifecycle/README.md) |
+| Tick Lifecycle & Transaction Management | Restructures content already covered above by Side-Transactions and the tick loop's Parallel Tick Fence into its own directory — see the flagging note below. | ✅ Implemented | 🟣 Advanced | [→](Runtime/tick-lifecycle/README.md) |
 | &nbsp;&nbsp;↳ Side-Transactions (Immediate Durability) | A transaction you open and commit from inside a tick system that becomes durable on its own, independent of whether the tick's main UoW ever flushes. | ✅ Implemented | 🟣 Advanced | [→](Runtime/tick-lifecycle/side-transactions.md) |
 | &nbsp;&nbsp;↳ Parallel Tick Fence (WriteTickFence) | Spreads the post-tick WriteTickFence step across the worker pool instead of running it serially on one thread. | ✅ Implemented | 🟣 Advanced | [→](Runtime/tick-lifecycle/parallel-tick-fence.md) |
 
-> Flagging note: the last two entries (Declarative Scheduling — Auto-DAG, Tick Lifecycle & Transaction Management) are directory-form restructurings that duplicate content already covered earlier in this table (Declarative System Scheduling; Side-Transactions + Parallel Tick Fence). They exist as real, unlinked doc pages under `Runtime/`; listed here for completeness per the source data, but they likely need consolidating with — or retiring in favor of — their originals rather than living on as permanent duplicates.
+> Flagging note: the last two entries (Declarative Scheduling — Auto-DAG, Tick Lifecycle & Transaction Management) are directory-form restructurings that duplicate content already covered earlier in this table (Declarative System Scheduling; Side-Transactions + Parallel Tick Fence). They are real doc pages under `Runtime/`, listed here for completeness; they likely need consolidating with — or retiring in favor of — the entries they duplicate rather than living on as permanent duplicates.
 
 ### Resources
 
 | Feature | Summary | Status | Level | Link |
 |---|---|---|---|---|
-| Resource Budget Configuration (ResourceOptions) | Startup-time configuration of fixed/growable resource limits (page cache size, max active transactions, WAL ring/segment sizing, shadow buffer, checkpoint thresholds) plus Validate() to check fixed allocations fit the total memory budget. | ✅ Implemented | 🔵 Core | [→](Resources/resource-budgets-options.md) |
+| Resource Budget Configuration (ResourceOptions) | Startup-time configuration of fixed/growable resource limits (max active transactions, WAL ring sizing, checkpoint thresholds and cadence), each knob range-checked at DI resolution. | ✅ Implemented | 🔵 Core | [→](Resources/resource-budgets-options.md) |
 | Exhaustion Policy & ResourceExhaustedException | Typed exception for resource-limit hits; ExhaustionPolicy enum documents intent but isn't a runtime dispatch switch. | 🚧 Partial | 🔵 Core | [→](Resources/exhaustion-policy-handling.md) |
 | DI Registration & Wiring | Register Typhon services into IServiceCollection and have each one self-attach to the resource graph. | ✅ Implemented | 🔵 Core | [→](Resources/resources-di-wiring.md) |
 | Observability Bridge (Resources to OTel/Health/Alerts) | Consumer-side mapping of resource snapshots to OpenTelemetry metrics, health-check thresholds, and alert payloads. | 🚧 Partial | 🟣 Advanced | [→](Resources/observability-bridge-resources.md) |
@@ -394,13 +394,13 @@ Every Internal feature, one line each — engine machinery with no direct applic
 
 | Feature | Summary | Status | Link |
 |---|---|---|---|
-| Spatial R-Tree Index | Page-backed R-Tree attached to a component field, giving sub-microsecond AABB/radius/ray queries shared across every archetype that uses it. | ✅ Implemented | [→](Spatial/spatial-rtree-index/README.md) |
+| Per-Cell Cluster Index Internals | Node layout, fanout and lock protocol of the R-Tree a cell half holds once its density crosses the promotion threshold. Most cells stay far below it and scan a linear list of cluster bounds instead. | ✅ Implemented | [→](Spatial/spatial-rtree-index/README.md) |
 | Trigger Volumes (Enter / Leave / Stay) | Region entities diffed against the spatial tree(s) each cycle to emit Enter/Leave/Stay events at a configurable per-region frequency. | ✅ Implemented | [→](Spatial/spatial-trigger-volumes.md) |
 | Interest Management (Delta Spatial Queries) | Per-observer "what changed near me" delta queries via an archived dirty-bitmap ring buffer, with full-sync fallback for stale observers. | 🚧 Partial | [→](Spatial/spatial-interest-management.md) |
-| Cluster Spatial Queries | Per-cell broadphase + per-entity narrowphase AABB/Radius queries for cluster-eligible archetypes. | 🚧 Partial | [→](Spatial/cluster-spatial-queries.md) |
+| Cluster Spatial Queries | Per-cell broadphase + per-entity narrowphase AABB/Radius queries. | 🚧 Partial | [→](Spatial/cluster-spatial-queries.md) |
 | Cluster Dormancy (Sleep / Wake) | Clusters with no component writes for N ticks sleep and skip dispatch entirely, waking within one tick of being touched. | ✅ Implemented | [→](Spatial/cluster-dormancy.md) |
 
-> Note: Static / Dynamic Tree Separation, the only child of Spatial R-Tree Index, is Public — see the [Public](#public--what-you-can-use) section above.
+> Note: Static / Dynamic Separation, the only child of Per-Cell Cluster Index Internals, is Public — see the [Public](#public--what-you-can-use) section above.
 
 ### Resources
 

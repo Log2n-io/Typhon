@@ -222,7 +222,7 @@ public sealed class DatabaseRegistry
         // Process-unique temp name: two engines registering the same database at once must not collide on the staging file itself.
         var tmp = $"{target}.{Environment.ProcessId}.tmp";
         File.WriteAllText(tmp, json);
-        File.Move(tmp, target, overwrite: true);
+        File.Move(tmp, target, true);
         return true;
     }
 
@@ -248,7 +248,7 @@ public sealed class DatabaseRegistry
             System.IO.Directory.CreateDirectory(_directory);
             var tmp = $"{path}.{Environment.ProcessId}.tmp";
             File.WriteAllText(tmp, ReadmeText);
-            File.Move(tmp, path, overwrite: true);
+            File.Move(tmp, path, true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

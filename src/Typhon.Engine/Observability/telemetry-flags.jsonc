@@ -242,7 +242,7 @@
                   "name": "TickEnd",
                   "kind": "subtreeResolved",
                   "field": "SchedulerQueueTickEndActive",
-                  "desc": "Combined flag for the QueueTickEnd instant (kind 244). Per-(tick, queue) rollup emitted at end-of-tick; drives the Workbench Data API queue/&lt;name&gt; tracks (#311 / DAG view backpressure edges)."
+                  "desc": "Combined flag for the QueueTickEnd instant (kind 244). Per-(tick, queue) rollup emitted at end-of-tick; drives the Workbench Data API queue/&lt;name&gt; tracks and the DAG view's backpressure edges."
                 }
               ]
             }
@@ -428,7 +428,7 @@
                   "name": "YieldOrSleep",
                   "kind": "subtreeResolved",
                   "field": "ConcurrencyAdaptiveWaiterYieldOrSleepActive",
-                  "desc": "Combined gate for AdaptiveWaiter yield-or-sleep transition events. Phase 2 design (#280) chose transitions only — NOT per-spin — to keep trace volume sane."
+                  "desc": "Combined gate for AdaptiveWaiter yield-or-sleep transition events. Transitions only — NOT per-spin — to keep trace volume sane."
                 }
               ]
             },
@@ -630,13 +630,31 @@
                   "name": "Execute",
                   "kind": "subtreeResolved",
                   "field": "SpatialClusterMigrationExecuteActive",
-                  "desc": "Combined gate for the Spatial:ClusterMigration:Execute span (migration apply; legacy kind 60, on by default)."
+                  "desc": "Combined gate for the Spatial:ClusterMigration:Execute span (migration apply; kind 60, on by default)."
                 },
                 {
                   "name": "Hysteresis",
                   "kind": "subtreeResolved",
                   "field": "SpatialClusterMigrationHysteresisActive",
                   "desc": "Combined gate for the Spatial:ClusterMigration:Hysteresis span (hysteresis suppression of a migration)."
+                },
+                {
+                  "name": "Repair",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialClusterRepairActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:Repair span (kind 64: one admitted repair unit, with its cell and degradation)."
+                },
+                {
+                  "name": "Relocation",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialClusterRelocationActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:Relocation instant (kind 65: the per-tick throttle outcome split)."
+                },
+                {
+                  "name": "ArchetypeTelemetry",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialArchetypeTelemetryActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:ArchetypeTelemetry instant (kind 66: the per-archetype per-tick counter snapshot the Workbench Spatial panel reads)."
                 }
               ]
             },

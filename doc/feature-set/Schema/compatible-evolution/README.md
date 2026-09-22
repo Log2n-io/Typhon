@@ -27,12 +27,11 @@ On reopen, `RegisterComponentFromAccessor<T>()` diffs the persisted field layout
 component segment at the new stride, then copies each entity's bytes into it field-by-field — zero-filling new
 fields and applying sign-extend/zero-extend/IEEE754-promotion for widened ones.
 
-> ⚠️ **Budget for a full index rebuild — this page used to say the opposite.** A migration re-clusters the
+> ⚠️ **Budget for a full index rebuild.** A migration re-clusters the
 > archetype into a **new** cluster segment and calls `RebuildIndexesFromData`, for **100 %** of migrations, not only
-> for a newly-`[Index]`-attributed field. Entities do **not** keep their original ChunkId. Since
-> [#629](https://github.com/Log2n-io/Typhon/issues/629) every secondary index lives on the archetype and is rebuilt
-> from cluster data, which is deliberately the same scan crash recovery runs — a second bespoke backfill is what
-> could disagree with the write path, and did ([#670](https://github.com/Log2n-io/Typhon/issues/670)). Size a startup
+> for a newly-`[Index]`-attributed field. Entities do **not** keep their original ChunkId. Every secondary index
+> lives on the archetype and is rebuilt from cluster data, which is deliberately the same scan crash recovery
+> runs — a second, bespoke backfill is exactly the thing that can disagree with the write path. Size a startup
 > migration window accordingly: it is O(entities) per archetype **plus** an index build per indexed field.
 
 The MVCC revision chain

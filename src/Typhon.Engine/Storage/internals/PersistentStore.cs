@@ -106,6 +106,8 @@ public readonly unsafe struct PersistentStore : IPageStore
     public void AllocatePages(ref Span<int> pageIds, int startFrom, ChangeSet changeSet)
         => _mmf.AllocatePages(ref pageIds, startFrom, changeSet);
 
+    public void ReleaseUnpublishedPages(ReadOnlySpan<int> pageIds, ChangeSet changeSet) => _mmf.ReleaseUnpublishedPages(pageIds, changeSet);
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public int GetOrAllocateDirectoryTwin(int primaryPageIndex, ChangeSet changeSet) => _mmf.GetOrAllocateDirectoryTwin(primaryPageIndex, changeSet);
 

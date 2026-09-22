@@ -9399,12 +9399,15 @@
           "cellKey",
           "cellX",
           "cellY",
+          "cellZ",
           "entitiesInCell",
           "clustersInCell",
           "aabbMinX",
           "aabbMinY",
+          "aabbMinZ",
           "aabbMaxX",
-          "aabbMaxY"
+          "aabbMaxY",
+          "aabbMaxZ"
         ],
         "type": "object",
         "properties": {
@@ -9425,6 +9428,14 @@
             "format": "int32"
           },
           "cellY": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32"
+          },
+          "cellZ": {
             "pattern": "^-?(?:0|[1-9]\\d*)$",
             "type": [
               "integer",
@@ -9464,6 +9475,14 @@
             ],
             "format": "float"
           },
+          "aabbMinZ": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "float"
+          },
           "aabbMaxX": {
             "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
             "type": [
@@ -9473,6 +9492,14 @@
             "format": "float"
           },
           "aabbMaxY": {
+            "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
+            "type": [
+              "number",
+              "string"
+            ],
+            "format": "float"
+          },
+          "aabbMaxZ": {
             "pattern": "^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?$",
             "type": [
               "number",
@@ -10572,6 +10599,15 @@
             "default": 0
           },
           "clusterGridHeight": {
+            "pattern": "^-?(?:0|[1-9]\\d*)$",
+            "type": [
+              "integer",
+              "string"
+            ],
+            "format": "int32",
+            "default": 0
+          },
+          "clusterGridDepth": {
             "pattern": "^-?(?:0|[1-9]\\d*)$",
             "type": [
               "integer",

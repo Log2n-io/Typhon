@@ -409,6 +409,78 @@ export interface TickData {
    * <b>boundary</b> ticks — the first and last tick of each chunk, the only candidates for participating in a merge.
    */
   rawEvents: TraceEvent[];
+  /**
+   * Per-archetype spatial-maintenance counters for this tick (#911 O3), keyed by archetype id. Undefined when the tick carried no
+   * spatial events — which is a real state and not a zero: an engine with no spatial archetype never emits these at all.
+   *
+   * <b>Projected here rather than read from <c>rawEvents</c> on demand</b>, because <c>tickBuilder</c> wipes <c>rawEvents</c> on every
+   * tick that is not a chunk boundary. A consumer walking raw events for a per-tick series would silently see one tick in fifty.
+   */
+  spatialByArchetype?: Map<number, SpatialTickTelemetry>;
+}
+
+/**
+ * One archetype's spatial-maintenance counters for one tick — the union of the two per-archetype instants the fence emits:
+ * <c>SpatialArchetypeTelemetry</c> (kind 66, the counter snapshot) and <c>SpatialRelocationOutcome</c> (kind 65, the throttle's split).
+ *
+ * <b>Two clocks.</b> Everything here is a PER-TICK value, reset at the top of every fence. Nothing in this record is cumulative, so a
+ * consumer polling at UI rate is reading one arbitrary tick out of hundreds — say which tick, or aggregate explicitly.
+ */
+/**
+ * Fetch (or create) one archetype's row. The two instants arrive as separate records, so whichever lands first creates the row with
+ * every counter at zero — which is the honest reading for a term the other record has not supplied yet, and matches the engine's own
+ * "zero means zero, never unknown" contract.
+ */
+function spatialRowFor(map: Map<number, SpatialTickTelemetry>, archetypeId: number): SpatialTickTelemetry {
+  let row = map.get(archetypeId);
+  if (row === undefined) {
+    row = {
+      archetypeId,
+      migrations: 0, hysteresisAbsorbed: 0, migrationCpuMs: 0,
+      driftersDetected: 0, relocationsAdmitted: 0, relocationsThrottled: 0, relocationsSuperseded: 0,
+      driftersUnplaced: 0, driftersUnplacedNoCandidate: 0, driftersSpilled: 0, pinsRejected: 0, crossingsQueued: 0,
+      repairUnits: 0, repairUnitsRefused: 0, repairQueueDepth: 0,
+      budgetUsedMs: 0,
+      tightnessSamples: 0, extentRatio: 0, packingBound: 0,
+      activeClusters: 0, cellTreePromotions: 0, cellTreeDemotions: 0,
+    };
+    map.set(archetypeId, row);
+  }
+  return row;
+}
+
+export interface SpatialTickTelemetry {
+  archetypeId: number;
+  // ── Crossing group ──
+  migrations: number;
+  hysteresisAbsorbed: number;
+  /** CPU-milliseconds SUMMED ACROSS WORKERS, never a wall-clock duration. W workers busy for 1 ms report W. */
+  migrationCpuMs: number;
+  // ── Relocation group ──
+  driftersDetected: number;
+  relocationsAdmitted: number;
+  relocationsThrottled: number;
+  relocationsSuperseded: number;
+  driftersUnplaced: number;
+  driftersUnplacedNoCandidate: number;
+  driftersSpilled: number;
+  pinsRejected: number;
+  crossingsQueued: number;
+  // ── Repair group ──
+  repairUnits: number;
+  repairUnitsRefused: number;
+  repairQueueDepth: number;
+  // ── Budget group ──
+  budgetUsedMs: number;
+  // ── Tightness ──
+  /** Zero means the fence wrote no cluster this tick — NOT that clusters are points. The means are only meaningful above zero. */
+  tightnessSamples: number;
+  extentRatio: number;
+  packingBound: number;
+  // ── Structure ──
+  activeClusters: number;
+  cellTreePromotions: number;
+  cellTreeDemotions: number;
 }
 
 /** One ThreadInfo record (kind 77) — slot ownership metadata emitted when a producer thread claims its slot. */
@@ -608,6 +680,8 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
   const threadInfos: ThreadInfoEvent[] = [];
   const contextSwitches = new Map<number, OnCpuSlice[]>();
   let gaugeSnapshot: GaugeSnapshot | undefined;
+  // #911 O3 — built lazily so a tick with no spatial archetype carries no map at all rather than an empty one.
+  let spatialByArchetype: Map<number, SpatialTickTelemetry> | undefined;
 
   // Phases are still emitted as Start/End instant pairs — keep a short-lived map to pair them up.
   const openPhases = new Map<number, TraceEvent>();
@@ -754,6 +828,40 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
             values,
           };
         }
+        break;
+      }
+
+      // #911 O3 — the two per-archetype spatial instants. Both are emitted once per archetype per tick from the fence's
+      // Finalize, so the two halves of one archetype's record always describe the same tick and can be merged by id.
+      case TraceEventKind.SpatialArchetypeTelemetry: {
+        const row = spatialRowFor(spatialByArchetype ??= new Map(), evt.archetypeId ?? 0);
+        row.activeClusters = evt.activeClusters ?? 0;
+        row.migrations = evt.migrationCount ?? 0;
+        row.migrationCpuMs = evt.migrationCpuMs ?? 0;
+        row.hysteresisAbsorbed = evt.hysteresisAbsorbed ?? 0;
+        row.driftersDetected = evt.driftersDetected ?? 0;
+        row.repairUnits = evt.repairUnits ?? 0;
+        row.repairUnitsRefused = evt.repairUnitsRefused ?? 0;
+        row.repairQueueDepth = evt.repairQueueDepth ?? 0;
+        row.budgetUsedMs = evt.budgetUsedMs ?? 0;
+        row.tightnessSamples = evt.tightnessSamples ?? 0;
+        row.extentRatio = evt.extentRatio ?? 0;
+        row.packingBound = evt.packingBound ?? 0;
+        row.cellTreePromotions = evt.cellTreePromotions ?? 0;
+        row.cellTreeDemotions = evt.cellTreeDemotions ?? 0;
+        break;
+      }
+
+      case TraceEventKind.SpatialRelocationOutcome: {
+        const row = spatialRowFor(spatialByArchetype ??= new Map(), evt.archetypeId ?? 0);
+        row.relocationsAdmitted = evt.relocationsAdmitted ?? 0;
+        row.relocationsThrottled = evt.relocationsThrottled ?? 0;
+        row.relocationsSuperseded = evt.relocationsSuperseded ?? 0;
+        row.driftersUnplaced = evt.driftersUnplaced ?? 0;
+        row.driftersUnplacedNoCandidate = evt.driftersUnplacedNoCandidate ?? 0;
+        row.driftersSpilled = evt.driftersSpilled ?? 0;
+        row.pinsRejected = evt.pinsRejected ?? 0;
+        row.crossingsQueued = evt.crossingsQueued ?? 0;
         break;
       }
 
@@ -1216,6 +1324,7 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
     threadInfos,
     contextSwitches,
     rawEvents: events,
+    spatialByArchetype,
   };
 }
 

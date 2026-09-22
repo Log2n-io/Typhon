@@ -184,9 +184,6 @@ public class DBComponentDefinition
         /// <summary>Kind of spatial bounds indexed (AABB / bounding sphere, 2D/3D, single/double precision). Meaningful when <see cref="HasSpatialIndex"/>.</summary>
         public SpatialFieldType SpatialFieldType { get; set; }
 
-        /// <summary>Fat-AABB margin used for movement hysteresis in the dynamic R-Tree, from <see cref="SpatialIndexAttribute.Margin"/>.</summary>
-        public float SpatialMargin { get; set; }
-
         /// <summary>Broadphase cell size for the spatial index, from <see cref="SpatialIndexAttribute.CellSize"/>. <c>0</c> selects the engine default.</summary>
         public float SpatialCellSize { get; set; }
 

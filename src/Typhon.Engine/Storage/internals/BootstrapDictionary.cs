@@ -45,19 +45,54 @@ public class BootstrapDictionary
         DateTime = 0x09,  // 8 bytes (DateTime.Ticks as long)
         String   = 0x0A,  // NUL-terminated UTF8
 
+        // Int7/Int8 are NOT adjacent to Int1..Int6 — Long/DateTime/String already own 0x08-0x0A, and renumbering those would make every existing file
+        // unreadable for no gain. The discontiguity is why nothing may test the int-vector types with a range pattern; use IntCountOf instead (#872 step 8,
+        // where the persisted SpatialGridConfig grew from 6 floats to 8).
+        Int7     = 0x0B,  // 28 bytes (7 × int)
+        Int8     = 0x0C,  // 32 bytes (8 × int)
+
+        // Added by #914 for the same reason Int7/Int8 were added by #872 step 8: the persisted SpatialGridConfig outgrew the previous cap. Its world frame
+        // is f64 now — six bounds and a cell size at 8 bytes each is 14 ints, plus the f32 hysteresis — so 8 int slots no longer hold it.
+        Int16    = 0x0D,  // 64 bytes (16 × int)
+
         End      = 0xFF,  // sentinel — end of stream
     }
 
     /// <summary>
+    /// Number of <see cref="int"/> slots a value type holds, or <c>0</c> when it is not an int-vector type. The one place that knows <c>Int7</c>/<c>Int8</c>
+    /// are not contiguous with <c>Int1..Int6</c>.
+    /// </summary>
+    internal static int IntCountOf(ValueType type) => type switch
+    {
+        >= ValueType.Int1 and <= ValueType.Int6 => (byte)type - (byte)ValueType.Int1 + 1,
+        ValueType.Int7 => 7,
+        ValueType.Int8 => 8,
+        ValueType.Int16 => 16,
+        _ => 0,
+    };
+
+    /// <summary>Inverse of <see cref="IntCountOf"/>: the value type holding exactly <paramref name="count"/> ints.</summary>
+    internal static ValueType TypeForIntCount(int count) => count switch
+    {
+        >= 1 and <= 6 => (ValueType)((byte)ValueType.Int1 + count - 1),
+        7 => ValueType.Int7,
+        8 => ValueType.Int8,
+        16 => ValueType.Int16,
+        _ => throw new ArgumentOutOfRangeException(nameof(count), count,
+            "Bootstrap int-vector values hold 1 to 8 ints, or exactly 16. There is no 9-15 encoding: the sizes exist to fit specific records, not as a "
+            + "general vector type, and adding one costs an on-disk type byte that every future reader must understand."),
+    };
+
+    /// <summary>
     /// A dynamically-typed value stored in the bootstrap dictionary.
-    /// Wraps a small array of ints (1-6), a long, a bool, a DateTime, or a string.
+    /// Wraps a small array of ints (1-8, or 16), a long, a bool, a DateTime, or a string.
     /// </summary>
     [PublicAPI]
     public readonly struct Value
     {
         public readonly ValueType Type;
         private readonly long _scalar;      // for Long, DateTime, Bool
-        private readonly int[] _ints;       // for Int1..Int6 (null for scalar types)
+        private readonly int[] _ints;       // for the int-vector types (null for scalar types)
         private readonly string _string;    // for String type
 
         private Value(ValueType type, long scalar, int[] ints = null, string str = null)
@@ -79,6 +114,9 @@ public class BootstrapDictionary
         public static Value FromInt4(int v0, int v1, int v2, int v3) => new(ValueType.Int4, 0, [v0, v1, v2, v3]);
         public static Value FromInt5(int v0, int v1, int v2, int v3, int v4) => new(ValueType.Int5, 0, [v0, v1, v2, v3, v4]);
         public static Value FromInt6(int v0, int v1, int v2, int v3, int v4, int v5) => new(ValueType.Int6, 0, [v0, v1, v2, v3, v4, v5]);
+
+        /// <summary>Build an int-vector value of any supported width (1 to 8). The general form the fixed-arity factories above are shorthand for.</summary>
+        public static Value FromInts(ReadOnlySpan<int> values) => new(TypeForIntCount(values.Length), 0, values.ToArray());
         public static Value FromLong(long value) => new(ValueType.Long, value);
         public static Value FromDateTime(DateTime value) => new(ValueType.DateTime, value.Ticks);
         public static Value FromString(string value) => new(ValueType.String, 0, str: value);
@@ -127,7 +165,7 @@ public class BootstrapDictionary
             }
         }
 
-        /// <summary>Get the int value at the given index (0-based). Valid for Int1..Int6.</summary>
+        /// <summary>Get the int value at the given index (0-based). Valid for the int-vector types.</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public int GetInt(int index = 0)
         {
@@ -135,10 +173,10 @@ public class BootstrapDictionary
             return _ints[index];
         }
 
-        /// <summary>Number of int values (1-6 for IntN types, 0 for others).</summary>
+        /// <summary>Number of int values (1-8 for IntN types, 0 for others).</summary>
         public int IntCount => _ints?.Length ?? 0;
 
-        /// <summary>Shorthand: first int value. Valid for Int1..Int6.</summary>
+        /// <summary>Shorthand: first int value. Valid for the int-vector types.</summary>
         public int AsInt => GetInt(0);
 
         public override string ToString() => Type switch
@@ -147,7 +185,7 @@ public class BootstrapDictionary
             ValueType.Long => $"Long({_scalar})",
             ValueType.DateTime => $"DateTime({AsDateTime:O})",
             ValueType.String => $"String({_string})",
-            >= ValueType.Int1 and <= ValueType.Int6 => $"Int{_ints.Length}({string.Join(", ", _ints)})",
+            _ when IntCountOf(Type) > 0 => $"Int{_ints.Length}({string.Join(", ", _ints)})",
             _ => $"Unknown({Type})"
         };
     }
@@ -227,10 +265,7 @@ public class BootstrapDictionary
             {
                 ThrowStreamOverflow();
             }
-            fixed (char* keyChars = kvp.Key)
-            {
-                Encoding.UTF8.GetBytes(keyChars, kvp.Key.Length, dest, keyBytes);
-            }
+            Encoding.UTF8.GetBytes(kvp.Key, new Span<byte>(dest, keyBytes));   // the key as a span, never pinned for a pointer
             dest += keyBytes;
             *dest++ = 0; // NUL terminator
 
@@ -337,16 +372,10 @@ public class BootstrapDictionary
     private static int GetValueSize(Value value) => value.Type switch
     {
         ValueType.Bool => 1,
-        ValueType.Int1 => 4,
-        ValueType.Int2 => 8,
-        ValueType.Int3 => 12,
-        ValueType.Int4 => 16,
-        ValueType.Int5 => 20,
-        ValueType.Int6 => 24,
         ValueType.Long => 8,
         ValueType.DateTime => 8,
         ValueType.String => Encoding.UTF8.GetByteCount(value.AsString) + 1, // + NUL
-        _ => 0
+        _ => IntCountOf(value.Type) * 4
     };
 
     private static unsafe void WriteValue(byte* dest, Value value)
@@ -358,7 +387,12 @@ public class BootstrapDictionary
                 break;
 
             case >= ValueType.Int1 and <= ValueType.Int6:
-                for (int i = 0; i < value.IntCount; i++)
+            case ValueType.Int7:
+            case ValueType.Int8:
+            case ValueType.Int16:
+                // IntCountOf(Type), not value.IntCount: GetValueSize reserves the record from the TYPE, so writing from the array length would let the two
+                // disagree and overrun — or under-fill — the reserved bytes, corrupting every entry after this one in the stream.
+                for (int i = 0; i < IntCountOf(value.Type); i++)
                 {
                     *(int*)(dest + i * 4) = value.GetInt(i);
                 }
@@ -375,10 +409,7 @@ public class BootstrapDictionary
             case ValueType.String:
                 var str = value.AsString;
                 int len = Encoding.UTF8.GetByteCount(str);
-                fixed (char* chars = str)
-                {
-                    Encoding.UTF8.GetBytes(chars, str.Length, dest, len);
-                }
+                Encoding.UTF8.GetBytes(str, new Span<byte>(dest, len));   // the string as a span, never pinned for a pointer
                 dest[len] = 0; // NUL
                 break;
         }
@@ -394,7 +425,10 @@ public class BootstrapDictionary
                 return Value.FromBool(b);
 
             case >= ValueType.Int1 and <= ValueType.Int6:
-                int count = (byte)type - (byte)ValueType.Int1 + 1;
+            case ValueType.Int7:
+            case ValueType.Int8:
+            case ValueType.Int16:
+                int count = IntCountOf(type);
                 if (src + count * 4 > limit) { return default; }
                 var ints = new int[count];
                 for (int i = 0; i < count; i++)
@@ -402,16 +436,7 @@ public class BootstrapDictionary
                     ints[i] = *(int*)(src + i * 4);
                 }
                 src += count * 4;
-                return count switch
-                {
-                    1 => Value.FromInt(ints[0]),
-                    2 => Value.FromInt2(ints[0], ints[1]),
-                    3 => Value.FromInt3(ints[0], ints[1], ints[2]),
-                    4 => Value.FromInt4(ints[0], ints[1], ints[2], ints[3]),
-                    5 => Value.FromInt5(ints[0], ints[1], ints[2], ints[3], ints[4]),
-                    6 => Value.FromInt6(ints[0], ints[1], ints[2], ints[3], ints[4], ints[5]),
-                    _ => default
-                };
+                return Value.FromInts(ints);
 
             case ValueType.Long:
                 if (src + 8 > limit) { return default; }

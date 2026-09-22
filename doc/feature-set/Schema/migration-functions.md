@@ -41,7 +41,7 @@ dbe.RegisterMigration<PlayerV1, PlayerV2>((ref PlayerV1 old, out PlayerV2 new_) 
 dbe.RegisterComponentFromAccessor<PlayerV2>();
 ```
 
-Byte-level form, for when `PlayerV1` is no longer compiled into the application:
+Byte-level form, for when `PlayerV1` is not compiled into the application:
 
 ```csharp
 dbe.RegisterByteMigration("Game.Player", fromRevision: 1, toRevision: 2,
@@ -59,7 +59,7 @@ Track progress on large migrations via `dbe.OnMigrationProgress`.
 | API | Use when |
 |---|---|
 | `RegisterMigration<TOld,TNew>(MigrationFunc<TOld,TNew>)` | `TOld` struct is available in code — typed, zero-copy `ref`/`out` |
-| `RegisterByteMigration(name, fromRev, toRev, oldSize, newSize, ByteMigrationFunc)` | `TOld` struct no longer exists — manual byte layout |
+| `RegisterByteMigration(name, fromRev, toRev, oldSize, newSize, ByteMigrationFunc)` | `TOld` struct is not available in code — manual byte layout |
 
 ## ⚠️ Guarantees & limits
 

@@ -1,5 +1,5 @@
 using System;
-using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
 
@@ -8,6 +8,7 @@ namespace Typhon.Engine.Internals;
 /// Single-threaded, no MVCC, no WAL, no conflict detection, no revision tracking.
 /// Operates directly on ComponentTable's ComponentSegment using chunkId as the stable identifier.
 /// </summary>
+/// <remarks>The caller's <c>data</c> is reached through a span, never a pointer: it can live on the GC heap.</remarks>
 internal static unsafe class SystemCrud
 {
     /// <summary>
@@ -25,7 +26,7 @@ internal static unsafe class SystemCrud
         var dst = compAccessor.GetChunkAsSpan(chunkId, true);
         int overhead = table.ComponentOverhead;
         int compSize = Math.Min(sizeof(T), table.ComponentStorageSize);
-        new Span<byte>(Unsafe.AsPointer(ref data), compSize).CopyTo(dst.Slice(overhead));
+        MemoryMarshal.AsBytes(new ReadOnlySpan<T>(ref data)).Slice(0, compSize).CopyTo(dst.Slice(overhead));
         compAccessor.Dispose();
 
         return chunkId;
@@ -45,7 +46,7 @@ internal static unsafe class SystemCrud
         int compSize = Math.Min(sizeof(T), table.ComponentStorageSize);
 
         data = default;
-        src.Slice(overhead, compSize).CopyTo(new Span<byte>(Unsafe.AsPointer(ref data), compSize));
+        src.Slice(overhead, compSize).CopyTo(MemoryMarshal.AsBytes(new Span<T>(ref data)));
         compAccessor.Dispose();
 
         return true;
@@ -63,7 +64,7 @@ internal static unsafe class SystemCrud
         var dst = compAccessor.GetChunkAsSpan(chunkId, true);
         int overhead = table.ComponentOverhead;
         int compSize = Math.Min(sizeof(T), table.ComponentStorageSize);
-        new Span<byte>(Unsafe.AsPointer(ref data), compSize).CopyTo(dst.Slice(overhead));
+        MemoryMarshal.AsBytes(new ReadOnlySpan<T>(ref data)).Slice(0, compSize).CopyTo(dst.Slice(overhead));
         compAccessor.Dispose();
     }
 }

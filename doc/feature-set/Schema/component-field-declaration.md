@@ -66,7 +66,7 @@ int healthOffset = def.FieldsByName["Health"].OffsetInComponentStorage;
 | `[Field(FieldId, Name, PreviousName)]` | name = C# member name, id = auto-assigned | Overrides field name/id; `PreviousName` preserves identity across a rename |
 | `[Index(AllowMultiple)]` | `AllowMultiple = false` | Adds a secondary B+Tree index on the field; `AllowMultiple` allows non-unique values |
 | `[ForeignKey(targetType)]` | — | Declares a referential link (field must be `long`); enables cascade-delete via `IndexAttribute.OnParentDelete` |
-| `[SpatialIndex(margin, cellSize)]` | — | At most one per component; registers the field with the spatial R-Tree |
+| `[SpatialIndex(cellSize)]` | — | At most one per component; registers the field with the spatial R-Tree |
 | `schemaValidation` (`RegisterComponentFromAccessor<T>`) | `SchemaValidationMode.Enforce` | Throws on breaking changes detected at reopen; `Skip` bypasses validation (unsafe) |
 
 ## ⚠️ Guarantees & limits

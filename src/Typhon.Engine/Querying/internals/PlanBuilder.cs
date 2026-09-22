@@ -18,18 +18,14 @@ internal class PlanBuilder
     /// (short-circuit optimization). Attempts to select a unique secondary index as the primary scan stream.
     /// </summary>
     public ExecutionPlan BuildPlan(FieldEvaluator[] evaluators, ComponentTable table, ISelectivityEstimator estimator) =>
-        BuildPlanCore(evaluators, table, null, estimator, descending: false, orderByFieldIndex: int.MinValue,
-            queryInstanceKind: 0, queryInstanceLocalId: 0, definitionSourceFile: null, definitionSourceLine: 0, definitionSourceMethod: null,
-            executionSourceFile: null, executionSourceLine: 0, executionSourceMethod: null);
+        BuildPlanCore(evaluators, table, null, estimator, false, int.MinValue, 0, 0, null, 0, null, null, 0, null);
 
     /// <summary>
     /// Builds a plan with OrderBy support. Sets the iteration direction based on <paramref name="orderBy"/>.
     /// Secondary index selection is only used when OrderBy is by the same field as the primary predicate, or when OrderBy is by PK (falls back to PK scan).
     /// </summary>
     public ExecutionPlan BuildPlan(FieldEvaluator[] evaluators, ComponentTable table, ISelectivityEstimator estimator, OrderByField orderBy) =>
-        BuildPlanCore(evaluators, table, null, estimator, descending: orderBy.Descending, orderByFieldIndex: orderBy.FieldIndex,
-            queryInstanceKind: 0, queryInstanceLocalId: 0, definitionSourceFile: null, definitionSourceLine: 0, definitionSourceMethod: null,
-            executionSourceFile: null, executionSourceLine: 0, executionSourceMethod: null);
+        BuildPlanCore(evaluators, table, null, estimator, orderBy.Descending, orderBy.FieldIndex, 0, 0, null, 0, null, null, 0, null);
 
     /// <summary>
     /// Builds a plan with full Query-Definition-Export attribution (#342). Issuer supplies:
@@ -46,8 +42,8 @@ internal class PlanBuilder
         string definitionSourceFile, int definitionSourceLine, string definitionSourceMethod,
         string executionSourceFile, int executionSourceLine, string executionSourceMethod) =>
         BuildPlanCore(evaluators, table, stats, estimator,
-            descending: orderBy?.Descending ?? false,
-            orderByFieldIndex: orderBy?.FieldIndex ?? int.MinValue,
+            orderBy?.Descending ?? false,
+            orderBy?.FieldIndex ?? int.MinValue,
             queryInstanceKind, queryInstanceLocalId,
             definitionSourceFile, definitionSourceLine, definitionSourceMethod,
             executionSourceFile, executionSourceLine, executionSourceMethod);
@@ -70,9 +66,8 @@ internal class PlanBuilder
         // index from the plan.
         if (queryInstanceLocalId != 0)
         {
-            EmitDefinitionDescribe(evaluators, table, queryInstanceKind, queryInstanceLocalId,
-                definitionSourceFile, definitionSourceLine, definitionSourceMethod, orderByFieldIndex, descending,
-                primaryIndexFieldIdx: (short)plan.PrimaryFieldIndex);
+            EmitDefinitionDescribe(evaluators, table, queryInstanceKind, queryInstanceLocalId, definitionSourceFile, definitionSourceLine, 
+                definitionSourceMethod, orderByFieldIndex, descending, (short)plan.PrimaryFieldIndex);
         }
 
         // ── Step 3: intern execution-site strings on the producer thread, get IDs for the QueryPlanEvent ──

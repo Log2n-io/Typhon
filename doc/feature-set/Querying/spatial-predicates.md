@@ -23,7 +23,7 @@ Mark the field that defines an entity's bounds with `[SpatialIndex]`; the engine
 [Component("Game.Position", 1)]
 public struct Position
 {
-    [SpatialIndex(margin: 0.5f)]
+    [SpatialIndex]
     public float X, Y, Z;
 }
 
@@ -48,7 +48,6 @@ var hit = t.Query<UnitArch>()
 
 | Constructor arg (`[SpatialIndex]`) | Default | Effect |
 |---|---|---|
-| `margin` | required | Fat-AABB enlargement; absorbs small moves without a tree update |
 | `cellSize` | `0` (auto) | Bucket size for the static/bulk-loaded tree variant |
 | `Mode` | `SpatialMode.Dynamic` | `Static` skips per-tick update maintenance for rarely-moving entities |
 | `Category` | `uint.MaxValue` | Archetype-level bitmask; lets a per-cluster broadphase skip whole archetype clusters that don't overlap the query |

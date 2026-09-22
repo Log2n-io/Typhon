@@ -1,51 +1,72 @@
-using Typhon.Schema.Definition;
-
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Encapsulates all spatial index state for a single ComponentTable. Null on ComponentTable if no <c>[SpatialIndex]</c> attribute is present.
-/// Holds up to two R-Trees (static + dynamic), back-pointer segment, field metadata, and optional occupancy hashmap.
-/// With per-component-type SpatialMode, exactly one tree is non-null.
+/// Per-<see cref="ComponentTable"/> spatial metadata. Null on a table whose component has no <c>[SpatialIndex]</c> field.
 /// </summary>
+/// <remarks>
+/// <para><b>What this used to be, and why the difference matters.</b> Until #872 step 13 this type also owned an entity-level
+/// <c>SpatialRTree&lt;PersistentStore&gt;</c>, its back-pointer segment and a Layer-1 occupancy hashmap — three persisted segments per spatial component. That
+/// tree lost its last writer to #666 ("EVERY archetype is cluster-backed"), which made <c>IsClusterEligible</c> unconditionally true and left every
+/// entity-tree writer either behind a <c>!IsClusterEligible</c> guard or with no caller at all. It was still allocated, still written into the file, still
+/// reloaded on open and still traversed by every spatial query — permanently empty. Step 13 removed it once its last unique capabilities (ray and frustum)
+/// existed on the cluster path.</para>
+/// <para>What is left is metadata that describes the spatial FIELD rather than any index over it — the offset and shape the cluster path decodes bounds with —
+/// plus the fan-out list of cluster archetypes that actually hold the data, and the two systems layered on them.</para>
+/// </remarks>
 internal class SpatialIndexState
 {
-    /// <summary>R-Tree for static entities (bulk-loaded, skipped by tick fence). Null when Mode == Dynamic.</summary>
-    public SpatialRTree<PersistentStore> StaticTree { get; }
-
-    /// <summary>R-Tree for dynamic entities (fat AABBs, tick-fence updates). Null when Mode == Static.</summary>
-    public SpatialRTree<PersistentStore> DynamicTree { get; }
-
-    public ChunkBasedSegment<PersistentStore> BackPointerSegment { get; }
     public SpatialFieldInfo FieldInfo { get; }
+
+    /// <summary>
+    /// Node layout for this component's spatial variant.
+    /// </summary>
+    /// <remarks>
+    /// Retained after the entity tree's removal because the PER-CELL cluster trees share the layout, and because query code reads
+    /// <see cref="SpatialNodeDescriptor.CoordCount"/> as the authority on whether a component is 2D or 3D.
+    /// </remarks>
     public SpatialNodeDescriptor Descriptor { get; }
 
-    /// <summary>Layer 1 coarse occupancy filter. Null when CellSize == 0 (default — queries go straight to tree).</summary>
-    public PagedHashMap<long, int, PersistentStore> OccupancyMap { get; }
+    /// <summary>Trigger volume system for this spatial index. Null until first <see cref="GetOrCreateTriggerSystem"/> call.</summary>
+    public SpatialTriggerSystem TriggerSystem { get; private set; }
 
-    /// <summary>Trigger volume system for this spatial index. Null until first CreateTriggerSystem() call.</summary>
-    public SpatialTriggerSystem TriggerSystem { get; internal set; }
-
-    /// <summary>Interest management system for this spatial index. Null until first GetOrCreateInterestSystem() call.</summary>
+    /// <summary>Interest management system for this spatial index. Null until first <see cref="GetOrCreateInterestSystem"/> call.</summary>
     public SpatialInterestSystem InterestSystem { get; private set; }
 
-    /// <summary>The active tree based on FieldInfo.Mode. Exactly one of StaticTree/DynamicTree is non-null.</summary>
-    public SpatialRTree<PersistentStore> ActiveTree => FieldInfo.Mode == SpatialMode.Static ? StaticTree : DynamicTree;
-
-    /// <summary>Route to the correct tree by back-pointer's TreeSelector value (which equals (byte)SpatialMode).</summary>
-    public SpatialRTree<PersistentStore> GetTree(byte treeSelector) => treeSelector == (byte)SpatialMode.Static ? StaticTree : DynamicTree;
+    /// <summary>Serialises the two lazy constructions below. Uncontended after first use.</summary>
+    private readonly object _systemsLock = new();
 
     /// <summary>Get or create the interest management system for this spatial index.</summary>
+    /// <remarks>
+    /// <b>Locked, not <c>??=</c>.</b> Two racing callers each ran the null check, each built a system, and each stored theirs — after which one caller's
+    /// observers were registered on an instance nothing else could reach, and its deltas silently stopped arriving. Harmless while the only callers were
+    /// tests calling this once; #872 step 13 made it public API, where "get the observer set" is exactly the kind of call two systems make on startup.
+    /// </remarks>
     internal SpatialInterestSystem GetOrCreateInterestSystem(ComponentTable table)
     {
-        InterestSystem ??= new SpatialInterestSystem(table, this);
-        return InterestSystem;
+        if (InterestSystem != null)
+        {
+            return InterestSystem;
+        }
+
+        lock (_systemsLock)
+        {
+            return InterestSystem ??= new SpatialInterestSystem(table, this);
+        }
     }
 
     /// <summary>Get or create the trigger system for this spatial index.</summary>
+    /// <inheritdoc cref="GetOrCreateInterestSystem" path="/remarks"/>
     internal SpatialTriggerSystem GetOrCreateTriggerSystem(ComponentTable table)
     {
-        TriggerSystem ??= new SpatialTriggerSystem(table, this);
-        return TriggerSystem;
+        if (TriggerSystem != null)
+        {
+            return TriggerSystem;
+        }
+
+        lock (_systemsLock)
+        {
+            return TriggerSystem ??= new SpatialTriggerSystem(table, this);
+        }
     }
 
     // ── Cluster archetype references for fan-out ────────────
@@ -60,15 +81,9 @@ internal class SpatialIndexState
         ClusterArchetypes.Add(clusterState);
     }
 
-    internal SpatialIndexState(SpatialRTree<PersistentStore> staticTree, SpatialRTree<PersistentStore> dynamicTree,
-        ChunkBasedSegment<PersistentStore> backPointerSegment, SpatialFieldInfo fieldInfo, SpatialNodeDescriptor descriptor,
-        PagedHashMap<long, int, PersistentStore> occupancyMap = null)
+    internal SpatialIndexState(SpatialFieldInfo fieldInfo, SpatialNodeDescriptor descriptor)
     {
-        StaticTree = staticTree;
-        DynamicTree = dynamicTree;
-        BackPointerSegment = backPointerSegment;
         FieldInfo = fieldInfo;
         Descriptor = descriptor;
-        OccupancyMap = occupancyMap;
     }
 }

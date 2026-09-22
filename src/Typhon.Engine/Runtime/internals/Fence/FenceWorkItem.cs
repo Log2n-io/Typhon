@@ -1,8 +1,10 @@
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Discriminator for <see cref="FenceWorkItem"/>. The fence is split into three chained phases; each phase has its own kind. The Prep and Finalize kinds are
-/// archetype-atomic (one item per cluster-eligible archetype, runs end-to-end on a single worker). MigrationApply is sliceable — a single archetype's
+/// Discriminator for <see cref="FenceWorkItem"/>. The fence is a chain of six phases; each phase has its own kind(s). Finalize is archetype-atomic (one
+/// item per cluster-eligible archetype, end-to-end on one worker); Prep is atomic for small archetypes and <see cref="PrepSlice"/> items for large ones
+/// (#886), and Finalize likewise: atomic for small archetypes, a serial head plus <see cref="FinalizeEmitSlice"/> items for large ones (#889).
+/// MigrationApply is sliceable — a single archetype's
 /// <c>PendingMigrations</c> array is partitioned into contiguous slices sorted by destination cell key so multiple workers can apply migrations for the SAME
 /// archetype concurrently without contending on cell-level data.
 /// </summary>
@@ -28,6 +30,24 @@ internal enum FenceWorkKind : byte
     /// fat archetype enable per-archetype parallel AABB recompute. Must run AFTER all <see cref="MigrationApply"/> slices for the same archetype have completed.
     /// </summary>
     AabbRefreshSlice = 6,
+
+    /// <summary>Phase 2.5 — apply one key-range slice of one indexed field's staged value updates, in a single partitioning descent. Slices are snapped to
+    /// LEAF boundaries rather than split by count alone, so two workers never write the same node and the descent can run with no latch, no OLC validation and
+    /// no B-link right-walk (EW-01, #872 §5.5). Runs AFTER every <see cref="MigrationApply"/> — the migrations are what stage the entries.</summary>
+    IndexUpdateSlice = 7,
+
+    /// <summary>Phase 2.6 — apply one BUCKET-range slice of one archetype's staged EntityMap location patches (#872 step 7, §5.4). Parts own disjoint
+    /// buckets, so no two workers are ever inside one bucket chunk. Runs AFTER every <see cref="MigrationApply"/> — the migrations are what stage the
+    /// entries.</summary>
+    EntityMapUpdateSlice = 8,
+
+    /// <summary>One range of an archetype's dirty-bitmap words, steps ② ③ ④ ⑤ of Prep (#886 lead D). <c>SliceStart</c> = first word, <c>SliceCount</c> = words,
+    /// <c>UnitCount</c> = dirty clusters in the range.</summary>
+    PrepSlice = 9,
+
+    /// <summary>One range of an archetype's dirty-bitmap words of Finalize's WAL emit (#889), after the head ran on the driver. Same fields as
+    /// <see cref="PrepSlice"/>.</summary>
+    FinalizeEmitSlice = 10,
 
     /// <summary>Phase 4 — per-archetype Finalize work: bookkeeping clear, dormancy sweep, dirty-ring archive, WAL emit. One item per cluster-eligible archetype.
     /// Must run AFTER all <see cref="AabbRefreshSlice"/> slices for the same archetype have completed.</summary>
@@ -62,4 +82,5 @@ internal struct FenceWorkItem
     public int SliceStart;     // PendingMigrations index where this slice begins (MigrationApply only)
     public int SliceCount;     // number of migrations in this slice (MigrationApply only)
     public int UnitCount;      // cost-attribution unit count: entities for MigrationApply, clusters for AabbRefreshSlice; 0 otherwise
+    public int FieldId;        // flattened (slot, field) index into the archetype's IndexUpdateStaging (IndexUpdateSlice only)
 }

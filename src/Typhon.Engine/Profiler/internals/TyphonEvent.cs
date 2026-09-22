@@ -784,16 +784,15 @@ internal static partial class TyphonEvent
             return;
         }
 
-        var size = SchedulerMetronomeEventCodec.ComputeSizeWait(hasTraceContext: false);
+        var size = SchedulerMetronomeEventCodec.ComputeSizeWait(false);
         if (!ring.TryReserve(size, out var dst))
         {
             return;
         }
 
         var spanId = SpanIdGenerator.NextId(slotIdx, slot);
-        SchedulerMetronomeEventCodec.EncodeWait(dst, (byte)slotIdx, startTimestamp, endTimestamp,
-            spanId, parentSpanId: 0,
-            scheduledTimestamp, multiplier, intentClass, phaseFlags, out _);
+        SchedulerMetronomeEventCodec.EncodeWait(dst, (byte)slotIdx, startTimestamp, endTimestamp, spanId, 0, scheduledTimestamp, multiplier, intentClass,
+            phaseFlags, out _);
         ring.Publish();
     }
 

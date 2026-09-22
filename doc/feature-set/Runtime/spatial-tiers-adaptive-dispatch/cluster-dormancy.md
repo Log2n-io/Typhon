@@ -7,7 +7,7 @@ description: 'Clusters untouched for N ticks sleep and are skipped by every disp
 # Cluster Dormancy (Sleep/Wake)
 > Clusters untouched for N ticks sleep and are skipped by every dispatch path, waking within one tick of being written to.
 
-**Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Runtime](../README.md)
+**Status:** ✅ Implemented · **Visibility:** Internal · **Category:** [Runtime](../README.md)
 
 ## 🎯 What it solves
 
@@ -77,7 +77,7 @@ arbitrary game code.
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Runtime/internals/DormancyReporter.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Runtime/internals/DormancyReporter.cs) (thread-local deferred wake requests, single-threaded drain)
+- Source: [src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) (`PendingWakeRequests`: per-archetype deferred wake requests, drained single-threaded at the fence by `DatabaseEngine.DrainDormancyWakeRequests`)
 - Source: [src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) (`DormancySweep`, `ProcessWakeRequest`, `TransitionWakePendingToActive`)
 - Source: [src/Typhon.Engine/Ecs/public/ClusterSleepState.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/ClusterSleepState.cs)
 - Parent feature: [Spatial Tiers & Adaptive Dispatch](./README.md)

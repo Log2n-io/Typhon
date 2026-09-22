@@ -1,4 +1,5 @@
-﻿using System.Numerics;
+﻿using System.Collections.Generic;
+using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Schema.Definition;
@@ -26,12 +27,90 @@ class ClusterSpatial3DTests : TestBase<ClusterSpatial3DTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClSpatialPos>();
         dbe.RegisterComponentFromAccessor<ClSpatialMeta>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-10_000, -10_000),
             worldMax: new Vector2(10_000, 10_000),
             cellSize: 100f));
         dbe.InitializeArchetypes();
         return dbe;
+    }
+
+    /// <summary>
+    /// A promoted cell answers a 3D archetype's query identically to the linear scan it replaces — including when the
+    /// query leaves an axis OPEN with an infinite bound, which is the documented way to ask a 2D question of a 3D index.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>#905.</b> <c>CellClusterTree.QueryToCoords</c> used to map an infinite Z range onto the unit "flat slab"
+    /// that <c>ToCoords</c> writes for a 2D cluster. That is right only while every STORED box is on that slab. A 3D
+    /// archetype stores its real Z, so a cell holding entities at z ≈ 125 was asked for clusters overlapping z ∈ [0, 1]
+    /// and answered NOTHING — a silent <c>SQ-01</c> false negative on every open-axis query against a promoted cell,
+    /// with promotion on by default at 1 024 clusters per cell at the time (#905; off by default since #917).</para>
+    /// <para><b>Why nothing caught it.</b> Every existing promoted-cell differential uses a 2D archetype, whose stored Z
+    /// is already the ±∞ sentinel and therefore genuinely lives on the slab. The combination that fails is a 3D field
+    /// plus an open axis, and it had no test. Found by the game-workload harness, not by this suite.</para>
+    /// <para>Ablation: restoring the flat-slab mapping in <c>QueryToCoords</c> makes the open-axis arm return zero.</para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SQ-01")]
+    public void PromotedCell_AnswersA3DArchetypeIdenticallyToTheScan([Values(true, false)] bool openAxis)
+    {
+        var scan = QueryOneCell(promote: false, openAxis);
+        var tree = QueryOneCell(promote: true, openAxis);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(scan, Is.Not.Empty, "precondition: the query has to find something on the scan for the comparison to mean anything");
+            Assert.That(tree, Is.EquivalentTo(scan), "the promoted cell answers a different set from the linear scan it replaced");
+        });
+    }
+
+    /// <summary>Fill one cell with 3D entities, optionally promote it, and return what a box query finds.</summary>
+    private HashSet<long> QueryOneCell(bool promote, bool openAxis)
+    {
+        ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        using var scope = ServiceProvider.CreateScope();
+        var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<ClSpatialPos>();
+        dbe.RegisterComponentFromAccessor<ClSpatialMeta>();
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
+            worldMin: new Vector2(-10_000, -10_000), worldMax: new Vector2(10_000, 10_000), cellSize: 1_000f));
+
+        // Promote on the first cluster, and on count alone: this is about what a promoted cell ANSWERS, not about when a
+        // cell deserves a tree.
+        dbe.ClusterCellTreePromoteThreshold = promote ? 1 : int.MaxValue;
+        dbe.ClusterCellTreePromoteTightness = 1f;
+        dbe.InitializeArchetypes();
+
+        // Z well away from the unit slab [0, 1] the defect collapsed the query onto — 125 is where a flat world's entities
+        // sit when a scenario parks them at half a cell.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var met = default(ClSpatialMeta);
+            for (var i = 0; i < 200; i++)
+            {
+                var pos = MakePos(10f + ((i * 37) % 900), 10f + ((i * 61) % 900), 125f, 2f);
+                tx.Spawn<ClSpatialUnit>(ClSpatialUnit.Pos.Set(in pos), ClSpatialUnit.Meta.Set(in met));
+            }
+
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        var cs = dbe._archetypeStates[Archetype<ClSpatialUnit>.Metadata.ArchetypeId].ClusterState;
+        Assert.That(cs.PromotedCellCount, promote ? Is.GreaterThan(0) : Is.Zero, "the arm did not get the structure it was asked for");
+
+        var found = new HashSet<long>();
+        using (var epoch = EpochGuard.Enter(dbe.EpochManager))
+        {
+            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, openAxis ? float.NegativeInfinity : 0f,
+                         1_000f, 1_000f, openAxis ? float.PositiveInfinity : 1_000f))
+            {
+                found.Add(r.EntityId);
+            }
+        }
+
+        return found;
     }
 
     private static ClSpatialPos MakePos(float x, float y, float z, float size = 1.0f) =>
@@ -536,6 +615,90 @@ class ClusterSpatial3DTests : TestBase<ClusterSpatial3DTests>
             using var tx = dbe.CreateQuickTransaction();
             var resultsMid = tx.Query<ClSpatialUnit>().WhereInAABB<ClSpatialPos>(0, 0, 80, 100, 100, 120).Execute();
             Assert.That(resultsMid, Does.Not.Contain(idMid), "Destroyed mid-Z entity should not be queryable");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // A grid that is genuinely three-dimensional (#872 step 8)
+    //
+    // Every fixture above configures a FLAT grid, which is what the engine had before step 8: entities differing only in Z shared a cell and were separated
+    // by the narrowphase alone. Those tests still pass unchanged — that is the equivalence the step rests on — but they cannot see the new capability, so
+    // they would go on passing if the Z axis were dropped again. These two can not.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    private DatabaseEngine SetupCubicGridEngine()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<ClSpatialPos>();
+        dbe.RegisterComponentFromAccessor<ClSpatialMeta>();
+        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+            worldMin: new Vector3(-10_000, -10_000, -10_000),
+            worldMax: new Vector3(10_000, 10_000, 10_000),
+            cellSize: 100f));
+        dbe.InitializeArchetypes();
+        return dbe;
+    }
+
+    [Test]
+    public void CubicGrid_EntitiesDifferingOnlyInZ_BucketIntoDifferentCells()
+    {
+        using var dbe = SetupCubicGridEngine();
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var met = new ClSpatialMeta { Tag = 1 };
+            var low = MakePos(50, 50, 50);
+            var high = MakePos(50, 50, 950);
+            tx.Spawn<ClSpatialUnit>(ClSpatialUnit.Pos.Set(in low), ClSpatialUnit.Meta.Set(in met));
+            met.Tag = 2;
+            tx.Spawn<ClSpatialUnit>(ClSpatialUnit.Pos.Set(in high), ClSpatialUnit.Meta.Set(in met));
+            tx.Commit();
+        }
+
+        var grid = dbe.SpatialGrid;
+        int lowCell = grid.WorldToCellKey(50f, 50f, 50f);
+        int highCell = grid.WorldToCellKey(50f, 50f, 950f);
+        Assert.That(lowCell, Is.Not.EqualTo(highCell), "9 cells apart on Z must not be the same cell in a cubic grid");
+        Assert.That(grid.GetCell(lowCell).EntityCount, Is.EqualTo(1), "the low entity is alone in its cell");
+        Assert.That(grid.GetCell(highCell).EntityCount, Is.EqualTo(1), "the high entity is alone in its cell");
+    }
+
+    [Test]
+    public void CubicGrid_QuerySpanningSeveralZCells_ReturnsEntitiesFromAllOfThem()
+    {
+        // The broadphase half, and an SQ-01 guard on the enumerator's NEW Z loop. The two entities sit nine Z cells apart, so a query covering both is the
+        // one shape that requires `while (_currentCellZ <= _cellMaxZ)` to actually iterate: without it the walk visits only the query's first Z plane and
+        // the far entity is a silent false negative. Asserting exclusion instead would prove nothing — the narrowphase rejects a far entity either way.
+        using var dbe = SetupCubicGridEngine();
+
+        EntityId idLow, idHigh;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var met = new ClSpatialMeta { Tag = 1 };
+            var low = MakePos(50, 50, 50);
+            idLow = tx.Spawn<ClSpatialUnit>(ClSpatialUnit.Pos.Set(in low), ClSpatialUnit.Meta.Set(in met));
+            met.Tag = 2;
+            var high = MakePos(50, 50, 950);
+            idHigh = tx.Spawn<ClSpatialUnit>(ClSpatialUnit.Pos.Set(in high), ClSpatialUnit.Meta.Set(in met));
+            tx.Commit();
+        }
+
+        var grid = dbe.SpatialGrid;
+        grid.WorldToCellRange(0f, 0f, 0f, 100f, 100f, 1000f, out _, out _, out var minZ, out _, out _, out var maxZ);
+        Assert.That(maxZ - minZ, Is.GreaterThanOrEqualTo(9), "the query must genuinely span several Z cells, or the loop below is never exercised");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var spanning = tx.Query<ClSpatialUnit>().WhereInAABB<ClSpatialPos>(0, 0, 0, 100, 100, 1000).Execute();
+            Assert.That(spanning, Does.Contain(idLow));
+            Assert.That(spanning, Does.Contain(idHigh), "an entity nine Z cells away is only reachable if the enumerator walks Z");
+        }
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var narrow = tx.Query<ClSpatialUnit>().WhereInAABB<ClSpatialPos>(0, 0, 0, 100, 100, 100).Execute();
+            Assert.That(narrow, Does.Contain(idLow));
+            Assert.That(narrow, Does.Not.Contain(idHigh));
         }
     }
 }

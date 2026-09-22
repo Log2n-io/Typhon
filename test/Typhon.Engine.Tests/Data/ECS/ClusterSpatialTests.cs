@@ -17,7 +17,7 @@ namespace Typhon.Engine.Tests;
 struct ClSpatialPos
 {
     [Field]
-    [SpatialIndex(5.0f)]
+    [SpatialIndex]
     public AABB3F Bounds;
 
     [Field]
@@ -56,7 +56,7 @@ struct ClSpatialVData
 struct ClSpatialStaticPos
 {
     [Field]
-    [SpatialIndex(0.0f, Mode = SpatialMode.Static)]
+    [SpatialIndex(Mode = SpatialMode.Static)]
     public AABB3F Bounds;
 }
 
@@ -96,7 +96,7 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClSpatialPos>();
         dbe.RegisterComponentFromAccessor<ClSpatialMeta>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-10_000, -10_000),
             worldMax: new Vector2(10_000, 10_000),
             cellSize: 100f));
@@ -109,12 +109,92 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClSpatialStaticPos>();
         dbe.RegisterComponentFromAccessor<ClSpatialMeta>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-10_000, -10_000),
             worldMax: new Vector2(10_000, 10_000),
             cellSize: 100f));
         dbe.InitializeArchetypes();
         return dbe;
+    }
+
+    /// <summary>
+    /// The specialised AABB3F scan must skip a degenerate slot without letting it poison the cluster bound.
+    /// </summary>
+    /// <remarks>
+    /// <para><c>RecomputeClusterAabb</c> dispatches AABB3F and AABB2F to specialised scans that reduce in world f32 and convert to cell-relative once per
+    /// cluster. Two things in that rewrite could regress silently, and neither is visible in a bound that merely looks plausible.</para>
+    /// <para>The subject is the degeneracy test, rewritten from <c>IsNaN(a) || IsNaN(b) || a &gt; b</c> to <c>!(a &lt;= b)</c>. Those are identical
+    /// under IEEE comparison — every ordered compare against NaN is false — but only if the rewrite kept the negation. Drop it and a NaN slot is ACCEPTED,
+    /// and then min/max propagate the NaN to the whole cluster: every query against that cell either matches everything or nothing, depending on which side
+    /// of the compare the NaN lands. This test writes a NaN box into an occupied slot and requires the other two entities to still bound it exactly.</para>
+    /// <para>The second is the empty result. A cluster whose every slot is degenerate must return the <c>Empty</c> sentinel — <c>+Infinity</c> on MinX — because
+    /// that is what the callers test to decide whether to publish an AABB at all. Returning a zero box instead would insert a cluster at the origin.</para>
+    /// </remarks>
+    [Test]
+    public unsafe void TickFence_DegenerateSlot_IsSkippedWithoutPoisoningTheClusterBound()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId a, b, bad;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pa = MakePos(10, 10, 10, size: 1f);
+            var pb = MakePos(20, 20, 20, size: 1f);
+            var pbad = MakePos(1000, 1000, 1000, size: 1f);
+            a = tx.Spawn<ClSpatialUnit>(ClSpatialUnit.Pos.Set(in pa), ClSpatialUnit.Meta.Set(new ClSpatialMeta { Tag = 1 }));
+            b = tx.Spawn<ClSpatialUnit>(ClSpatialUnit.Pos.Set(in pb), ClSpatialUnit.Meta.Set(new ClSpatialMeta { Tag = 2 }));
+            bad = tx.Spawn<ClSpatialUnit>(ClSpatialUnit.Pos.Set(in pbad), ClSpatialUnit.Meta.Set(new ClSpatialMeta { Tag = 3 }));
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        // Make the third entity degenerate in place with an INVERTED box (min above max) rather than a NaN one.
+        //
+        // NaN cannot reach this scan through a write at all: DetectClusterMigrations validates the centre first and throws
+        // "Non-finite position on spatial entity" before AabbRefresh ever runs. An inverted box is finite, passes that guard, and is the degeneracy form the
+        // scan actually has to handle — which makes it the only form worth asserting on here. Discovering that cost one red test, and it is the reason this
+        // comment exists rather than a NaN literal.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            ref var pos = ref tx.OpenMut(bad).Write(ClSpatialUnit.Pos);
+            pos.Bounds = new AABB3F
+            {
+                MinX = 60f, MinY = 60f, MinZ = 60f,
+                MaxX = 40f, MaxY = 40f, MaxZ = 40f,
+            };
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(2);
+
+        var cs = dbe._archetypeStates[Archetype<ClSpatialUnit>.Metadata.ArchetypeId].ClusterState;
+        var chunkId = cs.ActiveClusterIds[0];
+        var aabb = cs.ClusterAabbs[chunkId];
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(float.IsNaN(aabb.MinX), Is.False, "the cluster minimum is not a number");
+            Assert.That(float.IsNaN(aabb.MaxX), Is.False, "the cluster maximum is not a number");
+
+            // The two healthy entities span 9..21 in world space on every axis; the stored bound is cell-relative and rounded OUTWARD, so it must contain
+            // that span rather than equal it exactly.
+            var cellKey = cs.ClusterCellMap[chunkId];
+            dbe.SpatialGrid.CellOrigin(cellKey, out var ox, out var oy, out var oz);
+            const string Contains = "the bound must still contain the surviving entities";
+            Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MinX, ox), Is.LessThanOrEqualTo(9d), Contains);
+            Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MaxX, ox), Is.GreaterThanOrEqualTo(21d), Contains);
+            Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MaxY, oy), Is.GreaterThanOrEqualTo(21d), Contains);
+            Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MaxZ, oz), Is.GreaterThanOrEqualTo(21d), Contains);
+
+            // And it must NOT have been stretched to the degenerate entity's old position at 1000.
+            // The inverted box spans 40..60, entirely outside the healthy 9..21 span. Accepting it would stretch the bound to 60.
+            Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MaxX, ox), Is.LessThan(30d),
+                "the degenerate slot was folded into the bound instead of being skipped");
+        });
+
+        _ = a;
+        _ = b;
     }
 
     private static ClSpatialPos MakePos(float x, float y, float z, float size = 1.0f, float speed = 0f) =>
@@ -227,10 +307,16 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
         tx.Spawn<ClSpatialUnit>(ClSpatialUnit.Pos.Set(in pos), ClSpatialUnit.Meta.Set(in met));
         tx.Commit();
 
+        // The shared per-table R-Tree this test used to assert was empty is gone (#872 step 13), so emptiness is no longer a property that can hold or
+        // fail — what survives is that a spatial component still gets its FIELD metadata, which the cluster path decodes bounds with, and that the entity
+        // is reachable through the cluster index. AC-13.3 is what now guarantees no second index home has reappeared.
         var table = dbe.GetComponentTable<ClSpatialPos>();
-        Assert.That(table.SpatialIndex, Is.Not.Null);
-        Assert.That(table.SpatialIndex.DynamicTree.EntityCount, Is.EqualTo(0),
-            "Shared per-table R-Tree should be empty — cluster entities use per-archetype tree");
+        Assert.Multiple(() =>
+        {
+            Assert.That(table.SpatialIndex, Is.Not.Null, "a component with [SpatialIndex] must still carry its field metadata");
+            Assert.That(table.SpatialIndex.Descriptor.CoordCount, Is.EqualTo(6), "AABB3F is a 3D variant");
+            Assert.That(CountClSpatialEntities(dbe), Is.EqualTo(1), "the spawned entity is not reachable through the cluster index");
+        });
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -694,7 +780,7 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
         var dbe = sp.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClSpatialPos>();
         dbe.RegisterComponentFromAccessor<ClSpatialMeta>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-10_000, -10_000),
             worldMax: new Vector2(10_000, 10_000),
             cellSize: 100f));

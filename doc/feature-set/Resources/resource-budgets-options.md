@@ -1,11 +1,11 @@
 ---
 uid: feature-resources-resource-budgets-options
 title: 'Resource Budget Configuration (ResourceOptions)'
-description: 'Startup-time sizing of every fixed/growable resource limit, with a Validate() sanity check.'
+description: 'Startup-time sizing of every fixed/growable resource limit, range-checked at DI resolution.'
 ---
 
 # Resource Budget Configuration (ResourceOptions)
-> Startup-time sizing of every fixed/growable resource limit, with a Validate() sanity check.
+> Startup-time sizing of every fixed/growable resource limit, range-checked at DI resolution.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🔵 Core · **Category:** [Resources](./README.md)
 
@@ -13,17 +13,17 @@ description: 'Startup-time sizing of every fixed/growable resource limit, with a
 Typhon's memory-bound components (page cache, WAL ring/segments, shadow buffer) must be sized
 before the engine starts — there's no GC to grow them lazily, and getting it wrong either wastes
 memory or causes runtime exhaustion under load. Applications need one place to declare these
-limits, in domain units (pages, transactions, bytes), and a way to catch a misconfiguration —
-fixed allocations that don't fit the declared memory budget — at startup instead of in production.
+limits, in domain units (transactions, bytes, milliseconds), and a way to catch an out-of-range
+value at startup instead of in production.
 
 ## ⚙️ How it works (in brief)
 `ResourceOptions` is a plain settings object hung off `DatabaseEngineOptions.Resources`. Each
-property maps to one bounded resource's limit (page cache pages, max active transactions, WAL ring
-bytes, WAL segment count/size, shadow buffer pages, checkpoint thresholds) and ships with a sane
+property maps to one bounded resource's limit (max active transactions, WAL ring bytes, page
+checksum verification, checkpoint cadence and barrier timeout) and ships with a sane
 default. Components never see this object directly — each receives only its own limit at
-construction. There is no overall memory budget and no manual validation call: the
-`TotalMemoryBudgetBytes` property and the `Validate()` method were removed in #148 as vestigial
-(they governed no allocation). Each wired knob is range-checked automatically at DI resolution by
+construction. There is no overall memory budget and no manual validation call: `ResourceOptions` has
+no `TotalMemoryBudgetBytes` property and no `Validate()` method, because neither would govern an
+allocation. Each wired knob is range-checked automatically at DI resolution by
 `DatabaseEngineOptionsValidator`.
 
 ## 💻 Usage
@@ -58,9 +58,9 @@ services.AddManagedPagedMMF(o => o.DatabaseCacheSize = 512UL << 20);   // 512 Mi
 | `CheckpointIntervalMs` | 30000 | Idle checkpoint cadence |
 | `CheckpointBarrierTimeoutMs` | 30000 | How long a checkpoint waits for its barrier before giving up |
 
-That is the entire type. #148 removed `PageCachePages`, `MaxPageCachePages`, `TransactionPoolSize`,
-`WalBackPressureThreshold`, `WalMaxSegmentSizeBytes`, `WalMaxSegments`, `CheckpointMaxDirtyPages` and
-`ShadowBufferPages` as vestigial — nothing read them. Page-cache size is
+That is the entire type. There is no `PageCachePages`, `MaxPageCachePages`, `TransactionPoolSize`,
+`WalBackPressureThreshold`, `WalMaxSegmentSizeBytes`, `WalMaxSegments`, `CheckpointMaxDirtyPages` or
+`ShadowBufferPages` knob — nothing would read one. Page-cache size is
 `PagedMMFOptions.DatabaseCacheSize` (default 256 MiB); WAL segment sizing and group-commit cadence are
 `WalWriterOptions`; the transaction pool is a `const 16` in `TransactionChain`, not a knob.
 
@@ -73,7 +73,7 @@ That is the entire type. #148 removed `PageCachePages`, `MaxPageCachePages`, `Tr
   sums your allocations against a memory ceiling — a configuration that passes can still ask for
   more RAM than the machine has.
 - There is no `Validate()`, `CalculateFixedAllocationBytes()` or `CalculateAvailableBudgetBytes()`
-  to call — all three went with #148's purge.
+  to call — the type exposes no budgeting API at all.
 - Each component receives only its own limit (constructor injection) — there is no way to read
   another component's budget back out of a live engine via this type.
 - The exhaustion policy each limit triggers (FailFast, Wait, Evict, Degrade) is fixed per-component

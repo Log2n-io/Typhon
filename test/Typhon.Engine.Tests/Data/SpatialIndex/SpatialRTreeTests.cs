@@ -95,7 +95,7 @@ private static double[] MakeCoords(SpatialVariant variant, double minX, double m
         var results = new List<long>();
         foreach (var result in tree.QueryAABB(queryCoords))
         {
-            results.Add(result.EntityId);
+            results.Add(result.PayloadId);
         }
         return results;
     }
@@ -454,7 +454,7 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
 
         var coords = MakeCoords(variant, 1, 2, 3, 4);
         uint mask = 0x0000_000F;
-        var (leafId, slot) = tree.Insert(100, 0, coords, ref accessor, categoryMask: mask);
+        var (leafId, slot) = tree.Insert(100, coords, ref accessor, categoryMask: mask);
 
         // Read back the stored mask
         byte* leafBase = accessor.GetChunkAddress(leafId);
@@ -489,7 +489,7 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
         for (int i = 0; i < 5; i++)
         {
             var coords = MakeCoords(variant, i * 10, 0, i * 10 + 5, 5);
-            tree.Insert(100 + i, 0, coords, ref accessor, categoryMask: (uint)(1 << i));
+            tree.Insert(100 + i, coords, ref accessor, categoryMask: (uint)(1 << i));
         }
 
         // Query with mask=0 (no filter) — should return all 5
@@ -497,7 +497,7 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
         var queryCoords = MakeCoords(variant, -100, -100, 200, 200);
         foreach (var r in tree.QueryAABB(queryCoords, categoryMask: 0))
         {
-            results.Add(r.EntityId);
+            results.Add(r.PayloadId);
         }
         Assert.That(results, Has.Count.EqualTo(5), "No-filter query should return all entities");
 
@@ -526,9 +526,9 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
         uint maskB = 0x02;  // Category B
         uint maskAB = 0x03; // Both categories
 
-        tree.Insert(1, 0, MakeCoords(variant, 0, 0, 5, 5), ref accessor, categoryMask: maskA);
-        tree.Insert(2, 0, MakeCoords(variant, 10, 0, 15, 5), ref accessor, categoryMask: maskB);
-        tree.Insert(3, 0, MakeCoords(variant, 20, 0, 25, 5), ref accessor, categoryMask: maskAB);
+        tree.Insert(1, MakeCoords(variant, 0, 0, 5, 5), ref accessor, categoryMask: maskA);
+        tree.Insert(2, MakeCoords(variant, 10, 0, 15, 5), ref accessor, categoryMask: maskB);
+        tree.Insert(3, MakeCoords(variant, 20, 0, 25, 5), ref accessor, categoryMask: maskAB);
 
         var queryCoords = MakeCoords(variant, -100, -100, 200, 200);
 
@@ -536,7 +536,7 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
         var resultsA = new List<long>();
         foreach (var r in tree.QueryAABB(queryCoords, categoryMask: maskA))
         {
-            resultsA.Add(r.EntityId);
+            resultsA.Add(r.PayloadId);
         }
         Assert.That(resultsA, Has.Count.EqualTo(2), "Category A query");
         Assert.That(resultsA, Does.Contain(1L));
@@ -546,7 +546,7 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
         var resultsB = new List<long>();
         foreach (var r in tree.QueryAABB(queryCoords, categoryMask: maskB))
         {
-            resultsB.Add(r.EntityId);
+            resultsB.Add(r.PayloadId);
         }
         Assert.That(resultsB, Has.Count.EqualTo(2), "Category B query");
         Assert.That(resultsB, Does.Contain(2L));
@@ -556,7 +556,7 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
         var resultsAB = new List<long>();
         foreach (var r in tree.QueryAABB(queryCoords, categoryMask: maskAB))
         {
-            resultsAB.Add(r.EntityId);
+            resultsAB.Add(r.PayloadId);
         }
         Assert.That(resultsAB, Has.Count.EqualTo(1), "Category A+B conjunctive query");
         Assert.That(resultsAB, Does.Contain(3L));
@@ -582,8 +582,8 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
         var accessor = segment.CreateChunkAccessor();
 
         // Insert two entities: one with mask 0x01, one with mask 0x02
-        var (leaf1, slot1) = tree.Insert(1, 0, MakeCoords(variant, 0, 0, 5, 5), ref accessor, categoryMask: 0x01);
-        tree.Insert(2, 0, MakeCoords(variant, 10, 0, 15, 5), ref accessor, categoryMask: 0x02);
+        var (leaf1, slot1) = tree.Insert(1, MakeCoords(variant, 0, 0, 5, 5), ref accessor, categoryMask: 0x01);
+        tree.Insert(2, MakeCoords(variant, 10, 0, 15, 5), ref accessor, categoryMask: 0x02);
 
         // Union should have both bits
         byte* leafBase = accessor.GetChunkAddress(leaf1);
@@ -616,7 +616,7 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
         var accessor = segment.CreateChunkAccessor();
 
         // Insert with default mask (uint.MaxValue)
-        var (leafId, slot) = tree.Insert(1, 0, MakeCoords(variant, 0, 0, 5, 5), ref accessor);
+        var (leafId, slot) = tree.Insert(1, MakeCoords(variant, 0, 0, 5, 5), ref accessor);
 
         // Query with mask=0x01 — should find it (has all bits set)
         var queryCoords = MakeCoords(variant, -100, -100, 200, 200);
@@ -674,7 +674,7 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
             double y = rng.NextDouble() * 1000;
             var coords = MakeCoords(variant, x, y, x + 5, y + 5);
             uint mask = (uint)(1 << rng.Next(0, 4)); // One of 4 category bits
-            tree.Insert(i + 1, 0, coords, ref accessor, categoryMask: mask);
+            tree.Insert(i + 1, coords, ref accessor, categoryMask: mask);
             oracle.Insert(i + 1, coords, mask);
         }
 
@@ -687,7 +687,7 @@ public void QueryAABB_vs_BruteForce_RandomData(SpatialVariant variant)
             var treeResults = new HashSet<long>();
             foreach (var r in tree.QueryAABB(queryCoords, categoryMask: queryMask))
             {
-                treeResults.Add(r.EntityId);
+                treeResults.Add(r.PayloadId);
             }
 
             var oracleResults = new HashSet<long>(oracle.QueryAABB(queryCoords, queryMask));

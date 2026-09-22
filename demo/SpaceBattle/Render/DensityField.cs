@@ -125,17 +125,19 @@ internal sealed class DensityField
         {
             for (var cx = 0; cx < g.GridWidth; cx++)
             {
-                var n = host.CellEntityCount(host.Grid.ComputeCellKey(cx, cy));
+                var n = host.CellEntityCount(host.Grid.ComputeCellKey(cx, cy, 0));
                 if (n <= 0)
                 {
                     continue;
                 }
-                var x0 = g.WorldMin.X + cx * g.CellSize;
-                var y0 = g.WorldMin.Y + cy * g.CellSize;
+                // f64 frame, f32 raster: the cell origin is computed in double and narrowed once for the bin lookup (#914).
+                var x0 = (float)(g.WorldMin.X + cx * g.CellSize);
+                var y0 = (float)(g.WorldMin.Y + cy * g.CellSize);
+                var cellSize = (float)g.CellSize;
                 var bx0 = BinIndex(x0);
                 var by0 = BinIndex(y0);
-                var bx1 = BinIndex(x0 + g.CellSize - 0.001f);
-                var by1 = BinIndex(y0 + g.CellSize - 0.001f);
+                var bx1 = BinIndex(x0 + cellSize - 0.001f);
+                var by1 = BinIndex(y0 + cellSize - 0.001f);
                 var covered = (bx1 - bx0 + 1) * (by1 - by0 + 1);
                 var share = n / (float)covered;
                 for (var by = by0; by <= by1; by++)

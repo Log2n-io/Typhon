@@ -311,6 +311,64 @@ class ClusterQueryTests : TestBase<ClusterQueryTests>
         Assert.That(result, Has.Count.EqualTo(5));
     }
 
+    /// <summary>
+    /// A zone map maintained by the WIDEN path must keep covering the slots that did NOT change.
+    /// </summary>
+    /// <remarks>
+    /// <para>Step ④ of Prep no longer re-derives min/max from every occupied slot of every dirty cluster; it widens from the slots the tick&apos;s dirty mask
+    /// names, and re-derives exactly on a 1-in-16 rotation, because narrowing is the only part that needs the full scan and a too-wide bound costs pruning
+    /// rather than correctness.</para>
+    /// <para><b>The shape is the whole test, and the first version of it was worthless.</b> Writing every entity each tick makes the changed mask equal the
+    /// occupancy, and then "widen from the mask" and "recompute from occupancy" are the same operation — an ablation that turned the widen into a REPLACE
+    /// left the fixture green. Here only every fourth entity is written, and the cluster&apos;s maximum is held by an entity that is never written at all: a
+    /// bound rebuilt from the changed slots alone loses that maximum, the query for it prunes the cluster, and the entity becomes unfindable while still
+    /// sitting in storage. That is the exact failure mode the widen contract exists to forbid.</para>
+    /// </remarks>
+    [Test]
+    public void ZoneMapPrune_WidenMustNotDropTheSlotsThatDidNotChange()
+    {
+        using var dbe = SetupEngine();
+
+        const int population = 100;
+        var ids = new EntityId[population];
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < population; i++)
+            {
+                var stats = new ClQStats((i + 1) * 10, 1);     // 10 .. 1000
+                var tag = new ClQTag(i);
+                ids[i] = tx.Spawn<ClQUnit>(ClQUnit.Stats.Set(in stats), ClQUnit.Tag.Set(in tag));
+            }
+
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        // The extreme is entity 99 (score 1000), and 99 % 4 != 0, so it is never written below. The threshold is 995 rather than 990 because entity 98
+        // scores exactly 990 and would match as well — an off-by-one that made an earlier version of this assertion expect the wrong count.
+        for (var tick = 2; tick <= 15; tick++)
+        {
+            using (var tx = dbe.CreateQuickTransaction())
+            {
+                for (var i = 0; i < population; i += 4)
+                {
+                    ref var stats = ref tx.OpenMut(ids[i]).Write(ClQUnit.Stats);
+                    stats.Score = 500 + (tick % 3);          // all written entities crowd into the middle of the range
+                }
+
+                tx.Commit();
+            }
+
+            dbe.WriteTickFence(tick);
+
+            using var read = dbe.CreateQuickTransaction();
+            var high = read.Query<ClQUnit>().WhereField<ClQStats>(s => s.Score >= 995).Execute();
+            Assert.That(high, Has.Count.EqualTo(1),
+                $"tick {tick}: the entity holding the cluster maximum was pruned away — the zone map narrowed to the slots that changed");
+        }
+    }
+
     [Test]
     public void ZoneMapPrune_EqualityQuery_CorrectResult()
     {

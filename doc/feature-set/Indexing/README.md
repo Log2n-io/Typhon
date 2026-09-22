@@ -5,7 +5,7 @@ description: 'Concurrent B+Tree secondary indexes — automatically built and ma
 ---
 
 # Indexing
-> Concurrent B+Tree secondary indexes — automatically built and maintained per `[Index]`-tagged `ComponentTable` field, in four key-width-specialized variants under a per-node optimistic-concurrency (OLC) protocol — back point lookups, ordered range scans, and (on `Versioned` components) MVCC-correct historical reconstruction of index membership over time. Primary-key access is no longer part of this surface: the PK B+Tree has been removed in favor of `EntityMap`/ECS entity APIs.
+> Concurrent B+Tree secondary indexes — automatically built and maintained per `[Index]`-tagged `ComponentTable` field, in four key-width-specialized variants under a per-node optimistic-concurrency (OLC) protocol — back point lookups and ordered range scans, MVCC-correct at your transaction's snapshot. Index membership is current-state only, on `Versioned` components as much as anywhere else: point-in-time reads work through the revision chain (see [Temporal Queries](../Querying/temporal-queries.md)), not through the index. Primary-key access is not part of this surface: `EntityMap` and the ECS entity APIs serve it instead.
 
 > 🔬 **Recommended:** read [in-depth-overview/03-indexing.md](../../in-depth-overview/03-indexing.md) (Chapter 03: Indexing) first to understand the overall design and concepts behind this category, before diving into the specific features below.
 

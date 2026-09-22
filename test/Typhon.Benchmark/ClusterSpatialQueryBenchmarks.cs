@@ -33,7 +33,7 @@ namespace Typhon.Benchmark;
 struct ClQBenchPos
 {
     [Field]
-    [SpatialIndex(1.0f)]
+    [SpatialIndex]
     public AABB2F Bounds;
 }
 
@@ -102,7 +102,7 @@ public class ClusterAabbQueryBenchmarks : IDisposable
         _dbe.RegisterComponentFromAccessor<ClQBenchPos>();
 
         // Issue #230 Option B: ConfigureSpatialGrid is required for cluster spatial archetypes.
-        _dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        _dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(WorldSize, WorldSize),
             cellSize: CellSize));
@@ -264,7 +264,7 @@ public class ClusterRadiusQueryBenchmarks : IDisposable
         _dbe = _sp.GetRequiredService<DatabaseEngine>();
 
         _dbe.RegisterComponentFromAccessor<ClQBenchPos>();
-        _dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        _dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(WorldSize, WorldSize),
             cellSize: CellSize));

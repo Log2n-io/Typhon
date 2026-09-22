@@ -21,6 +21,7 @@ import QueryConsolePanel from '@/panels/QueryConsole/QueryConsolePanel';
 import EngineLiveHealthPanel from '@/panels/EngineLiveHealth/EngineLiveHealthPanel';
 import DevFixturePanel from '@/panels/DevFixture/DevFixturePanel';
 import IntegrityPanel from '@/panels/Integrity/IntegrityPanel';
+import SpatialMaintenancePanel from '@/panels/SpatialMaintenance/SpatialMaintenancePanel';
 
 // AC2.11 / AC3.11 — per-view conformance, parameterized over the reintroduced Stage-2/3 views (the conformance
 // doc's suites D + E). Each view is rendered in its **cold** state (no session → hooks disabled → empty/loading)
@@ -80,6 +81,10 @@ const VIEWS: { id: string; label: string; render: () => React.JSX.Element }[] = 
   // is a sentence explaining what the view does and that reading is safe, which is the PC-2 shape. Enrolled
   // in its *docked* form; the full-bleed no-session form wraps this same component, so it inherits both.
   { id: 'Integrity', label: 'Integrity', render: () => <IntegrityPanel /> },
+  // #911 O3 Spatial Maintenance: pure DOM (header + stat groups). The conformance fixture is an OPEN session, so this
+  // renders its attach-only cold state — which is the branch D + E need, and is a sentence explaining why the view is
+  // empty rather than an empty panel.
+  { id: 'SpatialMaintenance', label: 'Spatial Maintenance', render: () => <SpatialMaintenancePanel {...NO_PROPS} /> },
 ];
 
 function mount(view: (typeof VIEWS)[number]) {

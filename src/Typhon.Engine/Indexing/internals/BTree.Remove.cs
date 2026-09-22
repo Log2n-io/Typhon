@@ -395,6 +395,14 @@ internal abstract partial class BTree<TKey, TStore>
 
                     if (order == 0 && (Root == ll || ll.GetCount(ref accessor) > ll.GetCapacity() / 2))
                     {
+                        if (args.OnlyIfBufferEmpty && _storage.BufferElementCount(ll.GetFirst(ref accessor).Value, ref args.SiblingAccessor) != 0)
+                        {
+                            // Present and refilled since the caller emptied it: the key stays. Answered here — a fall-through to the general path would only
+                            // re-find the same key and reach the same verdict after locking its neighbours (IXW-06).
+                            ll.GetLatch(ref accessor).AbortWriteLock();
+                            return;
+                        }
+
                         args.SetRemovedValue(ll.PopFirstInternal(ref accessor).Value);
                         ll.GetLatch(ref accessor).WriteUnlock();
                         _hasCachedLastKey = false;
@@ -446,6 +454,12 @@ internal abstract partial class BTree<TKey, TStore>
 
                     if (order == 0 && (Root == rll || rll.GetCount(ref accessor) > rll.GetCapacity() / 2))
                     {
+                        if (args.OnlyIfBufferEmpty && _storage.BufferElementCount(rll.GetLast(ref accessor).Value, ref args.SiblingAccessor) != 0)
+                        {
+                            rll.GetLatch(ref accessor).AbortWriteLock();   // present and refilled — see the begin fast path
+                            return;
+                        }
+
                         args.SetRemovedValue(rll.PopLastInternal(ref accessor).Value);
                         rll.GetLatch(ref accessor).WriteUnlock();
                         _hasCachedLastKey = false;
@@ -633,6 +647,16 @@ internal abstract partial class BTree<TKey, TStore>
             node.GetLatch(ref accessor).AbortWriteLock(); // key not found — didn't modify leaf
             completed = true;
             return false; // key not found — no merge
+        }
+
+        // IXW-06: a key whose buffer was refilled since the caller emptied it stays, and the answer is known here — before the slow path below locks the
+        // leaf's neighbours and its recorded path for a merge that will not happen, and bumps every one of their versions on the way out. The same test in
+        // RemoveLeaf is the backstop for any other caller; this one is the path that runs.
+        if (args.OnlyIfBufferEmpty && _storage.BufferElementCount(node.GetItem(keyIndex, ref accessor).Value, ref sibAccessor) != 0)
+        {
+            node.GetLatch(ref accessor).AbortWriteLock();   // nothing modified
+            completed = true;
+            return false;
         }
 
         // Fast path: leaf won't underflow after remove (count > capacity/2) or root leaf (depth == 0).

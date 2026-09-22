@@ -290,7 +290,10 @@ public class TraceEventEncodeEquivalenceTests
         Span<byte> bufStruct = stackalloc byte[256];
         ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
 
-        var golden = Convert.FromHexString("3F003C0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F00012CA0000002F010000");
+        // The trailing 00 is the optional-mask byte, which #911 O1 added along with the three per-kind outcome counts. It is APPENDED after the required
+        // payload, so a record written before the change is a strict prefix of one written after it: the header's own size field is what tells a reader
+        // whether the mask is there, and a decoder that checks it reads both. The size byte moves 3F -> 40 for the same reason.
+        var golden = Convert.FromHexString("40003C0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F00012CA0000002F01000000");
         AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
     }
 
@@ -1773,57 +1776,10 @@ public class TraceEventEncodeEquivalenceTests
         AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
     }
 
-    [Test]
-    public void SpatialMaintainInsertEvent_StructEncode_MatchesCodec()
-    {
-        var ev = new SpatialMaintainInsertEvent
-        {
-            Header = new TraceSpanHeader
-            {
-                ThreadSlot = ThreadSlot,
-                StartTimestamp = StartTs,
-                SpanId = SpanId,
-                ParentSpanId = ParentSpanId,
-                TraceIdHi = TraceIdHi,
-                TraceIdLo = TraceIdLo,
-            },
-            EntityPK = 1001L,
-            ComponentTypeId = 0x1300,
-            DidDegenerate = 0x13,
-        };
-
-        Span<byte> bufStruct = stackalloc byte[256];
-        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
-
-        var golden = Convert.FromHexString("40008A0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F0E903000000000000001313");
-        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
-    }
-
-    [Test]
-    public void SpatialMaintainUpdateSlowPathEvent_StructEncode_MatchesCodec()
-    {
-        var ev = new SpatialMaintainUpdateSlowPathEvent
-        {
-            Header = new TraceSpanHeader
-            {
-                ThreadSlot = ThreadSlot,
-                StartTimestamp = StartTs,
-                SpanId = SpanId,
-                ParentSpanId = ParentSpanId,
-                TraceIdHi = TraceIdHi,
-                TraceIdLo = TraceIdLo,
-            },
-            EntityPK = 1001L,
-            ComponentTypeId = 0x1300,
-            EscapeDistSq = 3.5f,
-        };
-
-        Span<byte> bufStruct = stackalloc byte[256];
-        ev.EncodeTo(bufStruct, EndTs, out var lenStruct);
-
-        var golden = Convert.FromHexString("43008B0744443333222211111111000000000000DDDDCCCCBBBBAAAAF0DEBC9A78563412010F0F0F0F0F0F0F0FF0F0F0F0F0F0F0F0E903000000000000001300006040");
-        AssertSpanEqualsGolden(bufStruct, lenStruct, golden);
-    }
+    // SpatialMaintainInsertEvent and SpatialMaintainUpdateSlowPathEvent had golden-encoding tests here until #872
+    // step 13. Both producer structs were emitted only from SpatialMaintainer's entity-tree writers, which went with
+    // the tree; a golden test over a producer nothing can call proves the codec agrees with a struct that will never
+    // encode anything. Their TraceEventKind values (138, 139) are reserved rather than reused — see the enum.
 
     [Test]
     public void SpatialTierIndexRebuildEvent_StructEncode_MatchesCodec()

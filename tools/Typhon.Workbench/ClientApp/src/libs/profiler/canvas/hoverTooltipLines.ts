@@ -33,6 +33,29 @@ export function buildHoverTooltipLines(hover: TimeAreaHover): string[] | null {
         if (s.rawEvent.archetypeId !== undefined) lines.push(`Archetype: #${s.rawEvent.archetypeId}`);
         if (s.rawEvent.migrationCount !== undefined) lines.push(`Entities: ${s.rawEvent.migrationCount.toLocaleString()}`);
         if (s.rawEvent.componentCount !== undefined) lines.push(`Components: ${s.rawEvent.componentCount.toLocaleString()}`);
+        // #911 O1: a slice mixes all three kinds because the queue is sorted by destination cell, so the split is what
+        // makes the span answerable. Absent on traces from an engine before #911.
+        const kinds: string[] = [];
+        if (s.rawEvent.crossingCount) kinds.push(`${s.rawEvent.crossingCount.toLocaleString()} crossing`);
+        if (s.rawEvent.relocationCount) kinds.push(`${s.rawEvent.relocationCount.toLocaleString()} relocation`);
+        if (s.rawEvent.repairCount) kinds.push(`${s.rawEvent.repairCount.toLocaleString()} repair`);
+        if (kinds.length > 0) lines.push(`Kinds: ${kinds.join(' · ')}`);
+      }
+      // SpatialRepairUnit (64): begin = (archetype, cellKey, clusterCount, entityCount), optional = degradation /
+      // valveFired / movedCount. A unit with movedCount 0 is a cell that was already packed — the gather and the sort
+      // were still paid, which is exactly what this span exists to make visible.
+      if ((s.kind as number) === 64 && s.rawEvent) {
+        if (s.rawEvent.archetypeId !== undefined) lines.push(`Archetype: #${s.rawEvent.archetypeId}`);
+        if (s.rawEvent.cellKey !== undefined) lines.push(`Cell: #${s.rawEvent.cellKey}`);
+        if (s.rawEvent.clusterCount !== undefined) lines.push(`Clusters: ${s.rawEvent.clusterCount.toLocaleString()}`);
+        if (s.rawEvent.entityCount !== undefined) lines.push(`Entities: ${s.rawEvent.entityCount.toLocaleString()}`);
+        if (s.rawEvent.movedCount !== undefined) {
+          lines.push(s.rawEvent.movedCount === 0
+            ? 'Moved: 0 (cell was already packed)'
+            : `Moved: ${s.rawEvent.movedCount.toLocaleString()}`);
+        }
+        if (s.rawEvent.degradation !== undefined) lines.push(`Degradation: ${(s.rawEvent.degradation * 100).toFixed(1)}% of cell`);
+        if (s.rawEvent.valveFired) lines.push('Safety valve: fired (admitted over budget)');
       }
       // SpatialClusterMigrationDetectScan (249): begin = (archetype, scanSlotCount), optional outcomes
       // = migrationsQueued / hysteresisAbsorbed / clustersTouched. Older traces lack the optional set.

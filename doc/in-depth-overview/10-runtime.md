@@ -23,7 +23,7 @@ If you've used Unity DOTS, Bevy, or any modern ECS scheduler, the shape will fee
 | **Tick** | One simulation frame. Driven by `TickDriver`, target rate set by `RuntimeOptions.BaseTickRate` (default 60 Hz). |
 | **Track** | An ordered, tagged container of DAGs. Tracks run sequentially: every DAG of track *N* completes before any DAG of track *N+1* starts. |
 | **DAG** | A dependency graph of systems. DAGs within one track are independent. |
-| **Phase** | DAG-local ordering bucket. Systems in phase *N* finish before any system in phase *N+1* of the same DAG. |
+| **Phase** | DAG-local ordering bucket, not a barrier: a system in phase *N+1* runs after a system in phase *N* only when a declared access conflict or an explicit edge connects them, directly or through other systems; otherwise they may overlap ([§4](#4-the-dag)). |
 | **System** | The unit of work. One of `CallbackSystem`, `QuerySystem`, `PipelineSystem` ([§5](#5-systems)). |
 | **Worker** | A `Typhon.Worker-{i}` thread that picks ready systems off the DAG and runs them. |
 
@@ -93,7 +93,7 @@ schedule.PublicTrack
 var scheduler = schedule.Build(parent: registry.Runtime, logger);
 ```
 
-`DeclareDag` is mandatory — there is no default-DAG convenience. Within a DAG, phase order is a hard barrier; within a phase, edges come from explicit `.After()` / `.Before()` declarations and from access-derived dependencies ([§4](#4-the-dag)).
+`DeclareDag` is mandatory — there is no default-DAG convenience. Within a DAG, phase order is not a barrier: within and across phases, edges come from explicit `.After()` / `.Before()` declarations and from access-derived dependencies ([§4](#4-the-dag)).
 
 ---
 
@@ -108,9 +108,9 @@ A DAG is built once at `RuntimeSchedule.Build()` time and never mutates. Each sy
 | `Name`, `Type`, `Index` | Identity. `Index` is the canonical slot in `DagScheduler.Systems`. |
 | `DagId`, `Phase`, `PhaseIndex` | Owning DAG, resolved phase, DAG-local phase index. |
 | `Successors`, `PredecessorCount` | Graph topology computed by `DagBuilder.Build`. |
-| `TotalChunks` | Static chunk count for pipeline/parallel systems. |
+| `TotalChunks` | Chunk count: static for a pipeline, the live dispatch's for a parallel `QuerySystem`. |
 | **`RuntimeChunkCount`** | Per-tick override set by `OnPrepare` for chunked-callback systems (fence work-planner uses this to size `FenceExec`). |
-| **`ExplicitChunkCount`** | Static chunk count from `SystemBuilder.ChunkedParallel(N)`. Zero = "derive from entity count". |
+| **`ExplicitChunkCount`** | Static chunk count from `SystemBuilder.ChunkedParallel(N)`. Zero = "derive it per dispatch, from measured cost or entity count" (`CostBasedChunking`). |
 | `Access` | The `SystemAccessDescriptor` populated from `b.Reads<T>()` / `b.Writes<T>()` declarations. |
 
 ### `AccessDagDeriver` — derive edges from declared access
@@ -121,7 +121,7 @@ Once phases and explicit edges are known, the deriver walks each DAG's systems a
 
 1. **Validates conflicts** as hard errors (W×W with no ordering, R×W plain without `ReadsFresh` / `ReadsSnapshot`, resource W×W, `ExclusivePhase` violations). `ReadsSnapshot` on a non-`Versioned` component (`SingleVersion` or `Transient`) is *also* a hard `Build()`-time error — SV/Transient have no per-tick consistent snapshot to give, regardless of `CommitDiscipline` (rule AC-05 / CM-04).
 2. **Emits intra-phase edges**: `ReadsFresh` ⇒ writer-before-reader, `ReadsSnapshot` ⇒ reader-before-writer (snapshot is the previous-tick value, so the writer can run concurrently *after* the reader started), event producer-before-consumer, resource R/W ordering.
-3. **Emits cross-phase edges only on conflict** (post-2026-05-07 change): a phase-(N+1) system with no access conflict against a phase-N system can run concurrently with it. Phase order is still a coarse contract, but no longer an all-to-all barrier.
+3. **Emits cross-phase edges only on conflict**: a phase-(N+1) system with no access conflict against a phase-N system can run concurrently with it. Phase order is a coarse contract, not an all-to-all barrier.
 
 The result is a single static graph the scheduler walks every tick.
 
@@ -196,12 +196,11 @@ The `-4` leaves headroom for the TickDriver, the WAL writer ([11-durability](11-
 
 ### Between-tick wait — kernel wait only, *not* 3-phase
 
-This is a deliberate difference from the TickDriver. The scheduler holds a single signal:
+This is a deliberate difference from the TickDriver. Each worker owns one signal:
 
 ```csharp
-// _tickStartSignal = ManualResetEventSlim(initialState: false, spinCount: 0)
-// "SpinCount=0: go straight to kernel wait" — DagScheduler.cs:135
-private readonly ManualResetEventSlim _tickStartSignal = new(false, 0);
+// One ManualResetEventSlim(initialState: false, spinCount: 0) per worker — straight to a kernel wait
+private readonly ManualResetEventSlim[] _workerWake;
 ```
 
 In `WorkerLoop`, between ticks:
@@ -209,18 +208,19 @@ In `WorkerLoop`, between ticks:
 ```csharp
 while (_tickGeneration == lastGen) {
     if (_workerShutdown != 0) return;
-    _tickStartSignal.Wait(TimeSpan.FromMilliseconds(50));
+    wake.Wait(TimeSpan.FromMilliseconds(50));
+    wake.Reset();   // consume the Set before re-checking the generation
 }
 ```
 
-That's it — a pure 50 ms kernel wait, no user-mode spinning, no yield phase. The TickDriver sets the signal when it bumps `_tickGeneration` to start a new tick. Wake latency is the kernel-transition cost (~1–5 µs), which is negligible against a 16 ms tick at 60 Hz. **Do not confuse this with the TickDriver's 3-phase Sleep/Yield/Spin** — that strategy is for the metronome only, because the *driver* needs sub-microsecond accuracy at the wake point. Workers need only "wake somewhere in the next millisecond"; spinning here would waste a core for no benefit.
+That's it — a 50 ms kernel wait, no user-mode spinning, no yield phase. The TickDriver bumps `_tickGeneration`, then Sets every worker's event. The events are per worker because one shared event made the woken workers queue on its lock to leave `Wait`: with 32 workers the last one ran ~6 ms after the Set. With an event each, the median worker runs ~85 µs after it and the last ~150 µs. In the SWG Tatooine demo that shortened the tick by 8–12 % at its two smallest populations and by nothing measurable above them. A wake that never reaches its worker is counted when the worker's backstop is what resumes it (`DagScheduler.LostWakeCount`, per tick `TickTelemetry.LostWakes`); one that the next dispatch's Set rescues first leaves no trace, so a non-zero count proves a defect and a zero proves nothing. **Do not confuse this with the TickDriver's 3-phase Sleep/Yield/Spin** — that strategy is for the metronome only, because the *driver* needs sub-microsecond accuracy at the wake point. Workers need only "wake somewhere in the next millisecond"; spinning here would waste a core for no benefit.
 
 ### Within-tick dispatch
 
 Once awake, each worker loops `FindReadySystem` → `ProcessSystem` until `_systemsRemaining == 0`:
 
 - `FindReadySystem` does a linear scan of `_isReady[]` returning a system whose predecessors all completed.
-- `ProcessSystem` claims the system (CAS on `_isReady` for single-shot systems, `Interlocked.Increment(_nextChunk)` for multi-chunk).
+- `ProcessSystem` claims the system: a CAS on `_isReady` for a single-shot system; for a multi-chunk one, `Interlocked.Increment` on its claim word, which packs the live dispatch's chunk count with the next index, so a claim can only name a chunk of the dispatch it came from (rule CD-01).
 - Idle workers (no ready work) spin briefly with PAUSE for the first ~100 iterations, then `Thread.Yield` until work appears or the tick ends.
 
 Failure isolation (the default, `SystemExceptionPolicy.Isolate`): if a system throws, the worker marks `_systemFailed[sysIdx] = true`, propagates failure to its successors, and emits a `SkipReason.DependencyFailed` for them; independent DAG branches keep running. An outer safety-net `try/catch` in `WorkerLoop` ensures even a bug inside a catch handler can't kill the worker — the simulation would otherwise freeze with `_systemsRemaining > 0` forever.
@@ -254,7 +254,7 @@ if (Engine.WalManager == null) {
 }
 ```
 
-Parallel fence is **WAL-mode only** in v1. The per-worker `ChangeSet` cleanup (`ReleaseExcessDirtyMarks`) is correct only in WAL mode — WAL-less mode would risk torn writes across workers touching the same page. When no `WalManager` is configured, the runtime falls back to the serial `WriteTickFence` on the TickDriver thread, which uses the UoW's single-thread `ChangeSet` correctly.
+Parallel fence is **WAL-mode only**. The per-worker `ChangeSet` cleanup (`ReleaseExcessDirtyMarks`) is correct only in WAL mode — WAL-less mode would risk torn writes across workers touching the same page. When no `WalManager` is configured, the runtime falls back to the serial `WriteTickFence` on the TickDriver thread, which uses the UoW's single-thread `ChangeSet` correctly.
 
 The split is also why `EnableParallelFence` exists as an off switch in `RuntimeOptions` — a diagnostic safety valve.
 
@@ -328,7 +328,8 @@ Every tick, on advance, the driver emits a **`Scheduler.Overload.TickMultiplier`
 | `BaseTickRate` | 60 | Target tick rate in Hz. |
 | `WorkerCount` | -1 (auto) | `Math.Max(1, ProcessorCount - 4)`; `1` for serial debug. |
 | `TelemetryRingCapacity` | 1024 | Per-scheduler tick telemetry buffer (must be power of 2). |
-| **`ParallelQueryMinChunkSize`** | **64** | Floor on entities per chunk for parallel `QuerySystem` dispatch. Smaller entity sets still use the parallel path with `totalChunks = 1`. |
+| `CostBasedChunking` | `true` | Size parallel `QuerySystem` chunks from the previous dispatch's measured worker time: spread over `round(WorkerCount × ChunksPerWorker)` chunks while each carries 25–100 µs, fewer below that, up to twice as many above it, so a slow last chunk no longer holds the pool. |
+| **`ParallelQueryMinChunkSize`** | **64** | Floor on entities per chunk for the entity rule — a parallel `QuerySystem`'s first dispatch, a checkerboard system, and every dispatch when `CostBasedChunking` is off. Smaller entity sets still use the parallel path with `totalChunks = 1`. |
 | `EnableParallelFence` | `true` | Off switch for [§7](#7-parallel-fence) — falls back to serial `WriteTickFence`. |
 | `FenceChunkOversubscription` | 2 | Fence chunk cap = `factor × WorkerCount`. Smooths preemption jitter. |
 | `SystemExceptionPolicy` | `Isolate` | What an unhandled system exception costs. `Isolate` skips only the failing branch; `AbortTickAndStop` cancels the rest of the tick and makes the runtime terminal — see [§6](#6-workers). |

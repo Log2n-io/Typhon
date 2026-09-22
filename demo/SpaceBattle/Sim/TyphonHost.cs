@@ -89,7 +89,7 @@ internal sealed class TyphonHost : IDisposable
         DBE.RegisterComponentFromAccessor<Asteroid>();
         DBE.RegisterComponentFromAccessor<PickupInfo>();
 
-        GridConfig = new SpatialGridConfig(
+        GridConfig = SpatialGridConfig.Flat(
             worldMin: Vector2.Zero,
             worldMax: new Vector2(_cfg.WorldSize, _cfg.WorldSize),
             cellSize: _cfg.CellSize,
@@ -348,18 +348,20 @@ internal sealed class TyphonHost : IDisposable
     public int CountEntitiesInRect(in WorldRect rect)
     {
         var g = GridConfig;
-        var inv = 1f / g.CellSize;
-        var cx0 = Math.Clamp((int)MathF.Floor((rect.MinX - g.WorldMin.X) * inv), 0, g.GridWidth - 1);
-        var cy0 = Math.Clamp((int)MathF.Floor((rect.MinY - g.WorldMin.Y) * inv), 0, g.GridHeight - 1);
-        var cx1 = Math.Clamp((int)MathF.Floor((rect.MaxX - g.WorldMin.X) * inv), 0, g.GridWidth - 1);
-        var cy1 = Math.Clamp((int)MathF.Floor((rect.MaxY - g.WorldMin.Y) * inv), 0, g.GridHeight - 1);
+        var inv = (float)(1d / g.CellSize);
+        var worldMinX = (float)g.WorldMin.X;
+        var worldMinY = (float)g.WorldMin.Y;
+        var cx0 = Math.Clamp((int)MathF.Floor((rect.MinX - worldMinX) * inv), 0, g.GridWidth - 1);
+        var cy0 = Math.Clamp((int)MathF.Floor((rect.MinY - worldMinY) * inv), 0, g.GridHeight - 1);
+        var cx1 = Math.Clamp((int)MathF.Floor((rect.MaxX - worldMinX) * inv), 0, g.GridWidth - 1);
+        var cy1 = Math.Clamp((int)MathF.Floor((rect.MaxY - worldMinY) * inv), 0, g.GridHeight - 1);
 
         var total = 0;
         for (var cy = cy0; cy <= cy1; cy++)
         {
             for (var cx = cx0; cx <= cx1; cx++)
             {
-                total += CellEntityCount(Grid.ComputeCellKey(cx, cy));
+                total += CellEntityCount(Grid.ComputeCellKey(cx, cy, 0));
             }
         }
         return total;
@@ -376,22 +378,21 @@ internal sealed class TyphonHost : IDisposable
         return map != null && chunkId < map.Length ? map[chunkId] : -1;
     }
 
+    /// <summary>
+    /// Per-tick migration churn, read through the engine's public telemetry surface (#872 step 1) rather than by summing internal cluster-state fields by
+    /// hand. The old loop enumerated this demo's five archetype ids; <c>GetSpatialTelemetryTotal</c> sums every archetype that owns cluster state, which for
+    /// this demo is the same five.
+    /// </summary>
     public MigrationCounters ReadMigrationCounters()
     {
-        var c = default(MigrationCounters);
-        foreach (var id in new[] { ShipArchetypeId, ShotArchetypeId, StationArchetypeId, RockArchetypeId, LootArchetypeId })
+        var t = DBE.GetSpatialTelemetryTotal();
+        return new MigrationCounters
         {
-            var st = ClusterStateOf(id);
-            if (st == null)
-            {
-                continue;
-            }
-            c.Migrations += st.LastTickMigrationCount;
-            c.HysteresisAbsorbed += st.LastTickHysteresisAbsorbedCount;
-            c.ExecuteMs += st.LastTickMigrationExecuteMs;
-            c.ActiveClusters += st.ActiveClusterCount;
-        }
-        return c;
+            Migrations = t.MigrationCount,
+            HysteresisAbsorbed = t.HysteresisAbsorbedCount,
+            ExecuteMs = t.MigrationExecuteMs,
+            ActiveClusters = t.ActiveClusterCount,
+        };
     }
 
     public void Dispose()

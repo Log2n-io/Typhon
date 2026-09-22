@@ -58,7 +58,7 @@ Every flag follows `<Subsystem><Detail>Active`. There are ~30 subsystem prefixes
 | Query / ECS | `QueryParseActive`, `QueryExecuteIterateActive`, `EcsQueryConstructActive`, `EcsViewIncrementalDrainActive`, `EcsViewDeltaBufferOverflowActive` |
 | Durability | `DurabilityWalOsWriteActive`, `DurabilityWalGroupCommitActive`, `DurabilityCheckpointWriteBatchActive`, `DurabilityRecoveryFpiActive`, `DurabilityUowStateActive` |
 
-The full prefix is mandatory at the call site — there is no `AccessControlActive` (legacy docs claimed there was). It's always `ConcurrencyAccessControlActive`. Same for `StoragePageCacheActive` (not `PagedMMFActive`), `DataIndexBTreeActive` (not `BTreeActive`), `DataTransactionActive` (not `TransactionActive`).
+The full prefix is mandatory at the call site — there is no `AccessControlActive`. It's always `ConcurrencyAccessControlActive`. Same for `StoragePageCacheActive` (not `PagedMMFActive`), `DataIndexBTreeActive` (not `BTreeActive`), `DataTransactionActive` (not `TransactionActive`).
 
 ### Parent-implies-children resolution
 
@@ -176,13 +176,13 @@ Sparse by design — gaps left for related categories to grow contiguously. Appr
 | 187–213 | **Query / ECS:Query / ECS:View** | Parse, DNF, Plan, Estimate, IndexScan, Iterate, Filter, Pagination, plus ECS depth |
 | 214–234 | **Durability** | WAL split (QueueDrain/OsWrite/Signal), GroupCommit, Queue, Buffer, Frame, Backpressure; Checkpoint depth; Recovery; UoW state/deadline |
 | 235–240 | **Subscription dispatch** | Subscriber, DeltaBuild, DeltaSerialize, TransitionBeginSync, Cleanup, DirtyBitmapSupplement |
-| 241–245 | Scheduler follow-ups (#289, #311, #327) | MetronomeWait (span), OverloadDetector (instant), RuntimePhaseSpan, QueueTickEnd, SchedulerSystemArchetype |
-| 246 | Fallback | `NamedSpan` — user-defined span with inline UTF-8 name (was 200 until 2026-05-10, reassigned to avoid collision with `EcsQueryMaskAnd`; wire format bumped from v7 to v8) |
-| 247–248 | Query Definition Export (#342) | `QueryDefinitionDescribe`, `QueryArgs` — variable-length payloads |
+| 241–245 | Scheduler follow-ups | MetronomeWait (span), OverloadDetector (instant), RuntimePhaseSpan, QueueTickEnd, SchedulerSystemArchetype |
+| 246 | Fallback | `NamedSpan` — user-defined span with inline UTF-8 name |
+| 247–248 | Query Definition Export | `QueryDefinitionDescribe`, `QueryArgs` — variable-length payloads |
 | 249–253 | Spatial/Fence detail | `SpatialClusterMigrationDetectScan`, `SpatialClusterAabbRefresh`, `WriteTickFenceTable`/`-Shadow`/`-Spatial` |
 | 254 | OS thread scheduling | `ThreadContextSwitch` (Windows ETW kernel logger, Admin-only) |
 
-Total declared kinds: **~217**. Earlier docs claimed 37 / 38 — that was the count at Phase 1, before the Phase 2-8 explosion.
+Total declared kinds: **~217**.
 
 ### Per-kind suppression deny-list
 
@@ -196,7 +196,7 @@ Total declared kinds: **~217**. Earlier docs claimed 37 / 38 — that was the co
 private const int DefaultBufferCapacity = 1 * 1024 * 1024;  // 1 MB per slot
 ```
 
-Earlier docs said 128 KB. The size has been raised twice (128 KB → 1 MB → 4 MB constant in design notes); the current shipped value is 1 MB.
+Design notes carry a 4 MB figure for this constant; the shipped value is the 1 MB above.
 
 - **256 slots maximum** — `MaxSlots = 256`, an `EpochThreadRegistry`-shape array of cache-line-padded structs.
 - **Per-slot SPSC ring** — variable-size records; producer is the owning thread, consumer is the profiler drain thread.
@@ -265,8 +265,8 @@ public enum LiveFrameType : byte
     Init                    = 1,    // file header + system/archetype/component tables
     Block                   = 2,    // one LZ4-compressed record block per consumer drain
     Shutdown                = 3,    // end of session
-    FileTable               = 4,    // interned source file paths (#302)
-    SourceLocationManifest  = 5,    // id → (fileId, line, kind, method) (#302)
+    FileTable               = 4,    // interned source file paths
+    SourceLocationManifest  = 5,    // id → (fileId, line, kind, method)
 }
 ```
 
@@ -280,15 +280,15 @@ Init + FileTable + SourceLocationManifest are sent once during the handshake. Af
 public const ushort CurrentChunkerVersion = 16;
 ```
 
-The chunker version stamps the Workbench-side cache. Bumped on any change that affects how records fold into the on-disk cache (new sections, decode-semantic changes). Earlier docs cited v8 — the version has advanced through schema changes for component definitions (v13), system-archetype touches (v15), and the NamedSpan kind reassignment (v16).
+The chunker version stamps the Workbench-side cache. It is bumped on any change that affects how records fold into the on-disk cache: new sections, or a change in decode semantics.
 
 The trace **file** format also has its own version — [`TraceFileHeader.cs:149`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Profiler/TraceFileHeader.cs):
 
 ```csharp
-public const ushort CurrentVersion = 11;  // Track→DAG partitioning (#354)
+public const ushort CurrentVersion = 11;  // Track→DAG partitioning
 ```
 
-v11 adds the Tracks + DAGs tables to support the Track→DAG hierarchy [10-runtime](10-runtime.md). The Workbench reader hard-rejects v10-and-older — re-record against a v11-aware build.
+v11 carries the Tracks + DAGs tables that support the Track→DAG hierarchy [10-runtime](10-runtime.md). The Workbench reader hard-rejects v10-and-older — re-record against a v11-aware build.
 
 ---
 
@@ -338,7 +338,7 @@ Output: off-CPU gaps visible in the Workbench timeline overlaid on the affected 
 4. Calls `TyphonProfiler.Start(parent, metadata, processExitTeardown: FinishStop)`.
 5. Subscribes `runtime.Engine.MMF.DisposingEvent` to `FinishStop` so the trace finalizes deterministically when the engine's storage tears down (after the engine's own shutdown teardown, so engine-shutdown events make it into the trace).
 
-When `ProfilerActive` is on but no output channel is configured, `TryStart` emits a one-shot warning to `Console.Error` (once per process) and returns without starting the profiler. This replaces the silent no-op of earlier versions — see `BuildInertProfilerWarning` (#792).
+When `ProfilerActive` is on but no output channel is configured, `TryStart` emits a one-shot warning to `Console.Error` (once per process) and returns without starting the profiler — see `BuildInertProfilerWarning`. It never fails silently.
 
 ### Drain
 
@@ -373,7 +373,7 @@ When `ProfilerCpuSamplingActive` is on, the bootstrap starts an in-process `CpuS
 
 The viewer is split between an ASP.NET Core server (`tools/Typhon.Workbench/`) and a TypeScript SPA (`ClientApp/`).
 
-> **Note:** the standalone `Typhon.Profiler.Server` project that earlier docs (and the architecture SVG) referenced has been **retired** — its functionality is merged into `tools/Typhon.Workbench/`. There's only one server now.
+> **Note:** the architecture SVG shows a standalone `Typhon.Profiler.Server` project. No such project exists — the viewer server is `tools/Typhon.Workbench/`, and it is the only one.
 
 ### Server side
 - **Trace sessions:** the controller opens a `.typhon-trace` + sidecar `-cache` pair via `TraceFileCache` / `TraceFileCacheReader`. Pan/zoom queries hit the cache, not the raw trace.

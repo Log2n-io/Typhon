@@ -90,7 +90,7 @@ public sealed class TraceFileReader : IDisposable
     /// trailing <c>RoutingId</c> field. That is a layout-breaking change — a v11 table would mis-decode under a v12 walk, and mis-decoded archetype identity is
     /// exactly the silent-wrong-answer failure this revision exists to prevent. Re-record against a v12 build.
     /// </summary>
-    public const ushort MinSupportedVersion = 12;
+    public const ushort MinSupportedVersion = 13;
 
     /// <summary>
     /// On-disk header layout segments. v12 is the oldest supported version, so every segment is always present on disk.
@@ -365,7 +365,6 @@ public sealed class TraceFileReader : IDisposable
                     SpatialFieldType = _binaryReader.ReadByte(),
                     SpatialMode = _binaryReader.ReadByte(),
                     SpatialCellSize = _binaryReader.ReadSingle(),
-                    SpatialMargin = _binaryReader.ReadSingle(),
                     SpatialCategory = _binaryReader.ReadUInt32(),
                     ForeignKeyTargetType = ReadShortString(),
                 };

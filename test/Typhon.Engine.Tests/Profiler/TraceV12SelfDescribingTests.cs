@@ -83,7 +83,8 @@ public sealed class TraceV12SelfDescribingTests
 
         Assert.Multiple(() =>
         {
-            Assert.That(read.Version, Is.EqualTo(12), "v12 is the revision that introduced these fields");
+            Assert.That(read.Version, Is.EqualTo(TraceFileHeader.CurrentVersion),
+            "the header must carry the CURRENT revision — v12 introduced these fields, v13 dropped SpatialMargin from the field record");
             Assert.That(read.DatabaseId, Is.EqualTo(SampleDatabaseId));
             Assert.That(read.GetDatabaseName(), Is.EqualTo("world"));
             Assert.That(read.TsnMin, Is.EqualTo(41_022));
@@ -141,7 +142,8 @@ public sealed class TraceV12SelfDescribingTests
 
         var ex = Assert.Throws<InvalidDataException>(() => reader.ReadHeader());
         Assert.That(ex.Message, Does.Contain("version: 11"));
-        Assert.That(ex.Message, Does.Contain("12"), "the message must name the supported range so the fix — re-record — is obvious");
+        Assert.That(ex.Message, Does.Contain(TraceFileHeader.CurrentVersion.ToString()),
+            "the message must name the supported range so the fix — re-record — is obvious");
     }
 
     // ── AC3 · D-3 routing ids survive the wire ──────────────────────────────────────────────────────────────────────────────────────────────────────────

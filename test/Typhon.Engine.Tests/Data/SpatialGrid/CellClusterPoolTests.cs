@@ -1,3 +1,5 @@
+using System;
+using System.Threading;
 using NUnit.Framework;
 
 namespace Typhon.Engine.Tests;
@@ -10,7 +12,7 @@ class CellClusterPoolTests
     [Test]
     public void NewPool_EmptyCell_HasZeroClusters()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
         Assert.That(pool.GetClusters(cellKey: 5).Length, Is.EqualTo(0));
         Assert.That(pool.GetClusterCount(cellKey: 5), Is.EqualTo(0));
     }
@@ -18,7 +20,7 @@ class CellClusterPoolTests
     [Test]
     public void AddCluster_FirstEntry_AllocatesSegment()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
 
         pool.AddCluster(cellKey: 5, clusterChunkId: 42);
 
@@ -31,7 +33,7 @@ class CellClusterPoolTests
     [Test]
     public void AddCluster_ManyEntries_InSameCell_PreservesOrder()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
         for (int i = 0; i < 20; i++)
         {
             pool.AddCluster(cellKey: 3, clusterChunkId: 100 + i);
@@ -47,7 +49,7 @@ class CellClusterPoolTests
     [Test]
     public void AddCluster_MultipleCells_Independent()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
 
         pool.AddCluster(cellKey: 1, clusterChunkId: 10);
         pool.AddCluster(cellKey: 2, clusterChunkId: 20);
@@ -61,7 +63,7 @@ class CellClusterPoolTests
     [Test]
     public void RemoveCluster_SwapWithLast_RemovesMiddleEntry()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
         pool.AddCluster(cellKey: 0, clusterChunkId: 1);
         pool.AddCluster(cellKey: 0, clusterChunkId: 2);
         pool.AddCluster(cellKey: 0, clusterChunkId: 3);
@@ -81,7 +83,7 @@ class CellClusterPoolTests
     [Test]
     public void RemoveCluster_Missing_ReturnsFalse()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
         pool.AddCluster(cellKey: 0, clusterChunkId: 1);
         bool removed = pool.RemoveCluster(cellKey: 0, clusterChunkId: 999);
         Assert.That(removed, Is.False);
@@ -91,7 +93,7 @@ class CellClusterPoolTests
     [Test]
     public void RemoveCluster_AllEntries_LeavesEmptySegment()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
         pool.AddCluster(cellKey: 0, clusterChunkId: 1);
         pool.AddCluster(cellKey: 0, clusterChunkId: 2);
         pool.RemoveCluster(cellKey: 0, clusterChunkId: 1);
@@ -103,7 +105,7 @@ class CellClusterPoolTests
     [Test]
     public void Grow_BeyondInitialCapacity_Succeeds()
     {
-        var pool = new CellClusterPool(cellCount: 16, initialPoolCapacity: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16, initialPoolCapacity: 16);
         // Force multiple capacity doublings
         for (int i = 0; i < 100; i++)
         {
@@ -118,28 +120,6 @@ class CellClusterPoolTests
         }
     }
 
-    [Test]
-    public void Reset_ClearsAllCellCapacities_AndPoolTail()
-    {
-        var pool = new CellClusterPool(cellCount: 16);
-        for (int i = 0; i < 10; i++)
-        {
-            pool.AddCluster(cellKey: 0, clusterChunkId: i);
-        }
-        int tailBefore = pool.PoolTail;
-        Assert.That(tailBefore, Is.GreaterThan(0));
-
-        pool.Reset();
-
-        Assert.That(pool.PoolTail, Is.EqualTo(0));
-        Assert.That(pool.GetClusterCount(cellKey: 0), Is.EqualTo(0));
-
-        // After reset, a fresh add on a different cell key starts at offset 0 again.
-        pool.AddCluster(cellKey: 3, clusterChunkId: 99);
-        Assert.That(pool.GetClusterCount(cellKey: 3), Is.EqualTo(1));
-        Assert.That(pool.GetClusters(cellKey: 3)[0], Is.EqualTo(99));
-    }
-
     // ═══════════════════════════════════════════════════════════════════════
     // Per-cell scan cursor (ClaimSlotInCell O(M²) re-scan collapse)
     // ═══════════════════════════════════════════════════════════════════════
@@ -147,14 +127,14 @@ class CellClusterPoolTests
     [Test]
     public void ScanCursor_New_DefaultsToZero()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
         Assert.That(pool.GetScanCursor(cellKey: 7), Is.EqualTo(0));
     }
 
     [Test]
     public void AdvanceScanCursor_MovesForwardOnly()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
 
         pool.AdvanceScanCursor(cellKey: 2, value: 5);
         Assert.That(pool.GetScanCursor(cellKey: 2), Is.EqualTo(5));
@@ -173,7 +153,7 @@ class CellClusterPoolTests
     [Test]
     public void ScanCursor_PerCell_Independent()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
         pool.AdvanceScanCursor(cellKey: 1, value: 4);
         pool.AdvanceScanCursor(cellKey: 2, value: 8);
         Assert.That(pool.GetScanCursor(cellKey: 1), Is.EqualTo(4));
@@ -184,7 +164,7 @@ class CellClusterPoolTests
     [Test]
     public void ResetScanCursor_ReturnsToZero()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
         pool.AdvanceScanCursor(cellKey: 0, value: 12);
         pool.ResetScanCursor(cellKey: 0);
         Assert.That(pool.GetScanCursor(cellKey: 0), Is.EqualTo(0));
@@ -195,22 +175,9 @@ class CellClusterPoolTests
     }
 
     [Test]
-    public void Reset_ClearsScanCursors()
-    {
-        var pool = new CellClusterPool(cellCount: 16);
-        pool.AdvanceScanCursor(cellKey: 0, value: 7);
-        pool.AdvanceScanCursor(cellKey: 5, value: 11);
-
-        pool.Reset();
-
-        Assert.That(pool.GetScanCursor(cellKey: 0), Is.EqualTo(0));
-        Assert.That(pool.GetScanCursor(cellKey: 5), Is.EqualTo(0));
-    }
-
-    [Test]
     public void SetScanCursor_MovesBackward()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
         pool.AdvanceScanCursor(cellKey: 4, value: 12);
 
         // SetScanCursor is unconditional — unlike AdvanceScanCursor it moves the cursor backward (phase-2 self-healing).
@@ -218,10 +185,108 @@ class CellClusterPoolTests
         Assert.That(pool.GetScanCursor(cellKey: 4), Is.EqualTo(3));
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Single-writer guard
+    //
+    // The pool has no lock and deliberately cannot get a useful one: AddCluster writes _pool, bumps _tail and may Array.Resize, so a lock over the four
+    // side arrays would leave exactly the corruption it appears to prevent. Its safety is a CALLER-side contract (ClaimSlotInCell holds _finalizeLock, the
+    // rebuild reduce is serial, both RemoveCluster paths are serial for the archetype) that no signature expresses. EnterWriter turns that contract into
+    // something checked, and these tests are what stop the check itself from being decorative.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    [Test]
+    [CancelAfter(15_000)]
+    public void AddCluster_WhileAnotherThreadIsMidMutation_ThrowsInsteadOfLosingTheAppend()
+    {
+        // Without the guard this is silent: both writers read the same `count`, both store count + 1, and one cluster ends up attached to a cell that
+        // GetClusters never returns — entities in a cell no query finds, with no exception anywhere near the cause.
+        var pool = new CellClusterPool(initialCellCapacity: 16);
+        pool.AddCluster(cellKey: 1, clusterChunkId: 7);
+
+        var ex = RunWhileAnotherThreadHoldsTheWriterSlot(pool, p => p.AddCluster(cellKey: 2, clusterChunkId: 9));
+
+        Assert.That(ex, Is.InstanceOf<InvalidOperationException>(), "a concurrent structural mutation must be reported, not absorbed");
+        Assert.That(ex.Message, Does.Contain(nameof(CellClusterPool.AddCluster)), "the message must name the offending entry point");
+    }
+
+    [Test]
+    [CancelAfter(15_000)]
+    public void RemoveCluster_WhileAnotherThreadIsMidMutation_ThrowsInsteadOfCorruptingTheSegment()
+    {
+        // Removal is swap-with-last, so a concurrent one drops an unrelated cluster id on the floor rather than merely losing a count.
+        var pool = new CellClusterPool(initialCellCapacity: 16);
+        pool.AddCluster(cellKey: 1, clusterChunkId: 7);
+        pool.AddCluster(cellKey: 1, clusterChunkId: 8);
+
+        var ex = RunWhileAnotherThreadHoldsTheWriterSlot(pool, p => p.RemoveCluster(cellKey: 1, clusterChunkId: 7));
+
+        Assert.That(ex, Is.InstanceOf<InvalidOperationException>());
+        Assert.That(ex.Message, Does.Contain(nameof(CellClusterPool.RemoveCluster)));
+    }
+
+    [Test]
+    [CancelAfter(15_000)]
+    public void WriterSlot_IsReleasedWhenAMutationThrows()
+    {
+        // AddCluster rejects a negative cell key from inside the guarded region. If the release were not in a finally, that one rejected call would poison
+        // the pool for the rest of the process — every later mutation, on any thread, reporting a phantom concurrent writer. A caller that legitimately
+        // probes with a -1 from SpatialGridAccessor is exactly how that would happen.
+        var pool = new CellClusterPool(initialCellCapacity: 16);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => pool.AddCluster(cellKey: -1, clusterChunkId: 3));
+
+        Assert.DoesNotThrow(() => pool.AddCluster(cellKey: 4, clusterChunkId: 3), "the failed call must not have left the writer slot claimed");
+        Assert.That(pool.GetClusterCount(cellKey: 4), Is.EqualTo(1));
+    }
+
+    /// <summary>
+    /// Run <paramref name="call"/> on a fresh thread while another thread sits inside the guarded region, and return whatever it threw (or null).
+    /// </summary>
+    /// <remarks>
+    /// The holder is parked by calling <see cref="CellClusterPool.EnterWriter"/> directly rather than by racing two real mutations. That is the whole point:
+    /// a race-based version of this test would pass or fail on scheduling luck, and a flaky guard test gets deleted long before the guard does.
+    /// </remarks>
+    private static Exception RunWhileAnotherThreadHoldsTheWriterSlot(CellClusterPool pool, Action<CellClusterPool> call)
+    {
+        var parked = new ManualResetEventSlim(false);
+        var release = new ManualResetEventSlim(false);
+        Exception captured = null;
+
+        var holder = new Thread(() =>
+        {
+            pool.EnterWriter("parked-by-the-test");
+            parked.Set();
+            release.Wait();
+            pool.ExitWriter();
+        })
+        { IsBackground = true };
+        holder.Start();
+        parked.Wait();
+
+        var offender = new Thread(() =>
+        {
+            try
+            {
+                call(pool);
+            }
+            catch (Exception ex)
+            {
+                captured = ex;
+            }
+        })
+        { IsBackground = true };
+        offender.Start();
+        offender.Join();
+
+        release.Set();
+        holder.Join();
+        return captured;
+    }
+
     [Test]
     public void SetScanCursor_MovesForward()
     {
-        var pool = new CellClusterPool(cellCount: 16);
+        var pool = new CellClusterPool(initialCellCapacity: 16);
         pool.SetScanCursor(cellKey: 4, value: 9);
         Assert.That(pool.GetScanCursor(cellKey: 4), Is.EqualTo(9));
     }

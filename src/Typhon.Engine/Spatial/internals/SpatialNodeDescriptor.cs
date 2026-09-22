@@ -20,12 +20,10 @@ internal readonly struct SpatialNodeDescriptor
 
     // Leaf SOA layout
     public readonly int LeafCapacity;
-    public readonly int LeafCoordOffsets; // = HeaderSize (start of first coord array)
-    public readonly int LeafCoordStride;  // LeafCapacity * CoordSize (distance between coord arrays)
-    public readonly int LeafIdOffset;         // start of EntityId array
-    public readonly int LeafIdSize;           // 8 (EntityId always 64-bit)
-    public readonly int LeafCompChunkIdOffset; // start of ComponentChunkId array (int per entry)
-    public readonly int LeafCompChunkIdSize;   // 4 (ComponentChunkId always int)
+    public readonly int LeafCoordOffsets;       // = HeaderSize (start of first coord array)
+    public readonly int LeafCoordStride;        // LeafCapacity * CoordSize (distance between coord arrays)
+    public readonly int LeafIdOffset;           // start of payload id array
+    public readonly int LeafIdSize;             // 8 (payload id always 64-bit)
     public readonly int LeafCategoryMaskOffset; // start of CategoryMask array (uint per entry)
     public readonly int LeafCategoryMaskSize;   // 4 (CategoryMask always uint)
 
@@ -60,20 +58,25 @@ internal readonly struct SpatialNodeDescriptor
 
         EntryAreaSize = Stride - HeaderSize;
 
-        int leafEntrySize = CoordCount * CoordSize + 8 + 4 + 4;   // +8 EntityId (64-bit) + 4 ComponentChunkId (int) + 4 CategoryMask (uint)
+        // +8 payload id (64-bit) + 4 CategoryMask (uint).
+        //
+        // A 4-byte ComponentChunkId sat between them until #872 step 13. It was the owning component's chunk id, carried so a two-pass compound query
+        // could reach component storage without an EntityMap lookup — a service only the ENTITY-level tree could offer, since a cluster tree's payload IS a
+        // cluster chunk id and it passed zero here. With that tree retired the field was 4 bytes of zero per entry on the only trees left, and dropping it
+        // raises LeafCapacity: R2Df32 15 -> 17, R3Df32 11 -> 13, R2Df64 9 -> 10. R3Df64 stays at 11 — its 704-byte entry area divides by 60 the same way it
+        // divided by 64 — which is why AC-13.5 asks only about the f32 variants.
+        int leafEntrySize = CoordCount * CoordSize + 8 + 4;
         int internalEntrySize = CoordCount * CoordSize + 4;  // +4 for ChildChunkId (int)
 
         LeafCapacity = EntryAreaSize / leafEntrySize;
         InternalCapacity = EntryAreaSize / internalEntrySize;
 
-        // Leaf SOA offsets: [Coords...] [EntityIds] [ComponentChunkIds]
+        // Leaf SOA offsets: [Coords...] [PayloadIds] [CategoryMasks]
         LeafCoordOffsets = HeaderSize;
         LeafCoordStride = LeafCapacity * CoordSize;
         LeafIdOffset = LeafCoordOffsets + CoordCount * LeafCoordStride;
         LeafIdSize = 8;
-        LeafCompChunkIdOffset = LeafIdOffset + LeafCapacity * LeafIdSize;
-        LeafCompChunkIdSize = 4;
-        LeafCategoryMaskOffset = LeafCompChunkIdOffset + LeafCapacity * LeafCompChunkIdSize;
+        LeafCategoryMaskOffset = LeafIdOffset + LeafCapacity * LeafIdSize;
         LeafCategoryMaskSize = 4;
 
         // Internal SOA offsets

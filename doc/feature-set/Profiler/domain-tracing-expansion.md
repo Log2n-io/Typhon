@@ -11,11 +11,11 @@ description: 'Nine new domains of forensic-grade tracing — locks, spatial, sch
 
 ## 🎯 What it solves
 
-The original built-in instrumentation covers nine coarse-grained subsystems (transaction commit, B+Tree ops,
+The built-in instrumentation covers nine coarse-grained subsystems (transaction commit, B+Tree ops,
 page cache, WAL, checkpoint, ...) but stops short of the questions you ask once a workload is deployed and you
 can't attach a debugger: which thread waited on which lock, why a spatial query traversed so many R-Tree nodes,
-how long a scheduler worker sat idle, or where in the MVCC chain a read stalled. Getting that detail used to
-mean adding ad hoc instrumentation, reproducing the problem, then ripping the instrumentation back out. This
+how long a scheduler worker sat idle, or where in the MVCC chain a read stalled. Getting that detail otherwise
+means adding ad hoc instrumentation, reproducing the problem, then ripping the instrumentation back out. This
 feature extends the same always-on tracing pipeline into nine additional engine domains so that level of
 forensic detail is a config flag away, not a code change.
 
@@ -55,7 +55,7 @@ using Typhon.Engine;
 TelemetryConfig.EnsureInitialized();
 Console.WriteLine(TelemetryConfig.GetConfigurationSummary());
 
-// Gates are public static fields, one per category/leaf — same shape as the original nine subsystems:
+// Gates are public static fields, one per category/leaf — same shape as the nine built-in subsystems:
 if (TelemetryConfig.DataMvccChainWalkActive)
 {
     Console.WriteLine("MVCC slow-path chain walks are landing in the trace.");
@@ -101,7 +101,7 @@ if (TelemetryConfig.DataMvccChainWalkActive)
 
 ## 🔗 Related
 
-- Sibling features: [Built-in Engine Instrumentation Catalog](./builtin-subsystem-instrumentation.md) (the original nine-subsystem baseline this expansion builds on), [Configuration & Performance Tuning](./profiler-configuration-tuning.md) (the gating mechanism these new flags plug into)
+- Sibling features: [Built-in Engine Instrumentation Catalog](./builtin-subsystem-instrumentation.md) (the nine-subsystem baseline this expansion builds on), [Configuration & Performance Tuning](./profiler-configuration-tuning.md) (the gating mechanism these new flags plug into)
 - Source: `src/Typhon.Engine/Observability/public/TelemetryConfig.cs`, `src/Typhon.Engine/Profiler/internals/{SpatialQueryEvents,SpatialMaintainEvents,SpatialRTreeEvents,SpatialMiscEvents,DataPlaneEvents,DurabilityEvents,StorageMemoryEvents,SubscriptionDispatchEvents}.cs`
 
 <!-- Deep dive: claude/design/Profiler/07-tracing-instrumentation/README.md — umbrella (architecture, category tree, phasing, decisions) -->

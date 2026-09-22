@@ -134,6 +134,39 @@ internal class TransactionChain : ResourceNode, IDebugPropertiesProvider
     }
 
     /// <summary>
+    /// The lowest <see cref="Transaction.InFlightLsnFloor"/> over the live transactions: the first LSN appended by any commit still between its WAL
+    /// append and the end of its publish, or <see cref="long.MaxValue"/> when there is none (CK-13).
+    /// </summary>
+    internal long LowestInFlightLsn()
+    {
+        var lowest = long.MaxValue;
+        var wc = WaitContext.FromTimeout(TimeoutOptions.Current.TransactionChainLockTimeout);
+        if (!_control.EnterSharedAccess(ref wc))
+        {
+            // A lock timeout is transient, so the checkpoint cycle that asked is retried rather than latched fatal (CK-06).
+            ThrowHelper.ThrowLockTimeout("TransactionChain/LowestInFlightLsn", TimeoutOptions.Current.TransactionChainLockTimeout);
+        }
+
+        try
+        {
+            for (var cur = Volatile.Read(ref _head); cur != null; cur = cur.Next)
+            {
+                var floor = cur.InFlightLsnFloor;
+                if (floor != 0 && floor < lowest)
+                {
+                    lowest = floor;
+                }
+            }
+        }
+        finally
+        {
+            _control.ExitSharedAccess();
+        }
+
+        return lowest;
+    }
+
+    /// <summary>
     /// Computes the next MinTSN by walking the singly-linked chain to find the second-to-last transaction.
     /// Caller must hold shared lock on Control.
     /// </summary>

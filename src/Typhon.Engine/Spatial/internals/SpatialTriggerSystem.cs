@@ -1,15 +1,11 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
-using System.Numerics;
-using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Per-region configuration stored contiguously for cache-friendly iteration.
-/// 64 bytes — fits in one x86 cache line.
 /// </summary>
 [StructLayout(LayoutKind.Sequential)]
 internal struct SpatialRegionConfig
@@ -18,51 +14,59 @@ internal struct SpatialRegionConfig
     public double MaxX, MaxY, MaxZ;
     public uint CategoryMask;
     public byte EvaluationFrequency;
-    public TargetTreeMode TargetTree;
     public byte Active;  // 0=destroyed/free, 1=active
-    public byte _pad;
+    public byte _pad0, _pad1;
+
+    /// <summary>
+    /// Monotonic per-slot handle generation. <b>Never reused for anything else</b> — see <see cref="NextFree"/>.
+    /// </summary>
     public int Generation;
+
+    /// <summary>
+    /// Free-list link while <see cref="Active"/> is 0; meaningless while the slot is live.
+    /// </summary>
+    /// <remarks>
+    /// <b>This used to be stored in <see cref="Generation"/>, and that let a destroyed handle validate.</b> Destroy wrote the next-free index over the
+    /// generation and create did <c>Generation++</c> on that link, so the counter walked backwards: create 0/1/2, destroy 0 then 1, create again — the reused
+    /// slot lands on generation 1, which is exactly the handle the caller was told was dead. The same arithmetic makes <c>default(SpatialRegionHandle)</c>
+    /// (index 0, generation 0) reachable as a live handle. Pre-existing; #872 step 13 promoted it to public API, which is what made it worth its own field.
+    /// </remarks>
+    public int NextFree;
+
     public int LastEvaluatedTick;
 }
 
 /// <summary>
-/// Per-region mutable occupant state. Separated from config for locality (config is read-only during eval scan).
+/// Per-region mutable occupant state. Separated from config for locality (config is read-only during the eval scan).
 /// </summary>
+/// <remarks>
+/// <b>Two occupant sets, double-buffered.</b> Occupants are tracked by entity id rather than by a bitmap over component chunk ids. The bitmap form was right
+/// for the entity-level R-Tree, whose payload WAS a component chunk id; cluster storage has its own chunk-id namespace that would collide with it, so the
+/// cluster path always used sets and the bitmap half went with the tree in #872 step 13.
+/// </remarks>
 internal sealed class RegionOccupantState
 {
-    /// <summary>Previous occupant bitmap indexed by componentChunkId. From ArrayPool.</summary>
-    internal long[] PreviousBitmap;
-    internal int PreviousWordCount;
+    /// <summary>Occupants observed on the previous evaluation of this region.</summary>
+    internal HashSet<long> PreviousOccupants;
 
-    /// <summary>Previous entity lookup: dense chunkId → entityId, for resolving "left" entity IDs.</summary>
-    internal long[] PreviousEntityLookup;
-    internal int PreviousEntityLookupSize;
-
-    /// <summary>Static tree cache bitmap (null until first Both/StaticOnly eval).</summary>
-    internal long[] StaticCacheBitmap;
-    internal int StaticCacheWordCount;
-
-    /// <summary>Static tree entity lookup: chunkId → entityId for cached static results.</summary>
-    internal long[] StaticCacheEntityLookup;
-    internal int StaticCacheEntityLookupSize;
-
-    /// <summary>MutationVersion of the static tree when cache was built. -1 = invalidated.</summary>
-    internal int StaticCacheVersion;
-
-    /// <summary>Previous cluster occupants tracked by EntityId (separate from bitmap to avoid namespace collision).</summary>
-    internal HashSet<long> PreviousClusterOccupants;
-
-    /// <summary>Scratch set for current-tick cluster occupants. Double-buffered with <see cref="PreviousClusterOccupants"/> to avoid
-    /// per-evaluation allocation. After the diff, the sets are swapped.</summary>
-    internal HashSet<long> ClusterOccupantsScratch;
+    /// <summary>Scratch set for the current evaluation. Swapped with <see cref="PreviousOccupants"/> after the diff, so neither is reallocated.</summary>
+    internal HashSet<long> OccupantsScratch;
 }
 
 /// <summary>
 /// External trigger volume system for a single ComponentTable's spatial index.
-/// Detects enter/leave/stay transitions by querying the R-Tree and diffing against per-region occupant bitmaps.
-/// Zero-allocation on the hot path. ~800ns per region evaluation at 50 occupants.
 /// </summary>
-internal sealed unsafe class SpatialTriggerSystem
+/// <remarks>
+/// <para>Detects enter / leave / stay transitions by querying the per-cell cluster index for each region's box and diffing the occupant set against the
+/// previous evaluation's. Allocation-free on the hot path once both sets have grown to their working size.</para>
+/// <para><b>Cluster-only since #872 step 13.</b> Evaluation used to query up to two entity-level R-Trees — a dynamic one every tick and a static one behind a
+/// mutation-version cache — populate an occupant bitmap indexed by component chunk id, and XOR it against the previous tick's. Every part of that
+/// disappeared with the tree it read: the bitmap, the dense chunk-id-to-entity lookup, the static cache and its invalidation hooks, and the
+/// <c>TargetTreeMode</c> selector that chose between the two trees. A cell's static and dynamic halves are both visited by
+/// <see cref="ArchetypeClusterState.QueryAabb(SpatialGrid, double, double, double, double, double, double, uint)"/>, so there is nothing left for a caller to
+/// select between.</para>
+/// </remarks>
+internal sealed class SpatialTriggerSystem
 {
     // Region storage — flat array with free-list
     private SpatialRegionConfig[] _configs;
@@ -70,11 +74,6 @@ internal sealed unsafe class SpatialTriggerSystem
     private int _capacity;
     private int _activeCount;
     private int _freeHead; // index of first free slot, -1 = none
-
-    // Per-evaluation scratch buffers (shared across all regions, cleared between)
-    private long[] _scratchBitmap;
-    private long[] _entityLookup;     // dense: chunkId → entityId (current eval)
-    private long[] _prevEntityLookup; // dense: chunkId → entityId (previous eval, swapped)
 
     // Result buffers (pre-allocated, sliced for SpatialTriggerResult)
     private long[] _resultEntered;
@@ -103,8 +102,7 @@ internal sealed unsafe class SpatialTriggerSystem
 
     // ── Region CRUD ──────────────────────────────────────────────────────
 
-    public SpatialRegionHandle CreateRegion(ReadOnlySpan<double> bounds, uint categoryMask = 0, byte evaluationFrequency = 1, 
-        TargetTreeMode targetTree = TargetTreeMode.DynamicOnly)
+    public SpatialRegionHandle CreateRegion(ReadOnlySpan<double> bounds, uint categoryMask = 0, byte evaluationFrequency = 1)
     {
         if (evaluationFrequency == 0)
         {
@@ -115,8 +113,7 @@ internal sealed unsafe class SpatialTriggerSystem
         if (_freeHead >= 0)
         {
             index = _freeHead;
-            // Next free slot is stored in Generation field (repurposed while inactive)
-            _freeHead = _configs[index].Generation;
+            _freeHead = _configs[index].NextFree;
         }
         else
         {
@@ -139,12 +136,11 @@ internal sealed unsafe class SpatialTriggerSystem
         config.MaxZ = halfCoord == 3 && bounds.Length > halfCoord + 2 ? bounds[halfCoord + 2] : 0;
         config.CategoryMask = categoryMask;
         config.EvaluationFrequency = evaluationFrequency;
-        config.TargetTree = targetTree;
         config.Active = 1;
-        config.Generation++;
+        config.Generation++;   // monotonic per slot, so a handle from a previous tenancy can never validate
         config.LastEvaluatedTick = int.MinValue; // force evaluation on first tick
 
-        _occupants[index] = new RegionOccupantState { StaticCacheVersion = -1 };
+        _occupants[index] = new RegionOccupantState();
         _activeCount++;
 
         TyphonEvent.EmitSpatialTriggerRegion(0, (ushort)index, categoryMask);
@@ -158,17 +154,9 @@ internal sealed unsafe class SpatialTriggerSystem
         ref var config = ref _configs[handle.Index];
         TyphonEvent.EmitSpatialTriggerRegion(1, (ushort)handle.Index, config.CategoryMask);
         config.Active = 0;
-
-        // Return pooled arrays
-        var occ = _occupants[handle.Index];
-        if (occ.PreviousBitmap != null)             { ArrayPool<long>.Shared.Return(occ.PreviousBitmap); }  
-        if (occ.PreviousEntityLookup != null)       { ArrayPool<long>.Shared.Return(occ.PreviousEntityLookup); }
-        if (occ.StaticCacheBitmap != null)          { ArrayPool<long>.Shared.Return(occ.StaticCacheBitmap); }
-        if (occ.StaticCacheEntityLookup != null)    { ArrayPool<long>.Shared.Return(occ.StaticCacheEntityLookup); }
         _occupants[handle.Index] = null;
 
-        // Push to free list (store next-free in Generation field)
-        config.Generation = _freeHead;
+        config.NextFree = _freeHead;
         _freeHead = handle.Index;
         _activeCount--;
     }
@@ -187,20 +175,12 @@ internal sealed unsafe class SpatialTriggerSystem
         config.MaxX = newBounds.Length > halfCoord ? newBounds[halfCoord] : 0;
         config.MaxY = newBounds.Length > halfCoord + 1 ? newBounds[halfCoord + 1] : 0;
         config.MaxZ = halfCoord == 3 && newBounds.Length > halfCoord + 2 ? newBounds[halfCoord + 2] : 0;
-
-        // Invalidate static cache
-        var occ = _occupants[handle.Index];
-        occ?.StaticCacheVersion = -1;
     }
 
     public void UpdateRegionCategoryMask(SpatialRegionHandle handle, uint newMask)
     {
         ValidateHandle(handle);
         _configs[handle.Index].CategoryMask = newMask;
-
-        // Invalidate static cache (category change affects static results)
-        var occ = _occupants[handle.Index];
-        occ?.StaticCacheVersion = -1;
     }
 
     // ── Evaluation ───────────────────────────────────────────────────────
@@ -228,202 +208,57 @@ internal sealed unsafe class SpatialTriggerSystem
             var occ = _occupants[handle.Index];
             int coordCount = _spatialState.Descriptor.CoordCount;
 
-            // Estimate max chunkId from component segment allocation count
-            int maxChunkId = _table.ComponentSegment.AllocatedChunkCount;
-
-            int wordCount = (maxChunkId + 63) >> 6;
-            if (wordCount == 0)
-            {
-                wordCount = 1;
-            }
-
-            EnsureScratchCapacity(wordCount, maxChunkId);
-
-            // Clear scratch bitmap
-            Array.Clear(_scratchBitmap, 0, wordCount);
-
-            // Build query coords
             Span<double> queryCoords = stackalloc double[coordCount];
             BuildQueryCoords(in config, queryCoords, coordCount);
 
-            // Query tree(s) and populate scratch bitmap + entity lookup
-            HashSet<long> clusterOccupants = null;
+            // Reuse the previous cycle's discarded set rather than allocating one per evaluation.
+            var current = occ.OccupantsScratch ?? [];
+            current.Clear();
+
             var guard = EpochGuard.Enter(_table.DBE.EpochManager);
             try
             {
-                // Dynamic tree
-                if (config.TargetTree != TargetTreeMode.StaticOnly && _spatialState.DynamicTree != null)
-                {
-                    QueryAndPopulateBitmap(_spatialState.DynamicTree, queryCoords, config.CategoryMask, wordCount);
-                }
-
-                // Per-archetype cluster spatial index fan-out (issue #230 Phase 3 Option B).
-                // Cluster entities are tracked by EntityId in a HashSet, NOT by bitmap, because the per-table bitmap's chunkId namespace is not meaningful for
-                // cluster-archetype results (cluster storage has its own clusterChunkId namespace that would collide with the per-table ComponentChunkId namespace).
-                // Under Option B, cluster spatial archetypes require a configured SpatialGrid (enforced at init time in DatabaseEngine.InitializeArchetypes). The
-                // enumerator's two-pass cell walk visits DynamicIndex and StaticIndex for each cell, so the caller doesn't need to branch on mode.
-                if (_spatialState.ClusterArchetypes != null)
-                {
-                    var grid = _table.DBE.SpatialGrid;
-                    float qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ;
-                    if (coordCount == 4)
-                    {
-                        // 2D region — [minX, minY, maxX, maxY]. Use infinite Z bounds so 2D cluster archetypes (which have empty-sentinel Z) and 3D cluster
-                        // archetypes (which have meaningful Z) both pass the Z overlap test trivially.
-                        qMinX = (float)queryCoords[0];
-                        qMinY = (float)queryCoords[1];
-                        qMinZ = float.NegativeInfinity;
-                        qMaxX = (float)queryCoords[2];
-                        qMaxY = (float)queryCoords[3];
-                        qMaxZ = float.PositiveInfinity;
-                    }
-                    else
-                    {
-                        // 3D region — [minX, minY, minZ, maxX, maxY, maxZ].
-                        qMinX = (float)queryCoords[0];
-                        qMinY = (float)queryCoords[1];
-                        qMinZ = (float)queryCoords[2];
-                        qMaxX = (float)queryCoords[3];
-                        qMaxY = (float)queryCoords[4];
-                        qMaxZ = (float)queryCoords[5];
-                    }
-
-                    foreach (var cs in _spatialState.ClusterArchetypes)
-                    {
-                        if (!cs.SpatialSlot.HasSpatialIndex)
-                        {
-                            continue;
-                        }
-                        if (clusterOccupants == null)
-                        {
-                            // Double-buffer: reuse the scratch set from the previous evaluation cycle to avoid per-call HashSet allocation.
-                            clusterOccupants = occ.ClusterOccupantsScratch ?? new HashSet<long>();
-                            clusterOccupants.Clear();
-                        }
-                        foreach (var hit in cs.QueryAabb(grid, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, config.CategoryMask))
-                        {
-                            clusterOccupants.Add(hit.EntityId);
-                        }
-                    }
-                }
-
-                // Static tree
-                if (config.TargetTree != TargetTreeMode.DynamicOnly && _spatialState.StaticTree != null)
-                {
-                    var staticTree = _spatialState.StaticTree;
-                    if (occ.StaticCacheVersion != staticTree.MutationVersion)
-                    {
-                        // Phase 3: Spatial:Trigger:Cache:Invalidate instant — static-tree mutation observed.
-                        TyphonEvent.EmitSpatialTriggerCacheInvalidate((ushort)Math.Min(handle.Index, ushort.MaxValue), occ.StaticCacheVersion, staticTree.MutationVersion);
-                        RebuildStaticCache(occ, staticTree, queryCoords, config.CategoryMask, maxChunkId);
-                    }
-                    // OR static cache into scratch bitmap
-                    int staticWords = Math.Min(occ.StaticCacheWordCount, wordCount);
-                    for (int w = 0; w < staticWords; w++)
-                    {
-                        _scratchBitmap[w] |= occ.StaticCacheBitmap[w];
-                    }
-                    // Merge static entity lookups into current
-                    int staticLookupSize = Math.Min(occ.StaticCacheEntityLookupSize, _entityLookup.Length);
-                    for (int i = 0; i < staticLookupSize; i++)
-                    {
-                        if (occ.StaticCacheEntityLookup[i] != 0)
-                        {
-                            _entityLookup[i] = occ.StaticCacheEntityLookup[i];
-                        }
-                    }
-                }
+                CollectClusterOccupants(queryCoords, coordCount, config.CategoryMask, current);
             }
             finally
             {
                 guard.Dispose();
             }
 
-            // Diff: XOR + AND, extract enter/leave
+            var previous = occ.PreviousOccupants;
             int enteredCount = 0;
             int leftCount = 0;
             int stayCount = 0;
 
-            int prevWordCount = occ.PreviousWordCount;
-            long[] prevBitmap = occ.PreviousBitmap;
-            int diffWords = Math.Max(wordCount, prevWordCount);
-
-            for (int w = 0; w < diffWords; w++)
+            foreach (long entityId in current)
             {
-                long curWord = w < wordCount ? _scratchBitmap[w] : 0L;
-                long prevWord = prevBitmap != null && w < prevWordCount ? prevBitmap[w] : 0L;
-                long diff = curWord ^ prevWord;
-
-                if (diff == 0)
+                if (previous != null && previous.Contains(entityId))
                 {
-                    stayCount += BitOperations.PopCount((ulong)curWord);
+                    stayCount++;
                     continue;
                 }
 
-                long entered = diff & curWord;
-                long left = diff & prevWord;
-                long stayed = curWord & prevWord;
-                stayCount += BitOperations.PopCount((ulong)stayed);
-
-                // Extract entered bits → resolve EntityId from current lookup
-                while (entered != 0)
-                {
-                    int bit = BitOperations.TrailingZeroCount((ulong)entered);
-                    int chunkId = w * 64 + bit;
-                    EnsureResultCapacity(ref _resultEntered, enteredCount);
-                    _resultEntered[enteredCount++] = _entityLookup[chunkId];
-                    entered &= entered - 1;
-                }
-
-                // Extract left bits → resolve EntityId from PREVIOUS lookup
-                while (left != 0)
-                {
-                    int bit = BitOperations.TrailingZeroCount((ulong)left);
-                    int chunkId = w * 64 + bit;
-                    EnsureResultCapacity(ref _resultLeft, leftCount);
-                    long entityId = occ.PreviousEntityLookup != null && chunkId < occ.PreviousEntityLookupSize ? occ.PreviousEntityLookup[chunkId] : 0;
-                    _resultLeft[leftCount++] = entityId;
-                    left &= left - 1;
-                }
+                EnsureResultCapacity(ref _resultEntered, enteredCount);
+                _resultEntered[enteredCount++] = entityId;
             }
 
-            // Cluster entity enter/leave via HashSet diff (avoids bitmap namespace collision with per-table ComponentChunkIds)
-            if (clusterOccupants != null || occ.PreviousClusterOccupants != null)
+            if (previous != null)
             {
-                var prev = occ.PreviousClusterOccupants;
-                if (clusterOccupants != null)
+                foreach (long entityId in previous)
                 {
-                    foreach (long eid in clusterOccupants)
+                    if (current.Contains(entityId))
                     {
-                        if (prev == null || !prev.Contains(eid))
-                        {
-                            EnsureResultCapacity(ref _resultEntered, enteredCount);
-                            _resultEntered[enteredCount++] = eid;
-                        }
-                        else
-                        {
-                            stayCount++;
-                        }
+                        continue;
                     }
+
+                    EnsureResultCapacity(ref _resultLeft, leftCount);
+                    _resultLeft[leftCount++] = entityId;
                 }
-                if (prev != null)
-                {
-                    foreach (long eid in prev)
-                    {
-                        if (clusterOccupants == null || !clusterOccupants.Contains(eid))
-                        {
-                            EnsureResultCapacity(ref _resultLeft, leftCount);
-                            _resultLeft[leftCount++] = eid;
-                        }
-                    }
-                }
-                // Double-buffer swap: current becomes previous, old previous becomes scratch for next cycle.
-                occ.ClusterOccupantsScratch = occ.PreviousClusterOccupants;
-                occ.PreviousClusterOccupants = clusterOccupants;
             }
 
-            // Swap entity lookup arrays for next evaluation's "left" resolution
-            SwapPreviousState(occ, wordCount, maxChunkId);
+            // Double-buffer swap: current becomes previous, old previous becomes next cycle's scratch.
+            occ.OccupantsScratch = previous;
+            occ.PreviousOccupants = current;
 
             // Phase 3: Spatial:Trigger:Occupant:Diff stats instant (no bitmap, just counts).
             // More precisely: prevCount = stayCount + leftCount; currCount = stayCount + enteredCount.
@@ -448,7 +283,59 @@ internal sealed unsafe class SpatialTriggerSystem
 
     // ── Private helpers ──────────────────────────────────────────────────
 
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    /// <summary>
+    /// Collect every entity of every cluster archetype sharing this spatial component whose bounds overlap the region.
+    /// </summary>
+    /// <remarks>
+    /// A 2D region is widened to infinite Z rather than being given the plane's own coordinates, so that a 2D archetype (whose Z is an empty sentinel) and a
+    /// 3D one (whose Z is meaningful) both pass the Z overlap test on a query that did not ask about Z.
+    /// </remarks>
+    private void CollectClusterOccupants(ReadOnlySpan<double> queryCoords, int coordCount, uint categoryMask, HashSet<long> into)
+    {
+        var clusterArchetypes = _spatialState.ClusterArchetypes;
+        if (clusterArchetypes == null)
+        {
+            return;
+        }
+
+        // No narrowing: the region's coordinates arrive as doubles and QueryAabb takes doubles since #919. The (float) casts that used to sit here were a
+        // round trip through a width neither end asked for, and a trigger volume is exactly where it would have been noticed last — a region quantised to
+        // ~128-unit steps at 10^9 fires for entities outside it and stays silent for entities inside, with no error either way.
+        double qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ;
+        if (coordCount == 4)
+        {
+            qMinX = queryCoords[0];
+            qMinY = queryCoords[1];
+            qMinZ = double.NegativeInfinity;
+            qMaxX = queryCoords[2];
+            qMaxY = queryCoords[3];
+            qMaxZ = double.PositiveInfinity;
+        }
+        else
+        {
+            qMinX = queryCoords[0];
+            qMinY = queryCoords[1];
+            qMinZ = queryCoords[2];
+            qMaxX = queryCoords[3];
+            qMaxY = queryCoords[4];
+            qMaxZ = queryCoords[5];
+        }
+
+        var grid = _table.DBE.SpatialGrid;
+        foreach (var cs in clusterArchetypes)
+        {
+            if (!cs.SpatialSlot.HasSpatialIndex)
+            {
+                continue;
+            }
+
+            foreach (var hit in cs.QueryAabb(grid, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, categoryMask))
+            {
+                into.Add(hit.EntityId);
+            }
+        }
+    }
+
     private void ValidateHandle(SpatialRegionHandle handle)
     {
         if ((uint)handle.Index >= (uint)_capacity || _configs[handle.Index].Generation != handle.Generation || _configs[handle.Index].Active == 0)
@@ -465,30 +352,6 @@ internal sealed unsafe class SpatialTriggerSystem
         _capacity = newCapacity;
     }
 
-    private void EnsureScratchCapacity(int wordCount, int maxChunkId)
-    {
-        if (_scratchBitmap == null || _scratchBitmap.Length < wordCount)
-        {
-            if (_scratchBitmap != null)
-            {
-                ArrayPool<long>.Shared.Return(_scratchBitmap);
-            }
-            _scratchBitmap = ArrayPool<long>.Shared.Rent(wordCount);
-        }
-        int lookupSize = maxChunkId + 1;
-        if (_entityLookup == null || _entityLookup.Length < lookupSize)
-        {
-            if (_entityLookup != null)
-            {
-                ArrayPool<long>.Shared.Return(_entityLookup);
-                ArrayPool<long>.Shared.Return(_prevEntityLookup);
-            }
-            _entityLookup = ArrayPool<long>.Shared.Rent(lookupSize);
-            _prevEntityLookup = ArrayPool<long>.Shared.Rent(lookupSize);
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void BuildQueryCoords(in SpatialRegionConfig config, Span<double> coords, int coordCount)
     {
         int halfCoord = coordCount >> 1;
@@ -506,106 +369,6 @@ internal sealed unsafe class SpatialTriggerSystem
         }
     }
 
-    private void QueryAndPopulateBitmap(SpatialRTree<PersistentStore> tree, ReadOnlySpan<double> queryCoords, uint categoryMask, int wordCount)
-    {
-        foreach (var hit in tree.QueryAABBOccupants(queryCoords, categoryMask: categoryMask))
-        {
-            int chunkId = hit.ComponentChunkId;
-            int wordIdx = chunkId >> 6;
-            if (wordIdx < wordCount)
-            {
-                _scratchBitmap[wordIdx] |= 1L << (chunkId & 63);
-            }
-            if (chunkId < _entityLookup.Length)
-            {
-                _entityLookup[chunkId] = hit.EntityId;
-            }
-        }
-    }
-
-    private void RebuildStaticCache(RegionOccupantState occ, SpatialRTree<PersistentStore> staticTree, ReadOnlySpan<double> queryCoords, uint categoryMask, 
-        int maxChunkId)
-    {
-        int wordCount = (maxChunkId + 63) >> 6;
-        if (wordCount == 0)
-        {
-            wordCount = 1;
-        }
-
-        // Ensure cache arrays
-        if (occ.StaticCacheBitmap == null || occ.StaticCacheBitmap.Length < wordCount)
-        {
-            if (occ.StaticCacheBitmap != null)
-            {
-                ArrayPool<long>.Shared.Return(occ.StaticCacheBitmap);
-            }
-            occ.StaticCacheBitmap = ArrayPool<long>.Shared.Rent(wordCount);
-        }
-        Array.Clear(occ.StaticCacheBitmap, 0, wordCount);
-        occ.StaticCacheWordCount = wordCount;
-
-        int lookupSize = maxChunkId + 1;
-        if (occ.StaticCacheEntityLookup == null || occ.StaticCacheEntityLookup.Length < lookupSize)
-        {
-            if (occ.StaticCacheEntityLookup != null)
-            {
-                ArrayPool<long>.Shared.Return(occ.StaticCacheEntityLookup);
-            }
-            occ.StaticCacheEntityLookup = ArrayPool<long>.Shared.Rent(lookupSize);
-        }
-        Array.Clear(occ.StaticCacheEntityLookup, 0, lookupSize);
-        occ.StaticCacheEntityLookupSize = lookupSize;
-
-        // Query static tree
-        foreach (var hit in staticTree.QueryAABBOccupants(queryCoords, categoryMask: categoryMask))
-        {
-            int chunkId = hit.ComponentChunkId;
-            int wordIdx = chunkId >> 6;
-            if (wordIdx < wordCount)
-            {
-                occ.StaticCacheBitmap[wordIdx] |= 1L << (chunkId & 63);
-            }
-            if (chunkId < lookupSize)
-            {
-                occ.StaticCacheEntityLookup[chunkId] = hit.EntityId;
-            }
-        }
-
-        occ.StaticCacheVersion = staticTree.MutationVersion;
-    }
-
-    private void SwapPreviousState(RegionOccupantState occ, int wordCount, int maxChunkId)
-    {
-        // Ensure previous bitmap is sized
-        if (occ.PreviousBitmap == null || occ.PreviousBitmap.Length < wordCount)
-        {
-            if (occ.PreviousBitmap != null)
-            {
-                ArrayPool<long>.Shared.Return(occ.PreviousBitmap);
-            }
-            occ.PreviousBitmap = ArrayPool<long>.Shared.Rent(wordCount);
-        }
-
-        // Copy scratch → previous (can't swap because scratch is shared across regions)
-        Array.Copy(_scratchBitmap, occ.PreviousBitmap, wordCount);
-        occ.PreviousWordCount = wordCount;
-
-        // Swap entity lookup for left resolution: current becomes previous, previous becomes current
-        // But entity lookup is shared across regions, so we copy instead
-        int lookupSize = maxChunkId + 1;
-        if (occ.PreviousEntityLookup == null || occ.PreviousEntityLookup.Length < lookupSize)
-        {
-            if (occ.PreviousEntityLookup != null)
-            {
-                ArrayPool<long>.Shared.Return(occ.PreviousEntityLookup);
-            }
-            occ.PreviousEntityLookup = ArrayPool<long>.Shared.Rent(lookupSize);
-        }
-        Array.Copy(_entityLookup, occ.PreviousEntityLookup, lookupSize);
-        occ.PreviousEntityLookupSize = lookupSize;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void EnsureResultCapacity(ref long[] buffer, int count)
     {
         if (count >= buffer.Length)

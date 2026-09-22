@@ -234,7 +234,7 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
     /// Scheduler / pipeline entry point. Bypasses caller-attribute capture so engine-internal call sites are NOT recorded as user execution sites
     /// (a scheduler-driven refresh has no user site — the owning system is the relevant attribution and is already on the span).
     /// </summary>
-    internal void RefreshFromScheduler(Transaction tx) => Refresh(tx, callerFile: null, callerLine: 0, callerMethod: null);
+    internal void RefreshFromScheduler(Transaction tx) => Refresh(tx, null, 0, null);
 
     /// <summary>
     /// Emit a <see cref="Typhon.Profiler.TraceEventKind.QueryDefinitionDescribe"/> trace event for this view's

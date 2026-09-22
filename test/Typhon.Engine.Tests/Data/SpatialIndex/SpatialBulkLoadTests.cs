@@ -79,7 +79,7 @@ public class SpatialBulkLoadTests
 
     // ── Helpers ─────────────────────────────────────────────────────────
 
-    private static void GenerateRandomEntries(int count, SpatialVariant variant, Random rng, out long[] entityIds, out int[] compChunkIds,
+    private static void GenerateRandomEntries(int count, SpatialVariant variant, Random rng, out long[] entityIds,
         out double[] coords, out uint[] categoryMasks)
     {
         var desc = SpatialNodeDescriptor.ForVariant(variant);
@@ -87,14 +87,12 @@ public class SpatialBulkLoadTests
         int halfCoord = coordCount / 2;
 
         entityIds = new long[count];
-        compChunkIds = new int[count];
         coords = new double[count * coordCount];
         categoryMasks = new uint[count];
 
         for (int i = 0; i < count; i++)
         {
             entityIds[i] = i + 1;
-            compChunkIds[i] = 0; // standalone test, no back-pointers
             categoryMasks[i] = uint.MaxValue;
 
             double cx = rng.NextDouble() * 1000;
@@ -128,7 +126,7 @@ public class SpatialBulkLoadTests
         var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 10, desc.Stride);
 
         var tree = SpatialRTree<PersistentStore>.BulkLoad(segment, variant,
-            ReadOnlySpan<long>.Empty, ReadOnlySpan<int>.Empty, ReadOnlySpan<double>.Empty, ReadOnlySpan<uint>.Empty);
+            ReadOnlySpan<long>.Empty, ReadOnlySpan<double>.Empty, ReadOnlySpan<uint>.Empty);
 
         Assert.That(tree.EntityCount, Is.EqualTo(0));
         TreeValidator.Validate(tree);
@@ -155,9 +153,9 @@ public class SpatialBulkLoadTests
         var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 500, desc.Stride);
 
         var rng = new Random(42);
-        GenerateRandomEntries(entityCount, variant, rng, out var entityIds, out var compChunkIds, out var coords, out var categoryMasks);
+        GenerateRandomEntries(entityCount, variant, rng, out var entityIds, out var coords, out var categoryMasks);
 
-        var tree = SpatialRTree<PersistentStore>.BulkLoad(segment, variant, entityIds, compChunkIds, coords, categoryMasks);
+        var tree = SpatialRTree<PersistentStore>.BulkLoad(segment, variant, entityIds, coords, categoryMasks);
 
         Assert.That(tree.EntityCount, Is.EqualTo(entityCount));
         TreeValidator.Validate(tree);
@@ -180,9 +178,9 @@ public class SpatialBulkLoadTests
         var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 500, desc.Stride);
 
         var rng = new Random(123);
-        GenerateRandomEntries(entityCount, variant, rng, out var entityIds, out var compChunkIds, out var coords, out var categoryMasks);
+        GenerateRandomEntries(entityCount, variant, rng, out var entityIds, out var coords, out var categoryMasks);
 
-        var tree = SpatialRTree<PersistentStore>.BulkLoad(segment, variant, entityIds, compChunkIds, coords, categoryMasks);
+        var tree = SpatialRTree<PersistentStore>.BulkLoad(segment, variant, entityIds, coords, categoryMasks);
 
         // Build brute-force oracle
         var oracle = new BruteForceSpatialIndex(coordCount);
@@ -209,7 +207,7 @@ public class SpatialBulkLoadTests
             var treeResults = new HashSet<long>();
             foreach (var hit in tree.QueryAABB(queryCoords))
             {
-                treeResults.Add(hit.EntityId);
+                treeResults.Add(hit.PayloadId);
             }
 
             var oracleResults = new HashSet<long>(oracle.QueryAABB(queryCoords));
@@ -235,7 +233,7 @@ public class SpatialBulkLoadTests
         var segment = pmmf.AllocateChunkBasedSegment(PageBlockType.None, 500, desc.Stride);
 
         var rng = new Random(99);
-        GenerateRandomEntries(entityCount, variant, rng, out var entityIds, out var compChunkIds, out var coords, out var categoryMasks);
+        GenerateRandomEntries(entityCount, variant, rng, out var entityIds, out var coords, out var categoryMasks);
 
         // Set half the entities to category 1, half to category 2
         for (int i = 0; i < entityCount; i++)
@@ -243,7 +241,7 @@ public class SpatialBulkLoadTests
             categoryMasks[i] = (uint)(i % 2 == 0 ? 1 : 2);
         }
 
-        var tree = SpatialRTree<PersistentStore>.BulkLoad(segment, variant, entityIds, compChunkIds, coords, categoryMasks);
+        var tree = SpatialRTree<PersistentStore>.BulkLoad(segment, variant, entityIds, coords, categoryMasks);
         TreeValidator.Validate(tree);
 
         // Query with mask=1 should only return even-indexed entities
@@ -254,7 +252,7 @@ public class SpatialBulkLoadTests
         var mask1Results = new List<long>();
         foreach (var hit in tree.QueryAABB(bigQuery, categoryMask: 1))
         {
-            mask1Results.Add(hit.EntityId);
+            mask1Results.Add(hit.PayloadId);
         }
 
         // All results should be even-indexed entity IDs (1, 3, 5, ... based on our generation)

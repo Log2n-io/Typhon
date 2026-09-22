@@ -103,4 +103,36 @@ public static class ObservabilityBridgeExtensions
 
         return services;
     }
+
+    /// <summary>
+    /// Registers <see cref="EcsMetricsExporter"/> so the ECS and spatial-partitioning instruments can be published on the <c>Typhon.ECS</c> meter.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <returns>The service collection for chaining.</returns>
+    /// <remarks>
+    /// <para>
+    /// Deliberately separate from <see cref="AddTyphonObservabilityBridge"/>: that method's documented prerequisite is <see cref="IResourceGraph"/>, and
+    /// folding a <see cref="DatabaseEngine"/> dependency into it would change its contract for every existing caller. Registration is lazy, so resolving it
+    /// without an engine registered fails at resolution rather than at startup.
+    /// </para>
+    /// <para>
+    /// <b>Registration alone publishes nothing.</b> The instruments are created in the exporter's constructor, and this is a lazy singleton — a host that
+    /// calls this method and then scrapes sees no <c>typhon.ecs.*</c> series until something resolves
+    /// <see cref="EcsMetricsExporter"/> at least once. Resolve it during startup:
+    /// <code>
+    /// services.AddTyphonEcsMetrics();
+    /// // ...after the provider is built, before the first scrape:
+    /// _ = provider.GetRequiredService&lt;EcsMetricsExporter&gt;();
+    /// </code>
+    /// </para>
+    /// <para>
+    /// Every instrument is observable — the callbacks run when an OTel consumer polls, never on the tick path, so enabling this costs a running engine
+    /// nothing until something scrapes it.
+    /// </para>
+    /// </remarks>
+    public static IServiceCollection AddTyphonEcsMetrics(this IServiceCollection services)
+    {
+        services.TryAddSingleton(sp => new EcsMetricsExporter(sp.GetRequiredService<DatabaseEngine>()));
+        return services;
+    }
 }

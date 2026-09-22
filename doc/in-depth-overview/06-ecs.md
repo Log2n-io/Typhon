@@ -294,7 +294,7 @@ foreach (var cluster in accessor.GetClusterEnumerator<Ant>())
 
 The TZCNT loop walks only live slots — branch-free, very fast. `OccupancyBits` is a 64-bit mask at offset 0 of the cluster chunk; `EnabledBits(slot)` masks for component-disabled entities; `ActiveBits(slot) = OccupancyBits & EnabledBits(slot)` is the common case.
 
-Cluster storage is opt-in per archetype (`IsClusterEligible` on `ArchetypeMetadata`). Eligible archetypes report `ClusterRef`-accessible storage; others use legacy per-entity storage.
+Every archetype is cluster-backed: `IsClusterEligible` on `ArchetypeMetadata` is unconditionally true, so all entity storage is `ClusterRef`-accessible.
 
 ---
 

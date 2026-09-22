@@ -24,6 +24,23 @@ internal sealed class LiveFenceCostModel
 
     public float MigrationCost;
     public float AabbCost;
+
+    /// <summary>Microseconds per dirty cluster of a sliced Prep (#886 lead D). Seeded from the shadow and spatial per-cluster costs; learned like the others.</summary>
+    public float PrepCost;
+
+    /// <summary>µs per staged index value update. Calibrated exactly like <see cref="MigrationCost"/>, from the IndexMassUpdate phase's own chunk
+    /// wall-time and unit counts.</summary>
+    public float IndexUpdateCost;
+
+    /// <summary>µs per staged EntityMap location patch, calibrated from the EntityMapUpdate phase's own chunk wall time and unit counts.</summary>
+    public float EntityMapUpdateCost;
+
+    /// <summary>µs per dirty cluster of a sliced Finalize emit (#889), calibrated from the Finalize phase's chunk wall time over the slices' dirty-cluster
+    /// counts. Atomic Finalize items carry no units, so a phase with only those never moves it; a tick that mixes sliced and atomic archetypes charges
+    /// the atomic items' wall to the slices' units and reads high — the same bias <see cref="PrepCost"/> has carried since #886, bounded by the
+    /// <c>2 × W × O</c> chunk cap, so it yields smaller slices and never a wrong plan.</summary>
+    public float FinalizeEmitCost;
+
     public readonly float ShadowCost;
     public readonly float SpatialCost;
 
@@ -39,13 +56,41 @@ internal sealed class LiveFenceCostModel
     private long _aabbSumWall;
     private long _aabbSumUnits;
 
+    private readonly long[] _idxWall = new long[WindowSize];
+    private readonly long[] _idxUnits = new long[WindowSize];
+    private int _idxCursor;
+    private long _idxSumWall;
+    private long _idxSumUnits;
+
+    private readonly long[] _emWall = new long[WindowSize];
+    private readonly long[] _emUnits = new long[WindowSize];
+    private int _emCursor;
+    private long _emSumWall;
+    private long _emSumUnits;
+
+    private readonly long[] _prepWall = new long[WindowSize];
+    private readonly long[] _prepUnits = new long[WindowSize];
+    private int _prepCursor;
+    private long _prepSumWall;
+    private long _prepSumUnits;
+
+    private readonly long[] _finWall = new long[WindowSize];
+    private readonly long[] _finUnits = new long[WindowSize];
+    private int _finCursor;
+    private long _finSumWall;
+    private long _finSumUnits;
+
     public LiveFenceCostModel(FenceCostModel seed)
     {
         ArgumentNullException.ThrowIfNull(seed);
         MigrationCost = seed.MigrationCost;
         AabbCost = seed.AabbCost;
+        IndexUpdateCost = seed.IndexUpdateCost;
+        EntityMapUpdateCost = seed.EntityMapUpdateCost;
         ShadowCost = seed.ShadowCost;
         SpatialCost = seed.SpatialCost;
+        PrepCost = seed.ShadowCost + seed.SpatialCost;
+        FinalizeEmitCost = seed.FinalizeEmitCost;
     }
 
     public void UpdatePhase(FencePhase phase, long wallTicks, long unitCount)
@@ -53,6 +98,19 @@ internal sealed class LiveFenceCostModel
         if (unitCount <= 0 || wallTicks <= 0) return;
         switch (phase)
         {
+            case FencePhase.Prep:
+                _prepSumWall  -= _prepWall[_prepCursor];
+                _prepSumUnits -= _prepUnits[_prepCursor];
+                _prepWall[_prepCursor]  = wallTicks;
+                _prepUnits[_prepCursor] = unitCount;
+                _prepSumWall  += wallTicks;
+                _prepSumUnits += unitCount;
+                _prepCursor = (_prepCursor + 1) & WindowMask;
+                if (_prepSumUnits > 0)
+                {
+                    PrepCost = (float)((_prepSumWall * TicksToMicros) / _prepSumUnits);
+                }
+                break;
             case FencePhase.Migrate:
                 _migSumWall  -= _migWall[_migCursor];
                 _migSumUnits -= _migUnits[_migCursor];
@@ -78,6 +136,48 @@ internal sealed class LiveFenceCostModel
                 if (_aabbSumUnits > 0)
                 {
                     AabbCost = (float)((_aabbSumWall * TicksToMicros) / _aabbSumUnits);
+                }
+                break;
+
+            case FencePhase.IndexMassUpdate:
+                _idxSumWall  -= _idxWall[_idxCursor];
+                _idxSumUnits -= _idxUnits[_idxCursor];
+                _idxWall[_idxCursor]  = wallTicks;
+                _idxUnits[_idxCursor] = unitCount;
+                _idxSumWall  += wallTicks;
+                _idxSumUnits += unitCount;
+                _idxCursor = (_idxCursor + 1) & WindowMask;
+                if (_idxSumUnits > 0)
+                {
+                    IndexUpdateCost = (float)((_idxSumWall * TicksToMicros) / _idxSumUnits);
+                }
+                break;
+
+            case FencePhase.Finalize:
+                _finSumWall  -= _finWall[_finCursor];
+                _finSumUnits -= _finUnits[_finCursor];
+                _finWall[_finCursor]  = wallTicks;
+                _finUnits[_finCursor] = unitCount;
+                _finSumWall  += wallTicks;
+                _finSumUnits += unitCount;
+                _finCursor = (_finCursor + 1) & WindowMask;
+                if (_finSumUnits > 0)
+                {
+                    FinalizeEmitCost = (float)((_finSumWall * TicksToMicros) / _finSumUnits);
+                }
+                break;
+
+            case FencePhase.EntityMapUpdate:
+                _emSumWall  -= _emWall[_emCursor];
+                _emSumUnits -= _emUnits[_emCursor];
+                _emWall[_emCursor]  = wallTicks;
+                _emUnits[_emCursor] = unitCount;
+                _emSumWall  += wallTicks;
+                _emSumUnits += unitCount;
+                _emCursor = (_emCursor + 1) & WindowMask;
+                if (_emSumUnits > 0)
+                {
+                    EntityMapUpdateCost = (float)((_emSumWall * TicksToMicros) / _emSumUnits);
                 }
                 break;
         }

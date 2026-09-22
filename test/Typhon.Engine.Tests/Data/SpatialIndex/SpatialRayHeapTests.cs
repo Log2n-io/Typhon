@@ -151,7 +151,7 @@ public class SpatialRayHeapTests
         var ids = new HashSet<long>();
         foreach (var hit in tree.QueryRay(origin, direction, maxDist))
         {
-            ids.Add(hit.EntityId);
+            ids.Add(hit.PayloadId);
         }
 
         return ids;
@@ -251,7 +251,7 @@ public class SpatialRayHeapTests
                 int seen = 0;
                 foreach (var hit in tree.QueryRay(origin, direction, maxDist))
                 {
-                    _ = hit.EntityId;
+                    _ = hit.PayloadId;
                     if (++seen == 5 + round)
                     {
                         break;

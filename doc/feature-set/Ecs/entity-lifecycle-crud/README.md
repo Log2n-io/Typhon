@@ -89,7 +89,7 @@ dtx.Commit();
   and *absent* (Versioned component never supplied at Spawn — `Enable(comp)` throws; use `Enable(comp, in value)`).
   Zero overhead unless a concurrent transaction is mid-`Enable`/`Disable`.
 - There is no `tx.Read<T>(id)` shorthand — always `Open`/`OpenMut` first to obtain an `EntityRef`.
-- The old flat CRUD API (`CreateEntity`/`ReadEntity`/`UpdateEntity`/`DeleteEntity`) is gone — `EntityRef` is the
+- There is no flat CRUD API (`CreateEntity`/`ReadEntity`/`UpdateEntity`/`DeleteEntity`) — `EntityRef` is the
   only entity manipulation path.
 
 ## 🧪 Tests

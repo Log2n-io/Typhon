@@ -1,13 +1,13 @@
 ---
 uid: feature-spatial-spatial-trigger-volumes
 title: 'Trigger Volumes (Enter / Leave / Stay)'
-description: 'Per-region occupant diffing against the R-Tree(s) emits Enter/Leave/Stay events at a configurable per-region frequency.'
+description: 'Per-region occupant diffing against the per-cell cluster index emits Enter/Leave/Stay events at a configurable per-region frequency.'
 ---
 
 # Trigger Volumes (Enter / Leave / Stay)
-> Per-region occupant diffing against the R-Tree(s) emits Enter/Leave/Stay events at a configurable per-region frequency.
+> Per-region occupant diffing against the per-cell cluster index emits Enter/Leave/Stay events at a configurable per-region frequency.
 
-**Status:** ✅ Implemented · **Visibility:** Internal · **Category:** [Spatial](./README.md)
+**Status:** ✅ Implemented · **Visibility:** Public · **Category:** [Spatial](./README.md)
 
 ## 🎯 What it solves
 
@@ -15,19 +15,20 @@ Games need transition events — the moment an entity enters or leaves a region 
 
 ## ⚙️ How it works (in brief)
 
-A trigger region is a lightweight config slot (bounds, category mask, evaluation frequency, target-tree mode) — not an ECS entity or component. Each evaluation queries the spatial tree(s) for the region's AABB and category mask, builds a bitmap of current occupants, and XORs it against the bitmap captured at the region's previous evaluation: set-but-not-previously-set bits are Enter, previously-set-but-not-set bits are Leave, the rest are Stay (count only, not materialized). Evaluation is frequency-gated per region — a region is skipped unless `currentTick - lastEvaluatedTick >= EvaluationFrequency` — so cheap ambient zones and expensive per-tick damage fields can share the same system at different cadences. `TargetTreeMode` controls which tree(s) are queried: `DynamicOnly` (default) never touches the static tree; `Both`/`StaticOnly` query the static tree once and cache the result, only re-querying it when the static tree mutates or the region's bounds/category change. Spatial-grid cluster archetypes registered on the same index are diffed too, tracked by EntityId rather than by R-Tree chunk id.
+A trigger region is a lightweight config slot — bounds, category mask, evaluation frequency — not an ECS entity or component. Each evaluation runs one AABB query through the per-cell cluster index for the region's box and category mask, collecting the matching entities of every cluster archetype that shares the spatial component, and compares that set against the set captured at the region's previous evaluation. An entity in the current set but not the previous one is an **Enter**; one in the previous set but not the current is a **Leave**; one in both is a **Stay**, counted but not materialized.
+
+Occupancy is tracked **by entity id**, in a `HashSet<long>`, and that is a correctness requirement rather than a convenience: cluster storage has its own chunk-id namespace, so a bitmap indexed by the component table's would collide two different entities onto one bit and report neither transition. The two sets are double-buffered and swapped after each diff, so a steady-state evaluation allocates nothing once both have grown to their working size.
+
+Evaluation is frequency-gated per region — a region is skipped unless `currentTick - lastEvaluatedTick >= EvaluationFrequency` — so cheap ambient zones and expensive per-tick damage fields can share the same system at different cadences. A region that has never been evaluated always evaluates on its first call, whatever its frequency. A 2D region is widened to infinite Z rather than being given the plane's own coordinates, so a 2D archetype and a 3D one both pass the Z overlap test on a query that did not ask about Z.
 
 ## 💻 Usage
 
-Trigger regions are reached through the per-table spatial index state, which is engine-internal today (see Guarantees below) — this is the actual API, shown as the test suite exercises it:
-
 ```csharp
-var table = dbe.GetComponentTable<Position>();
-var triggers = table.SpatialIndex.GetOrCreateTriggerSystem(table);
+// The facade is a thin handle over engine-owned state — cheap to obtain, nothing to dispose.
+SpatialTriggerVolumes triggers = dbe.SpatialTriggers<Position>();
 
-double[] zoneBounds = { -10, -10, -10, 50, 50, 50 };   // minX,minY,minZ,maxX,maxY,maxZ
-var zone = triggers.CreateRegion(zoneBounds, categoryMask: (uint)Faction.Player,
-    evaluationFrequency: 5, targetTree: TargetTreeMode.DynamicOnly);
+double[] zoneBounds = { -10, -10, -10, 50, 50, 50 };   // minX,minY,minZ,maxX,maxY,maxZ (four doubles for a 2D component)
+var zone = triggers.CreateRegion(zoneBounds, categoryMask: (uint)Faction.Player, evaluationFrequency: 5);
 
 // once per tick, per region:
 SpatialTriggerResult r = triggers.EvaluateRegion(zone, currentTick);
@@ -38,38 +39,39 @@ if (r.WasEvaluated)
     // r.StayCount — occupants unchanged since the previous evaluation
 }
 
-triggers.UpdateRegionBounds(zone, newBounds);       // invalidates static-tree cache
-triggers.UpdateRegionCategoryMask(zone, newMask);   // invalidates static-tree cache
+triggers.UpdateRegionBounds(zone, newBounds);       // occupant set is kept, so the next evaluation reports the difference
+triggers.UpdateRegionCategoryMask(zone, newMask);
 triggers.DestroyRegion(zone);
 ```
 
-| `TargetTreeMode` | Default | Effect |
+| `CreateRegion` arg | Default | Effect |
 |---|---|---|
-| `DynamicOnly` | yes | Queries the dynamic tree only; static tree never touched |
-| `Both` | — | Dynamic tree every evaluation + cached static-tree result, merged |
-| `StaticOnly` | — | Static tree only, fully cached after the first evaluation |
+| `bounds` | required | `[minX, minY, maxX, maxY]` for a 2D component, `[minX, minY, minZ, maxX, maxY, maxZ]` for a 3D one |
+| `categoryMask` | `0` | `0` = no filtering; non-zero admits a cluster on any bit overlap, the same semantic the cluster broadphase applies |
+| `evaluationFrequency` | `1` | Minimum ticks between real evaluations; `0` is coerced to `1` |
 
 ## ⚠️ Guarantees & limits
 
-- **Engine-internal only today** — `SpatialTriggerSystem`, `ComponentTable.SpatialIndex`, and `GetOrCreateTriggerSystem` are all `internal`; there is no public `DatabaseEngine`/ECS entry point yet, so application code outside the engine assembly cannot create or evaluate trigger regions. `SpatialRegionHandle`, `SpatialTriggerResult`, and `TargetTreeMode` are public types, ready for a future public wrapper.
-- **Event completeness (rule TV-01)** — every outside→inside transition between two evaluations produces exactly one Enter, every inside→outside produces exactly one Leave; an entity inside at both evaluations produces neither (it's counted in `StayCount` only).
-- **Frequency contract (rule TV-02)** — `EvaluationFrequency = N` guarantees at most one evaluation every N ticks. A skipped evaluation returns `SpatialTriggerResult.Skipped` (`WasEvaluated == false`; `Entered`/`Left`/`StayCount` are not meaningful). A freshly created region always evaluates on its first call regardless of N.
-- **Result spans are transient** — `Entered`/`Left` are `ReadOnlySpan<long>` over pooled buffers, valid only until the next `EvaluateRegion` call on that system; copy entity ids out before yielding control if they need to outlive the call.
-- **Static-tree caching, not re-querying** — `Both`/`StaticOnly` regions re-run the static query only when the static tree's mutation version changes or the region's bounds/category mask are updated; steady-state evaluations reuse the cached bitmap.
-- **Cluster archetypes are included automatically** — if the table's spatial index has spatial-grid cluster archetypes registered, their entities are queried and diffed in the same `EvaluateRegion` call, tracked by EntityId in a separate set from the R-Tree bitmap.
-- **Destroyed handles are rejected** — `DestroyRegion` bumps the slot's generation; any further use of the old handle (including a double-destroy) throws `ArgumentException`.
-- **Designed for ~800ns per region** at ~50 occupants (AABB query + bitmap diff); cost tracks occupant count and tree depth, and per-tick total cost is bounded by staggering `EvaluationFrequency` across regions rather than evaluating all regions every tick.
+- **Reachable from application code** — `dbe.SpatialTriggers<T>()` returns a public `SpatialTriggerVolumes` facade, and throws `InvalidOperationException` naming the component if it carries no `[SpatialIndex]` field. Application code reaches the system through that facade and not through an internal factory. A `default`-constructed facade is rejected by every member; check `IsValid` if you did not obtain it from the extension method.
+- **Event completeness** — every outside→inside transition between two evaluations produces exactly one Enter, every inside→outside produces exactly one Leave; an entity inside at both evaluations produces neither, and is counted in `StayCount` only.
+- **Frequency contract** — `EvaluationFrequency = N` guarantees at most one evaluation every N ticks. A skipped call returns a result whose `WasEvaluated` is `false`, in which case `Entered`, `Left` and `StayCount` are not meaningful. A freshly created region always evaluates on its first call regardless of N.
+- **Result spans are transient, and shared across regions** — `Entered` and `Left` are `ReadOnlySpan<long>` over the system's result buffers, valid only until the next `EvaluateRegion` call on that system, whichever region it names. Copy entity ids out before yielding control if they need to outlive the call.
+- **Both cell halves are always evaluated** — a region cannot be scoped to static or dynamic clusters, and no argument narrows the walk to one half. One query visits both halves of each cell it opens.
+- **Destroyed handles are rejected** — `DestroyRegion` bumps the slot's generation; any further use of the old handle, including a double-destroy, throws `ArgumentException`. The free-list link lives in its own field rather than over the generation counter, so recycling a slot never walks that counter backwards and a destroyed handle can never validate against the slot that replaced it.
+- **Do not hold the facade across a schema migration** — the underlying state is created on first use and lives as long as the component's `ComponentTable`, which is the engine's lifetime in ordinary use but not across a migration that reconstructs the table.
+- **Cost tracks occupants and cluster count** — each evaluation is one cell walk plus a set diff, so it scales with how many clusters the region's cells hold and how many entities they yield, not with world size. Per-tick total cost is bounded by staggering `EvaluationFrequency` across regions rather than evaluating all of them every tick. *No per-region measurement is on record.*
 
 ## 🧪 Tests
 
-- [SpatialTriggerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialTriggerTests.cs) — region lifecycle + generation-checked handle reuse, `Enter`/`Leave`/`StayInside` event completeness, `EvalFrequency_SkipsTicks`
+- [SpatialTriggerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/SpatialIndex/SpatialTriggerTests.cs) — `Enter_SpawnInsideRegion`, `Leave_DestroyEntity` and `StayInside_NoEnterLeaveEvents` for event completeness; `EvalFrequency_SkipsTicks` for the frequency contract; `CreateRegion_HandleReuse_GenerationPreventsStaleAccess` for the generation check; `CategoryMask_FiltersNonMatchingEntities`, `UpdateBounds_NewEntitiesEnterLeave`, `MultipleRegions_IndependentTracking` and `LargeScale_MultipleRegions_EventCorrectness`; `StaticEntity_EntersOnceThenStays` and `DestroyingAStaticEntity_ReportsItAsLeaving` cover a static-mode archetype
 
 ## 🔗 Related
 
-- Source: [src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs)
-- Source: [src/Typhon.Engine/Spatial/public/SpatialRegionHandle.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialRegionHandle.cs) (`TargetTreeMode`)
-- Source: [src/Typhon.Engine/Spatial/public/SpatialTriggerResult.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialTriggerResult.cs)
-- Related catalog entry: [Spatial Category Filtering](./spatial-category-filtering.md), [Spatial R-Tree Index](./spatial-rtree-index/README.md)
+- Source: [src/Typhon.Engine/Spatial/public/SpatialObservers.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialObservers.cs) (the public `SpatialTriggerVolumes` facade and the `SpatialTriggers<T>()` extension)
+- Source: [src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs) (region storage, the occupant diff, frequency gating)
+- Source: [src/Typhon.Engine/Spatial/public/SpatialRegionHandle.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialRegionHandle.cs), [src/Typhon.Engine/Spatial/public/SpatialTriggerResult.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialTriggerResult.cs)
+- Related catalog entry: [Spatial Category Filtering](./spatial-category-filtering.md), [Cluster Spatial Queries](./cluster-spatial-queries.md) (the walk each evaluation runs)
+- Related catalog entry: [Interest Management (Delta Spatial Queries)](./spatial-interest-management.md) — the sibling system on the same index, reached the same way
 
-<!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F3 — Trigger Volumes: algorithm, static-cache strategy, frequency budget) -->
-<!-- Rules: rules/spatial.md (Module: Trigger Volumes — TV-01 event completeness, TV-02 frequency contract) -->
+<!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F3 — Trigger Volumes: algorithm, frequency budget) -->
+<!-- Rules: rules/spatial.md (Module: Trigger Volumes — TV-01 event completeness and entity-id occupancy, TV-02 frequency contract; IM-04 for the public entry point) -->

@@ -4,6 +4,7 @@ using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -635,13 +636,23 @@ public class ChunkBasedSegmentBitmapL3Tests
             $"Found {idList.Count - uniqueCount} duplicate IDs in concurrent allocation");
     }
 
-    [Property("MemPageCount", 16*1024)]
+    // The fixture is a bare page cache with no checkpoint, and Setup holds an epoch scope for the whole test, so every page the segment
+    // touches stays dirty and unevictable until TearDown: the segment has to fit in the cache. It used not to be bounded. It grew ~1 000
+    // pages per 100 ms, reached 9 500–15 600 pages in the test's second, and in ~1 run in 10 needed a grow past a 16 384-page cache: the
+    // engine's 5 s back-pressure timeout, which the old 5 s wait below reported as a deadlock. It now grows to 160 pages at most, then runs near-full.
+    [Property("MemPageCount", 2*1024)]
     [Test]
     [CancelAfter(10000)]
     [Category("Sensitive")] // timing-dependent concurrency test — flaky under parallel CPU load; runs in the gate's serial quiet pass
     public void ConcurrentAllocateAndFree_MaintainsConsistency()
     {
         var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 20, 64);
+
+        // The segment grows freely up to maxPages (20 → 40 → 80 → 160), then the allocators leave `slack` chunks free: it runs near-full, the free
+        // list almost empty and allocate, free and rebuild racing, without an allocator ever finding it full, which is the only thing that grows it.
+        // The slack exceeds the four allocators, so no interleaving of theirs can use it up.
+        const int maxPages = 160;
+        const int slack = 64;
 
         var allocatedIds = new System.Collections.Concurrent.ConcurrentQueue<int>();
         var errors = new System.Collections.Concurrent.ConcurrentBag<string>();
@@ -659,7 +670,8 @@ public class ChunkBasedSegmentBitmapL3Tests
                     while (!cts.Token.IsCancellationRequested)
                     {
                         // Check if there's likely room before allocating
-                        if (segment.FreeChunkCount <= 0)
+                        var free = segment.FreeChunkCount;
+                        if (free <= 0 || (segment.Length >= maxPages && free <= slack))
                         {
                             Thread.SpinWait(100);
                             continue;
@@ -713,9 +725,16 @@ public class ChunkBasedSegmentBitmapL3Tests
             }));
         }
 
-        if (!Task.WaitAll(tasks.ToArray(), TimeSpan.FromSeconds(5)))
+        // Past the 1 s run plus one 5 s page-cache back-pressure timeout, so a grow that exhausts the cache surfaces as that exception (WaitAll
+        // rethrows it). Allocators queued on the segment's grow lock would each wait their own 5 s after it, so a timeout here reports what it saw
+        // rather than calling it a hang.
+        if (!Task.WaitAll(tasks.ToArray(), TimeSpan.FromSeconds(8)))
         {
-            Assert.Fail("ConcurrentAllocateAndFree tasks did not complete within 5s — likely deadlock in AllocateChunk/FreeChunk");
+            var faulted = string.Join(", ", tasks.Where(t => t.IsFaulted).Select(t => t.Exception?.InnerException?.GetType().Name));
+            var cache = _pmmf.CountUnevictablePages();
+            Assert.Fail($"ConcurrentAllocateAndFree tasks did not complete within 8s. Faulted so far: [{faulted}]; segment {segment.Length} pages; "
+                        + $"cache {cache.Unevictable} of {cache.Total} pages unevictable, {cache.Debt} owed. A full cache stalls each allocator queued on "
+                        + "the grow lock for 5 s in turn; anything else is a hang in AllocateChunk/FreeChunk.");
         }
 
         // Report any errors found during concurrent execution
@@ -737,7 +756,66 @@ public class ChunkBasedSegmentBitmapL3Tests
         // The allocated count should be at least the reserved chunk (0) 
         Assert.That(segment.AllocatedChunkCount, Is.GreaterThanOrEqualTo(1));
         Assert.That(segment.FreeChunkCount, Is.GreaterThanOrEqualTo(0));
-        Assert.That(segment.AllocatedChunkCount + segment.FreeChunkCount, Is.EqualTo(segment.ChunkCapacity));
+
+        // Exact, not merely non-negative: `Allocated + Free == Capacity` holds by definition (Free IS Capacity - Allocated), so it could never fail.
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(CountAllocatedChunks(segment)), "the allocated count drifted from the bitmap");
+    }
+
+    /// <summary>
+    /// A free that lands while <c>RebuildFreeList</c> is running must still reach the allocated count. The rebuild used to overwrite the count with its
+    /// own popcount; a free on a page the scan had already passed was then lost, the count stayed one too high for good, and under load
+    /// <see cref="ChunkBasedSegment{TStore}.FreeChunkCount"/> went negative. Deterministic: the probe frees inside the rebuild, after the scan.
+    /// </summary>
+    [Test]
+    public void AFreeDuringTheFreeListRebuild_StillReachesTheAllocatedCount()
+    {
+        var segment = _pmmf.AllocateChunkBasedSegment(PageBlockType.None, 3, 64);
+        var ids = new List<int>();
+        while (segment.FreeChunkCount > 0)
+        {
+            ids.Add(segment.AllocateChunk(false));
+        }
+
+        int onFirstPage = ids[0];
+        int onLastPage = ids[^1];
+        Assert.That(segment.GetChunkLocation(onFirstPage).segmentIndex, Is.LessThan(segment.GetChunkLocation(onLastPage).segmentIndex),
+            "precondition: the two chunks must sit on different pages, the first one scanned before the other");
+
+        // One free chunk, and a free list that has lost track of it — what the lost race RebuildFreeList exists for leaves behind. The next allocation
+        // walks an empty list with the count below capacity, so it rebuilds.
+        segment.FreeChunk(onLastPage);
+        segment.GetType().GetField("_freeHead", BindingFlags.NonPublic | BindingFlags.Instance)!.SetValue(segment, -1);
+
+        var fired = 0;
+        segment.RebuildFreeListProbe = () =>
+        {
+            if (Interlocked.Exchange(ref fired, 1) == 0)
+            {
+                segment.FreeChunk(onFirstPage);   // page 0: the scan has already counted this chunk as allocated
+            }
+        };
+        segment.AllocateChunk(false);
+        segment.RebuildFreeListProbe = null;
+
+        Assert.That(fired, Is.EqualTo(1), "precondition: the allocation must have rebuilt the free list");
+        Assert.That(segment.AllocatedChunkCount, Is.EqualTo(CountAllocatedChunks(segment)),
+            "the free made during the rebuild was overwritten by the scan's snapshot");
+        Assert.That(segment.FreeChunkCount, Is.EqualTo(1));
+    }
+
+    /// <summary>Chunks whose bitmap bit is set: the ground truth the allocated count must equal.</summary>
+    private static int CountAllocatedChunks(ChunkBasedSegment<PersistentStore> segment)
+    {
+        var set = 0;
+        for (var id = 0; id < segment.ChunkCapacity; id++)
+        {
+            if (segment.IsChunkAllocated(id))
+            {
+                set++;
+            }
+        }
+
+        return set;
     }
 
     #endregion

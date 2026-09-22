@@ -20,15 +20,6 @@ internal static class SpatialGeometry
         outer.MinX <= inner.MinX && outer.MaxX >= inner.MaxX && outer.MinY <= inner.MinY && outer.MaxY >= inner.MaxY;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static AABB2F Enlarge(AABB2F box, float margin) => new()
-    {
-        MinX = box.MinX - margin,
-        MinY = box.MinY - margin,
-        MaxX = box.MaxX + margin,
-        MaxY = box.MaxY + margin,
-    };
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static AABB2F Union(AABB2F a, AABB2F b) => new()
     {
         MinX = Math.Min(a.MinX, b.MinX),
@@ -62,17 +53,6 @@ internal static class SpatialGeometry
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool Contains(AABB3F outer, AABB3F inner) =>
         outer.MinX <= inner.MinX && outer.MaxX >= inner.MaxX && outer.MinY <= inner.MinY && outer.MaxY >= inner.MaxY && outer.MinZ <= inner.MinZ && outer.MaxZ >= inner.MaxZ;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static AABB3F Enlarge(AABB3F box, float margin) => new()
-    {
-        MinX = box.MinX - margin,
-        MinY = box.MinY - margin,
-        MinZ = box.MinZ - margin,
-        MaxX = box.MaxX + margin,
-        MaxY = box.MaxY + margin,
-        MaxZ = box.MaxZ + margin,
-    };
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static AABB3F Union(AABB3F a, AABB3F b) => new()
@@ -117,15 +97,6 @@ internal static class SpatialGeometry
         outer.MinX <= inner.MinX && outer.MaxX >= inner.MaxX && outer.MinY <= inner.MinY && outer.MaxY >= inner.MaxY;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static AABB2D Enlarge(AABB2D box, double margin) => new()
-    {
-        MinX = box.MinX - margin,
-        MinY = box.MinY - margin,
-        MaxX = box.MaxX + margin,
-        MaxY = box.MaxY + margin,
-    };
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static AABB2D Union(AABB2D a, AABB2D b) => new()
     {
         MinX = Math.Min(a.MinX, b.MinX),
@@ -159,17 +130,6 @@ internal static class SpatialGeometry
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool Contains(AABB3D outer, AABB3D inner) =>
         outer.MinX <= inner.MinX && outer.MaxX >= inner.MaxX && outer.MinY <= inner.MinY && outer.MaxY >= inner.MaxY && outer.MinZ <= inner.MinZ && outer.MaxZ >= inner.MaxZ;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static AABB3D Enlarge(AABB3D box, double margin) => new()
-    {
-        MinX = box.MinX - margin,
-        MinY = box.MinY - margin,
-        MinZ = box.MinZ - margin,
-        MaxX = box.MaxX + margin,
-        MaxY = box.MaxY + margin,
-        MaxZ = box.MaxZ + margin,
-    };
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static AABB3D Union(AABB3D a, AABB3D b) => new()

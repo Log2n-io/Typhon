@@ -4,10 +4,12 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using static System.FormattableString;
 
 namespace Typhon.Engine.Tests;
 
@@ -1010,7 +1012,7 @@ public class OlcBTreeRaceStressTests
                                                && deltas[CtrEntries] == 0)
         {
             label = "SPINNING";
-            verdict = $"only WriteLockFailures moved, by {deltas[CtrWriteLockFails]:N0} in {DeadlineSampleWindow.TotalSeconds}s. The operation is not restarting "
+            verdict = Invariant($"only WriteLockFailures moved, by {deltas[CtrWriteLockFails]:N0} in {DeadlineSampleWindow.TotalSeconds}s. The operation is not restarting ")
                     + "and not completing: it is inside a write-lock spin that never acquires. That is lock-acquisition livelock, NOT a restart storm — the "
                     + "restart-bound story does not apply and MaxPessimisticRestarts will never fire here.";
         }
@@ -1020,8 +1022,8 @@ public class OlcBTreeRaceStressTests
             // WHICH loop is the first fork, and it used to be unanswerable: the pessimistic retry incremented the counter named OptimisticRestarts, so a
             // record reading "restarts +870, fallbacks +0" was arithmetically impossible from the optimistic loop (capped at 3, then an unconditional
             // fallback tick) and nothing said so. The two want opposite investigations, so the verdict names the loop before it names a suspect.
-            verdict = $"optimistic restarts moved by {deltas[CtrRestarts]:N0}, PESSIMISTIC restarts by {deltas[CtrPessRestarts]:N0}, fallbacks by "
-                    + $"{deltas[CtrFallbacks]:N0}. The operation keeps re-attempting and losing — a restart storm.";
+            verdict = Invariant($"optimistic restarts moved by {deltas[CtrRestarts]:N0}, PESSIMISTIC restarts by {deltas[CtrPessRestarts]:N0}, fallbacks by ")
+                    + Invariant($"{deltas[CtrFallbacks]:N0}. The operation keeps re-attempting and losing — a restart storm.");
             verdict += deltas[CtrPessRestarts] > deltas[CtrRestarts]
                 ? " It is inside AddOrUpdateCorePessimistic's retry loop, heading for the MaxPessimisticRestarts throw (#738); the exit histogram below "
                   + "names the bail burning the budget, and each of them wants a different fix."
@@ -1044,7 +1046,16 @@ public class OlcBTreeRaceStressTests
         // hypothetical: it misread exactly that way on first encounter, minutes after the record was produced, by someone who had just written the classifier
         // above it. A label that has to be cross-checked against the code that printed it is not evidence, and this harness's whole purpose is producing
         // evidence.
-        sb.Append($"DEADLINE after {IterationDeadline.TotalSeconds}s — {label}: {verdict}\n  total(+delta over {DeadlineSampleWindow.TotalSeconds}s):");
+        // ── Every number in this dump is formatted INVARIANT, deliberately ────────────────────────────────────────────
+        //
+        // `:N0` is culture-sensitive: 8616 renders "8,616" under en-US and "8 616" (narrow no-break space) under a French
+        // region setting. Two costs, and the second is the one that bit. First, a stress record whose SHAPE depends on the
+        // developer's locale cannot be diffed against CI's or against a colleague's — and being diffable is the only job a
+        // deadline dump has. Second, `BTreeRetryExitInstrumentationTests` asserts on this text: with machine formatting it
+        // passed on CI (en-US) and failed on any non-US dev box, which reads as "this branch is broken" rather than "this
+        // machine is configured differently". That is the same false signal `scripts/pre-push.sh`'s own notes record for
+        // the missing SPA build, and it costs a session's confidence each time.
+        sb.Append(Invariant($"DEADLINE after {IterationDeadline.TotalSeconds}s — {label}: {verdict}\n  total(+delta over {DeadlineSampleWindow.TotalSeconds}s):"));
         for (int i = 0; i < deltas.Length; i++)
         {
             // Every scalar prints, zeros included — a frozen counter is evidence. The exit buckets print only when non-empty, because seventeen mostly-zero
@@ -1053,7 +1064,7 @@ public class OlcBTreeRaceStressTests
             {
                 continue;
             }
-            sb.Append($" {CounterNames[i]}={first[i]:N0}(+{deltas[i]:N0})");
+            sb.Append(Invariant($" {CounterNames[i]}={first[i]:N0}(+{deltas[i]:N0})"));
         }
 
         WriteProgress(s.Name, iter, $"DEADLINE/{label}");
@@ -1104,7 +1115,7 @@ public class OlcBTreeRaceStressTests
             {
                 sb.Append(' ');
             }
-            sb.Append(moved[i].Name).Append('=').Append(moved[i].Count.ToString("N0"));
+            sb.Append(moved[i].Name).Append('=').Append(moved[i].Count.ToString("N0", CultureInfo.InvariantCulture));
         }
         return sb.ToString();
     }
@@ -1127,10 +1138,16 @@ public class OlcBTreeRaceStressTests
         try
         {
             string exe = "dotnet-stack";
-            var local = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotnet", "tools", "dotnet-stack.exe");
+
+            // do not rely on PATH inside a test host; the tool lives in a known place when it is installed at all. The
+            // file name is NOT the same everywhere — a global tool is `dotnet-stack.exe` on Windows and `dotnet-stack`
+            // with no extension on Linux and macOS, so probing only for the .exe silently misses an installed tool on
+            // every CI runner this fixture actually runs on.
+            var toolDir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dotnet", "tools");
+            var local = System.IO.Path.Combine(toolDir, OperatingSystem.IsWindows() ? "dotnet-stack.exe" : "dotnet-stack");
             if (System.IO.File.Exists(local))
             {
-                exe = local;   // do not rely on PATH inside a test host; the tool lives in a known place when it is installed at all
+                exe = local;
             }
 
             var psi = new ProcessStartInfo(exe, $"report -p {Environment.ProcessId}")
@@ -1147,13 +1164,24 @@ public class OlcBTreeRaceStressTests
                 return "  stack capture: could not start dotnet-stack.";
             }
 
-            string stdout = proc.StandardOutput.ReadToEnd();
-            string stderr = proc.StandardError.ReadToEnd();
+            // Both pipes have to drain CONCURRENTLY with the wait. Draining stdout to completion first and stderr only
+            // afterwards deadlocks the pair the moment stderr fills its buffer: the child blocks writing stderr, the
+            // parent blocks reading stdout, neither moves, and the 90s bound below never fires because control never
+            // reaches it. A method whose entire job is to survive a wedge must not be able to manufacture one.
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+
             if (!proc.WaitForExit(90_000))
             {
                 try { proc.Kill(entireProcessTree: true); } catch { /* best-effort */ }
                 return "  stack capture: dotnet-stack did not return within 90s — the diagnostics endpoint is itself unresponsive, which is a finding.";
             }
+
+            // The child has exited, so both pipes are at EOF and these complete immediately in the normal case. Still
+            // bounded: a grandchild inheriting the write handle keeps the pipe open past its parent's exit, and that
+            // would hang here forever on an unbounded wait.
+            string stdout = stdoutTask.Wait(10_000) ? stdoutTask.Result : string.Empty;
+            string stderr = stderrTask.Wait(10_000) ? stderrTask.Result : string.Empty;
 
             if (string.IsNullOrWhiteSpace(stdout))
             {

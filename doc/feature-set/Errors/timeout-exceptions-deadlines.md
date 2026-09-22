@@ -12,9 +12,9 @@ description: 'Configurable, finite deadlines replace infinite waits, turning eve
 
 ## 🎯 What it solves
 
-Every lock acquisition and buffer claim in Typhon used to wait forever — `ref WaitContext.Null` meant any
-contention, stuck writer, or resource exhaustion hung the caller indefinitely, indistinguishable from a deadlock.
-There was no way to bound how long an operation could block, and no structured signal when it did. This feature
+A lock acquisition or buffer claim that waits forever — what `ref WaitContext.Null` asks for — lets any
+contention, stuck writer, or resource exhaustion hang the caller indefinitely, indistinguishable from a deadlock.
+That leaves no bound on how long an operation blocks and no structured signal when it does. This feature
 gives every wait a finite, per-subsystem-configurable deadline and converts an expired wait into a specific
 exception type carrying what was being waited for and how long — never a silent hang, never a generic
 `System.TimeoutException`.

@@ -46,17 +46,3 @@ public readonly struct SpatialRegionHandle : IEquatable<SpatialRegionHandle>
     /// <summary>Returns a string of the form <c>Region(index:generation)</c>.</summary>
     public override string ToString() => $"Region({Index}:{Generation})";
 }
-
-/// <summary>
-/// Controls which R-Tree(s) a trigger region evaluates against.
-/// </summary>
-[PublicAPI]
-public enum TargetTreeMode : byte
-{
-    /// <summary>Query only the dynamic tree (default). Best for regions tracking moving entities.</summary>
-    DynamicOnly = 0,
-    /// <summary>Query both static and dynamic trees. Static results are cached and only re-queried on tree mutation.</summary>
-    Both = 1,
-    /// <summary>Query only the static tree. Fully cached after first evaluation.</summary>
-    StaticOnly = 2,
-}

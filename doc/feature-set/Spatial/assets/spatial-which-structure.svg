@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 620" width="1200" height="620" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    .t   { font-size: 21px; font-weight: 700; fill: #18181b; }
+    .st  { font-size: 13.5px; fill: #52525b; }
+    .h   { font-size: 14.5px; font-weight: 700; fill: #18181b; }
+    .q   { font-size: 13.5px; font-weight: 700; fill: #18181b; }
+    .b   { font-size: 12px; fill: #3f3f46; }
+    .lm  { font-size: 11.5px; fill: #71717a; }
+    .bad { font-size: 11.5px; fill: #b91c1c; }
+    .lb  { font-size: 13px; font-weight: 700; fill: #3f3f46; }
+    .mono{ font-size: 11.5px; font-family: ui-monospace, Consolas, monospace; fill: #3f3f46; }
+    .yes { font-size: 11px; font-weight: 700; fill: #15803d; }
+  </style>
+  <rect width="1200" height="620" fill="#ffffff"/>
+  <defs>
+    <marker id="dn" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#16a34a"/></marker>
+  </defs>
+
+  <text class="t"  x="40" y="38">How a spatial query resolves</text>
+  <text class="st" x="40" y="60">Every spatial query takes the same path: expand the region into the cells it covers, test the cluster bounds in each, then scan the clusters that overlap.</text>
+
+  <!-- ═══ the flow ═══ -->
+  <rect x="40" y="92" width="720" height="42" fill="#f4f4f5" stroke="#a1a1aa" rx="4"/>
+  <text class="q" x="58" y="118">A query carrying a spatial filter &#8212; AABB, Radius, Ray or Frustum</text>
+
+  <path d="M 120 134 L 120 156" stroke="#16a34a" stroke-width="1.6" marker-end="url(#dn)"/>
+
+  <rect x="40" y="160" width="720" height="60" fill="#f0fdf4" stroke="#16a34a" rx="4"/>
+  <text class="q"   x="58" y="182">Does the component carry a <tspan class="mono" font-weight="700">[SpatialIndex]</tspan> field?</text>
+  <text class="bad" x="58" y="204">No &#8594; rejected at the call site by a debug check. It is not a runtime path at all.</text>
+  <text class="yes" x="700" y="182">yes</text>
+
+  <path d="M 120 220 L 120 242" stroke="#16a34a" stroke-width="1.6" marker-end="url(#dn)"/>
+
+  <rect x="40" y="246" width="720" height="76" fill="#f0fdf4" stroke="#16a34a" rx="4"/>
+  <text class="q"   x="58" y="268">Was <tspan class="mono" font-weight="700">ConfigureSpatialGrid</tspan> called before <tspan class="mono" font-weight="700">InitializeArchetypes</tspan>?</text>
+  <text class="bad" x="58" y="290">No &#8594; the typed cluster query throws. The fluent query returns an <tspan font-weight="700">empty set</tspan> instead, which is a silent</text>
+  <text class="bad" x="58" y="308">miss rather than an error. The two entry points do not agree, and that is worth knowing.</text>
+  <text class="yes" x="700" y="268">yes</text>
+
+  <path d="M 120 322 L 120 344" stroke="#16a34a" stroke-width="1.6" marker-end="url(#dn)"/>
+
+  <rect x="40" y="348" width="720" height="76" fill="#f0fdf4" stroke="#16a34a" rx="4"/>
+  <text class="q"   x="58" y="370">Does the query box match the archetype&#8217;s storage tier?</text>
+  <text class="bad" x="58" y="392">No &#8594; the dimensionality and precision must agree exactly. An f64 box throws as not supported;</text>
+  <text class="bad" x="58" y="410">f32 is what ships today, in both two and three dimensions.</text>
+  <text class="yes" x="700" y="370">yes</text>
+
+  <path d="M 120 424 L 120 448" stroke="#16a34a" stroke-width="1.6" marker-end="url(#dn)"/>
+
+  <!-- ═══ where the spatial mode matters ═══ -->
+  <rect x="800" y="160" width="360" height="264" fill="#eff6ff" stroke="#2563eb" stroke-width="1.4" rx="4"/>
+  <text class="lb" x="818" y="186">What the spatial mode decides</text>
+  <text class="b"  x="818" y="210">Spatial mode picks the <tspan font-weight="700">half</tspan>, not the path. A static</text>
+  <text class="b"  x="818" y="228">cluster is written to the cell&#8217;s static half, a dynamic</text>
+  <text class="b"  x="818" y="246">one to the dynamic half. Every query reads both</text>
+  <text class="b"  x="818" y="264">and unions them.</text>
+  <text class="lm" x="818" y="292">The static half skips fence maintenance: written at</text>
+  <text class="lm" x="818" y="309">spawn, updated on destroy, otherwise read-only.</text>
+  <text class="lm" x="818" y="337">Storage mode does not gate this. Single-version,</text>
+  <text class="lm" x="818" y="354">versioned and transient archetypes are all</text>
+  <text class="lm" x="818" y="371">cluster-backed.</text>
+  <text class="lm" x="818" y="399">A cluster belongs to exactly one cell, so a query</text>
+  <text class="lm" x="818" y="416">never meets the same cluster twice.</text>
+
+  <!-- ═══ where every query lands ═══ -->
+  <rect x="40" y="452" width="1120" height="128" fill="#dcfce7" stroke="#16a34a" stroke-width="2.5" rx="4"/>
+  <text class="h" x="58" y="478">The per-cell cluster index &#8212; where every spatial query lands</text>
+  <text class="b" x="58" y="504">Expand the query region into the grid cells it covers.</text>
+  <text class="b" x="58" y="522">In each cell, test the cluster bounds. That is the broadphase.</text>
+  <text class="b" x="58" y="540">For every cluster that overlaps, scan its occupied slots. That is the narrowphase.</text>
+  <text class="lm" x="58" y="566">All four shapes resolve here, and every archetype resolves the same way whatever its storage mode.</text>
+</svg>

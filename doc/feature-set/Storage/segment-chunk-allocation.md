@@ -56,4 +56,4 @@ foreach (var seg in db.EnumerateStorageSegments().Where(s => s.IsChunkBased))
 <!-- Deep dive: claude/design/Storage/PageCache/05-chunk-allocator.md (forward linked-list allocator, L0 bitmap, AllocateChunk/FreeChunk algorithms) -->
 <!-- Reference: claude/design/Storage/database-file-format.md §5–6 (on-disk page layout for segments and chunks) -->
 <!-- Reference: claude/design/Storage/StackChunkAccessor.md (notes the superseded design; points to the live ChunkAccessor<TStore>) -->
-<!-- ADRs: claude/adr/008-chunk-based-segments.md (superseded), claude/adr/041-treiber-stack-chunk-allocator.md (superseded — documents the move away from the three-level bitmap, itself later replaced by the forward linked list), claude/adr/010-soa-simd-chunk-accessor.md (partially superseded — SOA+SIMD design rationale for the chunk accessor) -->
+<!-- ADRs: claude/adr/008-chunk-based-segments.md (superseded), claude/adr/041-treiber-stack-chunk-allocator.md (superseded — a Treiber-stack design; the live allocator is the forward linked list), claude/adr/010-soa-simd-chunk-accessor.md (partially superseded — SOA+SIMD design rationale for the chunk accessor) -->

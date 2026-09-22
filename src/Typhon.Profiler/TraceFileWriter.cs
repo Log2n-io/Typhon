@@ -263,7 +263,6 @@ public sealed class TraceFileWriter : IDisposable
                 _writer.Write(f.SpatialFieldType);
                 _writer.Write(f.SpatialMode);
                 _writer.Write(f.SpatialCellSize);
-                _writer.Write(f.SpatialMargin);
                 _writer.Write(f.SpatialCategory);
                 WriteShortString(f.ForeignKeyTargetType ?? string.Empty);
             }

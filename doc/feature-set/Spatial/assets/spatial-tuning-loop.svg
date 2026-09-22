@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 920" width="1200" height="920" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    .t   { font-size: 21px; font-weight: 700; fill: #18181b; }
+    .st  { font-size: 13.5px; fill: #52525b; }
+    .h   { font-size: 14.5px; font-weight: 700; fill: #18181b; }
+    .sn  { font-size: 13px; font-weight: 700; fill: #18181b; }
+    .b   { font-size: 11.5px; fill: #3f3f46; }
+    .lm  { font-size: 11.5px; fill: #71717a; }
+    .lb  { font-size: 13px; font-weight: 700; fill: #3f3f46; }
+    .mono{ font-size: 11px; font-family: ui-monospace, Consolas, monospace; fill: #3f3f46; }
+    .monod{ font-size: 11px; font-family: ui-monospace, Consolas, monospace; fill: #a1a1aa; }
+    .th  { font-size: 12px; font-weight: 700; fill: #18181b; }
+    .badge{ font-size: 11.5px; font-weight: 700; fill: #ffffff; }
+    .ctr { font-size: 12px; font-weight: 700; fill: #b91c1c; }
+  </style>
+  <rect width="1200" height="920" fill="#ffffff"/>
+  <defs>
+    <marker id="lp" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#2563eb"/></marker>
+  </defs>
+
+  <text class="t"  x="40" y="38">The tuning loop</text>
+  <text class="st" x="40" y="60">A symptom is not a diagnosis. Each row below names the counter that separates one cause from another, and the single parameter that moves it.</text>
+
+  <!-- ══════════ the ring ══════════ -->
+  <g fill="none" stroke="#2563eb" stroke-width="1.8">
+    <path d="M 410 170 Q 478 176 460 296" marker-end="url(#lp)"/>
+    <path d="M 460 364 Q 478 484 416 490" marker-end="url(#lp)"/>
+    <path d="M 190 490 Q 122 484 140 364" marker-end="url(#lp)"/>
+    <path d="M 140 296 Q 122 176 184 170" marker-end="url(#lp)"/>
+  </g>
+
+  <rect x="190" y="142" width="220" height="56" fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" rx="6"/>
+  <circle cx="208" cy="160" r="10" fill="#2563eb"/><text class="badge" x="208" y="164" text-anchor="middle">1</text>
+  <text class="sn" x="226" y="165">Observe a symptom</text>
+  <text class="lm" x="206" y="186">overrun ticks, poor selectivity</text>
+
+  <rect x="360" y="302" width="210" height="56" fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" rx="6"/>
+  <circle cx="378" cy="320" r="10" fill="#2563eb"/><text class="badge" x="378" y="324" text-anchor="middle">2</text>
+  <text class="sn" x="396" y="325">Confirm with a counter</text>
+  <text class="lm" x="376" y="346">the one that separates causes</text>
+
+  <rect x="190" y="462" width="220" height="56" fill="#eff6ff" stroke="#2563eb" stroke-width="1.6" rx="6"/>
+  <circle cx="208" cy="480" r="10" fill="#2563eb"/><text class="badge" x="208" y="484" text-anchor="middle">3</text>
+  <text class="sn" x="226" y="485">Change one parameter</text>
+  <text class="lm" x="206" y="506">the one that governs that counter</text>
+
+  <rect x="30" y="302" width="210" height="56" fill="#fef2f2" stroke="#dc2626" stroke-width="1.6" rx="6"/>
+  <circle cx="48" cy="320" r="10" fill="#dc2626"/><text class="badge" x="48" y="324" text-anchor="middle">4</text>
+  <text class="sn" x="66" y="325">Rebuild and rerun</text>
+  <text class="lm" x="46" y="346">there is no live dial</text>
+
+  <text class="ctr" x="300" y="322" text-anchor="middle">one turn</text>
+  <text class="ctr" x="300" y="342" text-anchor="middle">= one restart</text>
+
+  <text class="lm" x="40" y="546">Grid configuration is set once, before archetypes initialise, and the call throws if you</text>
+  <text class="lm" x="40" y="564">try it twice or afterwards. Every turn of this loop is a rebuild and a rerun.</text>
+
+  <!-- ══════════ telemetry reality ══════════ -->
+  <rect x="620" y="96" width="540" height="464" fill="#fafafa" stroke="#d4d4d8" rx="4"/>
+  <text class="h" x="638" y="122">What actually reaches a dashboard</text>
+
+  <text class="lb" x="638" y="150" fill="#15803d">Exported to OpenTelemetry &#8212; ten metrics</text>
+  <text class="lm" x="638" y="168">every name below is prefixed <tspan class="mono">typhon.ecs.spatial.</tspan></text>
+  <text class="mono" x="638" y="192">migrations</text>
+  <text class="mono" x="638" y="210">hysteresis_absorbed</text>
+  <text class="mono" x="638" y="228">migration_duration_ms</text>
+  <text class="mono" x="638" y="246">active_clusters</text>
+  <text class="mono" x="638" y="264">clusters_scanned</text>
+  <text class="mono" x="906" y="192">drifters_detected</text>
+  <text class="mono" x="906" y="210">drift_absorbed</text>
+  <text class="mono" x="906" y="228">recluster_budget_ms</text>
+  <text class="mono" x="906" y="246">migrations_total</text>
+  <text class="mono" x="906" y="264">hysteresis_absorbed_total</text>
+
+  <text class="lb" x="638" y="298" fill="#b91c1c">Not exported &#8212; in-process only, through the engine&#8217;s telemetry call</text>
+  <text class="monod" x="638" y="320">RelocationsThrottled</text>   <text class="monod" x="840" y="320">RepairUnitsRefused</text>   <text class="monod" x="1010" y="320">RepairQueueDepth</text>
+  <text class="monod" x="638" y="338">MeasuredNsPerEntity</text>    <text class="monod" x="840" y="338">RepairUnitCount</text>      <text class="monod" x="1010" y="338">RepairedEntityCount</text>
+  <text class="monod" x="638" y="356">DriftersUnplaced</text>       <text class="monod" x="840" y="356">RelocationsSuperseded</text><text class="monod" x="1010" y="356">RepairValveFires</text>
+  <text class="monod" x="638" y="374">RepairQueueEvicted</text>     <text class="monod" x="840" y="374">MigrationTotalMs</text>     <text class="monod" x="1010" y="374">SlotsScanned</text>
+
+  <rect x="638" y="388" width="504" height="78" fill="#fef2f2" stroke="#dc2626" stroke-width="1.2" rx="3"/>
+  <text class="b" x="652" y="408" font-weight="700" fill="#b91c1c">The exported duration is the misleading one.</text>
+  <text class="b" x="652" y="426">It brackets the migrant loop alone. Since the index and entity-map updates</text>
+  <text class="b" x="652" y="442">moved to later phases it under-reports by roughly half, and the whole-cost</text>
+  <text class="b" x="652" y="458">counter is not exported.</text>
+
+  <rect x="638" y="474" width="504" height="78" fill="#fffbeb" stroke="#d97706" stroke-width="1.2" rx="3"/>
+  <text class="b" x="652" y="494" font-weight="700" fill="#b45309">Per-tick gauges are samples, not rates.</text>
+  <text class="b" x="652" y="512">Every non-cumulative value describes the most recently completed tick and is</text>
+  <text class="b" x="652" y="528">reset at the next fence. A scrape every few seconds reads one arbitrary tick</text>
+  <text class="b" x="652" y="544">out of hundreds. Differentiate the two totals instead.</text>
+
+  <!-- ══════════ the table ══════════ -->
+  <line x1="40" y1="588" x2="1160" y2="588" stroke="#e4e4e7"/>
+  <text class="lb" x="40" y="614">Symptom, the counter that confirms it, and the one parameter to move</text>
+
+  <rect x="40" y="626" width="1120" height="28" fill="#f4f4f5" stroke="#d4d4d8"/>
+  <text class="th" x="56"  y="645">Symptom</text>
+  <text class="th" x="380" y="645">What confirms it</text>
+  <text class="th" x="850" y="645">What to change</text>
+
+  <g stroke="#e4e4e7">
+    <rect x="40" y="654" width="1120" height="28" fill="#ffffff"/><rect x="40" y="682" width="1120" height="28" fill="#fafafa"/>
+    <rect x="40" y="710" width="1120" height="28" fill="#ffffff"/><rect x="40" y="738" width="1120" height="28" fill="#fafafa"/>
+    <rect x="40" y="766" width="1120" height="28" fill="#ffffff"/><rect x="40" y="794" width="1120" height="28" fill="#fafafa"/>
+    <rect x="40" y="822" width="1120" height="28" fill="#ffffff"/><rect x="40" y="850" width="1120" height="28" fill="#fafafa"/>
+  </g>
+  <g class="b">
+    <text x="56" y="673">Queries open far too many clusters</text>
+    <text x="380" y="673"><tspan class="mono">DriftersDetected</tspan> high, <tspan class="mono">MigrationCount</tspan> low, <tspan class="mono">RelocationsThrottled</tspan> non-zero</text>
+    <text x="850" y="673">raise <tspan class="mono" font-weight="700">ReclusterBudgetMs</tspan></text>
+
+    <text x="56" y="701">One entity migrates every tick at a cell edge</text>
+    <text x="380" y="701"><tspan class="mono">HysteresisAbsorbedCount</tspan> near zero against <tspan class="mono">MigrationCount</tspan></text>
+    <text x="850" y="701">raise <tspan class="mono" font-weight="700">MigrationHysteresisRatio</tspan></text>
+
+    <text x="56" y="729">Constant churn inside a cell</text>
+    <text x="380" y="729"><tspan class="mono">DriftAbsorbedCount</tspan> near zero as a share of itself plus <tspan class="mono">DriftersDetected</tspan></text>
+    <text x="850" y="729">raise <tspan class="mono" font-weight="700">ClusterDriftMarginRatio</tspan></text>
+
+    <text x="56" y="757">Drift is detected but never repaired</text>
+    <text x="380" y="757">that same share near <tspan font-weight="700">one</tspan> &#8212; the margin suppresses moves it should allow</text>
+    <text x="850" y="757">lower <tspan class="mono" font-weight="700">ClusterDriftMarginRatio</tspan></text>
+
+    <text x="56" y="785">Repairs never run at all</text>
+    <text x="380" y="785"><tspan class="mono">RepairUnitsRefused</tspan> non-zero while <tspan class="mono">RepairUnitCount</tspan> stays at zero</text>
+    <text x="850" y="785">raise <tspan class="mono" font-weight="700">ReclusterBudgetMs</tspan>, or shrink the unit</text>
+
+    <text x="56" y="813">Degradation is outrunning the budget</text>
+    <text x="380" y="813"><tspan class="mono">RepairValveFires</tspan> persistently non-zero &#8212; the valve bounds overshoot</text>
+    <text x="850" y="813">raise <tspan class="mono" font-weight="700">ReclusterBudgetMs</tspan></text>
+
+    <text x="56" y="841">Degraded cells are being forgotten</text>
+    <text x="380" y="841"><tspan class="mono">RepairQueueEvicted</tspan> growing while <tspan class="mono">RepairQueueDepth</tspan> sits at the cap</text>
+    <text x="850" y="841">raise <tspan class="mono" font-weight="700">RepairQueueMaxCells</tspan></text>
+
+    <text x="56" y="869">The budget is calibrated for another machine</text>
+    <text x="380" y="869"><tspan class="mono">MeasuredNsPerEntity</tspan> far from the <tspan class="mono">RepairNsPerEntity</tspan> seed it started from</text>
+    <text x="850" y="869">reseed <tspan class="mono" font-weight="700">RepairNsPerEntity</tspan></text>
+  </g>
+
+  <text class="lm" x="56" y="898">Two readings are not tuning problems. <tspan class="mono">DriftersUnplaced</tspan> tracking <tspan class="mono">DriftersDetected</tspan> means the cell has run out of room, which no ratio fixes. <tspan class="mono">SlotsScanned</tspan> tracking the</text>
+  <text class="lm" x="56" y="914">whole population rather than the clusters written this tick means the refresh has lost its dirty gate, which is a regression to report rather than a knob to turn.</text>
+</svg>

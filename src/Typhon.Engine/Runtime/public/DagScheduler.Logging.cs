@@ -41,4 +41,11 @@ public sealed partial class DagScheduler
     [LoggerMessage(Level = LogLevel.Warning,
         Message = "Track {TrackIndex} was abandoned during shutdown with {SystemsRemaining} system(s) unfinished — that tick's work did not complete")]
     private partial void LogTickDrainAbandonedOnShutdown(int trackIndex, int systemsRemaining);
+
+    // Once per scheduler; later ones are only counted (LostWakeCount, TickTelemetry.LostWakes). A lost wake is the per-worker wake protocol failing: the worker
+    // still joins, but only when its backstop fires, so it costs latency, not correctness.
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "Worker {WorkerId} slept through the wake for generation {Generation} and was resumed by its {BackstopMs} ms backstop; further lost wakes "
+                  + "are counted in DagScheduler.LostWakeCount and TickTelemetry.LostWakes, not logged")]
+    private partial void LogLostWake(int workerId, int generation, double backstopMs);
 }

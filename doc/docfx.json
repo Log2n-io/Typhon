@@ -33,6 +33,7 @@
       { "files": ["favicon.svg"] },
       { "files": ["key-concepts/assets/**"] },
       { "files": ["assets/**"], "src": "in-depth-overview", "dest": "overview" },
+      { "files": ["**/assets/**"], "src": "feature-set", "dest": "guides/feature-catalog" },
       { "files": ["charts/**"], "src": "../benchmark/reports", "dest": "benchmarks" }
     ],
     "template": [

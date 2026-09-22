@@ -13,7 +13,7 @@ description: 'A runtime resource graph that tracks every significant engine reso
 
 | Feature | Summary | Status | Level |
 |---|---|---|---|
-| [Resource Budget Configuration (ResourceOptions)](resource-budgets-options.md) | Startup-time configuration of fixed/growable resource limits (page cache size, max active transactions, WAL ring/segment sizing, shadow buffer, checkpoint thresholds) plus `Validate()` to check fixed allocations fit the total memory budget | ✅ Implemented | 🔵 Core |
+| [Resource Budget Configuration (ResourceOptions)](resource-budgets-options.md) | Startup-time configuration of fixed/growable resource limits (max active transactions, WAL ring sizing, checkpoint thresholds and cadence), each knob range-checked at DI resolution | ✅ Implemented | 🔵 Core |
 | [Exhaustion Policy & ResourceExhaustedException](exhaustion-policy-handling.md) | Typed exception for resource-limit hits; `ExhaustionPolicy` enum documents intent but isn't a runtime dispatch switch | 🚧 Partial | 🔵 Core |
 | [DI Registration & Wiring](resources-di-wiring.md) | Register Typhon services into `IServiceCollection` and have each one self-attach to the resource graph | ✅ Implemented | 🔵 Core |
 | [Observability Bridge (Resources to OTel/Health/Alerts)](observability-bridge-resources.md) | Consumer-side mapping of resource snapshots to OpenTelemetry metrics, health-check thresholds, and alert payloads | 🚧 Partial | 🟣 Advanced |

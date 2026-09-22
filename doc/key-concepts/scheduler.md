@@ -8,7 +8,7 @@ description: 'From each system''s declared reads/writes the engine derives the e
 
 > **In one line:** from each [system](xref:concept-system)'s declared reads/writes, the engine **derives the execution graph once** and rejects unsafe schedules **at build time**.
 
-The [runtime](xref:concept-runtime) walks a fixed structure you declare at startup: **Track → DAG → Phase → System**. Phases (`Input` / `Simulation` / `Output` / `Cleanup`, or your own) are a DAG-local total order — everything in `Input` finishes before `Simulation` starts. Within and across phases, two systems run concurrently *unless their access declarations conflict*: phases are a contract, not a barrier wall.
+The [runtime](xref:concept-runtime) walks a fixed structure you declare at startup: **Track → DAG → Phase → System**. Phases (`Input` / `Simulation` / `Output` / `Cleanup`, or your own) are a DAG-local total order, but not a barrier. Within and across phases, two systems may run concurrently *unless a declared access conflict or an explicit edge connects them*, directly or through other systems; that is the only way a `Simulation` system waits for an `Input` system.
 
 Access declarations are the heart of it. `Reads<T>` / `Writes<T>` state what a system touches; `ReadsFresh<T>` wants this tick's value (ordered after the writer), `ReadsSnapshot<T>` accepts last tick's (runs *concurrently* with the writer — Versioned-only). Two unordered writers of the same component in the same phase is a **build-time error**, not a production race. `After`/`Before` add explicit edges when you need them.
 

@@ -31,9 +31,29 @@ public partial class DatabaseEngine
     /// <c>ZoneMap?.Widen(dstChunkId, ...)</c> call below), so a cluster that only gained entities by migration is correct without a rescan here.
     /// </para>
     /// </remarks>
-    private void RecomputeClusterZoneMaps(ArchetypeClusterState clusterState, long[] dirtyBits)
+    /// <param name="clusterState">The archetype whose zone maps are being refreshed.</param>
+    /// <param name="dirtyBits">One word per cluster chunk id; a non-zero word marks a cluster whose summaries may be stale.</param>
+    /// <param name="clusterAccessor">
+    /// The caller's OPEN accessor on <see cref="ArchetypeClusterState.ClusterSegment"/>, or <c>default</c> when the archetype is pure-Transient and has no
+    /// cluster segment to accessorise. See the remarks on <see cref="ProcessClusterShadowEntries"/> for why this is threaded in rather than rented here.
+    /// </param>
+    private void RecomputeClusterZoneMaps(ArchetypeClusterState clusterState, long[] dirtyBits, ref ChunkAccessor<PersistentStore> clusterAccessor)
     {
-        // Nothing durable-or-indexed was written this tick ⇒ every zone map still describes its cluster exactly. Bail before renting an accessor.
+        BeginZoneMapTick(clusterState);
+        RecomputeClusterZoneMapsRange(clusterState, dirtyBits, ref clusterAccessor, 0, dirtyBits.Length);
+    }
+
+    /// <summary>Advances the zone-map exact-pass rotation once for this tick and publishes the phase every slice reads (#886 lead D).</summary>
+    private static void BeginZoneMapTick(ArchetypeClusterState clusterState)
+        => clusterState.ZoneMapRetightenPhase = (int)(Interlocked.Increment(ref clusterState.ZoneMapRetightenTick) & (ZoneMapRetightenPeriod - 1));
+
+    /// <inheritdoc cref="RecomputeClusterZoneMaps"/>
+    /// <remarks>The <c>[firstWord, firstWord + wordCount)</c> range is the slice's; the rotation phase must already have been published by
+    /// <see cref="BeginZoneMapTick"/> — this method never advances it, or W slices would rotate the exact pass W times too fast.</remarks>
+    private void RecomputeClusterZoneMapsRange(ArchetypeClusterState clusterState, long[] dirtyBits, ref ChunkAccessor<PersistentStore> clusterAccessor,
+        int firstWord, int wordCount)
+    {
+        // Nothing durable-or-indexed was written this tick ⇒ every zone map still describes its cluster exactly. Bail before touching anything.
         var writtenSlots = clusterState.FenceWrittenSlots;
         if (writtenSlots == 0)
         {
@@ -45,16 +65,8 @@ public partial class DatabaseEngine
         if (HasZoneMaps(clusterState.IndexSlots))
         {
             Debug.Assert(!pureTransient, "a pure-Transient archetype cannot own PersistentStore-backed index slots");
-            var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-            try
-            {
-                RecomputeZoneMapsForHome(clusterState, dirtyBits, writtenSlots, clusterState.IndexSlots, clusterState.ClusterSegment, ref clusterAccessor,
-                    ref clusterAccessor);
-            }
-            finally
-            {
-                clusterAccessor.Dispose();
-            }
+            RecomputeZoneMapsForHome(clusterState, dirtyBits, writtenSlots, clusterState.IndexSlots, clusterState.ClusterSegment, ref clusterAccessor,
+                ref clusterAccessor, firstWord, wordCount);
         }
 
         if (HasZoneMaps(clusterState.TransientIndexSlots))
@@ -65,20 +77,12 @@ public partial class DatabaseEngine
                 if (pureTransient)
                 {
                     RecomputeZoneMapsForHome(clusterState, dirtyBits, writtenSlots, clusterState.TransientIndexSlots, clusterState.TransientSegment,
-                        ref transientAccessor, ref transientAccessor);
+                        ref transientAccessor, ref transientAccessor, firstWord, wordCount);
                 }
                 else
                 {
-                    var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-                    try
-                    {
-                        RecomputeZoneMapsForHome(clusterState, dirtyBits, writtenSlots, clusterState.TransientIndexSlots, clusterState.ClusterSegment,
-                            ref clusterAccessor, ref transientAccessor);
-                    }
-                    finally
-                    {
-                        clusterAccessor.Dispose();
-                    }
+                    RecomputeZoneMapsForHome(clusterState, dirtyBits, writtenSlots, clusterState.TransientIndexSlots, clusterState.ClusterSegment,
+                        ref clusterAccessor, ref transientAccessor, firstWord, wordCount);
                 }
             }
             finally
@@ -112,6 +116,16 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
+    /// How often a cluster's zone map is re-derived exactly rather than widened. Power of two so the rotation is a mask.
+    /// </summary>
+    /// <remarks>
+    /// 16 ticks is ~0.27 s at 60 Hz. The cost of a larger value is selectivity: a bound stays as wide as the widest key any entity held since the last exact
+    /// pass, so a cluster whose extreme entity left keeps that entity's key in its range until its turn comes round. The cost of a smaller one is the scan
+    /// this whole path exists to avoid. Nothing depends on the exact figure — it is a knob, and the shape of the trade is monotone in both directions.
+    /// </remarks>
+    private const int ZoneMapRetightenPeriod = 16;
+
+    /// <summary>
     /// Recomputes one index home's zone maps over the dirty clusters. Same three-store split as <see cref="ProcessClusterShadowEntries"/>: the occupancy word
     /// comes from <paramref name="primaryAccessor"/>, the component column from <paramref name="dataAccessor"/>, and they are the same accessor for every home
     /// except a Transient slot on a mixed archetype.
@@ -122,78 +136,212 @@ public partial class DatabaseEngine
     /// </remarks>
     private static unsafe void RecomputeZoneMapsForHome<TIdx, TPrimary, TData>(ArchetypeClusterState clusterState, long[] dirtyBits, int writtenSlots,
         ClusterIndexSlot<TIdx>[] ixSlots, ChunkBasedSegment<TPrimary> primarySegment, ref ChunkAccessor<TPrimary> primaryAccessor,
-        ref ChunkAccessor<TData> dataAccessor)
+        ref ChunkAccessor<TData> dataAccessor, int firstWord, int wordCount)
         where TIdx : struct, IPageStore
         where TPrimary : struct, IPageStore
         where TData : struct, IPageStore
     {
-        for (var wordIdx = 0; wordIdx < dirtyBits.Length; wordIdx++)
+        // Field-outer, cluster-inner (#886 lead D): one shared acquire of the zone map's grow latch per field per call, not one per (cluster × field).
+        // Under a sliced Prep the per-write acquire was a CAS on one padded word per field from eight cores at once — ~4 000 bounces a tick — and the
+        // step's CPU tripled. The addresses are re-resolved per field, which is an accessor window hit; the latch was the cost.
+        var retightenPhase = clusterState.ZoneMapRetightenPhase;
+        var end = Math.Min(dirtyBits.Length, firstWord + wordCount);
+        for (var s = 0; s < ixSlots.Length; s++)
         {
-            if (dirtyBits[wordIdx] == 0)
+            ref var ixSlot = ref ixSlots[s];
+            if ((writtenSlots & (1 << ixSlot.Slot)) == 0)
             {
                 continue;
             }
 
-            var clusterChunkId = wordIdx;
-
-            // Guard against freed/unallocated chunks (stale dirty bits from destroyed entities)
-            if (clusterChunkId == 0 || !primarySegment.IsChunkAllocated(clusterChunkId))
+            for (var f = 0; f < ixSlot.Fields.Length; f++)
             {
-                continue;
-            }
-
-            var primaryBase = primaryAccessor.GetChunkAddress(clusterChunkId);
-            var dataBase = dataAccessor.GetChunkAddress(clusterChunkId);
-
-            for (var s = 0; s < ixSlots.Length; s++)
-            {
-                ref var ixSlot = ref ixSlots[s];
-
-                // Skip a component nobody wrote this tick: its values are unchanged, so its zone map's min/max is unchanged. AllSlotsWritten (-1) has
-                // every bit set, so the fail-safe path takes this branch for every slot and rescans exactly as before.
-                if ((writtenSlots & (1 << ixSlot.Slot)) == 0)
+                var zoneMap = ixSlot.Fields[f].ZoneMap;
+                if (zoneMap == null)
                 {
                     continue;
                 }
 
-                for (var f = 0; f < ixSlot.Fields.Length; f++)
+                var fieldOffset = ixSlot.Fields[f].FieldOffset;
+                var store = zoneMap.BeginBatch(end);
+                try
                 {
-                    ixSlot.Fields[f].ZoneMap?.Recompute(clusterChunkId, primaryBase, dataBase, clusterState.Layout, ixSlot.Slot,
-                        ixSlot.Fields[f].FieldOffset);
+                    for (var wordIdx = firstWord; wordIdx < end; wordIdx++)
+                    {
+                        if (dirtyBits[wordIdx] == 0)
+                        {
+                            continue;
+                        }
+
+                        var clusterChunkId = wordIdx;
+                        if (clusterChunkId == 0 || !primarySegment.IsChunkAllocated(clusterChunkId))
+                        {
+                            continue;
+                        }
+
+                        var primaryBase = primaryAccessor.GetChunkAddress(clusterChunkId);
+                        var dataBase = dataAccessor.GetChunkAddress(clusterChunkId);
+                        var exactPass = ((clusterChunkId + retightenPhase) & (ZoneMapRetightenPeriod - 1)) == 0;
+                        if (exactPass)
+                        {
+                            zoneMap.RecomputeInto(store, clusterChunkId, primaryBase, dataBase, clusterState.Layout, ixSlot.Slot, fieldOffset);
+                        }
+                        else
+                        {
+                            zoneMap.WidenMaskedInto(store, clusterChunkId, (ulong)dirtyBits[wordIdx], dataBase, clusterState.Layout, ixSlot.Slot, fieldOffset);
+                        }
+                    }
+                }
+                finally
+                {
+                    zoneMap.EndBatch();
                 }
             }
         }
     }
 
-    /// <summary>
-    /// Iterate dirty cluster entities and (1) detect cell crossings for migration (issue #229 Phase 3) and
-    /// (2) update per-archetype spatial R-Tree positions.
-    /// Called at tick boundary from <see cref="WriteClusterTickFence"/>.
-    /// </summary>
-    /// <remarks>
-    /// <para><b>Precondition:</b> <paramref name="dirtyBits"/> has already been masked against live
-    /// occupancy by <see cref="WriteClusterTickFence"/> (line ~916: <c>dirtyBits[i] &amp;= occupancy</c>). Every
-    /// set bit in this array therefore corresponds to a currently-occupied slot. Breaking this invariant would
-    /// let destroyed or reclaimed slots pollute migration detection and R-Tree updates. Do not split the pre-mask
-    /// from this iteration without refreshing the occupancy guarantee.</para>
-    ///
-    /// <para><b>Migration detection</b> runs only when the archetype has opted into the spatial grid
-    /// (<c>ClusterCellMap != null</c>, implying a configured <see cref="SpatialGrid"/>). The detection is
-    /// cluster-coherent: all entities in a cluster share the same cell (Phase 1+2 invariant), so the current
-    /// cell's world bounds and the hysteresis margin are hoisted out of the inner per-slot loop. The per-entity
-    /// check is an exit-by-margin axis-aligned bounds test (4 comparisons, early-exit), only falling back to
-    /// <see cref="SpatialGrid.WorldToCellKey"/> when the margin is actually exceeded. The hysteresis formulation
-    /// is semantically equivalent to <c>claude/design/Spatial/SpatialTiers/01-spatial-clusters.md</c> §"Migration
-    /// Hysteresis" but reorganized for a fast common-case "entity stayed inside" path.</para>
-    ///
-    /// <para><b>Non-finite positions throw.</b> If an entity's spatial field contains NaN or Infinity,
-    /// this method raises <see cref="InvalidOperationException"/> with diagnostic context (entity id, cluster,
-    /// slot, position). Silent-clamping a non-finite position would produce invisible data corruption in the
-    /// spatial index. The contract is: upstream systems MUST write finite positions. Consistent with Phase 1+2's
-    /// spawn-time <see cref="SpatialGrid.WorldToCellKey"/> guard.</para>
-    /// </remarks>
     private unsafe void DetectClusterMigrations(ArchetypeClusterState clusterState, ArchetypeEngineState engineState, ushort archetypeId, long[] dirtyBits,
         ref ChunkAccessor<PersistentStore> clusterAccessor)
+    {
+        clusterState.EnsurePendingMigrationCapacityForTick();
+
+        // A null <paramref name="dirtyBits"/> means "this archetype has no change list this tick", which is the barrier-only clean branch (#939): step (a)
+        // is the whole of detection there, so there is nothing to size a word range against and the range is empty by construction.
+        DetectClusterMigrationsRange(clusterState, engineState, archetypeId, dirtyBits, ref clusterAccessor, 0, dirtyBits?.Length ?? 0, null);
+    }
+
+    /// <summary>
+    /// Step (a) of detection: the crossings <c>ClusterRef.WriteSpatial</c> already flagged at write time
+    /// (<see cref="ArchetypeClusterState.ClusterMigrationPendingSlots"/>), appended to the shared queue in ascending cluster order. Serial — the
+    /// unsliced detector calls it first, the sliced Prep's head calls it once before the slices; a slice never does.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The flag says WHICH slot moved; the position says WHERE it is.</b> The barrier records a per-cluster destination computed from the value
+    /// it was handed, and nothing un-flags a slot: an entity written out of its cell and back within one tick, or a slot two writes carried to two
+    /// different cells, still carries the first destination at the fence. Executing it moves an entity into a cell it is not in — silently, every
+    /// counter balancing (CC-02). The same goes for a write that reaches a spawn's slot inside the claim-to-data window the spawn commit still has
+    /// (see <c>NoteClusterBorn</c>'s "known residual"): the writer flags a crossing from ITS value, the spawn's own position then lands, and the flag
+    /// describes an entity that never existed. <c>ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell</c> reached that one in
+    /// about one cold run in ten; <c>ClusterMigrationTests.WriteSpatial_CrossAndReturnInOneTick_StaysInItsCell</c> reaches the first with two writes.</para>
+    /// <para>So the drain re-reads the slot's field and decides exactly as the legacy scan does — exited with the hysteresis margin, then the cell the
+    /// centre resolves to — and the recorded key is at most a hint. One field read per flagged slot, against the migration it would otherwise
+    /// mis-execute. A flag whose entity is home is dropped and counted in <see cref="ArchetypeClusterState.LastTickStaleFlagsDropped"/>.</para>
+    /// </remarks>
+    private static unsafe void DrainPreFlaggedMigrations(ArchetypeClusterState clusterState, ushort archetypeId, ref ChunkAccessor<PersistentStore> clusterAccessor,
+        ref int migrationsQueuedCount, ref int clustersTouched)
+    {
+        var processBitmap = clusterState.ClusterProcessBitmap;
+        var migrationPending = clusterState.ClusterMigrationPendingSlots;
+        if (processBitmap == null || migrationPending == null)
+        {
+            return;
+        }
+
+        ref var ss = ref clusterState.SpatialSlot;
+        var layout = clusterState.Layout;
+        var compSize = layout.ComponentSize(ss.Slot);
+        var compOffset = layout.ComponentOffset(ss.Slot);
+        var fieldType = ss.FieldInfo.FieldType;
+        var is3D = fieldType.Is3D();
+        var grid = clusterState.Grid;
+        ref readonly var cfg = ref grid.Config;
+        var cellSize = cfg.CellSize;
+        var hysteresisMargin = cellSize * cfg.MigrationHysteresisRatio;
+        var staleDropped = 0;
+        var jumps = 0;
+        var clamped = 0;
+
+        for (var wordIdx = 0; wordIdx < processBitmap.Length; wordIdx++)
+        {
+            var word = processBitmap[wordIdx];
+            if (word == 0)
+            {
+                continue;
+            }
+
+            while (word != 0)
+            {
+                var chunkId = (wordIdx << 6) + BitOperations.TrailingZeroCount((ulong)word);
+                word &= word - 1;
+                if (chunkId >= migrationPending.Length)
+                {
+                    continue;
+                }
+
+                var slotMask = migrationPending[chunkId];
+                if (slotMask == 0)
+                {
+                    continue;
+                }
+
+                var currentCellKey = clusterState.ClusterCellMap[chunkId];
+                if (currentCellKey < 0)
+                {
+                    continue;
+                }
+
+                clustersTouched++;
+                var clusterBase = clusterAccessor.GetChunkAddress(chunkId);
+                var (cx, cy, cz) = grid.CellKeyToCoords(currentCellKey);
+                var curCellMinX = cfg.WorldMin.X + cx * cellSize;
+                var curCellMinY = cfg.WorldMin.Y + cy * cellSize;
+                var curCellMinZ = cfg.WorldMin.Z + cz * cellSize;
+                while (slotMask != 0)
+                {
+                    var slotIndex = BitOperations.TrailingZeroCount(slotMask);
+                    slotMask &= slotMask - 1;
+                    var fieldPtr = clusterBase + compOffset + slotIndex * compSize + ss.FieldOffset;
+                    SpatialGrid.ReadSpatialCenter3D(fieldPtr, fieldType, out var posX, out var posY, out var posZ);
+                    var exited = posX < curCellMinX - hysteresisMargin || posX > curCellMinX + cellSize + hysteresisMargin
+                                 || posY < curCellMinY - hysteresisMargin || posY > curCellMinY + cellSize + hysteresisMargin
+                                 || posZ < curCellMinZ - hysteresisMargin || posZ > curCellMinZ + cellSize + hysteresisMargin;
+                    var destCellKey = exited ? grid.WorldToCellKey(posX, posY, posZ) : currentCellKey;
+                    if (destCellKey == currentCellKey)
+                    {
+                        staleDropped++;
+                        continue;
+                    }
+
+                    migrationsQueuedCount++;
+                    var (dx, dy, dz) = grid.CellKeyToCoords(destCellKey);
+                    jumps += SpatialGrid.IsJump(cx, cy, cz, dx, dy, dz) ? 1 : 0;
+                    clamped += grid.IsClampedPoint(posX, posY, posZ, is3D) ? 1 : 0;
+                    TyphonEvent.EmitSpatialClusterMigrationDetect(archetypeId, chunkId, currentCellKey, destCellKey);
+                    clusterState.EnqueueMigration(chunkId, slotIndex, destCellKey);
+                    TyphonEvent.EmitSpatialClusterMigrationQueue(archetypeId, chunkId,
+                        (ushort)Math.Min(clusterState.PendingMigrationCount, ushort.MaxValue));
+                }
+            }
+        }
+
+        clusterState.LastTickStaleFlagsDropped = staleDropped;
+        AddCrossingClassification(clusterState, jumps, clamped);
+    }
+
+    /// <summary>
+    /// Publish one producer call's #910 T0 counts. One atomic per call rather than per crossing: Prep slices file crossings concurrently, and the reset at
+    /// the top of the fence is ordered against them by the phase barrier, the same arrangement as <c>PrepSliceHysteresisAbsorbed</c>.
+    /// </summary>
+    private static void AddCrossingClassification(ArchetypeClusterState clusterState, int jumps, int clamped)
+    {
+        if (jumps != 0)
+        {
+            Interlocked.Add(ref clusterState.LastTickJumpCrossings, jumps);
+        }
+
+        if (clamped != 0)
+        {
+            Interlocked.Add(ref clusterState.LastTickClampedDestinations, clamped);
+        }
+    }
+
+    /// <inheritdoc cref="DetectClusterMigrations"/>
+    // firstWord: First dirty-bitmap word this call owns (#886 lead D: a Prep slice detects only its own clusters).
+    // wordCount: Width of the owned range, in words.
+    // sink: Where a slice files its crossings — slice-private, concatenated by the tail in slice order. <c>null</c> appends to the shared
+    // queue directly, which is the unsliced path and the only one allowed to grow it.
+    private unsafe void DetectClusterMigrationsRange(ArchetypeClusterState clusterState, ArchetypeEngineState engineState, ushort archetypeId, long[] dirtyBits,
+        ref ChunkAccessor<PersistentStore> clusterAccessor, int firstWord, int wordCount, List<MigrationRequest> sink)
     {
         // Hybrid migration detection:
         //   (a) Drain pre-flagged migrations from ClusterMigrationPendingSlots (set by WriteSpatial at write time — sparse, near-zero cost).
@@ -203,14 +351,17 @@ public partial class DatabaseEngine
         //
         // For AntHill (all writes through WriteSpatial), step (b)'s per-slot work is fully masked out — the loop body becomes a popcount-and-skip,
         // which is fast even at 100k entities.
-        var processBitmap = clusterState.ClusterProcessBitmap;
         var migrationPending = clusterState.ClusterMigrationPendingSlots;
-        var migrationDestKeys = clusterState.ClusterMigrationDestCellKeys;
 
+        // The span's slot count changes meaning for a barrier-only clean tick as of #939, and the change is deliberate: it used to be the popcount of the
+        // occupancy words Prep had just written into a synthetic change list, and is now 0, because there is no longer a list and nothing is scanned. The
+        // field means "slots this call iterated", which is honest in both readings — but a trace spanning the commit will show it fall to zero for those
+        // archetypes without their workload having changed.
         var scanSlotCount = 0;
-        if (TelemetryConfig.SpatialClusterMigrationDetectActive)
+        if (dirtyBits != null && TelemetryConfig.SpatialClusterMigrationDetectActive)
         {
-            for (var wi = 0; wi < dirtyBits.Length; wi++)
+            var scanEnd = Math.Min(dirtyBits.Length, firstWord + wordCount);
+            for (var wi = firstWord; wi < scanEnd; wi++)
             {
                 scanSlotCount += BitOperations.PopCount((ulong)dirtyBits[wi]);
             }
@@ -218,72 +369,47 @@ public partial class DatabaseEngine
         var detectScanSpan = TyphonEvent.BeginSpatialClusterMigrationDetectScan(archetypeId, scanSlotCount);
         try
         {
-            // Pre-size pending-migration queue.
-            var expectedCapacity = Math.Max(16, clusterState.LastTickMigrationCount + (clusterState.LastTickMigrationCount >> 2));
-            if (clusterState.PendingMigrations == null || clusterState.PendingMigrations.Length < expectedCapacity)
-            {
-                clusterState.PendingMigrations = new MigrationRequest[expectedCapacity];
-            }
-
             var migrationsQueuedCount = 0;
             var hysteresisAbsorbedCount = 0;
             var clustersTouched = 0;
+            var jumps = 0;
+            var clamped = 0;
 
             // ─── Step (a): drain WriteSpatial-flagged migrations ───
-            if (processBitmap != null && migrationPending != null)
+            //
+            // Whole-bitmap and serial by shape: it walks ClusterProcessBitmap end to end and appends to the shared queue. A Prep slice therefore never runs
+            // it — the head does, once, before the slices (#886): the queue then reads step (a) first and the slices' step (b) after, which is the order
+            // the unsliced detector produces. Running it per slice would have appended W copies of every pre-flagged request through the unsynchronised
+            // EnqueueMigration, and CR-05's guard is Debug-only.
+            if (sink == null)
             {
-                for (var wordIdx = 0; wordIdx < processBitmap.Length; wordIdx++)
-                {
-                    var word = processBitmap[wordIdx];
-                    if (word == 0)
-                    {
-                        continue;
-                    }
-
-                    while (word != 0)
-                    {
-                        var chunkId = (wordIdx << 6) + BitOperations.TrailingZeroCount((ulong)word);
-                        word &= word - 1;
-                        if (chunkId >= migrationPending.Length)
-                        {
-                            continue;
-                        }
-
-                        var slotMask = migrationPending[chunkId];
-                        if (slotMask == 0)
-                        {
-                            continue;
-                        }
-
-                        var destCellKey = migrationDestKeys[chunkId];
-                        if (destCellKey < 0)
-                        {
-                            continue;
-                        }
-
-                        clustersTouched++;
-                        var currentCellKey = clusterState.ClusterCellMap[chunkId];
-                        while (slotMask != 0)
-                        {
-                            var slotIndex = BitOperations.TrailingZeroCount(slotMask);
-                            slotMask &= slotMask - 1;
-                            migrationsQueuedCount++;
-                            TyphonEvent.EmitSpatialClusterMigrationDetect(archetypeId, chunkId, currentCellKey, destCellKey);
-                            clusterState.EnqueueMigration(chunkId, slotIndex, destCellKey);
-                            TyphonEvent.EmitSpatialClusterMigrationQueue(archetypeId, chunkId, (ushort)Math.Min(clusterState.PendingMigrationCount, ushort.MaxValue));
-                        }
-                    }
-                }
+                DrainPreFlaggedMigrations(clusterState, archetypeId, ref clusterAccessor, ref migrationsQueuedCount, ref clustersTouched);
             }
 
             // ─── Step (b): legacy scan over dirtyBits for slots not covered by step (a) ───
             // Skipped entirely when SpatialBarrierOnly — caller has guaranteed every spatial write
             // goes through WriteSpatial, so step (a) is exhaustive.
+            //
+            // A null change list means the same thing said the other way round (#939): the clean branch builds none for a barrier-only archetype, because
+            // this is the guard it would have been built for. Asserted rather than merely tolerated — any OTHER archetype arriving without one would skip
+            // step (b) silently, which is a crossing never detected rather than a crash.
+            Debug.Assert(dirtyBits != null || clusterState.SpatialBarrierOnly,
+                "a null change list is only meaningful when the caller has guaranteed every spatial write goes through WriteSpatial");
+
+            // Deliberately NOT `|| dirtyBits == null`. In every state the assert above permits, null implies SpatialBarrierOnly and the test below has already
+            // fired, so the extra disjunct is dead — it becomes live only in the state the assert FORBIDS, and there it would turn a Release
+            // NullReferenceException into a silently skipped step (b): one crossing never detected, which is exactly the [fatal][silent] outcome MD-02 names.
+            // A Debug-only assert paired with Release silence is the wrong pairing for a silent-fatal rule; let it throw.
             if (clusterState.SpatialBarrierOnly)
             {
-                clusterState.LastTickHysteresisAbsorbedCount = hysteresisAbsorbedCount;
+                // This branch contributes NOTHING to the absorbed count, and must not pretend otherwise. The local's only ++ is in step (b) below, which this
+                // branch returns before reaching, so it is provably zero here — writing it to the field or the span would be arithmetic that reads as if it
+                // did something. On the barrier-only path the count is produced at write time by ClusterRef.MaybeFlagMigration and already drained into
+                // LastTickHysteresisAbsorbedCount by PrepareArchetypeFence, so THAT is the truthful value for the span to report (#872).
+                Debug.Assert(hysteresisAbsorbedCount == 0,
+                    "step (a) has started counting absorbed crossings — fold it into the drain in PrepareArchetypeFence instead of dropping it here");
                 detectScanSpan.MigrationsQueued = migrationsQueuedCount;
-                detectScanSpan.HysteresisAbsorbed = hysteresisAbsorbedCount;
+                detectScanSpan.HysteresisAbsorbed = clusterState.LastTickHysteresisAbsorbedCount;
                 detectScanSpan.ClustersTouched = clustersTouched;
                 return;
             }
@@ -296,13 +422,16 @@ public partial class DatabaseEngine
             var grid = _spatialGrid;
             var clusterCellMap = clusterState.ClusterCellMap;
             var fieldType = ss.FieldInfo.FieldType;
+            var is3D = fieldType.Is3D();
             ref readonly var cfg = ref grid.Config;
             var cellSize = cfg.CellSize;
             var worldMinX = cfg.WorldMin.X;
             var worldMinY = cfg.WorldMin.Y;
+            var worldMinZ = cfg.WorldMin.Z;
             var hysteresisMargin = cellSize * cfg.MigrationHysteresisRatio;
 
-            for (var wordIdx = 0; wordIdx < dirtyBits.Length; wordIdx++)
+            var end = Math.Min(dirtyBits.Length, firstWord + wordCount);
+            for (var wordIdx = firstWord; wordIdx < end; wordIdx++)
             {
                 var word = dirtyBits[wordIdx];
                 if (word == 0)
@@ -326,11 +455,13 @@ public partial class DatabaseEngine
                     continue;
                 }
 
-                var (cx, cy) = grid.CellKeyToCoords(currentCellKey);
+                var (cx, cy, cz) = grid.CellKeyToCoords(currentCellKey);
                 var curCellMinX = worldMinX + cx * cellSize;
                 var curCellMinY = worldMinY + cy * cellSize;
+                var curCellMinZ = worldMinZ + cz * cellSize;
                 var curCellMaxX = curCellMinX + cellSize;
                 var curCellMaxY = curCellMinY + cellSize;
+                var curCellMaxZ = curCellMinZ + cellSize;
                 clustersTouched++;
 
                 var remaining = effective;
@@ -340,43 +471,76 @@ public partial class DatabaseEngine
                     remaining &= remaining - 1;
                     var entityPK = *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8);
                     var fieldPtr = clusterBase + compOffset + slotIndex * compSize + ss.FieldOffset;
-                    SpatialGrid.ReadSpatialCenter2D(fieldPtr, fieldType, out var posX, out var posY);
-                    if (!float.IsFinite(posX) || !float.IsFinite(posY))
+                    SpatialGrid.ReadSpatialCenter3D(fieldPtr, fieldType, out var posX, out var posY, out var posZ);
+                    if (!double.IsFinite(posX) || !double.IsFinite(posY) || !double.IsFinite(posZ))
                     {
                         throw new InvalidOperationException(
-                            $"Non-finite position on spatial entity: entityId=0x{entityPK:X16}, clusterChunkId={clusterChunkId}, slotIndex={slotIndex}, position=({posX}, {posY}).");
+                            $"Non-finite position on spatial entity: entityId=0x{entityPK:X16}, clusterChunkId={clusterChunkId}, slotIndex={slotIndex}, "
+                            + $"position=({posX}, {posY}, {posZ}).");
                     }
                     var exited = posX < curCellMinX - hysteresisMargin
                                  || posX > curCellMaxX + hysteresisMargin
                                  || posY < curCellMinY - hysteresisMargin
-                                 || posY > curCellMaxY + hysteresisMargin;
+                                 || posY > curCellMaxY + hysteresisMargin
+                                 || posZ < curCellMinZ - hysteresisMargin
+                                 || posZ > curCellMaxZ + hysteresisMargin;
                     if (exited)
                     {
-                        var newCellKey = grid.WorldToCellKey(posX, posY);
+                        var newCellKey = grid.WorldToCellKey(posX, posY, posZ);
                         if (newCellKey != currentCellKey)
                         {
                             migrationsQueuedCount++;
+                            var (dx, dy, dz) = grid.CellKeyToCoords(newCellKey);
+                            jumps += SpatialGrid.IsJump(cx, cy, cz, dx, dy, dz) ? 1 : 0;
+                            clamped += grid.IsClampedPoint(posX, posY, posZ, is3D) ? 1 : 0;
                             TyphonEvent.EmitSpatialClusterMigrationDetect(archetypeId, clusterChunkId, currentCellKey, newCellKey);
-                            clusterState.EnqueueMigration(clusterChunkId, slotIndex, newCellKey);
-                            TyphonEvent.EmitSpatialClusterMigrationQueue(archetypeId, clusterChunkId, (ushort)Math.Min(clusterState.PendingMigrationCount, ushort.MaxValue));
+                            if (sink != null)
+                            {
+                                sink.Add(new MigrationRequest(clusterChunkId, slotIndex, newCellKey));
+                            }
+                            else
+                            {
+                                clusterState.EnqueueMigration(clusterChunkId, slotIndex, newCellKey);
+                            }
+
+                            TyphonEvent.EmitSpatialClusterMigrationQueue(archetypeId, clusterChunkId,
+                                (ushort)Math.Min(sink?.Count ?? clusterState.PendingMigrationCount, ushort.MaxValue));
                         }
                     }
-                    else if (posX < curCellMinX || posX > curCellMaxX || posY < curCellMinY || posY > curCellMaxY)
+                    else if (   posX < curCellMinX || posX > curCellMaxX
+                             || posY < curCellMinY || posY > curCellMaxY
+                             || posZ < curCellMinZ || posZ > curCellMaxZ)
                     {
                         hysteresisAbsorbedCount++;
                         if (TelemetryConfig.SpatialClusterMigrationHysteresisActive)
                         {
                             var ex = posX < curCellMinX ? (curCellMinX - posX) : (posX > curCellMaxX ? (posX - curCellMaxX) : 0f);
                             var ey = posY < curCellMinY ? (curCellMinY - posY) : (posY > curCellMaxY ? (posY - curCellMaxY) : 0f);
-                            TyphonEvent.EmitSpatialClusterMigrationHysteresis(archetypeId, clusterChunkId, ex * ex + ey * ey);
+                            var ez = posZ < curCellMinZ ? (curCellMinZ - posZ) : (posZ > curCellMaxZ ? (posZ - curCellMaxZ) : 0f);
+                            TyphonEvent.EmitSpatialClusterMigrationHysteresis(archetypeId, clusterChunkId, (float)((ex * ex) + (ey * ey) + (ez * ez)));
                         }
                     }
                 }
             }
 
-            clusterState.LastTickHysteresisAbsorbedCount = hysteresisAbsorbedCount;
+            // This is the ONLY producer of the absorbed count on the non-barrier path, and the mirror image of the branch above: here the scan counts and the
+            // live write-time accumulator is the one that stays zero. `+=` rather than `=` so the two compose instead of one clobbering the other — the fence
+            // has already drained the live value into this field by the time we get here, and a `=` would silently discard it if an archetype ever produced
+            // both. Exactly one of the two is non-zero for a given archetype today; the Debug.Assert above is what says so out loud.
+            if (sink != null)
+            {
+                Interlocked.Add(ref clusterState.PrepSliceHysteresisAbsorbed, hysteresisAbsorbedCount);
+            }
+            else
+            {
+                clusterState.LastTickHysteresisAbsorbedCount += hysteresisAbsorbedCount;
+                clusterState.TotalHysteresisAbsorbedCount += hysteresisAbsorbedCount;
+            }
+
+            AddCrossingClassification(clusterState, jumps, clamped);
+
             detectScanSpan.MigrationsQueued = migrationsQueuedCount;
-            detectScanSpan.HysteresisAbsorbed = hysteresisAbsorbedCount;
+            detectScanSpan.HysteresisAbsorbed = sink != null ? hysteresisAbsorbedCount : clusterState.LastTickHysteresisAbsorbedCount;
             detectScanSpan.ClustersTouched = clustersTouched;
         }
         finally
@@ -386,30 +550,25 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
-    /// In-place ClusterEntityRecord field updater consumed by <see cref="RawValuePagedHashMap{TKey,TStore}.TryUpdateInPlace"/>
-    /// during migration. Patches the 4-byte ClusterChunkId and 1-byte SlotIndex fields without rewriting the rest of the record.
-    /// Struct (not ref struct) so it can sit on the stack as a local in <see cref="ExecuteMigrations"/> and pass through `ref`. NOT <c>readonly</c>: it also
-    /// carries the record's own BornTSN/DiedTSN back out, read under the same bucket write lock that performs the patch (H1).
+    /// The inline per-entity location updater, used when the batch is too small for bucket runs to exist.
     /// </summary>
-    private unsafe struct ClusterLocationUpdater : IRawValueUpdater
+    /// <remarks>
+    /// Reads the record's own BornTSN/DiedTSN back out under the same bucket write lock that performs the patch, exactly as
+    /// <see cref="ClusterLocationBulkUpdater"/> does for the staged path — the H1 fold needs them at that instant, not from a later lookup.
+    /// </remarks>
+    private unsafe struct ClusterLocationInlineUpdater : IRawValueUpdater
     {
         private readonly int _chunkId;
         private readonly byte _slotIndex;
 
-        public ClusterLocationUpdater(int chunkId, byte slotIndex)
+        public ClusterLocationInlineUpdater(int chunkId, byte slotIndex)
         {
             _chunkId = chunkId;
             _slotIndex = slotIndex;
         }
 
-        /// <summary>
-        /// The migrated entity's own BornTSN, captured while the record is under the bucket's write lock. A migration moves an entity BETWEEN clusters of one
-        /// archetype without changing its BornTSN, so the destination cluster's H1 visibility summary has to absorb it — otherwise a cluster that was "clean"
-        /// silently acquires an entity younger than a live reader's snapshot, and the scan skips the probe that would have hidden it.
-        /// </summary>
         public long ObservedBornTsn;
 
-        /// <summary>The migrated entity's DiedTSN (0 = alive). Non-zero forces the destination cluster back onto the per-entity probe.</summary>
         public long ObservedDiedTsn;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -421,6 +580,137 @@ public partial class DatabaseEngine
             ClusterEntityRecordAccessor.SetClusterChunkId(valueBytes, _chunkId);
             ClusterEntityRecordAccessor.SetSlotIndex(valueBytes, _slotIndex);
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // #926 — the Migrate phase's zone-map batches.
+    //
+    // ZoneMapArray.Widen takes the archetype-wide grow latch shared and releases it, so the pre-#926 Migrate loop issued two locked read-modify-writes on ONE
+    // word per migrant per indexed field. A shared acquire still takes the line exclusive; eight workers draining ten thousand migrations bounced that word
+    // between cores tens of thousands of times under no logical contention. #886 measured and fixed exactly this on the Prep path and left the batched API
+    // behind; this is the Migrate path finally using it. Rule MD-03.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// The stores this thread's open zone-map batches write into, indexed by the running field id the migrant loop computes.
+    /// </summary>
+    /// <remarks>
+    /// <b>Thread-static rather than pooled or passed:</b> a Migrate slice runs wholly on one worker thread, so there is nothing to share and nothing to
+    /// synchronise; the array is grown once per thread and reused for every slice that thread ever runs, which is what keeps the batching allocation-free on
+    /// the hot path. It is only ever read between <see cref="OpenZoneMapBatches"/> and <see cref="CloseZoneMapBatches"/> in the same call.
+    /// </remarks>
+    [ThreadStatic]
+    private static ZoneMapArray.Store[] _zoneBatchStores;
+
+    /// <summary>Opens one zone-map batch per indexed field and returns how many field slots <see cref="_zoneBatchStores"/> now describes.</summary>
+    /// <remarks>
+    /// Returns 0 — every write falling back to the per-write form — when the archetype has no indexed fields or when the A/B toggle is off. A field without
+    /// a zone map still consumes its slot, because the migrant loop's field id counts fields and not zone maps; that slot holds null and the call site reads
+    /// it as "no batch".
+    /// </remarks>
+    private static int OpenZoneMapBatches(ArchetypeClusterState clusterState)
+    {
+        var ixSlots = clusterState.IndexSlots;
+        if (ixSlots == null || !ArchetypeClusterState.BatchMigrateZoneMaps)
+        {
+            return 0;
+        }
+
+        // THE SERIAL FENCE DOES NOT BATCH, and this is a correctness gate rather than a tuning one.
+        //
+        // Batching exists to stop W workers taking one archetype-wide latch per migrant. A serial fence has one writer and no contention to amortise, so it
+        // gains nothing — and it LOSES: holding a batch means holding the grow latch shared, and a destination past the pinned store then has nowhere to go.
+        // The parallel path answers that with a fence failure, which it can afford because its pre-size makes it unreachable. The serial path cannot throw
+        // over something the pre-size concedes can happen (PreSizeArchetypeFence keeps a growth safety net for exactly this on the sibling arrays), so it
+        // must be able to fall back to the growing `Widen` — and that fallback deadlocks against the batch's own shared count if a batch is open, because
+        // the shared counter is not per-thread. Not opening one at all is the fix; AC-4's "serial unchanged" is then literally true.
+        if (!ArchetypeClusterState.InMigrateSlice)
+        {
+            return 0;
+        }
+
+
+        var fieldCount = 0;
+        for (var s = 0; s < ixSlots.Length; s++)
+        {
+            fieldCount += ixSlots[s].Fields.Length;
+        }
+
+        if (fieldCount == 0)
+        {
+            return 0;
+        }
+
+        var stores = _zoneBatchStores;
+        if (stores == null || stores.Length < fieldCount)
+        {
+            stores = new ZoneMapArray.Store[Math.Max(fieldCount, 8)];
+            _zoneBatchStores = stores;
+        }
+
+        // Unwinds its own partial work. A latch leaked here is worse than a leaked ring slot or accessor: it is not reclaimed at any later point, so every
+        // future grower on that map waits on it forever — a recoverable exception turned into a permanent hang.
+        var fieldId = 0;
+        try
+        {
+            for (var s = 0; s < ixSlots.Length; s++)
+            {
+                ref var ixSlot = ref ixSlots[s];
+                for (var f = 0; f < ixSlot.Fields.Length; f++, fieldId++)
+                {
+                    // BeginBatchAtCapacity, not BeginBatch: the growing form would replace the store under sibling workers that already hold batches on the
+                    // same field, which is the MD-02 abandonment ZoneMapArray.Grow refuses. Coverage comes from PreSizeArchetypeFence instead.
+                    stores[fieldId] = ixSlot.Fields[f].ZoneMap?.BeginBatchAtCapacity();
+                }
+            }
+        }
+        catch
+        {
+            CloseZoneMapBatches(clusterState, fieldId);
+            throw;
+        }
+
+        return fieldCount;
+    }
+
+    /// <summary>Releases every batch <see cref="OpenZoneMapBatches"/> opened, and drops the store references so a stale one cannot be written through.</summary>
+    private static void CloseZoneMapBatches(ArchetypeClusterState clusterState, int fieldCount)
+    {
+        if (fieldCount == 0)
+        {
+            return;
+        }
+
+        var ixSlots = clusterState.IndexSlots;
+        var stores = _zoneBatchStores;
+        var fieldId = 0;
+        for (var s = 0; s < ixSlots.Length; s++)
+        {
+            ref var ixSlot = ref ixSlots[s];
+            for (var f = 0; f < ixSlot.Fields.Length; f++, fieldId++)
+            {
+                if (stores[fieldId] == null)
+                {
+                    continue;
+                }
+
+                // Cleared as well as released. The Store is dead the moment the latch is dropped — that is BeginBatch's stated contract — and leaving the
+                // reference in a thread-static array is how a later slice on this thread would write through an abandoned generation and lose a widen
+                // silently. The clear costs one store per field per slice and removes the whole class of mistake.
+                stores[fieldId] = null;
+                ixSlot.Fields[f].ZoneMap.EndBatch();
+            }
+        }
+    }
+
+    /// <summary>The batch a Migrate slice opened does not cover a destination the slice reached — the pre-size bound was wrong. See #890 for the verdict.</summary>
+    private static void ThrowZoneMapBatchTooSmall(ushort archetypeId, int dstChunkId)
+    {
+        ThrowHelper.ThrowInvalidOp(
+            $"Archetype {archetypeId}'s Migrate slice reached destination cluster {dstChunkId}, which falls outside the zone-map batch it opened at slice "
+            + "start. Widening it would need the grow latch exclusively, which would abandon the store every sibling worker is writing into and silently "
+            + "drop their bounds (MD-02, MD-03). PreSizeArchetypeFence sizes every zone map to PrimarySegmentCapacity + 2 * PendingMigrationCount + 64, a "
+            + "bound the Migrate phase cannot exceed, so reaching this means that bound is wrong.");
     }
 
     /// <summary>
@@ -437,7 +727,10 @@ public partial class DatabaseEngine
     ///   <item>Copy every component slot's bytes source → destination (Persistent + Transient; Q8)</item>
     ///   <item>Copy EntityId and EnabledBits</item>
     ///   <item>Remove the old per-archetype B+Tree index entries and insert new ones at the new <c>clusterLocation</c></item>
-    ///   <item>Remove the old spatial R-Tree back-pointer and insert a new one at the new <c>clusterLocation</c></item>
+    ///   <item>Union the migrant's bounds into the destination cluster's AABB, rebased into the destination cell's frame, and add or update that
+    ///         cluster in the destination cell's index. There is no per-entity spatial back-pointer to move: since #872 step 13 the per-cell cluster
+    ///         index is the only index home (rule SH-01), and the entity-level R-Tree it used to point into no longer exists. The SOURCE cluster's
+    ///         bound is deliberately left conservative here rather than shrunk in place; the fence's refresh pass retightens it</item>
     ///   <item>Upsert the EntityMap <see cref="ClusterEntityRecordAccessor"/> with the new (chunkId, slot)</item>
     ///   <item><see cref="ArchetypeClusterState.ReleaseSlot(ref ChunkAccessor{PersistentStore}, int, int, ChangeSet, SpatialGrid, bool)"/> on the
     ///         source (clears occupancy, decrements cell.EntityCount, detaches empty clusters)</item>
@@ -458,7 +751,7 @@ public partial class DatabaseEngine
     /// destination slot bit survives the subsequent WAL publish.</para>
     /// </remarks>
     private unsafe void ExecuteMigrations(ArchetypeClusterState clusterState, ArchetypeEngineState engineState, ushort archetypeId, int sliceStart, 
-        int sliceCount, ChangeSet changeSet, List<DirtyBitDelta> dirtyBuffer = null)
+        int sliceCount, ChangeSet changeSet, List<DirtyBitDelta> dirtyBuffer = null, int chunkIndex = 0)
     {
         var totalPending = clusterState.PendingMigrationCount;
         if (sliceCount <= 0 || sliceStart >= totalPending)
@@ -475,6 +768,13 @@ public partial class DatabaseEngine
         // is ever needed inside this slice loop — workers Interlocked.Or/And on disjoint or shared words without parallel-resize race.
         var dirtyBits = clusterState.FenceDirtyBits;
 
+        // Non-null by construction, and worth asserting now that it is conditional (#939): PreSizeArchetypeFence runs from FinishArchetypeFencePrep on every
+        // Prep exit, outside the hasWork gate, and allocates whenever PendingMigrationCount > 0 — the same count that gates this phase running at all. The
+        // pairing is prose rather than a type, and the contemplated `hasWork |= queue.Count > 0` (TickFence.cs, the barrier-only re-nomination gap) is exactly
+        // the edit that would file requests after that count is read.
+        Debug.Assert(dirtyBits != null,
+            "the Migrate phase reached a slice with no dirty-bit buffer — PreSizeArchetypeFence did not run, or ran before the queue was filled");
+
         var startTimestamp = Stopwatch.GetTimestamp();
 
         var layout = clusterState.Layout;
@@ -482,7 +782,29 @@ public partial class DatabaseEngine
         // Total component instances moved this batch — surfaces in the profiler tooltip alongside the entity count
         // so users see the actual data-shuffling cost (a 3-component archetype migrating 1300 entities moves 3900
         // component slots' worth of data, not just 1300).
-        using var migrationScope = TyphonEvent.BeginClusterMigration(archetypeId, count, count * componentCount);
+        //
+        // Position is load-bearing: this brackets the three CreateChunkAccessor rentals below, any of which can block on page acquisition, exactly as it did
+        // before #911. Moving it past them shrinks kind 60's duration with no work getting faster, which silently breaks every timeline comparison against a
+        // pre-#911 trace. Not a `using var` — the per-kind fields are written after the loop and a using-variable is readonly — so it is disposed in the
+        // `finally` below, after those writes, because Dispose is what publishes the record.
+        //
+        // Residual, stated rather than papered over: an exception between here and that `try` leaks the ring slot. The statements in between are field reads
+        // and struct constructions, so this is the "the process is already failing" case, and the alternative (an outer try wrapping the whole method) buys
+        // that at the price of re-indenting 400 lines.
+        var migrationScope = TyphonEvent.BeginClusterMigration(archetypeId, count, count * componentCount);
+
+        // #911 O1 counted these only when the profiler was on; #912 made them unconditional, and the reason is that the profiler is the wrong instrument for
+        // the question they answer. A Migrate slice mixes all three kinds by construction — the queue is sorted by destination cell key, not by kind — so
+        // attributing a cost to relocation rather than to crossing REQUIRES the split, and turning the profiler on to get it perturbs the very bracket being
+        // measured, because the ring emits from inside it. Every per-kind finding in the design's §5.8 was reached with throwaway counters on a branch for
+        // exactly that reason, and the point of a permanent surface is that the next campaign does not have to.
+        //
+        // The cost is one predictable branch per migration on a switch over a field the loop has already loaded. Counted over the whole slice rather than over
+        // the requests that survive the stale-source guard, because the span's own MigrationCount is the slice length: the three add up to it exactly, which
+        // makes the split checkable rather than merely plausible, in a trace AND on the telemetry snapshot.
+        var crossingCount = 0;
+        var relocationCount = 0;
+        var repairCount = 0;
 
         var grid = _spatialGrid;
         var transientMask = layout.TransientSlotMask;
@@ -493,18 +815,35 @@ public partial class DatabaseEngine
 
         // Single-assignment accessor construction (TYPHON004 forbids the default→reassign pattern).
         var hasClusterAccessor = clusterState.ClusterSegment != null;
+
+        // Step 14: the cluster this slice allocated for FreshCluster relocations, per destination cell. Slices are carved on DestCellKey and a
+        // relocation's destination is its source cell, so the pair never has to survive the slice. See ClaimSlotInFreshCluster.
+        var freshCell = -1;
+        var freshCluster = -1;
         var clusterAccessor = hasClusterAccessor ? clusterState.ClusterSegment.CreateChunkAccessor(changeSet) : default;
 
         var hasTransientClusterAccessor = clusterState.TransientSegment != null;
         var transientClusterAccessor = hasTransientClusterAccessor ? clusterState.TransientSegment.CreateChunkAccessor() : default;
 
-        var hasIdxAccessor = clusterState.IndexSegment != null;
-        var idxAccessor = hasIdxAccessor ? clusterState.IndexSegment.CreateChunkAccessor(changeSet) : default;
-        // A field's nodes live in whichever segment its stride requires; String64 fields use the archetype's second segment (#658).
-        var hasIdxAccessorS64 = clusterState.IndexSegmentString64 != null;
-        var idxAccessorS64 = hasIdxAccessorS64 ? clusterState.IndexSegmentString64.CreateChunkAccessor(changeSet) : default;
+        // No index accessor is rented here anymore. Step 6 replaced this loop's Remove(key) + Add(key, newLoc) with an append to IndexUpdateStaging, and
+        // staging touches no B+Tree page — the IndexMassUpdate phase rents its own accessors when it applies the batch. The pair that used to be rented (the
+        // archetype's index segment and, for String64 fields, its second segment — #658) were created and disposed with nothing in between.
 
         var emAccessor = engineState.EntityMap.Segment.CreateChunkAccessor(changeSet);
+
+        // #912. Closes the PROLOGUE — the span construction and the three rentals above, any of which can block on page acquisition. Inside the bracket, where
+        // it has always been; measured rather than moved, so subtracting it does not change what LastTickMigrationExecuteMs means. One extra timestamp per
+        // SLICE, of which a tick has tens.
+        // Declared out here, ASSIGNED inside the try below. The assignment is what the `finally` releases against, so opening the batches anywhere the
+        // `finally` does not yet cover would leak the grow latch on a throw in between — and a leaked latch is not reclaimed later by anything, so it turns
+        // a recoverable exception into a permanent hang for every future grower on that map.
+        var zoneBatchFieldCount = 0;
+        ZoneMapArray.Store[] zoneBatchStores = null;
+
+        var afterPrologue = 0L;
+        // Accumulated in the finally, published with the rest AFTER it. Publishing from inside would leave a slice that threw contributing an epilogue to a
+        // tick whose slice count and execute span it never contributed to — a telemetry surface reporting a part larger than the whole it belongs to.
+        var epilogueTicks = 0L;
 
         // Narrowphase scratch for the #230 Phase 1 per-cell index migration hook. Hoisted out of the
         // migration loop to avoid CA2014 stack-pressure accumulation — a batch of thousands of migrations
@@ -515,6 +854,12 @@ public partial class DatabaseEngine
 
         try
         {
+            // #926. One zone-map batch per indexed field, held for the whole slice. Inside the prologue bracket because that is what it is — per-SLICE fixed
+            // cost — and the telemetry that divides the execute span by entities has to be able to see it.
+            zoneBatchFieldCount = OpenZoneMapBatches(clusterState);
+            zoneBatchStores = _zoneBatchStores;
+            afterPrologue = Stopwatch.GetTimestamp();
+
             var pending = clusterState.PendingMigrations;
             for (var i = sliceStart; i < sliceEndExclusive; i++)
             {
@@ -522,6 +867,19 @@ public partial class DatabaseEngine
                 var srcChunkId = req.SourceClusterChunkId;
                 var srcSlot = req.SourceSlotIndex;
                 var destCellKey = req.DestCellKey;
+
+                switch (req.Kind)
+                {
+                    case MigrationKind.Relocation:
+                        relocationCount++;
+                        break;
+                    case MigrationKind.Repair:
+                        repairCount++;
+                        break;
+                    default:
+                        crossingCount++;
+                        break;
+                }
 
                 // 0. Stale-source guard: verify the source slot's occupancy bit is still set.
                 // The detection phase reads occupancy through a read-only accessor (no ChangeSet → DC not bumped). If
@@ -558,13 +916,52 @@ public partial class DatabaseEngine
                 var migrationBornBound = TransactionChain.NextFreeId;
                 int dstChunkId;
                 int dstSlot;
-                if (hasClusterAccessor)
+                // A step-10 intra-cell relocation names its destination CLUSTER, not just the cell: the least-enlargement choice detection made is the
+                // entire point of the move, and first-fit would discard it (see MigrationRequest.DestClusterChunkId). AnyCluster keeps the cell-crossing
+                // behaviour byte for byte — the pinned overload's first test is the sign check.
+                // A step-12 repair additionally names the SLOT, because the whole destination layout is an output of the Morton sort rather than of the
+                // claim. AnySlot keeps step 10's behaviour byte for byte — the pinned overload tests the sign before touching the exact-slot path.
+                var preferredCluster = req.DestClusterChunkId;
+                var preferredSlot = req.DestSlotIndex;
+                if (preferredCluster == MigrationRequest.FreshCluster)
                 {
-                    (dstChunkId, dstSlot) = clusterState.ClaimSlotInCell(destCellKey, ref clusterAccessor, changeSet, grid, migrationBornBound);
+                    (dstChunkId, dstSlot) = hasClusterAccessor
+                        ? clusterState.ClaimSlotInFreshCluster(destCellKey, ref clusterAccessor, changeSet, grid, migrationBornBound, ref freshCell,
+                            ref freshCluster)
+                        : clusterState.ClaimSlotInFreshCluster(destCellKey, ref transientClusterAccessor, null, grid, migrationBornBound, ref freshCell,
+                            ref freshCluster);
                 }
                 else
                 {
-                    (dstChunkId, dstSlot) = clusterState.ClaimSlotInCell(destCellKey, ref transientClusterAccessor, grid, migrationBornBound);
+                    // Step 15 (D4). A cell-crossing request names no cluster, and the drain is where the choice is best made: the destination cell is
+                    // this slice's alone (slices are carved on DestCellKey), so the occupancy it reads is live and the bounds it reads already include
+                    // the arrivals this slice has unioned in. The position comes from the source slot — the line the copy below is about to read anyway
+                    // — rather than travelling in the request, rebased into the DESTINATION cell's frame, which is the frame ClusterAabbs stores (C15).
+                    // A pinned request (relocation, repair) passes straight through: the pinned overload tests the pin before it looks at the point.
+                    var destPx = 0f;
+                    var destPy = 0f;
+                    var destPz = 0f;
+                    if (grid.Config.LeastEnlargementPlacement || grid.Config.GrowthCapPlacement)
+                    {
+                        // Both switches off: the pinned overload never looks at the point, so the field is not read for it (step 15 review).
+                        var srcFieldPtr = srcPrimaryPre + spatialCompOffset + srcSlot * spatialCompSize + ss.FieldOffset;
+                        SpatialGrid.ReadSpatialCenter3D(srcFieldPtr, ss.FieldInfo.FieldType, out var migrantX, out var migrantY, out var migrantZ);
+                        grid.CellOrigin(destCellKey, out var destOriginX, out var destOriginY, out var destOriginZ);
+                        destPx = (float)(migrantX - destOriginX);
+                        destPy = (float)(migrantY - destOriginY);
+                        destPz = (float)(migrantZ - destOriginZ);
+                    }
+
+                    if (hasClusterAccessor)
+                    {
+                        (dstChunkId, dstSlot) = clusterState.ClaimSlotInCell(destCellKey, preferredCluster, preferredSlot, destPx, destPy, destPz,
+                            ref clusterAccessor, changeSet, grid, migrationBornBound);
+                    }
+                    else
+                    {
+                        (dstChunkId, dstSlot) = clusterState.ClaimSlotInCell(destCellKey, preferredCluster, preferredSlot, destPx, destPy, destPz,
+                            ref transientClusterAccessor, grid, migrationBornBound);
+                    }
                 }
 
                 // 3. Re-fetch source / destination bases after potential segment growth inside ClaimSlotInCell.
@@ -632,61 +1029,73 @@ public partial class DatabaseEngine
                 var oldClusterLocation = srcChunkId * 64 + srcSlot;
                 var newClusterLocation = dstChunkId * 64 + dstSlot;
 
-                // 7. Update per-archetype B+Tree index entries. Key is unchanged (data was just copied); value
-                //    (clusterLocation) changes. Follow the destroy+spawn primitive pattern: Remove(key) + Add(key, newLoc).
-                if (hasIdxAccessor && clusterState.IndexSlots != null)
+                // 7. Stage this migrant's index value updates instead of applying them (#872 step 6). The KEY is unchanged — the component copy in step 4
+                //    already moved the entity's bytes, so the destination holds the same indexed value it had — and only the VALUE (clusterLocation) moves.
+                //    That is precisely the shape the bulk partitioning descent exists for, so what used to be Remove(key) + Add(key, newLoc) per migrant per
+                //    field, two root-to-leaf descents to change four bytes, becomes one appended record. The IndexMassUpdate phase then applies every
+                //    archetype's whole batch in one descent per leaf-snapped key range.
+                // Gated on IndexSlots alone. The obvious-looking `IndexSegment != null` would be wrong: a field's nodes live in whichever segment its
+                // stride requires, so an archetype indexed ONLY on String64 fields keeps them all in IndexSegmentString64 (#658) and would skip staging
+                // entirely — its index would simply never be updated after a migration. IndexSlots is the list of fields that need updating, which is the
+                // actual precondition.
+                if (clusterState.IndexSlots != null)
                 {
                     var ixSlots = clusterState.IndexSlots;
+                    var staging = clusterState.IndexUpdates;
+                    var fieldId = 0;
                     for (var ixs = 0; ixs < ixSlots.Length; ixs++)
                     {
                         ref var ixSlot = ref ixSlots[ixs];
                         var ixCompSize = layout.ComponentSize(ixSlot.Slot);
                         var dstCompBase = dstBase + layout.ComponentOffset(ixSlot.Slot) + dstSlot * ixCompSize;
-                        for (var fi = 0; fi < ixSlot.Fields.Length; fi++)
+                        for (var fi = 0; fi < ixSlot.Fields.Length; fi++, fieldId++)
                         {
                             ref var field = ref ixSlot.Fields[fi];
+                            // fieldPtr already holds the key: the component copy in step 4 is src -> dst, so the destination bytes are the entity's current
+                            // value. Passed straight through as a raw address rather than copied into a local first — building a KeyBytes8 here memcpy'd
+                            // FieldSize bytes into an 8-byte struct (64 for a String64 field), smashing the stack and crashing the host. Same defect and
+                            // same fix as the destroy twin (Transaction.ECS.cs:1393).
                             var fieldPtr = dstCompBase + field.FieldOffset;
-                            // The B+Tree takes the key by raw pointer, so pass fieldPtr straight through. Building a KeyBytes8 first (an 8-byte struct) and
-                            // taking its address memcpy'd FieldSize bytes into it — 64 for a String64 indexed field — smashing 56 bytes of stack over the
-                            // ChunkAccessor locals sitting next to it, and crashing the host. Same defect and same fix as the destroy twin
-                            // (Transaction.ECS.cs:1393). fieldPtr already holds the key: the component copy in step 4 is src -> dst, so the destination bytes
-                            // are the entity's current value, which is exactly the key being removed from the tree before the re-add.
-                            // For non-unique (AllowMultiple) cluster indexes, read the srcBase elementId from the
-                            // source cluster's tail and call RemoveValue — Remove(key) would wipe the entire buffer
-                            // at the key and corrupt siblings. srcBase is still the source cluster's bytes (the
-                            // component COPY done in step 4 is src→dst, so the source tail is intact). Issue #229 Phase 3.
-                            // Regression test: ClusterIndex_NonUniqueField_MigrateOneEntity_PreservesSiblingsInIndex.
+                            var stride = field.Index.BulkEntryStride(field.AllowMultiple);
+                            var dest = staging.Reserve(chunkIndex, fieldId, stride);
+
                             if (field.AllowMultiple)
                             {
+                                // The elementId does NOT change, and that is the quiet simplification the conversion buys. Remove+Add relocated the entity's
+                                // element into a new buffer and had to write the new id into the destination tail; a value-only update leaves the element
+                                // exactly where it is, so the destination inherits the source's id and one VSBS allocation per migrant per field disappears.
+                                // srcBase still holds the source cluster's bytes — step 4's copy is src -> dst and does not touch the elementId tail.
                                 var elementId = *(int*)(srcBase + layout.IndexElementIdOffset(field.MultiFieldIndex, srcSlot));
-                                var useS64 = hasIdxAccessorS64 && ReferenceEquals(field.Index.Segment, clusterState.IndexSegmentString64);
-                                int newElementId;
-                                if (useS64)
-                                {
-                                    field.Index.RemoveValue(fieldPtr, elementId, oldClusterLocation, ref idxAccessorS64);
-                                    newElementId = field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessorS64);
-                                }
-                                else
-                                {
-                                    field.Index.RemoveValue(fieldPtr, elementId, oldClusterLocation, ref idxAccessor);
-                                    newElementId = field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessor);
-                                }
-                                *(int*)(dstBase + layout.IndexElementIdOffset(field.MultiFieldIndex, dstSlot)) = newElementId;
+                                field.Index.WriteBulkMultiEntry(dest, fieldPtr, elementId, oldClusterLocation, newClusterLocation);
+                                *(int*)(dstBase + layout.IndexElementIdOffset(field.MultiFieldIndex, dstSlot)) = elementId;
                             }
                             else
                             {
-                                if (hasIdxAccessorS64 && ReferenceEquals(field.Index.Segment, clusterState.IndexSegmentString64))
+                                field.Index.WriteBulkEntry(dest, fieldPtr, newClusterLocation);
+                            }
+
+                            // The zone map is not an index and has no ordering dependency on the tree, so it stays inline.
+                            //
+                            // #926. Written through the slice's open batch instead of through `Widen`, which would take the archetype-wide grow latch
+                            // shared and release it again for THIS ONE entity. The batch holds it once for the whole slice.
+                            var zoneMap = field.ZoneMap;
+                            if (zoneMap != null)
+                            {
+                                var zoneStore = fieldId < zoneBatchFieldCount ? zoneBatchStores[fieldId] : null;
+                                if (zoneStore == null)
                                 {
-                                    field.Index.Remove(fieldPtr, out _, ref idxAccessorS64);
-                                    field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessorS64);
+                                    // No batch — the serial fence, or the A/B arm with batching off. The per-write form is correct on both; it is merely
+                                    // contended on a path that has no contention to suffer from.
+                                    zoneMap.Widen(dstChunkId, fieldPtr);
                                 }
-                                else
+                                else if (!zoneMap.WidenInto(zoneStore, dstChunkId, fieldPtr))
                                 {
-                                    field.Index.Remove(fieldPtr, out _, ref idxAccessor);
-                                    field.Index.Add(fieldPtr, newClusterLocation, ref idxAccessor);
+                                    // A pinned store implies a Migrate slice (OpenZoneMapBatches refuses to batch anywhere else), so the destination falling
+                                    // past it means PreSizeArchetypeFence's bound was wrong. Growing out of it here would abandon the store every sibling
+                                    // worker is writing into, so this is a loud fence failure (#890) — the same answer the sibling per-cluster arrays give.
+                                    ThrowZoneMapBatchTooSmall(archetypeId, dstChunkId);
                                 }
                             }
-                            field.ZoneMap?.Widen(dstChunkId, fieldPtr);
                         }
                     }
                 }
@@ -702,7 +1111,7 @@ public partial class DatabaseEngine
                 // If src becomes empty, ReleaseSlot below → FinaliseEmptyClusterCellState removes it from the per-cell index.
                 if (ss.FieldInfo.Mode == SpatialMode.Dynamic && clusterState.ClusterCellMap != null)
                 {
-                    if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(dstFieldPtr, ss.FieldInfo, migrantCoords, ss.Descriptor))
+                    if (SpatialMaintainer.ReadAndValidateBoundsFromPtr(dstFieldPtr, ss.FieldInfo, migrantCoords))
                     {
                         clusterState.EnsureClusterAabbsCapacity(dstChunkId + 1);
                         clusterState.EnsureClusterSpatialIndexSlotCapacity(dstChunkId + 1);
@@ -716,115 +1125,125 @@ public partial class DatabaseEngine
                         // Tier-dispatched union: 2D fields wrote [minX, minY, maxX, maxY] into the first 4 slots; 3D fields wrote the full 6-double layout.
                         // Category mask comes from the archetype-level [SpatialIndex(Category=)] attribute (issue #230 Phase 3).
                         var archetypeCategory = ss.FieldInfo.Category;
-                        if (ss.FieldInfo.FieldType == SpatialFieldType.AABB3F || ss.FieldInfo.FieldType == SpatialFieldType.BSphere3F)
-                        {
-                            dstClusterAabb.Union3F(
-                                (float)migrantCoords[0], (float)migrantCoords[1], (float)migrantCoords[2],
-                                (float)migrantCoords[3], (float)migrantCoords[4], (float)migrantCoords[5],
-                                archetypeCategory);
-                        }
-                        else
-                        {
-                            dstClusterAabb.Union2F(
-                                (float)migrantCoords[0], (float)migrantCoords[1],
-                                (float)migrantCoords[2], (float)migrantCoords[3],
-                                archetypeCategory);
-                        }
 
+                        // C15 (#872 step 9): the destination cluster's bounds belong to the DESTINATION cell's frame. This is the rebase point — a migrant's
+                        // coordinates arrive in world space and are converted here, so a cluster that changes cell never carries a bound measured from the
+                        // cell it left. Getting this wrong is silent: every bound would be off by exactly the offset between the two cells.
                         var dstCellKey = clusterState.ClusterCellMap[dstChunkId];
                         if (dstCellKey >= 0)
                         {
+                            _spatialGrid.CellOrigin(dstCellKey, out double dstOriginX, out double dstOriginY, out double dstOriginZ);
+                            if (ss.FieldInfo.FieldType.Is3D())
+                            {
+                                dstClusterAabb.Union3F(
+                                    ClusterSpatialAabb.ToCellRelativeMin(migrantCoords[0], dstOriginX),
+                                    ClusterSpatialAabb.ToCellRelativeMin(migrantCoords[1], dstOriginY),
+                                    ClusterSpatialAabb.ToCellRelativeMin(migrantCoords[2], dstOriginZ),
+                                    ClusterSpatialAabb.ToCellRelativeMax(migrantCoords[3], dstOriginX),
+                                    ClusterSpatialAabb.ToCellRelativeMax(migrantCoords[4], dstOriginY),
+                                    ClusterSpatialAabb.ToCellRelativeMax(migrantCoords[5], dstOriginZ),
+                                    archetypeCategory);
+                            }
+                            else
+                            {
+                                dstClusterAabb.Union2F(
+                                    ClusterSpatialAabb.ToCellRelativeMin(migrantCoords[0], dstOriginX),
+                                    ClusterSpatialAabb.ToCellRelativeMin(migrantCoords[1], dstOriginY),
+                                    ClusterSpatialAabb.ToCellRelativeMax(migrantCoords[2], dstOriginX),
+                                    ClusterSpatialAabb.ToCellRelativeMax(migrantCoords[3], dstOriginY),
+                                    archetypeCategory);
+                            }
                             if (!wasInIndex)
                             {
                                 clusterState.AddClusterToPerCellIndex(dstChunkId, dstCellKey, dstClusterAabb);
                             }
                             else
                             {
-                                var indexSlot = clusterState.ClusterSpatialIndexSlot[dstChunkId];
-                                clusterState.PerCellIndex[dstCellKey].DynamicIndex.UpdateAt(indexSlot, in dstClusterAabb);
+                                clusterState.UpdateClusterInPerCellIndex(dstChunkId, dstCellKey, in dstClusterAabb);
                             }
                         }
                     }
                 }
 
-                // 9. Update EntityMap ClusterEntityRecord with the new (clusterChunkId, slotIndex).
-                //    CRITICAL: EntityMap is keyed by EntityKey (the 52-bit top half of RawValue), NOT by the full RawValue stored in cluster slots.
-                //    Passing RawValue here would silently miss every lookup — the map would never get updated, and the entity would remain resolvable via
-                //    its stale (srcChunkId, srcSlot) pointer until a subsequent spawn reclaimed that slot, at which point the stale EntityMap entry would
-                //    resolve to the unrelated new entity's bytes. Unpack explicitly (unsigned shift to avoid sign extension on the top bit).
+                // 9. Stage this migrant's EntityMap location patch instead of applying it (#872 step 7, §5.4).
+                //    CRITICAL: EntityMap is keyed by EntityKey (the 52-bit top half of RawValue), NOT by the full RawValue stored in cluster slots. Passing
+                //    RawValue here would silently miss every lookup — the map would never get updated, and the entity would remain resolvable via its stale
+                //    (srcChunkId, srcSlot) pointer until a subsequent spawn reclaimed that slot, at which point the stale EntityMap entry would resolve to the
+                //    unrelated new entity's bytes. Unpack explicitly.
                 //    Regression test: Migration_ThenSubsequentSpawn_ReclaimingSourceSlot_DoesNotCorruptMigratedEntity.
-                //    In-place primitive (TryUpdateInPlace) — single hash → bucket → chain scan, mutate the 5 bytes that change
-                //    (4-byte ChunkId + 1-byte SlotIndex) under the bucket's OLC write lock. Halves the EntityMap stage cost vs the
-                //    pre-#TBD TryGet+Upsert pair which did two chain scans + a full-record stack copy + double OLC traversal.
-                //    Returns false if the entity is already gone (destroy race precondition from Q9 says the occupancy pre-mask
-                //    should have filtered this out, but the no-op return preserves the same forgiving semantics as before).
+                //
+                //    What staging buys: TryUpdateInPlace already wrote only the 5 bytes that change, so the cost it could not shed was the hash, the
+                //    PackedMeta read, the ResolveBucket, the directory lookup, the dirty-mark and the OLC lock/unlock pair — all per entity. Sorting the batch
+                //    by bucket amortises every one of those across the entries sharing a bucket. The bucket index is computed HERE, on the worker, because the
+                //    batch has to be sorted by it and recomputing it in the apply would put one of the two hashes back.
                 var entityKey = EntityId.FromRaw(entityPK).EntityKey;
-                var clusterLocationUpdater = new ClusterLocationUpdater(dstChunkId, (byte)dstSlot);
-                var updated = engineState.EntityMap.TryUpdateInPlace(entityKey, ref clusterLocationUpdater, ref emAccessor);
-                if (updated)
+                if (clusterState.UseBulkEntityMapUpdate)
                 {
-                    // H1: the destination cluster now holds this entity, so its visibility summary must bound the entity's own TSNs. The born side is already
-                    // bounded by the NextFreeId fold inside the claim (step 2) and this fold only ever raises, so it is a no-op confirmation kept for the day
-                    // that bound is tightened. The DIED side has no such pre-fold: a migrated entity carrying a tombstone is only discovered here, and folding
-                    // it AFTER the record update is what keeps the summary from being relaxed on the strength of a move that did not happen.
-                    clusterState.NoteClusterBorn(dstChunkId, clusterLocationUpdater.ObservedBornTsn);
-                    if (clusterLocationUpdater.ObservedDiedTsn != 0)
+                    clusterState.EntityMapUpdates.Add(chunkIndex, new EntityLocationUpdate
                     {
-                        // A tombstoned entity that keeps an occupancy bit breaks the premise the whole died watermark rests on — "ReleaseSlot clears the bit at
-                        // destroy commit", so a reader past the last death sees a word that already reflects it. Here it does not: the dst bit was set at claim
-                        // and only the SRC slot is released below, so this cluster holds a set bit for a dead entity. Under the pre-#722 sticky flag that
-                        // closed the gate forever and the per-entity probe caught it; a plain watermark would let every reader past ObservedDiedTsn through,
-                        // and TryCountViaOccupancy popcounts on that vouch with nothing to catch it. VisibilityUnknown restores the sticky behaviour for
-                        // exactly this case and nothing else: permanent deny for this cluster, no change to any cluster that drains normally.
-                        clusterState.NoteClusterDied(dstChunkId, ArchetypeClusterState.VisibilityUnknown);
-                    }
+                        EntityKey = entityKey,
+                        Bucket = engineState.EntityMap.BucketIndexOf(entityKey),
+                        DstChunkId = dstChunkId,
+                        DstSlot = dstSlot,
+                    });
                 }
-                if (!updated)
+                else
                 {
-                    // EntityMap doesn't have this entity — was committed-destroyed before fence ran. We've already copied data to (dstChunkId, dstSlot), so the
-                    // destination cluster now contains an orphan entity's bytes that nothing references. Roll back the destination side: clear the slot's
-                    // occupancy + entityId so spatial queries don't keep returning this ghost. The source side gets cleared by the ReleaseSlot below as usual.
-                    // Log so we can root-cause the underlying WriteSpatial-flagged-but-then-destroyed race.
-                    Console.WriteLine($"[Migrate-Orphan] archId={archetypeId} entityKey={entityKey} "
-                        + $"srcChunk={srcChunkId} srcSlot={srcSlot} dstChunk={dstChunkId} dstSlot={dstSlot} — "
-                        + "TryUpdateInPlace returned false (entity gone). Rolling back dst slot.");
-                    if (hasClusterAccessor)
+                    // The inline path, kept for batches too small to produce bucket runs. It differs from the staged one ONLY in where the map write happens:
+                    // the same fold, the same rollback, and the same conservative treatment of steps 10 and 11 below, so the two arms are comparable and the
+                    // engine has one set of semantics rather than two.
+                    var entry = new EntityLocationUpdate { EntityKey = entityKey, DstChunkId = dstChunkId, DstSlot = dstSlot };
+                    var updater = new ClusterLocationInlineUpdater(dstChunkId, (byte)dstSlot);
+                    if (engineState.EntityMap.TryUpdateInPlace(entityKey, ref updater, ref emAccessor))
                     {
-                        var dstRollbackBase = clusterAccessor.GetChunkAddress(dstChunkId, true);
-                        Interlocked.And(ref *(long*)dstRollbackBase, ~(1L << dstSlot));
-                        *(long*)(dstRollbackBase + layout.EntityIdsOffset + dstSlot * 8) = 0;
-                        for (var s = 0; s < componentCount; s++)
+                        clusterState.NoteClusterBorn(dstChunkId, updater.ObservedBornTsn);
+                        if (updater.ObservedDiedTsn != 0)
                         {
-                            var ebOff = layout.EnabledBitsOffset(s);
-                            Interlocked.And(ref *(long*)(dstRollbackBase + ebOff), ~(1L << dstSlot));
+                            clusterState.NoteClusterDied(dstChunkId, ArchetypeClusterState.VisibilityUnknown);
                         }
                     }
-                    else if (hasTransientClusterAccessor)
+                    else
                     {
-                        var dstRollbackBase = transientClusterAccessor.GetChunkAddress(dstChunkId, true);
-                        Interlocked.And(ref *(long*)dstRollbackBase, ~(1L << dstSlot));
-                        *(long*)(dstRollbackBase + layout.EntityIdsOffset + dstSlot * 8) = 0;
-                        for (var s = 0; s < componentCount; s++)
-                        {
-                            var ebOff = layout.EnabledBitsOffset(s);
-                            Interlocked.And(ref *(long*)(dstRollbackBase + ebOff), ~(1L << dstSlot));
-                        }
+                        clusterState.RollbackOrphanedDestinationSlot(entry.DstChunkId, entry.DstSlot, entry.EntityKey, changeSet);
                     }
-                    // Don't proceed to ReleaseSlot src — the original entity is already gone (its slot was cleared at destroy commit). Don't bump dirtyBits —
-                    // the migration was a no-op.
-                    continue;
                 }
+
+                // The H1 visibility fold and the destroyed-in-flight rollback that used to live here now run in the EntityMapUpdate phase, which is where the
+                // "was the entity still in the map" verdict becomes known. Steps 10 and 11 below are therefore no longer gated on that verdict, and both
+                // resulting differences are CONSERVATIVE:
+                //
+                //   * An orphan's source slot is now released. ReleaseSlot derives `wasOccupied` from ClearSlotMetadata's return and gates the cell-count
+                //     decrement and the drain check on it, so releasing a slot a destroy already cleared is a no-op — and a destroy clearing that slot is the
+                //     only way the entity left the map. Had it somehow not, releasing is the correct action regardless.
+                //   * An orphan now records a dirty-bit delta for a migration that gets rolled back. That marks slots dirty which need not be, never the
+                //     reverse.
+                //
+                // Neither is reachable unless the orphan case fires at all, which step 0's occupancy pre-check and step 1b's entityPK guard are supposed to
+                // have filtered out, and which is additionally an EW-01 violation that ExclusiveWindow now throws on rather than absorbing silently.
 
                 // 10. Release the source slot. Clears occupancy, EnabledBits, EntityId, decrements cell.EntityCount. If the cluster becomes empty, the
                 // finalize-and-free is DEFERRED to FinalizeArchetypeFence (review C-1) — freeing here would race with a concurrent ClaimSlotInCell that may
                 // have just CAS-claimed a slot.
                 if (hasClusterAccessor)
                 {
-                    clusterState.ReleaseSlot(ref clusterAccessor, srcChunkId, srcSlot, changeSet, grid, deferFinalize: true);
+                    clusterState.ReleaseSlot(ref clusterAccessor, srcChunkId, srcSlot, changeSet, grid, true);
                 }
                 else
                 {
-                    clusterState.ReleaseSlot(ref transientClusterAccessor, srcChunkId, srcSlot, grid, deferFinalize: true);
+                    clusterState.ReleaseSlot(ref transientClusterAccessor, srcChunkId, srcSlot, grid, true);
+                }
+
+                // 10b. The source cluster just lost an entity, so its AABB may be too large — flag a full recompute for this tick's refresh pass (#872
+                // step 10, AC-10.9). Step 8 above notes the src AABB "stays conservative (not shrunk) — Phase 1 trade-off"; that trade is what an
+                // intra-cell relocation cannot accept, since tightening the source IS the point of the move. Cheap and unconditional: a cell-crossing
+                // migration wants it just as much, and the flag costs one CAS against a cluster the refresh is likely to visit anyway.
+                // #912: on the parallel path this is DEFERRED to the per-chunk drain, which already carries srcChunkId and already runs under the finalize
+                // latch — see ArchetypeClusterState.DeferMigrateClusterFlags. The two atomics it saves are issued once per migration into arrays so densely
+                // packed that the whole process bitmap is a single cache line at realistic cluster counts, so every worker took the same line exclusive on
+                // every migrant. The serial path has no buffer and no contention, and keeps the direct call.
+                if (dirtyBuffer == null || !ArchetypeClusterState.DeferMigrateClusterFlags)
+                {
+                    clusterState.FlagClusterForShrinkRefresh(srcChunkId);
                 }
 
                 // 11. Record dirty-bit deltas to a worker-local buffer instead of writing FenceDirtyBits directly. False-sharing on adjacent chunkIds
@@ -859,16 +1278,18 @@ public partial class DatabaseEngine
         }
         finally
         {
-            emAccessor.Dispose();
-            if (hasIdxAccessor)
-            {
-                idxAccessor.Dispose();
-            }
+            // #912. Opens the EPILOGUE — three accessor disposals and the span's own publish, which is what Dispose does.
+            var epilogueStart = Stopwatch.GetTimestamp();
 
-            if (hasIdxAccessorS64)
-            {
-                idxAccessorS64.Dispose();
-            }
+            migrationScope.CrossingCount = crossingCount;
+            migrationScope.RelocationCount = relocationCount;
+            migrationScope.RepairCount = repairCount;
+
+            // Before the accessors, because this is a LATCH and they are page rentals: every other worker's batch on the same field waits behind nothing,
+            // but a grower waits behind all of them, so the shortest hold is the correct one.
+            CloseZoneMapBatches(clusterState, zoneBatchFieldCount);
+
+            emAccessor.Dispose();
             if (hasTransientClusterAccessor)
             {
                 transientClusterAccessor.Dispose();
@@ -877,6 +1298,13 @@ public partial class DatabaseEngine
             {
                 clusterAccessor.Dispose();
             }
+
+            // AFTER the accessor disposals, which is where `using var migrationScope` used to put it before the readonly-field rules forced an explicit
+            // Dispose. The argument the comment at the span's START makes — that moving it shrinks kind 60 with no work getting faster, and silently breaks
+            // every timeline comparison against a pre-#911 trace — applies to the END in exactly the same way. Releasing three accessors is real work this
+            // method does, and the span has always covered it.
+            migrationScope.Dispose();
+            epilogueTicks = Stopwatch.GetTimestamp() - epilogueStart;
 
             // saveChanges and ReleaseDirtyMarks are deliberately NOT called here. ExecuteMigrations operates on the UoW's shared ChangeSet (passed
             // by the caller through WriteClusterTickFence → WriteTickFence). The UoW owns the commit lifecycle: in WAL mode SaveChanges is never called
@@ -892,6 +1320,26 @@ public partial class DatabaseEngine
         var durationMs = (endTimestamp - startTimestamp) * 1000.0 / Stopwatch.Frequency;
         // Accumulate per-slice counters atomically — multiple workers may slice the same archetype's PendingMigrations.
         Interlocked.Add(ref clusterState.LastTickMigrationCount, count);
+        // #912. The number of spans summed into LastTickMigrationExecuteMs below, and the per-kind split of what they moved. Without the first, that sum
+        // divided by an entity count cannot be told apart from the same work cut into more pieces — which is what raising the worker count does to it.
+        Interlocked.Increment(ref clusterState.LastTickMigrationSliceCount);
+        // #926's proof, and it is a count rather than a timing on purpose: one batch per indexed field per slice makes this INDEPENDENT of the migration
+        // count, so a per-migrant acquire surviving anywhere on the path shows up as an identity failure rather than as a number someone has to interpret.
+        Interlocked.Add(ref clusterState.LastTickZoneMapBatchOpens, zoneBatchFieldCount);
+        // `afterPrologue` stays 0 when the batch open threw before it was stamped; publishing `0 - startTimestamp` would contribute a large NEGATIVE prologue
+        // to the tick, which is the "a part larger than the whole" failure SO-01 names, with the sign reversed.
+        Interlocked.Add(ref clusterState.LastTickMigrationPrologueTicks, afterPrologue > startTimestamp ? afterPrologue - startTimestamp : 0L);
+        Interlocked.Add(ref clusterState.LastTickMigrationEpilogueTicks, epilogueTicks);
+        Interlocked.Add(ref clusterState.LastTickCrossingsExecuted, crossingCount);
+        Interlocked.Add(ref clusterState.LastTickRelocationsExecuted, relocationCount);
+        Interlocked.Add(ref clusterState.LastTickRepairsExecuted, repairCount);
+        // Cumulative twin of the above (#872 step 1). One Interlocked per SLICE, not per migration — the per-tick counter is reset every fence, so an
+        // asynchronous scrape of it samples one arbitrary tick and cannot yield a rate.
+        //
+        // This may well touch a SECOND contended cache line rather than sharing the one above: ArchetypeClusterState is a plain sealed class, so the CLR uses
+        // LayoutKind.Auto and groups fields by alignment — an 8-byte long and a 4-byte int declared adjacently are not laid out adjacently, and declaration
+        // order buys nothing. If the Migrate phase ever shows up as contended here, MD-03's remedy is an explicit padded struct, not a field reorder.
+        Interlocked.Add(ref clusterState.TotalMigrationCount, count);
         // Time accumulation as double via CAS-loop (no Interlocked.Add(double) in .NET).
         SpinWait sw = default;
         while (true)
@@ -929,7 +1377,33 @@ public partial class DatabaseEngine
     /// </list>
     /// For a SingleVersion / Versioned slot all three collapse onto the cluster segment, which is why this needed only one accessor before.
     /// </remarks>
-    private int ProcessClusterShadowEntries(ArchetypeClusterState clusterState, ArchetypeEngineState engineState, ChangeSet changeSet)
+    /// <param name="clusterState">The archetype whose parked index key-changes are being replayed.</param>
+    /// <param name="engineState">Resolves a component slot to its table, for the view-registry notifications the drain emits.</param>
+    /// <param name="changeSet">Threaded into the index accessor for a persisted store; <c>null</c> for a Transient one, which logs nothing.</param>
+    /// <param name="clusterAccessor">
+    /// The caller's OPEN accessor on <see cref="ArchetypeClusterState.ClusterSegment"/>, or <c>default</c> when the archetype is pure-Transient (the
+    /// <c>ClusterSegment == null</c> branch of <c>PrepareArchetypeFenceCore</c>), where no cluster-segment address is ever taken.
+    /// </param>
+    /// <remarks>
+    /// <para><b>#882 — threaded in rather than rented here, and the reason is the page window.</b> Prep already holds an accessor on this very segment for
+    /// its occupancy mask and its crossing test. An accessor is a self-contained ~430-byte struct with its OWN 32-slot page window and its own clock hand —
+    /// two of them share nothing — so renting a second one here made both re-resolve the same pages and each pay
+    /// <c>IncrementSlotRefCount</c>/<c>DecrementSlotRefCount</c> on the same shared <c>PageInfo</c> cache lines. With
+    /// <see cref="RecomputeClusterZoneMaps"/> renting a third, one Prep opened three windows onto one segment and let them evict each other's entries.</para>
+    /// <para>Measured before the change: the shadow drain was <b>43 % of Prep</b> at the 25 % reference point of the #872 matrix, and 47 % under stress —
+    /// almost none of it B+Tree work.</para>
+    /// </remarks>
+    private int ProcessClusterShadowEntries(ArchetypeClusterState clusterState, ArchetypeEngineState engineState, ChangeSet changeSet,
+        ref ChunkAccessor<PersistentStore> clusterAccessor)
+        => ProcessClusterShadowEntriesRange(clusterState, engineState, changeSet, ref clusterAccessor, 0, int.MaxValue, true);
+
+    /// <inheritdoc cref="ProcessClusterShadowEntries"/>
+    // firstWord: First cluster chunk id this call owns (#886 lead D: a Prep slice drains only the entries of its own clusters).
+    // wordCount: Width of the owned range, in clusters.
+    // resetBuffers: Whether to reset each drained buffer and the shadow bitmap afterwards. A slice must not — other slices are still reading
+    // the same buffers — so the tail does it once for all of them.
+    private int ProcessClusterShadowEntriesRange(ArchetypeClusterState clusterState, ArchetypeEngineState engineState, ChangeSet changeSet,
+        ref ChunkAccessor<PersistentStore> clusterAccessor, int firstWord, int wordCount, bool resetBuffers)
     {
         var totalShadowEntries = 0;
         var pureTransient = clusterState.ClusterSegment == null;
@@ -937,16 +1411,8 @@ public partial class DatabaseEngine
         if (HasPendingShadow(clusterState.IndexSlots))
         {
             Debug.Assert(!pureTransient, "a pure-Transient archetype cannot own PersistentStore-backed index slots");
-            var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-            try
-            {
-                totalShadowEntries += DrainClusterShadowSlots(clusterState, engineState, clusterState.IndexSlots, ref clusterAccessor, ref clusterAccessor,
-                    changeSet);
-            }
-            finally
-            {
-                clusterAccessor.Dispose();
-            }
+            totalShadowEntries += DrainClusterShadowSlots(clusterState, engineState, clusterState.IndexSlots, ref clusterAccessor, ref clusterAccessor,
+                changeSet, firstWord, wordCount, resetBuffers);
         }
 
         if (HasPendingShadow(clusterState.TransientIndexSlots))
@@ -957,20 +1423,12 @@ public partial class DatabaseEngine
                 if (pureTransient)
                 {
                     totalShadowEntries += DrainClusterShadowSlots(clusterState, engineState, clusterState.TransientIndexSlots, ref transientAccessor,
-                        ref transientAccessor, changeSet);
+                        ref transientAccessor, changeSet, firstWord, wordCount, resetBuffers);
                 }
                 else
                 {
-                    var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
-                    try
-                    {
-                        totalShadowEntries += DrainClusterShadowSlots(clusterState, engineState, clusterState.TransientIndexSlots, ref clusterAccessor,
-                            ref transientAccessor, changeSet);
-                    }
-                    finally
-                    {
-                        clusterAccessor.Dispose();
-                    }
+                    totalShadowEntries += DrainClusterShadowSlots(clusterState, engineState, clusterState.TransientIndexSlots, ref clusterAccessor,
+                        ref transientAccessor, changeSet, firstWord, wordCount, resetBuffers);
                 }
             }
             finally
@@ -979,7 +1437,11 @@ public partial class DatabaseEngine
             }
         }
 
-        clusterState.ClusterShadowBitmap.Clear();
+        if (resetBuffers)
+        {
+            clusterState.ClusterShadowBitmap.Clear();
+        }
+
         return totalShadowEntries;
     }
 
@@ -1016,7 +1478,8 @@ public partial class DatabaseEngine
 
     /// <summary>Drains one index home's shadow buffers. See <see cref="ProcessClusterShadowEntries"/> for what each of the three stores addresses.</summary>
     private unsafe int DrainClusterShadowSlots<TIdx, TPrimary, TData>(ArchetypeClusterState clusterState, ArchetypeEngineState engineState,
-        ClusterIndexSlot<TIdx>[] ixSlots, ref ChunkAccessor<TPrimary> primaryAccessor, ref ChunkAccessor<TData> dataAccessor, ChangeSet changeSet)
+        ClusterIndexSlot<TIdx>[] ixSlots, ref ChunkAccessor<TPrimary> primaryAccessor, ref ChunkAccessor<TData> dataAccessor, ChangeSet changeSet,
+        int firstWord, int wordCount, bool resetBuffers)
         where TIdx : struct, IPageStore
         where TPrimary : struct, IPageStore
         where TData : struct, IPageStore
@@ -1026,9 +1489,36 @@ public partial class DatabaseEngine
         // One shared write per drain instead of one per shadow entry per field (review M4). The fence drains archetypes in parallel, so this counter is a
         // store other cores may be watching; N of them bought nothing over one.
         var mutations = 0;
+            // ── Nothing wrote this component, so no key in it moved ────────────────────────────────────────────────
+            //
+            // Capture is per ENTITY, not per field: ShadowClusterIndexedFields runs on the first write to an entity and shadows EVERY indexed field of EVERY
+            // fence-maintained slot, because at that moment it cannot know which components the transaction is about to touch. The drain can know. A
+            // component absent from FenceWrittenSlots was not written by anyone this tick, so every one of its shadow entries is guaranteed to compare equal
+            // — and reaching that verdict costs a page-window probe and a key read each.
+            //
+            // Measured: the partitioning benchmark's archetype pairs a moving `Bounds` with an indexed `Tag` that nothing ever writes, which is the ordinary
+            // shape of a component, not a contrivance. At 100 % moving the drain walked 64 000 entries per tick to prove Tag had not changed — 22 % of the
+            // entire fence.
+            //
+            // Gated on SlotReleasesThisTick as well, and that second term is what makes this exact rather than merely plausible. The loop below is not only
+            // a compare: its `occupancy == 0` branch is the destroy-side index REMOVAL for fence-maintained slots. An entity written for component T and then
+            // destroyed needs its indexed component S taken out of the tree, and S is precisely what the written-slot test would skip. With no releases at all
+            // this tick that case cannot exist. With releases, the drain runs in full, exactly as before.
+            //
+            // `writtenSlots != 0` is the third term and it is a FAIL-SAFE, not an optimisation. Zero is ambiguous: it means "nothing was written" on the
+            // paths that maintain WrittenSlotUnion, and "this path does not maintain it" everywhere else — and a pure-Transient archetype is the second kind.
+            // Its writes never reach the SetDirty overload that records a component slot, so the union stays zero while the shadow buffers fill, and a gate
+            // that trusted the zero skipped every drain and left the tree on the pre-mutation key
+            // (ClusterPureTransientIndexTests.Mutate_MovesTheKeyInTheTreeAtTheFence, caught exactly this). A non-empty buffer with an empty union is a
+            // contradiction, and the honest response to a contradiction is to do the work.
+            var writtenSlots = clusterState.FenceWrittenSlots;
+            var skipUnwritten = writtenSlots != 0 && Volatile.Read(ref clusterState.SlotReleasesThisTick) == 0;
+
             for (var s = 0; s < ixSlots.Length; s++)
             {
                 ref var ixSlot = ref ixSlots[s];
+                var slotUnwritten = skipUnwritten && (writtenSlots & (1 << ixSlot.Slot)) == 0;
+
                 for (var f = 0; f < ixSlot.Fields.Length; f++)
                 {
                     var buffer = ixSlot.ShadowBuffers[f];
@@ -1038,16 +1528,43 @@ public partial class DatabaseEngine
                         continue;
                     }
 
-                    totalShadowEntries += count;
+                    if (slotUnwritten)
+                    {
+                        // Reset, not skip: the entries describe THIS tick and must not be seen by the next one, whose FenceWrittenSlots may well include
+                        // this component. Leaving them queued would replay stale old-keys against a tree that has since moved.
+                        if (resetBuffers)
+                        {
+                            buffer.Reset();
+                        }
+
+                        continue;
+                    }
 
                     ref var field = ref ixSlot.Fields[f];
+
+                    // Walk the buffer in ascending cluster order rather than in the order user code happened to write the entities (#882). The two
+                    // GetChunkAddress calls below are the drain's whole cost on the common path — the one where the indexed field did not actually change —
+                    // and in append order they miss the accessor's 32-page window on nearly every entry. See BuildShadowDrainOrder for the measurement.
+                    //
+                    // One behaviour this reorders, deliberately: with two entities colliding on a UNIQUE key inside one drain,
+                    // Transaction.RejectUniqueIndexCollision below rejects whichever it reaches SECOND, so which of the two is rejected now follows cluster
+                    // order instead of write order. Both are legal and neither is promised by any rule — but NOTHING PINS IT: no fixture in this repo
+                    // declares a unique cluster index and drives two colliding writes through one drain, so this paragraph is the only record that the
+                    // choice moved.
+                    // The atomic path orders the buffer here, into the archetype's scratch. A slice reads the plan the head built once for the whole
+                    // buffer and takes its own clusters' contiguous range of it (#886 lead D) — the field's ChunkId column is read once per tick, not
+                    // three times per slice.
+                    var order = resetBuffers 
+                        ? clusterState.BuildShadowDrainOrder(buffer, count) : buffer.DrainOrderForClusters(firstWord, firstWord + wordCount);
+                    var included = order.Length;
+                    totalShadowEntries += included;
                     var idxAccessor = CreateIndexAccessor(field.Index.Segment, changeSet);
 
                     try
                     {
-                        for (var e = 0; e < count; e++)
+                        for (var k = 0; k < included; k++)
                         {
-                            ref var entry = ref buffer[e];
+                            ref var entry = ref buffer[order[k]];
                             var clusterChunkId = entry.ChunkId >> 6;   // entityIndex → chunkId
                             var slotIndex = entry.ChunkId & 0x3F;      // entityIndex → slot
 
@@ -1126,8 +1643,28 @@ public partial class DatabaseEngine
                                 // The SV mutation path. A SingleVersion component has no revision chain, so its index maintenance happens HERE, at the
                                 // tick-fence shadow drain, rather than on the commit path — which is why guarding only the commit sites left the collision
                                 // reachable (#675).
-                                Transaction.RejectUniqueIndexCollision(ref field, fieldPtr, clusterLocation, ref idxAccessor);
-                                field.Index.Move(&oldKey, fieldPtr, clusterLocation, ref idxAccessor);
+                                //
+                                // #886 lead C: no pre-read. Every arm of BTree.Move re-finds newKey under the leaf's write latch and returns false, with the
+                                // tree untouched, when another entry holds it — a verdict that stays true when two workers drain two clusters at once,
+                                // which a TryGet-then-Move pair does not: both can pass the read and both then insert. false also means "oldKey is not in
+                                // the tree", which was silent before and stays silent; the cold-path check below tells the two apart and raises #675's
+                                // message for the first. The pessimistic arm is the one whose existence check is not latched, and it reports the same
+                                // collision by throwing after having removed the old key — the state the pre-read's throw also left, since the data already
+                                // holds the colliding value either way.
+                                bool moved;
+                                try
+                                {
+                                    moved = field.Index.Move(&oldKey, fieldPtr, clusterLocation, ref idxAccessor);
+                                }
+                                catch (UniqueConstraintViolationException)
+                                {
+                                    moved = false;
+                                }
+
+                                if (!moved)
+                                {
+                                    Transaction.RejectUniqueIndexCollision(ref field, fieldPtr, clusterLocation, ref idxAccessor);
+                                }
                             }
 
                             // Notify registered views (same pattern as ProcessShadowFieldEntries)
@@ -1154,11 +1691,16 @@ public partial class DatabaseEngine
                         idxAccessor.Dispose();
                     }
 
-                    buffer.Reset();
+                    if (resetBuffers)
+                    {
+                        buffer.Reset();
+                    }
                 }
             }
 
-        clusterState.MutationsSinceRebuild += mutations;
+        // Through the padded field, atomically: W slices of one archetype fold into it at once (#886 lead D). The statistics worker only compares it
+        // to a threshold.
+        Interlocked.Add(ref clusterState._mutationsSinceRebuild.Value, mutations);
         return totalShadowEntries;
     }
 

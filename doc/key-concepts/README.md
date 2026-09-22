@@ -89,7 +89,7 @@ The engine object and the machinery underneath it.
 |---|---|
 | **[DatabaseEngine](xref:concept-database-engine)** | The root object — one per process — that owns everything. |
 | **[Page cache & paged store](xref:concept-page-cache)** | Memory-mapped storage; working set resident, the rest on disk. |
-| **[Cluster storage](xref:concept-cluster-storage)** | Batched SoA layout — your storage-mode mix silently decides it (~50× bulk iteration). |
+| **[Cluster storage](xref:concept-cluster-storage)** | Batched SoA layout every archetype gets; storage mode places each component inside it. |
 | **[WAL & checkpoint](xref:concept-wal-checkpoint)** | The log that makes commits durable; the checkpoint recycles it. |
 
 ---

@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 700" width="1200" height="700" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    .t   { font-size: 21px; font-weight: 700; fill: #18181b; }
+    .st  { font-size: 13.5px; fill: #52525b; }
+    .h   { font-size: 15px; font-weight: 700; fill: #18181b; }
+    .l   { font-size: 12.5px; fill: #3f3f46; }
+    .lm  { font-size: 12px; fill: #71717a; }
+    .lb  { font-size: 12.5px; font-weight: 700; fill: #3f3f46; }
+    .mono{ font-size: 12px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; fill: #3f3f46; }
+    .monob{ font-size: 12px; font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace; font-weight: 700; fill: #18181b; }
+    .num { font-size: 11.5px; font-family: ui-monospace, Consolas, monospace; fill: #71717a; }
+  </style>
+  <rect width="1200" height="700" fill="#ffffff"/>
+
+  <text class="t" x="40" y="38">Entity, cluster, cell — the three units of population</text>
+  <text class="st" x="40" y="60">Entities live in slots of a cluster. A cluster belongs to exactly one cell. Queries are answered in clusters, never entity by entity.</text>
+
+  <!-- ══ Column A: the grid of cells ══ -->
+  <text class="h" x="50" y="104">1 &#183; The world is a grid of cells</text>
+  <g stroke="#d4d4d8" fill="#f4f4f5">
+    <rect x="50"  y="120" width="100" height="100"/><rect x="150" y="120" width="100" height="100"/><rect x="250" y="120" width="100" height="100"/>
+    <rect x="50"  y="220" width="100" height="100"/>                                                <rect x="250" y="220" width="100" height="100"/>
+    <rect x="50"  y="320" width="100" height="100"/><rect x="150" y="320" width="100" height="100"/><rect x="250" y="320" width="100" height="100"/>
+  </g>
+  <rect x="150" y="220" width="100" height="100" fill="#dbeafe" stroke="#2563eb" stroke-width="2.5"/>
+  <g fill="#a1a1aa">
+    <circle cx="78"  cy="150" r="2.5"/><circle cx="112" cy="182" r="2.5"/><circle cx="290" cy="168" r="2.5"/>
+    <circle cx="316" cy="196" r="2.5"/><circle cx="86"  cy="366" r="2.5"/><circle cx="196" cy="358" r="2.5"/>
+    <circle cx="224" cy="392" r="2.5"/><circle cx="300" cy="270" r="2.5"/><circle cx="322" cy="298" r="2.5"/>
+  </g>
+  <g fill="#f59e0b">
+    <circle cx="172" cy="242" r="3"/><circle cx="196" cy="238" r="3"/><circle cx="214" cy="256" r="3"/>
+    <circle cx="182" cy="268" r="3"/><circle cx="228" cy="278" r="3"/><circle cx="192" cy="296" r="3"/>
+    <circle cx="222" cy="304" r="3"/><circle cx="166" cy="286" r="3"/>
+  </g>
+  <text class="l"  x="50" y="444">Cells are cheap and coarse. A cell is</text>
+  <text class="l"  x="50" y="461">an address, not a container: it holds</text>
+  <text class="l"  x="50" y="478">a 64-byte <tspan class="mono">CellState</tspan> and nothing else.</text>
+  <text class="lm" x="50" y="500">Cells are three-dimensional. A flat</text>
+  <text class="lm" x="50" y="516">world is a grid exactly one cell deep.</text>
+
+  <!-- connector A -> B -->
+  <path d="M 250 270 L 430 270" stroke="#2563eb" stroke-width="1.6" stroke-dasharray="5 4" fill="none" marker-end="url(#ab)"/>
+  <defs>
+    <marker id="ab" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#2563eb"/></marker>
+    <marker id="ag" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#71717a"/></marker>
+  </defs>
+
+  <!-- ══ Column B: one cell, its clusters ══ -->
+  <text class="h" x="440" y="104">2 &#183; One cell holds clusters</text>
+  <rect x="440" y="120" width="300" height="300" fill="#dbeafe" stroke="#2563eb" stroke-width="2.5"/>
+
+  <rect x="466" y="146" width="118" height="104" fill="#fef3c7" fill-opacity="0.75" stroke="#d97706" stroke-width="1.8"/>
+  <g fill="#f59e0b">
+    <circle cx="481" cy="164" r="3.4"/><circle cx="508" cy="156" r="3.4"/><circle cx="540" cy="174" r="3.4"/><circle cx="566" cy="192" r="3.4"/>
+    <circle cx="488" cy="212" r="3.4"/><circle cx="520" cy="230" r="3.4"/><circle cx="554" cy="238" r="3.4"/><circle cx="574" cy="204" r="3.4"/>
+  </g>
+  <text class="lb" x="466" y="140" fill="#b45309">cluster A</text>
+
+  <rect x="608" y="156" width="114" height="112" fill="#dcfce7" fill-opacity="0.8" stroke="#16a34a" stroke-width="1.8"/>
+  <g fill="#22c55e">
+    <circle cx="622" cy="172" r="3.4"/><circle cx="650" cy="166" r="3.4"/><circle cx="690" cy="180" r="3.4"/><circle cx="712" cy="200" r="3.4"/>
+    <circle cx="630" cy="215" r="3.4"/><circle cx="668" cy="238" r="3.4"/><circle cx="700" cy="255" r="3.4"/><circle cx="645" cy="260" r="3.4"/>
+  </g>
+  <text class="lb" x="608" y="150" fill="#15803d">cluster B</text>
+
+  <rect x="498" y="296" width="164" height="100" fill="#ede9fe" fill-opacity="0.85" stroke="#7c3aed" stroke-width="1.8"/>
+  <g fill="#8b5cf6">
+    <circle cx="512" cy="312" r="3.4"/><circle cx="548" cy="320" r="3.4"/><circle cx="590" cy="308" r="3.4"/><circle cx="632" cy="325" r="3.4"/>
+    <circle cx="520" cy="360" r="3.4"/><circle cx="566" cy="352" r="3.4"/><circle cx="610" cy="372" r="3.4"/><circle cx="650" cy="386" r="3.4"/>
+  </g>
+  <text class="lb" x="498" y="412" fill="#6d28d9">cluster C</text>
+
+  <text class="l"  x="440" y="444">The box drawn round each cluster is its</text>
+  <text class="l"  x="440" y="461"><tspan class="mono">ClusterAabb</tspan> &#8212; the bound a query tests</text>
+  <text class="l"  x="440" y="478">before it opens the cluster at all.</text>
+  <text class="lm" x="440" y="500">A cluster never straddles two cells. That is</text>
+  <text class="lm" x="440" y="516">load-bearing for reopen, not just for queries.</text>
+
+  <!-- connector B -> C -->
+  <path d="M 584 198 L 812 198" stroke="#d97706" stroke-width="1.6" stroke-dasharray="5 4" fill="none" marker-end="url(#ac)"/>
+  <defs><marker id="ac" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#d97706"/></marker></defs>
+
+  <!-- ══ Column C: a cluster in storage ══ -->
+  <text class="h" x="820" y="104">3 &#183; A cluster is one page of SoA</text>
+  <rect x="820" y="120" width="330" height="252" fill="#ffffff" stroke="#d97706" stroke-width="2" rx="4"/>
+
+  <rect x="830" y="130" width="310" height="30" fill="#fef3c7" stroke="#f59e0b"/>
+  <text class="monob" x="840" y="150">OccupancyBits</text><text class="num" x="1010" y="150">u64, lower N bits</text>
+
+  <rect x="830" y="164" width="310" height="30" fill="#fafafa" stroke="#e4e4e7"/>
+  <text class="mono" x="840" y="184">EntityKeys[N]</text><text class="num" x="1010" y="184">8 B &#215; N</text>
+
+  <rect x="830" y="198" width="310" height="30" fill="#f4f4f5" stroke="#e4e4e7"/>
+  <text class="mono" x="840" y="218">Position[N]</text><text class="num" x="1010" y="218">the spatial field</text>
+
+  <rect x="830" y="232" width="310" height="30" fill="#fafafa" stroke="#e4e4e7"/>
+  <text class="mono" x="840" y="252">Velocity[N]</text><text class="num" x="1010" y="252">one per component</text>
+
+  <rect x="830" y="266" width="310" height="30" fill="#f4f4f5" stroke="#e4e4e7"/>
+  <text class="mono" x="840" y="286">Health[N]</text><text class="num" x="1010" y="286">&#8230;</text>
+
+  <rect x="830" y="300" width="310" height="30" fill="#fafafa" stroke="#e4e4e7"/>
+  <text class="mono" x="840" y="320">IndexElementIds[k][N]</text>
+
+  <text class="num" x="830" y="352">slot 0</text><text class="num" x="884" y="352">slot 1</text><text class="num" x="938" y="352">slot 2</text>
+  <text class="num" x="992" y="352">&#8230;</text><text class="num" x="1040" y="352">slot N&#8722;1</text>
+
+  <text class="l"  x="820" y="398">One cluster = N slots = one chunk = one page.</text>
+  <text class="l"  x="820" y="415">N is chosen in 8..64, per archetype, to fit the</text>
+  <text class="l"  x="820" y="432">most entities into a single page.</text>
+  <text class="lm" x="820" y="454">Two side tables are keyed by the same chunk id:</text>
+  <text class="lm" x="820" y="470"><tspan class="mono">ClusterAabbs</tspan> holds the bound drawn at left,</text>
+  <text class="lm" x="820" y="486"><tspan class="mono">ClusterCellMap</tspan> holds the cell it belongs to.</text>
+
+  <!-- ══ bottom band ══ -->
+  <line x1="40" y1="546" x2="1160" y2="546" stroke="#e4e4e7" stroke-width="1"/>
+
+  <rect x="40" y="566" width="358" height="112" fill="#f4f4f5" stroke="#d4d4d8" rx="4"/>
+  <text class="lb" x="56" y="590">A cluster belongs to exactly one cell</text>
+  <text class="lm" x="56" y="612">Rebuilding after a reopen reads only the first</text>
+  <text class="lm" x="56" y="628">occupied entity of a cluster and files the whole</text>
+  <text class="lm" x="56" y="644">cluster under that entity&#8217;s cell. A cluster that</text>
+  <text class="lm" x="56" y="660">straddled two cells would be silently misfiled.</text>
+
+  <rect x="420" y="566" width="358" height="112" fill="#f4f4f5" stroke="#d4d4d8" rx="4"/>
+  <text class="lb" x="436" y="590">Queries answer in clusters</text>
+  <text class="lm" x="436" y="612">Walking a cluster&#8217;s slots costs 0.576 ns per</text>
+  <text class="lm" x="436" y="628">entity. Resolving one entity by id costs 46.5 ns.</text>
+  <text class="lm" x="436" y="644">That 81&#215; gap is why the whole spatial path is</text>
+  <text class="lm" x="436" y="660">built at cluster granularity.</text>
+
+  <rect x="800" y="566" width="360" height="112" fill="#f4f4f5" stroke="#d4d4d8" rx="4"/>
+  <text class="lb" x="816" y="590">The bound is what selectivity rests on</text>
+  <text class="lm" x="816" y="612">A query tests cluster bounds, then opens the</text>
+  <text class="lm" x="816" y="628">clusters that overlap. If the bounds are loose,</text>
+  <text class="lm" x="816" y="644">every cluster overlaps and the hierarchy buys</text>
+  <text class="lm" x="816" y="660">nothing at all.</text>
+</svg>

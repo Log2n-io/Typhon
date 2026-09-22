@@ -69,8 +69,8 @@ view.Refresh(tx);                   // scheduler-driven refresh falls back to th
   line that invoked the API, matching the [Source Attribution](./source-attribution.md) model.
 - **Zero cost when disabled** — gated behind `TelemetryConfig.QueryActive`; JIT-eliminated like every other
   profiler subsystem.
-- **Backward-compatible wire format** — trace files from before this feature still decode; the new fields simply
-  decode as absent.
+- **Backward-compatible wire format** — a trace file that carries none of these fields still decodes; the query
+  fields simply decode as absent.
 - **Partial status** — the Workbench-side Query Catalog / Plan Tree / Execution Inspector panels this data feeds
   are built but system ownership isn't wired yet (definitions currently show no owning system), the "triggered
   at" execution-site link isn't surfaced in the Execution Inspector, and polymorphic queries don't yet break out

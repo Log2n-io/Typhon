@@ -301,12 +301,13 @@ public partial class DatabaseEngine
     /// O(archetypes), no page I/O.
     /// </summary>
     internal bool TryGetClusterSpatialInfo(int clusterSegmentRootPage, out bool isSpatial, out float cellSize, out int gridWidth, out int gridHeight,
-        out string spatialMode)
+        out int gridDepth, out string spatialMode)
     {
         isSpatial = false;
         cellSize = 0;
         gridWidth = 0;
         gridHeight = 0;
+        gridDepth = 0;
         spatialMode = "";
 
         var states = _archetypeStates;
@@ -327,9 +328,10 @@ public partial class DatabaseEngine
             if (isSpatial && _spatialGrid != null)
             {
                 ref readonly var cfg = ref _spatialGrid.Config;
-                cellSize = cfg.CellSize;
+                cellSize = (float)cfg.CellSize;
                 gridWidth = cfg.GridWidth;
                 gridHeight = cfg.GridHeight;
+                gridDepth = cfg.GridDepth;
                 spatialMode = cluster.SpatialSlot.FieldInfo.Mode.ToString();
             }
             return true;
@@ -340,24 +342,29 @@ public partial class DatabaseEngine
 
     /// <summary>
     /// Per-cluster spatial-cell context for the cluster chunk <paramref name="clusterChunkId"/> of the segment whose root page is
-    /// <paramref name="clusterSegmentRootPage"/> — the grid cell the cluster is attached to (key + 2D coords), the cell's live entity / cluster counts (global sums
-    /// across every cluster-spatial archetype sharing the grid), and the cluster's tight 2D AABB. This is the per-chunk "why is this cluster mostly empty" answer:
+    /// <paramref name="clusterSegmentRootPage"/> — the grid cell the cluster is attached to (key + cell coords), the cell's live entity / cluster counts
+    /// (global sums across every cluster-spatial archetype sharing the grid), and the cluster's tight AABB. This is the per-chunk "why is this cluster mostly
+    /// empty" answer:
     /// it is the only cluster in a cell that holds just a handful of entities. Returns <see langword="false"/> when no grid is configured, the owning archetype is
     /// non-spatial, the chunk is unmapped (not attached to a cell), or the id is out of range. Read-only, O(archetypes), no page I/O — all reads hit in-memory
     /// transient spatial state.
     /// </summary>
-    internal bool TryGetClusterChunkSpatialInfo(int clusterSegmentRootPage, int clusterChunkId, out int cellKey, out int cellX, out int cellY,
-        out int entitiesInCell, out int clustersInCell, out float aabbMinX, out float aabbMinY, out float aabbMaxX, out float aabbMaxY)
+    internal bool TryGetClusterChunkSpatialInfo(int clusterSegmentRootPage, int clusterChunkId, out int cellKey, out int cellX, out int cellY, out int cellZ,
+        out int entitiesInCell, out int clustersInCell, out double aabbMinX, out double aabbMinY, out double aabbMinZ, out double aabbMaxX,
+        out double aabbMaxY, out double aabbMaxZ)
     {
         cellKey = -1;
         cellX = 0;
         cellY = 0;
+        cellZ = 0;
         entitiesInCell = 0;
         clustersInCell = 0;
         aabbMinX = 0;
         aabbMinY = 0;
+        aabbMinZ = 0;
         aabbMaxX = 0;
         aabbMaxY = 0;
+        aabbMaxZ = 0;
 
         var grid = _spatialGrid;
         if (grid == null)
@@ -395,7 +402,7 @@ public partial class DatabaseEngine
                 return false; // cluster not attached to a cell (unmapped)
             }
 
-            (cellX, cellY) = grid.CellKeyToCoords(cellKey);
+            (cellX, cellY, cellZ) = grid.CellKeyToCoords(cellKey);
             ref var cell = ref grid.GetCell(cellKey);
             entitiesInCell = cell.EntityCount;
             clustersInCell = cell.ClusterCount;
@@ -403,11 +410,22 @@ public partial class DatabaseEngine
             var aabbs = cluster.ClusterAabbs;
             if (aabbs != null && (uint)clusterChunkId < (uint)aabbs.Length)
             {
+                // Converted back to WORLD space on the way out. Since #872 step 9 the stored bounds are C15 cell-relative, and every consumer of this
+                // method — the Workbench storage detail panel, `typhon` CLI output — reads them as world coordinates. Handing the raw offsets outward
+                // would report a cluster at (10, 10) when it sits at (110, 10): not a correctness failure inside the engine, but a display that is
+                // confidently wrong, which is worse than one that is obviously broken.
+                //
+                // f64 out, and through ToWorldExact rather than ToWorld, since #914: the panel displays a world coordinate, and an f32 one is quantised to
+                // ~64-unit steps at 10^9 — so every cluster in a distant region of an f64 world would have been reported at the same place. The exact
+                // conversion also drops the half-ULP inward rounding ToWorld's own remarks apologise for.
+                grid.CellOrigin(cellKey, out double originX, out double originY, out double originZ);
                 ref var box = ref aabbs[clusterChunkId];
-                aabbMinX = box.MinX;
-                aabbMinY = box.MinY;
-                aabbMaxX = box.MaxX;
-                aabbMaxY = box.MaxY;
+                aabbMinX = ClusterSpatialAabb.ToWorldExact(box.MinX, originX);
+                aabbMinY = ClusterSpatialAabb.ToWorldExact(box.MinY, originY);
+                aabbMinZ = ClusterSpatialAabb.ToWorldExact(box.MinZ, originZ);
+                aabbMaxX = ClusterSpatialAabb.ToWorldExact(box.MaxX, originX);
+                aabbMaxY = ClusterSpatialAabb.ToWorldExact(box.MaxY, originY);
+                aabbMaxZ = ClusterSpatialAabb.ToWorldExact(box.MaxZ, originZ);
             }
             return true;
         }

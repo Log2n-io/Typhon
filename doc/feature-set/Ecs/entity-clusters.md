@@ -58,7 +58,7 @@ pos.X += 1;
 ## ⚠️ Guarantees & limits
 
 - **Cluster size is auto-computed, not chosen by the caller**: N ∈ [8, 64] is picked per archetype to maximize entities-per-page; iteration code is identical for every N.
-- **Eligibility is automatic, not opt-in**: an archetype clusters if it has at least one `SingleVersion` or `Transient` component. Pure-`Versioned` archetypes and `Transient` components with indexed fields stay on the legacy per-entity path — there is no manual opt-out.
+- **Every archetype is cluster-backed, and there is no opt-out**: eligibility is unconditional, the pure-`Versioned` archetype included — a cluster stores the `Versioned` HEAD in the slot and keeps the revision chain separate, exactly as it does for a mixed archetype. Being unconditional is what makes exactly one spatial index possible; an opt-out would keep a second index home alive for every consumer to branch on.
 - **Direct `GetSpan`/`Get` writes bypass dirty tracking**: call `MarkCurrentDirty()` (whole cluster) or `MarkSlotDirty(slot)` (single entity) after writing, or the change never reaches the WAL/checkpoint. Writing `Versioned` components through `GetSpan` is rejected by design (`Debug.Assert`) — use `OpenMut`/`Write` for those, which still goes through the revision chain.
 - **Measured impact** (100K entities, 2-component archetype): per-entity cost 134 ns → ~2.7 ns (~50x), tick time ~10x, working set 19.2 MB → 2.5 MB (L3 → L2).
 - **Random access stays correct, not just fast**: MVCC visibility (`BornTSN`/`DiedTSN`), B+Tree/spatial indexes, and `EnabledBits` are all maintained per entity; `Open`/`OpenMut` need no code changes to benefit.

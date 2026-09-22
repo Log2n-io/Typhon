@@ -25,8 +25,14 @@ The fence is split into four chained phases — Prep, Migrate, AabbRefresh, Fina
 as a chunk-parallel system on the worker pool right after the user's tick DAG completes. A per-tick
 work planner sizes chunks from measured per-unit cost (continuously recalibrated from a sliding
 window of recent ticks) and bin-packs work evenly across workers rather than splitting by a fixed
-count, so one slow chunk doesn't stall the tick while idle workers wait. This is entirely internal —
-application code does not call into the fence; it is tuned, not invoked, through `RuntimeOptions`.
+count, so one slow chunk doesn't stall the tick while idle workers wait. **The parallel dispatch** is entirely
+internal — it is tuned, not invoked, through `RuntimeOptions`.
+
+> **`WriteTickFence` itself is public, and calling it is not optional outside the runtime.** Under
+> `TyphonRuntime` the fence is invoked automatically at tick end and application code never touches it. A host
+> embedding the engine **without** the runtime must call `dbe.WriteTickFence(n)` itself, once per tick — see
+> [Embedding without the runtime](../../../guide/embedding-without-the-runtime.md). What is internal is *how* the fence spreads its
+> work across workers, not *whether* the fence runs.
 
 ## 💻 Usage
 
@@ -43,7 +49,7 @@ using var runtime = TyphonRuntime.Create(engine, schedule => { /* ... */ }, opti
 
 | Option | Default | Effect |
 |---|---|---|
-| `EnableParallelFence` | `true` | Parallel fence sub-DAG vs. the legacy single-threaded `WriteTickFence` |
+| `EnableParallelFence` | `true` | Parallel fence sub-DAG vs. the single-threaded `WriteTickFence` |
 | `FenceChunkOversubscription` | 2 | Chunk-count cap = oversubscription × `WorkerCount`; smooths per-worker preemption jitter |
 | `FenceCostModel` | AntHill-calibrated defaults | Seeds per-unit cost (migration ≈ 33µs/entity, AABB ≈ 2.4µs/cluster) |
 | `AdaptiveFenceCost` | `true` | Continuously recalibrates `FenceCostModel` from a 64-tick sliding window; disable to pin the static seed for repeatable benchmarks |
@@ -52,7 +58,7 @@ using var runtime = TyphonRuntime.Create(engine, schedule => { /* ... */ }, opti
 
 - Application code never interacts with the fence DAG directly — there is no API surface beyond the
   `RuntimeOptions` knobs above.
-- `EnableParallelFence = false` falls back to the legacy serial `WriteTickFence` on the TickDriver
+- `EnableParallelFence = false` falls back to the serial `WriteTickFence` on the TickDriver
   thread — useful for diagnostics or as a regression safety valve; observable behavior is otherwise
   equivalent.
 - Both the parallel and serial paths feed the engine's mandatory WAL + checkpoint pipeline to drain

@@ -21,7 +21,7 @@ namespace Typhon.Engine.Tests;
 struct ClCcPos
 {
     [Field]
-    [SpatialIndex(1.0f)]
+    [SpatialIndex]
     public AABB2F Bounds;
 }
 
@@ -60,7 +60,7 @@ class ClusterComponentCollectionTests : TestBase<ClusterComponentCollectionTests
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClCcPos>();
         dbe.RegisterComponentFromAccessor<ClCcBag>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(WorldMax, WorldMax),
             cellSize: CellSize));
@@ -154,8 +154,8 @@ class ClusterComponentCollectionTests : TestBase<ClusterComponentCollectionTests
         using var dbe = SetupEngineWithGrid();
         var id = SpawnWithItems(dbe, 50f, 50f, 10, out _);
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f);
-        int dstCell = dbe.SpatialGrid.WorldToCellKey(350f, 350f);
+        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+        int dstCell = dbe.SpatialGrid.WorldToCellKey(350f, 350f, 0f);
         Assert.That(srcCell, Is.Not.EqualTo(dstCell), "positions must be in different cells");
 
         // Move the entity into a new cell (writes only the SV Pos), then run the tick fence to migrate it.

@@ -20,7 +20,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<ClCohPos>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(worldMax, worldMax),
             cellSize: cellSize));
@@ -46,7 +46,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
 
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildClusterAabbs();
+            cs.RebuildClusterAabbs(dbe.SpatialGrid);
         }
 
         // No clusters → no AABBs allocated.
@@ -73,7 +73,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         // entity (it re-derives the same AABB from the same position).
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildClusterAabbs();
+            cs.RebuildClusterAabbs(dbe.SpatialGrid);
         }
 
         Assert.That(cs.ClusterAabbs, Is.Not.Null, "ClusterAabbs should be allocated after rebuild");
@@ -107,7 +107,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         var cs = GetClusterState(dbe);
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildClusterAabbs();
+            cs.RebuildClusterAabbs(dbe.SpatialGrid);
         }
 
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(1),
@@ -140,7 +140,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         var cs = GetClusterState(dbe);
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildClusterAabbs();
+            cs.RebuildClusterAabbs(dbe.SpatialGrid);
         }
 
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(3),
@@ -176,7 +176,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         var cs = GetClusterState(dbe);
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildClusterAabbs();
+            cs.RebuildClusterAabbs(dbe.SpatialGrid);
         }
 
         // For each active cluster, verify the back-pointer correctly locates it in its cell's DynamicIndex.
@@ -425,7 +425,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
 
         // Sanity: two clusters (A and B), cell B's stored AABB is the wide union of m1 and m2.
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(2));
-        int cellB = dbe.SpatialGrid.WorldToCellKey(110f, 10f);
+        int cellB = dbe.SpatialGrid.WorldToCellKey(110f, 10f, 0f);
         int cbChunkId = -1;
         for (int i = 0; i < cs.ActiveClusterCount; i++)
         {
@@ -433,11 +433,16 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
             if (cs.ClusterCellMap[cid] == cellB) { cbChunkId = cid; break; }
         }
         Assert.That(cbChunkId, Is.GreaterThanOrEqualTo(0), "cluster in cell B must exist");
+        // Asserted in WORLD space, converted back through the cell origin. Cluster bounds are C15 cell-relative (#872 step 9), and cell B sits at x=100 —
+        // so a raw `before.MinX == 110f` reads the offset 10 and fails. The sibling assertions elsewhere in this fixture happen to survive the change only
+        // because their clusters live in cell (0,0,0), where the origin is zero and the two frames coincide. Converting here keeps the test saying what it
+        // means rather than what the storage happens to hold.
+        dbe.SpatialGrid.CellOrigin(cellB, out double cbOriginX, out double cbOriginY, out _);
         var before = cs.ClusterAabbs[cbChunkId];
-        Assert.That(before.MinX, Is.EqualTo(110f));
-        Assert.That(before.MaxX, Is.EqualTo(190f));
-        Assert.That(before.MinY, Is.EqualTo(10f));
-        Assert.That(before.MaxY, Is.EqualTo(90f));
+        Assert.That(ClusterSpatialAabb.ToWorldExact(before.MinX, cbOriginX), Is.EqualTo(110f).Within(0.001f));
+        Assert.That(ClusterSpatialAabb.ToWorldExact(before.MaxX, cbOriginX), Is.EqualTo(190f).Within(0.001f));
+        Assert.That(ClusterSpatialAabb.ToWorldExact(before.MinY, cbOriginY), Is.EqualTo(10f).Within(0.001f));
+        Assert.That(ClusterSpatialAabb.ToWorldExact(before.MaxY, cbOriginY), Is.EqualTo(90f).Within(0.001f));
 
         // Destroy m2 in one transaction (no dirty bit set by destroy alone).
         using (var tx = dbe.CreateQuickTransaction())
@@ -461,17 +466,19 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
 
         // Cluster B should now hold {m1, migrant}. The tight AABB spans (110,10) and (150,50).
         // Critically, m2's old (190,90) position must NOT contribute — the recompute scans live occupancy.
+        // World space again — see the `before` assertions for why the raw fields cannot be compared against world coordinates.
         var after = cs.ClusterAabbs[cbChunkId];
-        Assert.That(after.MinX, Is.EqualTo(110f), "min X = m1");
-        Assert.That(after.MinY, Is.EqualTo(10f),  "min Y = m1");
-        Assert.That(after.MaxX, Is.EqualTo(150f), "max X = migrant (m2 excluded because destroyed)");
-        Assert.That(after.MaxY, Is.EqualTo(50f),  "max Y = migrant (m2 excluded because destroyed)");
+        Assert.That(ClusterSpatialAabb.ToWorldExact(after.MinX, cbOriginX), Is.EqualTo(110f).Within(0.001f), "min X = m1");
+        Assert.That(ClusterSpatialAabb.ToWorldExact(after.MinY, cbOriginY), Is.EqualTo(10f).Within(0.001f), "min Y = m1");
+        Assert.That(ClusterSpatialAabb.ToWorldExact(after.MaxX, cbOriginX), Is.EqualTo(150f).Within(0.001f), "max X = migrant (m2 excluded)");
+        Assert.That(ClusterSpatialAabb.ToWorldExact(after.MaxY, cbOriginY), Is.EqualTo(50f).Within(0.001f), "max Y = migrant (m2 excluded)");
 
-        // The per-cell index SoA row must mirror the tightened AABB.
+        // The per-cell index row must mirror the tightened AABB — in the SAME frame, which is what makes this a mirror check rather than a second
+        // world-space assertion.
         int indexSlot = cs.ClusterSpatialIndexSlot[cbChunkId];
         var idx = cs.PerCellIndex[cellB].DynamicIndex;
-        Assert.That(idx.MaxX[indexSlot], Is.EqualTo(150f));
-        Assert.That(idx.MaxY[indexSlot], Is.EqualTo(50f));
+        Assert.That(idx.MaxX[indexSlot], Is.EqualTo(after.MaxX));
+        Assert.That(idx.MaxY[indexSlot], Is.EqualTo(after.MaxY));
     }
 
     /// <summary>

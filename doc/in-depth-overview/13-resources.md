@@ -250,28 +250,28 @@ The snapshot exposes pure-data queries over the frozen `Nodes` dictionary:
 
 Lives inside `DatabaseEngineOptions` and is consumed by the components at construction. Set at startup, immutable afterwards. Real defaults — check these against the field declarations:
 
-> **Page-cache size is not a `ResourceOptions` knob.** It lives on `PagedMMFOptions.DatabaseCacheSize` (bytes, default **256 MiB**) — set it via `TyphonOptions.PageCacheSize(...)`. The former `PageCachePages`/`MaxPageCachePages` entries were removed in #148.
+> **Page-cache size is not a `ResourceOptions` knob.** It lives on `PagedMMFOptions.DatabaseCacheSize` (bytes, default **256 MiB**) — set it via `TyphonOptions.PageCacheSize(...)`. There is no `PageCachePages` or `MaxPageCachePages` entry on `ResourceOptions`.
 
 `ResourceOptions` carries **five** properties. That is the whole type:
 
 | Property | Default | Meaning |
 |---|---:|---|
 | `MaxActiveTransactions` | `1000` | Hard limit on concurrent transactions; `FailFast` beyond |
-| `WalRingBufferSizeBytes` | `64 * 1024 * 1024` (**64 MB** total, 2 × 32 MB halves) | In-memory WAL stage; sized for tail latency (#559) |
+| `WalRingBufferSizeBytes` | `64 * 1024 * 1024` (**64 MB** total, 2 × 32 MB halves) | In-memory WAL stage; sized for tail latency |
 | `PageChecksumVerification` | `OnLoad` | CRC every load · only during recovery · recovery-suspect mode |
 | `CheckpointIntervalMs` | `30000` (**30 s**) | Idle checkpoint cadence |
 | `CheckpointBarrierTimeoutMs` | `30000` (**30 s**) | How long a checkpoint waits for its barrier |
 
-#148 removed the rest — `PageCachePages`, `MaxPageCachePages`, `TransactionPoolSize`, `WalBackPressureThreshold`, `WalMaxSegments`, `WalMaxSegmentSizeBytes`, `CheckpointMaxDirtyPages`, `ShadowBufferPages`, `PageSizeBytes` — as **vestigial**: they were read by nothing and bounded no allocation. If you are looking for one of them, the live knob is elsewhere:
+Names such as `PageCachePages`, `MaxPageCachePages`, `TransactionPoolSize`, `WalBackPressureThreshold`, `WalMaxSegments`, `WalMaxSegmentSizeBytes`, `CheckpointMaxDirtyPages`, `ShadowBufferPages` and `PageSizeBytes` are **not** knobs on this type — nothing reads them and they bound no allocation. If you are looking for one of them, the live knob is elsewhere:
 
-| Looking for | Now lives on |
+| Looking for | Lives on |
 |---|---|
 | page-cache size | `PagedMMFOptions.DatabaseCacheSize` (bytes, default **256 MiB**), via `TyphonOptions.PageCacheSize(...)` |
 | WAL segment size / count / staging | `WalWriterOptions.SegmentSize`, `PreAllocateSegments`, `StagingBufferSize` |
 | group-commit cadence | `WalWriterOptions.GroupCommitIntervalMs` |
 | transaction pool size | not configurable — `TransactionChain.PoolMaxSize` is a `const 16` |
 
-There is likewise **no overall memory budget and no manual validation step**. The `TotalMemoryBudgetBytes` property and the `Validate()` / `CalculateAvailableBudgetBytes()` pair went with the same purge. Instead, `DatabaseEngineOptionsValidator` — a real `IValidateOptions<DatabaseEngineOptions>`, registered by `AddDatabaseEngine` — range-checks `MaxActiveTransactions`, `WalRingBufferSizeBytes`, `CheckpointIntervalMs` and `CheckpointBarrierTimeoutMs`, plus `WalWriterOptions`' `SegmentSize`, `PreAllocateSegments`, `StagingBufferSize` and `GroupCommitIntervalMs`, at DI resolution. An out-of-range value fails at startup, with no call for you to remember.
+There is likewise **no overall memory budget and no manual validation step** — no `TotalMemoryBudgetBytes` property, and no `Validate()` / `CalculateAvailableBudgetBytes()` pair to call. Instead, `DatabaseEngineOptionsValidator` — a real `IValidateOptions<DatabaseEngineOptions>`, registered by `AddDatabaseEngine` — range-checks `MaxActiveTransactions`, `WalRingBufferSizeBytes`, `CheckpointIntervalMs` and `CheckpointBarrierTimeoutMs`, plus `WalWriterOptions`' `SegmentSize`, `PreAllocateSegments`, `StagingBufferSize` and `GroupCommitIntervalMs`, at DI resolution. An out-of-range value fails at startup, with no call for you to remember.
 
 ---
 

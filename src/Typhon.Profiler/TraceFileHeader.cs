@@ -235,7 +235,12 @@ public struct TraceFileHeader
     ///     <see cref="TraceHeaderFlags.MultipleEnginesObserved"/>. v11-and-older traces are hard-rejected — the ArchetypeTable layout change would otherwise
     ///     mis-decode silently, which is precisely the class of bug this revision exists to close.
     /// </summary>
-    public const ushort CurrentVersion = 12;
+    /// <summary>
+    ///     <b>v13</b>: the per-field spatial record drops <c>SpatialMargin</c>. The value it carried was the <c>[SpatialIndex]</c> argument, which
+    ///     the engine stopped reading when the entity-level spatial index was retired and which has now been removed from the schema surface entirely. A
+    ///     v12 reader would mis-decode every field record after the spatial block, so v12 joins v11 as hard-rejected rather than silently reinterpreted.
+    /// </summary>
+    public const ushort CurrentVersion = 13;
 
     /// <summary>True when <see cref="TraceHeaderFlags.MultipleEnginesObserved"/> is set — routing ids in this trace are absent, not merely suspect.</summary>
     public bool MultipleEnginesObserved => ((TraceHeaderFlags)Flags & TraceHeaderFlags.MultipleEnginesObserved) != 0;

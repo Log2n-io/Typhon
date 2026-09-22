@@ -109,7 +109,8 @@ python3 scripts/test-affected.py src/Typhon.Engine/Concurrency/AccessControlSmal
 The script:
 - Reads `coverage/test-affected-map.json` (built by `scripts/build-test-affected-map.py` — periodic refresh) to map src files to the fixtures that empirically cover them.
 - Falls back to a naming-convention guess (`Foo.cs` → `FooTests`) when the map is stale or missing.
-- Falls back to the **full suite** automatically if the affected set is >50 % of all fixtures (e.g., a cross-cutting type like `WaitContext`), or if no fixture can be inferred.
+- Falls back to the **full suite** automatically if the affected set is >50 % of all fixtures (e.g., a cross-cutting type like `WaitContext`), or if no fixture can be inferred. That full suite runs the way the merge gate runs it, via `bench/aws/shard.py run` (~46 s on a 7950X, against ~92 s for one process); `--single-process` keeps the one-process run. Expect this often for foundational files: 79 of the map's 462 files reach more than 250 fixtures (`ChunkBasedSegment.cs` reaches 478).
+- `--build` builds the test project first. Without it the last build runs, and a test binary older than your edit tests the old code.
 - Accepts multiple files; unions the affected fixtures.
 - For test-side edits, the file IS the fixture — no inversion needed.
 
@@ -164,9 +165,17 @@ Each line names the gate job it corresponds to, so a local failure is the same f
 > session's confidence in an otherwise-green branch, and the conclusion drawn was "`pre-push.sh` cannot go green
 > locally" — which is wrong.
 
-**What it deliberately does NOT reproduce:** the 8-way sharding and the serial `Sensitive` pass. Those change
-CONTENTION, which is a real source of gate-only failures. If a test reddens the gate but passes here, that is the first
-suspect, and `bench/aws/shard.py run` is the tool for it.
+**The engine suite runs the way the gate runs it** (since 2026-09-12): `bench/aws/shard.py run`.
+- It runs the gate's 8 shards as 8 concurrent single-worker processes, then the serial `Sensitive` pass, then up to two
+  retries of whatever failed.
+- Measured on a 7950X: **48 s**, against **92 s** for one `dotnet test` process. One process spends its second half
+  running the 120 `[NonParallelizable]` fixtures one at a time; separate processes cannot share statics, so the shards
+  run them side by side.
+- `--single-process` keeps the old path, for a box too small for 8 processes. What the script still cannot reproduce is
+  the gate's hardware.
+- Keep `bench/aws/shards.json` balanced: when shard 0 (the catch-all for unplanned classes) runs far longer than the
+  others, re-plan with `python3 bench/aws/shard.py plan --k 8 --trx <the per-shard trx>`. A plan five days stale once
+  put 2 021 tests in shard 0 and made the sharded run take 183 s.
 
 **Rebuilding the map:** the builder is **incremental**.
 - `python3 scripts/build-test-affected-map.py` — re-collects only fixtures whose test source has changed since the cached XML. ~0.3 s when nothing changed; ~5 s per touched fixture.
@@ -240,8 +249,21 @@ dotnet project convert poc.cs   # generates poc.csproj from directives
 ### Unsafe Code & Performance
 - Project uses `<AllowUnsafeBlocks>true` extensively
 - Heavy use of pointers, stackalloc, and unmanaged memory for performance
-- GCHandle pins page cache to avoid GC moves
+- The page cache is native memory (`IMemoryAllocator.AllocatePinned` → `PinnedMemoryBlock` → `NativeMemory`), never a GC array
 - Blittable struct requirements for components ensure zero-copy operations
+- **🔴 Raw pointers address only memory the engine owns — NEVER GC-allocated data.** A `byte*` / `T*` may point into:
+  page-cache memory, memory from the engine's own allocator (`AllocatePinned` / `PinnedMemoryBlock`, i.e. `NativeMemory`),
+  or the stack (`stackalloc`, locals). It must never point into a managed object. That rules out:
+  - `GC.AllocateArray(…, pinned: true)` / `GC.AllocateUninitializedArray(…, true)` +
+    `Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(…))` — the pinned object heap stops the GC *moving* an
+    array, not *freeing* it. A buffer referenced only through such a pointer was freed mid-scan while the scan kept
+    writing into it: the SWG Tatooine x64 `Internal CLR error (0x80131506)` crash.
+  - `GCHandle.Alloc(…, GCHandleType.Pinned)` + `AddrOfPinnedObject()`, and `fixed` over managed arrays, strings, or fields
+    of a struct held in a class.
+  - `Unsafe.AsPointer(ref x)` where `x` can live on the heap — an `out`/`ref` parameter, an array element, a field.
+
+  For managed memory use `ref` / `Span<T>` (`MemoryMarshal.CreateSpan`, `Vector256.LoadUnsafe(ref …)`), which the GC
+  tracks. For a buffer that must be addressed by pointer, allocate it natively and free it deterministically.
 
 ### Coding Standards
 - **Follow `.editorconfig`**: All C# code must follow the formatting rules in `/.editorconfig`. Key rules include:

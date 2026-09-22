@@ -168,21 +168,26 @@ export interface StorageSegmentSummaryDto {
   clusterGridWidth?: number;
   /** Spatial grid height in cells. */
   clusterGridHeight?: number;
+  /** Spatial grid depth in cells; 1 for a flat world. */
+  clusterGridDepth?: number;
   /** Spatial mode — `Dynamic` / `Static` (empty unless a spatial cluster). */
   clusterSpatialMode?: string;
 }
 
-/** The spatial-grid cell a cluster chunk is bucketed into, plus the cell's totals and the cluster's tight 2D AABB — mirrors `StorageClusterCellDto`. */
+/** The spatial-grid cell a cluster chunk is bucketed into, plus the cell's totals and the cluster's tight AABB — mirrors `StorageClusterCellDto`. */
 export interface StorageClusterCellDto {
   cellKey: number;
   cellX: number;
   cellY: number;
+  cellZ: number;
   entitiesInCell: number;
   clustersInCell: number;
   aabbMinX: number;
   aabbMinY: number;
+  aabbMinZ: number;
   aabbMaxX: number;
   aabbMaxY: number;
+  aabbMaxZ: number;
 }
 
 /** Response of `GET /dbmap/chunk/{segId}/{chunkId}` — mirrors `StorageChunkDto`. */

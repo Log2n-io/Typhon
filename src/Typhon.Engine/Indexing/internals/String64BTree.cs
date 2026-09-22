@@ -303,6 +303,12 @@ internal abstract class String64BTree<TStore> : BTree<String64, TStore> where TS
             return new KeyValueItem(chunk.GetKey(i), chunk.Values[i]);
         }
 
+        public override void SetValueOnly(NodeWrapper node, int index, int value, ref ChunkAccessor<TStore> accessor)
+        {
+            ref var chunk = ref accessor.GetChunk<IndexString64Chunk>(node.ChunkId, true);
+            Volatile.Write(ref chunk.Values[IndexString64Chunk.Adjust(chunk.Start + index)], value);
+        }
+
         public override void SetItem(NodeWrapper node, int index, KeyValueItem value, bool adjust, ref ChunkAccessor<TStore> accessor)
         {
             ref var chunk = ref accessor.GetChunk<IndexString64Chunk>(node.ChunkId, true);
@@ -426,6 +432,9 @@ internal abstract class String64BTree<TStore> : BTree<String64, TStore> where TS
         public override VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId, ref ChunkAccessor<TStore> accessor) => default;
         public override VariableSizedBufferAccessor<int, TStore> GetBufferReadOnlyAccessor(int bufferId) => default;
         public override int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor) => 0;
+        public override bool UpdateInBuffer(int bufferId, int elementId, int oldValue, int newValue, ref ChunkAccessor<TStore> bufferAccessor)
+            => false;   // unique index: values live in the node, not in a buffer
+        public override int BufferElementCount(int bufferId, ref ChunkAccessor<TStore> bufferAccessor) => 0;
         public override void DeleteBuffer(int bufferId, ref ChunkAccessor<TStore> bufferAccessor) { }
 
         public override NodeWrapper GetFirstChild(NodeWrapper node, ref ChunkAccessor<TStore> accessor)
@@ -855,6 +864,10 @@ internal class String64MultipleBTree<TStore> : String64BTree<TStore> where TStor
 
         public override int RemoveFromBuffer(int bufferId, int elementId, int value, ref ChunkAccessor<TStore> bufferAccessor)
             => _valueStore.DeleteElement(bufferId, elementId, value, ref bufferAccessor);
+        public override bool UpdateInBuffer(int bufferId, int elementId, int oldValue, int newValue, ref ChunkAccessor<TStore> bufferAccessor)
+            => _valueStore.UpdateElement(bufferId, elementId, oldValue, newValue, ref bufferAccessor);
+        public override int BufferElementCount(int bufferId, ref ChunkAccessor<TStore> bufferAccessor)
+            => _valueStore.GetElementCount(bufferId, ref bufferAccessor);
         public override void DeleteBuffer(int bufferId, ref ChunkAccessor<TStore> bufferAccessor) => _valueStore.DeleteBuffer(bufferId, ref bufferAccessor);
     }
 }

@@ -1,5 +1,7 @@
 # Spatial acceleration: coarse ConfigureSpatialGrid cells (sparse) → per occupied cell a
-# lazily-allocated PerCellSpatialSlot holding a static and a dynamic R-tree.
+# lazily-allocated PerCellSpatialSlot holding a static and a dynamic cluster index. Each index is a
+# structure-of-arrays list of cluster bounds, scanned linearly. Promotion to a real R-tree
+# (CellClusterTree) exists but ships OFF: CellTreePromoteThreshold defaults to int.MaxValue.
 # Render (needs container dimensions → elk layout):
 #   "/c/Program Files/D2/d2.exe" --layout elk --theme 0 spatial-grid.d2 spatial-grid.svg
 direction: right
@@ -45,11 +47,11 @@ grid: "Coarse grid — ConfigureSpatialGrid (cells are sparse)" {
 }
 
 # Compact exploded view of one occupied cell.
-detail: "One occupied cell → PerCellSpatialSlot" {
+detail: "One occupied cell → PerCellSpatialSlot\nPromotion to a real R-tree (CellClusterTree) exists above\nCellTreePromoteThreshold, which is OFF by default." {
   s: "static clusters\n(fixed — e.g. food)" { style.fill: "#dcfce7" }
   d: "dynamic clusters\n(moving — e.g. ants)" { style.fill: "#ffedd5" }
-  si: "StaticIndex — R-tree\nbuilt once · skips the fence" { style.fill: "#dcfce7" }
-  di: "DynamicIndex — R-tree\nrefreshed at fence · fat-AABB" { style.fill: "#ffedd5" }
+  si: "StaticIndex — SoA list of\ncluster bounds · linear scan\nbuilt once · skips the fence" { style.fill: "#dcfce7" }
+  di: "DynamicIndex — SoA list of\ncluster bounds · linear scan\nrefreshed at the fence" { style.fill: "#ffedd5" }
   s -> si: "SpatialMode.Static" { style.font-size: 11 }
   d -> di: "SpatialMode.Dynamic" { style.font-size: 11 }
 }

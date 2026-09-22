@@ -27,17 +27,16 @@ A unique index's B+Tree value is the entity's component chunk-id itself — dire
 chunk-ids that share the key. To remove or relocate a single entity's slot inside a HEAD buffer in O(1) instead of
 scanning it, every `AllowMultiple`-indexed field adds a hidden 4-byte `ElementId` to the component's storage
 overhead — unique fields add nothing. The mode also picks the commit-time B+Tree operation: unique fields use
-`Add`/`Move`/`Remove`; `AllowMultiple` fields use `Add`/`MoveValue`/`RemoveValue`, and on `Versioned` components
-additionally maintain a per-key TAIL history buffer. Both shapes share the identical OLC concurrency model and the
-same read API (`Transaction.EnumerateIndex`) — the difference is invisible to a caller and shows up only in
-storage footprint and commit cost.
+`Add`/`Move`/`Remove`; `AllowMultiple` fields use `Add`/`MoveValue`/`RemoveValue`. Both shapes share the
+identical OLC concurrency model and the same read API (`Transaction.EnumerateIndex`) — the difference is
+invisible to a caller and shows up only in storage footprint and commit cost.
 
 ## Sub-features
 
 | Sub-feature | Declared as | On-disk value | Extra per-entity cost |
 |-------------|-------------|----------------|------------------------|
 | [Unique (single-value) secondary index](./unique-secondary-index.md) | `[Index]` (default) | Key → chunk-id, directly | none |
-| [Multi-value secondary index (AllowMultiple)](./multi-value-secondary-index.md) | `[Index(AllowMultiple = true)]` | Key → HEAD buffer of chunk-ids (+ TAIL on `Versioned`) | +4 bytes (`ElementId`) |
+| [Multi-value secondary index (AllowMultiple)](./multi-value-secondary-index.md) | `[Index(AllowMultiple = true)]` | Key → HEAD buffer of chunk-ids | +4 bytes (`ElementId`) |
 
 ## ⚠️ Guarantees & limits
 
@@ -47,12 +46,12 @@ storage footprint and commit cost.
 - The 4-byte `ElementId` overhead applies to every `AllowMultiple`-indexed field on every component instance,
   regardless of storage mode (`SingleVersion`/`Versioned`/`Transient`) — it is what lets the commit path remove an
   entity from its HEAD buffer without a linear scan.
-- The TAIL history segment is allocated once per table, only if at least one `AllowMultiple` index exists on it,
-  and each key's TAIL buffer is populated lazily on that key's first mutation — a table with only unique indexes
-  never allocates it.
+- An `AllowMultiple` index's HEAD buffers live in the same chunk segment as its own B+Tree nodes, as a
+  variable-sized buffer store over that segment; a key's buffer is allocated when the key is first inserted. A
+  unique index has no buffer store at all — its value sits in the node.
 - Unique-field commits (`Move`) are a single tree traversal that write-locks at most two leaves. `AllowMultiple`
-  commits (`MoveValue`/`RemoveValue`) do that same traversal plus splice the entity into/out of a HEAD buffer (and,
-  on `Versioned` tables, append TAIL entries) — strictly more work per commit for the same field shape.
+  commits (`MoveValue`/`RemoveValue`) do that same traversal plus splice the entity into/out of a HEAD buffer —
+  strictly more work per commit for the same field shape.
 - Both modes expose the identical read surface — `Transaction.EnumerateIndex` over ascending key order — so
   choosing a mode never changes how query code is written, only what it costs underneath.
 - The mode applies uniformly across all three component storage modes (`SingleVersion`/`Versioned`/`Transient`);

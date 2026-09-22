@@ -457,3 +457,73 @@ written for the read path; these are the write-path obligations that went unwrit
   note: the nightly `OlcBTreeRaceStressTests` tier remains the probabilistic net for the same defect arriving by a real race - ~40% of runs red before the
         guard, 0 in 70,833 root splits after.
   requires IXS-05 (the orphaned leaf is how this violation becomes visible)
+
+### IXW-06: A multi-value buffer is touched only under its leaf's latch, and an emptied key is dropped only if still empty there `[fatal]` `[silent]`
+
+  invariant a buffer id read from a leaf entry is used to mutate the buffer ONLY while the write latch of that leaf is held by the same thread — it is
+            never carried across a latch release
+  invariant the key of a buffer one thread has emptied is removed from the tree only if, under the removing leaf's write latch, the buffer STILL holds
+            no element (`RemoveArguments.OnlyIfBufferEmpty`); an append that got the latch in between keeps the key alive
+  invariant a miss on a latched leaf means "absent" only if that leaf OWNS the key's range (`KeyOutsideLeafAuthority` false, both bounds); a miss on a
+            leaf that does not is a descent that landed beside its target and is re-descended, never reported
+  never `FindLeaf` + `GetItem` + `Append`/`RemoveFromBuffer` with no latch between them — that is what `MoveValuePessimistic` did
+  never `RemoveCorePessimistic(key)` + `DeleteBuffer(bufferId)` unconditionally after an unlatched interval — that is what `RemoveValue`'s tail did
+  never `FindLeaf(key)` then `Find(key) < 0` read as "not in the tree" — `FindLeaf` validates no internal-node version and right-walks on the upper bound
+        alone, so a concurrent merge or borrow (keys shift LEFT) leaves it one leaf too far right; IXS-07's second parent validation closed this for the
+        optimistic descent and this rule closes it for the pessimistic one
+  never an unbounded retry around the authority test — it is a STATE test, and a stale separator nobody fixes would spin forever (IXW-01); the loop is
+        bounded by `MaxPessimisticRestarts` and throws, as `RemoveIterative`'s `RemoveLeafNotAuthoritative` bail does
+  never an optimistic `MoveValue` path taking an entry out of a leaf that would underflow — when the move empties the old buffer and no entry comes in
+        (two-leaf always; same-leaf when the new key already exists) it bails to the pessimistic path BEFORE any storage write, as `Move` always did;
+        without that the two-leaf path left EMPTY leaves linked in the chain, which `CheckConsistency` reports and the census cannot see
+  never a root-to-leaf descent that reads an internal node's child pointer without validating the node's version — `FindLeaf`'s own loop did, under a
+        comment from the whole-tree-lock era ("internal nodes are stable"), read a slot a concurrent `PopFirstInternal` had just cleared, took chunk 0 as
+        its child and cycled in the segment header's bytes forever. `FindLeaf` now delegates to `OptimisticDescendToLeaf` (IXS-07's two validations per hop,
+        invalid child = restart) under `MaxPessimisticRestarts`
+  enforce `BTree.RemoveElementLatched` is the only way a buffer id is obtained for a removal; `AddOrUpdateCorePessimistic` is the only way an element is
+          appended on the pessimistic path (its duplicate branch appends under the leaf latch, its insert branch creates buffer, element and entry
+          together); `BTree.RemoveKeyIfBufferStillEmpty` is the only way an emptied key is dropped, and it sets `OnlyIfBufferEmpty`
+  enforce every removal site `RemoveCorePessimistic` can reach honours the flag: both fast paths test `BaseNodeStorage.BufferElementCount` on the item they
+          are about to pop, and `NodeWrapper.RemoveLeaf` tests it before `RemoveAtInternal`
+  enforce `TryLatchAuthoritativeLeaf` is the one latching descent the pessimistic writers use: it re-descends while the latched leaf is obsolete, an
+          EMPTY linked leaf (the bounds cannot judge one) or `KeyOutsideLeafAuthority`, and throws past `MaxPessimisticRestarts`; `RemoveElementLatched`
+          uses it, and its buffer step is under try/finally so a `LockBuffer` timeout cannot leave the leaf write-locked for the process lifetime.
+          `MovePessimistic`'s unlatched pre-check re-descends on the same predicate, bounded the same way, before its `false` can be read as a unique
+          collision by the fence's drain
+  enforce `CanLoseAnEntryInPlace` (root, or strictly above half full) gates the entry removal on both optimistic `MoveValue` paths when
+          `BufferElementCount(oldBufferId) == 1`
+  scope: BTree.Move.cs (`MoveValue`, `MoveValuePessimistic`, `MovePessimistic`, `CanLoseAnEntryInPlace`), BTree.cs (`RemoveValue`,
+         `RemoveElementLatched`, `TryLatchAuthoritativeLeaf`, `RemoveKeyIfBufferStillEmpty`, `RemoveArguments`), BTree.Remove.cs (`RemoveCorePessimistic`,
+         `RemoveIterative`), BTree.NodeWrapper.cs (`RemoveLeaf`),
+         BTree.Insert.cs (`KeyOutsideLeafAuthority`), BTree.BaseNodeStorage.cs (`BufferElementCount`),
+         DatabaseEngine.ClusterMigration.cs (`DrainClusterShadowSlots`, `ProcessShadowFieldEntries`), DatabaseEngine.TickFence.cs (`RunPrepSlice`)
+  on_violation: two silent shapes. (1) Element loss: a latched peer empties the key, removes the entry and frees the buffer; the allocator re-issues the
+                chunk; the stale id then addresses a dead buffer or another key's, and the element vanishes from the index or lands under a key its move never
+                named. (2) A spurious NOT-FOUND: `MoveValue` returns -1 for a key that is present, the tree untouched; the fence's drain then writes -1 into
+                the cluster's elementId tail and leaves the index on the OLD key — the entity holds a key the index does not list it under, and the old
+                leaf entry names a slot whose occupant now holds something else. Nothing throws and the structural validators pass in both — the tree is
+                intact, its contents are wrong.
+  measured: with `MaxOptimisticRestarts = 3`, thirty-two threads reach the pessimistic fallback for ~350 of 512 moves.
+            Shape (1): `BTreeMoveValueConcurrencyTests.ConcurrentMoveValue_KeepsEveryElement_UnderItsNewKey` — 64 keys x 8 values, every pair moved by
+            exactly one thread, full census — lost whole runs of a key's values in 8 runs of 12 before; 0 in 20 after, with the fallback still taken ~350
+            times per run. With the fallback made unreachable (`MaxOptimisticRestarts = 1_000_000`, as an experiment) the unfixed tree lost nothing in 10
+            runs, which is what located the defect in that path rather than in the latched ones.
+            Shape (2): `..._UniqueKeysToFreshKeys_KeepsEveryElement` — 4 096 keys of ONE value, each moved to a key that did not exist, so every move is
+            a removal plus a fresh insert with splits and merges live — returned -1 for 1 to 5 present keys per run, in 7 runs of 8, with the tree
+            untouched for them; the same with every move forced pessimistic (`MaxOptimisticRestarts = 0`), 6 of 6. 0 in 10 after the authority check.
+            At the fence: `PrepSliceEquivalenceTests` at W = 8, ~45 % of runs red with the drain sliced on the unfixed tree, 0 in 21 with slicing off,
+            0 in 14 with only the drain serialised; 4 in 15 still red after shape (1) alone was fixed, which is how shape (2) was found.
+            Shape (3), structural: `CheckConsistency` after the serial `UniqueToFresh` run reported two consecutive leaves with first key 0 — empty
+            leaves the two-leaf `MoveValue` path had left linked, deterministically, single-threaded. Shape (4), a HANG: one thread alone in a quiescent
+            tree, forever in `FindLeaf`, about 1 run in 10 at 32 threads; a bound on the descent turned it into "node #907 (count=25) routes to #0", a
+            writer trap proved nothing STORED a zero, and the pre-fix tree at `16fa2891` hung 3 runs in 13 on the same census — pre-existing, exposed.
+  rationale: #886 sliced Prep and ran the drain from W workers on the premise that the tree was multi-writer (IXW-01..05). Those rules cover the leaf and
+             node protocol, and the optimistic paths honoured them; nobody had stated that the BUFFER behind a multi-value entry needs the same latch, so
+             the fallback — written for a single writer — read ids the way a single writer may. The one-day guard (16fa2891) moved the drain to one thread
+             and cost the fence 1.13-1.26x; this rule is what let it go back to W workers.
+  verified: `BTreeMoveValueConcurrencyTests.ConcurrentMoveValue_KeepsEveryElement_UnderItsNewKey` (shape 1) and
+            `..._UniqueKeysToFreshKeys_KeepsEveryElement` (shape 2), 2 x CPU threads, census — probabilistic in the way OlcBTreeStressTests is, so a single
+            green run is weak and the un-quarantined nightly is the real net. Their single-threaded twins pin the oracle.
+            `Mutant_AnElementRemovedBehindTheCensus_IsReported` shows the census detects the loss shape rather than passing vacuously.
+  requires IXW-04 (the leaf-authority proof both paths take, and which says nothing about the buffer behind the entry)
+

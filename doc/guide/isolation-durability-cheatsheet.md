@@ -151,7 +151,7 @@ Three names in this area mislead. Learn them once here.
 And the three dials one more time, because collapsing them is the root confusion:
 
 - **`StorageMode`** = *layout* (design-time, per component).
-- **`CommitDiscipline`** = whether a SingleVersion write is *transactional* — isolation, rollback **and** durability, per transaction. It was called `DurabilityDiscipline` until #648, which is why so much of the documentation used to claim a SingleVersion write can never be rolled back.
+- **`CommitDiscipline`** = whether a SingleVersion write is *transactional* — isolation, rollback **and** durability, per transaction. The name says *commit*, not *durability*, deliberately — durability is only one of the three things it buys, so a SingleVersion write opened under the `Commit` discipline **can** be rolled back.
 - **`DurabilityMode`** = *when* the WAL flushes (per UnitOfWork).
 
 ---

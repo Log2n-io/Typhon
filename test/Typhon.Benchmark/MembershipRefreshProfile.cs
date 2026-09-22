@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Benchmark;
 
@@ -86,8 +85,8 @@ public static class MembershipRefreshProfile
         // re-query column walks and rejects per entity while the channel column never touches them. That inflates the ratio with an artefact of
         // the harness, and the resulting number was cited as fact in rules/ and the design doc.
         //
-        // Safe for a membership view specifically: its drain path reads only its own buffer, and its resync arm goes through RefreshPull, which
-        // rebinds via _query.UpdateTransaction(tx). Neither dereferences the creating transaction the way the incremental drain does (#862).
+        // Views deliberately outlive the transaction that creates them (#862). The retained query copy is detached from that creator;
+        // snapshot-dependent re-query work binds the transaction supplied to Refresh, while routing metadata comes from the view's cached engine.
         EcsView<VfArch> membership, baseline;
         using (var viewTx = dbe.CreateQuickTransaction())
         {

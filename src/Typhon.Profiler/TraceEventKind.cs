@@ -195,7 +195,17 @@ public enum TraceEventKind : byte
 
     // ── Cluster migration (span) ──
 
-    /// <summary>Cluster migration between spatial cells. Required: <c>archetypeId: u16</c>, <c>migrationCount: i32</c>.</summary>
+    /// <summary>
+    /// Cluster migration between spatial cells — one Migrate-phase SLICE, which mixes all three migration kinds because the pending queue is sorted by
+    /// destination cell key. Required: <c>archetypeId: u16</c>, <c>migrationCount: i32</c> (the slice length), <c>componentCount: i32</c>.
+    /// Optional (added by #911, in mask-bit order): <c>0x01 crossingCount: i32</c>, <c>0x02 relocationCount: i32</c>, <c>0x04 repairCount: i32</c> — the
+    /// three sum exactly to <c>migrationCount</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>The optional block is wire-additive.</b> Before #911 this kind had no optionals and therefore no mask byte, so a pre-#911 record is a strict
+    /// PREFIX of a post-#911 one: the mask sits after the required payload, and the header's own size field is what tells a reader whether it is there.
+    /// A decoder must bound its mask read against the record end rather than assume it (see <c>chunkDecoder.ts</c>'s <c>decodeOptionalMaskedFields</c>).
+    /// </remarks>
     ClusterMigration = 60,
 
     /// <summary>Per-tick span around the per-archetype body inside <c>WriteClusterTickFence</c>. Covers both the has-dirty branch
@@ -216,6 +226,61 @@ public enum TraceEventKind : byte
     /// Required payload: <c>archetypeId: u16</c>, <c>dirtyClusterCount: i32</c>. Optional: <c>migrationsExecuted: i32</c>.
     /// Gated on <c>RuntimeWriteTickFenceClusterSpatialActive</c>.</summary>
     WriteTickFenceClusterSpatial = 63,
+
+    // ── Spatial maintenance attribution (#911 O1/O3) — placed at 64-66 so they sit contiguous with the cluster group above ──
+
+    /// <summary>
+    /// One admitted repair unit — a cell's N worst clusters, Morton-re-sorted into freshly allocated destinations. Emitted by the Prep-phase planner at the
+    /// moment of admission, so the span brackets the plan and its execution is attributable to the cell it names.
+    /// Required: <c>archetypeId: u16</c>, <c>cellKey: i32</c>, <c>clusterCount: i32</c>, <c>entityCount: i32</c>.
+    /// Optional, in mask-bit order: <c>0x01 degradation: f32</c> (the max-axis extent ÷ cell size the cell was ranked on),
+    /// <c>0x02 valveFired: u8</c>, <c>0x04 movedCount: i32</c> (entities the plan actually moved; <c>0</c> means the cell was already packed).
+    /// The producer assigns all three unconditionally, so every emitted record carries mask <c>0x07</c>.
+    /// Gated on <c>SpatialClusterRepairActive</c>.
+    /// </summary>
+    /// <remarks>
+    /// The kind the timeline had no way to express: <see cref="ClusterMigration"/> brackets a whole Migrate slice with crossings, relocations and repairs
+    /// mixed, so "which cell was repaired, and how degraded was it" could only be answered with throwaway counters on a branch.
+    /// </remarks>
+    SpatialRepairUnit = 64,
+
+    /// <summary>
+    /// Per-archetype, per-tick rollup of what the throttle did with the intra-cell relocations detected on the previous tick — the outcome split the counters
+    /// already distinguish and the timeline did not. Instant-shaped.
+    /// Payload, all REQUIRED and in wire order — an instant has no optional-mask byte, so <c>[Optional]</c> does not exist for this shape:
+    /// <c>archetypeId: u16</c>, <c>admitted: i32</c>, <c>throttled: i32</c>, <c>superseded: i32</c>, <c>unplaced: i32</c>,
+    /// <c>unplacedNoCandidate: i32</c>, <c>spilled: i32</c>, <c>pinsRejected: i32</c>, <c>crossingsQueued: i32</c>. 34 bytes.
+    /// Gated on <c>SpatialClusterRelocationActive</c>.
+    /// </summary>
+    /// <remarks>
+    /// One event per archetype per tick, not one per refused relocation: the refusal rate reaches 10^4-10^5/second on a moving world, which is the rate the
+    /// deny-list exists to keep off the ring. The throttle resolves the whole split in one place, so the rollup is a read of values it has just computed.
+    /// </remarks>
+    SpatialRelocationOutcome = 65,
+
+    /// <summary>
+    /// Per-archetype, per-tick snapshot of the spatial-maintenance counters, so a live consumer can read them without an RPC into the engine. Instant-shaped.
+    /// Payload, all REQUIRED and in wire order — an instant has no optional-mask byte: <c>archetypeId: u16</c>, <c>activeClusters: i32</c>,
+    /// <c>migrations: i32</c>, <c>migrationCpuMs: f32</c>, <c>hysteresisAbsorbed: i32</c>, <c>driftersDetected: i32</c>, <c>repairUnits: i32</c>,
+    /// <c>repairUnitsRefused: i32</c>, <c>repairQueueDepth: i32</c>, <c>budgetUsedMs: f32</c>, <c>tightnessSamples: i32</c>, <c>extentRatio: f32</c>,
+    /// <c>packingBound: f32</c>, <c>cellTreePromotions: i32</c>, <c>cellTreeDemotions: i32</c> (58 bytes); then, appended for the maintenance controller
+    /// (#906): <c>queryClustersOpened: i64</c>, <c>queryCandidates: i64</c>, <c>queryHits: i64</c>, <c>budgetConfiguredMs: f32</c>,
+    /// <c>budgetGrantedMs: f32</c>, <c>efficiencyTolerance: f32</c>, <c>candidatesPerHitSmoothed: f32</c>, <c>candidatesPerHitBest: f32</c>,
+    /// <c>ticksAtWholeBudget: i32</c>, <c>controllerFlags: u8</c>, <c>efficiencyRebases: i32</c>, <c>repairCellsCooling: i32</c>,
+    /// <c>repairValveFires: i32</c>, <c>repairedEntities: i32</c>, <c>repairQueueEvicted: i64</c>, <c>measuredNsPerEntity: f32</c>,
+    /// <c>driftTargetBoost: f32</c>. 139 bytes. Emitted every tick for every archetype with cluster state, whatever path its fence took.
+    /// <para><b>Grow it only by appending — never reorder or remove a field.</b> The Workbench decoder reads it by offset, and a record written before an
+    /// append must stay a prefix of one written after. A record shorter than 139 bytes predates the fields it lacks: treat them as absent, which its size
+    /// says, not as zero, because several read zero as a meaning — a configured budget of 0 is "no enforcement". The generated C# decoder zero-fills
+    /// them.</para>
+    /// The relocation outcome split is NOT here — it is <see cref="SpatialRelocationOutcome"/>, joined by (archetype, tick).
+    /// Gated on <c>SpatialArchetypeTelemetryActive</c>.
+    /// </summary>
+    /// <remarks>
+    /// The attach transport is a one-way trace stream — there is no request/response channel from the Workbench to a running engine — so a live per-archetype
+    /// surface has to ride an event. Shaped after <see cref="SchedulerSystemArchetype"/>, which is already a per-archetype per-tick record.
+    /// </remarks>
+    SpatialArchetypeTelemetry = 66,
 
     // ── .NET runtime GC suspension (span) ──
 
@@ -480,18 +545,22 @@ public enum TraceEventKind : byte
     /// <summary>TierClusterIndex version-skip — rebuild bypassed because version unchanged. Payload: <c>archetypeId: u16</c>, <c>version: i32</c>, <c>reason: u8</c>.</summary>
     SpatialTierIndexVersionSkip = 137,
 
-    // ── Spatial Maintain pipeline ──
+    // ── Spatial Maintain pipeline — RETIRED by #872 step 13 ──
+    //
+    // All four described the entity-level R-Tree's per-entity maintenance, which was removed with the tree. The values
+    // are RESERVED rather than deleted: this enum is a wire format, and handing a retired number to a new event would
+    // make an old trace decode as something it is not. Nothing emits them.
 
-    /// <summary>Maintain.InsertSpatial — wraps RTree.Insert + back-pointer + occupancy. Payload: <c>entityPK: i64</c>, <c>componentTypeId: u16</c>, <c>didDegenerate: u8</c>.</summary>
+    /// <summary>RETIRED (#872 step 13). Was: Maintain.InsertSpatial — RTree.Insert + back-pointer + occupancy.</summary>
     SpatialMaintainInsert = 138,
 
-    /// <summary>Maintain.UpdateSpatial slow-path — escape detected, remove + reinsert. Payload: <c>entityPK: i64</c>, <c>componentTypeId: u16</c>, <c>escapeDistSq: f32</c>.</summary>
+    /// <summary>RETIRED (#872 step 13). Was: Maintain.UpdateSpatial slow path — escape detected, remove + reinsert.</summary>
     SpatialMaintainUpdateSlowPath = 139,
 
-    /// <summary>Degenerate AABB validation failure. Payload: <c>entityPK: i64</c>, <c>componentTypeId: u16</c>, <c>opcode: u8</c> (0=insert, 1=update, 2=remove).</summary>
+    /// <summary>RETIRED (#872 step 13). Was: degenerate AABB validation failure on the entity-tree write path.</summary>
     SpatialMaintainAabbValidate = 140,
 
-    /// <summary>Spatial back-pointer write (componentChunkId → leafChunkId+slotIndex). Payload: <c>componentChunkId: i32</c>, <c>leafChunkId: i32</c>, <c>slotIndex: u16</c>.</summary>
+    /// <summary>RETIRED (#872 step 13). Was: spatial back-pointer write (componentChunkId → leafChunkId + slotIndex).</summary>
     SpatialMaintainBackPointerWrite = 141,
 
     // ── Spatial Trigger system ──
@@ -543,7 +612,8 @@ public enum TraceEventKind : byte
     /// <summary>Worker wake from kernel signal. Payload: <c>workerId: u8</c>, <c>delayUs: u32</c>.</summary>
     SchedulerWorkerWake = 151,
 
-    /// <summary>Worker between-tick wait (kernel wait span). Payload: <c>workerId: u8</c>, <c>waitUs: u32</c>, <c>wakeReason: u8</c> (0=signal, 1=shutdown).</summary>
+    /// <summary>Worker between-tick wait (kernel wait span). Payload: <c>workerId: u8</c>, <c>waitUs: u32</c>, <c>wakeReason: u8</c> (0=woken, by the
+    /// signal or by the backstop with no wake lost; 1=shutdown; 2=resumed by the backstop after a lost wake).</summary>
     SchedulerWorkerBetweenTick = 152,
 
     // ── Scheduler:Dispense (instant) ──
@@ -1028,10 +1098,8 @@ public enum TraceEventKind : byte
     /// Gated on <c>RuntimeWriteTickFenceShadowActive</c>.</summary>
     WriteTickFenceShadow = 252,
 
-    /// <summary>Per-tick span around <c>ProcessSpatialEntries</c> for one ComponentTable (R-Tree position update for dirty entities).
-    /// Required payload: <c>componentTypeId: u16</c>, <c>dirtyEntryCount: i32</c>.
-    /// Optional payload: <c>escapedCount: i32</c> (entities whose new position escaped their fat AABB and got reinserted).
-    /// Gated on <c>RuntimeWriteTickFenceSpatialActive</c>.</summary>
+    /// <summary>RETIRED (#872 step 13). Was: per-tick span around <c>ProcessSpatialEntries</c> for one ComponentTable.
+    /// That pass maintained the entity-level R-Tree, which no longer exists; the value is reserved, not reused.</summary>
     WriteTickFenceSpatial = 253,
 
     // Cluster-scope per-archetype fence spans live at IDs 61-63 (next to ClusterMigration = 60).
@@ -1116,6 +1184,12 @@ public static class TraceEventKindExtensions
         // consumed 25 payload bytes as a span header — fabricated duration and parent links — and the Workbench rendered it on a
         // thread lane as a phantom span named `Kind[36]`.
         if (kind == TraceEventKind.EcsSpawnBatch)
+        {
+            return false;
+        }
+        // #911: 64 is a span, 65 and 66 are instants. Their numeric neighbours (60-63) are all spans, so the two instants need an explicit carve-out — the
+        // EcsSpawnBatch lesson one group along. TraceEventShapeConsistencyTests holds this against the producers' declared Shape.
+        if (v == 65 || v == 66)
         {
             return false;
         }

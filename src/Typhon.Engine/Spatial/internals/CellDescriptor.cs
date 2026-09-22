@@ -37,5 +37,18 @@ internal struct CellState
     /// grid. Mutated via <see cref="System.Threading.Interlocked.Increment(ref int)"/> / <see cref="System.Threading.Interlocked.Decrement(ref int)"/> only.</summary>
     [FieldOffset(8)] public int EntityCount;
 
-    // [FieldOffset(12) .. FieldOffset(63)] — 52 bytes of reserved tail capacity (cache-line padding).
+    /// <summary>
+    /// The cell's own grid coordinates. Present because a cell key is a POOL SLOT under the VDB grid (#872 step 8) and carries no positional information —
+    /// and <c>CB-01</c> is stated in terms of <c>grid.CellKeyToCoords(cellKey)</c>, as are the migration hysteresis bounds in three places. Storing them here
+    /// makes the decode one load from the cell's own cache line, which is cheaper than the arithmetic decode the dense grid needed.
+    /// </summary>
+    [FieldOffset(12)] public int CellX;
+
+    /// <summary>See <see cref="CellX"/>.</summary>
+    [FieldOffset(16)] public int CellY;
+
+    /// <summary>See <see cref="CellX"/>.</summary>
+    [FieldOffset(20)] public int CellZ;
+
+    // [FieldOffset(24) .. FieldOffset(63)] — 40 bytes of reserved tail capacity (cache-line padding). Step 9 needs two per-cell R-Tree handles here.
 }

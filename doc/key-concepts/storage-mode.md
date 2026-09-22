@@ -26,7 +26,7 @@ Set on the `[Component]` attribute and **fixed for a given `(component name, rev
 - **[Durability — mode & discipline](xref:concept-durability)** — the `Commit` discipline applies *only* to the `SingleVersion` layout.
 - **[Transaction](xref:concept-transaction)** — what "transactional" guarantees per mode.
 - **[Tick fence](xref:concept-tick-fence)** — where `SingleVersion` durability is realised.
-- **[Cluster storage](xref:concept-cluster-storage)** — the *implicit* consequence: one `SingleVersion`/`Transient` component flips the whole archetype to clustered SoA (~50× faster bulk iteration).
+- **[Cluster storage](xref:concept-cluster-storage)** — the batched SoA layout every archetype gets; the mode decides where a component's array sits inside the cluster and whether it is page-cache backed.
 
 ## In the API
 

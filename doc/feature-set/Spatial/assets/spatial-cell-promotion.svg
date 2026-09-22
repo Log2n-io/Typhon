@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 810" width="1200" height="810" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <style>
+    .t   { font-size: 21px; font-weight: 700; fill: #18181b; }
+    .st  { font-size: 13.5px; fill: #52525b; }
+    .h   { font-size: 14.5px; font-weight: 700; fill: #18181b; }
+    .b   { font-size: 11.5px; fill: #3f3f46; }
+    .lm  { font-size: 11.5px; fill: #71717a; }
+    .lb  { font-size: 13px; font-weight: 700; fill: #3f3f46; }
+    .mono{ font-size: 11.5px; font-family: ui-monospace, Consolas, monospace; fill: #3f3f46; }
+    .monos{ font-size: 10.5px; font-family: ui-monospace, Consolas, monospace; fill: #3f3f46; }
+    .th  { font-size: 12px; font-weight: 700; fill: #18181b; }
+    .edge{ font-size: 11.5px; font-style: italic; fill: #52525b; }
+    .big { font-size: 15px; font-weight: 700; fill: #b91c1c; }
+  </style>
+  <rect width="1200" height="810" fill="#ffffff"/>
+  <defs>
+    <marker id="pr" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#7c3aed"/></marker>
+    <marker id="dm" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#a1a1aa"/></marker>
+  </defs>
+
+  <text class="t"  x="40" y="38">Inside an occupied cell</text>
+  <text class="st" x="40" y="60">A cell holds two halves, static and dynamic. Each half is a linear scan over cluster bounds, or a tree over them, never both.</text>
+
+  <rect x="40" y="80" width="1120" height="40" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5" rx="4"/>
+  <text class="big" x="60" y="106">The engine decides, per cell.</text>
+  <text class="b"   x="278" y="106">A half promotes at 1024 clusters and falls back at 512. Move the boundary with <tspan class="mono" font-weight="700">Spatial.CellTreePromoteThreshold</tspan> &#8212; <tspan class="mono" font-weight="700">int.MaxValue</tspan> keeps every cell on the left.</text>
+
+  <!-- ══════════ LEFT: linear ══════════ -->
+  <rect x="40" y="144" width="480" height="336" fill="#fafafa" stroke="#d4d4d8" rx="4"/>
+  <text class="h" x="58" y="170">Sparse cell &#8212; each half is a linear index</text>
+
+  <rect x="56" y="184" width="448" height="132" fill="#fffbeb" stroke="#d97706" stroke-width="1.4" rx="3"/>
+  <text class="mono" x="70" y="204" font-weight="700">DynamicIndex : CellSpatialIndex</text>
+  <g stroke="#d97706" fill="#fef3c7">
+    <rect x="70"  y="214" width="200" height="20"/><rect x="290" y="214" width="200" height="20"/>
+    <rect x="70"  y="238" width="200" height="20"/><rect x="290" y="238" width="200" height="20"/>
+    <rect x="70"  y="262" width="200" height="20"/><rect x="290" y="262" width="200" height="20"/>
+    <rect x="70"  y="286" width="200" height="20"/><rect x="290" y="286" width="200" height="20"/>
+  </g>
+  <g class="monos">
+    <text x="80" y="228">ClusterIds[]</text>   <text x="300" y="228">CategoryMasks[]</text>
+    <text x="80" y="252">MinX[]</text>          <text x="300" y="252">MaxX[]</text>
+    <text x="80" y="276">MinY[]</text>          <text x="300" y="276">MaxY[]</text>
+    <text x="80" y="300">MinZ[]</text>          <text x="300" y="300">MaxZ[]</text>
+  </g>
+
+  <rect x="56" y="326" width="448" height="66" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.4" rx="3"/>
+  <text class="mono" x="70" y="346" font-weight="700">StaticIndex : CellSpatialIndex</text>
+  <text class="lm"   x="70" y="364">Same shape. Written at spawn, updated on destroy, and</text>
+  <text class="lm"   x="70" y="380">otherwise read-only &#8212; it skips fence maintenance entirely.</text>
+
+  <text class="lm" x="58" y="416">One allocation per cell that holds at least one cluster of this archetype,</text>
+  <text class="lm" x="58" y="432">grown by doubling. Removal is swap-with-last.</text>
+  <text class="lm" x="58" y="456">The broadphase is a straight scan of these arrays, six floats per cluster.</text>
+
+  <!-- ══════════ middle switch ══════════ -->
+  <path d="M 528 246 L 712 246" stroke="#7c3aed" stroke-width="1.8" marker-end="url(#pr)"/>
+  <text class="edge" x="546" y="238">promote at</text>
+  <text class="monos" x="546" y="270" font-weight="700" fill="#6d28d9">CellTreePromote</text>
+  <text class="monos" x="546" y="284" font-weight="700" fill="#6d28d9">Threshold</text>
+
+  <path d="M 712 348 L 528 348" stroke="#a1a1aa" stroke-width="1.6" marker-end="url(#dm)"/>
+  <text class="edge" x="560" y="340">demote at</text>
+  <text class="lm"   x="546" y="372">half of it. The gap is</text>
+  <text class="lm"   x="546" y="388">what stops thrashing:</text>
+  <text class="lm"   x="546" y="404">a rebuild is linear in</text>
+  <text class="lm"   x="546" y="420">a cell whose cluster</text>
+  <text class="lm"   x="546" y="436">count is by definition</text>
+  <text class="lm"   x="546" y="452">large.</text>
+
+  <!-- ══════════ RIGHT: promoted ══════════ -->
+  <rect x="720" y="144" width="440" height="336" fill="#fafafa" stroke="#d4d4d8" rx="4"/>
+  <text class="h" x="738" y="170">Dense cell &#8212; each half is a tree over cluster bounds</text>
+
+  <rect x="736" y="184" width="408" height="132" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4" rx="3"/>
+  <text class="mono" x="750" y="204" font-weight="700">DynamicTree : CellClusterTree</text>
+  <g stroke="#7c3aed" fill="#ede9fe">
+    <rect x="890" y="216" width="100" height="20"/>
+    <rect x="790" y="252" width="90" height="20"/><rect x="1000" y="252" width="90" height="20"/>
+    <rect x="756" y="288" width="66" height="20"/><rect x="836" y="288" width="66" height="20"/>
+    <rect x="978" y="288" width="66" height="20"/><rect x="1058" y="288" width="66" height="20"/>
+  </g>
+  <g stroke="#7c3aed" stroke-width="1.2" fill="none">
+    <path d="M 930 236 L 835 252"/><path d="M 950 236 L 1045 252"/>
+    <path d="M 815 272 L 789 288"/><path d="M 845 272 L 869 288"/>
+    <path d="M 1030 272 L 1011 288"/><path d="M 1060 272 L 1091 288"/>
+  </g>
+  <text class="monos" x="940" y="230" text-anchor="middle">root</text>
+  <text class="lm" x="750" y="228">payload is a</text>
+  <text class="lm" x="750" y="244">cluster chunk id,</text>
+  <text class="lm" x="750" y="260">not an entity id</text>
+
+  <rect x="736" y="326" width="408" height="66" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.4" rx="3"/>
+  <text class="mono" x="750" y="346" font-weight="700">StaticTree : CellClusterTree</text>
+  <text class="lm"   x="750" y="364">Promoted independently of the dynamic half. One tree</text>
+  <text class="lm"   x="750" y="380">segment is shared by every promoted cell of the archetype.</text>
+
+  <text class="lm" x="738" y="416">Publishing a tree drops the linear index it replaces. The two are</text>
+  <text class="lm" x="738" y="432">mutually exclusive: keeping both live would pay the tree&#8217;s</text>
+  <text class="lm" x="738" y="448">maintenance cost and the scan&#8217;s on every single update, which is</text>
+  <text class="lm" x="738" y="464">the worst of both structures rather than the best.</text>
+
+  <!-- ══════════ crossover ══════════ -->
+  <line x1="40" y1="502" x2="1160" y2="502" stroke="#e4e4e7"/>
+  <text class="lb" x="40" y="528">The measured crossover, which is why the default is off</text>
+
+  <rect x="40" y="542" width="640" height="26" fill="#f4f4f5" stroke="#d4d4d8"/>
+  <text class="th" x="56"  y="560">Clusters in one cell</text>
+  <text class="th" x="330" y="560">Which structure wins a selective query</text>
+  <text class="th" x="600" y="560">By</text>
+  <g stroke="#e4e4e7">
+    <rect x="40" y="568" width="640" height="24" fill="#ffffff"/><rect x="40" y="592" width="640" height="24" fill="#fafafa"/>
+    <rect x="40" y="616" width="640" height="24" fill="#ffffff"/><rect x="40" y="640" width="640" height="24" fill="#fafafa"/>
+  </g>
+  <g class="b">
+    <text x="56" y="585">80 &#8212; what real dense zones hold</text> <text x="330" y="585" fill="#15803d" font-weight="700">the linear scan</text>   <text x="600" y="585">6&#215;</text>
+    <text x="56" y="609">about 512</text>                        <text x="330" y="609">crossover &#8212; neither</text>                        <text x="600" y="609">&#8212;</text>
+    <text x="56" y="633">about 1 500</text>                      <text x="330" y="633" fill="#6d28d9" font-weight="700">the tree</text>          <text x="600" y="633">3.6&#215;</text>
+    <text x="56" y="657">15 625</text>                           <text x="330" y="657" fill="#6d28d9" font-weight="700">the tree</text>          <text x="600" y="657">25.8&#215;</text>
+  </g>
+
+  <rect x="710" y="542" width="450" height="58" fill="#fffbeb" stroke="#d97706" stroke-width="1.3" rx="4"/>
+  <text class="b"  x="726" y="562">Queries are only half of it. The tree&#8217;s <tspan font-weight="700">update</tspan> path is</text>
+  <text class="b"  x="726" y="580">22 to 38&#215; dearer per moved cluster, and clusters move every tick.</text>
+
+  <rect x="710" y="610" width="450" height="54" fill="#eff6ff" stroke="#2563eb" stroke-width="1.3" rx="4"/>
+  <text class="b"  x="726" y="630">Clusters per cell is the world <tspan font-style="italic">times</tspan> the cell size. On a clumped</text>
+  <text class="b"  x="726" y="648">population the mean was 1.8 per cell, with the worst cell at 102.</text>
+
+  <!-- ══════════ correction ══════════ -->
+  <rect x="40" y="686" width="1120" height="104" fill="#fef2f2" stroke="#dc2626" stroke-width="1.4" rx="4"/>
+  <text class="lb" x="60" y="710">What the concept page gets wrong</text>
+  <text class="b"  x="60" y="732">A cell does not hold two R-Trees. It holds two <tspan font-weight="700">halves</tspan>, and in a default engine each half is a linear scan over a small array of cluster bounds. Promotion is a hedge</text>
+  <text class="b"  x="60" y="750">against a mis-sized grid, not a normal operating mode, and reaching the regime where it pays needs hotspots so tight that any query into one returns tens of thousands of entities.</text>
+  <text class="lm" x="60" y="774">The discriminator is not optional. A reader that assumes the linear index is present sees an <tspan font-weight="700">empty</tspan> cell rather than a wrong one, which is the silent direction of a missed hit.</text>
+</svg>

@@ -104,6 +104,53 @@ internal static class WalScanner
         return records;
     }
 
+    /// <summary>
+    /// Number of WAL chunks that carry at least one <see cref="RecordKind.FenceBlock"/> record for <paramref name="tsn"/>. A fence emits one record per
+    /// dirty cluster whatever the batching, so record counts cannot see how many claims a tick made — chunk boundaries can (#886). A claim is one chunk
+    /// only while it stays under <c>RecordCodec</c>'s 65 528-byte chunk size; a bigger claim spans several, so this equals the claim count for small batches
+    /// (the fixture's ~16 KB) and over-counts large ones.
+    /// </summary>
+    public static int CountChunksCarryingFenceBlocks(string walDir, long tsn)
+    {
+        var chunks = 0;
+        var walIO = new WalFileIO();
+        using var reader = new WalSegmentReader(walIO);
+        foreach (var path in walIO.EnumerateSegmentPaths(walDir).OrderBy(p => p, StringComparer.Ordinal))
+        {
+            if (!reader.OpenSegment(path))
+            {
+                continue;
+            }
+
+            while (reader.TryReadNext(out var ch, out var body))
+            {
+                if (ch.ChunkType != (ushort)WalChunkType.Transaction)
+                {
+                    continue;
+                }
+
+                var offset = 0;
+                var carries = false;
+                while (RecordCodec.TryReadRecord(body, offset, out var consumed, out var view))
+                {
+                    offset += consumed;
+                    if (!view.IsUnknownKind && view.Kind == RecordKind.FenceBlock && view.Tsn == tsn)
+                    {
+                        carries = true;
+                        break;
+                    }
+                }
+
+                if (carries)
+                {
+                    chunks++;
+                }
+            }
+        }
+
+        return chunks;
+    }
+
     private static void ExpandFenceBlock(in RecordView view, List<Record> into)
     {
         if (!RecordCodec.TryReadFenceBlock(view.Payload, out var block))

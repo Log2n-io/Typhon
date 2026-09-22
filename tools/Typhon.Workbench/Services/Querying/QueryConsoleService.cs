@@ -70,8 +70,9 @@ public sealed class QueryConsoleService
         }
         catch (NotSupportedException ex)
         {
-            // The engine throws this for spatial shapes it can't serve on the matched tier — notably RAY on clustered
-            // archetypes (AABB + Radius only, per #230 Option B). Surface as a stable 400 rather than a 500.
+            // Kept as a guard, not as a live path: since #872 step 13 the cluster tier serves AABB, Radius, Ray and Frustum, so no shape the DSL can
+            // express reaches this today. A shape ADDED to the engine without a cluster implementation would, and a 400 naming the shape is a better answer
+            // than a 500 naming a stack.
             throw new WorkbenchException(400, "spatial_shape_not_supported", ex.Message);
         }
     }

@@ -54,7 +54,7 @@ catch (PageCorruptionException ex)
 
 ## ⚠️ Guarantees & limits
 
-- **Detection, not repair** — a CRC mismatch under `OnLoad` is reported, never silently patched; there is no in-place page repair (the old Full-Page-Image mechanism was retired — see ADR for the rationale). Recovery from a confirmed bad page means restoring from backup or letting crash recovery rebuild what it can.
+- **Detection, not repair** — a CRC mismatch under `OnLoad` is reported, never silently patched; there is no in-place page repair. Recovery from a confirmed bad page means restoring from backup or letting crash recovery rebuild what it can.
 - **Whole-page coverage** — the checksum covers the entire page except the 4-byte checksum field itself; any single- or multi-bit corruption in the page is detected.
 - **Non-blocking checkpoint snapshots** — the seqlock lets the checkpoint copy a page that is concurrently being written without taking a lock writers must wait on; a page with a writer in flight for an unreasonably long time is skipped for that checkpoint cycle rather than stalling it.
 - **Hardware-accelerated** — CRC32C uses the CPU's native CRC32 instruction; cost is roughly constant per 8 KB page and negligible next to the I/O it accompanies.

@@ -10,6 +10,38 @@ namespace Typhon.Engine;
 public class RuntimeOptions
 {
     /// <summary>
+    /// Minimum expected entries per bucket (<c>migrants / bucketCount</c>) before migration stages its EntityMap patches for the bulk phase instead of
+    /// applying them inline. Below it, the inline per-entity path runs and the phase emits nothing.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The bulk path's entire gain comes from entries sharing a bucket, and a small batch has none to share.</b> Measured A/B on <c>--fence-phase</c>
+    /// against a 400 000-entity archetype whose map holds ~57 000 buckets, comparing <c>Migrate CPU + EntityMapUpdate CPU</c> per migrant:
+    /// </para>
+    /// <list type="table">
+    ///   <item><description>100 000 migrants (~1.8 per bucket): bulk <b>402 / 511 / 558</b> ns at W = 1 / 4 / 8 against inline <b>691 / 849 / 758</b>. Bulk
+    ///   wins at every worker count.</description></item>
+    ///   <item><description>10 000 migrants (~0.17 per bucket): bulk <b>1287 / 1240 / 1350</b> ns against inline <b>1571 / 1022 / 1066</b>. Inline wins at
+    ///   W ≥ 2, and the spread within a single arm is wide enough that the two are not separable — the EntityMap term is a small part of a noisy Migrate
+    ///   phase at that batch size.</description></item>
+    /// </list>
+    /// <para>
+    /// <b>The default is set from the mechanism, not from a resolved crossover.</b> Runs shorter than one entry amortise nothing by construction, so
+    /// <c>1.0</c> is where the bulk path's advantage begins to exist at all; the crossover is somewhere below it and the benchmark could not resolve where.
+    /// Treat the value as provisional and re-measure when step 10's re-clustering produces a realistic migration rate — that is the workload this should be
+    /// tuned against, not the synthetic churn above.
+    /// </para>
+    /// <para>
+    /// Set to <c>0</c> to force the bulk path always, and <see cref="float.MaxValue"/> to force the inline path for any archetype whose map has buckets;
+    /// both arms of the measurement above used exactly that, via <c>--fence-phase --bulk-min=</c>. The <see cref="float.MaxValue"/> sentinel relies on
+    /// .NET Core 3.0+ SATURATING float-to-integer conversion — <c>(long)(float.MaxValue * bucketCount)</c> overflows to infinity and saturates to
+    /// <see cref="long.MaxValue"/>, which no migrant count reaches. Under the older unspecified conversion the same expression could yield
+    /// <see cref="long.MinValue"/> and force the BULK path instead, silently inverting the sentinel.
+    /// </para>
+    /// </remarks>
+    public float EntityMapBulkMinEntriesPerBucket { get; init; } = EntityMapUpdateStaging.DefaultMinEntriesPerBucket;
+
+    /// <summary>
     /// Target tick rate in Hz. Default: 60.
     /// The scheduler uses metronome-style tick advancement to prevent drift.
     /// </summary>
@@ -55,6 +87,19 @@ public class RuntimeOptions
     /// Default: 64.
     /// </summary>
     public int ParallelQueryMinChunkSize { get; set; } = 64;
+
+    /// <summary>
+    /// Size parallel <see cref="QuerySystem"/> chunks by their measured cost rather than their entity count. Default: true.
+    /// </summary>
+    /// <remarks>
+    /// <para>From its second dispatch on, a system's chunk count comes from its previous dispatch's worker time per entity. Its chunks spread over the
+    /// width, <c>round(WorkerCount × ChunksPerWorker)</c>, as long as each carries 25–100 µs of work; below that band it gets fewer chunks of 25 µs, above it
+    /// more chunks than the width, of 100 µs, up to twice the width, which the workers claim as they come free, so the pool no longer waits on one long last
+    /// chunk. At most one entity per chunk, and beyond the width at most one cluster per chunk.</para>
+    /// <para>A system's first dispatch, a checkerboard system and a system with its own <see cref="SystemDefinition.MinChunkSize"/> keep the entity
+    /// rule: <c>min(round(WorkerCount × ChunksPerWorker), ceil(entities / ParallelQueryMinChunkSize))</c>.</para>
+    /// </remarks>
+    public bool CostBasedChunking { get; set; } = true;
 
     /// <summary>
     /// When true (default), <c>WriteTickFence</c> is parallelized across the worker pool via the internal sub-DAG (<c>FenceExec</c>).
@@ -109,6 +154,34 @@ public class RuntimeOptions
 [PublicAPI]
 public sealed record FenceCostModel(float MigrationCost, float AabbCost, float ShadowCost, float SpatialCost)
 {
+    /// <summary>
+    /// µs per staged index value update, for the IndexMassUpdate phase (#872 step 6).
+    /// </summary>
+    /// <remarks>
+    /// <b>Three orders of magnitude below <see cref="MigrationCost"/>, which is exactly why it needs its own coefficient.</b> The phase's first
+    /// implementation reused <c>MigrationCost</c> — ≈33 µs, the cost of MOVING an entity — to price an operation measured at 0.055-0.077 µs. Nothing
+    /// mis-computes, but every index batch then looks enormously expensive to the planner, so <c>ComputeMaxChunks</c>'s
+    /// <c>floor(totalCost / MinChunkCostUs)</c> term saturates at its <c>2 × workerCount × oversubscription</c> cap for any batch at all, and the phase
+    /// splits into the smallest chunks it is allowed to — precisely the regime the 200 µs floor exists to avoid.
+    /// <para>
+    /// Seeded at 0.06 from #872 step 6's <c>--fence-parallel</c> measurement: 10 000 uniform updates on a 1 M-entry tree at 55-77 ns each, depending on how
+    /// many leaves the batch touches. Calibrated live from the phase's own wall time when <see cref="RuntimeOptions.AdaptiveFenceCost"/> is on.
+    /// </para>
+    /// </remarks>
+    public float IndexUpdateCost { get; init; } = 0.06f;
+
+    /// <summary>
+    /// Cost per staged EntityMap location patch, in the planner's arbitrary units. Seeded from step 7's measurement — ~40 ns/entity for the serial apply,
+    /// against ~11 ns for an index update — and refined at runtime by <see cref="LiveFenceCostModel"/> like every other coefficient.
+    /// </summary>
+    public float EntityMapUpdateCost { get; init; } = 0.04f;
+
+    /// <summary>
+    /// µs per dirty cluster of Finalize's WAL emit when it runs as slices (#889). Seeded from the measurement that motivated the slicing — 0.6 ms for
+    /// ~2 000 dirty clusters of 64 entities on Matrix M — and refined at runtime by <see cref="LiveFenceCostModel"/> like every other coefficient.
+    /// </summary>
+    public float FinalizeEmitCost { get; init; } = 0.3f;
+
     /// <summary>
     /// Default coefficients, calibrated against AntHill traces: migration ≈ 33.3 µs/entity, AABB recompute ≈ 2.4 µs/cluster.
     /// Shadow and Spatial coefficients are placeholders (1.0) pending measurement — override them for shadow-heavy or spatial workloads.

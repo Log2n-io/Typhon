@@ -23,7 +23,7 @@ namespace Typhon.Workbench.Tests.Services.Querying;
 [StructLayout(LayoutKind.Sequential)]
 public struct SpatPos
 {
-    [Field] [SpatialIndex(1.0f)] public AABB2F Bounds;
+    [Field] [SpatialIndex] public AABB2F Bounds;
 }
 
 [Component("Workbench.Test.SpatMeta", 1, StorageMode = StorageMode.SingleVersion)]
@@ -96,7 +96,7 @@ public sealed class QuerySpecCompilerSpatialTests
 
         _engine.RegisterComponentFromAccessor<SpatPos>();
         _engine.RegisterComponentFromAccessor<SpatMeta>();
-        _engine.ConfigureSpatialGrid(new SpatialGridConfig(new Vector2(0f, 0f), new Vector2(WorldSize, WorldSize), cellSize: 100f));
+        _engine.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(0f, 0f), new Vector2(WorldSize, WorldSize), cellSize: 100f));
         _engine.InitializeArchetypes();
 
         using var tx = _engine.CreateQuickTransaction();
@@ -144,8 +144,10 @@ public sealed class QuerySpecCompilerSpatialTests
     [Test]
     public void Aabb_CoveringWorld_ReturnsAllEntities()
     {
-        // The 2D AABB repack is the load-bearing case: the DSL's [minX,minY,minZ,maxX,maxY,maxZ] must become
-        // WhereInAABB(minX, minY, maxX, maxY, _, _) for the 2D component, or the box inverts and returns nothing.
+        // This test used to guard a REPACK: the compiler turned the DSL's [minX,minY,minZ,maxX,maxY,maxZ] into
+        // WhereInAABB(minX, minY, maxX, maxY, _, _) for a 2D component, because EcsQuery read the max corner from slots
+        // 2 and 3. That was a defect in EcsQuery, fixed in #872 step 13, and the repack went with it — so what this now
+        // guards is that the DSL's own order reaches the engine unchanged.
         Assert.That(RunCount("FROM SpatArch SPATIAL Workbench.Test.SpatPos AABB 0, 0, 0, 10000, 10000, 0"), Is.EqualTo(EntityCount));
     }
 
@@ -178,16 +180,32 @@ public sealed class QuerySpecCompilerSpatialTests
             Is.EqualTo(4));
     }
 
+    /// <summary>
+    /// A RAY over a cluster-backed archetype now RETURNS RESULTS. It used to throw.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>The polarity of this test is reversed from what it asserted before #872 step 13</b>, and the reversal is the point. The cluster tier
+    /// served only AABB and Radius under #230 Option B, so <c>EcsQuery</c> raised <see cref="NotSupportedException"/> for every other shape — and since #666
+    /// made every archetype cluster-backed, that was every archetype. Step 13 wired the step-9 cluster ray and frustum implementations into <c>EcsQuery</c>,
+    /// which is what made retiring the entity-level R-Tree a removal rather than the loss of a working <c>RAY</c>.</para>
+    /// <para>The eight fixture entities sit on the line <c>y = 500</c> at <c>x = 500, 1500, … 7500</c> with a half-extent of 10, so a ray fired along that
+    /// line from the origin crosses all of them — which is what makes the count, rather than merely "it did not throw", the assertion.</para>
+    /// </remarks>
     [Test]
-    public void Ray_OnClusterArchetype_EngineThrowsNotSupported()
+    public void Ray_OnClusterArchetype_ReturnsTheEntitiesTheRayCrosses()
     {
-        // Compilation succeeds (WhereRay is emitted); execution throws because the cluster tier serves only AABB + Radius
-        // (#230 Option B). QueryConsoleService maps this NotSupportedException to a stable 400 'spatial_shape_not_supported'.
-        var parse = DslParser.Parse("FROM SpatArch SPATIAL Workbench.Test.SpatPos RAY 0, 500, 0, 1, 0, 0, 100000");
-        Assert.That(parse.Errors, Is.Empty);
-        using var tx = _engine.CreateReadOnlyTransaction();
-        var compiled = QuerySpecCompiler.Compile(parse.Spec, _engine, tx);
-        Assert.Throws<NotSupportedException>(() => compiled.Execute(CancellationToken.None));
+        Assert.That(RunCount("FROM SpatArch SPATIAL Workbench.Test.SpatPos RAY 0, 500, 0, 1, 0, 0, 100000"), Is.EqualTo(EntityCount));
+    }
+
+    /// <summary>A ray parallel to the row of entities but offset off it crosses nothing — so the shape is being applied, not ignored.</summary>
+    /// <remarks>
+    /// Without this, the test above is satisfied by a ray predicate that was silently dropped: an ignored spatial clause returns every entity too. The offset
+    /// is 200 units against a half-extent of 10, so no rounding puts the ray inside a box.
+    /// </remarks>
+    [Test]
+    public void Ray_MissingEveryEntity_ReturnsNothing()
+    {
+        Assert.That(RunCount("FROM SpatArch SPATIAL Workbench.Test.SpatPos RAY 0, 700, 0, 1, 0, 0, 100000"), Is.EqualTo(0));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════

@@ -789,12 +789,12 @@ public class ParallelQueryTests
     // ═══════════════════════════════════════════════════════════════
 
     [Test]
-    public unsafe void HashMap_InternalAccessors_Valid()
+    public void HashMap_InternalAccessors_Valid()
     {
         using var map = new HashMap<long>(64);
         map.TryAdd(42);
 
-        Assert.That((long)map.EntriesPtr, Is.Not.EqualTo(0), "EntriesPtr must be non-null");
+        Assert.That(map.Entries, Is.Not.Null, "Entries must be allocated");
         Assert.That(map.EntryStride, Is.GreaterThan(0), "EntryStride must be positive");
         Assert.That(map.Capacity, Is.GreaterThanOrEqualTo(64), "Capacity must be at least initial");
     }

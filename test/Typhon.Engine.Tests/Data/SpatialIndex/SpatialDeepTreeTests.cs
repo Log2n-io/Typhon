@@ -195,7 +195,7 @@ public unsafe class SpatialDeepTreeTests
     {
         foreach (var result in tree.QueryAABB(queryCoords))
         {
-            if (result.EntityId == entityId)
+            if (result.PayloadId == entityId)
             {
                 return true;
             }
@@ -209,7 +209,7 @@ public unsafe class SpatialDeepTreeTests
         var results = new List<long>();
         foreach (var result in tree.QueryAABB(queryCoords))
         {
-            results.Add(result.EntityId);
+            results.Add(result.PayloadId);
         }
         results.Sort();
         return results;

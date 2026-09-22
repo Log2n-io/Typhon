@@ -197,30 +197,41 @@ internal static unsafe class IndexDataOracle
             var e = intTree.EnumerateRangeMultiple(int.MinValue, int.MaxValue);
             while (e.MoveNextKey())
             {
-                var values = e.CurrentValues;
-                for (var i = 0; i < values.Length; i++)
+                // The enumerator is TWO-LEVEL and this loop must be too. `CurrentValues` is one CHUNK of the key's VSBS buffer, not the whole of it —
+                // `NextChunk()` walks the rest, which is what EcsQuery's own `do { ... } while (enumerator.NextChunk())` does.
+                //
+                // Without the inner loop this oracle silently stopped at the root chunk, which holds 56 elements. Every key with more than 56 entities under
+                // it reported all the rest as "held by an entity but MISSING from the index" — a false alarm that scales with the population and looks
+                // exactly like real index loss. Measured while diagnosing #884: 8 phantom problems at 64 entities on one key, 200 at 256, always leaving
+                // precisely 56 values "found".
+                do
                 {
-                    var location = values[i];
-                    var chunkId = location >> 6;
-                    var slotIndex = location & 0x3F;
-                    var clusterBase = clusterAccessor.GetChunkAddress(chunkId);
-                    if ((*(ulong*)clusterBase & (1UL << slotIndex)) == 0)
+                    var values = e.CurrentValues;
+                    for (var i = 0; i < values.Length; i++)
                     {
-                        problems.Add($"{label}: leaf value {location} names cluster slot {chunkId}:{slotIndex}, which is NOT OCCUPIED — a stale entry left "
-                            + "behind by a destroy or a re-cluster.");
-                        continue;
-                    }
+                        var location = values[i];
+                        var chunkId = location >> 6;
+                        var slotIndex = location & 0x3F;
+                        var clusterBase = clusterAccessor.GetChunkAddress(chunkId);
+                        if ((*(ulong*)clusterBase & (1UL << slotIndex)) == 0)
+                        {
+                            problems.Add($"{label}: leaf value {location} names cluster slot {chunkId}:{slotIndex}, which is NOT OCCUPIED — a stale entry "
+                                + "left behind by a destroy or a re-cluster.");
+                            continue;
+                        }
 
-                    var actual = ReadKey(clusterBase + compOffset + slotIndex * compSize + field.FieldOffset, field.Index);
-                    if (actual != e.CurrentKey)
-                    {
-                        problems.Add($"{label}: leaf key {e.CurrentKey} names cluster slot {chunkId}:{slotIndex}, but the entity there currently holds "
-                            + $"{actual}. The leaf points at the WRONG slot.");
-                        continue;
-                    }
+                        var actual = ReadKey(clusterBase + compOffset + slotIndex * compSize + field.FieldOffset, field.Index);
+                        if (actual != e.CurrentKey)
+                        {
+                            problems.Add($"{label}: leaf key {e.CurrentKey} names cluster slot {chunkId}:{slotIndex}, but the entity there currently holds "
+                                + $"{actual}. The leaf points at the WRONG slot.");
+                            continue;
+                        }
 
-                    (seen.TryGetValue(e.CurrentKey, out var list) ? list : seen[e.CurrentKey] = []).Add(location);
+                        (seen.TryGetValue(e.CurrentKey, out var list) ? list : seen[e.CurrentKey] = []).Add(location);
+                    }
                 }
+                while (e.NextChunk());
             }
 
             foreach (var kv in expected)

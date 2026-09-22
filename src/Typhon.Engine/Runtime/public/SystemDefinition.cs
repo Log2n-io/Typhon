@@ -184,23 +184,51 @@ public sealed class SystemDefinition
 
     /// <summary>
     /// Oversubscription factor for parallel chunk dispatch. The effective worker-cap on chunk count becomes
-    /// <c>round(WorkerCount × ChunksPerWorker)</c> instead of <c>WorkerCount</c>. Default <c>1.0f</c> preserves the
+    /// <c>round(WorkerCount × ChunksPerWorker)</c> instead of <c>WorkerCount</c>; the cost rule
+    /// (<see cref="RuntimeOptions.CostBasedChunking"/>) can go to twice that. Default <c>1.0f</c> preserves the
     /// pre-knob behaviour (one chunk per worker).
     /// <para>
     /// Use values above 1.0 (e.g. 1.5, 2.0) on parallel systems where worker efficiency suffers because a single slow chunk
-    /// holds back the critical path — extra chunks let fast workers steal more work via the existing dynamic <c>_nextChunk</c>
+    /// holds back the critical path — extra chunks let fast workers steal more work via the existing dynamic chunk-claim
     /// loop in <see cref="DagScheduler"/>. Values must be in the range <c>[1.0, 64.0]</c>; <see cref="RuntimeSchedule.Build"/>
     /// rejects values outside that band. The upper bound also guards against the <c>(int)MathF.Round</c> overflow that would
     /// silently collapse the chunk cap to 1 for absurd factors.
     /// </para>
     /// <para>
-    /// The final chunk count is still capped by <c>ceil(entityCount / ParallelQueryMinChunkSize)</c>, so small populations
-    /// won't proliferate trivial chunks. Cost trade-off: every extra chunk pays its own prepare/dispatch overhead — Versioned
-    /// path also creates an extra <c>Transaction</c> per chunk.
+    /// The final chunk count is also capped by <c>ceil(entityCount / minChunkSize)</c>, so small populations won't
+    /// proliferate trivial chunks. Cost trade-off: every extra chunk pays its own prepare/dispatch overhead — the
+    /// Versioned path also creates an extra <c>Transaction</c> per chunk.
+    /// </para>
+    /// <para>
+    /// <b>Under the entity rule that second cap is frequently the binding one, and this knob cannot lift it.</b> A system
+    /// walking 320 entities against the default 64-entity floor gets <c>ceil(320 / 64) = 5</c> chunks however high this
+    /// factor is set — which makes this knob inert on exactly the small-population systems its guidance above describes.
+    /// The cost rule (<see cref="RuntimeOptions.CostBasedChunking"/>, the default from a system's second dispatch) has no
+    /// entity floor: it spreads the measured cost over <c>round(WorkerCount × ChunksPerWorker)</c> chunks, and up to twice
+    /// that when each would carry more than 100 µs.
     /// </para>
     /// Set by <see cref="RuntimeSchedule"/> from <see cref="SystemBuilder.ChunksPerWorker"/>.
     /// </summary>
     public float ChunksPerWorker { get; internal set; } = 1f;
+
+    /// <summary>
+    /// Smallest entity count this system will accept in a parallel chunk, overriding
+    /// <see cref="RuntimeOptions.ParallelQueryMinChunkSize"/>. <c>0</c> (the default) inherits the global value.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>What it is for.</b> The global floor is a bet that per-entity work is roughly uniform across the
+    /// schedule, because it is the same number of entities for every system. That bet fails whenever one system is far
+    /// more expensive per entity than its neighbours — measured in the SWG Tatooine workload (#906) at 3.5 µs/entity for
+    /// interest management against 9.3 ns/entity for creature AI in the same DAG, a spread of 375x. One floor cannot
+    /// serve both: at 64 it starves the expensive system of workers, and lowered globally it splits the cheap ones into
+    /// chunks whose dispatch costs more than their work.</para>
+    /// <para><b>How to choose one.</b> It is a physical quantity, so it is checkable rather than felt: divide a system's
+    /// <c>SystemTelemetry.WorkUs</c> by its <c>EntitiesProcessed</c> and pick a chunk that holds enough work to be
+    /// worth a dispatch. Setting it because a system "feels heavy" is how this becomes a number nobody can justify.</para>
+    /// <para><b>Setting it opts the system out of the cost rule</b> (<see cref="RuntimeOptions.CostBasedChunking"/>),
+    /// which does that division itself every tick and needs no floor.</para>
+    /// </remarks>
+    public int MinChunkSize { get; internal set; }
 
     // ═══════════════════════════════════════════════════════════════
     // Issue #231: Tier dispatch filter

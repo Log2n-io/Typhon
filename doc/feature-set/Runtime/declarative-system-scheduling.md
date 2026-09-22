@@ -68,8 +68,8 @@ protected override void Configure(SystemBuilder b) => b
   have no prior-tick history to freeze to and are rejected at `Build()`.
 - Phases order systems within one DAG only. Cross-DAG ordering is structural (track sequence), not
   access-derived — `.After()` / `.Before()` spanning DAGs is rejected at `Build()`.
-- Cross-phase edges are conflict-driven, not all-to-all: a straggler in phase N no longer gates
-  every system in phase N+1, only the ones with a declared data dependency on it.
+- Cross-phase edges are conflict-driven, not all-to-all: a straggler in phase N gates only the
+  systems in phase N+1 with a declared data dependency on it, not every system in the phase.
 - `Build()` validation has no suppress switch — a false positive is fixed by correcting the
   declaration, not disabling the check.
 - DEBUG builds assert every `EntityRef.Write<T>()` against the executing system's declared writes;

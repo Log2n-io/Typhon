@@ -57,7 +57,7 @@ public sealed class StaticStructuresRoundTripTests
                     Offset = 0, Size = 4, ArrayLength = 0,
                     Flags = 0x09 /* HasIndex | HasSpatialIndex */,
                     SpatialFieldType = 1, SpatialMode = 2,
-                    SpatialCellSize = 16f, SpatialMargin = 0.5f,
+                    SpatialCellSize = 16f,
                     SpatialCategory = 0xCAFEBABEu,
                     ForeignKeyTargetType = string.Empty,
                 },

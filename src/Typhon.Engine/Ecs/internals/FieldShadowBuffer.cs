@@ -49,7 +49,7 @@ internal struct ShadowEntry
 /// </para>
 /// <para>
 /// <b>Memory-ordering contract.</b> The reservation increments the count BEFORE the entry is written (the old lock-based version incremented it after). Reads
-/// are therefore only valid at the tick boundary, once the scheduler's phase barrier has retired every writer — which is exactly the contract
+/// are therefore only valid at the tick boundary, once the tick has drained and every writer has retired — which is exactly the contract
 /// <see cref="Count"/> and the indexer already document. Do not read this buffer concurrently with appends.
 /// </para>
 /// </remarks>
@@ -137,4 +137,127 @@ internal sealed class FieldShadowBuffer
     /// allocates nothing.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void Reset() => _count = 0;
+
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // Per-tick drain plan (#886 lead D). Built ONCE by the Prep head, read by every Prep slice, cleared by the tail.
+    //
+    // A slice drains only the entries of its own clusters. Having every slice scan the whole buffer to find them was measured at 13× the drain's CPU
+    // (three passes over 16 000 entries, times 31 slices, per field, per tick), which is more than the whole atomic drain cost. So the ordering is done once,
+    // serially, and what a slice gets is a contiguous range of an order that is already ascending by cluster: the histogram's end offsets, kept rather than
+    // cleared, are exactly the per-cluster boundaries the range lookup needs.
+    // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    private int[] _planOrder = [];
+    private int[] _planEnds = [];
+    private int _planMin;
+    private int _planSpan;
+    private int _planCount;
+
+    /// <summary>Orders the buffer's entries by ascending cluster chunk id and keeps the per-cluster boundaries. Same algorithm as
+    /// <c>ArchetypeClusterState.BuildDrainOrder</c>; the difference is what is retained.</summary>
+    internal void BuildDrainPlan()
+    {
+        // The histogram must start clean. The tail clears it (ClearDrainPlan), but a throw between head and tail — a unique collision, a non-finite
+        // position — skips the tail, and a build on top of last tick's end offsets scatters past the order array. Clearing here is the same memset and
+        // makes the build idempotent.
+        ClearDrainPlan();
+        var count = _count;
+        _planCount = count;
+        if (count <= 0)
+        {
+            return;
+        }
+
+        if (_planOrder.Length < count)
+        {
+            _planOrder = new int[Math.Max(count, Math.Max(256, _planOrder.Length * 2))];
+        }
+
+        var min = int.MaxValue;
+        var max = int.MinValue;
+        for (var e = 0; e < count; e++)
+        {
+            var c = this[e].ChunkId >> 6;
+            if (c < min)
+            {
+                min = c;
+            }
+
+            if (c > max)
+            {
+                max = c;
+            }
+        }
+
+        var span = max - min + 1;
+        if (_planEnds.Length < span)
+        {
+            _planEnds = new int[Math.Max(span, Math.Max(256, _planEnds.Length * 2))];
+        }
+
+        var ends = _planEnds;
+        for (var e = 0; e < count; e++)
+        {
+            ends[(this[e].ChunkId >> 6) - min]++;
+        }
+
+        var running = 0;
+        for (var b = 0; b < span; b++)
+        {
+            var c = ends[b];
+            ends[b] = running;
+            running += c;
+        }
+
+        var order = _planOrder;
+        for (var e = 0; e < count; e++)
+        {
+            order[ends[(this[e].ChunkId >> 6) - min]++] = e;
+        }
+
+        // After the scatter ends[b] is the END of bucket b — the start of bucket b + 1 — which is what DrainOrderForClusters slices on.
+        _planMin = min;
+        _planSpan = span;
+    }
+
+    /// <summary>The planned order's entries whose cluster chunk id lies in <c>[firstCluster, lastClusterExclusive)</c> — a contiguous range, in ascending
+    /// cluster order. Empty when no plan was built.</summary>
+    internal ReadOnlySpan<int> DrainOrderForClusters(int firstCluster, int lastClusterExclusive)
+    {
+        if (_planSpan == 0)
+        {
+            return default;
+        }
+
+        var lo = StartOf(firstCluster);
+        var hi = StartOf(lastClusterExclusive);
+        return hi > lo ? new ReadOnlySpan<int>(_planOrder, lo, hi - lo) : default;
+    }
+
+    private int StartOf(int cluster)
+    {
+        if (cluster <= _planMin)
+        {
+            return 0;
+        }
+
+        if (cluster >= _planMin + _planSpan)
+        {
+            return _planCount;
+        }
+
+        return _planEnds[cluster - _planMin - 1];
+    }
+
+    /// <summary>Forgets the plan and zeroes the histogram over the span it used, so the next build starts clean. See the clear-cost remark on
+    /// <c>ArchetypeClusterState.BuildDrainOrder</c> for why the whole span and not a retrace.</summary>
+    internal void ClearDrainPlan()
+    {
+        if (_planSpan > 0)
+        {
+            Array.Clear(_planEnds, 0, _planSpan);
+        }
+
+        _planSpan = 0;
+        _planCount = 0;
+    }
 }

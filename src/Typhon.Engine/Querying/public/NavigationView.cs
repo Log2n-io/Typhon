@@ -515,7 +515,12 @@ public unsafe class NavigationView<TSource, TTarget> : ViewBase where TSource : 
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool EvaluateKey(ref FieldEvaluator eval, ref KeyBytes8 key) => FieldEvaluator.Evaluate(ref eval, (byte*)Unsafe.AsPointer(ref key));
+    private static bool EvaluateKey(ref FieldEvaluator eval, ref KeyBytes8 key)
+    {
+        // A stack copy: the evaluator takes a pointer, and a pointer may address only the stack or engine memory, wherever the entry lives.
+        var local = key;
+        return FieldEvaluator.Evaluate(ref eval, (byte*)&local);
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private ref FieldEvaluator FindSourceEvaluator(int fieldIndex)

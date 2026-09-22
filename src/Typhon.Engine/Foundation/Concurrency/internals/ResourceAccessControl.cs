@@ -584,30 +584,29 @@ internal struct ResourceAccessControl
     // Scoped Guards
     // ═══════════════════════════════════════════════════════════════════════
 
+    // The guards hold a ref to _state, not a pointer: a ResourceAccessControl is usually a field of a class, and a pointer taken under `fixed` and
+    // carried out of it outlives the pin — the GC can move the object while the guard is alive.
+
     /// <summary>Enters ACCESSING and returns a disposable guard.</summary>
-    public unsafe AccessingGuard EnterAccessingScoped(ref WaitContext ctx)
+    [UnscopedRef]
+    public AccessingGuard EnterAccessingScoped(ref WaitContext ctx)
     {
         if (!EnterAccessing(ref ctx))
         {
             ThrowTimeout();
         }
-        fixed (int* ptr = &_state)
-        {
-            return new AccessingGuard(ptr);
-        }
+        return new AccessingGuard(ref _state);
     }
 
     /// <summary>Enters MODIFY and returns a disposable guard.</summary>
-    public unsafe ModifyGuard EnterModifyScoped(ref WaitContext ctx)
+    [UnscopedRef]
+    public ModifyGuard EnterModifyScoped(ref WaitContext ctx)
     {
         if (!EnterModify(ref ctx))
         {
             ThrowTimeout();
         }
-        fixed (int* ptr = &_state)
-        {
-            return new ModifyGuard(ptr);
-        }
+        return new ModifyGuard(ref _state);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -678,18 +677,18 @@ internal struct ResourceAccessControl
     // ═══════════════════════════════════════════════════════════════════════
 
     [PublicAPI]
-    public readonly unsafe ref struct AccessingGuard
+    public readonly ref struct AccessingGuard
     {
-        private readonly int* _statePtr;
+        private readonly ref int _state;
 
-        internal AccessingGuard(int* state)
+        internal AccessingGuard(ref int state)
         {
-            _statePtr = state;
+            _state = ref state;
         }
 
         public void Dispose()
         {
-            if (_statePtr == null)
+            if (Unsafe.IsNullRef(ref _state))
             {
                 return;
             }
@@ -698,7 +697,7 @@ internal struct ResourceAccessControl
 
             while (true)
             {
-                int state = *_statePtr;
+                int state = _state;
 
                 if (GetAccessingCount(state) == 0)
                 {
@@ -707,7 +706,7 @@ internal struct ResourceAccessControl
 
                 int newState = state - 1;
 
-                if (Interlocked.CompareExchange(ref *_statePtr, newState, state) == state)
+                if (Interlocked.CompareExchange(ref _state, newState, state) == state)
                 {
                     TyphonEvent.EmitConcurrencyResourceAccessing(false, (byte)GetAccessingCount(newState), 0);
                     return;
@@ -719,18 +718,18 @@ internal struct ResourceAccessControl
     }
 
     [PublicAPI]
-    public readonly unsafe ref struct ModifyGuard
+    public readonly ref struct ModifyGuard
     {
-        private readonly int* _statePtr;
+        private readonly ref int _state;
 
-        internal ModifyGuard(int* state)
+        internal ModifyGuard(ref int state)
         {
-            _statePtr = state;
+            _state = ref state;
         }
 
         public void Dispose()
         {
-            if (_statePtr == null)
+            if (Unsafe.IsNullRef(ref _state))
             {
                 return;
             }
@@ -740,7 +739,7 @@ internal struct ResourceAccessControl
 
             while (true)
             {
-                int state = *_statePtr;
+                int state = _state;
 
                 if (GetThreadId(state) != expectedThreadId)
                 {
@@ -749,7 +748,7 @@ internal struct ResourceAccessControl
 
                 int newState = state & ~ThreadIdMask;
 
-                if (Interlocked.CompareExchange(ref *_statePtr, newState, state) == state)
+                if (Interlocked.CompareExchange(ref _state, newState, state) == state)
                 {
                     TyphonEvent.EmitConcurrencyResourceModify(false, (ushort)expectedThreadId, 0);
                     return;

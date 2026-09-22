@@ -62,7 +62,7 @@ A third mode, `RecoverySuspect`, exists only on the crash-recovery path — the 
 - Derived structures (secondary indexes, occupancy bitmap) are never repaired in place on a CRC failure — they're discarded and rebuilt from primary data during recovery; this is intentionally simpler and cheaper than per-page repair.
 - The structural pages that *can't* be rebuilt (root meta, segment directories) are protected by A/B pairing instead: a torn write can corrupt only the non-current slot, so the currently-valid copy always survives. If — and only if — *both* slots of a pair are CRC-invalid, the open fails loudly rather than silently picking a corrupt one.
 - A primary data page (component/revision content, EntityMap, etc.) that fails CRC during recovery and still backs live data is **not** silently healed — the open fails loudly naming the page, rather than serving possibly-wrong bytes. This is a deliberate trade: an uncovered torn primary page is genuinely lost data, and refusing to open is the honest outcome.
-- There is no full-page-image (FPI) repair path — it was retired in favor of this rebuild-or-loud-fail model; checkpoint cost no longer includes a before-image write per dirtied page.
+- There is no full-page-image (FPI) repair path — damage is handled by the rebuild-or-loud-fail model above instead, so checkpoint cost carries no before-image write per dirtied page.
 
 ## 🧪 Tests
 

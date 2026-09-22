@@ -838,8 +838,17 @@ public sealed partial class ProfilerController : WorkbenchControllerBase
     /// </summary>
     private ActionResult CatalogNotReadyResponse()
     {
-        var session = (Sessions.ISession)HttpContext.Items["Session"]!;
-        if (session.IsSchemaBuilding)
+        var session = HttpContext.Items["Session"];
+
+        // A capture is attached, so a missing catalog is transient (its build has not finished) or a build that failed — never the permanent "this
+        // session kind has no catalog" conflict. Re-reading IsSchemaBuilding here raced the build: finishing between ResolveCatalog's IsReady and this
+        // read, it read "not ready" and "not building" and answered 409 (TopologyBridgeTests' 202-not-409, under load).
+        if (TryGetProfilerRuntime(session, out var runtime))
+        {
+            return runtime.BuildError is { } error ? TraceBuildFailed(error) : NotReady();
+        }
+
+        if (((Sessions.ISession)session!).IsSchemaBuilding)
         {
             return NotReady();
         }

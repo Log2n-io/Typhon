@@ -323,7 +323,7 @@ static DatabaseEngine OpenEngine()
         .Register<Faction>()
         .Register<Wallet>()
         .Register<Intent>()
-        .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
+        .ConfigureSpatialGrid(SpatialGridConfig.Flat(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
 
     // Every write to the spatial component goes through ClusterRef.WriteSpatial (BoundsSyncSystem is the only writer; spawns go through the spawn path).
     // Declaring that lets the tick fence trust WriteSpatial's inline cell-crossing detector and skip its fall-back scan over every dirty slot — the scan

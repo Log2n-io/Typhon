@@ -27,7 +27,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<TierPos>();
-        dbe.ConfigureSpatialGrid(new SpatialGridConfig(
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(0, 0),
             worldMax: new Vector2(100, 100),
             cellSize: 10f));
@@ -54,8 +54,8 @@ class CheckerboardTests : TestBase<CheckerboardTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f), SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f), SimTier.Tier0);
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier0);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -104,7 +104,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         {
             for (int cy = 0; cy < 3; cy++)
             {
-                dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(cx * 10f + 5f, cy * 10f + 5f), SimTier.Tier0);
+                dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(cx * 10f + 5f, cy * 10f + 5f, 0f), SimTier.Tier0);
             }
         }
 
@@ -117,7 +117,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         {
             int chunkId = cs.ActiveClusterIds[i];
             int cellKey = cs.ClusterCellMap[chunkId];
-            var (x, y) = grid.CellKeyToCoords(cellKey);
+            var (x, y, _) = grid.CellKeyToCoords(cellKey);
             if ((x + y) % 2 == 0)
             {
                 redCount++;
@@ -146,7 +146,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f), SimTier.Tier0);
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier0);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -201,8 +201,8 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         var meta = Archetype<TierUnit>.Metadata;
 
         // Spawn in Red cell (0,0) and Black cell (1,0)
-        var cellRed = dbe.SpatialGrid.WorldToCellKey(5f, 5f);
-        var cellBlack = dbe.SpatialGrid.WorldToCellKey(15f, 5f);
+        var cellRed = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
+        var cellBlack = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -275,8 +275,8 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         }
 
         // Set cell tiers (required for spatial grid state, but the system uses SimTier.All)
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f), SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f), SimTier.Tier0);
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier0);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -318,7 +318,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f), SimTier.Tier0);
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -366,8 +366,8 @@ class CheckerboardTests : TestBase<CheckerboardTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f), SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f), SimTier.Tier1);
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier1);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -409,7 +409,7 @@ class CheckerboardTests : TestBase<CheckerboardTests>
     {
         using var dbe = SetupEngineWithGrid();
         var grid = dbe.SpatialGrid;
-        int cellKey = grid.WorldToCellKey(5f, 5f);
+        int cellKey = grid.WorldToCellKey(5f, 5f, 0f);
 
         // Start at Tier2
         grid.SetCellTier(cellKey, SimTier.Tier2);
@@ -431,15 +431,15 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         var grid = dbe.SpatialGrid;
 
         // Set a few cells to different tiers
-        grid.SetCellTier(grid.WorldToCellKey(5f, 5f), SimTier.Tier0);
-        grid.SetCellTier(grid.WorldToCellKey(15f, 5f), SimTier.Tier1);
+        grid.SetCellTier(grid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        grid.SetCellTier(grid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier1);
 
         // Reset all to Tier3
         grid.ResetAllTiers(SimTier.Tier3);
 
-        Assert.That(grid.GetCell(grid.WorldToCellKey(5f, 5f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
-        Assert.That(grid.GetCell(grid.WorldToCellKey(15f, 5f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
-        Assert.That(grid.GetCell(grid.WorldToCellKey(55f, 55f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
+        Assert.That(grid.GetCell(grid.WorldToCellKey(5f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
+        Assert.That(grid.GetCell(grid.WorldToCellKey(15f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
+        Assert.That(grid.GetCell(grid.WorldToCellKey(55f, 55f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
     }
 
     [Test]
@@ -452,23 +452,23 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         grid.ResetAllTiers(SimTier.Tier3);
 
         // Set a 30x30 area to Tier0 (covers cells (0,0), (1,0), (2,0), (0,1), (1,1), (2,1), (0,2), (1,2), (2,2))
-        grid.SetTierInAABB(0f, 0f, 30f, 30f, SimTier.Tier0);
+        grid.SetTierInAABB(0f, 0f, 0f, 30f, 30f, 0f, SimTier.Tier0);
 
         // Cells inside AABB should be Tier0
-        Assert.That(grid.GetCell(grid.WorldToCellKey(5f, 5f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
-        Assert.That(grid.GetCell(grid.WorldToCellKey(15f, 15f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
-        Assert.That(grid.GetCell(grid.WorldToCellKey(25f, 25f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
+        Assert.That(grid.GetCell(grid.WorldToCellKey(5f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
+        Assert.That(grid.GetCell(grid.WorldToCellKey(15f, 15f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
+        Assert.That(grid.GetCell(grid.WorldToCellKey(25f, 25f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
 
         // Cell outside AABB should still be Tier3
-        Assert.That(grid.GetCell(grid.WorldToCellKey(55f, 55f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
+        Assert.That(grid.GetCell(grid.WorldToCellKey(55f, 55f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
 
         // Now apply Tier1 over a larger area — min semantics means Tier0 cells stay Tier0
-        grid.SetTierInAABB(0f, 0f, 60f, 60f, SimTier.Tier1);
+        grid.SetTierInAABB(0f, 0f, 0f, 60f, 60f, 0f, SimTier.Tier1);
 
         // Original Tier0 cells: still Tier0 (Tier0 < Tier1, min keeps Tier0)
-        Assert.That(grid.GetCell(grid.WorldToCellKey(5f, 5f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
+        Assert.That(grid.GetCell(grid.WorldToCellKey(5f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
         // Newly covered cells: Tier1 (was Tier3, Tier1 < Tier3)
-        Assert.That(grid.GetCell(grid.WorldToCellKey(45f, 45f)).Tier, Is.EqualTo((byte)SimTier.Tier1));
+        Assert.That(grid.GetCell(grid.WorldToCellKey(45f, 45f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier1));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -511,14 +511,14 @@ class CheckerboardTests : TestBase<CheckerboardTests>
                     Assert.That(ctx.SpatialGrid.CellSize, Is.EqualTo(10f));
 
                     // Coordinate conversion
-                    int cellKey = ctx.SpatialGrid.WorldToCell(5f, 5f);
-                    var (cx, cy) = ctx.SpatialGrid.GetCellCoords(cellKey);
+                    int cellKey = ctx.SpatialGrid.WorldToCell(5f, 5f, 0f);
+                    var (cx, cy, _) = ctx.SpatialGrid.GetCellCoords(cellKey);
                     Assert.That(cx, Is.EqualTo(0));
                     Assert.That(cy, Is.EqualTo(0));
 
                     // Tier assignment via accessor
-                    ctx.SpatialGrid.SetCellTier(0, 0, SimTier.Tier0);
-                    ctx.SpatialGrid.SetCellTier(1, 0, SimTier.Tier1);
+                    ctx.SpatialGrid.SetCellTier(0, 0, 0, SimTier.Tier0);
+                    ctx.SpatialGrid.SetCellTier(1, 0, 0, SimTier.Tier1);
                 }
             });
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
@@ -529,8 +529,8 @@ class CheckerboardTests : TestBase<CheckerboardTests>
 
         Assert.That(captured.IsValid, Is.True);
         // Verify the tier assignments stuck
-        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(5f, 5f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
-        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(15f, 5f)).Tier, Is.EqualTo((byte)SimTier.Tier1));
+        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
+        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier1));
         view.Dispose();
     }
 
@@ -556,11 +556,11 @@ class CheckerboardTests : TestBase<CheckerboardTests>
                     grid.ResetAllTiers(SimTier.Tier3);
 
                     // Observer A: Tier0 for area (0,0)→(30,30) → cells (0,0)-(2,2)
-                    grid.SetTierInAABB(0f, 0f, 30f, 30f, SimTier.Tier0);
+                    grid.SetTierInAABB(0f, 0f, 0f, 30f, 30f, 0f, SimTier.Tier0);
 
                     // Observer B: Tier1 for area (20,20)→(60,60) → cells (2,2)-(5,5)
                     // Cell (2,2) overlaps both: min(Tier0=1, Tier1=2) = Tier0
-                    grid.SetTierInAABB(20f, 20f, 60f, 60f, SimTier.Tier1);
+                    grid.SetTierInAABB(20f, 20f, 0f, 60f, 60f, 0f, SimTier.Tier1);
                 }
             });
         }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
@@ -570,13 +570,13 @@ class CheckerboardTests : TestBase<CheckerboardTests>
         runtime.Shutdown();
 
         // Cell (0,0): Observer A only → Tier0
-        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(5f, 5f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
+        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
         // Cell (2,2): Both observers → min(Tier0, Tier1) = Tier0
-        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(25f, 25f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
+        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(25f, 25f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier0));
         // Cell (4,4): Observer B only → Tier1
-        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(45f, 45f)).Tier, Is.EqualTo((byte)SimTier.Tier1));
+        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(45f, 45f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier1));
         // Cell (8,8): Neither observer → Tier3
-        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(85f, 85f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
+        Assert.That(dbe.SpatialGrid.GetCell(dbe.SpatialGrid.WorldToCellKey(85f, 85f, 0f)).Tier, Is.EqualTo((byte)SimTier.Tier3));
         view.Dispose();
     }
 }

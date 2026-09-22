@@ -89,7 +89,7 @@ internal sealed class CpuSamplerSession : IDisposable
             SamplingSessionStartQpc = Stopwatch.GetTimestamp();
 
             var client = new DiagnosticsClient(Environment.ProcessId);
-            _session = client.StartEventPipeSession(providers, requestRundown: true);
+            _session = client.StartEventPipeSession(providers);
 
             _output = new FileStream(_netTracePath, FileMode.Create, FileAccess.Write, FileShare.Read);
             _copyTask = _session.EventStream.CopyToAsync(_output);

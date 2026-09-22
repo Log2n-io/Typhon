@@ -10,7 +10,7 @@ Everything so far you drove **by hand**: you opened a transaction, did one thing
 
 This is the chapter where Typhon stops being a database you poke and becomes an engine that runs your world. It's the densest in the guide, and the most important if you're building a server.
 
-> 📌 **The runtime is recommended, but optional.** Everything in chapters 1–4 works without it — if your app is request/response, a batch job, or embeds Typhon inside an existing loop (a game engine's own frame, say), you can keep driving the engine directly through transactions and never declare a single system. The runtime is the *recommended* path when you have continuous, tick-driven logic to run in parallel; it's not a requirement for using Typhon.
+> 📌 **The runtime is recommended, but optional.** Everything in chapters 1–4 works without it — if your app is request/response, a batch job, or embeds Typhon inside an existing loop (a game engine's own frame, say), you can keep driving the engine directly through transactions and never declare a single system. The runtime is the *recommended* path when you have continuous, tick-driven logic to run in parallel; it's not a requirement for using Typhon. **If you go that way, read [Embedding without the runtime](embedding-without-the-runtime.md) first** — driving the engine yourself carries exactly one obligation, and skipping it fails silently.
 
 Two ideas carry the whole chapter:
 
@@ -187,7 +187,7 @@ Beyond components, you can declare **resources** (`ReadsResource`/`WritesResourc
 
 Access declarations handle *data* ordering. For *structural* ordering you have two tools:
 
-- **Phases** — a DAG-local total order. Everything in `Input` finishes before anything in `Simulation` starts. Typhon ships `Input`, `Simulation`, `Output`, `Cleanup`; you can define your own. Use phases for coarse "all input before all simulation before all rendering" structure.
+- **Phases** — a DAG-local total order, enforced through access: a `Simulation` system waits for an `Input` system when a declared conflict or an explicit edge connects them, directly or through other systems; otherwise the two may run at the same time. So declare every component a system reads, spatial queries included; a read you don't declare is ordered by nothing. Typhon ships `Input`, `Simulation`, `Output`, `Cleanup`; you can define your own. Use phases for the coarse causal order (input, then simulation, then rendering); the access declarations are what enforce it.
 - **`After` / `Before` / `AfterAll`** — an explicit edge between two named systems in the same DAG. Use it to disambiguate two writers, or to force a specific order the access model can't infer.
 
 You declare the phase list when you create the DAG, and the engine slots each system into its phase:
@@ -231,10 +231,11 @@ b.Input(() => _characters).Parallel().WritesVersioned()
 
 > 💡 **The zero-lock read is the whole point.** Under the hood, parallel reads share one `PointInTimeAccessor` — a single frozen TSN that every worker reads against without taking a single per-entity lock, because [snapshot isolation](03-transactions.md) guarantees the snapshot can't move under them. That's how "iterate a million entities across every core at one consistent instant" is a normal operation here, not a feat. It only works because nobody is mutating the versions those readers can see — the same property you bought with *Versioned* storage.
 
-Two knobs worth knowing (both in `RuntimeOptions`):
+Knobs worth knowing (the first two in `RuntimeOptions`):
 
-- **`ParallelQueryMinChunkSize`** (default 64) — the floor on entities per chunk. Small sets still run the parallel path, just as one chunk. Stops tiny populations from spawning a chunk per worker for no gain.
-- **`ChunksPerWorker`** (per-system, via `b.ChunksPerWorker(f)`) — oversubscription. Above 1.0, fast workers can steal extra chunks while a slow one finishes — smooths out an uneven workload.
+- **`CostBasedChunking`** (default true) — from a system's second tick on, its chunks are sized by what it measurably costs rather than by how many entities it has: spread over the workers while each chunk carries 25–100 µs of work, fewer chunks below that, up to twice as many above it. A slow last chunk then no longer holds the whole pool.
+- **`ParallelQueryMinChunkSize`** (default 64) — the floor on entities per chunk when chunks are counted by entities: a system's first tick, or every tick with `CostBasedChunking` off. Small sets still run the parallel path, just as one chunk. Stops tiny populations from spawning a chunk per worker for no gain.
+- **`ChunksPerWorker`** (per-system, via `b.ChunksPerWorker(f)`) — oversubscription: the chunk count aims at `round(WorkerCount × f)`. Above 1.0, fast workers can steal extra chunks while a slow one finishes — smooths out an uneven workload.
 
 ---
 
@@ -288,7 +289,120 @@ runtime.OnShutdown  += ctx => { /* persist final state — ctx has an Immediate-
 
 ---
 
-## 7. Staying real-time under load
+## 7. Spending the tick where it matters
+
+Everything so far runs *every system over every entity, every tick*. That's the right default, and it stops being affordable the moment your world is bigger than your screen. A shard full of characters has a handful near the player who need full-fidelity AI at 60 Hz, a ring beyond them who only need to keep moving, and a long tail out in the fields that nobody is looking at. Running all three at the same rate is one of the most common reasons a tick loop stops fitting its budget.
+
+Typhon gives you four mechanisms for this, and they're worth learning **in order**, because each one exists to fix what the previous one leaves on the table. They all ride on the spatial grid you configured back in [ch.2 §5](02-modeling.md#5-spatial--querying-by-geometry), and they all work at **cluster** granularity — never per entity, which is the whole point. A per-entity "am I near the player?" check every tick is itself O(N), and would cost more than the work it skips.
+
+### Step one: tier the world
+
+You classify the world coarsely — one **`SimTier`** per grid cell, once per tick — and every system downstream restricts itself to matching cells automatically. There are four tiers, `Tier0` (nearest) through `Tier3`, plus the combinations `Near` (`Tier0 | Tier1`) and `Active` (everything but `Tier3`).
+
+Assignment is *your* policy, not the engine's, because only you know what "important" means in your game. Write it as a `CallbackSystem` in `Phase.Input`, so it lands before anything that filters on it:
+
+```csharp
+internal sealed class TierAssignment : CallbackSystem
+{
+    private readonly Camera _camera;               // your own type — Typhon has no opinion about what a camera is
+    public TierAssignment(Camera camera) { _camera = camera; }
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("TierAssignment")
+        .Phase(Phase.Input)                        // before every Simulation system that filters on tier
+        .Priority(SystemPriority.Critical);        // never shed — the tiers have to exist
+
+    protected override void Execute(TickContext ctx)
+    {
+        var grid = ctx.SpatialGrid;
+        if (!grid.IsValid) return;                 // no grid configured — nothing to tier
+
+        grid.ResetAllTiers(SimTier.Tier3);         // everything is background until proven otherwise
+        Promote(grid, _camera.X, _camera.Y, 120f, SimTier.Tier0);   // full fidelity, close in
+        Promote(grid, _camera.X, _camera.Y, 300f, SimTier.Tier1);   // keep moving, no combat AI
+    }
+
+    private static void Promote(SpatialGridAccessor grid, float x, float y, float r, SimTier tier) =>
+        grid.SetTierInAABB(x - r, y - r, 0f, x + r, y + r, 0f, tier);   // six floats: min/max on all three axes
+}
+```
+
+Two things about that call are worth pausing on. It takes **six** floats, not four — Typhon's grid is 3D even when your world isn't, and our shard is a `Flat` world whose Z axis is exactly one cell deep, so `0f` to `0f` covers all of it. And it uses **promote-only** semantics: a cell already at a better tier is left alone. That's what lets you call it once per observer in a loop and get the union for free, which is what you want on a server with many players.
+
+Now a system opts in. The AI work is the expensive part, so it gets the tightest tier:
+
+```csharp
+b.Name("CombatAi").Phase(Phase.Simulation)
+ .Input(() => _characters).Parallel()
+ .Tier(SimTier.Tier0)                  // dispatch only against clusters in Tier 0 cells
+ .Writes<Intent>();
+```
+
+The filter runs against a per-archetype list of active clusters grouped by tier, rebuilt at tick start and **skipped entirely** when neither the grid's tier assignment nor the archetype's cluster set changed since last tick — a camera-stationary tick pays two integer compares. So `CombatAi` never scans the rest of the archetype to find out what to skip; the clusters it doesn't want were never in its dispatch list. The same scoping applies to a View, via `view.WithTier(SimTier.Tier0)`, if you want a published output set narrowed the same way.
+
+There's a feedback signal too. `ctx.TierBudgetMetrics` reports what each tier cost in wall-clock and entities *last* tick, so a `TierAssignment` system can shrink its own rings when it's over budget instead of you guessing radii. It reads all-zero on the very first tick — guard `BudgetMs == 0` before you divide by it.
+
+### Step two: amortise the tiers you kept
+
+Tiering gave you a set of clusters you don't run at all. But `Tier3` is most of your world, and "not at all" is usually too strong — background characters should still drift towards their destinations, just not sixty times a second.
+
+That's `CellAmortize(N)`: process `1/N` of the tier's clusters per tick, rotating buckets by tick number. It **requires** a non-`All` tier, since amortising everything would just be a slower simulation.
+
+```csharp
+b.Name("IdleDrift").Phase(Phase.Simulation)
+ .Input(() => _characters).Parallel()
+ .Tier(SimTier.Tier3).CellAmortize(60)   // each Tier 3 cluster gets one tick in sixty
+ .Writes<Transform>();
+```
+
+The trap is in the arithmetic, not the API. If the body keeps multiplying by `ctx.DeltaTime`, your background characters now move at one sixtieth speed. Use **`ctx.AmortizedDeltaTime`**, which is `DeltaTime × N` — the time that actually elapsed since this cluster's last turn:
+
+```csharp
+t.Pos = new Point2F { X = t.Pos.X + t.Vel.X * ctx.AmortizedDeltaTime, Y = … };
+```
+
+And note what's being skipped: whole clusters, not entities. This is not an entity-id modulo — the fifty-nine sixtieths you skip in a tick are never iterated at all.
+
+### Step three: let the quiet clusters sleep
+
+Amortisation still visits every cluster eventually, on a fixed rotation, whether or not anything in it changed. A cluster of characters standing still in an empty field gets its turn every sixtieth tick, does nothing, and costs you a dispatch anyway.
+
+**Dormancy** closes that gap. Each cluster carries a sleep counter that increments on every tick its dirty region stays clean, and resets the instant a write lands. Past a threshold the cluster flips to `Sleeping` and is dropped from *every* system's dispatch list for that archetype — tier-filtered or not, amortised or not — at no per-entity cost. A write wakes it, with a bounded one tick of latency: the wake is recorded on a thread-local list during parallel execution (touching shared sleep state inline would race), drained at the tick fence, and promoted before any system dispatches next tick. An optional heartbeat wakes sleepers on a staggered schedule anyway, if you want a periodic idle re-check.
+
+Two honest caveats before you reach for it.
+
+First, **it is not wired to a public API yet.** The thresholds live on the archetype's internal cluster state, so turning dormancy on today needs the same `InternalsVisibleTo` access the engine's own sample hosts build under. Only the `ClusterSleepState` enum is public.
+
+Second, and more likely to surprise you: **`WriteSpatial` deliberately doesn't mark a slot dirty.** That's the barrier `BoundsSyncSystem` uses to keep the spatial index honest, and it is the *high-frequency* write on a moving entity — so a cluster whose entities only ever move through the spatial barrier can fall asleep, and stay asleep, while still moving. Our shard is safe by accident: `MoveSystem` writes `Transform` through `ctx.Accessor.OpenMut(id).Write(...)`, which does mark dirty, so movement keeps its own clusters awake. If your movement path is *only* the spatial barrier, dormancy will quietly stop dispatching it.
+
+### Step four: checkerboard the systems that read their neighbours
+
+Everything above narrows *which* clusters run. This last one is about a system whose body reaches outside the cluster it was handed.
+
+Say you add a scent or influence field, where each cell's value blends with the values of the cells around it. Under `.Parallel()` two adjacent cells land on two workers at the same instant and race on the boundary they share. The usual escape is to make the system single-threaded, which is exactly backwards — a full-grid diffusion pass is often the most expensive thing in your tick, and the one you most want fanned out.
+
+`Checkerboard()` colours every cell from the parity of its grid coordinates, `(x + y + z) % 2`, and dispatches Red first, then Black, as two sequential phases inside one DAG node:
+
+```csharp
+b.Name("ScentDiffuse").Phase(Phase.Simulation)
+ .Input(() => _characters).Parallel()   // required — Checkerboard without Parallel throws at Build()
+ .Tier(SimTier.Near).Checkerboard()
+ .Writes<Scent>();                      // Scent being a new component you added to Character
+```
+
+Your `Execute` runs **twice** per tick, with `ctx.Entities` scoped to that phase's clusters. No two face-sharing cells ever share a colour, so while you're processing a Red cell no worker is touching any of its six orthogonal neighbours. Downstream systems see one node and wait for both phases; nothing else in the DAG needs to know dispatch happened twice.
+
+The three-axis parity is the part to remember. In our flat shard `z` is `0` everywhere and the split reduces to the familiar two-dimensional chequerboard — but in a 3D world the `z` term is what keeps a cell and the cell stacked directly above it in opposite colours. Drop it and the safety property quietly fails on one axis out of three.
+
+The limit is stated in the colouring itself: this protects **face adjacency only**. Diagonal neighbours share a colour, so a system that reaches diagonally is not protected by a two-phase split. It does compose cleanly with everything above — the colouring is computed over whatever cluster set the tier filter and dormancy already produced.
+
+> 💡 **All four compose, and the price is one tick of staleness.** A system can be tier-filtered, amortised and checkerboard-dispatched at once, with dormancy filtering underneath. The uniform trade is latency at the boundaries: a tier change, a cluster migration, or a wake all take effect at the *next* tick's dispatch, never the current one. That's the same one-tick rule the spatial index itself follows ([ch.2 §5](02-modeling.md#5-spatial--querying-by-geometry)), and it's why none of this needs a lock.
+
+For the full treatment — every option, every guarantee, and the exact throw conditions — see [Tiered Simulation Dispatch](../feature-set/Spatial/tiered-simulation-dispatch.md), [Cluster Dormancy](../feature-set/Spatial/cluster-dormancy.md) and [Checkerboard Dispatch](../feature-set/Spatial/checkerboard-dispatch.md). If the grid underneath is itself mis-sized none of this saves you, and that's a different job: [Tuning the Spatial Grid](../feature-set/Spatial/spatial-tuning.md), measured with [Reading Spatial Telemetry](../feature-set/Spatial/spatial-telemetry.md).
+
+---
+
+## 8. Staying real-time under load
 
 A fixed tick rate is a promise: 60 ticks a second means each tick has ~16 ms. When a tick starts overrunning that budget, the runtime would rather **degrade gracefully** than let latency spiral. You shape that degradation with two per-system declarations:
 
@@ -313,6 +427,6 @@ You can now run logic over your world every tick, in parallel, in real time. Tha
 
 ## 🧩 Key concepts & types
 
-**Concepts:** [System](../key-concepts/system.md) · [Typhon runtime](../key-concepts/runtime.md) · [Scheduler & phases](../key-concepts/scheduler.md) · [Tick](../key-concepts/tick.md) · [Transaction](../key-concepts/transaction.md) · [Unit of Work](../key-concepts/unit-of-work.md) · [PointInTimeAccessor](../key-concepts/point-in-time-accessor.md).
+**Concepts:** [System](../key-concepts/system.md) · [Typhon runtime](../key-concepts/runtime.md) · [Scheduler & phases](../key-concepts/scheduler.md) · [Tick](../key-concepts/tick.md) · [Transaction](../key-concepts/transaction.md) · [Unit of Work](../key-concepts/unit-of-work.md) · [PointInTimeAccessor](../key-concepts/point-in-time-accessor.md) · [Spatial tiers & adaptive dispatch](../key-concepts/spatial-tiers.md).
 
-**Exact calls:** `TyphonRuntime` (`Create` / `Start` / `Shutdown` / `OnFirstTick` / `OnShutdown` / `CurrentTickNumber`) · `RuntimeSchedule` (`PublicTrack.DeclareDag` / `Phases` / `Add`) · `CallbackSystem` / `QuerySystem` / `PipelineSystem` · `SystemBuilder` (`Name` / `Phase` / `Input` / `Reads` / `ReadsSnapshot` / `ReadsFresh` / `Writes` / `Parallel` / `WritesVersioned` / `After` / `Priority` / `CanShed`) · `Phase` (`Input` / `Simulation` / `Output` / `Cleanup`) · `TickContext` (`Transaction` / `Accessor` / `Entities` / `DeltaTime` / `TickNumber` / `CreateSideTransaction`) · `RuntimeOptions` (`BaseTickRate` / `WorkerCount`).
+**Exact calls:** `TyphonRuntime` (`Create` / `Start` / `Shutdown` / `OnFirstTick` / `OnShutdown` / `CurrentTickNumber`) · `RuntimeSchedule` (`PublicTrack.DeclareDag` / `Phases` / `Add`) · `CallbackSystem` / `QuerySystem` / `PipelineSystem` · `SystemBuilder` (`Name` / `Phase` / `Input` / `Reads` / `ReadsSnapshot` / `ReadsFresh` / `Writes` / `Parallel` / `WritesVersioned` / `After` / `Priority` / `CanShed` / `Tier` / `CellAmortize` / `Checkerboard`) · `Phase` (`Input` / `Simulation` / `Output` / `Cleanup`) · `SimTier` (`Tier0`–`Tier3` / `Near` / `Active` / `All`) · `SpatialGridAccessor` (`IsValid` / `ResetAllTiers` / `SetTierInAABB` / `SetCellTierMin`) · `ClusterSleepState` · `TickContext` (`Transaction` / `Accessor` / `Entities` / `DeltaTime` / `AmortizedDeltaTime` / `TickNumber` / `SpatialGrid` / `TierBudgetMetrics` / `CreateSideTransaction`) · `RuntimeOptions` (`BaseTickRate` / `WorkerCount`).

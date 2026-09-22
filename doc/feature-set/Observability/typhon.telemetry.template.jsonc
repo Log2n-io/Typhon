@@ -140,7 +140,7 @@
           // Combined gate for the Scheduler:Queue subtree.
           "Enabled": false,
           "TickEnd": {
-            // Combined flag for the QueueTickEnd instant (kind 244). Per-(tick, queue) rollup emitted at end-of-tick; drives the Workbench Data API queue/&lt;name&gt; tracks (#311 / DAG view backpressure edges).
+            // Combined flag for the QueueTickEnd instant (kind 244). Per-(tick, queue) rollup emitted at end-of-tick; drives the Workbench Data API queue/&lt;name&gt; tracks and the DAG view's backpressure edges.
             "Enabled": false,
           },
         },
@@ -256,7 +256,7 @@
           // Combined gate for the AdaptiveWaiter subtree.
           "Enabled": false,
           "YieldOrSleep": {
-            // Combined gate for AdaptiveWaiter yield-or-sleep transition events. Phase 2 design (#280) chose transitions only — NOT per-spin — to keep trace volume sane.
+            // Combined gate for AdaptiveWaiter yield-or-sleep transition events. Transitions only — NOT per-spin — to keep trace volume sane.
             "Enabled": false,
           },
         },
@@ -380,11 +380,23 @@
             "Enabled": false,
           },
           "Execute": {
-            // Combined gate for the Spatial:ClusterMigration:Execute span (migration apply; legacy kind 60, on by default).
+            // Combined gate for the Spatial:ClusterMigration:Execute span (migration apply; kind 60, on by default).
             "Enabled": false,
           },
           "Hysteresis": {
             // Combined gate for the Spatial:ClusterMigration:Hysteresis span (hysteresis suppression of a migration).
+            "Enabled": false,
+          },
+          "Repair": {
+            // Combined gate for the Spatial:ClusterMigration:Repair span (kind 64: one admitted repair unit, with its cell and degradation).
+            "Enabled": false,
+          },
+          "Relocation": {
+            // Combined gate for the Spatial:ClusterMigration:Relocation instant (kind 65: the per-tick throttle outcome split).
+            "Enabled": false,
+          },
+          "ArchetypeTelemetry": {
+            // Combined gate for the Spatial:ClusterMigration:ArchetypeTelemetry instant (kind 66: the per-archetype per-tick counter snapshot the Workbench Spatial panel reads).
             "Enabled": false,
           },
         },

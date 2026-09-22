@@ -292,7 +292,7 @@ internal static class FixtureDatabase
             // Spatial archetypes (Player/Deposit/Harvester/Factory positions) are cluster-eligible, so a configured
             // grid is REQUIRED before InitializeArchetypes (issue #230 Option B). All positions are placed within
             // [0, WorldSize] (see PlaceAabb). The config is persisted, so the Workbench reopens without re-configuring.
-            engine.ConfigureSpatialGrid(new SpatialGridConfig(
+            engine.ConfigureSpatialGrid(SpatialGridConfig.Flat(
                 new Vector2(0f, 0f), new Vector2(WorldSize, WorldSize), cellSize: WorldCellSize));
             engine.InitializeArchetypes();
 

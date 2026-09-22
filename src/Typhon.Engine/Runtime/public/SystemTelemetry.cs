@@ -29,6 +29,12 @@ public struct SystemTelemetry
     public float DurationUs;
 
     /// <summary>
+    /// Worker time a parallel QuerySystem used: the sum of its chunks' durations, where <see cref="DurationUs"/> is its span. Zero for other systems.
+    /// <c>DurationUs - WorkUs / workers</c> is how long the pool waited on the system beyond a perfect split of its work.
+    /// </summary>
+    public float WorkUs;
+
+    /// <summary>
     /// Difference between actual duration and theoretical optimal parallel duration.
     /// Only computed when <see cref="TelemetryConfig.SchedulerTrackStragglerGap"/> is enabled.
     /// Positive values indicate load imbalance (some workers finished earlier and idled).
@@ -63,4 +69,7 @@ public struct SystemTelemetry
 
     /// <summary>Stopwatch timestamp when the last chunk completed (or Callback finished).</summary>
     internal long LastChunkDoneTick;
+
+    /// <summary>Stopwatch ticks summed over a parallel QuerySystem's chunks by the workers that ran them (<see cref="WorkUs"/>).</summary>
+    internal long WorkTicks;
 }

@@ -33,11 +33,11 @@ The series follows the engine's folder layout — every `src/Typhon.Engine/<Fold
 | **04** | [Schema](04-schema.md) | Component and field definitions. The `FieldType` enum (including AABB/BSphere/Unsigned/DoubleFloat flags), persistence via `ComponentR1` / `FieldR1` / `ArchetypeR1` / `SchemaHistoryR1` system entities, schema evolution (eager migration on reopen), the diff model. |
 | **05** | [Revision (MVCC)](05-revision.md) | How snapshot isolation actually works. `CompRevStorageElement` layout (12 B with packed TSN + UowId + IsolationFlag), revision chains, write-time UowId stamping, the snapshot read walk, `EnabledBits` overrides. |
 | **06** | [ECS](06-ecs.md) | The API users actually touch. `EntityId`, `Comp<T>`, `Archetype<TSelf>` declaration, `Spawn`/`Destroy`/`Open`/`OpenMut`, `EntityRef`, `EntityLink<T>`, `PointInTimeAccessor` for parallel reads, cluster storage, the three storage modes (Versioned/SingleVersion/Transient). |
-| **07** | [Spatial](07-spatial.md) | Per-archetype broad-phase grid + per-component R-Tree for AABB/radius/ray queries. Spatial maintainer, geometric primitives, the `[SpatialIndex]` attribute, query operators. |
+| **07** | [Spatial](07-spatial.md) | One spatial index in two levels: a sparse cell grid, and a per-cell cluster broadphase that promotes to an R-Tree once a cell is dense. Geometric primitives, the `[SpatialIndex]` attribute, query operators, and intra-cell drift and repair. |
 | **08** | [Transactions](08-transactions.md) | `UnitOfWork`, `Transaction`, the TransactionChain (singly-linked, CAS PushHead), `UowRegistry`, durability modes (Deferred/GroupCommit/Immediate), deferred cleanup, deadlines. The mutation entry point. |
 | **09** | [Querying](09-querying.md) | `EcsQuery`, DNF predicate parsing, plan building, the pipeline executor, the view system (`EcsView`, `ViewDeltaRingBuffer`, delta computation), statistics (HLL/MCV/Histogram), selectivity estimation. Plus a brief Subscriptions section. |
 | **10** | [Runtime](10-runtime.md) | The scheduler. TickDriver, tracks (Engine-Pre / Public / Engine-Post), DAG construction from access patterns, worker threads, the parallel fence, overload management. |
-| **11** | [Durability](11-durability.md) | WAL v2 writer (group commit), wire format (chunk types, logical records via `RecordCodec`), checkpoint v2 (barrier → coverage gate → A/B meta flip → recycle), recovery (`RecoveryDriver` + scrub/rebuild, no FPI), the UoW state machine (transitional), fail-fast (per ADR). |
+| **11** | [Durability](11-durability.md) | WAL v2 writer (group commit), wire format (chunk types, logical records via `RecordCodec`), checkpoint v2 (barrier → coverage gate → A/B meta flip → recycle), recovery (`RecoveryDriver` + scrub/rebuild, no full-page images), the UoW state machine, fail-fast (per ADR). |
 | **12** | [Observability](12-observability.md) | Zero-overhead typed event pipeline (`TyphonEvent.Begin*`/`Emit*`), gate flags (`TelemetryConfig`), the ~217 event kinds, source location attribution, wire protocol, profiler engine pipeline, Workbench viewer, OTel integration. |
 | **13** | [Resources](13-resources.md) | The resource graph — every long-lived engine object as `IResource`. Metrics (Memory/Capacity/DiskIO/Throughput/Duration), snapshots, alerts, configuration (`ResourceOptions`), exhaustion policies. |
 | **14** | [Errors](14-errors.md) | The exception hierarchy, error codes, the `Result<TValue,TStatus>` zero-cost pattern, status enums, the throw-don't-retry philosophy. |
@@ -168,7 +168,7 @@ src/Typhon.Engine/<Folder>/
 
 When this series links to source files, the URL tells you instantly which side of the line you're looking at. A user of the engine should be able to reason about everything in `public/`; an engine contributor will care about both.
 
-A handful of folders deviate from the split (`Foundation/Collections/`, `Foundation/Memory/`, `Resources/`) — these are inherently internal or were structured before the convention was codified. Where this matters, the relevant chapter notes it.
+A handful of folders deviate from the split (`Foundation/Collections/`, `Foundation/Memory/`, `Resources/`) — these are inherently internal or simply sit outside the convention. Where this matters, the relevant chapter notes it.
 
 ---
 

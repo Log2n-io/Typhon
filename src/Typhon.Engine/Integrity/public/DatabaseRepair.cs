@@ -428,7 +428,7 @@ public static class DatabaseRepair
             var relative = Path.GetRelativePath(bundlePath, file);
             var destination = Path.Combine(target, relative);
             Directory.CreateDirectory(Path.GetDirectoryName(destination));
-            File.Copy(file, destination, overwrite: true);
+            File.Copy(file, destination, true);
         }
 
         return target;

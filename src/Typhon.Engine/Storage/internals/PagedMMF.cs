@@ -77,10 +77,27 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     //    stamp per 512 B sector in the free tail of its metadata region, and its PageChecksum field becomes a CRC over that
     //    footer rather than over the whole page. A revision-5 reader would compute a whole-page checksum and report every
     //    such page as corrupt, so the bump is what turns a confusing false alarm into a clean "incompatible format" refusal.
-    internal const int DatabaseFormatRevision   = 7;
-    internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;      // 8 MiB — the hard floor (see Validate)
-    internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;             // 256 MiB — the shipped production default
-    internal const ulong RecommendedMinimumCacheSize = 64UL * 1024 * 1024;             // 64 MiB — warn below this (unless TestMode)
+    //
+    // 8 (#872 step 13): the entity-level spatial index is gone, and a v7 file carries structures this build will never
+    //    account for. Every component with a [SpatialIndex] field used to allocate up to three persisted
+    //    StorageSegmentKind.Spatial segments — an R-Tree, a back-pointer segment, and a Layer-1 occupancy hashmap — plus a
+    //    `spatial.<component>` bootstrap entry naming their root pages. Nothing allocates, reads or frees any of them now.
+    //    Opened by this build, a v7 file's Spatial pages are allocated and owned by nothing: the page classifier cannot
+    //    name them, the integrity checker cannot reach them, and they are never reclaimed. That is what the bump refuses.
+    //
+    //    CORRECTED. The first version of this note claimed the LEAF LAYOUT was the dangerous half — the R-Tree leaf
+    //    entry did lose its 4-byte ComponentChunkId column (R2Df32 15 -> 17, R3Df32 11 -> 13), and the note asserted that
+    //    the per-cell CLUSTER trees share that layout and "ARE written", so a v7 leaf read with v8 offsets would serve
+    //    wrong clusters. They are NOT written: CellClusterTree is SpatialRTree<TransientStore> over a segment built by
+    //    CreateTransientClusterSegment — heap-backed, no file I/O. After this step NO persisted structure uses the leaf
+    //    layout at all, so that scenario is unreachable. The bump is still correct; the reason above is the real one. A
+    //    wrong reason on a format gate is worse than none, because the next person to weigh a layout change weighs it
+    //    against a hazard that does not exist.
+    internal const int DatabaseFormatRevision   = 8;
+    internal const ulong MinimumCacheSize       = MinimumMemPageCount * PageSize;                   // 8 MiB — the hard floor (see Validate)
+    internal const ulong MaximumCacheSize       = (ulong)int.MaxValue & ~((ulong)PageSize - 1);     // 2 GiB − 8 KiB — one allocation, sized in an int
+    internal const ulong DefaultDatabaseCacheSize   = 256UL * 1024 * 1024;                          // 256 MiB — the shipped production default
+    internal const ulong RecommendedMinimumCacheSize = 64UL * 1024 * 1024;                          // 64 MiB — warn below this (unless TestMode)
     internal const int WriteCachePageSize       = 1024 * 1024;
 
     #endregion
@@ -2767,8 +2784,9 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
 
         var memPageBaseAddr = _memPagesAddr;
 
-        // We want to generate as few IO operations as possible, so we sort the pages to identify the ones that are contiguous in the file
-        Array.Sort(memPageIndices, (x, y) => x - y);
+        // We want to generate as few IO operations as possible, so we sort the pages to identify the ones that are contiguous in the file. The bare
+        // overload: a comparison lambda, even a static one, routes Array.Sort through the delegate path instead of the primitive int one.
+        Array.Sort(memPageIndices);
 
         // Sample each page's writeback generation BEFORE anything is written, and publish these exact values once the fsync
         // below has made the bytes durable. Same contract as the checkpoint's capture, same reason: a modification landing

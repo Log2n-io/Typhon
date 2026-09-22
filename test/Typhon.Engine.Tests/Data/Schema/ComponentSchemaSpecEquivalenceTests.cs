@@ -48,7 +48,7 @@ class ComponentSchemaSpecEquivalenceTests
         public long ParentLink;
 
         [Field]
-        [SpatialIndex(2.0f, cellSize: 4.0f, Mode = SpatialMode.Static, Category = 7)]
+        [SpatialIndex(cellSize: 4.0f, Mode = SpatialMode.Static, Category = 7)]
         public AABB2F Bounds;
     }
 
@@ -150,7 +150,6 @@ class ComponentSchemaSpecEquivalenceTests
                 Assert.That(gf.ForeignKeyTargetType, Is.EqualTo(rf.ForeignKeyTargetType), $"{kvp.Key}.ForeignKeyTargetType");
                 Assert.That(gf.HasSpatialIndex, Is.EqualTo(rf.HasSpatialIndex), $"{kvp.Key}.HasSpatialIndex");
                 Assert.That(gf.SpatialFieldType, Is.EqualTo(rf.SpatialFieldType), $"{kvp.Key}.SpatialFieldType");
-                Assert.That(gf.SpatialMargin, Is.EqualTo(rf.SpatialMargin), $"{kvp.Key}.SpatialMargin");
                 Assert.That(gf.SpatialCellSize, Is.EqualTo(rf.SpatialCellSize), $"{kvp.Key}.SpatialCellSize");
                 Assert.That(gf.SpatialMode, Is.EqualTo(rf.SpatialMode), $"{kvp.Key}.SpatialMode");
                 Assert.That(gf.SpatialCategory, Is.EqualTo(rf.SpatialCategory), $"{kvp.Key}.SpatialCategory");

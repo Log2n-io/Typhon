@@ -324,29 +324,25 @@ internal static class BootstrapReader
                 value = BootstrapDictionary.Value.FromBool(stream[pos++] != 0);
                 return true;
 
+            // Int7/Int8 are labelled separately because their tags are NOT contiguous with Int1..Int6 — see BootstrapDictionary.ValueType.
             case >= BootstrapDictionary.ValueType.Int1 and <= BootstrapDictionary.ValueType.Int6:
-                var count = (byte)type - (byte)BootstrapDictionary.ValueType.Int1 + 1;
+            case BootstrapDictionary.ValueType.Int7:
+            case BootstrapDictionary.ValueType.Int8:
+            case BootstrapDictionary.ValueType.Int16:
+                var count = BootstrapDictionary.IntCountOf(type);
                 if (pos + (count * 4) > end)
                 {
                     return false;
                 }
 
-                Span<int> ints = stackalloc int[6];
+                Span<int> ints = stackalloc int[16];   // the widest int-vector type, Int16 (#914) — was 8 when Int8 was the cap
                 for (var i = 0; i < count; i++)
                 {
                     ints[i] = MemoryMarshal.Read<int>(stream[(pos + (i * 4))..]);
                 }
 
                 pos += count * 4;
-                value = count switch
-                {
-                    1 => BootstrapDictionary.Value.FromInt(ints[0]),
-                    2 => BootstrapDictionary.Value.FromInt2(ints[0], ints[1]),
-                    3 => BootstrapDictionary.Value.FromInt3(ints[0], ints[1], ints[2]),
-                    4 => BootstrapDictionary.Value.FromInt4(ints[0], ints[1], ints[2], ints[3]),
-                    5 => BootstrapDictionary.Value.FromInt5(ints[0], ints[1], ints[2], ints[3], ints[4]),
-                    _ => BootstrapDictionary.Value.FromInt6(ints[0], ints[1], ints[2], ints[3], ints[4], ints[5])
-                };
+                value = BootstrapDictionary.Value.FromInts(ints[..count]);
                 return true;
 
             case BootstrapDictionary.ValueType.Long:

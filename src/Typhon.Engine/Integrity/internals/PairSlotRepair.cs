@@ -46,7 +46,7 @@ internal static class PairSlotRepair
         // Stamp the copy as the newer generation so pair selection picks it, exactly as an ordinary write would have.
         var generation = PageImage.PairGeneration(siblingImage) + 1;
         PageBaseHeader.WritePairGeneration(siblingImage, generation);
-        PagedMMF.StampPageForWrite(siblingImage, LogicalIndexOf(damagedPageIndex, sibling, siblingImage), allowSectorFooter: false);
+        PagedMMF.StampPageForWrite(siblingImage, LogicalIndexOf(damagedPageIndex, sibling, siblingImage), false);
 
         RandomAccess.Write(handle, siblingImage, damagedPageIndex * (long)IntegrityConstants.PageSize);
         RandomAccess.FlushToDisk(handle);

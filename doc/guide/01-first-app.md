@@ -40,7 +40,7 @@ using var dbe = DatabaseEngine.Open("world-shard.typhon", o => o
     .Register<Faction>()
     .Register<Wallet>()
     .Register<Intent>()
-    .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
+    .ConfigureSpatialGrid(SpatialGridConfig.Flat(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f)));
 
 // ── 4. Spawn an entity (a write — needs a transaction) ─────────────────
 EntityId scout;
@@ -98,7 +98,7 @@ namespace ShardGuide
     [Component("Shard.Bounds", 1, StorageMode = StorageMode.SingleVersion)]
     public struct Bounds
     {
-        [SpatialIndex(2f, Mode = SpatialMode.Dynamic)] public AABB2F Box;
+        [SpatialIndex(Mode = SpatialMode.Dynamic)] public AABB2F Box;
     }
 
     // HAM — three parallel pools (Health / Action / Mind), drained by exertion, regenerated over time.
@@ -195,7 +195,7 @@ Note that one archetype freely **mixes storage modes** — `Character` has all t
 > using var dbe = DatabaseEngine.Open("world-shard.typhon", o => o
 >     .Register<Transform>().Register<Bounds>().Register<Ham>()
 >     .Register<Faction>().Register<Wallet>().Register<Intent>()
->     .ConfigureSpatialGrid(new SpatialGridConfig(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f))
+>     .ConfigureSpatialGrid(SpatialGridConfig.Flat(Vector2.Zero, new Vector2(1000f, 1000f), cellSize: 50f))
 >     .Seed(1, tx => tx.Spawn<Character>(
 >         Character.Transform.Set(new Transform { Pos = new Point2F { X = 10f, Y = 20f } }),
 >         Character.Bounds.Set(new Bounds { Box = new AABB2F { MinX = 10f, MaxX = 10f, MinY = 20f, MaxY = 20f } }),

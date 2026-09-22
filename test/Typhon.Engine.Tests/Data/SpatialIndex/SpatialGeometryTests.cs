@@ -81,19 +81,6 @@ public class SpatialGeometryTests
         Assert.That(SpatialGeometry.Contains(a, b), Is.False);
     }
 
-    // ── AABB2F Enlarge ──────────────────────────────────────────────────────
-
-    [Test]
-    public void Enlarge_AABB2F_AddsMarginUniformly()
-    {
-        var box = new AABB2F { MinX = 10, MinY = 20, MaxX = 30, MaxY = 40 };
-        var enlarged = SpatialGeometry.Enlarge(box, 5f);
-        Assert.That(enlarged.MinX, Is.EqualTo(5f), "MinX - margin");
-        Assert.That(enlarged.MinY, Is.EqualTo(15f), "MinY - margin");
-        Assert.That(enlarged.MaxX, Is.EqualTo(35f), "MaxX + margin");
-        Assert.That(enlarged.MaxY, Is.EqualTo(45f), "MaxY + margin");
-    }
-
     // ── AABB2F Union ────────────────────────────────────────────────────────
 
     [Test]

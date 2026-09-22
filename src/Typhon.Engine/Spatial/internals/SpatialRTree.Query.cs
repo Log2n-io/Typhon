@@ -2,38 +2,25 @@ using System;
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Numerics;
+using System.Runtime.Intrinsics;
 using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace Typhon.Engine.Internals;
 
-/// <summary>AABB query result: the EntityId and ComponentChunkId of an entity whose fat AABB overlaps the query box.
-/// ComponentChunkId enables direct CBS access for two-pass compound queries without an EntityMap lookup.</summary>
+/// <summary>The identity of one entry whose stored box satisfied a query.</summary>
 internal readonly struct SpatialQueryResult
 {
-    public readonly long EntityId;
-    public readonly int ComponentChunkId;
+    /// <summary>
+    /// The value the tree was given as the entry's identity. <b>Not necessarily an entity id</b> — the tree is generic over its payload, and #872 step 9 puts
+    /// CLUSTER chunk ids in it for the per-cell cluster trees. The field was called <c>EntityId</c> until then, which read as a type guarantee it never made
+    /// and cost a reviewer an hour concluding the cluster trees were indexing entities.
+    /// </summary>
+    public readonly long PayloadId;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public SpatialQueryResult(long entityId, int componentChunkId)
-    {
-        EntityId = entityId;
-        ComponentChunkId = componentChunkId;
-    }
-}
-
-/// <summary>Query result that includes both EntityId and ComponentChunkId. Used by trigger system to populate occupant bitmaps without a second lookup.</summary>
-internal readonly struct SpatialOccupantResult
-{
-    public readonly long EntityId;
-    public readonly int ComponentChunkId;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public SpatialOccupantResult(long entityId, int componentChunkId)
-    {
-        EntityId = entityId;
-        ComponentChunkId = componentChunkId;
-    }
+    public SpatialQueryResult(long payloadId) => PayloadId = payloadId;
 }
 
 /// <summary>Stack buffer for DFS traversal of the R-Tree during AABB queries.</summary>
@@ -54,8 +41,33 @@ internal unsafe partial class SpatialRTree<TStore>
     /// <param name="categoryMask">
     /// Category bitmask; when non-zero, only entities whose category mask contains all of these bits match. Pass <c>0</c> (default) to disable category filtering.
     /// </param>
-    internal AABBQueryEnumerator QueryAABB(ReadOnlySpan<double> queryCoords, ChangeSet changeSet = null, uint categoryMask = 0)
+    /// <remarks>
+    /// <paramref name="queryCoords"/> is <c>scoped</c>: the enumerator copies it into its own inline buffer and never retains the caller's memory. Saying so
+    /// is what lets a caller pass a <c>stackalloc</c> span and then hold the enumerator — which the full-extent walk in <c>CellClusterTree</c> needs, and which
+    /// ref-safety otherwise refuses on the assumption that the span escapes.
+    /// </remarks>
+    internal AABBQueryEnumerator QueryAABB(scoped ReadOnlySpan<double> queryCoords, ChangeSet changeSet = null, uint categoryMask = 0)
         => new(this, queryCoords, changeSet, categoryMask);
+
+    /// <summary>
+    /// An AABB query that borrows the caller's accessor instead of creating one.
+    /// </summary>
+    /// <remarks>
+    /// The accessor must outlive the returned enumerator — normally it is a local in the scope containing the <c>foreach</c>,
+    /// and ref-safety analysis enforces it. Reusing one across many queries is what keeps its page window warm; see
+    /// <c>AABBQueryEnumerator._borrowed</c>.
+    /// </remarks>
+    internal AABBQueryEnumerator QueryAABBWith(scoped ReadOnlySpan<double> queryCoords, ref ChunkAccessor<TStore> accessor, uint categoryMask = 0)
+        => new(this, queryCoords, ref accessor, categoryMask);
+
+    /// <summary>An AABB query stated in f32, the width every caller of a cell cluster tree already holds.</summary>
+    internal AABBQueryEnumerator QueryAABBF32(float minX, float minY, float minZ, float maxX, float maxY, float maxZ, uint categoryMask)
+        => new(this, minX, minY, minZ, maxX, maxY, maxZ, categoryMask, ref Unsafe.NullRef<ChunkAccessor<TStore>>());
+
+    /// <inheritdoc cref="QueryAABBF32"/>
+    internal AABBQueryEnumerator QueryAABBF32With(float minX, float minY, float minZ, float maxX, float maxY, float maxZ, uint categoryMask,
+        ref ChunkAccessor<TStore> accessor)
+        => new(this, minX, minY, minZ, maxX, maxY, maxZ, categoryMask, ref accessor);
 
     /// <summary>
     /// Ref struct enumerator for AABB overlap queries. Uses stack-based DFS with OLC read validation per node. Zero heap allocations.
@@ -64,6 +76,21 @@ internal unsafe partial class SpatialRTree<TStore>
     {
         private readonly SpatialRTree<TStore> _tree;
         private ChunkAccessor<TStore> _accessor;
+
+        /// <summary>
+        /// The caller's accessor when it lent one; a null ref when <see cref="_accessor"/> is ours to create and dispose.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>Why this exists.</b> An accessor created per query starts with an empty 32-slot page window, so the first
+        /// <c>GetChunkAddress</c> of every query takes the eviction-and-load slow path — measured as exactly one
+        /// <c>LoadAndGet → FindEvictionSlot → EvictSlot → LoadIntoSlot → RequestPageEpoch</c> chain per query, ~21% of a small
+        /// query's time. The B+Tree never pays it: its read path takes the caller's accessor
+        /// (<c>BTree.TryGet(TKey, ref ChunkAccessor{TStore})</c>) and its write paths rent a thread-local warm one.</para>
+        /// <para>A <c>ref</c> field rather than a pointer because <see cref="ChunkAccessor{TStore}"/> holds managed references
+        /// and so cannot be pointed at (CS8500). Ref-safety analysis then guarantees what the pointer form could only promise:
+        /// the compiler will not let the enumerator outlive the accessor it borrowed.</para>
+        /// </remarks>
+        private readonly ref ChunkAccessor<TStore> _borrowed;
         private readonly SpatialNodeDescriptor _desc;
 
         // Query bounds stored inline (max 6 doubles for 3D)
@@ -71,12 +98,87 @@ internal unsafe partial class SpatialRTree<TStore>
         private readonly int _coordCount;
         private readonly uint _categoryMask;
 
-        // DFS stack of chunk IDs to visit
-        private QueryStackBuffer _stack;
+        /// <summary>
+        /// DFS stack of chunk ids to visit — a buffer borrowed from <see cref="QueryStackPool"/>, <c>null</c> until this enumerator first descends a tree.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>Why it is rented lazily rather than in the constructor, which is the whole reason this is safe.</b> <see cref="GetEnumerator"/> returns
+        /// <c>this</c> — a COPY. A constructor-time rent would put the same array on both the copy and the original, and a caller writing
+        /// <c>using var e = tree.QueryAABB(…);</c> and then <c>foreach (… in e)</c> disposes both, returning one buffer twice and handing it to two live
+        /// enumerators. Renting on the first stack write instead means the discarded original owns nothing, and only the instance that actually iterates
+        /// ever holds a buffer. <see cref="QueryStackPool.Return"/> guards the same case a second time; this is what makes it unreachable.</para>
+        /// <para>Two live enumerators on one thread therefore hold two distinct arrays, which is what lets nested queries stay correct — see
+        /// <see cref="QueryStackPool"/>.</para>
+        /// </remarks>
+        private int[] _stack;
         private int _stackTop;
+
+        /// <summary>Proof that this instance, and not a copy of it, owns <see cref="_stack"/> — see <c>QueryStackPool.TokenSlot</c>.</summary>
+        private int _stackToken;
+
+        /// <summary>
+        /// The root to seed the stack with on first descent, or <c>0</c> for an empty tree or a stack already seeded.
+        /// </summary>
+        /// <remarks>
+        /// The constructor used to push the root directly. It cannot any more without renting, so it records the root here and the first pass through the
+        /// DFS loop does the push — see <see cref="_stack"/>.
+        /// </remarks>
+        private int _pendingRootChunkId;
 
         // Current leaf iteration
         private int _currentLeafChunkId;
+
+        /// <summary>The current leaf's chunk address, resolved once when the leaf is entered — see the resume loop in <see cref="MoveNext"/>.</summary>
+        private byte* _currentLeafBase;
+
+        /// <summary>The query box contains this leaf's MBR, so every entry in it matches and the per-entry overlap test is redundant.</summary>
+        private bool _currentLeafFullyContained;
+
+        // ── The f32 fast path ───────────────────────────────────────────────────────────────────────────────────
+        //
+        // Entries are stored f32 and the query box is held f64, so the scalar test widens six coordinates per entry and
+        // branches on desc.CoordSize to decide how to read each one. SpatialNodeDescriptor's own doc claims its readonly
+        // fields "are treated as constants after inlining" — that is only true of STATIC readonly fields; these arrive as a
+        // struct copied into the tree and again into this enumerator, so CoordSize is a real load and a real branch, six
+        // times per entry. Keeping a float copy of the box removes both, and makes the comparison native-width, which is
+        // what lets it vectorise at all: a node's coordinate arrays are already SoA, so all 13 MinX values are contiguous.
+        private readonly float _qMinXf;
+        private readonly float _qMinYf;
+        private readonly float _qMinZf;
+        private readonly float _qMaxXf;
+        private readonly float _qMaxYf;
+        private readonly float _qMaxZf;
+
+        /// <summary>3D f32 variant — the only one the cell cluster trees use, and the only one the vector path handles.</summary>
+        private readonly bool _f32x3D;
+
+        /// <summary>
+        /// The float box came straight from the caller and the f64 <see cref="_queryCoords"/> array was never filled.
+        /// </summary>
+        /// <remarks>
+        /// Callers hand this tree an f32 box; routing it through f64 and back cost eleven calls and ~9% of a small query's
+        /// time — <c>QueryToCoords</c>'s two local functions, four <c>IsNaN</c> tests, two infinity tests and the outward
+        /// re-rounding, none of which the vector path consumes. When the vector path is handling both leaves and internal
+        /// nodes the f64 array has no reader at all, so it is not built. If either vector gate is off, the scalar test needs
+        /// it, and the constructor fills it — hence the flag rather than an unconditional skip.
+        /// </remarks>
+        private readonly bool _floatBoxIsAuthoritative;
+
+        /// <summary>
+        /// Is the vectorised leaf scan usable here? 3D f32 only, and only while leaf capacity fits the mask.
+        /// </summary>
+        /// <remarks>
+        /// A field, not a property: it is constant for the life of a query, and as a property it re-read two statics and a
+        /// descriptor field on every node of the descent. The capacity bound is the honest limit of a <see cref="uint"/>
+        /// mask — R3Df32 gives 13 at the shipped 512-byte stride, and a larger stride would raise it.
+        /// </remarks>
+        private readonly bool _useMask;
+
+        /// <inheritdoc cref="_useMask"/>
+        private readonly bool _useInternalMask;
+
+        /// <summary>Bit i set = entry i of the current leaf matched. Fits a uint because leaf capacity is 13 (32 is asserted below).</summary>
+        private uint _leafMatchMask;
         private int _currentLeafIndex;
         private int _currentLeafCount;
 
@@ -86,14 +188,30 @@ internal unsafe partial class SpatialRTree<TStore>
         // Phase 3: Spatial:Query:Aabb span (Tier-2 gated). ResultCount/RestartCount filled during enumeration.
         private SpatialQueryAabbEvent _span;
 
-        internal AABBQueryEnumerator(SpatialRTree<TStore> tree, ReadOnlySpan<double> queryCoords, ChangeSet changeSet, uint categoryMask = 0)
+        internal AABBQueryEnumerator(SpatialRTree<TStore> tree, scoped ReadOnlySpan<double> queryCoords, ChangeSet changeSet, uint categoryMask = 0)
+            : this(tree, queryCoords, changeSet, categoryMask, ref Unsafe.NullRef<ChunkAccessor<TStore>>())
+        {
+        }
+
+        /// <summary>Construct over an accessor the CALLER owns. See <see cref="_borrowed"/> for why this exists.</summary>
+        internal AABBQueryEnumerator(SpatialRTree<TStore> tree, scoped ReadOnlySpan<double> queryCoords, ref ChunkAccessor<TStore> accessor,
+            uint categoryMask)
+            : this(tree, queryCoords, null, categoryMask, ref accessor)
+        {
+        }
+
+        private AABBQueryEnumerator(SpatialRTree<TStore> tree, scoped ReadOnlySpan<double> queryCoords, ChangeSet changeSet, uint categoryMask,
+            ref ChunkAccessor<TStore> borrowed)
         {
             _tree = tree;
             _desc = tree._desc;
             _coordCount = _desc.CoordCount;
-            _accessor = tree._segment.CreateChunkAccessor(changeSet);
+            _borrowed = ref borrowed;
+            _accessor = Unsafe.IsNullRef(ref borrowed) ? tree._segment.CreateChunkAccessor(changeSet) : default;
             _stackTop = 0;
             _currentLeafChunkId = 0;
+            _currentLeafBase = null;
+            _currentLeafFullyContained = false;
             _currentLeafIndex = -1;
             _currentLeafCount = 0;
             _current = default;
@@ -106,22 +224,288 @@ internal unsafe partial class SpatialRTree<TStore>
                 _queryCoords[i] = queryCoords[i];
             }
 
-            // Push root
-            if (tree._rootChunkId != 0)
+            _floatBoxIsAuthoritative = false;
+
+            // Root recorded, not pushed — the stack is rented on first descent. See _stack.
+            _stack = null;
+            _stackToken = 0;
+            _pendingRootChunkId = tree._rootChunkId;
+
+            // Gated on the span's OWN flag, which is a generated `static readonly bool` — so with the profiler off the JIT drops the
+            // call, the interceptor behind it and the struct it would have returned. Begun unconditionally this cost ~40 ns on every
+            // query, measured by A/B; the six counter bumps below were already gated on this same flag, so nothing else changes.
+            // Rounded OUTWARD. A double that lands between two floats must widen the box, never narrow it: narrowing drops a
+            // cluster grazing the query edge, which SQ-01 counts as a false negative however small the margin.
+            _f32x3D = _desc.CoordSize == 4 && _coordCount == 6;
+            _useMask = SpatialQueryTuning.SimdLeafScan && _f32x3D && _desc.LeafCapacity <= 32;
+            _useInternalMask = SpatialQueryTuning.SimdInternalScan && _f32x3D && _desc.InternalCapacity <= 32;
+            _qMinXf = Down(_queryCoords[0]);
+            _qMinYf = Down(_queryCoords[1]);
+            _qMinZf = Down(_queryCoords[2]);
+            _qMaxXf = Up(_queryCoords[3]);
+            _qMaxYf = Up(_queryCoords[4]);
+            _qMaxZf = Up(_queryCoords[5]);
+            _leafMatchMask = 0;
+
+            _span = SpatialQueryTuning.GateQuerySpan && !TelemetryConfig.SpatialQueryAabbActive
+                ? default
+                : TyphonEvent.BeginSpatialQueryAabb(categoryMask);
+        }
+
+        /// <summary>
+        /// Construct from an f32 query box, which is what every caller of a cell cluster tree actually holds.
+        /// </summary>
+        /// <remarks>
+        /// <para><b>The f64 coordinate array is not built when nothing will read it.</b> With both vector paths active the
+        /// scalar overlap tests are unreachable, so <see cref="_queryCoords"/> has no reader; filling it meant widening six
+        /// floats, clamping each against the tree's full extent, and rounding the result back outward — eleven calls and
+        /// ~9% of a small query, measured, to produce a value nothing consumed. If either vector gate is off the scalar
+        /// path needs it and it is filled, which is what <see cref="_floatBoxIsAuthoritative"/> records.</para>
+        /// <para><b>Infinities are kept, not clamped.</b> The f64 path maps an open bound to ±1e30 because an infinite
+        /// coordinate poisons the node-MBR arithmetic it unions into; a query box is only ever COMPARED, never unioned, so
+        /// the float box can hold a true infinity and be exactly the "everything" bound it is meant to be. NaN is the one
+        /// value that must not pass through — it compares false on every axis and would silently answer nothing — so it
+        /// maps to the open bound on that side, matching what the f64 path does with it.</para>
+        /// </remarks>
+        internal AABBQueryEnumerator(SpatialRTree<TStore> tree, float minX, float minY, float minZ, float maxX, float maxY, float maxZ,
+            uint categoryMask, ref ChunkAccessor<TStore> borrowed)
+        {
+            _tree = tree;
+            _desc = tree._desc;
+            _coordCount = _desc.CoordCount;
+            _borrowed = ref borrowed;
+            _accessor = Unsafe.IsNullRef(ref borrowed) ? tree._segment.CreateChunkAccessor(null) : default;
+            _stackTop = 0;
+            _currentLeafChunkId = 0;
+            _currentLeafBase = null;
+            _currentLeafFullyContained = false;
+            _currentLeafIndex = -1;
+            _currentLeafCount = 0;
+            _current = default;
+            _disposed = false;
+            _categoryMask = categoryMask;
+            _leafMatchMask = 0;
+
+            _f32x3D = _desc.CoordSize == 4 && _coordCount == 6;
+            _useMask = SpatialQueryTuning.SimdLeafScan && _f32x3D && _desc.LeafCapacity <= 32;
+            _useInternalMask = SpatialQueryTuning.SimdInternalScan && _f32x3D && _desc.InternalCapacity <= 32;
+
+            _qMinXf = float.IsNaN(minX) ? float.NegativeInfinity : minX;
+            _qMinYf = float.IsNaN(minY) ? float.NegativeInfinity : minY;
+            _qMinZf = float.IsNaN(minZ) ? float.NegativeInfinity : minZ;
+            _qMaxXf = float.IsNaN(maxX) ? float.PositiveInfinity : maxX;
+            _qMaxYf = float.IsNaN(maxY) ? float.PositiveInfinity : maxY;
+            _qMaxZf = float.IsNaN(maxZ) ? float.PositiveInfinity : maxZ;
+
+            _floatBoxIsAuthoritative = SpatialQueryTuning.DirectFloatBox && _useMask && _useInternalMask;
+            if (!_floatBoxIsAuthoritative)
             {
-                _stack[0] = tree._rootChunkId;
-                _stackTop = 1;
+                Span<double> coords = stackalloc double[6];
+                CellClusterTree.QueryToCoords(minX, minY, minZ, maxX, maxY, maxZ, coords);
+                for (int i = 0; i < 6; i++)
+                {
+                    _queryCoords[i] = coords[i];
+                }
             }
 
-            _span = TyphonEvent.BeginSpatialQueryAabb(categoryMask);
+            // Root recorded, not pushed — the stack is rented on first descent. See _stack.
+            _stack = null;
+            _stackToken = 0;
+            _pendingRootChunkId = tree._rootChunkId;
+
+            _span = SpatialQueryTuning.GateQuerySpan && !TelemetryConfig.SpatialQueryAabbActive
+                ? default
+                : TyphonEvent.BeginSpatialQueryAabb(categoryMask);
         }
 
         public SpatialQueryResult Current => _current;
 
         public AABBQueryEnumerator GetEnumerator() => this;
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static float Down(double v)
+        {
+            float f = (float)v;
+            return f > v ? MathF.BitDecrement(f) : f;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static float Up(double v)
+        {
+            float f = (float)v;
+            return f < v ? MathF.BitIncrement(f) : f;
+        }
+
+        /// <summary>
+        /// Test every entry of a 3D-f32 leaf at once, returning a bit per matching entry.
+        /// </summary>
+        /// <remarks>
+        /// Six compares over contiguous float arrays, ANDed into one mask — the shape the B+Tree's <c>CountLessThan</c> has
+        /// used since it was written, and which this tree's node layout has always permitted without anyone taking it. The
+        /// scalar tail exists because leaf capacity is 13, not a multiple of the vector width.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+        private uint MatchLeafF32(byte* nodeBase, int count)
+        {
+            float* minX = (float*)(nodeBase + _desc.LeafCoordOffsets);
+            float* minY = minX + _desc.LeafCapacity;
+            float* minZ = minY + _desc.LeafCapacity;
+            float* maxX = minZ + _desc.LeafCapacity;
+            float* maxY = maxX + _desc.LeafCapacity;
+            float* maxZ = maxY + _desc.LeafCapacity;
+
+            uint mask = 0;
+            int i = 0;
+            if (Vector256.IsHardwareAccelerated)
+            {
+                var qMinX = Vector256.Create(_qMinXf);
+                var qMinY = Vector256.Create(_qMinYf);
+                var qMinZ = Vector256.Create(_qMinZf);
+                var qMaxX = Vector256.Create(_qMaxXf);
+                var qMaxY = Vector256.Create(_qMaxYf);
+                var qMaxZ = Vector256.Create(_qMaxZf);
+                for (; i + 8 <= count; i += 8)
+                {
+                    var m = Vector256.GreaterThanOrEqual(Vector256.Load(maxX + i), qMinX)
+                        & Vector256.LessThanOrEqual(Vector256.Load(minX + i), qMaxX)
+                        & Vector256.GreaterThanOrEqual(Vector256.Load(maxY + i), qMinY)
+                        & Vector256.LessThanOrEqual(Vector256.Load(minY + i), qMaxY)
+                        & Vector256.GreaterThanOrEqual(Vector256.Load(maxZ + i), qMinZ)
+                        & Vector256.LessThanOrEqual(Vector256.Load(minZ + i), qMaxZ);
+                    mask |= m.ExtractMostSignificantBits() << i;
+                }
+            }
+
+            if (Vector128.IsHardwareAccelerated)
+            {
+                var qMinX = Vector128.Create(_qMinXf);
+                var qMinY = Vector128.Create(_qMinYf);
+                var qMinZ = Vector128.Create(_qMinZf);
+                var qMaxX = Vector128.Create(_qMaxXf);
+                var qMaxY = Vector128.Create(_qMaxYf);
+                var qMaxZ = Vector128.Create(_qMaxZf);
+                for (; i + 4 <= count; i += 4)
+                {
+                    var m = Vector128.GreaterThanOrEqual(Vector128.Load(maxX + i), qMinX)
+                        & Vector128.LessThanOrEqual(Vector128.Load(minX + i), qMaxX)
+                        & Vector128.GreaterThanOrEqual(Vector128.Load(maxY + i), qMinY)
+                        & Vector128.LessThanOrEqual(Vector128.Load(minY + i), qMaxY)
+                        & Vector128.GreaterThanOrEqual(Vector128.Load(maxZ + i), qMinZ)
+                        & Vector128.LessThanOrEqual(Vector128.Load(minZ + i), qMaxZ);
+                    mask |= m.ExtractMostSignificantBits() << i;
+                }
+            }
+
+            for (; i < count; i++)
+            {
+                if (maxX[i] >= _qMinXf && minX[i] <= _qMaxXf
+                    && maxY[i] >= _qMinYf && minY[i] <= _qMaxYf
+                    && maxZ[i] >= _qMinZf && minZ[i] <= _qMaxZf)
+                {
+                    mask |= 1u << i;
+                }
+            }
+
+            return mask;
+        }
+
+        /// <summary>
+        /// Classify every child of a 3D-f32 internal node at once: which overlap the query box, and which it contains outright.
+        /// </summary>
+        /// <remarks>
+        /// The leaf scan alone left half the box work scalar — at 512 clusters and a 2% query box the traversal ran 30 internal
+        /// tests against 32 leaf tests. Internal entries are SoA on the same layout as leaf entries, so the same six compares
+        /// apply; containment costs one extra pair per axis over the same loaded vectors, which is why both masks come out of
+        /// one pass rather than two.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining | MethodImplOptions.AggressiveOptimization)]
+        private void MatchInternalF32(byte* nodeBase, int count, out uint overlaps, out uint contains)
+        {
+            float* minX = (float*)(nodeBase + _desc.HeaderSize);
+            float* minY = minX + _desc.InternalCapacity;
+            float* minZ = minY + _desc.InternalCapacity;
+            float* maxX = minZ + _desc.InternalCapacity;
+            float* maxY = maxX + _desc.InternalCapacity;
+            float* maxZ = maxY + _desc.InternalCapacity;
+
+            uint ov = 0;
+            uint ct = 0;
+            int i = 0;
+            if (Vector256.IsHardwareAccelerated)
+            {
+                var qMinX = Vector256.Create(_qMinXf);
+                var qMinY = Vector256.Create(_qMinYf);
+                var qMinZ = Vector256.Create(_qMinZf);
+                var qMaxX = Vector256.Create(_qMaxXf);
+                var qMaxY = Vector256.Create(_qMaxYf);
+                var qMaxZ = Vector256.Create(_qMaxZf);
+                for (; i + 8 <= count; i += 8)
+                {
+                    var loX = Vector256.Load(minX + i);
+                    var loY = Vector256.Load(minY + i);
+                    var loZ = Vector256.Load(minZ + i);
+                    var hiX = Vector256.Load(maxX + i);
+                    var hiY = Vector256.Load(maxY + i);
+                    var hiZ = Vector256.Load(maxZ + i);
+
+                    var o = Vector256.GreaterThanOrEqual(hiX, qMinX) & Vector256.LessThanOrEqual(loX, qMaxX)
+                        & Vector256.GreaterThanOrEqual(hiY, qMinY) & Vector256.LessThanOrEqual(loY, qMaxY)
+                        & Vector256.GreaterThanOrEqual(hiZ, qMinZ) & Vector256.LessThanOrEqual(loZ, qMaxZ);
+                    var c = Vector256.GreaterThanOrEqual(loX, qMinX) & Vector256.LessThanOrEqual(hiX, qMaxX)
+                        & Vector256.GreaterThanOrEqual(loY, qMinY) & Vector256.LessThanOrEqual(hiY, qMaxY)
+                        & Vector256.GreaterThanOrEqual(loZ, qMinZ) & Vector256.LessThanOrEqual(hiZ, qMaxZ);
+                    ov |= o.ExtractMostSignificantBits() << i;
+                    ct |= c.ExtractMostSignificantBits() << i;
+                }
+            }
+
+            for (; i < count; i++)
+            {
+                float loX = minX[i], loY = minY[i], loZ = minZ[i];
+                float hiX = maxX[i], hiY = maxY[i], hiZ = maxZ[i];
+                if (hiX >= _qMinXf && loX <= _qMaxXf && hiY >= _qMinYf && loY <= _qMaxYf && hiZ >= _qMinZf && loZ <= _qMaxZf)
+                {
+                    ov |= 1u << i;
+                    if (loX >= _qMinXf && hiX <= _qMaxXf && loY >= _qMinYf && hiY <= _qMaxYf && loZ >= _qMinZf && hiZ <= _qMaxZf)
+                    {
+                        ct |= 1u << i;
+                    }
+                }
+            }
+
+            overlaps = ov;
+            contains = ov & ct;
+        }
+
         public bool MoveNext()
         {
+            // Mask-driven leaf scan: the whole leaf was tested when it was entered, so this pops matches off a bitmask and
+            // never touches a coordinate again.
+            while (_currentLeafChunkId != 0 && _useMask)
+            {
+                if (_leafMatchMask == 0)
+                {
+                    _currentLeafChunkId = 0;
+                    break;
+                }
+
+                int idx = BitOperations.TrailingZeroCount(_leafMatchMask);
+                _leafMatchMask &= _leafMatchMask - 1;
+                if (_categoryMask != 0
+                    && (SpatialNodeHelper.ReadLeafCategoryMask(_currentLeafBase, idx, _desc) & _categoryMask) != _categoryMask)
+                {
+                    continue;
+                }
+
+                _current = new SpatialQueryResult(SpatialNodeHelper.ReadLeafEntityId(_currentLeafBase, idx, _desc));
+                if (TelemetryConfig.SpatialQueryAabbActive && _span.ResultCount < ushort.MaxValue)
+                {
+                    _span.ResultCount++;
+                }
+
+                return true;
+            }
+
             // Resume leaf scan if in progress
             while (_currentLeafChunkId != 0)
             {
@@ -132,16 +516,17 @@ internal unsafe partial class SpatialRTree<TStore>
                     break;
                 }
 
-                byte* leafBase = _accessor.GetChunkAddress(_currentLeafChunkId);
-                if (LeafEntryOverlapsQuery(leafBase, _currentLeafIndex))
+                // Resolved when the leaf was entered, not here. Nothing between two MoveNext calls touches this accessor, so the address
+                // cannot move under us; CountInAABB in this same file has always held it across its leaf scan. Re-resolving per entry cost
+                // one GetChunkAddress per ENTRY — 5 per query against 1 node on a 4-cluster cell, measured by trace.
+                byte* leafBase = SpatialQueryTuning.HoistLeafBase ? _currentLeafBase : ChunkAddress(_currentLeafChunkId);
+                if (_currentLeafFullyContained || LeafEntryOverlapsQuery(leafBase, _currentLeafIndex))
                 {
                     if (_categoryMask != 0 && (SpatialNodeHelper.ReadLeafCategoryMask(leafBase, _currentLeafIndex, _desc) & _categoryMask) != _categoryMask)
                     {
                         continue;
                     }
-                    _current = new SpatialQueryResult(
-                        SpatialNodeHelper.ReadLeafEntityId(leafBase, _currentLeafIndex, _desc),
-                        SpatialNodeHelper.ReadLeafCompChunkId(leafBase, _currentLeafIndex, _desc));
+                    _current = new SpatialQueryResult(SpatialNodeHelper.ReadLeafEntityId(leafBase, _currentLeafIndex, _desc));
                     if (TelemetryConfig.SpatialQueryAabbActive && _span.ResultCount < ushort.MaxValue)
                     {
                         _span.ResultCount++;
@@ -151,11 +536,26 @@ internal unsafe partial class SpatialRTree<TStore>
                 }
             }
 
+            // First descent: take a traversal stack and seed it with the root. Every earlier return path in this method needs a leaf this loop has already
+            // entered, so nothing above can run before this — and a query that finds no candidate cell never reaches here and never rents at all, which is
+            // what keeps the empty-query path free of the tree entirely.
+            if (_pendingRootChunkId != 0)
+            {
+                _stack = QueryStackPool.Rent(out _stackToken);
+                _stack[0] = _pendingRootChunkId;
+                _stackTop = 1;
+                _pendingRootChunkId = 0;
+            }
+
             // DFS traversal
             while (_stackTop > 0)
             {
-                int chunkId = _stack[--_stackTop];
-                byte* nodeBase = _accessor.GetChunkAddress(chunkId);
+                // Sign-bit encoding, exactly as CountInAABB does it: bit 31 marks a subtree the query box fully contains, so every
+                // descendant matches and no overlap test under it can fail. Safe because chunk ids are small positive ints.
+                int raw = _stack[--_stackTop];
+                bool fullyContained = (raw & FullyContainedFlag) != 0;
+                int chunkId = raw & ~FullyContainedFlag;
+                byte* nodeBase = ChunkAddress(chunkId);
 
                 var latch = GetLatch(nodeBase);
                 int version = latch.ReadVersion();
@@ -195,8 +595,17 @@ internal unsafe partial class SpatialRTree<TStore>
                 {
                     // Start scanning this leaf
                     _currentLeafChunkId = chunkId;
+                    _currentLeafBase = nodeBase;
+                    _currentLeafFullyContained = fullyContained;
                     _currentLeafIndex = -1;
                     _currentLeafCount = count;
+                    if (_useMask)
+                    {
+                        // A contained leaf needs no test at all: every entry matches, so the mask is simply "all of them".
+                        _leafMatchMask = fullyContained
+                            ? (count >= 32 ? uint.MaxValue : (1u << count) - 1u)
+                            : MatchLeafF32(nodeBase, count);
+                    }
                     if (TelemetryConfig.SpatialQueryAabbActive && _span.LeavesEntered < ushort.MaxValue)
                     {
                         _span.LeavesEntered++;
@@ -205,20 +614,39 @@ internal unsafe partial class SpatialRTree<TStore>
                     return MoveNext(); // Re-enter to scan leaf entries
                 }
 
-                // Internal node: push overlapping children (reverse order for DFS)
-                for (int i = count - 1; i >= 0; i--)
+                // Internal node: push overlapping children (reverse order for DFS), each tagged with whether the query box
+                // contains it outright. A contained child's whole subtree is answered without another comparison.
+                if (_useInternalMask && !fullyContained)
                 {
-                    if (InternalEntryOverlapsQuery(nodeBase, i))
+                    // Descending index preserved: the DFS visits children in ascending order because they are pushed in
+                    // reverse, and the differential fixtures compare id SETS but the demotion rebuild reads this order.
+                    MatchInternalF32(nodeBase, count, out uint overlaps, out uint contains);
+                    for (int i = count - 1; i >= 0; i--)
                     {
-                        int childId = SpatialNodeHelper.ReadInternalChildId(nodeBase, i, _desc);
-                        if (_stackTop < 256)
+                        if ((overlaps & (1u << i)) == 0)
                         {
-                            _stack[_stackTop++] = childId;
+                            continue;
                         }
-                        else
+
+                        PushChild(
+                            SpatialNodeHelper.ReadInternalChildId(nodeBase, i, _desc),
+                            SpatialQueryTuning.FullyContained && (contains & (1u << i)) != 0);
+                    }
+                }
+                else
+                {
+                    for (int i = count - 1; i >= 0; i--)
+                    {
+                        if (fullyContained)
                         {
-                            // Tier-0 always-on record (#422): latch-safe — never throw here (we hold an OLC read latch).
-                            SpatialRTreeDiagnostics.RecordDfsStackOverflow("AABB");
+                            PushChild(SpatialNodeHelper.ReadInternalChildId(nodeBase, i, _desc), true);
+                            continue;
+                        }
+
+                        if (InternalEntryOverlapsQuery(nodeBase, i))
+                        {
+                            int childId = SpatialNodeHelper.ReadInternalChildId(nodeBase, i, _desc);
+                            PushChild(childId, SpatialQueryTuning.FullyContained && InternalEntryInsideQuery(nodeBase, i));
                         }
                     }
                 }
@@ -240,12 +668,64 @@ internal unsafe partial class SpatialRTree<TStore>
             return false;
         }
 
+        /// <summary>Bit 31 of a DFS stack entry: the query box contains this subtree entirely.</summary>
+        private const int FullyContainedFlag = unchecked((int)0x80000000);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void PushChild(int childId, bool contained)
+        {
+            if (_stackTop < QueryStackPool.Capacity)
+            {
+                _stack[_stackTop++] = contained ? childId | FullyContainedFlag : childId;
+            }
+            else
+            {
+                // Tier-0 always-on record (#422): latch-safe — never throw here (we hold an OLC read latch).
+                SpatialRTreeDiagnostics.RecordDfsStackOverflow("AABB");
+            }
+        }
+
+        /// <summary>Is this internal entry's box entirely INSIDE the query box? The containment counterpart of <see cref="InternalEntryOverlapsQuery"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private bool InternalEntryInsideQuery(byte* nodeBase, int index)
+        {
+            if (_coordCount == 4)
+            {
+                return SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 0, _desc) >= _queryCoords[0]
+                    && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 2, _desc) <= _queryCoords[2]
+                    && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 1, _desc) >= _queryCoords[1]
+                    && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 3, _desc) <= _queryCoords[3];
+            }
+
+            return SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 0, _desc) >= _queryCoords[0]
+                && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 3, _desc) <= _queryCoords[3]
+                && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 1, _desc) >= _queryCoords[1]
+                && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 4, _desc) <= _queryCoords[4]
+                && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 2, _desc) >= _queryCoords[2]
+                && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 5, _desc) <= _queryCoords[5];
+        }
+
+        /// <summary>Resolve a chunk through whichever accessor this enumerator is using.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [UnscopedRef]
+        private byte* ChunkAddress(int chunkId) =>
+            Unsafe.IsNullRef(ref _borrowed) ? _accessor.GetChunkAddress(chunkId) : _borrowed.GetChunkAddress(chunkId);
+
         private void RestartFromRoot()
         {
             _stackTop = 0;
             _currentLeafChunkId = 0;
+            _currentLeafBase = null;
+            _currentLeafFullyContained = false;
             if (_tree._rootChunkId != 0)
             {
+                // Only ever reached from inside the DFS loop, which rents before it runs — the null-coalesce is for the refactor that moves a caller, not for
+                // a path that exists today.
+                if (_stack == null)
+                {
+                    _stack = QueryStackPool.Rent(out _stackToken);
+                }
+
                 _stack[0] = _tree._rootChunkId;
                 _stackTop = 1;
             }
@@ -300,214 +780,20 @@ internal unsafe partial class SpatialRTree<TStore>
             if (!_disposed)
             {
                 _disposed = true;
+
+                // Nulled before it is handed back, so this instance can never name a buffer the pool has already re-issued. A query that never descended a
+                // tree rented nothing and returns nothing.
+                var stack = _stack;
+                var token = _stackToken;
+                _stack = null;
+                _stackToken = 0;
+                QueryStackPool.Return(stack, token);
+
                 _span.Dispose();
-                _accessor.Dispose();
-            }
-        }
-    }
-
-    // ── Occupant Query (EntityId + ComponentChunkId) ─────────────────────
-
-    /// <summary>
-    /// Query all entities whose fat AABB overlaps the given query box, returning both EntityId and ComponentChunkId per hit.
-    /// Used by the trigger system to populate occupant bitmaps indexed by componentChunkId without a second lookup.
-    /// </summary>
-    internal OccupantQueryEnumerator QueryAABBOccupants(ReadOnlySpan<double> queryCoords, ChangeSet changeSet = null, uint categoryMask = 0)
-        => new(this, queryCoords, changeSet, categoryMask);
-
-    /// <summary>
-    /// Ref struct enumerator identical to <see cref="AABBQueryEnumerator"/> except it yields <see cref="SpatialOccupantResult"/>
-    /// (EntityId + ComponentChunkId). The additional componentChunkId read is from an adjacent SOA array — same cache line.
-    /// </summary>
-    internal ref struct OccupantQueryEnumerator
-    {
-        private readonly SpatialRTree<TStore> _tree;
-        private ChunkAccessor<TStore> _accessor;
-        private readonly SpatialNodeDescriptor _desc;
-        private fixed double _queryCoords[6];
-        private readonly int _coordCount;
-        private readonly uint _categoryMask;
-        private QueryStackBuffer _stack;
-        private int _stackTop;
-        private int _currentLeafChunkId;
-        private int _currentLeafIndex;
-        private int _currentLeafCount;
-        private SpatialOccupantResult _current;
-        private bool _disposed;
-
-        internal OccupantQueryEnumerator(SpatialRTree<TStore> tree, ReadOnlySpan<double> queryCoords, ChangeSet changeSet, uint categoryMask = 0)
-        {
-            _tree = tree;
-            _desc = tree._desc;
-            _coordCount = _desc.CoordCount;
-            _accessor = tree._segment.CreateChunkAccessor(changeSet);
-            _stackTop = 0;
-            _currentLeafChunkId = 0;
-            _currentLeafIndex = -1;
-            _currentLeafCount = 0;
-            _current = default;
-            _disposed = false;
-            _categoryMask = categoryMask;
-
-            int len = Math.Min(queryCoords.Length, 6);
-            for (int i = 0; i < len; i++)
-            {
-                _queryCoords[i] = queryCoords[i];
-            }
-
-            if (tree._rootChunkId != 0)
-            {
-                _stack[0] = tree._rootChunkId;
-                _stackTop = 1;
-            }
-        }
-
-        public SpatialOccupantResult Current => _current;
-
-        public OccupantQueryEnumerator GetEnumerator() => this;
-
-        public bool MoveNext()
-        {
-            while (_currentLeafChunkId != 0)
-            {
-                _currentLeafIndex++;
-                if (_currentLeafIndex >= _currentLeafCount)
+                if (Unsafe.IsNullRef(ref _borrowed))
                 {
-                    _currentLeafChunkId = 0;
-                    break;
+                    _accessor.Dispose();   // a borrowed one belongs to the caller and outlives us
                 }
-
-                byte* leafBase = _accessor.GetChunkAddress(_currentLeafChunkId);
-                if (LeafEntryOverlapsQuery(leafBase, _currentLeafIndex))
-                {
-                    if (_categoryMask != 0
-                        && (SpatialNodeHelper.ReadLeafCategoryMask(leafBase, _currentLeafIndex, _desc) & _categoryMask) != _categoryMask)
-                    {
-                        continue;
-                    }
-                    _current = new SpatialOccupantResult(
-                        SpatialNodeHelper.ReadLeafEntityId(leafBase, _currentLeafIndex, _desc),
-                        SpatialNodeHelper.ReadLeafCompChunkId(leafBase, _currentLeafIndex, _desc));
-                    return true;
-                }
-            }
-
-            while (_stackTop > 0)
-            {
-                int chunkId = _stack[--_stackTop];
-                byte* nodeBase = _accessor.GetChunkAddress(chunkId);
-
-                var latch = GetLatch(nodeBase);
-                int version = latch.ReadVersion();
-                if (version == 0)
-                {
-                    RestartFromRoot();
-                    continue;
-                }
-
-                bool isLeaf = SpatialNodeHelper.IsLeaf(nodeBase);
-                int count = SpatialNodeHelper.GetCount(nodeBase);
-
-                if (!latch.ValidateVersion(version))
-                {
-                    RestartFromRoot();
-                    continue;
-                }
-
-                if (_categoryMask != 0 && (SpatialNodeHelper.ReadUnionCategoryMask(nodeBase, _desc) & _categoryMask) == 0)
-                {
-                    continue;
-                }
-
-                if (isLeaf)
-                {
-                    _currentLeafChunkId = chunkId;
-                    _currentLeafIndex = -1;
-                    _currentLeafCount = count;
-                    return MoveNext();
-                }
-
-                for (int i = count - 1; i >= 0; i--)
-                {
-                    if (InternalEntryOverlapsQuery(nodeBase, i))
-                    {
-                        int childId = SpatialNodeHelper.ReadInternalChildId(nodeBase, i, _desc);
-                        if (_stackTop < 256)
-                        {
-                            _stack[_stackTop++] = childId;
-                        }
-                        else
-                        {
-                            // Tier-0 always-on record (#422): latch-safe — never throw here (we hold an OLC read latch).
-                            SpatialRTreeDiagnostics.RecordDfsStackOverflow("occupant");
-                        }
-                    }
-                }
-
-                if (!latch.ValidateVersion(version))
-                {
-                    RestartFromRoot();
-                }
-            }
-
-            return false;
-        }
-
-        private void RestartFromRoot()
-        {
-            _stackTop = 0;
-            _currentLeafChunkId = 0;
-            if (_tree._rootChunkId != 0)
-            {
-                _stack[0] = _tree._rootChunkId;
-                _stackTop = 1;
-            }
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool LeafEntryOverlapsQuery(byte* nodeBase, int index)
-        {
-            if (_coordCount == 4)
-            {
-                return SpatialNodeHelper.ReadLeafCoord(nodeBase, index, 2, _desc) >= _queryCoords[0]
-                    && SpatialNodeHelper.ReadLeafCoord(nodeBase, index, 0, _desc) <= _queryCoords[2]
-                    && SpatialNodeHelper.ReadLeafCoord(nodeBase, index, 3, _desc) >= _queryCoords[1]
-                    && SpatialNodeHelper.ReadLeafCoord(nodeBase, index, 1, _desc) <= _queryCoords[3];
-            }
-
-            return SpatialNodeHelper.ReadLeafCoord(nodeBase, index, 3, _desc) >= _queryCoords[0]
-                && SpatialNodeHelper.ReadLeafCoord(nodeBase, index, 0, _desc) <= _queryCoords[3]
-                && SpatialNodeHelper.ReadLeafCoord(nodeBase, index, 4, _desc) >= _queryCoords[1]
-                && SpatialNodeHelper.ReadLeafCoord(nodeBase, index, 1, _desc) <= _queryCoords[4]
-                && SpatialNodeHelper.ReadLeafCoord(nodeBase, index, 5, _desc) >= _queryCoords[2]
-                && SpatialNodeHelper.ReadLeafCoord(nodeBase, index, 2, _desc) <= _queryCoords[5];
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool InternalEntryOverlapsQuery(byte* nodeBase, int index)
-        {
-            if (_coordCount == 4)
-            {
-                return SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 2, _desc) >= _queryCoords[0]
-                    && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 0, _desc) <= _queryCoords[2]
-                    && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 3, _desc) >= _queryCoords[1]
-                    && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 1, _desc) <= _queryCoords[3];
-            }
-
-            return SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 3, _desc) >= _queryCoords[0]
-                && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 0, _desc) <= _queryCoords[3]
-                && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 4, _desc) >= _queryCoords[1]
-                && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 1, _desc) <= _queryCoords[4]
-                && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 5, _desc) >= _queryCoords[2]
-                && SpatialNodeHelper.ReadInternalCoord(nodeBase, index, 2, _desc) <= _queryCoords[5];
-        }
-
-        public void Dispose()
-        {
-            if (!_disposed)
-            {
-                _disposed = true;
-                _accessor.Dispose();
             }
         }
     }
@@ -764,9 +1050,7 @@ internal unsafe partial class SpatialRTree<TStore>
                         {
                             continue;
                         }
-                        _current = new SpatialQueryResult(
-                            SpatialNodeHelper.ReadLeafEntityId(leafBase, _currentLeafIndex, _desc),
-                            SpatialNodeHelper.ReadLeafCompChunkId(leafBase, _currentLeafIndex, _desc));
+                        _current = new SpatialQueryResult(SpatialNodeHelper.ReadLeafEntityId(leafBase, _currentLeafIndex, _desc));
                         if (TelemetryConfig.SpatialQueryRayActive && _span.ResultCount < ushort.MaxValue)
                         {
                             _span.ResultCount++;
@@ -1059,9 +1343,7 @@ internal unsafe partial class SpatialRTree<TStore>
                         {
                             continue;
                         }
-                        _current = new SpatialQueryResult(
-                            SpatialNodeHelper.ReadLeafEntityId(leafBase, _currentLeafIndex, _desc),
-                            SpatialNodeHelper.ReadLeafCompChunkId(leafBase, _currentLeafIndex, _desc));
+                        _current = new SpatialQueryResult(SpatialNodeHelper.ReadLeafEntityId(leafBase, _currentLeafIndex, _desc));
                         if (TelemetryConfig.SpatialQueryFrustumActive && _span.ResultCount < ushort.MaxValue)
                         {
                             _span.ResultCount++;
@@ -1081,9 +1363,7 @@ internal unsafe partial class SpatialRTree<TStore>
                         {
                             continue;
                         }
-                        _current = new SpatialQueryResult(
-                            SpatialNodeHelper.ReadLeafEntityId(lb, _currentLeafIndex, _desc),
-                            SpatialNodeHelper.ReadLeafCompChunkId(lb, _currentLeafIndex, _desc));
+                        _current = new SpatialQueryResult(SpatialNodeHelper.ReadLeafEntityId(lb, _currentLeafIndex, _desc));
                         if (TelemetryConfig.SpatialQueryFrustumActive && _span.ResultCount < ushort.MaxValue)
                         {
                             _span.ResultCount++;
@@ -1234,7 +1514,7 @@ internal unsafe partial class SpatialRTree<TStore>
     /// component data (the tree stores fat AABBs, not tight bounds). Converges in 1–2 iterations for k &lt; 20.
     /// </summary>
     /// <returns>Number of results written (may be less than k if fewer entities exist).</returns>
-    internal int QueryKNN(ReadOnlySpan<double> center, int k, Span<(long entityId, double distSq)> results, ChangeSet changeSet = null, uint categoryMask = 0)
+    internal int QueryKNN(ReadOnlySpan<double> center, int k, Span<(long payloadId, double distSq)> results, ChangeSet changeSet = null, uint categoryMask = 0)
     {
         if (k <= 0 || _entityCount == 0)
         {
@@ -1281,7 +1561,7 @@ internal unsafe partial class SpatialRTree<TStore>
             // Iterative expansion — collect candidate entity IDs within expanding radius. distSq is set to 0 at the tree level because the tree stores fat
             // AABBs, not tight bounds. Callers must recompute actual distances from component data for precise ordering.
             int maxCandidates = Math.Min(k * 4, 256);
-            Span<(long entityId, double distSq)> candidates = stackalloc (long, double)[maxCandidates];
+            Span<(long payloadId, double distSq)> candidates = stackalloc (long, double)[maxCandidates];
             int lastCount = 0;
 
             for (int iteration = 0; iteration < 8; iteration++)
@@ -1293,7 +1573,7 @@ internal unsafe partial class SpatialRTree<TStore>
                     {
                         break;
                     }
-                    candidates[count++] = (result.EntityId, 0);
+                    candidates[count++] = (result.PayloadId, 0);
                 }
 
                 if (count >= k || count == lastCount || radius > 1e15)

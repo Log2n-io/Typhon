@@ -20,10 +20,22 @@ public sealed class EpochManager : ResourceNode, IMetricSource
     private long _globalEpoch;
     private readonly EpochThreadRegistry _registry;
 
+    /// <summary>
+    /// This engine's <c>EW-01</c> tick-fence exclusivity guard.
+    /// </summary>
+    /// <remarks>
+    /// It lives here because <see cref="EpochManager"/> is the one per-engine object that every structure the fence maintains already holds a reference to —
+    /// a B+Tree reaches it through its segment, and so does the EntityMap. The alternative, a process-wide static, would let one engine's fence indict
+    /// another engine's legal write under the parallel test fixtures. Nothing about epoch management is involved; this is scoping, and this is the object
+    /// whose scope is right.
+    /// </remarks>
+    internal ExclusiveWindow FenceWindow { get; }
+
     public EpochManager(string id, IResource parent) : base(id, ResourceType.Synchronization, parent)
     {
         _globalEpoch = 1; // Start at 1 so 0 means "no epoch" / "not pinned"
         _registry = new EpochThreadRegistry();
+        FenceWindow = new ExclusiveWindow();
     }
 
     /// <summary>Current global epoch value. Monotonically increasing.</summary>

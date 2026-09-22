@@ -48,9 +48,15 @@ public class PagedMMFOptions
     public const ulong DefaultCacheSizeBytes = PagedMMF.DefaultDatabaseCacheSize;
 
     /// <summary>
+    /// The maximum permitted <see cref="DatabaseCacheSize"/> in bytes: 2 GiB minus one page, the largest page multiple an <c>int</c> holds, because the
+    /// cache is one allocation whose size is an <c>int</c>. Values above this fail validation.
+    /// </summary>
+    public const ulong MaximumCacheSizeBytes = PagedMMF.MaximumCacheSize;
+
+    /// <summary>
     /// Page-cache size, in bytes. Must be a multiple of <see cref="PageSizeBytes"/>, at least <see cref="MinimumCacheSizeBytes"/>,
-    /// and at most 4 GiB. Default: <see cref="DefaultCacheSizeBytes"/> (256 MiB). The cache is a GCHandle-pinned byte array, so
-    /// size it for one primary engine per process; a workload whose transaction working set exceeds the cache hits
+    /// and at most <see cref="MaximumCacheSizeBytes"/> (2 GiB minus one page). Default: <see cref="DefaultCacheSizeBytes"/> (256 MiB).
+    /// The cache is one native allocation, so size it for one primary engine per process; a workload whose transaction working set exceeds the cache hits
     /// <see cref="PageCacheBackpressureTimeoutException"/>. Prefer the fluent <c>TyphonOptions.PageCacheSize(...)</c> to set it.
     /// </summary>
     public ulong DatabaseCacheSize { get; set; } = DefaultCacheSizeBytes;
@@ -125,7 +131,7 @@ public class PagedMMFOptions
             return;
         }
 
-        Directory.Delete(path, recursive: true);
+        Directory.Delete(path, true);
         var sw = new System.Diagnostics.Stopwatch();
         sw.Start();
         while (Directory.Exists(path) && sw.ElapsedMilliseconds < maxWaitMs)
@@ -190,9 +196,11 @@ public class PagedMMFOptions
             success = false;
         }
 
-        if (dcs > 0x100000000)
+        // The cache is one native allocation whose size travels as an int (IMemoryAllocator.AllocatePinned, the page I/O's Memory<byte> slices). This
+        // check used to allow 4 GiB, and every size from 2 GiB then threw at startup instead of here.
+        if (dcs > PagedMMF.MaximumCacheSize)
         {
-            sb.AppendLine($"Database Cache Size is bigger than the current limit of 4GiB");
+            sb.AppendLine($"Database Cache Size must be at most {PagedMMF.MaximumCacheSize} bytes (2 GiB minus one page): one allocation, sized in an int.");
             success = false;
         }
 

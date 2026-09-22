@@ -12,10 +12,21 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      pr:
+        description: >-
+          PR number to gate. Use this for a FORK PR: its own `pull_request` run gets no secrets, so the heavy
+          suites skip there. A maintainer reads the diff, then dispatches this from a base-repo branch — the
+          run is in base context, secrets flow, and the heavy job checks out refs/pull/<pr>/merge.
+        required: false
+        type: string
 
-# Back-to-back pushes within a PR cancel the older run instead of queueing.
+# Back-to-back pushes within a PR cancel the older run instead of queueing. A maintainer dispatch carries the PR
+# number in the key: two dispatches for DIFFERENT fork PRs are both launched from `main`, so keying on the ref
+# alone would make the second cancel the first — silently, and precisely when a maintainer is working a queue of
+# outside contributions.
 concurrency:
-  group: merge-gate-${{ github.head_ref || github.ref }}
+  group: merge-gate-${{ github.event.inputs.pr && format('pr{0}', github.event.inputs.pr) || github.head_ref || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -26,16 +37,58 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      engine: ${{ steps.filter.outputs.engine }}
-      workbench: ${{ steps.filter.outputs.workbench }}
-      tla: ${{ steps.filter.outputs.tla }}
-      rules: ${{ steps.filter.outputs.rules }}
+      engine: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.engine }}
+      workbench: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.workbench }}
+      tla: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.tla }}
+      rules: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.rules }}
       # `[no-ut]` in the PR head commit message → skip the heavy aws-gate suites (self-declared small-fix bypass).
       skip_ut: ${{ steps.ut.outputs.skip_ut }}
+      # True when this PR's head lives in a FORK. GitHub withholds every secret from such a run (repo, org AND
+      # environment secrets alike — environment REVIEWERS gate the job, not the fork restriction), so the c6id
+      # jobs cannot authenticate and must not pretend to. See the `fork` verdict in the `gate` job.
+      is_fork: ${{ steps.fork.outputs.is_fork }}
+      # The ref the heavy jobs check out. Empty on a normal run (checkout's default is correct); on a maintainer
+      # dispatch it is the PR's merge ref, so the gate measures the fork's code as it would land.
+      gate_ref: ${{ steps.dispatch.outputs.gate_ref }}
+      # Non-empty when this run gates a PR by dispatch. The code being gated may be a fork's, so everything below
+      # that would put it on the PERSISTENT box is switched off for the duration — see aws-gate-selfhosted.
+      dispatch_pr: ${{ steps.dispatch.outputs.pr }}
     steps:
       - uses: actions/checkout@v5
+
+      # A dispatch carrying a PR number gates that PR instead of this branch: the heavy jobs take its merge ref and
+      # every filter is forced true. Forcing them is deliberate — paths-filter would need a base to diff against and
+      # a maintainer dispatch is an explicit "run the whole thing", not a cost-optimised incremental run.
+      - name: Resolve maintainer dispatch target
+        id: dispatch
+        run: |
+          set -uo pipefail
+          PR='${{ github.event.inputs.pr }}'
+          if [ -n "$PR" ]; then
+            echo "pr=$PR"                       >> "$GITHUB_OUTPUT"
+            echo "gate_ref=refs/pull/$PR/merge" >> "$GITHUB_OUTPUT"
+            echo "::notice::Maintainer dispatch — gating PR #$PR at refs/pull/$PR/merge, all suites forced on."
+          else
+            echo "gate_ref=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # head.repo.full_name rather than head.repo.fork: a PR from a fork OF a fork reports the base it was forked
+      # from, and the only question that matters here is whether the head is THIS repository.
+      - name: Detect fork-originated PR
+        id: fork
+        run: |
+          set -uo pipefail
+          HEAD_REPO='${{ github.event.pull_request.head.repo.full_name }}'
+          if [ -n "$HEAD_REPO" ] && [ "$HEAD_REPO" != '${{ github.repository }}' ]; then
+            echo "is_fork=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Head is $HEAD_REPO (a fork) — the c6id suites will be skipped; no secrets reach this run."
+          else
+            echo "is_fork=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: dorny/paths-filter@v4
         id: filter
+        if: ${{ !steps.dispatch.outputs.pr }}
         with:
           filters: |
             engine:
@@ -78,10 +131,15 @@ jobs:
     needs: changes
     # Default (SkyPilot ephemeral) path — skipped when the persistent self-hosted runner is enabled (repo variable
     # GATE_RUNNER=selfhosted, #466); the aws-gate-selfhosted job below runs instead. Rollback = unset the variable.
+    # is_fork: a fork `pull_request` run receives no secrets, so AWS_ACCESS_KEY_ID arrives EMPTY and `sky launch`
+    # dies inside SkyPilot with "Storage store: s3 specified, but AWS access is disabled" — a stack trace that
+    # reads like a broken contribution instead of a platform constraint. Skipping is honest; the `gate` job below
+    # then reports RED with the reason and the maintainer path, so this never becomes a silent green (#774).
     if: >-
       (needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true')
       && needs.changes.outputs.skip_ut != 'true'
-      && vars.GATE_RUNNER != 'selfhosted'
+      && needs.changes.outputs.is_fork != 'true'
+      && (vars.GATE_RUNNER != 'selfhosted' || needs.changes.outputs.dispatch_pr != '')
     runs-on: ubuntu-latest
     # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
     # Same exposure as the self-hosted job below, by a different route: `sky launch` holds a billed VM for as long as this
@@ -93,7 +151,12 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: eu-west-1
     steps:
+      # ref is empty on a normal run → checkout's default (this PR's merge commit / this branch). On a maintainer
+      # dispatch it is refs/pull/<pr>/merge, which is what makes gating a fork PR possible at all: `workdir: .` in
+      # ci.sky.yaml uploads whatever this step produced, so the VM runs the fork's code as it would land on main.
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.changes.outputs.gate_ref }}
 
       - name: Install SkyPilot
         run: python3 -m pip install --quiet "skypilot[aws]"
@@ -103,17 +166,42 @@ jobs:
       - name: Run correctness gate on c6id
         timeout-minutes: 25
         run: |
-          sky launch bench/aws/ci.sky.yaml --down -y \
+          sky launch bench/aws/ci.sky.yaml -c typhon-ci-${{ github.run_id }} --down -y \
             --env RUN_ENGINE=${{ needs.changes.outputs.engine }} \
             --env RUN_WORKBENCH=${{ needs.changes.outputs.workbench }} \
             --env RUN_ID=${{ github.run_id }}
 
-      # `--down` only tears the cluster down on a normal exit. A step timeout or a cancelled run kills sky mid-flight and
-      # strands the VM — billing with nothing watching it. This runs on every path, including cancellation, and is a no-op
-      # when the cluster is already gone.
+      # `--down` sets AUTODOWN, which the skylet executes ON THE VM — it is not a teardown issued from this runner. So it
+      # needs ec2:TerminateInstances in the *instance role*, and it is silently a no-op when the VM cannot terminate
+      # itself: #971 scoped that away and left three c6id boxes running for hours. This step is the backstop, and it has
+      # to work without SkyPilot's cooperation — `sky down` needs sky's local state, which a cancelled or timed-out job
+      # may never have written, while the tag filter needs nothing but the API.
+      #
+      # It replaces `sky down -y <task name>`, which never matched anything: that name is the *task* name inside the
+      # .sky.yaml, while `sky launch` without `-c` generates a cluster called `sky-<hash>-<user>`. The step printed
+      # "Cluster(s) not found" on every run it ever made, including the ones it existed to protect. `-c` on the launch
+      # is what makes the name ours and this step able to name it.
       - name: Tear down the VM (always, including on timeout or cancel)
         if: always()
-        run: sky down -y typhon-ci-gate || true
+        run: |
+          set -uo pipefail
+          CLUSTER='typhon-ci-${{ github.run_id }}'
+          # The API sweep runs FIRST, deliberately. It needs nothing but credentials, finishes in seconds, and works
+          # when sky's local state was never written (a launch killed between RunInstances and its bookkeeping).
+          # `sky down` needs that state and can take minutes, so on a cancellation it can eat the whole grace window
+          # and leave the box running. Terminating out from under sky is safe — it then finds the instances gone.
+          #
+          # Two exact tag values rather than one prefix glob: `<cluster>*` would also match a run whose id is this
+          # one with more digits, and killing a concurrent run's VM is a worse failure than missing one.
+          TAGF="Name=tag:skypilot-cluster-name,Values=${CLUSTER},${CLUSTER}-*"
+          STATEF="Name=instance-state-name,Values=pending,running,stopping,stopped"
+          Q='Reservations[].Instances[].InstanceId'
+          ids=$(aws ec2 describe-instances --region eu-west-1 --filters "$TAGF" "$STATEF" --query "$Q" --output text || true)
+          if [ -n "${ids:-}" ]; then
+            echo "::warning::terminating instances left for ${CLUSTER}: ${ids}"
+            aws ec2 terminate-instances --region eu-west-1 --instance-ids ${ids} >/dev/null || true
+          fi
+          timeout 120 sky down -y "$CLUSTER" || true
 
       # if: always() — we want the report surfaced precisely when the gate FAILED.
       - name: Pull reports from S3
@@ -159,9 +247,13 @@ jobs:
   # not run" and is worse than the hang it prevents.
   wake-gate-runner:
     needs: changes
+    # is_fork: same empty-credential problem as aws-gate, and waking a box for a job that is itself skipped below
+    # would bill for an idle instance.
     if: >-
       (needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true')
       && needs.changes.outputs.skip_ut != 'true'
+      && needs.changes.outputs.is_fork != 'true'
+      && needs.changes.outputs.dispatch_pr == ''
       && vars.GATE_RUNNER == 'selfhosted'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -218,9 +310,19 @@ jobs:
   #      Warm toolchain + bin/obj on the box → incremental build; test DBs on the local NVMe (TMPDIR=/nvme). ----
   aws-gate-selfhosted:
     needs: changes
+    # is_fork is a SECURITY condition here, not just a credential one. This job runs on a persistent box that
+    # deliberately keeps warm bin/obj between runs (`clean: false`) — so arbitrary code from an outside fork would
+    # execute on a machine holding state that later runs trust, with the runner's own IMDS credentials in reach.
+    # A fork PR must therefore never reach this box at all. `is_fork` keeps it off the `pull_request` path, and
+    # `dispatch_pr` keeps it off the maintainer-dispatch path: a dispatch is a base-context event, so `is_fork` is
+    # FALSE there even when the ref being gated is a fork's merge ref — which made the dispatch #969 introduced as
+    # the safe route the one route that put unreviewed-by-the-machine code on the trusted box. Any PR-gating
+    # dispatch runs on the ephemeral SkyPilot VM instead (see aws-gate's condition above), which is torn down.
     if: >-
       (needs.changes.outputs.engine == 'true' || needs.changes.outputs.workbench == 'true')
       && needs.changes.outputs.skip_ut != 'true'
+      && needs.changes.outputs.is_fork != 'true'
+      && needs.changes.outputs.dispatch_pr == ''
       && vars.GATE_RUNNER == 'selfhosted'
     runs-on: [self-hosted, linux, typhon-c6id]
     # ---- COST FAIL-SAFE (#729, 2026-08-09). ----
@@ -240,6 +342,8 @@ jobs:
         uses: actions/checkout@v5
         with:
           clean: false
+          # Empty on a normal run; refs/pull/<pr>/merge on a maintainer dispatch — see aws-gate's checkout.
+          ref: ${{ needs.changes.outputs.gate_ref }}
       - name: Run correctness gate on the persistent c6id
         timeout-minutes: 10
         env:
@@ -303,18 +407,22 @@ jobs:
           shopt -s nullglob
           # Invoked via `bash` (not ./) so a missing exec bit — common when the script is committed from
           # Windows — doesn't fail the run with "Permission denied".
+          # <Spec>.cfg and <Spec>-<name>.cfg are models that must stay green; <Spec>-mutant.cfg and <Spec>-mutant-<name>.cfg must
+          # violate. Spec names carry no '-', so everything after the first one names the config.
           for cfg in *.cfg; do
             spec="${cfg%.cfg}"
-            case "$spec" in
-              *-mutant)
-                base="${spec%-mutant}"
-                echo "::group::genuineness — $base mutant must violate"
-                bash run-tlc.sh "$base" mutant --expect-violation
+            base="${spec%%-*}"
+            suffix="${spec#"$base"}"
+            suffix="${suffix#-}"
+            case "$suffix" in
+              mutant|mutant-*)
+                echo "::group::genuineness — $base $suffix must violate"
+                bash run-tlc.sh "$base" "$suffix" --expect-violation
                 echo "::endgroup::"
                 ;;
               *)
                 echo "::group::model-check — $spec"
-                bash run-tlc.sh "$spec"
+                bash run-tlc.sh "$base" "$suffix"
                 echo "::endgroup::"
                 ;;
             esac
@@ -573,7 +681,8 @@ jobs:
           rules='${{ needs.rule-coverage.result }}'
           inv='${{ needs.invariants.result }}'
           keywords='${{ needs.closing-keywords.result }}'
-          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords"
+          fork='${{ needs.changes.outputs.is_fork }}'
+          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords  is_fork=$fork"
           fail=0
           # changes must succeed; the two aws-gate variants + tla may legitimately be 'skipped' (nothing relevant
           # changed, or the other runner variant is inactive), and closing-keywords is 'skipped' on push/dispatch.
@@ -586,5 +695,35 @@ jobs:
           # invariants has no `if:` guard — it runs on every event, so anything but success is a red gate.
           [ "$inv" = "success" ] || { echo "invariants gate failed"; fail=1; }
           case "$keywords" in failure|cancelled) echo "closing-keywords guard failed"; fail=1 ;; esac
+
+          # A fork PR reports on what it ACTUALLY ran, and hands the rest off by name.
+          #
+          # #969 made this a hard red, on the reasoning that a gate reporting green while its heaviest job never ran
+          # is #774 all over again. That reasoning is right and is not weakened here — what changed is that the heavy
+          # job is no longer unrunnable. merge-gate-fork.yml gates the same merge ref on `pull_request_target`, where
+          # secrets flow, behind an environment a maintainer has to approve. So the honest report is no longer "RED,
+          # nothing verified it" but "these jobs passed, that check owns the rest".
+          #
+          # THIS IS ONLY TRUE WHILE `fork-gate` IS A REQUIRED CHECK ON `main`. Drop it from branch
+          # protection and this job's green becomes exactly the lie #774 is named after: a fork PR would show a green
+          # gate with no suite behind it. The required-check list is load-bearing, not cosmetic.
+          if [ "$fork" = "true" ]; then
+            {
+              echo "## Merge gate: policy jobs only (fork PR)"
+              echo ""
+              echo "GitHub withholds secrets from \`pull_request\` runs whose head is a fork, so the c6id jobs have no"
+              echo "AWS credentials and were skipped here. What ran and passed above needs no credential:"
+              echo "\`invariants\`, \`changes\`, \`rule-coverage\`, \`closing-keywords\`, \`tla\`."
+              echo ""
+              echo "**The heavy suites are gated by \`fork-gate\` on this same PR.** That check runs"
+              echo "on \`pull_request_target\` — base context, so secrets flow — and waits on the \`fork-pr-gate\`"
+              echo "environment until a maintainer approves it from this PR's Checks tab. Approve it after reading the"
+              echo "diff; it runs the engine and Workbench suites against this PR's merge ref on an ephemeral c6id."
+              echo ""
+              echo "A green mark HERE does not mean the tests passed. That verdict is the other check's."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::notice::Fork PR — heavy suites are gated by 'fork-gate', pending maintainer approval."
+          fi
+
           if [ "$fail" -ne 0 ]; then echo "Merge gate: RED"; exit 1; fi
           echo "Merge gate: GREEN"

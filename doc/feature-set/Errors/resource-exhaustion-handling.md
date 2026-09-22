@@ -12,7 +12,7 @@ description: 'Every bounded resource declares how it fails — fail fast, wait, 
 
 ## 🎯 What it solves
 
-Every embedded engine has bounded resources: a transaction pool, a page cache, a chunk segment's capacity. When one fills up, the caller needs to know two things immediately — *that* it happened, and whether retrying makes sense. Before this feature, that information was inconsistent: some limits (`MaxActiveTransactions`) were tracked in metrics but never enforced, a full page cache with all pages pinned could spin forever with no bound in Release builds, and a full chunk segment threw a generic `InvalidOperationException` indistinguishable from a programming bug. None of these surfaced a uniform, catchable signal.
+Every embedded engine has bounded resources: a transaction pool, a page cache, a chunk segment's capacity. When one fills up, the caller needs to know two things immediately — *that* it happened, and whether retrying makes sense. Without a uniform contract that information comes out inconsistent: a limit such as `MaxActiveTransactions` tracked in metrics but never enforced, a full page cache with all pages pinned spinning with no bound, a full chunk segment throwing a generic `InvalidOperationException` indistinguishable from a programming bug. None of those is a uniform, catchable signal.
 
 ## ⚙️ How it works (in brief)
 
@@ -58,7 +58,7 @@ catch (ResourceExhaustedException ex)
 
 ## ⚠️ Guarantees & limits
 
-- **No unbounded hangs.** The page-cache eviction wait is bounded by the caller's deadline (see [Timeout Exceptions & Deadlines](./timeout-exceptions-deadlines.md)) in every build configuration — Release builds no longer spin forever when all pages are pinned.
+- **No unbounded hangs.** The page-cache eviction wait is bounded by the caller's deadline (see [Timeout Exceptions & Deadlines](./timeout-exceptions-deadlines.md)) in every build configuration, Release included — a page cache whose pages are all pinned never spins unbounded.
 - **Typed, never generic.** Pool limits and chunk-segment-full surface as `ResourceExhaustedException`; a page-cache or WAL wait that expires surfaces as `PageCacheBackpressureTimeoutException`/`WalBackPressureTimeoutException` instead — never `InvalidOperationException`/`OutOfMemoryException`. `catch (ResourceExhaustedException)` covers the `FailFast` resources; `catch (TyphonException)` covers all of them uniformly.
 - **`IsTransient = true` is a hint, not a promise.** Exhaustion is expected to clear as concurrent work drains the resource, but the engine never retries on the caller's behalf — see [IsTransient](./transience-hint.md).
 - **`ExhaustionPolicy` is diagnostic metadata, not a runtime dispatcher.** Each resource hardcodes its own escalation logic (evict-then-wait, fail-fast, etc.); the enum on `ResourceNode` documents that behavior for introspection and tooling, it doesn't drive it.

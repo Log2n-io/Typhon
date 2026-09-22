@@ -101,7 +101,7 @@ public class Field
     public int ArrayLength { get; set; }            // > 0 if [n]-element fixed array
     public bool HasSpatialIndex { get; set; }
     public SpatialFieldType SpatialFieldType { get; set; }
-    public float SpatialMargin / SpatialCellSize { get; set; }
+    public float SpatialCellSize { get; set; }
     public SpatialMode SpatialMode { get; set; }    // Static / Dynamic
     public uint SpatialCategory { get; set; }       // archetype-level mask, default uint.MaxValue
     public bool IsForeignKey { get; set; }
@@ -120,7 +120,7 @@ public class Field
 | `[Component(name, revision, allowMultiple = false)]` + `StorageMode = ...` + `PreviousName = ...` | struct | Marks a struct as a component. `Name` keys the schema slot, `Revision` is the migration version, `StorageMode` chooses Versioned (default) / SingleVersion / Transient. |
 | `[Field(FieldId = N, Name = "...", PreviousName = "...")]` | field | Override the auto-assigned FieldId or current/previous field name. Used to keep FieldIds stable across renames. |
 | `[Index(AllowMultiple = false, OnParentDelete = CascadeAction.None)]` | field | Build a B+Tree index on this field. `AllowMultiple` allows non-unique keys (multi-value index). |
-| `[SpatialIndex(margin, cellSize, Mode = Dynamic, Category = uint.MaxValue)]` | field (AABB / BSphere) | Build a spatial index (R-Tree). At most one per component. Not allowed on Transient. |
+| `[SpatialIndex(cellSize, Mode = Dynamic, Category = uint.MaxValue)]` | field (AABB / BSphere) | Build a spatial index (R-Tree). At most one per component. Not allowed on Transient. |
 | `[ForeignKey(typeof(TargetComponent))]` | `long` field | Marks the field as an FK reference to another component's PK. |
 | `[Archetype(revision = 1, alias = null)]` + `Name = ...` + `PreviousName = ...` | class | Marks an ECS archetype. Identity is the CLR type name (or `Name = "…"`); the engine auto-assigns a per-process catalog id + a per-DB routing id — no numeric id is set in source. `PreviousName` keeps identity stable across a rename, matched on reopen (see [06-ecs](06-ecs.md)). |
 
@@ -146,8 +146,8 @@ public struct ComponentR1
     public int CompOverhead;         // ComponentStorageOverhead
     public int ComponentSPI;         // root page index of ComponentSegment
     public int VersionSPI;           // root page index of CompRevSegment (revision chain)
-    // DefaultIndexSPI, String64IndexSPI, TailIndexSPI removed in #629 —
-    // secondary-index ownership moved to ArchetypeR1 (ClusterIndexSPI / ClusterString64IndexSPI).
+    // Secondary-index ownership sits on ArchetypeR1 (ClusterIndexSPI / ClusterString64IndexSPI),
+    // not here.
     public ComponentCollection<FieldR1> Fields;
     public int SchemaRevision;
     public int FieldCount;
@@ -360,11 +360,11 @@ public bool RegisterComponentByType(
 
 Throws `ArgumentException` if `componentType` is a reference type or an open generic — the `unmanaged` constraint is verified at specialization time by the CLR.
 
-> **Note on the diagram:** Older docs and the embedded SVG still use the name `RegisterComponent<T>()` for the entry point. The actual API surface has been `RegisterComponentFromAccessor<T>` / `RegisterComponentByType` for some time. Don't go looking for `RegisterComponent<T>` in current code.
+> **Note on the diagram:** the embedded SVG labels the entry point `RegisterComponent<T>()`. The API surface is `RegisterComponentFromAccessor<T>` / `RegisterComponentByType`; there is no `RegisterComponent<T>` to look for.
 
 ### StorageMode is fixed per `(name, revision)`
 
-`StorageMode` comes solely from the component's `[Component]` attribute — there is no per-registration override. On reopen, re-declaring a persisted component at the **same revision** with a different `StorageMode` throws `InvalidOperationException` (`definition.Revision == persisted.Comp.SchemaRevision && declared != persisted`): reinterpreting persisted bytes under a different storage discipline would be silent corruption. Changing how a component is stored requires a new `[Component]` revision. (Full data migration across a mode change on a revision bump is not yet wired — tracked in #546.)
+`StorageMode` comes solely from the component's `[Component]` attribute — there is no per-registration override. On reopen, re-declaring a persisted component at the **same revision** with a different `StorageMode` throws `InvalidOperationException` (`definition.Revision == persisted.Comp.SchemaRevision && declared != persisted`): reinterpreting persisted bytes under a different storage discipline would be silent corruption. Changing how a component is stored requires a new `[Component]` revision. (Full data migration across a mode change on a revision bump is not yet wired.)
 
 ---
 

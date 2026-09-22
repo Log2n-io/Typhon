@@ -18,7 +18,7 @@ Marking the class **`partial`** lets Typhon's source generator add typed bulk ac
 - **[Entity](xref:concept-entity)** — an instance of an archetype, created with `Spawn<TArch>`.
 - **[Query](xref:concept-query)** — queries are typed on an archetype: `tx.Query<Unit>()`.
 - **[Schema evolution](xref:concept-schema-evolution)** — archetype membership and component versions are part of the persisted schema.
-- **[Cluster storage](xref:concept-cluster-storage)** — the archetype's component mix silently decides its physical layout (clustered SoA vs legacy per-entity) — a ~50× bulk-iteration difference.
+- **[Cluster storage](xref:concept-cluster-storage)** — every archetype is cluster-backed; its component mix decides where each component's array lives inside the cluster.
 
 ## In the API
 

@@ -26,7 +26,7 @@ and are registered by the `Add*()` extension that owns each options type:
 
 | Validator | Registered by | Checks |
 |---|---|---|
-| `DatabaseEngineOptionsValidator` | `AddDatabaseEngine` | `Resources` is non-null; `MaxActiveTransactions`, `WalRingBufferSizeBytes`, `CheckpointIntervalMs`, `CheckpointBarrierTimeoutMs` are all > 0; and when `Wal` is present, its `SegmentSize`, `PreAllocateSegments`, `StagingBufferSize` and `GroupCommitIntervalMs` |
+| `DatabaseEngineOptionsValidator` | `AddDatabaseEngine` | `Resources` is non-null; `MaxActiveTransactions`, `WalRingBufferSizeBytes`, `CheckpointIntervalMs`, `CheckpointBarrierTimeoutMs` are all > 0; `Spatial.CellTreePromoteThreshold` >= 2, since promotion at N and fall-back at N/2 leave no gap below that and a cell on the boundary would rebuild itself in both directions on alternating inserts; and when `Wal` is present, its `SegmentSize`, `PreAllocateSegments`, `StagingBufferSize` and `GroupCommitIntervalMs` |
 | `PagedMMFOptionsValidator<TO>` | `AddPagedMMF` / `AddManagedPagedMMF` | delegates to `PagedMMFOptions.Validate(silent, out message)` — `DatabaseName`, `DatabaseDirectory`, `DatabaseCacheSize` well-formedness — and surfaces its specific rule message |
 
 Failures accumulate rather than short-circuiting, so one startup reports every bad knob instead of
@@ -65,8 +65,8 @@ validator calls — one source of truth for storage-config rules, two entry poin
   the caller configured — defaults are valid by construction.
 - **Range-checking is not budgeting.** Nothing sums your allocations against a memory ceiling: a
   configuration where every individual knob is in range can still ask for more RAM than the machine
-  has. The `ResourceOptions.TotalMemoryBudgetBytes` / `Validate()` pair that once implied otherwise
-  was removed in #148 — it governed no allocation.
+  has. `ResourceOptions` carries no total-memory-budget knob and no `Validate()` of its own, because
+  such a budget would govern no allocation.
 - Validation runs at **first `IOptions<T>.Value` access**, which for these types is the first
   resolution of the service that consumes them — not at `BuildServiceProvider()`.
 - `MemoryAllocatorOptions` and `ResourceRegistryOptions` have **no** validator today; their

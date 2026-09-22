@@ -62,8 +62,8 @@ You opt a component into retention with `[TemporalRetention(KeepCount = N)]` (or
 ## 🔗 Related
 
 - Related feature: [Persistent Views](./persistent-views.md) — a different live-data mechanism (current-state delta tracking, not history)
-- Note: there is no index-side counterpart. Past key MEMBERSHIP is not reconstructible — the append-only index TAIL that would have answered it was removed
-  in #666 (no caller, no pruning). Point-in-time reads go through the revision chain, which is what this feature describes.
+- Note: there is no index-side counterpart. Past key MEMBERSHIP is not reconstructible — the index keeps no append-only TAIL that would answer it,
+  and nothing prunes one. Point-in-time reads go through the revision chain, which is what this feature describes.
 
 <!-- Deep dive: claude/design/Querying/temporal-queries.md — full design (retention model, chunk directory layout, compaction algorithm, phased implementation plan) -->
 <!-- Research: claude/research/Querying/TemporalQueries.md -->

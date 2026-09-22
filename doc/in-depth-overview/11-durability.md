@@ -12,11 +12,11 @@ Durability is what makes Typhon ACID's "D". The contract is the usual one: once 
 
 Both pipelines run on dedicated background threads. Commit-time work on the application thread is minimal: serialize the records into a ring buffer, optionally wait for the WAL writer to confirm durability, return. Page writes are deferred — they're a background activity decoupled from the commit path.
 
-> **This chapter describes the "Minimal WAL" redesign (v2).** The WAL now carries **logical** records — `(EntityId, slot)` (the per-archetype component slot under the EntityId's routing id) and a value, never pages or chunk ids — written by a single `RecordCodec`, and recovery re-applies them through the engine's own write primitives (`RecoveryApplier`) and then **rebuilds** derived structures instead of repairing pages. Full-Page Images are gone. The full design lives in `claude/design/Durability/MinimalWal/`; correctness is gated on invariant rules (`rules/durability.md`), a crash-sim sweep, and TLA+ specs.
+> **The WAL carries logical records.** Each one is an `(EntityId, slot)` pair — the per-archetype component slot under the EntityId's routing id — plus a value, never a page or a chunk id. A single `RecordCodec` writes them, recovery re-applies them through the engine's own write primitives (`RecoveryApplier`), and derived structures are then **rebuilt** rather than repaired page by page. There are no Full-Page Images. The full design lives in `claude/design/Durability/MinimalWal/`; correctness is gated on invariant rules (`rules/durability.md`), a crash-sim sweep, and TLA+ specs.
 >
-> **Transitional note:** the v1 **persisted UoW Registry** and the v1 `WalRecovery` scan still exist and run alongside the v2 path (§7, §8). Commit *fate* for logical records is already decided by the WAL commit marker, not the registry, so the registry is redundant for fate — but its removal is an independent, still-pending cleanup (not part of the now-shipped Committed discipline).
+> **The persisted UoW Registry does not decide commit fate.** For logical records that is the WAL commit marker's job, so the registry is redundant for fate, though the registry and the `WalRecovery` scan that consults it both run at open (§7, §8). Removing them is a pending cleanup.
 
-This doc covers the WAL (writer, segments, wire format), the checkpoint (v2 cycle, staging pool, A/B meta-pair), recovery (`RecoveryDriver` + the surviving v1 scan), torn-page safety without FPI, and the durability invariants that hold across all of them.
+This doc covers the WAL (writer, segments, wire format), the checkpoint (cycle, staging pool, A/B meta-pair), recovery (the segment scan plus `RecoveryDriver`), torn-page safety without full-page images, and the durability invariants that hold across all of them.
 
 <a href="assets/typhon-durability-overview.svg">
   <img src="assets/typhon-durability-overview.svg" width="1200" alt="Durability subsystem overview">
@@ -64,15 +64,15 @@ The WAL writer is a single dedicated OS thread:
 | Priority | `ThreadPriority.AboveNormal` |
 | Background | true |
 
-It is the single consumer of an MPSC (multi-producer, single-consumer) commit buffer ([`WalCommitBuffer`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalCommitBuffer.cs)). Application threads commit a transaction by claiming space via an atomic tail-increment (`TryClaim` → `Interlocked.Add`, which maps to `LOCK XADD` on x64), writing the record batch into the claimed span, then publishing a frame. The writer drains published frames, copies them into a 4096-byte-aligned staging buffer, patches the chunk CRC chain over the **whole drained batch at once**, and writes that buffer to the active segment file with `RandomAccess.Write`. (Patching the entire batch in one shot is what fixed a v1 bug where a chunk straddling a 256 KB write-slice boundary could be left with a zero footer CRC.)
+It is the single consumer of an MPSC (multi-producer, single-consumer) commit buffer ([`WalCommitBuffer`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalCommitBuffer.cs)). Application threads commit a transaction by claiming space via an atomic tail-increment (`TryClaim` → `Interlocked.Add`, which maps to `LOCK XADD` on x64), writing the record batch into the claimed span, then publishing a frame. The writer drains published frames, copies them into a 4096-byte-aligned staging buffer, patches the chunk CRC chain over the **whole drained batch at once**, and writes that buffer to the active segment file with `RandomAccess.Write`. (Patching the entire batch in one shot is what keeps a chunk straddling a 256 KB write-slice boundary from being left with a zero footer CRC.)
 
-The transport — MPSC buffer, dedicated writer thread, segment management, FUA I/O — is **unchanged from v1**. Only the record *format* (§3) and the recovery/checkpoint logic above it (§5, §7) were redesigned.
+The transport is the MPSC buffer, the dedicated writer thread, segment management and FUA I/O. The record *format* (§3) and the recovery/checkpoint logic (§5, §7) sit above it.
 
 ### Ring buffer sizing
 
 Default is **64 MB total** (`ResourceOptions.WalRingBufferSizeBytes = 64 * 1024 * 1024`). The buffer is split into two halves of 32 MB each — producers fill one half while the writer drains the other (Aeron-style ping-pong, per ADR). When the active half fills up, producers wait for the writer to swap.
 
-The default is sized for **tail latency, not throughput** (#559). Measured on a 20 001-entity cluster archetype at 120 Hz, the median tick is flat across 8/16/32/64 MB, but the worst tick falls from ~29 ms to ~18 ms at 64 MB: a ring that fills makes producers block on the buffer swap, which surfaces as an occasional tick blowing several times its budget. Lower it for memory-constrained or low-write deployments — the engine is correct at any size, it just swaps buffers more often.
+The default is sized for **tail latency, not throughput**. Measured on a 20 001-entity cluster archetype at 120 Hz, the median tick is flat across 8/16/32/64 MB, but the worst tick falls from ~29 ms to ~18 ms at 64 MB: a ring that fills makes producers block on the buffer swap, which surfaces as an occasional tick blowing several times its budget. Lower it for memory-constrained or low-write deployments — the engine is correct at any size, it just swaps buffers more often.
 
 ### GroupCommit (default mode)
 
@@ -128,7 +128,7 @@ Every WAL chunk has the same envelope:
 | Value | Type | Body |
 |---|---|---|
 | `1` | `Transaction` | one or more logical records (a `RecordBatch`) — see §3.1 |
-| `2` | *(gap)* | **retired** — was `FullPageImage`. Left as a gap so old segments with FPI chunks are skipped (unknown type) rather than mis-parsed |
+| `2` | *(gap)* | **permanently reserved** — never allocate it. A chunk carrying type 2 is skipped as an unknown type rather than mis-parsed |
 | `3` | `TickFence` | `TickFenceHeader (24 B)` + N entries of `(ChunkId:4 B, ComponentData:PayloadStride B)` |
 | `4` | `ClusterTickFence` | `ClusterTickFenceHeader (24 B)` + N entries of `(EntityIndex:4 B, AllComponentData)` |
 | `5` | `BulkBegin` | BulkLoad session begin manifest |
@@ -163,7 +163,7 @@ After the header, the body carries the **logical address** (`EntityId : long`, p
 | `4` | `BulkManifest` | sessionId, begin LSN, entity/component counts | orphan detection only |
 | `5` | `FenceBlock` | archetype + cluster id, a contiguous range of entity slots (`FirstSlot`, `SlotSpan`), a `DirtyMask`, the entity-key column and each durable component's SoA column | expanded back into per-`(entity, slot)` values, then applied as `Slot` would be |
 
-`FenceBlock` (#559) is what the cluster tick fence emits instead of per-`(entity, component)` `Slot` records: a cluster's storage is already Structure-of-Arrays, so each column is one bulk copy straight out of the cluster page. Entities inside the emitted range that were clean ride along and are redundant, never wrong. It is therefore one of the most frequently written kinds for cluster archetypes, and `RecoveryDriver` counts the expansions (`FenceBlockRecordsExpanded`) so a test can tell a recovered value from an untouched one.
+`FenceBlock` is what the cluster tick fence emits instead of per-`(entity, component)` `Slot` records: a cluster's storage is already Structure-of-Arrays, so each column is one bulk copy straight out of the cluster page. Entities inside the emitted range that were clean ride along and are redundant, never wrong. It is therefore one of the most frequently written kinds for cluster archetypes, and `RecoveryDriver` counts the expansions (`FenceBlockRecordsExpanded`) so a test can tell a recovered value from an untouched one.
 
 **Record flags** ([`RecordFlags`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecordFormat.cs)):
 
@@ -174,7 +174,7 @@ After the header, the body carries the **logical address** (`EntityId : long`, p
 
 The batch is built by [`CommitBatchBuilder`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/CommitBatchBuilder.cs), which buckets entries by category so the codec always emits them in **LOG-07 order** (Spawn → Slot/CollectionDelta → Destroy/SetEnabledBits → BulkManifest) — a mis-ordered batch is unconstructible by API shape, so a `Slot` can never arrive before its entity's `Spawn`. Tick-fence batches are built by the same builder in fence mode and carry `FenceBlock` records with their own `CollectionDelta` records alongside; they are committed individually and carry no Tx markers (the `FenceRecord` flag above).
 
-> **`WalRecordHeader.cs` is legacy.** The 32-byte `WalRecordHeader` struct from v1 still exists in the tree but is **not** the logical-record format — `RecordFormat.RecordHeader` (24 B) is what `RecordCodec` reads and writes.
+> **`WalRecordHeader.cs` is not the record format.** The 32-byte `WalRecordHeader` struct exists in the tree but is **not** the logical-record format — `RecordFormat.RecordHeader` (24 B) is what `RecordCodec` reads and writes.
 
 ---
 
@@ -193,11 +193,11 @@ WAL records are written into segment files named `{segmentId:D16}.wal` in the co
 | Pre-allocated segments | 4, built on the first rotation | `WalWriterOptions.PreAllocateSegments` |
 | Rotation threshold | 75 % utilization | `WalWriter.RotationThreshold` constant |
 
-**Segments are not uniformly sized, and the pool is not built at open** (#784). A database that never fills a segment never rotates, so its first segment is its entire WAL forever — sizing that file for steady-state throughput charged a 1.8 MB database a 320 MiB `wal/` directory. The first segment is therefore `InitialSegmentSize`, and the pre-allocation pool is created on the **first rotation**, when the database has demonstrated it will actually need one. Everything from that rotation on is `SegmentSize`, so a busy database's steady state is unchanged. Each header declares its **own** size rather than the configured one, which is what lets readers bound their scan correctly across a mixed-size set.
+**Segments are not uniformly sized, and the pool is not built at open.** A database that never fills a segment never rotates, so its first segment is its entire WAL forever — sizing that file for steady-state throughput would charge a 1.8 MB database a 320 MiB `wal/` directory. The first segment is therefore `InitialSegmentSize`, and the pre-allocation pool is created on the **first rotation**, when the database has demonstrated it will actually need one. Everything from that rotation on is `SegmentSize`, so a busy database pays the full segment size only once it has shown it needs one. Each header declares its **own** size rather than the configured one, which is what lets readers bound their scan correctly across a mixed-size set.
 
 When the active segment passes 75 % utilization, the writer seals it, opens the next pre-allocated segment, writes its header, and replenishes the pool. Pre-allocation creates empty files via `RandomAccess.SetLength` so rotation doesn't pay metadata-write latency on the hot path.
 
-A drain larger than the space left in the active segment forces an **early** rotation, ahead of the 75 % threshold, and the replacement is sized `max(SegmentSize, header + batch)` so an over-sized batch still lands inside a declared region. Skipping that check would extend the file past what its header declares — a positioned write past EOF succeeds silently — and every byte beyond the declared size is unreachable to recovery (rule `WR-03`, #785).
+A drain larger than the space left in the active segment forces an **early** rotation, ahead of the 75 % threshold, and the replacement is sized `max(SegmentSize, header + batch)` so an over-sized batch still lands inside a declared region. Skipping that check would extend the file past what its header declares — a positioned write past EOF succeeds silently — and every byte beyond the declared size is unreachable to recovery (rule `WR-03`).
 
 ### Segments are deleted, not "recycled"
 
@@ -230,7 +230,7 @@ It wakes on a `ManualResetEventSlim` either at the configured interval (default 
 
 ### The cycle (`RunCheckpointCycle`)
 
-The v2 cycle never persists never-durable bytes (CK-02) and never advances past a page it failed to capture (CK-03):
+The cycle never persists never-durable bytes (CK-02) and never advances past a page it failed to capture (CK-03):
 
 | Step | Action | Rule |
 |---|---|---|
@@ -241,13 +241,13 @@ The v2 cycle never persists never-durable bytes (CK-02) and never advances past 
 | 5 | **Advance `CheckpointLSN`** — `DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn)` writes the watermark block to the meta-pair's **alternate** slot (gen+1, CRC, fsync); the generation flip is the cycle's atomic commit point. | CK-05 |
 | 6 | **Recycle** — `SegmentManager.MarkReclaimable(trimLsn)` deletes sealed segments below the persisted checkpoint, where `trimLsn = Min(checkpointLsn, lastTickFenceLsn)` so TickFence-only data isn't lost. | CK-04 |
 
-There is **no FPI-bitmap reset step** — FPI is gone (§6). (Transitional: the cycle also calls `_uowRegistry.TransitionWalDurableToCommitted()` while the v1 registry is still present; see §8.)
+There is **no FPI-bitmap reset step**, because Typhon writes no full-page images (§6). The cycle also calls `_uowRegistry.TransitionWalDurableToCommitted()` (§8).
 
 A **flush-only cycle** (`FlushOnlyCycle` — capture + write + DC-decrement, *no* barrier/gate/meta-flip/recycle) keeps the page cache drainable during a large recovery window without advancing `CheckpointLSN` (CK-08).
 
 ### A/B slot-pairing — the doublewrite-free torn-write net (CK-05)
 
-The meta page (root header + bootstrap dictionary + the `DurabilityWatermarks` block) and every segment-directory page occupy **two physical slots**. A write always targets the *non-current* slot with `PairGeneration = current+1` + a fresh CRC, fsyncs, then flips the in-memory current pointer. The current-valid slot is **never** overwritten, so a torn write can't destroy the only good copy — reopen selects the highest-generation CRC-valid slot; both-invalid fails the open loudly. This replaces FPI for the structural pages that rebuild (§6) can't re-derive.
+The meta page (root header + bootstrap dictionary + the `DurabilityWatermarks` block) and every segment-directory page occupy **two physical slots**. A write always targets the *non-current* slot with `PairGeneration = current+1` + a fresh CRC, fsyncs, then flips the in-memory current pointer. The current-valid slot is **never** overwritten, so a torn write can't destroy the only good copy — reopen selects the highest-generation CRC-valid slot; both-invalid fails the open loudly. This is what protects the structural pages that rebuild (§6) can't re-derive.
 
 ### [`DurabilityWatermarks`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/DurabilityWatermarks.cs)
 
@@ -280,7 +280,7 @@ The pool uses a bitmap free-list (`BitOperations.TrailingZeroCount` for O(1) acq
 
 ## 6. Torn-page safety (no FPI)
 
-Typhon's 8 KB pages span two 4 KB device blocks; consumer NVMe makes 8 KB writes non-atomic, so a crash mid-write can **tear** a page. v1 repaired torn pages with Full-Page Images (a before-image per page per checkpoint cycle, replayed before WAL apply). **v2 retired FPI entirely** — `FpiBitmap`, `FpiCompression`, `FpiMetadata`, the `WriteFpiRecord` capture path, `SearchFpiForPage`, and the `FullPageImage` chunk type are all deleted. The replacement net:
+Typhon's 8 KB pages span two 4 KB device blocks; consumer NVMe makes 8 KB writes non-atomic, so a crash mid-write can **tear** a page. Typhon writes **no full-page images**: there is no before-image capture per checkpoint cycle, no FPI bitmap or metadata, and no FPI repair step in recovery. The net that catches a torn page instead:
 
 | Page class | On CRC failure during recovery | Rule |
 |---|---|---|
@@ -288,19 +288,19 @@ Typhon's 8 KB pages span two 4 KB device blocks; consumer NVMe makes 8 KB writes
 | **Derived** (Occupancy) | Usually healed — `RederiveOccupancyOnCrash` rebuilds the bitmap from actual segment ownership. Exception: if a persisted archetype or component segment pointer cannot be read during reconstruction, it throws rather than adopting a partial bitmap (partial ⇒ live pages marked free). That throw manifests as a loud open failure, not a silent bad rebuild. | CK-09 |
 | **Primary** (component/revision content, EntityMap, cluster, collections, string table, system) | **Heal-or-loud-fail**: recorded *suspect* during recovery; resolved after rebuild — if the page no longer backs a live chunk (entity re-created in-window, scrub freed the old) → healed; if it still backs a live primary chunk → **the open FAILS LOUDLY** naming the page (`ResolveSuspectPrimaryPages`). | RB-04 |
 
-This is the defining safety property of the redesign: a torn primary page is never silently served as if intact. Because every primary segment is a `ChunkBasedSegment`, `ResolveSuspectPrimaryPages` (`IsDerivedSegmentKind` = `Index | Spatial | Occupancy`) loud-fails uniformly — there is no silent-corruption path. The A/B slot-pairing (§5) covers the structural meta/directory pages that rebuild can't re-derive.
+This is the defining safety property: a torn primary page is never silently served as if intact. Because every primary segment is a `ChunkBasedSegment`, `ResolveSuspectPrimaryPages` (`IsDerivedSegmentKind` = `Index | Spatial | Occupancy`) loud-fails uniformly — there is no silent-corruption path. The A/B slot-pairing (§5) covers the structural meta/directory pages that rebuild can't re-derive.
 
-> CRC *detection* is unchanged from v1 — only the *response* changed, from FPI repair to rebuild / loud-fail. An uncovered torn primary page is genuinely lost data, and failing the open is the honest outcome.
+> CRC checking is what *detects* the tear; the *response* is rebuild or loud-fail, never page repair. An uncovered torn primary page is genuinely lost data, and failing the open is the honest outcome.
 
 ---
 
 ## 7. Recovery
 
-Recovery runs at engine open, before any transaction is accepted. In the current (transitional) code it is **two cooperating passes**:
+Recovery runs at engine open, before any transaction is accepted, as **two cooperating passes**:
 
-### 7.1 v1 scan — `WalRecovery` (surviving)
+### 7.1 Segment scan — `WalRecovery`
 
-[`Durability/internals/WalRecovery.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalRecovery.cs) — invoked from `DatabaseEngine` open as `new WalRecovery(...).Recover(UowRegistry, checkpointLSN, …)`. It still performs:
+[`Durability/internals/WalRecovery.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalRecovery.cs) — invoked from `DatabaseEngine` open as `new WalRecovery(...).Recover(UowRegistry, checkpointLSN, …)`. It performs:
 
 | Phase | What it does |
 |---|---|
@@ -310,9 +310,9 @@ Recovery runs at engine open, before any transaction is accepted. In the current
 | 6 — TickFence replay | Apply `TickFence` (per-SV-table) and `ClusterTickFence` (per-archetype) entries — SingleVersion / cluster state that has no per-record WAL trail. |
 | 7 — Finalize | Emit stats. |
 
-> Phase 4 (FPI repair) and Phase 5 (committed-transaction replay via the old `WalReplayHelper`) are **deleted** — the v2 `RecoveryDriver` owns logical-record apply, and rebuild replaces FPI. This surviving pass and the persisted `UowRegistry` it consults are slated for removal in an independent, still-pending cleanup (the Committed discipline has already shipped and does not depend on it).
+> The phase numbers skip 4 and 5 by design: this pass performs no torn-page repair and no record replay of its own. `RecoveryDriver` (§7.2) owns logical-record apply, and rebuilding derived structures covers what a full-page image would otherwise repair. This pass and the persisted `UowRegistry` it consults are slated for removal in a pending cleanup.
 
-### 7.2 v2 logical apply — `RecoveryDriver` + `RecoveryApplier`
+### 7.2 Logical apply — `RecoveryDriver` + `RecoveryApplier`
 
 [`RecoveryDriver.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/RecoveryDriver.cs) (`Run(walIO, walDir, dbe, checkpointLsn)`) runs **after** archetype initialization and owns the logical-record apply:
 
@@ -346,15 +346,15 @@ After apply, `DatabaseEngine.RunWalV2Recovery` completes the base:
 | `OnLoad` (default) | Verify page CRC on every load from disk. On mismatch a page is recorded *suspect* (RecoverySuspect mode during recovery) or throws `PageCorruptionException` (normal operation). |
 | `RecoveryOnly` | Skip CRC checks during normal operation; verify only during recovery. |
 
-During the crash path the engine stays in `RecoveryOnly` through apply (there is no on-load FPI repair fallback any more), then `InitializeArchetypes` restores the configured mode after `RunWalV2Recovery` completes.
+During the crash path the engine stays in `RecoveryOnly` through apply, since there is no on-load repair fallback, then `InitializeArchetypes` restores the configured mode after `RunWalV2Recovery` completes.
 
 ### Recovery metrics
 
-The v2 driver returns a `RecoveryDriver.Result` (`SegmentsScanned`, `RecordsScanned`, `RecordsApplied`, `TxCommitted`, `MaxTsn`, `MaxLsn`, `StoppedAtCorruption`) — every field is test-asserted. `StoppedAtCorruption` is a diagnostic flag that distinguishes "scan ran out of segments" from "scan stopped at a LOG-03 / REC-01 corruption boundary"; the stop itself is unconditional regardless of which case fired. The surviving v1 pass returns [`WalRecoveryResult`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/public/WalRecoveryResult.cs) (`SegmentsScanned`, `UowsPromoted`, `UowsVoided`, `TickFenceChunksProcessed`, `BulkBeginCount`/`BulkEndCount`, `LastValidLSN`, `ElapsedMicroseconds`; its `FpiRecordsApplied` field remains for binary-compat but is never populated).
+`RecoveryDriver` returns a `RecoveryDriver.Result` (`SegmentsScanned`, `RecordsScanned`, `RecordsApplied`, `TxCommitted`, `MaxTsn`, `MaxLsn`, `StoppedAtCorruption`) — every field is test-asserted. `StoppedAtCorruption` is a diagnostic flag that distinguishes "scan ran out of segments" from "scan stopped at a LOG-03 / REC-01 corruption boundary"; the stop itself is unconditional regardless of which case fired. The segment scan returns [`WalRecoveryResult`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/public/WalRecoveryResult.cs) (`SegmentsScanned`, `UowsPromoted`, `UowsVoided`, `TickFenceChunksProcessed`, `BulkBeginCount`/`BulkEndCount`, `LastValidLSN`, `ElapsedMicroseconds`; its `FpiRecordsApplied` field is never populated).
 
 ---
 
-## 8. UoW state machine (transitional)
+## 8. UoW state machine
 
 [`UnitOfWorkState`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/DurabilityMode.cs) — one byte, five states. Owned by the [`UowRegistry`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/internals/UowRegistry.cs) (see [08-transactions](08-transactions.md)); transitions are one-way.
 
@@ -375,7 +375,7 @@ Free → Pending → Void → Free                          (crash recovery)
 - `WalDurable → Committed` via `UowRegistry.TransitionWalDurableToCommitted()`, invoked by the checkpoint (§5).
 - `Pending → Void` during recovery's cross-reference phase (`VoidRemainingPending`); a committed bitmap then filters ghost revisions for post-crash visibility.
 
-> **Why this is transitional.** Under the Minimal-WAL design, commit fate is the WAL `TxCommit` marker (§7.2), so the persisted registry is redundant for *fate*; its remaining role is post-crash ghost-visibility filtering. The registry is **to be demoted to a volatile in-memory id allocator** — dropping the persistence, the `Void` state, and the committed bitmap — as an independent, still-pending cleanup (not gated on the now-shipped Committed discipline). They are documented here because they are still present in, and run from, the current code.
+> **The registry is redundant for commit fate.** Commit fate is the WAL `TxCommit` marker (§7.2); the registry's one live role is post-crash ghost-visibility filtering. It is slated to be **demoted to a volatile in-memory id allocator** — dropping the persistence, the `Void` state, and the committed bitmap — as a pending cleanup. The states above are documented because the current code holds and runs them.
 
 ---
 
