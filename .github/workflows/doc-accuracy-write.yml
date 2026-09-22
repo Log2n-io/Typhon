@@ -1,0 +1,208 @@
+name: Doc-Accuracy Write (reusable)
+
+# The write half of the doc-accuracy workflows, shared by the nightly review (doc-accuracy-review.yml, kind
+# `doc-drift`) and the weekly audit (doc-accuracy-audit.yml, kind `doc-audit`). No LLM runs here. Two jobs:
+#   * set-type — types the issues the caller's run filed as `Task`.
+#   * open-pr  — commits the `doc-fix-patch` artifact (doc-fix.patch + fixes.txt, already through the doc/-only path
+#                guard) on a branch of its own and opens a draft PR. Nothing here reads attacker-controlled prose
+#                beyond that patch.
+#
+# THE JOB SPLIT IS THE SECURITY BOUNDARY: the caller grants contents:write + issues:write + pull-requests:write to the
+# job that calls this workflow, never to the job that runs the LLM. Actions `permissions:` has no path or branch scope,
+# so the token that can open this PR could also commit to main; it must never sit next to a model reading hostile input.
+#
+# ── Why the type is set here, not by the model at filing time (added 2026-09-22) ─────────────────────────────────────
+# GitHub only lets a caller with PUSH access set an issue type, and silently drops the type otherwise ("Create an
+# issue" / "Update an issue", REST docs). The LLM job holds contents:read, so `gh issue create --type Task` there would
+# look fine and do nothing. Push access is exactly the grant the LLM job must never hold, so the type is applied here,
+# deterministically, to the issues the run filed. `Task`, not `Bug`: a doc inaccuracy is work on the docs, and keeping
+# them out of Bug keeps `type:Bug` meaning engine defects; the `documentation` label already sets them apart.
+#
+# ── One PR per run, never an accumulating branch (changed 2026-09-22) ─────────────────────────────────────────────
+# Until then every night merged `main` into a long-lived `doc-drift/nightly` branch and appended to the one open PR.
+# That design had a single point of failure: the day merging `main` conflicted, every later night filed its issues
+# and threw its fixes away. PR #829 sat as a draft from 08-16, conflicted from 09-12, and five nights of fixes were
+# lost before anyone noticed.
+#
+# A branch cut fresh from the commit the LLM job read cannot conflict with it, so the patch always lands. Each run
+# is small and reviewable on its own, and one stale PR blocks nothing. The bot never touches an existing branch, so
+# it never force-pushes and never auto-resolves: when two open PRs edit the same page, the second one to merge
+# shows the conflict to a human, who resolves it.
+
+on:
+  workflow_call:
+    inputs:
+      kind:
+        description: "doc-drift (nightly review) or doc-audit (weekly audit) — prefixes the branch, commit and PR title"
+        required: true
+        type: string
+      since:
+        description: "UTC timestamp the caller's run started; issues created after it, with the [kind] prefix, are its filings"
+        required: true
+        type: string
+      has_patch:
+        description: "true when the caller uploaded a doc-fix-patch artifact"
+        required: true
+        type: boolean
+
+jobs:
+  set-type:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      KIND: ${{ inputs.kind }}
+      SINCE: ${{ inputs.since }}
+    steps:
+      - name: Type this run's issues as Task
+        run: |
+          set -euo pipefail
+          case "$KIND" in doc-drift|doc-audit) ;; *) echo "::error::unknown kind '$KIND'"; exit 1 ;; esac
+          REPO="${{ github.repository }}"
+          gh issue list --repo "$REPO" --state open --label documentation --limit 100 \
+              --json number,title,createdAt > issues.json
+          NUMS=$(python3 -c "
+          import json, os
+          for i in json.load(open('issues.json')):
+              if i['createdAt'] >= os.environ['SINCE'] and i['title'].startswith('[' + os.environ['KIND'] + ']'):
+                  print(i['number'])
+          ")
+          if [ -z "$NUMS" ]; then
+            echo "::notice::This run filed no [$KIND] issues."
+            exit 0
+          fi
+          for n in $NUMS; do
+            gh issue edit "$n" --repo "$REPO" --type Task >/dev/null || true
+            # Read it back: a missing push grant does not fail the call, it drops the type without a word.
+            if [ "$(gh api "repos/$REPO/issues/$n" --jq '.type.name // ""')" = "Task" ]; then
+              echo "#$n typed Task"
+            else
+              echo "::warning::#$n is still untyped — the token could not set the issue type (it needs push access)."
+            fi
+          done
+
+  open-pr:
+    if: ${{ inputs.has_patch }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      KIND: ${{ inputs.kind }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0        # the ping-pong guard blames history
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: doc-fix-patch
+
+      - name: Commit the patch on its own branch
+        run: |
+          set -euo pipefail
+          case "$KIND" in doc-drift|doc-audit) ;; *) echo "::error::unknown kind '$KIND'"; exit 1 ;; esac
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Cut from the commit the LLM job read — the checkout above is the same github.sha, so the patch applies to
+          # exactly the text it was made from. Run id + attempt make the name unique across a same-day manual dispatch
+          # and a re-run, so the bot never pushes onto a branch that already exists (and so never needs --force).
+          BRANCH="$KIND/$(date -u +%F)-r${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          git switch -c "$BRANCH"
+
+          # Layer 1 (scripts/check-doc-links.py) gates doc/ on every PR through build-docs.yml — but never on
+          # THIS one. GitHub suppresses `pull_request` workflows for PRs created with GITHUB_TOKEN, so a
+          # bot-opened doc PR is the one doc change in the repo that no link check ever sees. Run the same
+          # lint here instead, which is strictly stronger than the check it stands in for: it refuses to COMMIT
+          # a dead link rather than annotating one after it is already on the branch.
+          # Baseline BEFORE the patch, because the lint covers all of doc/ and main can in principle arrive
+          # already broken. Without this, inherited breakage would be reported as "these fixes broke a
+          # link", and a bot that misattributes its failures is one people learn to ignore.
+          python3 scripts/check-doc-links.py --quiet && BASE_OK=1 || BASE_OK=0
+
+          if ! git apply doc-fix.patch; then
+            echo "::error::Patch does not apply to the commit it was made from — the LLM and open-pr checkouts disagree. Findings remain filed as issues."
+            exit 1
+          fi
+
+          # Stage FIRST, then ask the INDEX whether anything is there. Not `git status --porcelain`: that is a
+          # whole-worktree predicate and is never empty in this job, because download-artifact drops
+          # doc-fix.patch and fixes.txt in the workspace root and they show up as `??` lines.
+          # -A so a newly created page counts, not just edits to existing ones.
+          git add -A doc/
+          if git diff --cached --quiet; then
+            echo "::notice::The patch is a no-op against main. Nothing to commit."
+            echo "committed=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # Ping-pong guard. Is this patch rewriting prose a PREVIOUS bot run wrote? Touching the same PAGE twice is
+          # fine and expected. Rewriting the same LINES is not: it means the bot is arguing with itself, and since
+          # each run only sees the current text, neither side knows a round trip is happening. #642 was that — the
+          # 2026-08-01 fix bridged into a claim it had not checked, and 2026-08-02 filed the result. Blame the
+          # PRE-IMAGE line ranges of each hunk (HEAD is still pre-patch here; the patch is staged, not committed) and
+          # refuse if any land on a recent bot commit. Recent, not ever: prose the bot wrote months ago legitimately
+          # needs revising when the code moves, and a permanent ban would freeze those pages.
+          # HEAD is main, so a run is visible here once merged: a squash carries the PR title, a merge commit carries
+          # the bot's own commit subject, and both start with the [kind] prefix. Two UNMERGED runs rewriting the same
+          # lines are not caught here; they surface as a merge conflict on the second PR instead.
+          PINGPONG=""
+          NOW=$(date +%s)
+          for f in $(git diff --cached --name-only); do
+            for hunk in $(git diff --cached -U0 -- "$f" | sed -n 's/^@@ -\([0-9,]*\).*/\1/p'); do
+              start=${hunk%,*}
+              len=${hunk#*,}
+              [ "$hunk" = "$start" ] && len=1          # "@@ -12 @@" means one line, no comma
+              [ "$len" = 0 ] && continue               # pure insertion — touches nobody's prose
+              end=$((start + len - 1))
+              for sha in $(git blame -L "$start,$end" --porcelain HEAD -- "$f" 2>/dev/null \
+                             | grep -oE '^[0-9a-f]{40}' | sort -u); do
+                case "$(git log -1 --format=%s "$sha")" in
+                  '[doc-drift]'*|'[doc-audit]'*)
+                    age=$(( (NOW - $(git log -1 --format=%ct "$sha")) / 86400 ))
+                    if [ "$age" -le 30 ]; then
+                      PINGPONG="$PINGPONG  $f:$start-$end was written ${age}d ago by ${sha:0:7}"$'\n'
+                    fi
+                    ;;
+                esac
+              done
+            done
+          done
+          if [ -n "$PINGPONG" ]; then
+            echo "::error::This patch rewrites lines a recent doc-bot run wrote — the bot is revising its own output, which is how a fix turns into a round trip. Findings remain filed as issues; apply them by hand after deciding which reading is right."
+            printf '%s' "$PINGPONG"
+            exit 1
+          fi
+
+          # There is something to commit — hold it to the same mechanical bar every other doc change clears.
+          if ! python3 scripts/check-doc-links.py; then
+            if [ "$BASE_OK" = 0 ]; then
+              echo "::warning::doc/ link lint was ALREADY failing before this patch — committing anyway, this breakage is inherited from main and not caused by these fixes."
+            else
+              echo "::error::These doc fixes introduce a dead link, a stale anchor or an unresolvable src/ path. Refusing to commit them. The findings remain filed as issues and the next run retries from a clean tree."
+              exit 1
+            fi
+          fi
+
+          git commit -m "[$KIND] doc fixes $(date -u +%F) [no-ut] [no-doc]" \
+                     -m "$(cat fixes.txt)" \
+                     -m "Filed and fixed by the $KIND doc-accuracy workflow. Review the diff — the model fixes only what it is confident about, so the referenced issues may cover more than this commit does."
+          git push -u origin "$BRANCH"
+          echo "committed=1" >> "$GITHUB_ENV"
+
+      - name: Open the draft PR
+        if: ${{ env.committed == '1' }}
+        run: |
+          set -euo pipefail
+          {
+            cat fixes.txt
+            echo
+            echo "Doc fixes applied automatically by the \`$KIND\` doc-accuracy workflow (\`.github/workflows/doc-accuracy-write.yml\`)."
+            echo
+            echo "**Draft on purpose — this wants a human read.** The model fixes only findings it is confident about, so the \`Fixes\` list above may be longer than the diff. Check the issues that have no corresponding change and either fix them here or drop the \`Fixes\` line."
+            echo
+            echo "One PR per run: the bot never pushes to this branch again, so adjust it freely (\`git fetch && git switch $BRANCH\`, edit, commit, push). If another doc-bot PR edits the same page, whichever merges second shows the conflict."
+          } > body.md
+          gh pr create --repo "${{ github.repository }}" --draft --base main --head "$BRANCH" \
+              --title "[$KIND] Documentation fixes $(date -u +%F)" --body-file body.md
