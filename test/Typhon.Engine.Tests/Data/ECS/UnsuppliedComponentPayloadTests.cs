@@ -572,21 +572,7 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
 
         // #847: point reads use the EntityMap copy of EnabledBits and passed even while the cluster SoA copy stayed stale.
         // Assert the SoA specifically so bulk iteration sees the recovered enable too.
-        var clusterAccessor = read.For<EcsUnit>();
-        var foundInEnabledSoA = false;
-        foreach (var cluster in clusterAccessor.GetClusterEnumerator())
-        {
-            var occupancy = cluster.OccupancyBits;
-            var enabled = cluster.EnabledBits(velSlot);
-            if ((occupancy & enabled) != 0)
-            {
-                foundInEnabledSoA = true;
-                break;
-            }
-        }
-        clusterAccessor.Dispose();
-
-        Assert.That(foundInEnabledSoA, Is.True,
+        Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, velSlot), Is.True,
             "WAL SetEnabledBits replay must publish the recovered enable into the cluster SoA, not only the EntityMap record");
     }
 
@@ -616,31 +602,74 @@ class UnsuppliedComponentPayloadTests : TestBase<UnsuppliedComponentPayloadTests
             using var epoch = Typhon.Engine.Internals.EpochGuard.Enter(dbe.EpochManager);
 
             // Absolute state after the recovered transaction: Position enabled, Velocity disabled.
-            var recoveredBits = (ushort)(1 << posSlot);
-            applier.ApplySetEnabledBitsToExisting((long)id.RawValue, recoveredBits);
-
-            // AP-12: applying the same absolute record twice must remain a no-op semantically.
-            applier.ApplySetEnabledBitsToExisting((long)id.RawValue, recoveredBits);
+            applier.ApplySetEnabledBitsToExisting((long)id.RawValue, (ushort)(1 << posSlot));
         }
 
-        using var read = dbe.CreateQuickTransaction();
-        Assert.That(read.Open(id).IsEnabled(EcsUnit.Velocity), Is.False,
-            "the EntityMap copy must reflect the recovered disable");
-
-        var clusterAccessor = read.For<EcsUnit>();
-        var anyVelocityEnabled = false;
-        foreach (var cluster in clusterAccessor.GetClusterEnumerator())
+        using (var read = dbe.CreateQuickTransaction())
         {
-            if ((cluster.OccupancyBits & cluster.EnabledBits(velSlot)) != 0)
-            {
-                anyVelocityEnabled = true;
-                break;
-            }
+            Assert.That(read.Open(id).IsEnabled(EcsUnit.Velocity), Is.False,
+                "the EntityMap copy must reflect the recovered disable");
         }
-        clusterAccessor.Dispose();
 
-        Assert.That(anyVelocityEnabled, Is.False,
+        Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, velSlot), Is.False,
             "absolute SetEnabledBits replay must clear the entity's stale Velocity bit from the cluster SoA");
+        Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, posSlot), Is.True,
+            "a bit the mask keeps set must stay set — clearing every slot would pass the Velocity assertion alone");
+    }
+
+    /// <summary>
+    /// A SetEnabledBits apply interrupted between its two copies is healed by the re-run (AP-12, #847).
+    /// </summary>
+    /// <remarks>
+    /// Recovery writes the EntityMap record and the cluster SoA on different pages, and a crash during the seal checkpoint can persist one and not the
+    /// other. The re-run then starts from a record that already holds the recovered mask over a cluster that does not. An apply that skipped the SoA
+    /// whenever the record already matched — the obvious optimisation — would leave that disagreement in place for good; this is the state that rules
+    /// it out. Applying the same mask twice over a consistent base, by contrast, converges under any implementation and proves nothing.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("AP-12")]
+    public void Recovery_SetEnabledBits_ReapplyHealsASoACopyThePriorPassLeftStale()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var pos = new EcsPosition(1, 2, 3);
+            var vel = new EcsVelocity(4, 5, 6);
+            id = tx.Spawn<EcsUnit>(EcsUnit.Position.Set(in pos), EcsUnit.Velocity.Set(in vel));
+            tx.Commit();
+        }
+
+        var meta = Archetype<EcsUnit>.Metadata;
+        var posSlot = meta.GetSlot(EcsUnit.Position._componentTypeId);
+        var velSlot = meta.GetSlot(EcsUnit.Velocity._componentTypeId);
+        var recoveredBits = (ushort)(1 << posSlot);
+
+        using (var applier = new Typhon.Engine.Internals.RecoveryApplier(dbe))
+        {
+            using var epoch = Typhon.Engine.Internals.EpochGuard.Enter(dbe.EpochManager);
+            applier.ApplySetEnabledBitsToExisting((long)id.RawValue, recoveredBits);
+        }
+
+        // The prior pass's cluster page never reached disk: restore the pre-crash SoA bit and leave the record's recovered mask in place.
+        ClusterSoAProbe.SetEnabled(dbe, meta.ArchetypeId, id, velSlot, true);
+        using (var read = dbe.CreateQuickTransaction())
+        {
+            Assert.That(read.Open(id).IsEnabled(EcsUnit.Velocity), Is.False, "precondition: the record already holds the recovered mask");
+        }
+
+        Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, velSlot), Is.True, "precondition: the SoA still holds the pre-crash bit");
+
+        using (var applier = new Typhon.Engine.Internals.RecoveryApplier(dbe))
+        {
+            using var epoch = Typhon.Engine.Internals.EpochGuard.Enter(dbe.EpochManager);
+            applier.ApplySetEnabledBitsToExisting((long)id.RawValue, recoveredBits);
+        }
+
+        Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, velSlot), Is.False,
+            "the re-run must rewrite the SoA from the absolute mask even though the record already matched it");
+        Assert.That(ClusterSoAProbe.IsEnabled(dbe, meta.ArchetypeId, id, posSlot), Is.True);
     }
 
     /// <summary>Spawns B against a chunk deliberately recycled from a destroyed A, omitting Velocity.</summary>
