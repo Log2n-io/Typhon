@@ -229,6 +229,7 @@ internal sealed class HitArena
     /// </remarks>
     private int[] _intChunks = new int[256];
     private ulong[] _intSlots = new ulong[256];
+    private bool[] _intChanged = new bool[256];
     private int[] _intRanges = [];
     private int _intCount;
 
@@ -239,6 +240,11 @@ internal sealed class HitArena
     /// <param name="i">Its index.</param>
     /// <returns>The chunk id.</returns>
     public int InteriorChunk(int i) => _intChunks[i];
+
+    /// <summary>Whether one whole-admitted cluster's contents changed this tick.</summary>
+    /// <param name="i">Its index.</param>
+    /// <returns><see langword="true"/> when a stationary member must still flush it.</returns>
+    public bool InteriorChanged(int i) => _intChanged[i];
 
     /// <summary>The occupancy of one whole-admitted cluster — the mask every member of the cell sees.</summary>
     /// <param name="i">Its index.</param>
@@ -264,20 +270,23 @@ internal sealed class HitArena
         return _intRanges;
     }
 
-    /// <summary>Records a cluster every member of this cell sees whole.</summary>
+    /// <summary>Records a cluster every member of this cell sees whole, and whether its contents changed this tick.</summary>
     /// <param name="chunkId">The cluster.</param>
-    /// <param name="slots">Its occupancy — the mask, because containment makes every occupied slot a hit.</param>
-    public void AddInteriorCluster(int chunkId, ulong slots)
+    /// <param name="slots">Its occupancy.</param>
+    /// <param name="changed">Whether any of its entities was written this tick.</param>
+    public void AddInteriorCluster(int chunkId, ulong slots, bool changed)
     {
         if (_intCount == _intChunks.Length)
         {
             var grown = _intChunks.Length * 2;
             Array.Resize(ref _intChunks, grown);
             Array.Resize(ref _intSlots, grown);
+            Array.Resize(ref _intChanged, grown);
         }
 
         _intChunks[_intCount] = chunkId;
         _intSlots[_intCount] = slots;
+        _intChanged[_intCount] = changed;
         _intCount++;
 
         InteriorClustersAdmitted++;
@@ -326,6 +335,7 @@ internal sealed class HitArena
     {
         _candCount = 0;
         _intCount = 0;
+        _chgCount = 0;
     }
 
     /// <summary>Notes the candidates this cell's broad phase collected, once it is complete.</summary>
@@ -345,6 +355,50 @@ internal sealed class HitArena
     /// <summary>Counts one cluster the broad phase reached. Called on a chunk-id transition, which is free: the query walks cluster-major.</summary>
     public void NoteBroadCluster() => BroadClustersReached++;
 
+    /// <summary>Whether the session this worker is resolving takes the sparse path. Set per session before its runs are flushed.</summary>
+    public bool Sparse;
+
+    // ── What a view is made of ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // For every cluster with at least one entity inside a member's view: whether ALL its entities are inside (and whether that was known without testing
+    // them, from the cell's inscribed disc), or only some. Cumulative, per member per tick.
+
+    /// <summary>Clusters wholly inside a view, admitted without a per-entity test.</summary>
+    public long ViewClustersAdmittedWhole;
+
+    /// <summary>Clusters wholly inside a view that the per-entity test had to establish.</summary>
+    public long ViewClustersTestedWhole;
+
+    /// <summary>Clusters with entities both inside and outside a view.</summary>
+    public long ViewClustersPartial;
+
+    /// <summary>Entities inside a view that belong to a partial cluster, and the entities those clusters hold.</summary>
+    public long ViewPartialInside;
+
+    /// <summary>See <see cref="ViewPartialInside"/>.</summary>
+    public long ViewPartialTotal;
+
+    /// <summary>This tick's most expensive group on this worker, in timestamp ticks, and its member count. Folded and cleared by the interest prologue.</summary>
+    public long HeaviestGroupTicks;
+
+    /// <summary>Members of <see cref="HeaviestGroupTicks"/>'s group.</summary>
+    public int HeaviestGroupMembers;
+
+    /// <summary>Runs a sparse session did not emit because its membership there did not move. Cumulative.</summary>
+    public long SparseRunsSkipped;
+
+    /// <summary>Runs skipped for the session being resolved — reset per session, read into the pass's per-session column when it closes.</summary>
+    public int SessionSparseSkipped;
+
+    /// <summary>Clusters this worker OPENED to fill the shared snapshot. Per worker, so counting it touches no shared line.</summary>
+    public long SnapshotOpens;
+
+    /// <summary>Clusters this worker read from the shared snapshot without opening them — the redundant opens the store removed.</summary>
+    public long SnapshotReads;
+
+    /// <summary>Clusters the broad phase reached whose STRUCTURE changed this tick — the only ones whose membership can have moved. Cumulative.</summary>
+    public long BroadClustersStructureChanged;
+
     /// <summary>
     /// Entity candidates the broad phase reached, CUMULATIVE — the partner of <see cref="BroadClustersReached"/>.
     /// </summary>
@@ -357,6 +411,94 @@ internal sealed class HitArena
 
     /// <summary>Counts one entity candidate the broad phase reached.</summary>
     public void NoteBroadEntity() => BroadEntitiesReached++;
+
+    // ── The CHANGED region ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // A member whose viewpoint did not move this tick, looking at a cluster whose contents did not move either, has bit-identical inputs to the previous
+    // tick and therefore a bit-identical answer. Such a member needs the kernel only over the clusters that DID change. Those are copied to the tail of the
+    // candidate columns — after every archetype's full range, so no archetype's full range is broken — which lets the same vector kernel run over a short
+    // contiguous span instead of being split per cluster, the shape that measured slower every time it was tried.
+    private int[] _chgFrom = new int[64];
+    private int[] _chgTo = new int[64];
+    private int[] _chgArch = new int[64];
+    private int _chgCount;
+    private int[] _chgRegion = [];
+
+    /// <summary>Notes that one straddling cluster's candidates, <c>[from, to)</c>, belong to a cluster whose contents changed.</summary>
+    /// <param name="archetype">The archetype's position in the profile.</param>
+    /// <param name="from">First candidate.</param>
+    /// <param name="to">One past its last.</param>
+    public void NoteChangedRange(int archetype, int from, int to)
+    {
+        if (to <= from)
+        {
+            return;
+        }
+
+        if (_chgCount == _chgFrom.Length)
+        {
+            var g = _chgFrom.Length * 2;
+            Array.Resize(ref _chgFrom, g);
+            Array.Resize(ref _chgTo, g);
+            Array.Resize(ref _chgArch, g);
+        }
+
+        _chgFrom[_chgCount] = from;
+        _chgTo[_chgCount] = to;
+        _chgArch[_chgCount] = archetype;
+        _chgCount++;
+    }
+
+    /// <summary>
+    /// Copies the noted changed ranges to the tail of the candidate columns, grouped by archetype, and returns where each archetype's region starts.
+    /// </summary>
+    /// <param name="archetypeCount">How many archetypes the profile names.</param>
+    /// <returns>Region starts; entry <c>a + 1</c> (or the candidate count for the last) is where archetype <c>a</c>'s region ends.</returns>
+    public int[] BuildChangedRegion(int archetypeCount)
+    {
+        if (_chgRegion.Length < archetypeCount)
+        {
+            _chgRegion = new int[Math.Max(8, archetypeCount)];
+        }
+
+        for (var a = 0; a < archetypeCount; a++)
+        {
+            _chgRegion[a] = _candCount;
+            for (var r = 0; r < _chgCount; r++)
+            {
+                if (_chgArch[r] != a)
+                {
+                    continue;
+                }
+
+                var from = _chgFrom[r];
+                var n = _chgTo[r] - from;
+                if (_candCount + n > _candChunks.Length)
+                {
+                    var grown = Math.Max(_candChunks.Length * 2, _candCount + n);
+                    Array.Resize(ref _candChunks, grown);
+                    Array.Resize(ref _candSlots, grown);
+                    Array.Resize(ref _candMinX, grown);
+                    Array.Resize(ref _candMinY, grown);
+                    Array.Resize(ref _candMaxX, grown);
+                    Array.Resize(ref _candMaxY, grown);
+                }
+
+                Array.Copy(_candChunks, from, _candChunks, _candCount, n);
+                Array.Copy(_candSlots, from, _candSlots, _candCount, n);
+                Array.Copy(_candMinX, from, _candMinX, _candCount, n);
+                Array.Copy(_candMinY, from, _candMinY, _candCount, n);
+                Array.Copy(_candMaxX, from, _candMaxX, _candCount, n);
+                Array.Copy(_candMaxY, from, _candMaxY, _candCount, n);
+                _candCount += n;
+            }
+        }
+
+        return _chgRegion;
+    }
+
+    /// <summary>Runs a stationary member retained without the kernel, because the cluster's structure and its own viewpoint were both unchanged.</summary>
+    public long StationaryRunsRetained;
 
     /// <summary>Records one entity the enlarged cell query reached.</summary>
     /// <param name="chunkId">Its cluster.</param>
@@ -580,6 +722,128 @@ internal sealed class HitArena
         //
         // Cumulative, the RATIO these exist to report is immune to when it is read: a torn read costs a little recency, never a wrong proportion. The
         // absolute values are then totals since the runtime started, which is what ObserverMotion already does and why it never had this problem.
+    }
+
+    // ── Deferred runs: a member's runs held back until its own view has said which of them are unchanged ──────────────────────────────────────────
+    //
+    // Per archetype, dense by chunk id and stamped with the member's serial, so a member's deferral is found by a load rather than a probe and is never
+    // cleared: a stamp from another member reads as "not deferred". Sized serially by the interest prologue. The list keeps the member's own order, so the
+    // runs its view did not retain are flushed in the order the walk produced them.
+    private int[][] _deferStamp = [];
+    private ulong[][] _deferNear = [];
+    private ulong[][] _deferFar = [];
+    private int[] _deferArch = new int[256];
+    private int[] _deferChunk = new int[256];
+    private int _deferCount;
+
+    /// <summary>The member being resolved, as a stamp for the deferral table. Advanced by <see cref="BeginDeferral"/>.</summary>
+    public int MemberSerial;
+
+    /// <summary>Runs a member's view retained without a probe. Cumulative.</summary>
+    public long RunsRetainedByView;
+
+    /// <summary>Live slots the broad phase reached, and those whose structure changed this tick. Cumulative.</summary>
+    public long BroadSlotsReached;
+
+    /// <summary>See <see cref="BroadSlotsReached"/>.</summary>
+    public long BroadSlotsChanged;
+
+    /// <summary>Sizes the deferral table of one archetype. Serial.</summary>
+    /// <param name="archetype">The archetype's plan index.</param>
+    /// <param name="archetypeCount">How many archetypes the plan has.</param>
+    /// <param name="chunkCapacity">One past the highest chunk id this tick can reach.</param>
+    public void EnsureDeferCapacity(int archetype, int archetypeCount, int chunkCapacity)
+    {
+        if (_deferStamp.Length < archetypeCount)
+        {
+            Array.Resize(ref _deferStamp, archetypeCount);
+            Array.Resize(ref _deferNear, archetypeCount);
+            Array.Resize(ref _deferFar, archetypeCount);
+        }
+
+        if ((_deferStamp[archetype]?.Length ?? 0) < chunkCapacity)
+        {
+            var g = Math.Max(chunkCapacity, Math.Max(256, (_deferStamp[archetype]?.Length ?? 0) * 2));
+            Array.Resize(ref _deferStamp[archetype], g);
+            Array.Resize(ref _deferNear[archetype], g);
+            Array.Resize(ref _deferFar[archetype], g);
+        }
+    }
+
+    /// <summary>Starts a member: nothing it defers is confused with the previous member's.</summary>
+    public void BeginDeferral()
+    {
+        // Zero is the "not deferred / consumed" stamp, so the serial never takes it: at the wrap every table is cleared, or a stamp from 2^32 members ago
+        // would read as this member's.
+        if (++MemberSerial == 0)
+        {
+            for (var a = 0; a < _deferStamp.Length; a++)
+            {
+                if (_deferStamp[a] != null)
+                {
+                    Array.Clear(_deferStamp[a]);
+                }
+            }
+
+            MemberSerial = 1;
+        }
+
+        _deferCount = 0;
+    }
+
+    /// <summary>Holds back one run of the current member.</summary>
+    /// <returns><see langword="false"/> when the chunk is beyond what the table was sized for; the caller flushes it now.</returns>
+    public bool TryDefer(int archetype, int chunkId, ulong nearMask, ulong farMask)
+    {
+        var stamps = (uint)archetype < (uint)_deferStamp.Length ? _deferStamp[archetype] : null;
+        if (stamps == null || (uint)chunkId >= (uint)stamps.Length)
+        {
+            return false;
+        }
+
+        stamps[chunkId] = MemberSerial;
+        _deferNear[archetype][chunkId] = nearMask;
+        _deferFar[archetype][chunkId] = farMask;
+        if (_deferCount == _deferArch.Length)
+        {
+            Array.Resize(ref _deferArch, _deferCount * 2);
+            Array.Resize(ref _deferChunk, _deferCount * 2);
+        }
+
+        _deferArch[_deferCount] = archetype;
+        _deferChunk[_deferCount++] = chunkId;
+        return true;
+    }
+
+    /// <summary>The current member's deferred masks for a chunk, if it deferred one.</summary>
+    public bool TryDeferred(int archetype, int chunkId, out ulong nearMask, out ulong farMask)
+    {
+        var stamps = (uint)archetype < (uint)_deferStamp.Length ? _deferStamp[archetype] : null;
+        if (stamps != null && (uint)chunkId < (uint)stamps.Length && stamps[chunkId] == MemberSerial)
+        {
+            nearMask = _deferNear[archetype][chunkId];
+            farMask = _deferFar[archetype][chunkId];
+            return true;
+        }
+
+        nearMask = farMask = 0UL;
+        return false;
+    }
+
+    /// <summary>Marks a deferred run as retained, so the leftover flush skips it.</summary>
+    public void ConsumeDeferred(int archetype, int chunkId) => _deferStamp[archetype][chunkId] = 0;
+
+    /// <summary>The current member's deferred runs, in the order it produced them.</summary>
+    public int DeferredCount => _deferCount;
+
+    /// <summary>One deferred run; <paramref name="live"/> is false once the view retained it.</summary>
+    public void Deferred(int i, out int archetype, out int chunkId, out ulong nearMask, out ulong farMask, out bool live)
+    {
+        archetype = _deferArch[i];
+        chunkId = _deferChunk[i];
+        live = _deferStamp[archetype][chunkId] == MemberSerial;
+        nearMask = _deferNear[archetype][chunkId];
+        farMask = _deferFar[archetype][chunkId];
     }
 
     /// <summary>

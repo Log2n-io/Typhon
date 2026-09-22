@@ -175,6 +175,21 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _ingress = new SubscriptionsIngress(_sessions, registry, CommandTypes, new CommandTypeBuffers(CommandTypes, Options.MaxSessions), _ingressRings,
                 Options.MaxSessions, _sendPump);
             _ingress.Interest = Interest;
+            Interest.SparseTopology = Options.SparseTopology;
+            Interest.GroupCap = Options.InterestGroupCap;
+
+            // The sparse topology path, wired OUTSIDE the shared-blocks option on purpose: interest reads whether a session's next frame will be
+            // incremental, and the frame stage reads projection's changed-block tables. Attaching the replication states the usual way would also
+            // switch on encode sharing, which is a separate option and a separate measurement.
+            Interest.Frames = _frames;
+            _frames?.AttachChangeStates(_replicationStates);
+            foreach (var state in _replicationStates)
+            {
+                if (state != null)
+                {
+                    state.TrackChangedBlocks = Options.SparseTopology;
+                }
+            }
             _ingress.Frames = _frames;
             Commands = new SubscriptionsCommands(_ingress);
 
@@ -559,11 +574,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // mask is all ones, which suppresses nothing — an archetype whose plan has not been published yet must not have its writes dropped.
             clusterState.ProjectedComponentMask = ProjectedComponentMaskOf(plan);
 
-            if (Options.TrackClusterContentChanges)
-            {
-                clusterState.TrackContentChanges = true;
-                clusterState.PublishChangedClusterList = true;
-            }
+            // The membership signal, on for every replicated archetype: interest's topology maintenance reads it, and without it every cluster reads as
+            // changed and retention never fires. Content tracking stays off — interest does not need it and it costs a mark per span handout.
+            clusterState.TrackStructureChanges = true;
         }
 
         return states;

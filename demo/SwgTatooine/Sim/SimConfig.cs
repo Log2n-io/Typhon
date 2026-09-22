@@ -251,9 +251,11 @@ public sealed class SimConfig
     /// <summary>Whether the interest stage times its broad phase, narrow phase and run assembly separately. <c>--subs-interest-phases</c>.</summary>
     public bool SubscriptionsInterestPhases;
 
-    /// <summary>Whether an interest cell admits a wholly-contained cluster without reading its entities. A same-binary switch, so one build is both arms.</summary>
-    /// <summary>Whether the engine tracks and publishes the changed-cluster list. Off by default; it has no reader yet, so it exists to be measured.</summary>
-    public bool SubscriptionsTrackContent;
+    /// <summary>Whether up-to-date sessions stop re-stating unchanged membership. A same-binary switch, so one build is both arms.</summary>
+    public bool SubscriptionsSparse;
+
+    /// <summary>The interest cell-group cap; zero is automatic. <c>--subs-group-cap</c>.</summary>
+    public int SubscriptionsGroupCap;
 
     /// <summary>
     /// <c>--subs-owed on|off</c>: whether a reused slot costs the session that slot on its next frame, or its whole next frame.

@@ -541,6 +541,11 @@ internal static unsafe class ProjectionPass
         block->ProjectedOccupancy = *(ulong*)clusterBase;
         Volatile.Write(ref block->ChangedTick, tick);
 
+        if (changedSlots != 0UL)
+        {
+            state.NoteChangedBlock(block->ChunkId, block, changedSlots, tick);
+        }
+
         // The watched mask is deliberately LEFT SET. It is the interest stage's, cleared by its own prologue at the start of the next tick, and the frame
         // stage still has to read it after this one has run — a pass that tidied up after itself would erase the very thing S2b is about to consult.
         PublishSharedRun(state, worker, block, blockBytes, arena, changedSlots, released, initializing, arrived, tick);

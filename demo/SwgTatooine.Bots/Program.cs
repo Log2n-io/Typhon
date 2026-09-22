@@ -19,12 +19,14 @@ var bots = int.Parse(Arg("--bots") ?? "100");
 var seconds = int.Parse(Arg("--seconds") ?? "60");
 var hz = int.Parse(Arg("--hz") ?? "4");
 var kind = Arg("--kind") ?? "god";
+var connectBatch = int.Parse(Arg("--connect-batch") ?? "1");
 
 var options = new BotSwarmOptions
 {
     Endpoint = new Uri(endpoint),
     Count = bots,
     TickHz = hz,
+    ConnectBatch = connectBatch,
     Kind = kind,
 };
 
@@ -121,6 +123,10 @@ string Blocks()
     Console.WriteLine($"SWEEP kind={kind} sessions={bots} project={project:F3} interest={interest:F3} frames={frames:F3} "
         + $"subs={subs:F3} tickP50={tick:F3} subsPct={(tick > 0 ? subs / tick * 100 : 0):F1} recPerFrame={swarm.RecordsPerFrame:F0} "
         + $"bytesPerSessionPerSec={bytesPerSessionPerSec:F0} totalBytes={swarm.BytesReceived}");
+    // Every system's mean, heaviest first: the tick is more than replication, and a change that moves cost out of the three stages above shows up here.
+    var bySystem = new System.Collections.Generic.List<(string Name, double Ms)>(systems);
+    bySystem.Sort((x, y) => y.Ms.CompareTo(x.Ms));
+    Console.WriteLine("SYSTEMS " + string.Join(" ", bySystem.ConvertAll(x => $"{x.Name}={x.Ms:F3}")));
 }
 
 Console.WriteLine();

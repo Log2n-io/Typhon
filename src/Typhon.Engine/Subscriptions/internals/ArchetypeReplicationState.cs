@@ -152,6 +152,93 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>Chunk id to block. Read directly by the projection passes.</summary>
     public ReplicationDirectory Directory { get; }
 
+    // ── This tick's changed blocks, by chunk ──────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // Written by projection for every block whose content changed this tick, read by the frame stage for the sessions that no longer re-state what they
+    // hold. The change is computed ONCE, here, per block; a session learns of it by testing the chunks it already holds against this table — its own view
+    // is the index, so there is no inverted list to maintain and no serial step to build one. Dense by chunk id and stamped, so it is never cleared: a
+    // stale entry names another tick and reads as "unchanged".
+    //
+    // One entry per chunk, so a write touches one line rather than one in each of two arrays, and a reader filters on the slots without a header miss.
+    // Each block is projected by exactly one worker, so entries are written once per tick; adjacent ids may belong to different workers, which costs a
+    // shared line on a store the store buffer hides. The tick is stored last and read first, with release and acquire, so the entry describes itself
+    // rather than relying on the stage join between projection and frames. Kept only while the sparse path reads it.
+    private ChangedBlock[] _changed = [];
+
+    /// <summary>Whether projection records its changed blocks for the sparse path. Set by the runtime from <see cref="SubscriptionsOptions.SparseTopology"/>.</summary>
+    internal bool TrackChangedBlocks;
+
+    private struct ChangedBlock
+    {
+        public nint Block;
+        public ulong Slots;
+        public uint Tick;
+    }
+
+    /// <summary>Records that <paramref name="block"/>'s content changed on <paramref name="tick"/>. Called by the projecting worker.</summary>
+    /// <param name="chunkId">The block's cluster.</param>
+    /// <param name="block">The block.</param>
+    /// <param name="slots">The slots whose content changed.</param>
+    /// <param name="tick">The tick.</param>
+    public void NoteChangedBlock(int chunkId, ReplicationBlockHeader* block, ulong slots, uint tick)
+    {
+        if (!TrackChangedBlocks || (uint)chunkId >= (uint)_changed.Length)
+        {
+            return;
+        }
+
+        ref var entry = ref _changed[chunkId];
+        entry.Block = (nint)block;
+        entry.Slots = slots;
+        Volatile.Write(ref entry.Tick, tick);
+    }
+
+    /// <summary>The block of <paramref name="chunkId"/> if its content changed on <paramref name="tick"/>, otherwise <see langword="null"/>.</summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <param name="tick">The tick.</param>
+    /// <param name="slots">The slots whose content changed.</param>
+    /// <returns>The block, or <see langword="null"/>.</returns>
+    public ReplicationBlockHeader* ChangedBlockOf(int chunkId, uint tick, out ulong slots)
+    {
+        slots = 0UL;
+        if ((uint)chunkId >= (uint)_changed.Length)
+        {
+            return null;
+        }
+
+        ref var entry = ref _changed[chunkId];
+        if (Volatile.Read(ref entry.Tick) != tick)
+        {
+            return null;
+        }
+
+        slots = entry.Slots;
+        return (ReplicationBlockHeader*)entry.Block;
+    }
+
+    private void EnsureChangedCapacity()
+    {
+        if (!TrackChangedBlocks)
+        {
+            return;
+        }
+
+        // Chunk ids are bounded by the cluster table's capacity, which only grows; the watched blocks are scanned only when the state has no cluster table.
+        var capacity = _attachedTo?.ClusterAabbs?.Length ?? 0;
+        if (capacity == 0)
+        {
+            for (var i = 0; i < _watchedBlocks.Count; i++)
+            {
+                capacity = Math.Max(capacity, _watchedBlocks[i]->ChunkId + 1);
+            }
+        }
+
+        if (capacity > _changed.Length)
+        {
+            Array.Resize(ref _changed, Math.Max(capacity, Math.Max(256, _changed.Length * 2)));
+        }
+    }
+
     /// <summary>
     /// The database's network identities and their reuse generations. Shared with every other replicated archetype and owned by neither — disposing this
     /// state leaves it alone.
@@ -602,6 +689,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         // has none, and only a watched slot is ever reached. It sizes the very first refill and nothing after it — see NetIdLeaseSet.BeginTick.
         _netIdLeases.BeginTick(NetIds, workers, _watchedBlocks.Count * Layout.SlotCount);
         _records.BeginTick(workers);
+        EnsureChangedCapacity();
 
         // Sized HERE, serially, because the workers below publish into it from every chunk at once and a growth on that path is several threads
         // reallocating one native buffer with nothing synchronizing them (17 § 18). A chunk id past the end simply publishes nothing and is encoded per

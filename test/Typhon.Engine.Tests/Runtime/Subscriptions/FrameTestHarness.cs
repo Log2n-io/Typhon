@@ -106,12 +106,23 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns>The index.</returns>
     public int PlanIndex(string name) => _interest.PlanIndex(name);
 
+    /// <summary>
+    /// Whether each tick runs the engine's tick fence first, as the runtime does. The fence publishes the structure signal, and every path that rests on
+    /// it — stationary retention above all — silently falls back to the walk without it.
+    /// </summary>
+    public bool RunFence { get; set; }
+
     /// <summary>Runs one whole tick of the track: interest, blocks, projection, frames, then the durability gate.</summary>
     /// <param name="tick">The tick number, which must advance.</param>
     /// <param name="workers">Worker-pool width for the two partitioned stages.</param>
     public void RunTick(long tick, int workers = 1)
     {
         Tick = tick;
+        if (RunFence)
+        {
+            Engine.WriteTickFence(tick);
+        }
+
         Sessions.BeginTick();
         RunInterest(tick, workers);
         RunProject(tick);

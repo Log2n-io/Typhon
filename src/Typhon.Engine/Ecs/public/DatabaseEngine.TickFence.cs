@@ -1945,6 +1945,8 @@ public partial class DatabaseEngine
             // point: a consumer distinguishes "this tick named no movers" from "this tick did not answer" by the tick stamp alone, and a skipped publish
             // would leave the stamp at the last tick that did run and be read as that tick's answer.
             clusterState.PublishAabbMovedClusters(tickNumber);
+            clusterState.PublishRetirements(tickNumber);
+            clusterState.PublishStructureChanges(tickNumber);
             return false;
         }
 
@@ -1979,6 +1981,13 @@ public partial class DatabaseEngine
         // barrier above has already joined, so the bitmap is complete; ClearAabbRefreshBookkeeping below does not touch it, but keeping the two publishes
         // adjacent is what stops a later edit from separating one of them from the barrier it depends on.
         clusterState.PublishAabbMovedClusters(tickNumber);
+
+        // AFTER DrainPendingClusterFinalizations above, which is where a cluster emptied this tick is actually retired — publishing before it would stamp
+        // the retirement onto the NEXT tick, and a consumer on this tick would read the retired cluster as merely unchanged.
+        clusterState.PublishRetirements(tickNumber);
+
+        // The membership signal, from the same window: after the finalization drain, so a slot released and a cluster retired this tick are both in it.
+        clusterState.PublishStructureChanges(tickNumber);
 
         if (clusterState.SpatialSlot.HasSpatialIndex && clusterState.SpatialSlot.FieldInfo.Mode == SpatialMode.Dynamic)
         {

@@ -87,6 +87,17 @@ public unsafe ref struct AabbClusterEnumerator
     private int _warmToken;
     private ref ChunkAccessor<PersistentStore> _warm;
 
+    /// <summary>
+    /// When set, <see cref="NextCluster"/> names the next admitted cluster without opening its page.
+    /// </summary>
+    /// <remarks>
+    /// <b>Finding a cluster and opening it are different costs, and a caller that shares clusters between queries only wants the first.</b> Opening is a
+    /// page-cache request per cluster; profiled at d06 with a thousand subscription sessions it is most of this enumerator's time, because every one of
+    /// about 165 overlapping interest cells re-opens the same clusters — each roughly fifteen times a tick. A caller that opens each cluster once and shares
+    /// what it read sets this and calls <see cref="OpenCluster"/> itself, at most once per cluster.
+    /// </remarks>
+    private bool _noOpen;
+
     // Iteration state.
     private int _currentCellX;
     private int _currentCellY;
@@ -512,6 +523,90 @@ public unsafe ref struct AabbClusterEnumerator
         _tallyHits += written;
         return written;
     }
+
+    /// <summary>
+    /// Advance to the next cluster the broadphase admits WITHOUT opening its page, reporting its id and world-space bounds.
+    /// </summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <param name="minX">Bounds minimum X, from the archetype's cluster AABBs — no page is read for it.</param>
+    /// <param name="minY">Bounds minimum Y.</param>
+    /// <param name="maxX">Bounds maximum X.</param>
+    /// <param name="maxY">Bounds maximum Y.</param>
+    /// <returns><see langword="false"/> once the query is exhausted.</returns>
+    /// <remarks>
+    /// The occupancy and the entities are not known here — a caller that needs them calls <see cref="OpenCluster"/>, once, and shares the result. An
+    /// unbounded box for a cluster whose bounds cannot be read is the safe direction: the caller's own tests then admit it and look inside.
+    /// </remarks>
+    public bool MoveNextClusterUnopened(out int chunkId, out double minX, out double minY, out double maxX, out double maxY)
+    {
+        ThrowIfRentStale();
+        _noOpen = true;
+        _currentOccupancyBits = 0UL;
+        _decidedHits = 0UL;
+        bool advanced;
+        try
+        {
+            advanced = NextCluster();
+        }
+        finally
+        {
+            // Reset whatever happened: a throw inside the walk would otherwise leave every later MoveNext in unopened mode, silently yielding nothing.
+            _noOpen = false;
+        }
+
+        if (!advanced)
+        {
+            ReleaseRentAfterDrain();
+            chunkId = -1;
+            minX = minY = maxX = maxY = 0d;
+            return false;
+        }
+
+        chunkId = _currentClusterChunkId;
+        minX = double.NegativeInfinity;
+        minY = double.NegativeInfinity;
+        maxX = double.PositiveInfinity;
+        maxY = double.PositiveInfinity;
+        var aabbs = Volatile.Read(ref _state.ClusterAabbs);
+        var cellMap = Volatile.Read(ref _state.ClusterCellMap);
+        if (aabbs != null && cellMap != null && (uint)chunkId < (uint)aabbs.Length && (uint)chunkId < (uint)cellMap.Length)
+        {
+            ref readonly var box = ref aabbs[chunkId];
+            _grid.CellOrigin(cellMap[chunkId], out var originX, out var originY, out _);
+            minX = ClusterSpatialAabb.ToWorldExact(box.MinX, originX);
+            minY = ClusterSpatialAabb.ToWorldExact(box.MinY, originY);
+            maxX = ClusterSpatialAabb.ToWorldExact(box.MaxX, originX);
+            maxY = ClusterSpatialAabb.ToWorldExact(box.MaxY, originY);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Adds a cluster's occupancy, read by the caller from its own copy, to the query's candidate tally — which the unopened walk cannot count itself and
+    /// which feeds the maintenance budget (SO-02).
+    /// </summary>
+    /// <param name="occupancy">The cluster's occupancy.</param>
+    public void TallyOccupancy(ulong occupancy) => _tallyCandidates += BitOperations.PopCount(occupancy);
+
+    /// <summary>Opens a cluster's page through this enumerator's warm accessor and returns its base address.</summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <returns>The cluster's base; its first eight bytes are the occupancy word.</returns>
+    public byte* OpenCluster(int chunkId)
+    {
+        ThrowIfRentStale();
+        EnsureAccessor();
+        return _warm.GetChunkAddress(chunkId);
+    }
+
+    /// <summary>Byte offset of the spatial field's column from a cluster's base.</summary>
+    public int SpatialFieldsOffset => _layout.FieldsOffset;
+
+    /// <summary>The spatial column's stride.</summary>
+    public int SpatialStride => _layout.Stride;
+
+    /// <summary>Whether the spatial field is the flat f32 box a shared snapshot can copy.</summary>
+    public bool IsAabb2F => _layout.FieldType == SpatialFieldType.AABB2F;
 
     /// <summary>
     /// Advance to the next CLUSTER the broadphase admits, reading no entity, and leave it open so the caller may decide whether to drain it.
@@ -1025,6 +1120,15 @@ public unsafe ref struct AabbClusterEnumerator
                         continue;
                     }
 
+                    if (_noOpen)
+                    {
+                        _currentClusterChunkId = treeChunkId;
+                        _currentOccupancyBits = 0UL;
+                        _currentClusterBase = null;
+                        _tallyClusters++;
+                        return true;
+                    }
+
                     EnsureAccessor();
                     _currentClusterBase = _warm.GetChunkAddress(treeChunkId);
                     _currentClusterChunkId = treeChunkId;
@@ -1045,6 +1149,15 @@ public unsafe ref struct AabbClusterEnumerator
                 }
 
                 int batchedChunkId = _currentCellIndex.ClusterIds[batchedIdx];
+                if (_noOpen)
+                {
+                    _currentClusterChunkId = batchedChunkId;
+                    _currentOccupancyBits = 0UL;
+                    _currentClusterBase = null;
+                    _tallyClusters++;
+                    return true;
+                }
+
                 EnsureAccessor();
                 _currentClusterBase = _warm.GetChunkAddress(batchedChunkId);
                 _currentClusterChunkId = batchedChunkId;
@@ -1092,6 +1205,15 @@ public unsafe ref struct AabbClusterEnumerator
 
                 // Broadphase hit — open the cluster for narrowphase scanning.
                 int chunkId = _currentCellIndex.ClusterIds[idx];
+                if (_noOpen)
+                {
+                    _currentClusterChunkId = chunkId;
+                    _currentOccupancyBits = 0UL;
+                    _currentClusterBase = null;
+                    _tallyClusters++;
+                    return true;
+                }
+
                 EnsureAccessor();
                 _currentClusterBase = _warm.GetChunkAddress(chunkId);
                 _currentClusterChunkId = chunkId;
@@ -1216,6 +1338,15 @@ public unsafe ref struct AabbClusterEnumerator
             }
 
             int chunkId = escaped.ChunkIds[i];
+            if (_noOpen)
+            {
+                _currentClusterChunkId = chunkId;
+                _currentOccupancyBits = 0UL;
+                _currentClusterBase = null;
+                _tallyClusters++;
+                return true;
+            }
+
             EnsureAccessor();
             _currentClusterBase = _warm.GetChunkAddress(chunkId);
             _currentClusterChunkId = chunkId;

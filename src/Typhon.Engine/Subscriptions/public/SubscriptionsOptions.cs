@@ -409,29 +409,29 @@ public sealed class SubscriptionsOptions
     public bool MeasureInterestPhases { get; init; }
 
     /// <summary>
-    /// Whether an interest cell's broad phase admits a wholly-contained cluster without reading its entities. Default off.
+    /// Whether a session that is up to date stops re-stating membership that did not change. Default off.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// A cell's query is centred on the CELL rather than on any member, so a cluster whose box lies inside the disc of radius
-    /// <c>enterRadius - cell*sqrt(2)/2</c> about that centre is visible WHOLE to every member: a member is at most a half-diagonal from the centre, and the
-    /// triangle inequality closes it. The cluster AABB contains every entity box it holds, so the admission is an implication of the same containment test
-    /// the per-entity kernel would have run — exact, not an approximation.
+    /// Without it, every session re-emits and re-marks every cluster it holds on every tick, and the frame stage walks all of them to find the few that
+    /// changed — measured at a thousand sessions, 81 % of the runs walked carried nothing. With it, a session whose frame will be incremental emits runs
+    /// only where its membership moved — the clusters it holds are still marked watched, so projection is unchanged — and content changes reach it from
+    /// projection's per-tick changed-block table, computed once per block rather than rediscovered by every session.
     /// </para>
     /// <para>
-    /// <b>Off by default and switchable at runtime</b> because the two shapes are an A/B and this repository's rule requires both arms to be one build.
+    /// A session that is behind, reset or owed a full read keeps the old path whole, because a full gather needs every run.
     /// </para>
     /// </remarks>
-        /// <summary>
-    /// Whether the engine tracks and publishes the per-tick changed-cluster list for replicated archetypes. Default off.
+    public bool SparseTopology { get; init; }
+
+    /// <summary>
+    /// The most sessions one interest cell group may hold before a crowded cell is cut into pieces. Zero (the default) is the automatic cap: sessions
+    /// divided by workers, at least eight.
     /// </summary>
     /// <remarks>
-    /// Both halves of the signal at once, because they gate different costs and neither is useful alone: the marks on the write paths, and the drain that
-    /// turns them into a list. It is off because the consumer that justified it — the projection gate of 21 section 7.2 — does not pay on the workloads
-    /// measured so far, and a signal with no reader is pure cost. It stays switchable because the measurements that would justify a reader cannot be taken
-    /// with it compiled out.
+    /// A group is resolved by one worker, so the largest group is a floor on the stage's wall time; every extra piece pays the cell's broad phase again.
     /// </remarks>
-    public bool TrackClusterContentChanges { get; init; }
+    public int InterestGroupCap { get; init; }
 
     /// <summary>
     /// Whether the frame stage takes its sessions from a shared cursor rather than a fixed slice each. Default <see langword="true"/>.

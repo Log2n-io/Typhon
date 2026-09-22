@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Internals;
 
@@ -145,6 +146,49 @@ internal sealed unsafe class InterestPass
     /// <summary>The per-archetype replication states. Exposed for the counters the track reports, never for the tick path.</summary>
     internal ArchetypeReplicationState[] ReplicationStates => _states;
     private readonly ArchetypeClusterState[] _clusterStates;
+
+    /// <summary>The frame stage, read for whether a session's next frame will be incremental. Set by the runtime once both exist.</summary>
+    internal FrameAssembler Frames;
+
+    /// <summary>Whether the sparse topology path is enabled. <see cref="SubscriptionsOptions.SparseTopology"/>.</summary>
+    internal bool SparseTopology;
+
+    /// <summary>The most sessions one cell group may hold; zero for the automatic cap. <see cref="SubscriptionsOptions.InterestGroupCap"/>.</summary>
+    internal int GroupCap;
+
+    // Cluster size against the cells that host it, sampled every ClusterSizeEvery ticks.
+    private const long ClusterSizeEvery = 64;
+    private long _clusterSizeSamples;
+    private double _clusterRadiusSum;
+    private double _clusterRadiusMax;
+    private double _gridCellSide;
+    private double _interestCellSide;
+
+
+    /// <summary>Per session this tick: whether it takes the sparse path. Decided in the prologue, read by the workers and the frame stage.</summary>
+    private bool[] _tickSparse = [];
+
+    /// <summary>
+    /// Per session this tick: whether its next frame is incremental — its view holds exactly what its last published frame described. Stationary retention
+    /// rests on it: re-emitting a held mask is only the kernel's answer when the mask is the one the kernel computed last tick.
+    /// </summary>
+    private bool[] _tickReady = [];
+
+    /// <summary>Per session this tick: how many runs the sparse path did not emit — what the frame stage adds back to reach the full path's run count.</summary>
+    private int[] _tickSparseSkipped = [];
+
+    /// <summary>How many runs the sparse path skipped for this tick's session <paramref name="index"/>.</summary>
+    /// <param name="index">The session's index.</param>
+    /// <returns>The count.</returns>
+    public int SparseSkippedOf(int index) => (uint)index < (uint)_tickSparseSkipped.Length ? _tickSparseSkipped[index] : 0;
+
+    /// <summary>Whether this tick's session <paramref name="index"/> takes the sparse path.</summary>
+    /// <param name="index">The session's index in this tick's arrays.</param>
+    /// <returns><see langword="true"/> when its runs name only membership changes.</returns>
+    public bool IsSparse(int index) => (uint)index < (uint)_tickSparse.Length && _tickSparse[index];
+
+    /// <summary>Per archetype, this tick's clusters opened once and shared by every interest cell. See <see cref="ClusterSnapshotStore"/>.</summary>
+    private readonly ClusterSnapshotStore[] _snapshots;
     private readonly SessionTable _sessions;
     private readonly ExclusiveWindow _fenceWindow;
     private readonly CompiledProfile[] _profiles;
@@ -312,11 +356,13 @@ internal sealed unsafe class InterestPass
         _fenceWindow = engine.EpochManager.FenceWindow;
 
         _clusterStates = new ArchetypeClusterState[plans.Length];
+        _snapshots = new ClusterSnapshotStore[plans.Length];
         for (var i = 0; i < plans.Length; i++)
         {
             var archetypeStates = engine._archetypeStates;
             var catalogId = plans[i].ArchetypeCatalogId;
             _clusterStates[i] = archetypeStates != null && catalogId < archetypeStates.Length ? archetypeStates[catalogId]?.ClusterState : null;
+            _snapshots[i] = _clusterStates[i] != null ? new ClusterSnapshotStore() : null;
         }
 
         _profiles = CompileProfiles(registry, plans);
@@ -491,6 +537,83 @@ internal sealed unsafe class InterestPass
         }
     }
 
+    /// <summary>Live slots the broad phase reached, and those whose structure changed. Cumulative.</summary>
+    public (long Reached, long Changed) BroadSlots
+    {
+        get
+        {
+            long r = 0, c = 0;
+            for (var i = 0; i < _arenas.Length; i++)
+            {
+                r += _arenas[i].BroadSlotsReached;
+                c += _arenas[i].BroadSlotsChanged;
+            }
+
+            return (r, c);
+        }
+    }
+
+    /// <summary>Runs a moving member's view retained in one pass instead of a probe each. Cumulative.</summary>
+    public long RunsRetainedByView
+    {
+        get
+        {
+            var t = 0L;
+            for (var i = 0; i < _arenas.Length; i++)
+            {
+                t += _arenas[i].RunsRetainedByView;
+            }
+
+            return t;
+        }
+    }
+
+    /// <summary>Runs sparse sessions did not emit because their membership there did not move. Cumulative.</summary>
+    public long SparseRunsSkipped
+    {
+        get
+        {
+            var t = 0L;
+            for (var i = 0; i < _arenas.Length; i++)
+            {
+                t += _arenas[i].SparseRunsSkipped;
+            }
+
+            return t;
+        }
+    }
+
+    /// <summary>Clusters opened to fill the shared snapshot, against those read from it without an open. Cumulative.</summary>
+    public (long Opens, long Reads) SnapshotUse
+    {
+        get
+        {
+            long o = 0, r = 0;
+            for (var i = 0; i < _arenas.Length; i++)
+            {
+                o += _arenas[i].SnapshotOpens;
+                r += _arenas[i].SnapshotReads;
+            }
+
+            return (o, r);
+        }
+    }
+
+    /// <summary>Clusters the broad phase reached whose structure changed this tick, cumulative.</summary>
+    public long BroadClustersStructureChanged
+    {
+        get
+        {
+            var t = 0L;
+            for (var i = 0; i < _arenas.Length; i++)
+            {
+                t += _arenas[i].BroadClustersStructureChanged;
+            }
+
+            return t;
+        }
+    }
+
     /// <summary>Distinct clusters every cell's broad phase reached this run, against the entities it collected from them.</summary>
     public long BroadClustersReached
     {
@@ -563,6 +686,92 @@ internal sealed unsafe class InterestPass
         return _arenas[range.Worker].Runs(range.Start, range.Count)[run];
     }
 
+    // ── The stage's parallel shape (mirrors the frame stage's, 17 § 17) ────────────────────────────────────────────────────────────────────────────
+    //
+    // A stage's wall time is its slowest chunk. Summed busy over span is the effective worker count; the start spread says whether the chunks ran at the
+    // same time at all; the heaviest group says whether one cell's crowd is the straggler that no cursor can split. Written by one chunk each, folded by
+    // the next tick's prologue, the stage's one single-threaded point.
+    private long[] _chunkBusy = [];
+    private long[] _chunkStart = [];
+    private long[] _chunkEnd = [];
+    private int _lastChunkCount;
+    private long _spanTicks;
+    private long _busySumTicks;
+    private long _busyMaxTicks;
+    private long _startSpreadTicks;
+    private long _heaviestGroupTicks;
+    private long _heaviestGroupMembers;
+    private long _spanCount;
+    private long _prologueTicks;
+    private long _prologueCount;
+
+    private void FoldChunkSpan()
+    {
+        var sum = 0L;
+        var max = 0L;
+        var first = long.MaxValue;
+        var lastStart = 0L;
+        var last = 0L;
+        for (var i = 0; i < _lastChunkCount && i < _chunkBusy.Length; i++)
+        {
+            if (_chunkStart[i] == 0)
+            {
+                continue;
+            }
+
+            sum += _chunkBusy[i];
+            max = Math.Max(max, _chunkBusy[i]);
+            first = Math.Min(first, _chunkStart[i]);
+            lastStart = Math.Max(lastStart, _chunkStart[i]);
+            last = Math.Max(last, _chunkEnd[i]);
+            _chunkStart[i] = 0;
+        }
+
+        var heaviest = 0L;
+        var members = 0;
+        for (var w = 0; w < _arenas.Length; w++)
+        {
+            var arena = _arenas[w];
+            if (arena != null && arena.HeaviestGroupTicks > heaviest)
+            {
+                heaviest = arena.HeaviestGroupTicks;
+                members = arena.HeaviestGroupMembers;
+            }
+
+            if (arena != null)
+            {
+                arena.HeaviestGroupTicks = 0;
+            }
+        }
+
+        if (last > first && first != long.MaxValue)
+        {
+            _spanTicks += last - first;
+            _busySumTicks += sum;
+            _busyMaxTicks += max;
+            _startSpreadTicks += lastStart - first;
+            _heaviestGroupTicks += heaviest;
+            _heaviestGroupMembers += members;
+            _spanCount++;
+        }
+    }
+
+    /// <summary>
+    /// Per tick, averaged: the stage's wall span, the CPU its chunks summed, the slowest chunk, how late the last chunk started, the heaviest single group
+    /// and its member count, and the serial prologue.
+    /// </summary>
+    public (double SpanMs, double BusyMs, double MaxChunkMs, double StartSpreadMs, double HeaviestGroupMs, double HeaviestGroupMembers, double PrologueMs)
+        ChunkSpan
+    {
+        get
+        {
+            var n = Math.Max(1L, _spanCount);
+            var ms = 1000d / Stopwatch.Frequency;
+            return (_spanTicks * ms / n, _busySumTicks * ms / n, _busyMaxTicks * ms / n, _startSpreadTicks * ms / n, _heaviestGroupTicks * ms / n,
+                (double)_heaviestGroupMembers / n, _prologueTicks * ms / Math.Max(1L, _prologueCount));
+        }
+    }
+
     /// <summary>
     /// The prologue and the tick's plan: clears the masks this pass set last tick, then partitions the open sessions that have a profile.
     /// </summary>
@@ -575,9 +784,30 @@ internal sealed unsafe class InterestPass
     /// </remarks>
     public int BeginTick(long tickNumber, int workerCount)
     {
+        var prologueFrom = Stopwatch.GetTimestamp();
+        FoldChunkSpan();
         _tickNumber = tickNumber;
         var workers = Math.Max(1, workerCount);
         EnsureArenas(workers);
+
+        // Sized here, single-threaded, so the stores never grow under the workers that fill them. Chunk ids are bounded by the cluster AABB table, which
+        // covers every id that can have bounds; interest runs after the fence, so no cluster is created while the stage runs.
+        for (var a = 0; a < _snapshots.Length; a++)
+        {
+            var aabbs = _clusterStates[a]?.ClusterAabbs;
+            if (_snapshots[a] != null && aabbs != null)
+            {
+                _snapshots[a].EnsureCapacity(aabbs.Length);
+            }
+
+            if (aabbs != null)
+            {
+                for (var w = 0; w < _arenas.Length; w++)
+                {
+                    _arenas[w]?.EnsureDeferCapacity(a, _clusterStates.Length, aabbs.Length);
+                }
+            }
+        }
 
         // The prologue: last tick's marks are dropped, so a slot that is no longer reached by anybody reads as unwatched rather than as stale. Plain stores —
         // the previous dispatch has joined and the next has not begun, so there is no other thread to order against.
@@ -620,12 +850,17 @@ internal sealed unsafe class InterestPass
                 Array.Resize(ref _tickHits, grown);
                 Array.Resize(ref _tickViewpoints, grown);
                 Array.Resize(ref _tickPlaced, grown);
+                Array.Resize(ref _tickSparse, grown);
+                Array.Resize(ref _tickReady, grown);
+                Array.Resize(ref _tickSparseSkipped, grown);
+                Array.Resize(ref _tickDisplacement, grown);
                 Array.Resize(ref _tickCellKeys, grown);
                 Array.Resize(ref _sortIndices, grown);
                 Array.Resize(ref _permSessions, grown);
                 Array.Resize(ref _permProfiles, grown);
                 Array.Resize(ref _permViewpoints, grown);
                 Array.Resize(ref _permPlaced, grown);
+                Array.Resize(ref _permDisplacement, grown);
             }
 
             // Read HERE, single-threaded, rather than inside the chunk. The table's viewpoint slot is written by application systems on the tick thread and
@@ -647,6 +882,23 @@ internal sealed unsafe class InterestPass
         // inside OrderSessionsByCell left it empty on every arm that returns early — cell keying off, or no session at all — and a chunk then found no
         // group to take and resolved nothing. Every hit count in the suite went to zero, which is what a dispatch with no work looks like from outside.
         BuildGroups();
+
+        var chunkCount = Math.Min(workers, _tickSessionCount);
+        if (_chunkBusy.Length < chunkCount)
+        {
+            Array.Resize(ref _chunkBusy, Math.Max(16, chunkCount));
+            Array.Resize(ref _chunkStart, _chunkBusy.Length);
+            Array.Resize(ref _chunkEnd, _chunkBusy.Length);
+        }
+
+        _lastChunkCount = chunkCount;
+        if (_measurePhases && _tickNumber % ClusterSizeEvery == 0)
+        {
+            SampleClusterSizes();
+        }
+
+        _prologueTicks += Stopwatch.GetTimestamp() - prologueFrom;
+        _prologueCount++;
 
         // The chunk count is bounded by the SESSION count, not by the group count. Bounding it by groups would put a cell holding every session on one
         // worker — which is the crowd this feature exists for — and ExecuteChunk splits a group across chunks when it has to (see its remarks).
@@ -719,12 +971,30 @@ internal sealed unsafe class InterestPass
             _permProfiles[i] = _tickProfiles[from];
             _permViewpoints[i] = _tickViewpoints[from];
             _permPlaced[i] = _tickPlaced[from];
+            _permDisplacement[i] = _tickDisplacement[from];
         }
 
         Array.Copy(_permSessions, _tickSessions, _tickSessionCount);
         Array.Copy(_permProfiles, _tickProfiles, _tickSessionCount);
         Array.Copy(_permViewpoints, _tickViewpoints, _tickSessionCount);
         Array.Copy(_permPlaced, _tickPlaced, _tickSessionCount);
+        Array.Copy(_permDisplacement, _tickDisplacement, _tickSessionCount);
+    }
+
+    /// <summary>Decides, per session, whether it takes the sparse path this tick. Serial; after the sessions are in their final order.</summary>
+    /// <remarks>
+    /// The condition is the frame stage's own — the session's next frame is incremental — read here because the frame stage has finished the previous
+    /// tick and not begun this one, so nothing it depends on can move between this decision and the gather that relies on it.
+    /// </remarks>
+    private void DecideSparse()
+    {
+        var frames = Frames;
+        for (var i = 0; i < _tickSessionCount; i++)
+        {
+            var ready = frames != null && _views != null && frames.WillGatherIncrementally(_tickSessions[i], _tickNumber);
+            _tickReady[i] = ready && frames.CanRetainStationary(_tickSessions[i], _tickNumber);
+            _tickSparse[i] = SparseTopology && ready;
+        }
     }
 
     /// <summary>
@@ -737,6 +1007,8 @@ internal sealed unsafe class InterestPass
     /// </remarks>
     private void BuildGroups()
     {
+        DecideSparse();
+
         if (_groupStart.Length < _tickSessionCount)
         {
             Array.Resize(ref _groupStart, Math.Max(16, _tickSessionCount));
@@ -752,7 +1024,7 @@ internal sealed unsafe class InterestPass
         // So a large cell is cut into pieces of at most this many sessions, each paying its own enlarged query exactly as a chunk-split group used to.
         // The cap is the mean chunk size, which is what the static form produced, and it is a balance knob rather than a policy: pieces smaller than this
         // buy nothing and pay another query each.
-        var cap = Math.Max(8, _tickSessionCount / Math.Max(1, _tickWorkerCount));
+        var cap = GroupCap > 0 ? GroupCap : Math.Max(8, _tickSessionCount / Math.Max(1, _tickWorkerCount));
 
         _groupTotal = 0;
         _groupCursor = 0;
@@ -782,6 +1054,12 @@ internal sealed unsafe class InterestPass
 
         _groupCursor = 0;
     }
+
+    /// <summary>How far each of this tick's sessions moved since it was last resolved, or infinity when it has no previous viewpoint.</summary>
+    private double[] _tickDisplacement = [];
+
+    /// <summary>Permutation scratch for <see cref="_tickDisplacement"/>, sorted with the rest when sessions are grouped by cell.</summary>
+    private double[] _permDisplacement = [];
 
     /// <summary>The key meaning "this session cannot be grouped": it takes the direct path alone.</summary>
     private const long NoCellKey = long.MinValue;
@@ -826,6 +1104,9 @@ internal sealed unsafe class InterestPass
     /// </remarks>
     private void NoteObserverMotion(SessionId session, Vector3D viewpoint, bool placed)
     {
+        // Written before any early return: this slot is reused every tick, and a stale zero left by a previous occupant would read as "did not move".
+        // Infinity means "unknown distance", which the topology maintenance reads as "cannot reuse".
+        _tickDisplacement[_tickSessionCount] = double.PositiveInfinity;
         if (!placed)
         {
             return;
@@ -847,7 +1128,15 @@ internal sealed unsafe class InterestPass
             var dy = viewpoint.Y - previous.Y;
             var dz = viewpoint.Z - previous.Z;
             _observerSteps++;
-            _observerMillimetresMoved += (long)(Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz)) * 1000d);
+            var moved = Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz));
+            _observerMillimetresMoved += (long)(moved * 1000d);
+            _tickDisplacement[_tickSessionCount] = moved;
+
+            // Exactly zero: a bit-identical viewpoint over a cluster with no structure change has identical inputs, so an identical answer.
+            if (dx == 0d && dy == 0d && dz == 0d)
+            {
+                _observerStationary++;
+            }
         }
 
         _lastViewpoint[slot] = viewpoint;
@@ -865,6 +1154,26 @@ internal sealed unsafe class InterestPass
     /// </remarks>
     public (long Steps, long MillimetresMoved, long Placed) ObserverMotion =>
         (Volatile.Read(ref _observerSteps), Volatile.Read(ref _observerMillimetresMoved), Volatile.Read(ref _observerPlaced));
+
+    /// <summary>Session-ticks whose viewpoint was bit-identical to the previous tick's.</summary>
+    public long ObserverStationary => Volatile.Read(ref _observerStationary);
+
+    private long _observerStationary;
+
+    /// <summary>Runs a session re-emitted from its maintained topology without running the kernel, cumulative.</summary>
+    public long TopologyRunsRetained
+    {
+        get
+        {
+            var t = 0L;
+            for (var i = 0; i < _arenas.Length; i++)
+            {
+                t += _arenas[i].StationaryRunsRetained;
+            }
+
+            return t;
+        }
+    }
 
     /// <summary>
     /// Where the interest stage's time has gone since start, in microseconds: the shared broad query, the per-entity narrow filter, and the run assembly.
@@ -1051,8 +1360,7 @@ internal sealed unsafe class InterestPass
         }
 
         var arena = _arenas[chunkIndex];
-        var from = (int)((long)chunkIndex * _tickSessionCount / chunkCount);
-        var to = (int)((long)(chunkIndex + 1) * _tickSessionCount / chunkCount);
+        var chunkFrom = Stopwatch.GetTimestamp();
 
         // Accumulated in locals and flushed once below: see HitArena's remarks on why a counter moved per cluster would be a shared line.
         var probes = 0L;
@@ -1072,7 +1380,11 @@ internal sealed unsafe class InterestPass
 
             var i = _groupStart[g];
             var count = _groupCount[g];
-            if (count > 1)
+            var groupFrom = Stopwatch.GetTimestamp();
+            // A cell of ONE still takes the cell path when it has a key. The direct path opens every cluster it reaches through the enumerator, which is
+            // exactly the redundant open the shared snapshot removed; profiled at a thousand sessions, the ~13 % of sessions alone in their cell were 39 %
+            // of this stage for that reason. Keyless sessions — unplaced, non-sphere, 3D — still go direct: they have no cell to be resolved as.
+            if (count > 1 || (_cellKeyed && _tickCellKeys[i] != NoCellKey))
             {
                 ResolveCellGroup(arena, chunkIndex, i, count, ref probes, ref hits);
                 cells++;
@@ -1082,6 +1394,21 @@ internal sealed unsafe class InterestPass
             {
                 hits += ResolveSessionDirect(arena, chunkIndex, i, ref probes);
             }
+
+            var groupTicks = Stopwatch.GetTimestamp() - groupFrom;
+            if (groupTicks > arena.HeaviestGroupTicks)
+            {
+                arena.HeaviestGroupTicks = groupTicks;
+                arena.HeaviestGroupMembers = count;
+            }
+        }
+
+        if ((uint)chunkIndex < (uint)_chunkBusy.Length)
+        {
+            var now = Stopwatch.GetTimestamp();
+            _chunkBusy[chunkIndex] = now - chunkFrom;
+            _chunkStart[chunkIndex] = chunkFrom;
+            _chunkEnd[chunkIndex] = now;
         }
 
         arena.Note(probes, hits, _fenceWindow.IsOpen);
@@ -1100,6 +1427,10 @@ internal sealed unsafe class InterestPass
     /// <returns>Hits recorded for the session.</returns>
     private int ResolveSessionDirect(HitArena arena, int chunkIndex, int i, ref long probes)
     {
+        // Set for EVERY session, not only on the cell path: the flag lives on the worker's arena, so a session resolved here would otherwise inherit whatever
+        // the previous session on this worker was — and skip runs the frame stage, which asks IsSparse for THIS session, would never replace.
+        arena.Sparse = _tickSparse[i];
+        arena.SessionSparseSkipped = 0;
         var profile = _profiles[_tickProfiles[i]];
         var archetypes = profile.ArchetypeIndices;
         var runStart = arena.RunCount;
@@ -1111,7 +1442,7 @@ internal sealed unsafe class InterestPass
             // Placed nowhere, so it sees nothing. Recording an empty window rather than skipping the session keeps the index space of this tick's
             // partition intact, which is what Frames walks by the same index — and the departure sweep still runs, because a session that loses its
             // viewpoint has to be told that everything it held is gone.
-            _tickHits[i] = CloseSession(arena, view, chunkIndex, runStart, leaveStart, 0);
+            _tickHits[i] = CloseSession(arena, view, chunkIndex, runStart, leaveStart, 0, retainUnchanged: false, ref probes);
             return 0;
         }
 
@@ -1133,7 +1464,8 @@ internal sealed unsafe class InterestPass
 
         var runsBefore = arena.RunCount;
         var coherent = _sessionEntered == 0 && _sessionLeft == 0;
-        _tickHits[i] = CloseSession(arena, view, chunkIndex, runStart, leaveStart, sessionHits);
+        _tickHits[i] = CloseSession(arena, view, chunkIndex, runStart, leaveStart, sessionHits, retainUnchanged: false, ref probes);
+        _tickSparseSkipped[i] = arena.SessionSparseSkipped;
         arena.NoteSessionCoherence(coherent && arena.RunCount == runsBefore && view != null);
         _sessionEntered = 0;
         _sessionLeft = 0;
@@ -1167,7 +1499,8 @@ internal sealed unsafe class InterestPass
     /// <b>This is what replaces the frame stage's known-set sweep</b> ([14 § 5.2](14), the worst-scaling function measured). It walks the session's
     /// CLUSTERS — some tens — rather than its known entities, and it emits a leave only for a slot the session was actually told about.
     /// </remarks>
-    private SessionHitRange CloseSession(HitArena arena, SessionInterestView view, int chunkIndex, int runStart, int leaveStart, int hits)
+    private SessionHitRange CloseSession(HitArena arena, SessionInterestView view, int chunkIndex, int runStart, int leaveStart, int hits,
+        bool retainUnchanged, ref long probes)
     {
         if (view != null)
         {
@@ -1178,6 +1511,12 @@ internal sealed unsafe class InterestPass
                 var mask = view.MaskAt(e);
                 if (mask == 0 || view.TouchedAt(e) == tick)
                 {
+                    continue;
+                }
+
+                if (retainUnchanged && TryRetainUnchanged(arena, view, e, mask, ref probes))
+                {
+                    hits += BitOperations.PopCount(mask);
                     continue;
                 }
 
@@ -1200,6 +1539,90 @@ internal sealed unsafe class InterestPass
         }
 
         return new SessionHitRange(chunkIndex, runStart, arena.RunCount - runStart, hits, leaveStart, arena.LeaveCount - leaveStart);
+    }
+
+    /// <summary>
+    /// Re-emits a held cluster's run unchanged when its answer provably cannot have changed, skipping the kernel that would have recomputed it.
+    /// </summary>
+    /// <param name="arena">The worker's arena.</param>
+    /// <param name="view">The session's view.</param>
+    /// <param name="e">The held entry.</param>
+    /// <param name="mask">Its held mask.</param>
+    /// <param name="probes">Directory probes, accumulated.</param>
+    /// <returns><see langword="true"/> when the run was re-emitted; <see langword="false"/> when the caller must depart the entry as before.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Only ever called for a member whose viewpoint is bit-identical to last tick's.</b> For such a member, a cluster whose contents did not change has
+    /// exactly the inputs it had then, so the kernel would return exactly the held mask. What this skips is that recomputation, and nothing else: the run
+    /// it emits is the one <see cref="FlushSphereRun"/> produces for an unchanged mask — block marked watched, entry touched, <c>entered</c> zero — so the
+    /// frame stage, which reads runs and not how they were made, sees byte-identical input. That is what keeps a session that is behind on acks correct:
+    /// its full gather walks these runs exactly as it would have walked the kernel's.
+    /// </para>
+    /// <para>
+    /// <b>Every condition is a reason the inputs might differ, and each one declines rather than guesses.</b> The entry must have been resolved on the
+    /// previous tick, or something could have changed in a tick it skipped. It must owe nothing, or the enter backlog would stop draining. The archetype
+    /// must have published a change list for this tick, the cluster must be absent from it, and it must not have been RETIRED this tick — retirement
+    /// clears the change bits on purpose, so a cluster emptied and retired reads as unchanged and would otherwise be kept forever.
+    /// </para>
+    /// </remarks>
+    private bool TryRetainUnchanged(HitArena arena, SessionInterestView view, int e, ulong mask, ref long probes)
+    {
+        var tick = _tickNumber;
+        if (view.TouchedAt(e) != tick - 1 || view.OwedAt(e) != 0UL)
+        {
+            return false;
+        }
+
+        var key = view.KeyAt(e);
+        var archetypeIndex = SessionInterestView.ArchetypeOf(key);
+        var chunkId = (int)(key & 0xFFFFFFFFL);
+        if (archetypeIndex >= _clusterStates.Length)
+        {
+            return false;
+        }
+
+        var clusterState = _clusterStates[archetypeIndex];
+        if (clusterState == null
+            || Volatile.Read(ref clusterState.StructureTick) != tick
+            || clusterState.StructureCoversAll
+            || clusterState.StructureSlotsOf(chunkId) != 0UL
+            || clusterState.RetiredOn(chunkId, tick))
+        {
+            return false;
+        }
+
+        nint blockAddress = 0;
+        ushort flags = InterestRunFlags.None;
+        if (TryGetBlock(archetypeIndex, chunkId, out var block))
+        {
+            blockAddress = (nint)block;
+            MarkWatched(arena, block, mask, (uint)tick);
+            if (arena.Sparse)
+            {
+                // Marked like any other, emitted as nothing: see FlushSphereRun.
+                probes++;
+                view.TouchAt(e, tick);
+                arena.NoteRunCoherence(true);
+                arena.NoteRunFlow(true);
+                arena.SparseRunsSkipped++;
+                arena.SessionSparseSkipped++;
+                arena.StationaryRunsRetained++;
+                return true;
+            }
+        }
+        else
+        {
+            flags = InterestRunFlags.NoBlock;
+            arena.AddNewBlock(archetypeIndex, chunkId);
+        }
+
+        probes++;
+        view.TouchAt(e, tick);
+        arena.NoteRunCoherence(true);
+        arena.NoteRunFlow(true);
+        arena.AddRun(archetypeIndex, chunkId, blockAddress, mask, 0UL, e, flags);
+        arena.StationaryRunsRetained++;
+        return true;
     }
 
     /// <summary>
@@ -1232,9 +1655,13 @@ internal sealed unsafe class InterestPass
         var cell = CellSideFor(radius);
 
         // The cell's centre, recomputed from the first member's viewpoint. Every member shares the key, so every member shares this.
-        var centreX = (Math.Floor(_tickViewpoints[start].X / cell) + 0.5d) * cell;
-        var centreY = (Math.Floor(_tickViewpoints[start].Y / cell) + 0.5d) * cell;
-        var broadRadius = radius + (cell * HalfDiagonal);
+        // A cell of one is resolved around its OWN viewpoint rather than its cell's centre: nothing else has to fit in the disc, so it needs no enlargement
+        // and its inscribed disc is its enter radius itself. That is a direct query, answered from the shared snapshot instead of by opening clusters.
+        var single = count == 1;
+        var halfDiagonal = single ? 0d : cell * HalfDiagonal;
+        var centreX = single ? _tickViewpoints[start].X : (Math.Floor(_tickViewpoints[start].X / cell) + 0.5d) * cell;
+        var centreY = single ? _tickViewpoints[start].Y : (Math.Floor(_tickViewpoints[start].Y / cell) + 0.5d) * cell;
+        var broadRadius = radius + halfDiagonal;
 
         // BROAD PHASE first, for EVERY archetype, before any session is filtered.
         //
@@ -1256,7 +1683,7 @@ internal sealed unsafe class InterestPass
         //
         // The ENTER radius, not the leave radius, because admitting a slot as near is the stronger claim of the two and enter <= leave; a slot inside the
         // enter radius is inside both, which is what lets the admission carry the same (near, mask) pair FilterCandidatesInto would have computed.
-        var interior = enterRadius - (cell * HalfDiagonal);
+        var interior = enterRadius - halfDiagonal;
         var interiorSq = interior * interior;
 
         // A profile whose enter radius is smaller than the cell's half-diagonal has no inscribed disc at all, so nothing can be admitted whole and every
@@ -1276,20 +1703,159 @@ internal sealed unsafe class InterestPass
                 continue;
             }
 
+            // Whether this archetype published its STRUCTURE changes for this tick — the writes that can change who sees an entity: positions, spawns,
+            // releases. Content changes (health, mode) are deliberately not in it; they change what an entity looks like, never whether it is visible.
+            // Without the signal every cluster reads as changed and a stationary member takes the ordinary path, so a missing signal can only switch
+            // retention OFF, never wrongly on.
+            var signal = Volatile.Read(ref clusterState.StructureTick) == _tickNumber && !clusterState.StructureCoversAll;
+
             using var e = clusterState.QueryRadius(clusterState.Grid, centreX, centreY, _tickViewpoints[start].Z, broadRadius);
+
+            // ── OPEN ONCE, SHARE ACROSS CELLS ─────────────────────────────────────────────────────────────────────────────────────────────────────
+            //
+            // Profiled at d06 with a thousand sessions, opening clusters was about half of this stage: each cell's query opens every cluster its disc
+            // reaches, and about 165 overlapping cells reach each one some fifteen times a tick. The broadphase here only FINDS clusters — from the spatial
+            // index and the cluster AABB table, with no page read — and the occupancy and entity bounds come from a store filled by whichever worker
+            // reached the cluster first this tick. The same filters the enumerator's drain applies are applied below, so the candidates are identical.
+            var snap = _snapshots[archetypes[a]];
+            if (snap != null && e.IsAabb2F)
+            {
+                var fieldsOffset = e.SpatialFieldsOffset;
+                var stride = e.SpatialStride;
+                var qMinX = centreX - broadRadius;
+                var qMaxX = centreX + broadRadius;
+                var qMinY = centreY - broadRadius;
+                var qMaxY = centreY + broadRadius;
+                var broadSq = broadRadius * broadRadius;
+
+                while (e.MoveNextClusterUnopened(out var chunkId, out var bMinX, out var bMinY, out var bMaxX, out var bMaxY))
+                {
+                    arena.NoteBroadCluster();
+                    var occ = snap.TryGet(chunkId, _tickNumber, out var mustFill);
+                    byte* privateBase = null;
+                    if (mustFill)
+                    {
+                        byte* basePtr;
+                        nint fillBlock;
+                        try
+                        {
+                            basePtr = e.OpenCluster(chunkId);
+                            fillBlock = _states[archetypes[a]].Directory.TryGetBlock(chunkId, out var found) ? (nint)found : 0;
+                        }
+                        catch
+                        {
+                            // The claim is this worker's; released so the cluster's other readers re-claim rather than spin on a fill that never comes.
+                            snap.Abandon(chunkId, _tickNumber);
+                            throw;
+                        }
+
+                        occ = snap.Fill(chunkId, _tickNumber, basePtr, fieldsOffset, stride, fillBlock);
+                        arena.SnapshotOpens++;
+                        if (!snap.Covers(chunkId))
+                        {
+                            privateBase = basePtr;
+                        }
+                    }
+                    else
+                    {
+                        arena.SnapshotReads++;
+                    }
+
+                    if (occ == 0UL)
+                    {
+                        continue;
+                    }
+
+                    e.TallyOccupancy(occ);
+                    var sSlots = signal ? clusterState.StructureSlotsOf(chunkId) : ulong.MaxValue;
+                    var sChanged = sSlots != 0UL;
+                    if (_measurePhases)
+                    {
+                        arena.BroadSlotsReached += BitOperations.PopCount(occ);
+                        arena.BroadSlotsChanged += BitOperations.PopCount(sSlots & occ);
+                    }
+                    if (sChanged)
+                    {
+                        arena.BroadClustersStructureChanged++;
+                    }
+
+                    var sdx = Math.Max(centreX - bMinX, bMaxX - centreX);
+                    var sdy = Math.Max(centreY - bMinY, bMaxY - centreY);
+                    if (admitInterior && sdx <= interior && sdy <= interior && (sdx * sdx) + (sdy * sdy) <= interiorSq)
+                    {
+                        arena.AddInteriorCluster(chunkId, occ, sChanged);
+                        continue;
+                    }
+
+                    var sFrom = arena.CandidateCount;
+                    var sBits = occ;
+                    while (sBits != 0UL)
+                    {
+                        var slot = BitOperations.TrailingZeroCount(sBits);
+                        sBits &= sBits - 1;
+
+                        AABB2F box;
+                        if (privateBase != null)
+                        {
+                            box = *(AABB2F*)(privateBase + fieldsOffset + (slot * stride));
+                        }
+                        else
+                        {
+                            box = snap.Box(chunkId, slot);
+                        }
+
+                        double eMinX = box.MinX, eMinY = box.MinY, eMaxX = box.MaxX, eMaxY = box.MaxY;
+
+                        // The enumerator's drain, restated: degenerate bounds skipped, the query box, then the closest-point distance to the cell centre.
+                        if (!(eMinX <= eMaxX) || !(eMinY <= eMaxY))
+                        {
+                            continue;
+                        }
+
+                        if (eMaxX < qMinX || eMinX > qMaxX || eMaxY < qMinY || eMinY > qMaxY)
+                        {
+                            continue;
+                        }
+
+                        var ndx = Math.Max(Math.Max(eMinX - centreX, 0d), centreX - eMaxX);
+                        var ndy = Math.Max(Math.Max(eMinY - centreY, 0d), centreY - eMaxY);
+                        if ((ndx * ndx) + (ndy * ndy) > broadSq)
+                        {
+                            continue;
+                        }
+
+                        arena.NoteBroadEntity();
+                        arena.AddCandidate(chunkId, slot, eMinX, eMinY, eMaxX, eMaxY);
+                    }
+
+                    if (sChanged)
+                    {
+                        arena.NoteChangedRange(a, sFrom, arena.CandidateCount);
+                    }
+                }
+
+                continue;
+            }
+
             while (e.MoveNextCluster(out var c))
             {
                 arena.NoteBroadCluster();
+                var changed = !signal || clusterState.StructureSlotsOf(c.ChunkId) != 0UL;
+                if (changed)
+                {
+                    arena.BroadClustersStructureChanged++;
+                }
 
                 // Farthest corner of the box from the centre: inside the disc iff the whole box is.
                 var dx = Math.Max(centreX - c.MinX, c.MaxX - centreX);
                 var dy = Math.Max(centreY - c.MinY, c.MaxY - centreY);
                 if (admitInterior && dx <= interior && dy <= interior && (dx * dx) + (dy * dy) <= interiorSq)
                 {
-                    arena.AddInteriorCluster(c.ChunkId, c.Slots);
+                    arena.AddInteriorCluster(c.ChunkId, c.Slots, changed);
                     continue;
                 }
 
+                var clusterFrom = arena.CandidateCount;
                 int n;
                 while ((n = e.FillCurrentCluster(drain)) > 0)
                 {
@@ -1300,8 +1866,26 @@ internal sealed unsafe class InterestPass
                         arena.AddCandidate(hit.ClusterChunkId, hit.SlotIndex, hit.MinX, hit.MinY, hit.MaxX, hit.MaxY);
                     }
                 }
+
+                if (changed)
+                {
+                    arena.NoteChangedRange(a, clusterFrom, arena.CandidateCount);
+                }
             }
         }
+
+        // After every archetype's full range, so none of them is broken: the changed clusters' candidates again, grouped by archetype, for the members
+        // that only need to look at what moved.
+        // Only a stationary member reads the changed region, and building it copies the changed clusters' candidates a second time — in a moving world,
+        // nearly all of them. Built when some member may take that path, which is decided from the same inputs the member loop uses.
+        var anyStationary = false;
+        for (var i = start; i < start + count && !anyStationary; i++)
+        {
+            anyStationary = MayBeStationary(i);
+        }
+
+        var changedRegion = anyStationary ? arena.BuildChangedRegion(archetypes.Length) : null;
+        var fullEnd = anyStationary ? changedRegion[0] : arena.CandidateCount;
 
         arena.NoteCellCollected();
         var broadTicks = _measurePhases ? Stopwatch.GetTimestamp() - broadFrom : 0L;
@@ -1317,36 +1901,82 @@ internal sealed unsafe class InterestPass
             var view = BeginView(i);
             var sessionHits = 0;
 
+            // ── A member that did not move ────────────────────────────────────────────────────────────────────────────────────────────────────────
+            //
+            // Its viewpoint is bit-identical to last tick's, so for every cluster whose contents also did not change, the kernel would compute exactly the
+            // mask it computed then — the inputs are the same bytes. Such a member runs the kernel over the CHANGED region only, and CloseSession re-emits
+            // everything else it held as the same run it would have produced. Displacement is infinity when there is no previous viewpoint, so a session
+            // seen for the first time can never take this path.
+            // Only when the view holds what the last published frame described and owes nothing: then the held mask IS the kernel's last answer. A view
+            // behind its frames (a skipped publish), with a pending cluster (no block yet, counted as owed) or with no view at all is recomputed in full.
+            var stationary = anyStationary && MayBeStationary(i) && view != null && view.OwedCount == 0;
+            arena.Sparse = _tickSparse[i];
+            arena.SessionSparseSkipped = 0;
+
+            // A MOVING member's runs are held back, not flushed: most of them name a cluster whose membership did not change, and finding that out
+            // cluster by cluster costs a probe into the member's view each. One sequential pass over the view afterwards retains those in place, and
+            // only the rest are flushed. A stationary member already skips its unchanged clusters by a stronger rule; see CloseSession.
+            var defer = !stationary && view != null;
+            if (defer)
+            {
+                arena.BeginDeferral();
+            }
+
             for (var a = 0; a < archetypes.Length; a++)
             {
-                var to = a + 1 < archetypes.Length ? ranges[a + 1] : arena.CandidateCount;
+                var to = a + 1 < archetypes.Length ? ranges[a + 1] : fullEnd;
+                var cFrom = stationary ? changedRegion[a] : 0;
+                var cTo = stationary ? (a + 1 < archetypes.Length ? changedRegion[a + 1] : arena.CandidateCount) : 0;
 
                 // Admitted whole by the box test: no distance is computed, and the mask IS the occupancy. One flush per cluster per member against the
                 // sixty-four tests per cluster per member it replaces.
                 var iTo = a + 1 < archetypes.Length ? interiorRanges[a + 1] : arena.InteriorCount;
                 for (var k = interiorRanges[a]; k < iTo; k++)
                 {
+                    if (stationary && !arena.InteriorChanged(k))
+                    {
+                        continue;
+                    }
+
                     var slots = arena.InteriorSlots(k);
-                    sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.InteriorChunk(k), slots, slots, ref probes);
+                    if (_measurePhases && !stationary)
+                    {
+                        arena.ViewClustersAdmittedWhole++;
+                    }
+
+                    if (!defer || !arena.TryDefer(archetypes[a], arena.InteriorChunk(k), slots, slots))
+                    {
+                        sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.InteriorChunk(k), slots, slots, ref probes);
+                    }
                 }
 
-                if (ranges[a] == to)
+                var kFrom = stationary ? cFrom : ranges[a];
+                var kTo = stationary ? cTo : to;
+                if (kFrom == kTo)
                 {
                     continue;
                 }
 
                 var narrowFrom = _measurePhases ? Stopwatch.GetTimestamp() : 0L;
                 arena.BeginSphere();
-                arena.FilterCandidatesInto(viewpoint.X, viewpoint.Y, enterRadius, radius, ranges[a], to);
+                arena.FilterCandidatesInto(viewpoint.X, viewpoint.Y, enterRadius, radius, kFrom, kTo);
                 if (_measurePhases)
                 {
                     narrowTicks += Stopwatch.GetTimestamp() - narrowFrom;
                     narrowFrom = Stopwatch.GetTimestamp();
                 }
 
+                if (_measurePhases && !stationary)
+                {
+                    NoteViewShape(arena, archetypes[a]);
+                }
+
                 for (var r = 0; r < arena.SphereCount; r++)
                 {
-                    sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.SphereChunk(r), arena.SphereNear(r), arena.SphereMask(r), ref probes);
+                    if (!defer || !arena.TryDefer(archetypes[a], arena.SphereChunk(r), arena.SphereNear(r), arena.SphereMask(r)))
+                    {
+                        sessionHits += FlushSphereRun(arena, view, archetypes[a], arena.SphereChunk(r), arena.SphereNear(r), arena.SphereMask(r), ref probes);
+                    }
                 }
 
                 if (_measurePhases)
@@ -1355,11 +1985,17 @@ internal sealed unsafe class InterestPass
                 }
             }
 
+            if (defer)
+            {
+                sessionHits += RetainDeferred(arena, view, ref probes);
+            }
+
             // A session is coherent only if NOTHING changed for it: no slot entered, none left, and no cluster departed. CloseSession appends the
             // departures, so the run count it added is the last term and has to be read after it.
             var runsBefore = arena.RunCount;
             var coherent = _sessionEntered == 0 && _sessionLeft == 0;
-            _tickHits[i] = CloseSession(arena, view, chunkIndex, runStart, leaveStart, sessionHits);
+            _tickHits[i] = CloseSession(arena, view, chunkIndex, runStart, leaveStart, sessionHits, retainUnchanged: stationary, ref probes);
+            _tickSparseSkipped[i] = arena.SessionSparseSkipped;
             arena.NoteSessionCoherence(coherent && arena.RunCount == runsBefore && view != null);
             _sessionEntered = 0;
             _sessionLeft = 0;
@@ -1370,6 +2006,203 @@ internal sealed unsafe class InterestPass
         {
             arena.NotePhases(broadTicks, narrowTicks, flushTicks);
         }
+    }
+
+    /// <summary>
+    /// Settles a moving member's deferred runs: one pass over its view retains every run that names an entry whose membership did not change, then the
+    /// rest are flushed in the order they were produced.
+    /// </summary>
+    /// <returns>Hits recorded.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The same decision <see cref="FlushSphereRun"/> makes, reached from the other side.</b> A run is retained exactly when FlushSphereRun would have
+    /// found an entry, computed the same mask as the entry holds, and seen nothing owed — the mask is computed the same way, hysteresis included. What
+    /// changes is how the entry is found: by walking the view, which is sequential and which the departure sweep walks anyway, instead of one hash probe
+    /// per cluster. A retained run is marked watched and, for a session that is not sparse, emitted with nothing entered, as FlushSphereRun would.
+    /// </para>
+    /// <para>
+    /// Anything the pass cannot settle — no entry, a changed mask, a debt, no block — is left deferred and flushed normally, so every run is decided by
+    /// the one path that already handles it.
+    /// </para>
+    /// </remarks>
+    private int RetainDeferred(HitArena arena, SessionInterestView view, ref long probes)
+    {
+        var hits = 0;
+        var tick = _tickNumber;
+        var stamp = (uint)tick;
+        var entries = view.EntryCount;
+        for (var e = 0; e < entries; e++)
+        {
+            var held = view.MaskAt(e);
+            if (held == 0UL || view.TouchedAt(e) == tick)
+            {
+                continue;
+            }
+
+            var key = view.KeyAt(e);
+            var archetype = SessionInterestView.ArchetypeOf(key);
+            var chunkId = (int)(key & 0xFFFFFFFFL);
+            if (!arena.TryDeferred(archetype, chunkId, out var nearMask, out var farMask))
+            {
+                continue;
+            }
+
+            var mask = nearMask == farMask ? farMask : nearMask | (farMask & held);
+            if (mask != held || view.OwedAt(e) != 0UL || !TryGetBlock(archetype, chunkId, out var block))
+            {
+                continue;
+            }
+
+            MarkWatched(arena, block, mask, stamp);
+            probes++;
+            view.TouchAt(e, tick);
+            arena.NoteRunCoherence(true);
+            arena.NoteRunFlow(true);
+            if (arena.Sparse)
+            {
+                arena.SparseRunsSkipped++;
+                arena.SessionSparseSkipped++;
+            }
+            else
+            {
+                arena.AddRun(archetype, chunkId, (nint)block, mask, 0UL, e, InterestRunFlags.None);
+            }
+
+            arena.ConsumeDeferred(archetype, chunkId);
+            arena.RunsRetainedByView++;
+            hits += BitOperations.PopCount(mask);
+        }
+
+        for (var d = 0; d < arena.DeferredCount; d++)
+        {
+            arena.Deferred(d, out var archetype, out var chunkId, out var nearMask, out var farMask, out var live);
+            if (live)
+            {
+                hits += FlushSphereRun(arena, view, archetype, chunkId, nearMask, farMask, ref probes);
+            }
+        }
+
+        return hits;
+    }
+
+    /// <summary>Whether session <paramref name="i"/> may take the stationary path: it did not move, and its view holds its last published frame.</summary>
+    private bool MayBeStationary(int i) => _tickDisplacement[i] == 0d && _tickReady[i];
+
+    /// <summary>
+    /// Counts, for one member's kernel output, the clusters wholly inside its view and those only partly inside. The occupancy is the snapshot's, which is
+    /// current for every cluster the member reached: filled this tick when it changed, unchanged since its last fill otherwise.
+    /// </summary>
+    private void NoteViewShape(HitArena arena, int archetypeIndex)
+    {
+        var snap = _snapshots[archetypeIndex];
+        if (snap == null)
+        {
+            return;
+        }
+
+        for (var r = 0; r < arena.SphereCount; r++)
+        {
+            var occ = snap.OccupancyOf(arena.SphereChunk(r));
+            var mask = arena.SphereMask(r) & occ;
+            if (mask == occ)
+            {
+                arena.ViewClustersTestedWhole++;
+            }
+            else
+            {
+                arena.ViewClustersPartial++;
+                arena.ViewPartialInside += BitOperations.PopCount(mask);
+                arena.ViewPartialTotal += BitOperations.PopCount(occ);
+            }
+        }
+    }
+
+    /// <summary>Samples the replicated archetypes' clusters: their radius (box half-diagonal) against the grid cell and the interest cell. Serial.</summary>
+    private void SampleClusterSizes()
+    {
+        for (var a = 0; a < _clusterStates.Length; a++)
+        {
+            var cs = _clusterStates[a];
+            var aabbs = cs == null ? null : Volatile.Read(ref cs.ClusterAabbs);
+            var cellMap = cs == null ? null : Volatile.Read(ref cs.ClusterCellMap);
+            if (aabbs == null || cellMap == null || cs.Grid == null)
+            {
+                continue;
+            }
+
+            _gridCellSide = cs.Grid.Config.CellSize;
+            var n = Math.Min(aabbs.Length, cellMap.Length);
+            for (var chunk = 0; chunk < n; chunk++)
+            {
+                if (cellMap[chunk] < 0)
+                {
+                    continue;
+                }
+
+                ref readonly var box = ref aabbs[chunk];
+                if (!(box.MinX <= box.MaxX) || !(box.MinY <= box.MaxY))
+                {
+                    continue;
+                }
+
+                var hw = ((double)box.MaxX - box.MinX) * 0.5d;
+                var hh = ((double)box.MaxY - box.MinY) * 0.5d;
+                var radius = Math.Sqrt((hw * hw) + (hh * hh));
+                _clusterRadiusSum += radius;
+                _clusterRadiusMax = Math.Max(_clusterRadiusMax, radius);
+                _clusterSizeSamples++;
+            }
+        }
+
+        for (var p = 0; p < _profiles.Length; p++)
+        {
+            if (_profiles[p].Kind == ObserverKind.Sphere && _profiles[p].QueryRadius > 0d)
+            {
+                _interestCellSide = CellSideFor(_profiles[p].QueryRadius);
+                break;
+            }
+        }
+    }
+
+    /// <summary>Mean and largest cluster radius (box half-diagonal), the grid cell that hosts clusters, and the interest cell, in world units.</summary>
+    public (double MeanRadius, double MaxRadius, double GridCellSide, double InterestCellSide, long Samples) ClusterSize =>
+        (_clusterSizeSamples == 0 ? 0d : _clusterRadiusSum / _clusterSizeSamples, _clusterRadiusMax, _gridCellSide, _interestCellSide, _clusterSizeSamples);
+
+    /// <summary>What moving members' views were made of: clusters wholly inside (admitted without a test, or tested), partly inside, and the partial ones' entities.</summary>
+    public (long AdmittedWhole, long TestedWhole, long Partial, long PartialInside, long PartialTotal) ViewShape
+    {
+        get
+        {
+            long aw = 0, tw = 0, p = 0, pi = 0, pt = 0;
+            for (var i = 0; i < _arenas.Length; i++)
+            {
+                var ar = _arenas[i];
+                aw += ar.ViewClustersAdmittedWhole;
+                tw += ar.ViewClustersTestedWhole;
+                p += ar.ViewClustersPartial;
+                pi += ar.ViewPartialInside;
+                pt += ar.ViewPartialTotal;
+            }
+
+            return (aw, tw, p, pi, pt);
+        }
+    }
+
+    /// <summary>A cluster's replication block: from this tick's snapshot when the cluster was filled into it, from the directory otherwise.</summary>
+    /// <param name="archetypeIndex">The archetype.</param>
+    /// <param name="chunkId">The cluster.</param>
+    /// <param name="block">The block.</param>
+    /// <returns><see langword="true"/> when the cluster has a block.</returns>
+    private bool TryGetBlock(int archetypeIndex, int chunkId, out ReplicationBlockHeader* block)
+    {
+        var snapshot = (uint)archetypeIndex < (uint)_snapshots.Length ? _snapshots[archetypeIndex] : null;
+        if (snapshot != null && snapshot.TryBlockOf(chunkId, _tickNumber, out var cached))
+        {
+            block = (ReplicationBlockHeader*)cached;
+            return cached != 0;
+        }
+
+        return _states[archetypeIndex].Directory.TryGetBlock(chunkId, out block);
     }
 
     /// <summary>
@@ -1469,6 +2302,25 @@ internal sealed unsafe class InterestPass
             }
         }
 
+        // A sparse session whose membership here did not move emits NOTHING for this cluster: the block is still marked watched, so it is projected as
+        // before, and a content change reaches the session through projection's changed-block table. The entry is only touched, so the departure sweep
+        // keeps it. An entry that
+        // owes slots is not skipped — its run is what serves the enter backlog a slice at a time.
+        if (arena.Sparse && entry >= 0 && mask == held && view.OwedAt(entry) == 0UL
+            && TryGetBlock(archetypeIndex, chunkId, out var heldBlock))
+        {
+            // Still marked: projection must see exactly the slots the full walk would have marked, or a slot's continuity — and with it the segment a
+            // later enter carries — would depend on which path a session took. Only the run and the frame stage's walk over it are saved.
+            MarkWatched(arena, heldBlock, mask, (uint)_tickNumber);
+            probes++;
+            view.TouchAt(entry, _tickNumber);
+            arena.NoteRunCoherence(true);
+            arena.NoteRunFlow(true);
+            arena.SparseRunsSkipped++;
+            arena.SessionSparseSkipped++;
+            return BitOperations.PopCount(mask);
+        }
+
         var directory = _states[archetypeIndex].Directory;
         var stamp = (uint)_tickNumber;
 
@@ -1483,7 +2335,7 @@ internal sealed unsafe class InterestPass
         // where this pass spends its time either.
         nint blockAddress = 0;
         ushort flags = InterestRunFlags.None;
-        if (directory.TryGetBlock(chunkId, out var block))
+        if (TryGetBlock(archetypeIndex, chunkId, out var block))
         {
             blockAddress = (nint)block;
             MarkWatched(arena, block, mask, stamp);

@@ -188,6 +188,10 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         if (_state.SpatialSlot.HasSpatialIndex && _state.SpatialSlot.Slot == slot)
         {
             Volatile.Write(ref _state.SpatialSpanHandedOut, 1);
+
+            // A mutable span over POSITIONS can move any entity of the cluster and cannot say which, so for membership it claims the whole cluster. A span
+            // over any other column changes what entities look like and never who can see them, and claims nothing here.
+            _state.NoteStructureSlots(_chunkId, ulong.MaxValue);
         }
 
         // ── The same claim, for replication, and it has to be a SEPARATE flag (#205) ────────────────────────────────────────────────────────────
@@ -391,6 +395,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
         // Same claim as the batched overload, for the one-slot form: this path raises no dirty bit either, and the slot is named right here (#205).
         _state.NoteSlotsChanged(_chunkId, 1UL << slotIndex);
+        _state.NoteStructureSlots(_chunkId, 1UL << slotIndex);
 
         var spatialSlot = _state.SpatialSlot;
         var slotBytes = ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T);
@@ -477,6 +482,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         // the most precise change signal anywhere in the engine for this path — WriteSpatial raises no dirty bit by design — and recording it costs one
         // interlocked OR per CALL, not per entity, on a call that already dispatches a field type and unions boxes.
         _state.NoteSlotsChanged(_chunkId, slots);
+        _state.NoteStructureSlots(_chunkId, slots);
 
         // Checked in every build, not only in strict mode: a slot past the cluster would write past its column, into the next one.
         var highest = 63 - BitOperations.LeadingZeroCount(slots);

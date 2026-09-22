@@ -296,9 +296,43 @@ public static class TatooineReplication
             Console.Error.WriteLine(
                 $"  span claims: {sc.Suppressed} suppressed as unprojected, {sc.Admitted} admitted "
                 + $"({(scTotal == 0 ? 0d : sc.Suppressed * 100d / scTotal):F1} % dropped)");
+            var isp = subs.InterestSpan;
+            Console.Error.WriteLine(
+                $"  interest span: {isp.SpanMs:F2} ms wall, {isp.BusyMs:F2} ms busy "
+                + $"({(isp.SpanMs <= 0 ? 0 : isp.BusyMs / isp.SpanMs):F1} concurrent), "
+                + $"slowest chunk {isp.MaxChunkMs:F2} ms, start spread {isp.StartSpreadMs:F2} ms, heaviest group {isp.HeaviestGroupMs:F2} ms "
+                + $"({isp.HeaviestGroupMembers:F1} members), prologue {isp.PrologueMs:F2} ms serial");
+            var csz = subs.ClusterSize;
+            Console.Error.WriteLine(
+                $"  cluster size: mean radius {csz.MeanRadius:F1} m (max {csz.MaxRadius:F1}) over {csz.Samples} samples; "
+                + $"grid cell {csz.GridCellSide:F1} m "
+                + $"(radius/side {(csz.GridCellSide <= 0 ? 0 : csz.MeanRadius / csz.GridCellSide):F2}); interest cell {csz.InterestCellSide:F1} m "
+                + $"(radius/side {(csz.InterestCellSide <= 0 ? 0 : csz.MeanRadius / csz.InterestCellSide):F2})");
+            var vsh = subs.ViewShape;
+            var vTotal = vsh.AdmittedWhole + vsh.TestedWhole + vsh.Partial;
+            double Pct(long part, long whole) => whole == 0 ? 0d : part * 100d / whole;
+            Console.Error.WriteLine(
+                $"  view shape (moving members): {vTotal} clusters in views; wholly inside {Pct(vsh.AdmittedWhole + vsh.TestedWhole, vTotal):F1} % "
+                + $"({Pct(vsh.AdmittedWhole, vTotal):F1} % admitted without a test, {Pct(vsh.TestedWhole, vTotal):F1} % tested), "
+                + $"partly inside {Pct(vsh.Partial, vTotal):F1} % with {Pct(vsh.PartialInside, vsh.PartialTotal):F1} % of their entities inside");
+            var bsl = subs.BroadSlots;
+            Console.Error.WriteLine(
+                $"  broad slots: {bsl.Changed} of {bsl.Reached} reached slots changed structure ({Pct(bsl.Changed, bsl.Reached):F1} %)");
+            var sp = subs.SparseTopology;
+            Console.Error.WriteLine($"  view retention: {subs.RunsRetainedByView} runs retained by a pass over the view");
+            Console.Error.WriteLine($"  sparse topology: {sp.Skipped} runs not emitted, {sp.Synthetic} content runs synthesized from the changed-block tables");
+            var su = subs.SnapshotUse;
+            Console.Error.WriteLine($"  cluster snapshot: {su.Opens} opens, {su.Reads} shared reads "
+                + $"({(su.Opens == 0 ? 0d : (su.Opens + su.Reads) / (double)su.Opens):F1}x reuse per open)");
+            var bsc = subs.BroadClustersStructureChanged;
+            var bcr = subs.BroadClustersReached;
+            Console.Error.WriteLine($"  structure signal: {bsc} of {bcr} clusters reached changed structure ({Pct(bsc, bcr):F1} %)");
+            var omv = subs.ObserverMotion;
+            Console.Error.WriteLine(
+                $"  topology: {subs.TopologyRunsRetained} runs retained; observers stationary {subs.ObserverStationary} of {omv.Steps} session-ticks "
+                + $"({(omv.Steps == 0 ? 0d : subs.ObserverStationary * 100d / omv.Steps):F1} %)");
             var ia = subs.InteriorAdmission;
             Console.Error.WriteLine($"  interior admission: {ia.Clusters} clusters whole, {ia.EntitiesSkipped} entity reads skipped");
-            var bcr = subs.BroadClustersReached;
             var bcand = subs.EntityCandidatesCollected;
             Console.Error.WriteLine(
                 $"  broad phase reach: {bcr} clusters -> {bcand} entity candidates ({(bcr == 0 ? 0d : (double)bcand / bcr):F1} per cluster)");
@@ -403,6 +437,7 @@ public static class TatooineReplication
                 subs.Place(session, at);
             }
         }
+
 
         // A closed session gives its player back, or the maps grow for the life of the process and every player eventually reads as held — at which
         // point a new session is bound to nothing and sees nothing.

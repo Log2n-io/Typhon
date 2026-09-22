@@ -1069,6 +1069,54 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal ArchetypeReplicationState ReplicationState;
 
+    /// <summary>Chunk ids retired since the last publish, stamped into <see cref="_retiredAt"/> by <see cref="PublishRetirements"/>.</summary>
+    private int[] _retiredPending = new int[16];
+    private int _retiredPendingCount;
+
+    /// <summary>The tick each chunk id was last retired on, indexed by chunk id; zero for never.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The changed-cluster list cannot carry a retirement, by design.</b> <see cref="RetireClusterId"/> clears the retiring id's content bits so the next
+    /// publish never names a dead chunk — which is right for a consumer that dereferences the ids it is handed. It means a cluster emptied and retired this
+    /// tick reads as UNCHANGED, and a consumer that keeps state for clusters it was not told about would keep this one forever. Replication's resident-set
+    /// retention is such a consumer. This is the signal that closes it.
+    /// </para>
+    /// <para>
+    /// <b>A stamp, not a flag</b>, so it needs no clearing: a reader compares it with the tick it is on, and a stale entry from a retirement long ago is
+    /// simply not equal. Grown by doubling and never shrunk, like every other per-chunk side table here.
+    /// </para>
+    /// </remarks>
+    private long[] _retiredAt = [];
+
+    /// <summary>Whether <paramref name="chunkId"/> was retired on <paramref name="tick"/>.</summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <param name="tick">The tick.</param>
+    /// <returns><see langword="true"/> when that id was retired on that tick.</returns>
+    public bool RetiredOn(int chunkId, long tick) => (uint)chunkId < (uint)_retiredAt.Length && _retiredAt[chunkId] == tick;
+
+    /// <summary>Stamps every id retired since the last call with <paramref name="tickNumber"/>. Called from the fence, beside the other publishes.</summary>
+    /// <param name="tickNumber">The tick being fenced.</param>
+    public void PublishRetirements(long tickNumber)
+    {
+        for (var i = 0; i < _retiredPendingCount; i++)
+        {
+            var id = _retiredPending[i];
+            if (id < 0)
+            {
+                continue;
+            }
+
+            if (id >= _retiredAt.Length)
+            {
+                Array.Resize(ref _retiredAt, Math.Max(64, Math.Max(id + 1, _retiredAt.Length * 2)));
+            }
+
+            _retiredAt[id] = tickNumber;
+        }
+
+        _retiredPendingCount = 0;
+    }
+
     /// <summary>
     /// Clears every per-cluster side table that must not outlive <paramref name="clusterChunkId"/>, immediately before the id goes back to the segment
     /// allocator and becomes reusable.
@@ -1087,10 +1135,24 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     private void RetireClusterId(int clusterChunkId)
     {
+        // Recorded for the stamp above, and only while the structure signal is read: an engine that never fences would otherwise grow the list without
+        // bound. RetireClusterId runs single-threaded per archetype — under the fence (Migrate records, the Finalize drain acts), or from a serial
+        // destroy's commit.
+        if (TrackStructureChanges)
+        {
+            if (_retiredPendingCount == _retiredPending.Length)
+            {
+                Array.Resize(ref _retiredPending, _retiredPending.Length * 2);
+            }
+
+            _retiredPending[_retiredPendingCount++] = clusterChunkId;
+        }
+
         // The changed-cluster list is exactly such a side table (#205): ReleaseSlot marks the slot it is freeing, and when that release drains the
         // cluster the id becomes recyclable a few lines later. A bit left behind would have the next publish name a chunk id that is retired, and a
         // consumer that dereferences an id — slice 5's resident-set walk will — would read a freed chunk.
         ClusterContentChanges?.ClearWord(clusterChunkId);
+        ClusterStructureChanges?.ClearWord(clusterChunkId);
 
         ResetClusterVisibility(clusterChunkId);
         ReplicationState?.ReleaseBlockForDrain(clusterChunkId);
@@ -1754,6 +1816,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (clusterChunkId >= 0)
         {
             NoteClusterContentChanged(clusterChunkId);
+            NoteStructureSlots(clusterChunkId, ulong.MaxValue);
         }
 
         // Name the caller's mistake rather than letting it surface as an IndexOutOfRangeException from the fold below. That exception was read for three
@@ -2495,6 +2558,89 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     public bool TrackContentChanges;
 
+    // ══ STRUCTURE CHANGES — the ones that can move an entity into or out of someone's view ═══════════════════════════════════════════════════════
+    //
+    // Replication has two questions about a tick and the engine used to answer both with one signal. WHICH ENTITIES a session sees can change only when an
+    // entity's POSITION changes, or when it appears or disappears — a health drop, a mode switch, a name change never moves anyone across anyone's radius.
+    // WHAT THOSE ENTITIES LOOK LIKE changes on any write at all. The content signal above answers the second and was being used for the first, and on the
+    // SWG demo it marked about 93 % of clusters a tick in a world where 1.9 % of entities moved — because a combat loop that reads Ai and Vitals through
+    // mutable spans marks every creature cluster every tick, and none of that can change membership.
+    //
+    // This is the first question's own signal, fed only by the paths that can change membership: WriteSpatial (exact slots), a mutable span over the
+    // SPATIAL column (the whole cluster — it cannot say which), a slot claimed (an entity appearing), a slot released (one leaving), a cluster created, and
+    // on the dirty path a write through EntityRef when the spatial column is among the slots the tick wrote. Off by default; replication switches it on.
+
+    /// <summary>Whether membership-changing writes are recorded. See the block above.</summary>
+    public bool TrackStructureChanges;
+
+    /// <summary>Per-entity structure marks, index <c>chunkId * 64 + slot</c> — one bitmap word per cluster.</summary>
+    public DirtyBitmap ClusterStructureChanges;
+
+    /// <summary>This tick's drained structure words, indexed by chunk id. Valid for <see cref="_structureWordCount"/> and only on <see cref="StructureTick"/>.</summary>
+    private long[] _structureWords = [];
+
+    private int _structureWordCount;
+
+    /// <summary>The tick <see cref="StructureSlotsOf"/> answers for, or -1. Any other tick means the words are stale and must not be read.</summary>
+    public long StructureTick = -1;
+
+    /// <summary>Whether this tick could not name its structure changes and every cluster must be treated as changed.</summary>
+    public bool StructureCoversAll;
+
+    /// <summary>Records that <paramref name="slots"/> of a cluster may have changed who can see them.</summary>
+    /// <param name="clusterChunkId">The cluster.</param>
+    /// <param name="slots">The slots, or all ones when the caller cannot say which.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void NoteStructureSlots(int clusterChunkId, ulong slots)
+    {
+        if (!TrackStructureChanges || clusterChunkId < 0)
+        {
+            return;
+        }
+
+        var bitmap = ClusterStructureChanges;
+        if (bitmap == null)
+        {
+            // Switched on after construction: this tick cannot claim a complete list.
+            StructureCoversAll = true;
+            return;
+        }
+
+        bitmap.OrWord(clusterChunkId, (long)slots);
+    }
+
+    /// <summary>The slots of a cluster whose membership may have changed on <see cref="StructureTick"/>; zero when none did.</summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <returns>The slots.</returns>
+    public ulong StructureSlotsOf(int chunkId) =>
+        (uint)chunkId < (uint)_structureWordCount ? (ulong)_structureWords[chunkId] : 0UL;
+
+    /// <summary>Publishes this tick's structure changes for <see cref="StructureSlotsOf"/>.</summary>
+    /// <param name="tickNumber">The tick being fenced.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Every mark is made by the writer, at the write.</b> WriteSpatial marks its exact slots, a spatial span its cluster, a claim, release or birth its
+    /// slots — and <see cref="SetDirty(int, int, int)"/> the slot when the component written is the spatial one, which covers the EntityRef, OpenMut and
+    /// Versioned-commit paths without depending on which fence branch the archetype takes. Reconstructing the set here from the fence's dirty words did
+    /// depend on it, and read a written-slot union the fence had already zeroed: position writes through those paths were never marked.
+    /// </para>
+    /// <para>
+    /// The count is established before the tick stamp is written, so a reader that sees the stamp sees a count already correct.
+    /// </para>
+    /// </remarks>
+    public void PublishStructureChanges(long tickNumber)
+    {
+        if (!TrackStructureChanges)
+        {
+            return;
+        }
+
+        var bitmap = ClusterStructureChanges;
+        _structureWordCount = bitmap == null ? 0 : bitmap.DrainInto(ref _structureWords);
+        StructureCoversAll = bitmap == null;
+        Volatile.Write(ref StructureTick, tickNumber);
+    }
+
     /// <summary>
     /// Bit <c>s</c> set means component slot <c>s</c> is read by this archetype's compiled projection. All ones until a projection says otherwise.
     /// </summary>
@@ -2940,6 +3086,13 @@ internal sealed unsafe partial class ArchetypeClusterState
             Interlocked.Or(ref WrittenSlotUnion, bit);
         }
 
+        // A position written through this path can move the entity across a view's boundary, so it is a STRUCTURE change and is marked here, where the
+        // exact slot is known — see PublishStructureChanges.
+        if (componentSlot == SpatialSlot.Slot && SpatialSlot.HasSpatialIndex)
+        {
+            NoteStructureSlots(clusterChunkId, 1UL << slotIndex);
+        }
+
         // NOTE: must NOT delegate to the component-less overload — that one poisons the mask to AllSlotsWritten, which would
         // undo the narrowing this overload exists to perform.
         MarkEntityDirty(clusterChunkId, slotIndex);
@@ -2960,6 +3113,12 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (WrittenSlotUnion != AllSlotsWritten)
         {
             Interlocked.Exchange(ref WrittenSlotUnion, AllSlotsWritten);
+        }
+
+        // The component is unknown, so it may have been the spatial one: marked, for the same reason the column mask is poisoned.
+        if (SpatialSlot.HasSpatialIndex)
+        {
+            NoteStructureSlots(clusterChunkId, 1UL << slotIndex);
         }
 
         MarkEntityDirty(clusterChunkId, slotIndex);
@@ -3060,6 +3219,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // because it aligns each cluster to exactly one bitmap word for O(1) per-cluster dirty scan.
             ClusterDirtyBitmap = new DirtyBitmap(Math.Max(64, capacity * 64)),
             ClusterContentChanges = new DirtyBitmap(Math.Max(64, capacity * 64)),
+            ClusterStructureChanges = new DirtyBitmap(Math.Max(64, capacity * 64)),
 
             // One bit per CHUNK ID rather than per entity slot, so this is 64x smaller than the two above it and its drain skips whole blocks at a time.
             _aabbMovedBits = new DirtyBitmap(Math.Max(64, capacity)),
@@ -3088,6 +3248,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // because it aligns each cluster to exactly one bitmap word for O(1) per-cluster dirty scan.
             ClusterDirtyBitmap = new DirtyBitmap(Math.Max(64, capacity * 64)),
             ClusterContentChanges = new DirtyBitmap(Math.Max(64, capacity * 64)),
+            ClusterStructureChanges = new DirtyBitmap(Math.Max(64, capacity * 64)),
             _aabbMovedBits = new DirtyBitmap(Math.Max(64, capacity)),
         };
 
@@ -8356,6 +8517,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // no SetDirty anywhere, so the dirty bitmap never learns of a new entity. Recorded at THIS funnel rather than at the nine sites that write an
         // occupancy word, because a new cluster reaches the active list through every one of them and through no other route.
         NoteClusterContentChanged(chunkId);
+        NoteStructureSlots(chunkId, ulong.MaxValue);
 
         var n = ActiveClusterCount;
         var ids = ActiveClusterIds;
@@ -8501,6 +8663,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // A slot that stopped being occupied is a change with no other signal: nothing in the engine reports a destroy, and a consumer that misses
         // it goes on describing a dead entity — and hands a respawn into that slot to a client under the OLD identity (#205).
         NoteSlotsChanged(clusterChunkId, 1UL << slotIndex);
+        NoteStructureSlots(clusterChunkId, 1UL << slotIndex);
 
         var clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
 
@@ -8586,6 +8749,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // A slot that stopped being occupied is a change with no other signal: nothing in the engine reports a destroy, and a consumer that misses
         // it goes on describing a dead entity — and hands a respawn into that slot to a client under the OLD identity (#205).
         NoteSlotsChanged(clusterChunkId, 1UL << slotIndex);
+        NoteStructureSlots(clusterChunkId, 1UL << slotIndex);
 
         var clusterBase = accessor.GetChunkAddress(clusterChunkId, true);
 

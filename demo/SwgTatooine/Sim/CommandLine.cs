@@ -108,11 +108,12 @@ public static class CommandLine
         c.DormancyTicks = Int(args, "--dormancy", 0);
         c.SubscriptionsPhaseTiming = Array.IndexOf(args, "--subs-phases") >= 0;
         c.SubscriptionsInterestPhases = Array.IndexOf(args, "--subs-interest-phases") >= 0;
-        c.SubscriptionsTrackContent = Str(args, "--subs-content", "off") switch
+        c.SubscriptionsGroupCap = Int(args, "--subs-group-cap", 0);
+        c.SubscriptionsSparse = Str(args, "--subs-sparse", "off") switch
         {
             "on" => true,
             "off" => false,
-            var other => throw new ArgumentException($"--subs-content takes on or off, not '{other}'"),
+            var other => throw new ArgumentException($"--subs-sparse takes on or off, not '{other}'"),
         };
         c.SubscriptionsOwedSlice = Int(args, "--subs-owed-slice", 2);
         c.SubscriptionsGatherPrefetch = Str(args, "--subs-prefetch", "off") switch

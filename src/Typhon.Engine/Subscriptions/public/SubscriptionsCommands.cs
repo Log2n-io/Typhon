@@ -490,6 +490,12 @@ public sealed class SubscriptionsCommands
     public (long Steps, long Millimetres, long Placed) ObserverMotion =>
         _ingress.Interest == null ? default : _ingress.Interest.ObserverMotion;
 
+    /// <summary>Session-ticks whose viewpoint did not move at all.</summary>
+    public long ObserverStationary => _ingress.Interest == null ? 0L : _ingress.Interest.ObserverStationary;
+
+    /// <summary>Runs a session re-emitted from its maintained topology without running the kernel.</summary>
+    public long TopologyRunsRetained => _ingress.Interest == null ? 0L : _ingress.Interest.TopologyRunsRetained;
+
     /// <summary>Why the leaves were sent: geometry, a reissued identity, or the known-set sweep — beside what the interest pass merely stopped reaching.</summary>
     public (long Considered, long Interest, long Stale, long Swept) LeaveCauses => _ingress.Frames == null ? default : _ingress.Frames.LeaveCauses;
 
@@ -534,9 +540,36 @@ public sealed class SubscriptionsCommands
         }
     }
 
-    /// <summary>Cluster candidates the broad phase collected, and how many a session accepted.</summary>
-        /// <summary>Distinct clusters every cell's broad phase reached, against the entity candidates it collected from them.</summary>
+    /// <summary>Distinct clusters every cell's broad phase reached, against the entity candidates it collected from them.</summary>
     public long BroadClustersReached => _ingress.Interest == null ? 0L : _ingress.Interest.BroadClustersReached;
+
+    /// <summary>Cluster radius (box half-diagonal), mean and largest, against the grid cell hosting clusters and the interest cell.</summary>
+    public (double MeanRadius, double MaxRadius, double GridCellSide, double InterestCellSide, long Samples) ClusterSize =>
+        _ingress.Interest == null ? default : _ingress.Interest.ClusterSize;
+
+    /// <summary>What moving members' views were made of: clusters wholly inside (admitted whole, or tested), partly inside, and those partial ones' entities.</summary>
+    public (long AdmittedWhole, long TestedWhole, long Partial, long PartialInside, long PartialTotal) ViewShape =>
+        _ingress.Interest == null ? default : _ingress.Interest.ViewShape;
+
+    /// <summary>Live slots the broad phase reached, and those whose structure changed this tick.</summary>
+    public (long Reached, long Changed) BroadSlots => _ingress.Interest == null ? default : _ingress.Interest.BroadSlots;
+
+    /// <summary>Runs a moving member's view retained in one sequential pass instead of a probe each.</summary>
+    public long RunsRetainedByView => _ingress.Interest == null ? 0L : _ingress.Interest.RunsRetainedByView;
+
+    /// <summary>Runs sparse sessions did not emit, and the content runs synthesized for them from the changed-block tables.</summary>
+    public (long Skipped, long Synthetic) SparseTopology =>
+        _ingress.Interest == null ? default : (_ingress.Interest.SparseRunsSkipped, _ingress.Interest.Frames?.SyntheticRuns ?? 0L);
+
+    /// <summary>The interest stage's parallel shape per tick: span, summed busy, slowest chunk, start spread, heaviest group and its size, serial prologue.</summary>
+    public (double SpanMs, double BusyMs, double MaxChunkMs, double StartSpreadMs, double HeaviestGroupMs, double HeaviestGroupMembers, double PrologueMs) InterestSpan =>
+        _ingress.Interest == null ? default : _ingress.Interest.ChunkSpan;
+
+    /// <summary>Clusters opened to fill the shared snapshot, against those read from it.</summary>
+    public (long Opens, long Reads) SnapshotUse => _ingress.Interest == null ? default : _ingress.Interest.SnapshotUse;
+
+    /// <summary>Clusters the broad phase reached whose structure changed.</summary>
+    public long BroadClustersStructureChanged => _ingress.Interest == null ? 0L : _ingress.Interest.BroadClustersStructureChanged;
 
     /// <summary>Entity candidates every cell's broad phase collected.</summary>
     public long EntityCandidatesCollected => _ingress.Interest == null ? 0L : _ingress.Interest.EntityCandidatesCollected;

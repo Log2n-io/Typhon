@@ -62,6 +62,10 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
         public long FramesProduced;
         public int Destroyed;
         public int Teleports;
+        public long SparseRunsSkipped;
+        public long SyntheticRuns;
+        public long RunsRetainedByView;
+        public long StationaryRetained;
     }
 
     /// <summary>
@@ -74,12 +78,16 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
     /// <param name="skipPercent">
     /// The percentage of ticks on which a session's frames are left undrained, which fills its hand-off slots and makes the engine skip it.
     /// </param>
+    /// <param name="crowd">
+    /// Observers crowded into shared interest cells and drifting slowly (<see cref="CrowdViewpointAt"/>), rather than orbiting apart — the shape that
+    /// exercises cell groups, stationary retention and the view pass.
+    /// </param>
     [Test]
     [VerifiesRule("SUB-18")]
-    public void TheDifferenceEmitsExactlyWhatTheFullWalkEmits([Values(0, 60, 90)] int skipPercent)
+    public void TheDifferenceEmitsExactlyWhatTheFullWalkEmits([Values(0, 60, 90)] int skipPercent, [Values(false, true)] bool crowd)
     {
-        var reference = Execute(temporal: false, skipPercent);
-        var difference = Execute(temporal: true, skipPercent);
+        var reference = Execute(temporal: false, skipPercent, crowd);
+        var difference = Execute(temporal: true, skipPercent, crowd);
 
         Assert.Multiple(() =>
         {
@@ -100,7 +108,9 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
             // difference: a session that is being skipped is by definition behind, and SUB-03 makes it read every slot. At full delivery the reduction is
             // the steady state and is asserted as such; under skipping it must merely still happen, or the arms would be two full walks and the byte
             // comparison would compare nothing. That the reduction switches itself off under back-pressure is a real property and is recorded in 15 § 11.
-            if (skipPercent == 0)
+            // The crowd holds many more entities per session and churns them at a far higher rate, so the full walk is taken often there for the ordinary
+            // reasons (a session owed enters); the steady-state claim is the orbiting workload's.
+            if (skipPercent == 0 && !crowd)
             {
                 Assert.That(difference.TemporalGathers, Is.GreaterThan(difference.FullGathers),
                     $"at full delivery the difference was taken {difference.TemporalGathers} times against {difference.FullGathers} full walks; it is "
@@ -115,6 +125,12 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
             // not was a netId that named two block entries at once — the engine re-leases an identity as entities are destroyed and slots reused — and a run
             // with few destroys never reaches it however many ticks it runs.
             Assert.That(difference.Destroyed, Is.GreaterThan(30), "the workload destroyed too little to put any pressure on identity or on slot reuse");
+            // The sparse path must have run both halves — skipping unchanged runs, and delivering content changes through the changed-block tables — or the
+            // comparison says nothing about it.
+            Assert.That(difference.SparseRunsSkipped, Is.GreaterThan(0), "no session ever skipped an unchanged run");
+            Assert.That(difference.SyntheticRuns, Is.GreaterThan(0), "no content change ever reached a session through the changed-block tables");
+            Assert.That(reference.SparseRunsSkipped, Is.Zero, "the reference arm took the sparse path");
+            Assert.That(difference.RunsRetainedByView, Is.GreaterThan(0), "no moving member's run was ever retained by the pass over its view");
             Assert.That(difference.Teleports, Is.GreaterThan(10), "the workload never forced a cluster migration, which is the leave-and-enter this path has "
                 + "to recognise as neither");
 
@@ -203,7 +219,81 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
         return new Vector3D(distance * Math.Cos(angle), distance * Math.Sin(angle), 0d);
     }
 
-    private Run Execute(bool temporal, int skipPercent = 0)
+    /// <summary>
+    /// A crowd: every observer within a few hundred metres of a common point that drifts a few metres a tick, so several share an interest cell and keep
+    /// sharing it — the shape the cell cache exists for.
+    /// </summary>
+    private static Vector3D CrowdViewpointAt(int session, long tick)
+    {
+        var cx = 1200d + (tick * 3d);
+        var cy = -800d + (tick * 1.5d);
+        var angle = session * (Math.PI * 2d / SessionCount);
+        var spread = 150d + (40d * Math.Sin((tick * 0.05d) + session));
+        return new Vector3D(cx + (spread * Math.Cos(angle)), cy + (spread * Math.Sin(angle)), 0d);
+    }
+
+    /// <summary>
+    /// The crowd, but moving in bursts: five ticks of drift, then ten standing still — so members take the stationary path, where the held mask is
+    /// re-emitted without the kernel, and do so across skipped frames.
+    /// </summary>
+    private static Vector3D PausingViewpointAt(int session, long tick) => CrowdViewpointAt(session, (tick / 15 * 5) + Math.Min(tick % 15, 5));
+
+    /// <summary>
+    /// Stationary retention emits exactly what the full walk emits: members standing still re-emit what they hold without running the kernel, and the
+    /// frames must not tell the difference — through skipped frames, spawns and destroys around them.
+    /// </summary>
+    /// <param name="skipPercent">The percentage of ticks on which a session's frames are left undrained.</param>
+    [Test]
+    [VerifiesRule("SUB-18")]
+    public void StationaryRetentionEmitsExactlyWhatTheFullWalkEmits([Values(0, 60, 90)] int skipPercent)
+    {
+        var reference = Execute(temporal: false, skipPercent, crowd: true, pausing: true);
+        var retained = Execute(temporal: true, skipPercent, crowd: true, pausing: true);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(reference.FramesProduced, Is.GreaterThan(SessionCount), "the reference arm produced too few frames to compare anything");
+            Assert.That(retained.FramesProduced, Is.EqualTo(reference.FramesProduced), "the two arms did not run the same world");
+            Assert.That(retained.StationaryRetained, Is.GreaterThan(0), "no stationary member ever retained a run, so the path was not exercised");
+            Assert.That(reference.StationaryRetained, Is.Zero, "the reference arm has no views, so nothing can be retained there");
+            AssertSameFrames(reference, retained, $"stationary retention at {skipPercent}% skip");
+        });
+    }
+
+    /// <summary>
+    /// The sparse topology emits exactly what the run walk emits with the incremental gather on in both arms, so a failure isolates the sparse path from
+    /// the difference it rides on.
+    /// </summary>
+    /// <param name="skipPercent">The percentage of ticks on which a session's frames are left undrained.</param>
+    [Test]
+    public void SparseTopologyEmitsExactlyWhatTheRunWalkEmits([Values(0, 60)] int skipPercent)
+    {
+        var walk = Execute(temporal: true, skipPercent, crowd: true, sparse: false);
+        var sparse = Execute(temporal: true, skipPercent, crowd: true, sparse: true);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(walk.FramesProduced, Is.GreaterThan(SessionCount), "the walk arm produced too few frames to compare anything");
+            Assert.That(sparse.FramesProduced, Is.EqualTo(walk.FramesProduced), "the two arms did not run the same world");
+            Assert.That(walk.SparseRunsSkipped, Is.Zero, "the walk arm took the sparse path");
+            Assert.That(sparse.SparseRunsSkipped, Is.GreaterThan(0), "no session ever skipped an unchanged run");
+            AssertSameFrames(walk, sparse, $"sparse topology at {skipPercent}% skip");
+        });
+    }
+
+    private static void AssertSameFrames(Run a, Run b, string what)
+    {
+        for (var s = 0; s < SessionCount; s++)
+        {
+            Assert.That(b.Frames[s], Has.Count.EqualTo(a.Frames[s].Count), $"session {s}: frame count differs ({what})");
+            for (var f = 0; f < Math.Min(a.Frames[s].Count, b.Frames[s].Count); f++)
+            {
+                Assert.That(b.Frames[s][f], Is.EqualTo(a.Frames[s][f]), $"session {s}, frame {f}: bytes differ ({what})");
+            }
+        }
+    }
+
+    private Run Execute(bool temporal, int skipPercent = 0, bool crowd = false, bool pausing = false, bool? sparse = null)
     {
         // A FRESH service provider per arm. The engine is a singleton of it and its spatial grid may be configured exactly once, so a second arm built on
         // the fixture's own provider is refused with "ConfigureSpatialGrid must be called before InitializeArchetypes". Tearing the provider down and
@@ -217,6 +307,10 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
             MaxSessions = 16,
             IncrementalInterest = temporal,
 
+            // The difference arm also takes the sparse topology: a session that is up to date emits runs only where its membership moved, and its
+            // content changes arrive through the changed-block tables. It must describe the same world in the same bytes as the full walk.
+            SparseTopology = sparse ?? temporal,
+
             // Raised for the same reason the oracle raises them: a pool that runs out makes the producer SKIP, and a skipped frame is a difference between
             // the arms that has nothing to do with the path under test.
             StatePoolBudgetBytes = 64L * 1024 * 1024,
@@ -227,6 +321,7 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
             EnterBudgetPerFrame = 100_000,
         });
 
+        harness.RunFence = true;
         var workload = new OracleWorkload(harness, seed: 20260918);
         workload.Seed(creatures: 320, rocks: 120);
 
@@ -237,7 +332,7 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
         {
             frames[s] = [];
             delivery[s] = new Random(90210 + s);
-            Assert.That(harness.Sessions.SetViewpoint(sessions[s], ViewpointAt(s, 1)), Is.True);
+            Assert.That(harness.Sessions.SetViewpoint(sessions[s], pausing ? PausingViewpointAt(s, 1) : crowd ? CrowdViewpointAt(s, 1) : ViewpointAt(s, 1)), Is.True);
         }
 
         // The priming tick: every hit cluster is given its replication block here and is watched from the next one, so a session's first tick has hits and
@@ -249,10 +344,10 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
             workload.Step();
             for (var s = 0; s < SessionCount; s++)
             {
-                Assert.That(harness.Sessions.SetViewpoint(sessions[s], ViewpointAt(s, tick)), Is.True);
+                Assert.That(harness.Sessions.SetViewpoint(sessions[s], pausing ? PausingViewpointAt(s, tick) : crowd ? CrowdViewpointAt(s, tick) : ViewpointAt(s, tick)), Is.True);
             }
 
-            harness.RunTick(tick);
+            harness.RunTick(tick, crowd ? 8 : 1);
             for (var s = 0; s < SessionCount; s++)
             {
                 // A session whose frames are left undrained fills its hand-off slots, and the engine then refuses to begin another for it (SUB-04). That
@@ -283,6 +378,10 @@ class IncrementalInterestTests : TestBase<IncrementalInterestTests>
             FramesProduced = harness.Assembler.FramesProduced,
             Destroyed = workload.Destroyed,
             Teleports = workload.Teleports,
+            SparseRunsSkipped = harness.Subscriptions.Interest.SparseRunsSkipped,
+            SyntheticRuns = harness.Assembler.SyntheticRuns,
+            RunsRetainedByView = harness.Subscriptions.Interest.RunsRetainedByView,
+            StationaryRetained = harness.Subscriptions.Interest.TopologyRunsRetained,
         };
     }
 

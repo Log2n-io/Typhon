@@ -320,20 +320,20 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
             states[i]?.DrainParkedEntries();
         }
 
-        var blocks = interest?.WatchedBlockCount ?? WatchedBlocks(states);
-        if (blocks == 0)
-        {
-            return 0;
-        }
-
-        var chunks = Math.Min(Math.Max(1, ctx.WorkerCount), blocks);
-
         // The gather comes FIRST, because the identity leases are sized from the watched slots it produces. Refilling before the partition exists would size
         // the very first tick's leases from nothing and defer most of an initial fill by a tick for no reason.
         if (interest != null)
         {
             Gather(interest, states, tick);
         }
+
+        var blocks = WatchedBlocks(states);
+        if (blocks == 0)
+        {
+            return 0;
+        }
+
+        var chunks = Math.Min(Math.Max(1, ctx.WorkerCount), blocks);
 
         for (var i = 0; i < states.Length; i++)
         {
@@ -407,7 +407,7 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         var total = 0;
         for (var i = 0; i < states.Length; i++)
         {
-            total += states[i].WatchedBlocks.Count;
+            total += states[i]?.WatchedBlocks.Count ?? 0;
         }
 
         return total;

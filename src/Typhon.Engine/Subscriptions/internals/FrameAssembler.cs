@@ -176,6 +176,13 @@ internal struct FrameCounters
 /// </remarks>
 internal sealed unsafe class FrameWorkerScratch : IDisposable
 {
+    // A sparse session's synthetic runs — one per held cluster whose content changed this tick and that no interest run already covered — and the stamps that
+    // say which of its view entries a real run covered. Per worker and reused, so a session's gather allocates nothing.
+    internal InterestRun[] SparseRuns = new InterestRun[256];
+    internal int[] CoveredStamp = new int[256];
+    internal int CoveredEpoch;
+    internal long SyntheticRuns;
+
     private struct RecordList
     {
         public FrameRecord* Items;
@@ -559,6 +566,12 @@ internal sealed class SessionFrameState
     /// <summary>Whether the initial fill under the enter budget has completed — the <c>VIEW_COMPLETE</c> flag.</summary>
     public bool ViewComplete { get; set; }
 
+    /// <summary>
+    /// Whether the last published frame left hits undescribed because their cluster had no block yet. Such hits are re-offered by the next tick's interest
+    /// recomputing the cluster — which a member standing still does not do for a cluster whose structure did not change — so they bar that shortcut.
+    /// </summary>
+    public bool LeftPendingHits { get; set; }
+
     /// <summary>Enter candidates the budget deferred on the last frame. Zero is what completes the view.</summary>
     public int DeferredEnters { get; set; }
 
@@ -825,6 +838,16 @@ internal sealed unsafe class FrameAssembler : IDisposable
     /// <param name="states">One per plan, in plan order, or <see langword="null"/> to leave the feature off.</param>
     public void AttachReplication(ArchetypeReplicationState[] states) => _replication = states;
 
+    /// <summary>
+    /// The replication states whose changed-block tables sparse sessions read — independent of <see cref="AttachReplication"/>, which also enables encode
+    /// sharing.
+    /// </summary>
+    private ArchetypeReplicationState[] _changeStates;
+
+    /// <summary>Attaches the states whose changed-block tables sparse sessions read.</summary>
+    /// <param name="states">The replication states.</param>
+    public void AttachChangeStates(ArchetypeReplicationState[] states) => _changeStates = states;
+
     /// <summary>Runs referenced rather than encoded, the records they carried, and the clusters that offered one and could not be shared.</summary>
     public (long Runs, long Records, long Refused) SharedRunUse =>
         (Volatile.Read(ref _sharedRunsUsed), Volatile.Read(ref _sharedRecordsUsed), Volatile.Read(ref _sharedRunsRefused));
@@ -968,6 +991,174 @@ internal sealed unsafe class FrameAssembler : IDisposable
     /// <param name="slot">The session table row.</param>
     /// <returns>The state.</returns>
     public SessionSendState* SendStateOf(int slot) => (SessionSendState*)((byte*)_sendStates + ((long)slot * SessionSendState.Bytes));
+
+    /// <summary>Runs synthesized for sparse sessions from the changed-block tables — content changes delivered without an interest run. Cumulative.</summary>
+    public long SyntheticRuns
+    {
+        get
+        {
+            var t = 0L;
+            for (var w = 0; w < _workers.Length; w++)
+            {
+                t += _workers[w]?.SyntheticRuns ?? 0;
+            }
+
+            return t;
+        }
+    }
+
+    /// <summary>
+    /// Builds a sparse session's synthetic runs: one per cluster it holds whose content changed this tick — or, when its frame turned out to be a full one,
+    /// every cluster it holds — that none of its real runs already covers.
+    /// </summary>
+    /// <param name="index">The session's index in this tick's arrays.</param>
+    /// <param name="view">Its interest view.</param>
+    /// <param name="scratch">The frame worker's scratch.</param>
+    /// <param name="runs">Its real runs this tick.</param>
+    /// <param name="allHeld">
+    /// The frame is a full gather after interest had already treated the session as sparse — a profile switch that reset it, a forced full read — so the
+    /// clusters interest skipped as unchanged must be read too, or the reset frame would never re-enter them.
+    /// </param>
+    /// <returns>The runs, empty when the session is not sparse.</returns>
+    /// <remarks>
+    /// <para>
+    /// A synthetic run is exactly the run interest would have emitted for an unchanged cluster — the held mask, nothing entered, the session's own view
+    /// entry — so the gather reads it with the same code and the same guarantees.
+    /// </para>
+    /// <para>
+    /// <b>The session's view is the index.</b> Its entries are the clusters it holds, and projection has already recorded the ones whose content changed —
+    /// computed once per block, not per session. What is left per session is one table read per held cluster, sequential over the view, in the session's
+    /// own frame worker, with nothing serial.
+    /// </para>
+    /// </remarks>
+    private ReadOnlySpan<InterestRun> SparseRunsFor(int index, SessionInterestView view, FrameWorkerScratch scratch, ReadOnlySpan<InterestRun> runs,
+        bool allHeld)
+    {
+        var states = _changeStates;
+        if (view == null || states == null || _interest == null || !_interest.IsSparse(index))
+        {
+            return ReadOnlySpan<InterestRun>.Empty;
+        }
+
+        var entries = view.EntryCount;
+
+        // The view entries a real run covers this tick: those are gathered through their run and must not be gathered twice. Zero is never an epoch, so at
+        // the wrap the stamps are cleared rather than letting one from 2^32 sessions ago read as this one's.
+        if (++scratch.CoveredEpoch == 0)
+        {
+            Array.Clear(scratch.CoveredStamp);
+            scratch.CoveredEpoch = 1;
+        }
+
+        var epoch = scratch.CoveredEpoch;
+        if (scratch.CoveredStamp.Length < entries)
+        {
+            Array.Resize(ref scratch.CoveredStamp, Math.Max(entries, scratch.CoveredStamp.Length * 2));
+        }
+
+        for (var r = 0; r < runs.Length; r++)
+        {
+            var vi = runs[r].ViewIndex;
+            if ((uint)vi < (uint)scratch.CoveredStamp.Length)
+            {
+                scratch.CoveredStamp[vi] = epoch;
+            }
+        }
+
+        var tick = (uint)_tick;
+        var n = 0;
+        for (var e = 0; e < entries; e++)
+        {
+            var held = view.MaskAt(e);
+            if (held == 0UL || scratch.CoveredStamp[e] == epoch)
+            {
+                continue;
+            }
+
+            var key = view.KeyAt(e);
+            var archetype = SessionInterestView.ArchetypeOf(key);
+            var state = archetype < states.Length ? states[archetype] : null;
+            if (state == null)
+            {
+                continue;
+            }
+
+            var chunk = (int)(key & 0xFFFFFFFFL);
+            var block = state.ChangedBlockOf(chunk, tick, out var changedSlots);
+            if (allHeld)
+            {
+                if (block == null && !state.Directory.TryGetBlock(chunk, out block))
+                {
+                    continue;
+                }
+            }
+            else if (block == null || (changedSlots & held) == 0UL)
+            {
+                continue;
+            }
+
+            // The entry was written for this tick, so the id can only disagree if the block was released and reused since — never within a tick.
+            if (block->ChunkId != chunk)
+            {
+                continue;
+            }
+
+            if (n == scratch.SparseRuns.Length)
+            {
+                Array.Resize(ref scratch.SparseRuns, n * 2);
+            }
+
+            ref var run = ref scratch.SparseRuns[n++];
+            run.Block = (nint)block;
+            run.Slots = held;
+            run.Entered = 0UL;
+            run.ViewIndex = e;
+            run.ChunkId = chunk;
+            run.ArchetypeIndex = archetype;
+            run.Flags = InterestRunFlags.None;
+        }
+
+        scratch.SyntheticRuns += n;
+        return new ReadOnlySpan<InterestRun>(scratch.SparseRuns, 0, n);
+    }
+
+    /// <summary>
+    /// Whether a member standing still may re-emit what it holds for the clusters whose structure did not change: its frame is incremental, so the view holds
+    /// what the last published frame described, and that frame left no hit pending on a cluster without a block.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="tick">The tick about to be resolved.</param>
+    /// <returns><see langword="true"/> when the held masks are exactly last tick's kernel output.</returns>
+    public bool CanRetainStationary(SessionId session, long tick) => WillGatherIncrementally(session, tick) && !StateOf(session).LeftPendingHits;
+
+    /// <summary>
+    /// Whether <paramref name="session"/>'s frame on <paramref name="tick"/> will take the incremental path — the condition the gather itself applies.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="tick">The tick about to be resolved.</param>
+    /// <returns><see langword="true"/> when its gather will read entered and changed slots only.</returns>
+    /// <remarks>
+    /// Read by interest before this stage runs for the tick. Every input — the reset and force flags, the baseline, the view-complete latch — is written by
+    /// this stage at the end of the PREVIOUS tick or by ingress before interest, so the answer interest acts on is the one the gather will reach.
+    /// </remarks>
+    public bool WillGatherIncrementally(SessionId session, long tick)
+    {
+        var state = StateOf(session);
+        if (state == null || _interest == null || !_interest.IncrementalInterest)
+        {
+            return false;
+        }
+
+        // The profile and generation are compared here because the reset they cause is only set by this stage's prologue, AFTER interest has asked:
+        // a session that switched profile this tick is about to be reset, and is not incremental whatever its baseline says.
+        if (state.Generation != session.Generation || !string.Equals(_sessions.ProfileName(session), state.Profile, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var fillNeedsFullRead = !state.ViewComplete && !_options.OwedSlotCarry;
+        return !state.PendingReset && !state.ForceFullGather && !fillNeedsFullRead && state.Baseline == tick - 1;
+    }
 
     /// <summary>One session's frame state, or <see langword="null"/> when the slot has never produced a frame.</summary>
     /// <param name="session">The session.</param>
@@ -2024,6 +2215,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
         // and is covered instead by ProjectionPass skipping the changed-mask computation on identity starvation, which stamps the slot changed on the tick
         // it finally gets one.
         state.ForceFullGather |= owed > 0 && !(_options.OwedSlotCarry && incremental);
+        state.LeftPendingHits = pending > 0;
 
         if (timing)
         {
@@ -2158,7 +2350,10 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
         // How many owed slots one run may serve. Everything owed is an enter and the frame can send at most this many in total, so serving far more than
         // the budget is provably wasted work; spreading it over the runs is what keeps distant clusters from starving.
-        var runCount = Math.Max(1, runs.Length);
+        // The owed slice is the enter budget divided by the number of runs the session HOLDS, and a sparse session's run list names only the ones whose
+        // membership moved. Dividing by that would hand each owed run a far larger slice and serve more deferred enters per frame than the full path does
+        // — the divergence IncrementalInterestTests caught. The runs interest skipped are added back, so the slice is the full path's exactly.
+        var runCount = Math.Max(1, runs.Length + _interest.SparseSkippedOf(index));
         var owedPerRun = _options.OwedSliceMultiplier <= 0
             ? int.MaxValue
             : Math.Max(1, (Math.Max(1, _options.EnterBudgetPerFrame) * _options.OwedSliceMultiplier) / runCount);
@@ -2186,9 +2381,13 @@ internal sealed unsafe class FrameAssembler : IDisposable
 
         temporal.BeginSession();
 
-        for (var r = 0; r < runs.Length; r++)
+        // A sparse session's real runs name only membership changes; the clusters whose CONTENT changed without their membership moving come through the
+        // fan-out as synthetic runs, read by exactly the same body below.
+        var synthetic = SparseRunsFor(index, view, scratch, runs, allHeld: full);
+        var total = runs.Length + synthetic.Length;
+        for (var r = 0; r < total; r++)
         {
-            ref readonly var run = ref runs[r];
+            ref readonly var run = ref (r < runs.Length ? ref runs[r] : ref synthetic[r - runs.Length]);
 
             // ── Why the gather prefetches at all ────────────────────────────────────────────────────────────────────────────────────────────────────
             //

@@ -37,6 +37,9 @@ public sealed class BotSwarmOptions
 
     /// <summary>How long to spread the connects over, so a hundred handshakes do not arrive in one tick.</summary>
     public TimeSpan ConnectStagger { get; init; } = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>How many connects go out between two staggers. One by default; a measurement run raises it to shorten a thousand-bot ramp.</summary>
+    public int ConnectBatch { get; init; } = 1;
 }
 
 /// <summary>
@@ -437,7 +440,7 @@ public sealed class BotSwarm : IAsyncDisposable
                 await bot.Client.DisposeAsync().ConfigureAwait(false);
             }
 
-            if (_options.ConnectStagger > TimeSpan.Zero && i + 1 < _options.Count)
+            if (_options.ConnectStagger > TimeSpan.Zero && i + 1 < _options.Count && (i + 1) % Math.Max(1, _options.ConnectBatch) == 0)
             {
                 await Task.Delay(_options.ConnectStagger, ct).ConfigureAwait(false);
             }
