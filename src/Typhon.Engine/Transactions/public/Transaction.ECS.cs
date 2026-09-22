@@ -2119,14 +2119,29 @@ public unsafe partial class Transaction
                     // Write full EntityId to cluster primary segment
                     *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) = (long)entry.Id.RawValue;
 
-                    // Set EnabledBits in cluster. Interlocked, not |=: the word is one per component per CLUSTER, and two transactions committing spawns
-                    // into the same cluster (their claims are independent CASes on the occupancy word) each read-modify-write it — a plain |= lets one
-                    // drop the other's bit, and every clearing site (ReleaseSlot, the migration source release) already goes through Interlocked.And.
+                    // Write EnabledBits in cluster from the ABSOLUTE mask — clearing as well as setting. A freed slot is not guaranteed clean: a publish
+                    // that passed its occupancy check while a concurrent destroy was clearing the slot (ClearSlotMetadata clears the bits BEFORE the
+                    // occupancy bit) can leave one of the previous occupant's bits behind, and a spawn that only ORs would inherit it — possibly for a
+                    // component this entity never supplied (#998 review, ENABLE-01). A bit already right costs a plain read, no atomic.
+                    // Interlocked, not |= / &=: the word is one per component per CLUSTER, and two transactions committing spawns into the same cluster
+                    // (their claims are independent CASes on the occupancy word) each read-modify-write it — a plain write lets one drop the other's bit.
                     for (int slot = 0; slot < ctx.ComponentCount; slot++)
                     {
-                        if ((enabledBits & (1 << slot)) != 0)
+                        ref var word = ref *(long*)(clusterBase + layout.EnabledBitsOffset(slot));
+                        var entityBit = 1L << slotIdx;
+                        var wanted = (enabledBits & (1 << slot)) != 0;
+                        if (((Volatile.Read(ref word) & entityBit) != 0) == wanted)
                         {
-                            Interlocked.Or(ref *(long*)(clusterBase + layout.EnabledBitsOffset(slot)), 1L << slotIdx);
+                            continue;
+                        }
+
+                        if (wanted)
+                        {
+                            Interlocked.Or(ref word, entityBit);
+                        }
+                        else
+                        {
+                            Interlocked.And(ref word, ~entityBit);
                         }
                     }
 
@@ -3290,52 +3305,164 @@ public unsafe partial class Transaction
         // meta._entityRecordSize bytes — so a cluster archetype whose every component is Versioned overflowed the legacy size by 5 bytes.
         byte* readBuf = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
 
-        foreach (var kvp in _pendingEnableDisable)
+        // One cluster accessor per archetype, not per entity: each creation resolves and pins a page and re-registers it in the change set.
+        ChunkAccessor<PersistentStore> clusterAccessor = default;
+        ArchetypeClusterState clusterAccessorOwner = null;
+        try
         {
-            var entityId = kvp.Key;
-            ushort newBits = kvp.Value;
-
-            // Skip spawned entities — FinalizeSpawns applies the enable/disable override
-            if (SpawnedContains(entityId))
+            foreach (var kvp in _pendingEnableDisable)
             {
-                continue;
+                FlushPendingEnableDisableEntry(kvp.Key, kvp.Value, readBuf, ref clusterAccessor, ref clusterAccessorOwner);
+            }
+        }
+        finally
+        {
+            if (clusterAccessorOwner != null)
+            {
+                clusterAccessor.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Publishes one entity's committed enabled mask to both copies — the EntityMap record, then the cluster words.</summary>
+    private void FlushPendingEnableDisableEntry(EntityId entityId, ushort newBits, byte* readBuf, ref ChunkAccessor<PersistentStore> clusterAccessor,
+        ref ArchetypeClusterState clusterAccessorOwner)
+    {
+        // Skip spawned entities — FinalizeSpawns applies the enable/disable override
+        if (SpawnedContains(entityId))
+        {
+            return;
+        }
+
+        var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
+        if (meta == null)
+        {
+            return;
+        }
+        var engineState = _dbe._archetypeStates[meta.ArchetypeId];
+        if (engineState?.EntityMap == null)
+        {
+            return;
+        }
+
+        var accessor = engineState.EntityMap.Segment.CreateChunkAccessor(_changeSet);
+        if (engineState.EntityMap.TryGet(entityId.EntityKey, readBuf, ref accessor))
+        {
+            ushort oldBits = EntityRecordAccessor.GetHeader(readBuf).EnabledBits;
+
+            // Record MVCC override if older transactions exist
+            if (oldBits != newBits)
+            {
+                _dbe.EnabledBitsOverrides.Record(entityId.EntityKey, TSN, oldBits);
+
+                // Notify views: enable/disable changes component visibility.
+                // Enable (0→1) emits isCreation so the view re-evaluates the entity.
+                // Disable (1→0) emits isDeletion so the view removes the entity.
+                NotifyViewsForEnableDisable(entityId, meta, engineState, oldBits, newBits);
             }
 
-            var meta = _dbe.GetMetaByRouting(entityId.ArchetypeId);
-            if (meta == null)
-            {
-                continue;
-            }
-            var engineState = _dbe._archetypeStates[meta.ArchetypeId];
-            if (engineState?.EntityMap == null)
-            {
-                continue;
-            }
+            // Both copies of the enabled state are published here, at commit, and nowhere earlier: the EntityMap record read by Open and queries, then
+            // the cluster EnabledBits words read by bulk iteration and the rebuilds (ENABLE-01).
+            EntityRecordAccessor.GetHeader(readBuf).EnabledBits = newBits;
+            PublishNewVersionedChainRoots(entityId, meta, readBuf);
+            engineState.EntityMap.Upsert(entityId.EntityKey, readBuf, ref accessor, _changeSet);
 
-            var accessor = engineState.EntityMap.Segment.CreateChunkAccessor(_changeSet);
-            if (engineState.EntityMap.TryGet(entityId.EntityKey, readBuf, ref accessor))
+            // Nothing to publish when the mask did not change (a Disable+Enable in one transaction), and nothing worth publishing for an entity this
+            // commit destroys: FlushPendingDestroys runs next and its ReleaseSlot clears every one of the slot's bits.
+            if (oldBits != newBits && (_pendingDestroys == null || !_pendingDestroys.Contains(entityId)))
             {
-                ushort oldBits = EntityRecordAccessor.GetHeader(readBuf).EnabledBits;
+                PublishClusterEnabledBits(engineState.ClusterState, meta.ComponentCount, entityId, readBuf, newBits, ref clusterAccessor,
+                    ref clusterAccessorOwner);
+            }
+        }
+        accessor.Dispose();
+    }
 
-                // Record MVCC override if older transactions exist
-                if (oldBits != newBits)
+    /// <summary>
+    /// Writes the committed <paramref name="enabledBits"/> into the entity's per-component cluster <c>EnabledBits</c> words (#998, rule ENABLE-01).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This used to happen in <c>EntityRef.Enable/Disable</c>, at staging. That published an uncommitted change to every concurrent bulk scan, and nothing
+    /// undid it on rollback, so a rolled-back Disable hid the component from cluster iteration while the record still said enabled — and the next
+    /// checkpoint persisted the divergence, which the crash rebuild then copies back into the record when it has no snapshot.
+    /// </para>
+    /// <para>
+    /// Every slot's bit is set from the absolute mask; a bit already right is left alone, so a commit costs one atomic per component that actually changed.
+    /// Those are <c>Interlocked</c> because the word is shared by every entity of the cluster: two transactions committing enable/disable on different
+    /// entities of one cluster each read-modify-write it, and a plain <c>|=</c> / <c>&amp;=</c> drops the other's bit — the race <see cref="FinalizeSpawns"/>
+    /// documents for the same words.
+    /// </para>
+    /// <para>
+    /// The record can be a tombstone: another transaction destroyed the entity and committed after this one read it, released the slot at commit, and a
+    /// spawn may already hold it. Writing then would stamp this entity's mask onto a DIFFERENT live entity, and a checkpoint would make that durable. So the
+    /// write happens only while the slot is still occupied by this entity's id. The check and the write are not one atomic step — a destroy and a re-spawn
+    /// of the same slot landing inside those few instructions remains the concurrent same-entity residual ENABLE-01 states.
+    /// </para>
+    /// </remarks>
+    private void PublishClusterEnabledBits(ArchetypeClusterState clusterState, int componentCount, EntityId entityId, byte* recordBuf, ushort enabledBits,
+        ref ChunkAccessor<PersistentStore> clusterAccessor, ref ArchetypeClusterState clusterAccessorOwner)
+    {
+        if (clusterState == null)
+        {
+            return;
+        }
+
+        var clusterChunkId = ClusterEntityRecordAccessor.GetClusterChunkId(recordBuf);
+        var slotIndex = ClusterEntityRecordAccessor.GetSlotIndex(recordBuf);
+
+        // PersistentStore for a mixed or SingleVersion archetype, bound to the change set so the checkpoint persists the page; TransientStore for a
+        // pure-Transient one, whose cluster metadata lives there and is never persisted.
+        if (clusterState.ClusterSegment != null)
+        {
+            if (!ReferenceEquals(clusterAccessorOwner, clusterState))
+            {
+                if (clusterAccessorOwner != null)
                 {
-                    _dbe.EnabledBitsOverrides.Record(entityId.EntityKey, TSN, oldBits);
-
-                    // Notify views: enable/disable changes component visibility.
-                    // Enable (0→1) emits isCreation so the view re-evaluates the entity.
-                    // Disable (1→0) emits isDeletion so the view removes the entity.
-                    NotifyViewsForEnableDisable(entityId, meta, engineState, oldBits, newBits);
+                    clusterAccessor.Dispose();
                 }
 
-                // Update the EntityMap record (the per-entity index read by Open). The committed cluster EnabledBits[C] is kept in sync by
-                // EntityRef.Enable/Disable (the immediate-visibility write); its DURABLE persistence on the cluster path is tracked under #398
-                // (the same enabled-bits crash-durability gap), so it is intentionally NOT re-written here without a covering cluster test.
-                EntityRecordAccessor.GetHeader(readBuf).EnabledBits = newBits;
-                PublishNewVersionedChainRoots(entityId, meta, readBuf);
-                engineState.EntityMap.Upsert(entityId.EntityKey, readBuf, ref accessor, _changeSet);
+                clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(_changeSet);
+                clusterAccessorOwner = clusterState;
             }
-            accessor.Dispose();
+
+            WriteEnabledWords(clusterAccessor.GetChunkAddress(clusterChunkId, true), clusterState.Layout, componentCount, slotIndex, (long)entityId.RawValue,
+                enabledBits);
+        }
+        else if (clusterState.TransientSegment != null)
+        {
+            using var transientAccessor = clusterState.TransientSegment.CreateChunkAccessor();
+            WriteEnabledWords(transientAccessor.GetChunkAddress(clusterChunkId, true), clusterState.Layout, componentCount, slotIndex, (long)entityId.RawValue,
+                enabledBits);
+        }
+
+        static void WriteEnabledWords(byte* clusterBase, ArchetypeClusterInfo layout, int componentCount, int slotIndex, long entityIdRaw, ushort enabledBits)
+        {
+            var entityBit = 1L << slotIndex;
+            if ((Volatile.Read(ref *(long*)clusterBase) & entityBit) == 0
+                || Volatile.Read(ref *(long*)(clusterBase + layout.EntityIdsOffset + slotIndex * 8)) != entityIdRaw)
+            {
+                return;   // the slot no longer holds this entity (see remarks)
+            }
+
+            for (var slot = 0; slot < componentCount; slot++)
+            {
+                ref var word = ref *(long*)(clusterBase + layout.EnabledBitsOffset(slot));
+                var wanted = (enabledBits & (1 << slot)) != 0;
+                if (((Volatile.Read(ref word) & entityBit) != 0) == wanted)
+                {
+                    continue;
+                }
+
+                if (wanted)
+                {
+                    Interlocked.Or(ref word, entityBit);
+                }
+                else
+                {
+                    Interlocked.And(ref word, ~entityBit);
+                }
+            }
         }
     }
 

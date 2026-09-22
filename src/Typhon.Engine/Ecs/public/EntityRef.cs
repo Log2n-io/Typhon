@@ -680,14 +680,10 @@ public unsafe ref struct EntityRef
         }
         byte slot = _archetype.GetSlot(comp._componentTypeId);
         _enabledBits &= (ushort)~(1 << slot);
-        _accessor.StageEnableDisable(_id, _enabledBits);
 
-        // Update cluster EnabledBits so cluster iteration sees the change immediately
-        if (_clusterBase != null)
-        {
-            ref ulong clusterBits = ref *(ulong*)(_clusterBase + _clusterLayout.EnabledBitsOffset(slot));
-            clusterBits &= ~(1UL << _clusterSlotIndex);
-        }
+        // Staged only. The cluster's EnabledBits copy is written at commit by FlushPendingEnableDisable, never from here: a write at staging reached every
+        // concurrent bulk scan before commit and survived a rollback (#998, rule ENABLE-01).
+        _accessor.StageEnableDisable(_id, _enabledBits);
     }
 
     /// <summary>True when <paramref name="slot"/> is a Versioned component this entity has no revision chain for — genuinely absent (#845).</summary>
@@ -738,14 +734,9 @@ public unsafe ref struct EntityRef
         }
 
         // Enable AFTER the content exists: the bit is what makes the slot readable, so publishing it earlier would briefly expose a slot with no value.
+        // Staged only — the cluster copy is written at commit (see Disable).
         _enabledBits |= (ushort)(1 << slot);
         _accessor.StageEnableDisable(_id, _enabledBits);
-
-        if (_clusterBase != null)
-        {
-            ref ulong enableBits = ref *(ulong*)(_clusterBase + _clusterLayout.EnabledBitsOffset(slot));
-            enableBits |= 1UL << _clusterSlotIndex;
-        }
 
         if (!needsContent)
         {
@@ -780,14 +771,8 @@ public unsafe ref struct EntityRef
               + "Use Enable(comp, in value) to supply one, or set it at Spawn.");
         }
 
+        // Staged only — the cluster copy is written at commit (see Disable).
         _enabledBits |= (ushort)(1 << slot);
         _accessor.StageEnableDisable(_id, _enabledBits);
-
-        // Update cluster EnabledBits so cluster iteration sees the change immediately
-        if (_clusterBase != null)
-        {
-            ref ulong clusterBits = ref *(ulong*)(_clusterBase + _clusterLayout.EnabledBitsOffset(slot));
-            clusterBits |= 1UL << _clusterSlotIndex;
-        }
     }
 }

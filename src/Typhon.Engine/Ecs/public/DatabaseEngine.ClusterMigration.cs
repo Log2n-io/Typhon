@@ -1014,15 +1014,22 @@ public partial class DatabaseEngine
                 // 5. Copy EntityId into destination slot primary segment.
                 *(long*)(dstBase + layout.EntityIdsOffset + dstSlot * 8) = entityPK;
 
-                // 6. Copy per-component EnabledBits. For each slot, transcribe src.bit(srcSlot) → dst.bit(dstSlot).
+                // 6. Copy per-component EnabledBits. For each slot, transcribe src.bit(srcSlot) → dst.bit(dstSlot), clearing as well as setting: the
+                //    claimed destination slot is not guaranteed clean of its previous occupant's bits (ENABLE-01). Plain writes are safe here — the
+                //    fence window admits no committing transaction (EW-01) and slices are carved on destination cell, so no other writer shares the word.
                 //    Source bits are cleared later by ReleaseSlot.
                 for (var s = 0; s < componentCount; s++)
                 {
                     var ebOff = layout.EnabledBitsOffset(s);
                     var srcEnabled = *(ulong*)(srcBase + ebOff);
+                    ref var dstWord = ref *(ulong*)(dstBase + ebOff);
                     if ((srcEnabled & (1UL << srcSlot)) != 0)
                     {
-                        *(ulong*)(dstBase + ebOff) |= 1UL << dstSlot;
+                        dstWord |= 1UL << dstSlot;
+                    }
+                    else
+                    {
+                        dstWord &= ~(1UL << dstSlot);
                     }
                 }
 

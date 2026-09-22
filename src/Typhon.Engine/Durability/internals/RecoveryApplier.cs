@@ -256,13 +256,19 @@ internal sealed unsafe class RecoveryApplier : IDisposable
             }
         }
 
-        // Write the full EntityId and per-slot EnabledBits into the cluster SoA (occupancy bit was set by ClaimSlot).
+        // Write the full EntityId and per-slot EnabledBits into the cluster SoA (occupancy bit was set by ClaimSlot). The bits come from the absolute mask,
+        // clearing as well as setting: a claimed slot is not guaranteed clean of its previous occupant's bits (ENABLE-01).
         *(long*)(clusterBase + layout.EntityIdsOffset + slotIdx * 8) = entityIdRaw;
         for (int slot = 0; slot < _componentCount; slot++)
         {
+            ref var word = ref *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot));
             if ((enabledBits & (1 << slot)) != 0)
             {
-                *(ulong*)(clusterBase + layout.EnabledBitsOffset(slot)) |= 1UL << slotIdx;
+                word |= 1UL << slotIdx;
+            }
+            else
+            {
+                word &= ~(1UL << slotIdx);
             }
         }
 
