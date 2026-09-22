@@ -444,8 +444,12 @@ class HandshakeTests
 
     // ── the open session ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// A <c>PING</c> is handed to the send side to answer — never answered on the receive thread, which would put a second writer on the link — and records the
+    /// client's applied tick. The answer's bytes are asserted end to end in <c>LiveHandshakeTests</c> and <c>SendPumpTests</c>.
+    /// </summary>
     [Test]
-    public void PingIsAnsweredWithPongAndRecordsTheClientsAppliedTick()
+    public void PingIsHandedToTheSendSideAndRecordsTheClientsAppliedTick()
     {
         var connection = Accept();
         connection.OnMessage(ClientMessages.Hello());
@@ -453,13 +457,11 @@ class HandshakeTests
 
         connection.OnMessage(ClientMessages.Ping(0xDEADBEEF, 1200));
 
-        var pong = PongMessage.Parse(_link.Take());
-
         Assert.Multiple(() =>
         {
-            Assert.That(pong.ClientMs, Is.EqualTo(0xDEADBEEF), "opaque to the server, which echoes it: the client picks the epoch");
-            Assert.That(pong.Tick, Is.EqualTo(_host.CurrentTick));
-            Assert.That(pong.UsIntoTick, Is.EqualTo(99_999u), "a u32, because a 10 Hz tick is 100 000 µs and more under dilation");
+            Assert.That(_host.PongRequests, Is.EqualTo(new[] { (connection.Session, 0xDEADBEEFu) }),
+                "opaque to the server, which echoes it: the client picks the epoch");
+            Assert.That(_link.PendingCount, Is.Zero, "the receive thread wrote to the link itself, beside whatever frame the pump was sending");
             Assert.That(connection.LastAppliedTick, Is.EqualTo(1200u), "this is what the lag skip is computed from");
             Assert.That(connection.State, Is.EqualTo(SubscriptionConnectionState.Open));
         });

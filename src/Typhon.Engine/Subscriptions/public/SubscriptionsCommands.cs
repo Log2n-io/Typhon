@@ -565,6 +565,13 @@ public sealed class SubscriptionsCommands
     public (double SpanMs, double BusyMs, double MaxChunkMs, double StartSpreadMs, double HeaviestGroupMs, double HeaviestGroupMembers, double PrologueMs) InterestSpan =>
         _ingress.Interest == null ? default : _ingress.Interest.ChunkSpan;
 
+    /// <summary>The send path, measured while phase timing is on — see <c>SendPump.SendPath</c>.</summary>
+    public (double WakeMsPerPublish, double WokenPerPublish, double QueueDelayUs, double SendUs, long SendsSync, long SendsAsync) SendPath =>
+        _ingress.SendPump == null ? default : _ingress.SendPump.SendPath;
+
+    /// <summary>Frames and bytes handed to links since start.</summary>
+    public (long Frames, long Bytes) SendTotals => _ingress.SendPump == null ? default : (_ingress.SendPump.FramesSent, _ingress.SendPump.BytesSent);
+
     /// <summary>Clusters opened to fill the shared snapshot, against those read from it.</summary>
     public (long Opens, long Reads) SnapshotUse => _ingress.Interest == null ? default : _ingress.Interest.SnapshotUse;
 

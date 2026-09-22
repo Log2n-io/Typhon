@@ -33,7 +33,9 @@ var options = new BotSwarmOptions
 Console.WriteLine($"connecting {bots} {kind} bots to {endpoint} …");
 
 await using var swarm = new BotSwarm(options);
-using var stopping = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
+// Armed only once every session is open: armed here, a connect phase longer than `--seconds` left no measured window at all, and every figure
+// below was read the moment the last session joined.
+using var stopping = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
 {
     e.Cancel = true;
@@ -42,6 +44,7 @@ Console.CancelKeyPress += (_, e) =>
 
 var opened = await swarm.StartAsync(CancellationToken.None);
 Console.WriteLine($"opened {opened} of {bots} sessions");
+stopping.CancelAfter(TimeSpan.FromSeconds(seconds));
 
 // A swarm that opened nothing has measured nothing, and every figure below it would be a well-formatted zero. It is reported as a
 // failure here rather than left to the reader, because the numbers that follow are the kind a reader trusts.
@@ -59,6 +62,10 @@ if (opened < bots)
 }
 
 var started = DateTime.UtcNow;
+
+// Bytes counted from the same instant as the window, not from the first connect: dividing everything received since the first session opened by the
+// time since the last one did overstated the rate by the connect phase's share.
+var bytesAtStart = swarm.BytesReceived;
 while (!stopping.IsCancellationRequested)
 {
     try
@@ -119,7 +126,7 @@ string Blocks()
     // Wire cost beside CPU cost: bytes per session per second is the number a capacity plan is actually built on, and a design that trades CPU for
     // payload (or the reverse) cannot be judged from the timing half alone.
     var elapsed = Math.Max(1.0, (DateTime.UtcNow - started).TotalSeconds);
-    var bytesPerSessionPerSec = bots > 0 ? swarm.BytesReceived / elapsed / bots : 0;
+    var bytesPerSessionPerSec = bots > 0 ? (swarm.BytesReceived - bytesAtStart) / elapsed / bots : 0;
     Console.WriteLine($"SWEEP kind={kind} sessions={bots} project={project:F3} interest={interest:F3} frames={frames:F3} "
         + $"subs={subs:F3} tickP50={tick:F3} subsPct={(tick > 0 ? subs / tick * 100 : 0):F1} recPerFrame={swarm.RecordsPerFrame:F0} "
         + $"bytesPerSessionPerSec={bytesPerSessionPerSec:F0} totalBytes={swarm.BytesReceived}");

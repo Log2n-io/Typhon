@@ -165,7 +165,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
             // The send side (P1-14b). It holds no memory of its own beyond one view and one work item per slot; what it carries is the rule that a frame
             // leaves the engine only after the tick that produced it has flushed.
-            _sendPump = new SendPump(_sessions, _frames, Options.MaxSessions);
+            _sendPump = new SendPump(_sessions, _frames, Options.MaxSessions, this);
 
             // Ingress (P1-05). The command registry is bound from the CATALOG, so the decode follows what the client negotiated against rather than a second
             // reading of the declarations; the ring pool is created here because a ring's lifetime is a session's, and sessions live in the table above it.
@@ -398,6 +398,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// Straight into the session's ingress ring (P1-05). A <see cref="WireFormatException"/> out of the decode is deliberately not caught here: the connection
     /// is what turns it into the close code the protocol names, and swallowing it would leave a malformed client connected.
     /// </remarks>
+    bool ISubscriptionsHost.RequestPong(SessionId session, uint clientMs) => _sendPump != null && _sendPump.RequestPong(session, clientMs);
+
+    /// <inheritdoc />
     void ISubscriptionsHost.BindSessionLink(SessionId session, ISubscriptionLink link)
     {
         if (link == null)

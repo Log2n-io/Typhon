@@ -31,6 +31,8 @@ internal sealed class InProcessLink : ISubscriptionLink
     private readonly ConcurrentQueue<byte[]> _messages = new();
     private readonly SemaphoreSlim _arrived = new(0);
     private int _closes;
+    private int _inFlight;
+    private int _overlaps;
 
     /// <summary>How long every send waits before completing. Zero — the default — completes synchronously.</summary>
     public TimeSpan Delay { get; set; }
@@ -72,6 +74,12 @@ internal sealed class InProcessLink : ISubscriptionLink
     /// <summary>How many messages are waiting to be read.</summary>
     public int PendingCount => _messages.Count;
 
+    /// <summary>
+    /// Sends that began while another was still in flight. <see cref="ISubscriptionLink"/> promises a link this never happens, so anything but zero is an
+    /// engine bug a link written to the contract would suffer from.
+    /// </summary>
+    public int OverlappedSends => Volatile.Read(ref _overlaps);
+
     /// <inheritdoc />
     public ValueTask SendAsync(ReadOnlyMemory<byte> message, CancellationToken ct)
     {
@@ -86,6 +94,11 @@ internal sealed class InProcessLink : ISubscriptionLink
             return ValueTask.CompletedTask;
         }
 
+        if (Interlocked.Increment(ref _inFlight) > 1)
+        {
+            Interlocked.Increment(ref _overlaps);
+        }
+
         var copy = message.ToArray();
         var wait = Delay;
         if (BytesPerSecond > 0)
@@ -96,6 +109,7 @@ internal sealed class InProcessLink : ISubscriptionLink
         if (wait <= TimeSpan.Zero)
         {
             Deliver(copy);
+            Interlocked.Decrement(ref _inFlight);
             return ValueTask.CompletedTask;
         }
 
@@ -156,8 +170,15 @@ internal sealed class InProcessLink : ISubscriptionLink
 
     private async Task SlowSendAsync(byte[] copy, TimeSpan wait, CancellationToken ct)
     {
-        await Task.Delay(wait, ct).ConfigureAwait(false);
-        Deliver(copy);
+        try
+        {
+            await Task.Delay(wait, ct).ConfigureAwait(false);
+            Deliver(copy);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _inFlight);
+        }
     }
 
     private void Deliver(byte[] copy)
@@ -230,6 +251,36 @@ internal sealed class FakeSubscriptionsHost : ISubscriptionsHost
 
     /// <inheritdoc />
     public void NoteSessionPing(SessionId session, uint appliedTick) => AppliedTicks[session] = appliedTick;
+
+    /// <summary>The <c>PING</c>s the connection handed to the send side to answer, in order.</summary>
+    public List<(SessionId Session, uint ClientMs)> PongRequests { get; } = [];
+
+    /// <summary>
+    /// Whether a requested <c>PONG</c> is also sent on the bound link, as the runtime's send pump would. Off by default, so a handshake test can see that the
+    /// connection itself wrote nothing; on for a fixture that compares what reaches the wire.
+    /// </summary>
+    public bool AnswerPongs { get; init; }
+
+    /// <inheritdoc />
+    /// <remarks>Refused, as the runtime refuses it, when the session has no bound link.</remarks>
+    public bool RequestPong(SessionId session, uint clientMs)
+    {
+        if (!BoundLinks.TryGetValue(session, out var link) || link == null)
+        {
+            return false;
+        }
+
+        PongRequests.Add((session, clientMs));
+        if (AnswerPongs)
+        {
+            var bytes = new byte[1 + 4 + 4 + 4];
+            var writer = new WireWriter(bytes);
+            new PongMessage(clientMs, CurrentTick, MicrosecondsIntoTick).Write(ref writer);
+            link.SendAsync(bytes, CancellationToken.None).AsTask().GetAwaiter().GetResult();
+        }
+
+        return true;
+    }
 }
 
 /// <summary>

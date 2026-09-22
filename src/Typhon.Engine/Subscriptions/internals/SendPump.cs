@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Protocol;
@@ -46,6 +47,9 @@ internal sealed class SendPump : IDisposable
     /// <summary>The widest a <c>KICK</c> can be: the type byte, the code, the reason's length prefix and the reason itself.</summary>
     private const int KickBytes = 1 + 2 + 1 + ProtocolConstants.KickReasonMaxBytes;
 
+    /// <summary>A <c>PONG</c>: the type byte and three <c>u32</c>.</summary>
+    private const int PongBytes = 1 + 4 + 4 + 4;
+
     private readonly SessionTable _sessions;
     private readonly FrameAssembler _frames;
     private readonly ISubscriptionLink[] _links;
@@ -53,20 +57,40 @@ internal sealed class SendPump : IDisposable
     private readonly int[] _pumping;
     private readonly SessionPumpWorkItem[] _workItems;
     private readonly PendingKick[] _kicks;
+
+    // The PING a session is owed an answer to: the client's clock plus one, zero for none, so one word says both whether and what, and a later PING
+    // supersedes an unanswered one. The answer is encoded into the slot's own buffer, which the one-in-flight rule makes reusable without a lease.
+    private readonly long[] _pongs;
+    private readonly NativeFrameMemoryManager[] _pongBuffers;
+    private readonly ISubscriptionsHost _clock;
     private readonly CancellationTokenSource _stopping = new();
 
     private long _framesSent;
     private long _bytesSent;
     private long _sendFailures;
     private long _kicksSent;
+    private long _pongsSent;
     private int _activePumps;
     private int _disposed;
+
+    // Send-path telemetry, collected only while FrameAssembler.PhaseTimingEnabled is set: the driver's wake walk, the thread pool's delay before a woken pump
+    // runs, and each link send's duration split by whether it completed synchronously. Stopwatch ticks.
+    private long _publishStamp;
+    private long _wakeTicks;
+    private long _publishes;
+    private long _woken;
+    private long _queueDelayTicks;
+    private long _pumpStarts;
+    private long _sendTicks;
+    private long _sendsSync;
+    private long _sendsAsync;
 
     /// <summary>Builds the pump table for a runtime's session capacity.</summary>
     /// <param name="sessions">The session table, for the in-flight counter and the close request.</param>
     /// <param name="frames">The assembler, for the publication gate, the per-slot hand-off state and the ready lists.</param>
     /// <param name="maxSessions">How many slots the table has.</param>
-    public SendPump(SessionTable sessions, FrameAssembler frames, int maxSessions)
+    /// <param name="clock">The server clock a <c>PONG</c> reports, read when it is sent; <see langword="null"/> reports zero.</param>
+    public SendPump(SessionTable sessions, FrameAssembler frames, int maxSessions, ISubscriptionsHost clock = null)
     {
         ArgumentNullException.ThrowIfNull(sessions);
         ArgumentNullException.ThrowIfNull(frames);
@@ -79,6 +103,9 @@ internal sealed class SendPump : IDisposable
         _pumping = new int[maxSessions];
         _workItems = new SessionPumpWorkItem[maxSessions];
         _kicks = new PendingKick[maxSessions];
+        _pongs = new long[maxSessions];
+        _pongBuffers = new NativeFrameMemoryManager[maxSessions];
+        _clock = clock;
     }
 
     /// <summary>Frames handed to a link and completed.</summary>
@@ -93,8 +120,32 @@ internal sealed class SendPump : IDisposable
     /// <summary>Sessions the tick closed that were told so with a <c>KICK</c> before their link was closed.</summary>
     public long KicksSent => Volatile.Read(ref _kicksSent);
 
+    /// <summary><c>PONG</c> answers handed to a link and completed.</summary>
+    public long PongsSent => Volatile.Read(ref _pongsSent);
+
     /// <summary>Pumps that had not come back when <see cref="Dispose"/> gave up waiting. Non-zero is a transport that does not honour a close.</summary>
     public int PumpsStillRunningAtDispose { get; private set; }
+
+    /// <summary>
+    /// The send path as measured while phase timing is on: driver wake time and sessions woken per publish, mean pool delay from publish to a pump starting,
+    /// mean link send duration, and how many sends completed synchronously against asynchronously.
+    /// </summary>
+    public (double WakeMsPerPublish, double WokenPerPublish, double QueueDelayUs, double SendUs, long SendsSync, long SendsAsync) SendPath
+    {
+        get
+        {
+            var publishes = Volatile.Read(ref _publishes);
+            var starts = Volatile.Read(ref _pumpStarts);
+            var sync = Volatile.Read(ref _sendsSync);
+            var async = Volatile.Read(ref _sendsAsync);
+            var ms = 1000d / Stopwatch.Frequency;
+            return (publishes == 0 ? 0d : Volatile.Read(ref _wakeTicks) * ms / publishes,
+                publishes == 0 ? 0d : (double)Volatile.Read(ref _woken) / publishes,
+                starts == 0 ? 0d : Volatile.Read(ref _queueDelayTicks) * ms * 1000d / starts,
+                sync + async == 0 ? 0d : Volatile.Read(ref _sendTicks) * ms * 1000d / (sync + async),
+                sync, async);
+        }
+    }
 
     /// <summary>Sessions whose pump is running right now. Zero means every frame published so far has left or been abandoned.</summary>
     public int ActivePumps => Volatile.Read(ref _activePumps);
@@ -117,6 +168,9 @@ internal sealed class SendPump : IDisposable
 
         if (session.IsValid && (uint)session.Slot < (uint)_links.Length)
         {
+            // A PING the slot's previous occupant left unanswered is not this session's to answer. Cleared before the link is published, and before WELCOME,
+            // so no PING of the new session can have been latched yet.
+            Volatile.Write(ref _pongs[session.Slot], 0);
             Volatile.Write(ref _links[session.Slot], link);
         }
     }
@@ -135,7 +189,32 @@ internal sealed class SendPump : IDisposable
         {
             Volatile.Write(ref _links[session.Slot], null);
             Volatile.Write(ref _kicks[session.Slot], null);
+            Volatile.Write(ref _pongs[session.Slot], 0);
         }
+    }
+
+    /// <summary>
+    /// Records that a session's <c>PING</c> must be answered, and wakes its pump to answer it.
+    /// </summary>
+    /// <param name="session">The session whose <c>PING</c> arrived.</param>
+    /// <param name="clientMs">The client clock the <c>PING</c> carried, echoed back.</param>
+    /// <returns><see langword="false"/> when there is no link to answer on.</returns>
+    /// <remarks>
+    /// <b>The pump answers, not the receive thread.</b> <see cref="ISubscriptionLink"/> promises at most one send in flight per session, and a receive thread
+    /// that sent its own <c>PONG</c> broke that promise whenever a frame was going out at the same moment. The built-in links serialize internally, so nothing
+    /// was corrupted, but a link written to the contract could be. The server clock is read when the answer is encoded, as close as possible to the send,
+    /// which is what a client placing its round trip inside the tick wants.
+    /// </remarks>
+    public bool RequestPong(SessionId session, uint clientMs)
+    {
+        if (IsDisposed || !session.IsValid || (uint)session.Slot >= (uint)_pongs.Length || Volatile.Read(ref _links[session.Slot]) == null)
+        {
+            return false;
+        }
+
+        Volatile.Write(ref _pongs[session.Slot], (long)clientMs + 1);
+        Wake(session);
+        return true;
     }
 
     /// <summary>
@@ -198,6 +277,14 @@ internal sealed class SendPump : IDisposable
 
         _frames.Gate.Publish(tick);
 
+        var measure = FrameAssembler.PhaseTimingEnabled;
+        var from = measure ? Stopwatch.GetTimestamp() : 0L;
+        if (measure)
+        {
+            Volatile.Write(ref _publishStamp, from);
+        }
+
+        var woken = 0;
         for (var worker = 0; worker < _frames.WorkerCount; worker++)
         {
             var ready = _frames.ReadyOf(worker);
@@ -205,9 +292,17 @@ internal sealed class SendPump : IDisposable
             {
                 Wake(ready[i]);
             }
+
+            woken += ready.Length;
         }
 
         _frames.ClearReady();
+        if (measure)
+        {
+            _wakeTicks += Stopwatch.GetTimestamp() - from;
+            _woken += woken;
+            _publishes++;
+        }
     }
 
     /// <summary>
@@ -288,6 +383,12 @@ internal sealed class SendPump : IDisposable
     /// <returns>The loop.</returns>
     internal async Task PumpAsync(int slot)
     {
+        if (FrameAssembler.PhaseTimingEnabled)
+        {
+            Interlocked.Add(ref _queueDelayTicks, Stopwatch.GetTimestamp() - Volatile.Read(ref _publishStamp));
+            Interlocked.Increment(ref _pumpStarts);
+        }
+
         try
         {
             while (true)
@@ -295,6 +396,9 @@ internal sealed class SendPump : IDisposable
                 while (await TrySendOneAsync(slot).ConfigureAwait(false))
                 {
                 }
+
+                // A PING's answer after the frames that were ready with it: its ordering against frames means nothing to the client, and a frame is late work.
+                await TryPongAsync(slot).ConfigureAwait(false);
 
                 // After the frames, because a session that has a published frame and a close pending is owed both, in that order: the frame belongs to a tick
                 // the server already committed, and dropping it would leave the client's baseline short of what the engine proved it wrote.
@@ -333,7 +437,7 @@ internal sealed class SendPump : IDisposable
             return false;
         }
 
-        if (Volatile.Read(ref _kicks[slot]) != null)
+        if (Volatile.Read(ref _kicks[slot]) != null || Volatile.Read(ref _pongs[slot]) != 0)
         {
             return true;
         }
@@ -430,7 +534,26 @@ internal sealed class SendPump : IDisposable
 
         try
         {
-            await link.SendAsync(buffer.Memory, _stopping.Token).ConfigureAwait(false);
+            var measure = FrameAssembler.PhaseTimingEnabled;
+            var from = measure ? Stopwatch.GetTimestamp() : 0L;
+            var pending = link.SendAsync(buffer.Memory, _stopping.Token);
+            if (measure)
+            {
+                if (pending.IsCompletedSuccessfully)
+                {
+                    Interlocked.Increment(ref _sendsSync);
+                }
+                else
+                {
+                    Interlocked.Increment(ref _sendsAsync);
+                }
+            }
+
+            await pending.ConfigureAwait(false);
+            if (measure)
+            {
+                Interlocked.Add(ref _sendTicks, Stopwatch.GetTimestamp() - from);
+            }
 
             // Only now may the producer overwrite the slot: the release inside CompleteSend is what orders the link's reads of these bytes ahead of the
             // next frame's writes into them (SUB-04).
@@ -455,6 +578,56 @@ internal sealed class SendPump : IDisposable
             // block itself is the producer's to recycle, and it does not move.
             _sessions.EndSend(session);
         }
+    }
+
+    /// <summary>
+    /// Sends the <c>PONG</c> a session is owed, if any.
+    /// </summary>
+    /// <param name="slot">The session table row.</param>
+    /// <returns>The send.</returns>
+    /// <remarks>
+    /// The bytes are this pump's own per-slot buffer, not a frame-pool block, so no <c>BeginSend</c> is taken: the buffer lives until <see cref="Dispose"/>,
+    /// which waits for every pump first. A failed send closes the session exactly as a failed frame does.
+    /// </remarks>
+    private async ValueTask TryPongAsync(int slot)
+    {
+        var pending = Interlocked.Exchange(ref _pongs[slot], 0);
+        if (pending == 0)
+        {
+            return;
+        }
+
+        var link = Volatile.Read(ref _links[slot]);
+        if (link == null)
+        {
+            return;
+        }
+
+        var buffer = _pongBuffers[slot] ??= NativeFrameMemoryManager.Allocate(PongBytes);
+        var length = EncodePong(buffer, (uint)(pending - 1), _clock);
+        try
+        {
+            await link.SendAsync(buffer.Memory[..length], _stopping.Token).ConfigureAwait(false);
+            Interlocked.Increment(ref _pongsSent);
+        }
+        catch (Exception)
+        {
+            Interlocked.Increment(ref _sendFailures);
+            _sessions.RequestClose(_sessions.IdAt(slot), SessionCloseReason.LinkLost, CloseCodes.InternalError);
+            link.Close(CloseCodes.InternalError, "send failed");
+        }
+    }
+
+    /// <summary>Writes a <c>PONG</c> into a buffer and answers its length.</summary>
+    /// <param name="buffer">The slot's buffer, at least <see cref="PongBytes"/> long.</param>
+    /// <param name="clientMs">The client clock being echoed.</param>
+    /// <param name="clock">The server clock, or <see langword="null"/>.</param>
+    /// <returns>How many bytes were written.</returns>
+    private static int EncodePong(NativeFrameMemoryManager buffer, uint clientMs, ISubscriptionsHost clock)
+    {
+        var writer = new WireWriter(buffer.GetSpan());
+        new PongMessage(clientMs, clock?.CurrentTick ?? 0, clock?.MicrosecondsIntoTick ?? 0).Write(ref writer);
+        return writer.Position;
     }
 
     /// <summary>
@@ -585,6 +758,8 @@ internal sealed class SendPump : IDisposable
         {
             _buffers[i]?.Release();
             _buffers[i] = null;
+            _pongBuffers[i]?.Release();
+            _pongBuffers[i] = null;
         }
 
         _stopping.Dispose();

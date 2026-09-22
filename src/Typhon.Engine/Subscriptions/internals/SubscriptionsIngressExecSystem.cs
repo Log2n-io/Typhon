@@ -157,6 +157,9 @@ internal sealed class SubscriptionsIngress : IDisposable
     private readonly SubscriptionsRegistry _registry;
     private readonly IngressRingPool _pool;
     private readonly SendPump _sendPump;
+
+    /// <summary>The runtime's send pump, for its telemetry.</summary>
+    internal SendPump SendPump => _sendPump;
     private readonly Lock _rowLock = new();
 
     private readonly SessionIngress[] _rows;

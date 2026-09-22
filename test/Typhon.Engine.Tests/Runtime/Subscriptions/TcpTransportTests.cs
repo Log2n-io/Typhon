@@ -666,7 +666,8 @@ class TcpTransportTests : TestBase<TcpTransportTests>
             var sessions = new SubscriptionsSessions();
             sessions.Kinds("god");
             _table = new SessionTable("Sessions", _registry.Runtime, _allocator, new SubscriptionsOptions { MaxSessions = 4 }, sessions.SessionEvents);
-            Host = new FakeSubscriptionsHost { Sessions = sessions, SessionTable = _table };
+            // Answers PONGs the way the runtime's send pump does, since this fixture compares what reaches the wire and has no pump of its own.
+            Host = new FakeSubscriptionsHost { Sessions = sessions, SessionTable = _table, AnswerPongs = true };
         }
 
         public FakeSubscriptionsHost Host { get; }

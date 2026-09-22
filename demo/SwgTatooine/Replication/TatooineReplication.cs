@@ -167,6 +167,9 @@ public static class TatooineReplication
     /// </para>
     /// </remarks>
     private static long _placeTicks;
+    private static long _sendWindowFrom, _sendFramesFrom, _sendBytesFrom, _sendAllocFrom, _sendItemsFrom;
+    private static double _sendCpuFrom;
+    private static int _sendGen0From;
 
     public static void PlacePlayerSessions(TickContext tick)
     {
@@ -296,6 +299,31 @@ public static class TatooineReplication
             Console.Error.WriteLine(
                 $"  span claims: {sc.Suppressed} suppressed as unprojected, {sc.Admitted} admitted "
                 + $"({(scTotal == 0 ? 0d : sc.Suppressed * 100d / scTotal):F1} % dropped)");
+            var sendPath = subs.SendPath;
+            var st = subs.SendTotals;
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            var cpu = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime.TotalMilliseconds;
+            var alloc = GC.GetTotalAllocatedBytes();
+            var items = System.Threading.ThreadPool.CompletedWorkItemCount;
+            var gen0 = GC.CollectionCount(0);
+            if (_sendWindowFrom != 0)
+            {
+                var wallMs = (now - _sendWindowFrom) * 1000d / System.Diagnostics.Stopwatch.Frequency;
+                Console.Error.WriteLine(
+                    $"  send path: wake {sendPath.WakeMsPerPublish:F3} ms/publish on the driver ({sendPath.WokenPerPublish:F0} woken), pool delay {sendPath.QueueDelayUs:F0} us, "
+                    + $"send {sendPath.SendUs:F1} us ({sendPath.SendsSync} sync, {sendPath.SendsAsync} async); window: {(st.Frames - _sendFramesFrom) * 1000d / wallMs:F0} frames/s, "
+                    + $"{(st.Bytes - _sendBytesFrom) / wallMs / 1000d:F1} MB/s, process CPU {(cpu - _sendCpuFrom) / wallMs:F2} cores, "
+                    + $"alloc {(alloc - _sendAllocFrom) / wallMs / 1000d:F2} MB/s, pool items {(items - _sendItemsFrom) * 1000d / wallMs:F0}/s, "
+                    + $"pool threads {System.Threading.ThreadPool.ThreadCount}, gen0 {gen0 - _sendGen0From}");
+            }
+
+            _sendWindowFrom = now;
+            _sendFramesFrom = st.Frames;
+            _sendBytesFrom = st.Bytes;
+            _sendCpuFrom = cpu;
+            _sendAllocFrom = alloc;
+            _sendItemsFrom = items;
+            _sendGen0From = gen0;
             var isp = subs.InterestSpan;
             Console.Error.WriteLine(
                 $"  interest span: {isp.SpanMs:F2} ms wall, {isp.BusyMs:F2} ms busy "

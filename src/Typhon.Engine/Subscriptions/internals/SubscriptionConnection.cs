@@ -90,6 +90,14 @@ internal interface ISubscriptionsHost
     void NoteSessionPing(SessionId session, uint appliedTick);
 
     /// <summary>
+    /// Has the session's send pump answer a <c>PING</c>, so the answer never overlaps a frame on the link.
+    /// </summary>
+    /// <param name="session">The session whose <c>PING</c> arrived.</param>
+    /// <param name="clientMs">The client clock to echo.</param>
+    /// <returns><see langword="false"/> when nothing can answer it — no send side, or the session's link is already unbound.</returns>
+    bool RequestPong(SessionId session, uint clientMs);
+
+    /// <summary>
     /// Hands a validated <c>COMMANDS</c> message to ingress.
     /// </summary>
     /// <param name="session">Whose commands they are.</param>
@@ -160,9 +168,6 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
 {
     /// <summary>Header bytes of a <c>WELCOME</c> before its catalog: the type byte, the fixed fields, and the catalog length's widest varint.</summary>
     private const int WelcomeHeaderBytes = 1 + 2 + 2 + 4 + 4 + 16 + 4 + 4 + 8 + 5;
-
-    /// <summary>A <c>PONG</c>: the type byte and three <c>u32</c>.</summary>
-    private const int PongBytes = 1 + 4 + 4 + 4;
 
     /// <summary>A <c>KICK</c>: the type byte, the code, and a reason with its length prefix.</summary>
     private const int KickBytes = 1 + 2 + 1 + ProtocolConstants.KickReasonMaxBytes;
@@ -552,7 +557,9 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
                 var ping = PingMessage.Parse(message);
                 Volatile.Write(ref _lastAppliedTick, ping.LastAppliedTick);
                 _host.NoteSessionPing(_session, ping.LastAppliedTick);
-                SendPong(ping.ClientMs);
+                // Answered by the session's pump, the link's only writer once the session is open. A refusal means the link is gone, so there is nobody
+                // to answer.
+                _host.RequestPong(_session, ping.ClientMs);
                 break;
 
             case MessageTypes.Bye:
@@ -573,26 +580,6 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
                 Refuse(CloseCodes.ProtocolError, "unknown or out-of-state message type");
                 break;
         }
-    }
-
-    private void SendPong(uint clientMs)
-    {
-        var pong = new PongMessage(clientMs, _host.CurrentTick, _host.MicrosecondsIntoTick);
-        var buffer = NativeFrameMemoryManager.Allocate(PongBytes);
-        int length;
-        try
-        {
-            var writer = new WireWriter(buffer.GetSpan());
-            pong.Write(ref writer);
-            length = writer.Position;
-        }
-        catch
-        {
-            buffer.Release();
-            throw;
-        }
-
-        Send(buffer, length);
     }
 
     // ── closing ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

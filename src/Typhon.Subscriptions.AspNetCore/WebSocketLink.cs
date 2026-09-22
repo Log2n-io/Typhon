@@ -34,6 +34,12 @@ internal sealed class WebSocketLink : ISubscriptionLink
     private Task _closeTask = Task.CompletedTask;
     private int _closes;
 
+    // The token the engine's sends cancel with, registered ONCE rather than per send: handing a cancellable token to ManagedWebSocket.SendAsync sends every
+    // frame down its fallback path — an async method, a registration and a disposal per message — where CancellationToken.None takes the synchronous one.
+    // Only the send pump passes a cancellable token, and it passes the same one for its whole life, so this registers once per link.
+    private CancellationToken _abortToken;
+    private CancellationTokenRegistration _abortRegistration;
+
     /// <summary>Adopts an accepted WebSocket.</summary>
     /// <param name="socket">The socket, already upgraded and carrying the <c>typhon.2</c> subprotocol.</param>
     public WebSocketLink(WebSocket socket)
@@ -59,15 +65,33 @@ internal sealed class WebSocketLink : ISubscriptionLink
     /// <b>A closed socket faults rather than completing.</b> Completing would tell the send pump the frame reached the client, and the pump would advance the
     /// session's sequence for bytes nobody received — after which the client's baseline is ahead of what it was actually sent, which no later frame corrects
     /// because records describe the present rather than a delta (SUB-03). Faulting takes the pump's failure path, which closes the session.
+    /// <para>
+    /// <b>Cancellation aborts the socket, and is wired once per token.</b> The send itself is issued with <see cref="CancellationToken.None"/>, which is what
+    /// keeps <c>ManagedWebSocket</c> on its synchronous path; <paramref name="ct"/> is honoured by a registration that aborts the socket, made the first time a
+    /// token is seen, so an in-flight send still fails at once when the engine stops. Not async itself: a completed send allocates nothing here.
+    /// </para>
     /// </remarks>
-    public async ValueTask SendAsync(ReadOnlyMemory<byte> message, CancellationToken ct)
+    public ValueTask SendAsync(ReadOnlyMemory<byte> message, CancellationToken ct)
     {
-        if (_socket.State != WebSocketState.Open)
+        if (ct.IsCancellationRequested)
         {
-            throw new WebSocketException(WebSocketError.InvalidState, $"the socket is {_socket.State}, so this frame was not sent");
+            return ValueTask.FromCanceled(ct);
         }
 
-        await _socket.SendAsync(message, WebSocketMessageType.Binary, endOfMessage: true, ct).ConfigureAwait(false);
+        if (_socket.State != WebSocketState.Open)
+        {
+            return ValueTask.FromException(new WebSocketException(WebSocketError.InvalidState, $"the socket is {_socket.State}, so this frame was not sent"));
+        }
+
+        if (ct.CanBeCanceled && ct != _abortToken)
+        {
+            // Sends on one link never overlap (the engine's guarantee), so this swap has a single writer.
+            _abortRegistration.Dispose();
+            _abortToken = ct;
+            _abortRegistration = ct.UnsafeRegister(static s => ((WebSocket)s).Abort(), _socket);
+        }
+
+        return _socket.SendAsync(message, WebSocketMessageType.Binary, endOfMessage: true, CancellationToken.None);
     }
 
     /// <inheritdoc />
@@ -110,7 +134,11 @@ internal sealed class WebSocketLink : ISubscriptionLink
     }
 
     /// <summary>Releases the cancellation source once the endpoint's loop has finished with the link.</summary>
-    public void Dispose() => _closing.Dispose();
+    public void Dispose()
+    {
+        _abortRegistration.Dispose();
+        _closing.Dispose();
+    }
 
     private async Task CloseSocketAsync(ushort code, string reason)
     {

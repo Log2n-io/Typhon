@@ -1,0 +1,7 @@
+<Patterns>
+  <Pattern PrintCallstacks="Full">Typhon\.</Pattern>
+  <Pattern PrintCallstacks="Full">System\.Net\.</Pattern>
+  <Pattern PrintCallstacks="Full">Microsoft\.AspNetCore\.</Pattern>
+  <Pattern PrintCallstacks="Full">System\.IO\.Pipelines\.</Pattern>
+  <Pattern PrintCallstacks="Full">System\.Threading\.</Pattern>
+</Patterns>

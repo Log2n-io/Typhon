@@ -400,6 +400,61 @@ class SendPumpTests : TestBase<SendPumpTests>
             + "thread-pool thread until the runtime is disposed");
     }
 
+    /// <summary>
+    /// A <c>PONG</c> is sent by the session's pump, so it never overlaps a frame on the link, and it carries the echoed clock and the server's tick.
+    /// </summary>
+    /// <remarks>
+    /// The link is slow on purpose: every send completes only after a timer, so a frame is in flight most of the time and a <c>PONG</c> written from the
+    /// receive thread — which is what the connection used to do — lands inside one. <see cref="ISubscriptionLink"/> promises a link that never happens.
+    /// </remarks>
+    [Test]
+    public void APongIsSentByThePumpAndNeverOverlapsAFrame()
+    {
+        using var dbe = SetupEngine();
+        Populate(dbe);
+
+        using var runtime = CreateRuntime(dbe);
+        Declare(runtime.Subscriptions);
+        runtime.Start();
+
+        var subscriptions = runtime.SubscriptionsContextForTest.Subscriptions;
+        var acceptor = StartTransport(runtime);
+        var link = new InProcessLink { Delay = TimeSpan.FromMilliseconds(1) };
+        var connection = Connect(acceptor, link);
+        connection.OnMessage(ClientMessages.Hello("god", Capabilities.None));
+        link.Take();
+
+        Volatile.Write(ref _alternatingSession, connection.Session.Value);
+        Assert.That(SpinWait.SpinUntil(() => subscriptions.SendPump.FramesSent > 0, TimeSpan.FromSeconds(5)), Is.True, "the session never received a frame");
+
+        // One PING per tick while frames keep flowing, from this thread — the receive thread's role.
+        const int pings = 20;
+        for (var i = 1; i <= pings; i++)
+        {
+            var tick = runtime.CurrentTickNumber;
+            connection.OnMessage(ClientMessages.Ping((uint)i, 0));
+            Assert.That(SpinWait.SpinUntil(() => runtime.CurrentTickNumber > tick, TimeSpan.FromSeconds(5)), Is.True, "the runtime did not tick");
+        }
+
+        Assert.That(SpinWait.SpinUntil(() => subscriptions.SendPump.PongsSent > 0 && link.PendingCount > 0, TimeSpan.FromSeconds(5)), Is.True);
+        var pongs = new List<PongMessage>();
+        while (link.TryTake(out var message, 200))
+        {
+            if (message.Length > 0 && message[0] == MessageTypes.Pong)
+            {
+                pongs.Add(PongMessage.Parse(message));
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(link.OverlappedSends, Is.Zero, "a send began while another was in flight: something other than the pump wrote to the link");
+            Assert.That(pongs, Is.Not.Empty, "no PONG reached the link");
+            Assert.That(pongs.TrueForAll(p => p.ClientMs is >= 1 and <= pings), Is.True, "every PONG echoes a clock a PING carried");
+            Assert.That(pongs.TrueForAll(p => p.Tick > 0), Is.True, "the server's tick, read when the PONG is encoded");
+        });
+    }
+
     // ── harness ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
