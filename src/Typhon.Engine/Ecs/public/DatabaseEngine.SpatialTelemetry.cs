@@ -217,8 +217,21 @@ public partial class DatabaseEngine
             TotalEfficiencyRebases = clusterState.TotalEfficiencyRebases,
             TicksAtWholeBudget = clusterState.TicksAtWholeBudget,
             DriftTargetBoost = clusterState.DriftTargetBoost,
+            FenceBranchPath = clusterState.FenceBranchPath,
         };
     }
+
+    /// <summary>
+    /// Reads one archetype's spatial-partitioning counters, naming the archetype by type instead of by id. Allocation-free; never throws.
+    /// </summary>
+    /// <typeparam name="TArch">The archetype whose counters to read.</typeparam>
+    /// <returns>A snapshot of the archetype's counters, or an all-zero snapshot when it has no cluster state in this engine.</returns>
+    /// <remarks>
+    /// The same reader as <see cref="GetSpatialTelemetry(int)"/> — see its remarks for when the snapshot is coherent. This overload exists because the id is
+    /// a catalog detail: a caller that has the archetype type should not have to go looking for its number.
+    /// </remarks>
+    [PublicAPI]
+    public SpatialMigrationTelemetry GetSpatialTelemetry<TArch>() where TArch : Archetype<TArch> => GetSpatialTelemetry(Archetype<TArch>.CatalogId);
 
     /// <summary>One archetype's queue-maintenance time in milliseconds, or zero when it has no queue yet.</summary>
     /// <summary>Stopwatch ticks to milliseconds. The sub-spans are accumulated as raw timestamps to keep the bracket to one subtraction.</summary>
@@ -304,6 +317,7 @@ public partial class DatabaseEngine
         var rebases = 0L;
         var wholeBudgetStreak = 0;
         var maxBoost = 0f;
+        byte maxBranch = 0;
 
         for (var i = 0; i < states.Length; i++)
         {
@@ -384,6 +398,17 @@ public partial class DatabaseEngine
             rebases += clusterState.TotalEfficiencyRebases;
             wholeBudgetStreak = Math.Max(wholeBudgetStreak, clusterState.TicksAtWholeBudget);
             maxBoost = MathF.Max(maxBoost, clusterState.DriftTargetBoost);
+
+            // MAXED for the same reason, and because the branch values are ORDERED by weight: 0 no work, 1 refresh, 2 full snapshot. The engine-wide figure is
+            // the heaviest branch any archetype ran this fence, which is what a reader asking "what did the fence do" wants. Summing ordinals would be
+            // meaningless — two archetypes on the refresh path are not one on the full path.
+            // Read ONCE into a local, as every other MAXed member here does: the writers are fence workers, so a second read could return a value below the
+            // one just compared and store a maximum that is not one.
+            var branch = clusterState.FenceBranchPath;
+            if (branch > maxBranch)
+            {
+                maxBranch = branch;
+            }
 
             // MAXED, not summed — see SpatialMigrationTelemetry.ClusterReach. It is a bound every walk widens by, and the engine-wide bound is the largest
             // any archetype needs, not the sum of what each needs separately. The named outliers, by contrast, are distinct clusters and do add.
@@ -466,6 +491,7 @@ public partial class DatabaseEngine
             TotalEfficiencyRebases = rebases,
             TicksAtWholeBudget = wholeBudgetStreak,
             DriftTargetBoost = maxBoost,
+            FenceBranchPath = maxBranch,
         };
     }
 }

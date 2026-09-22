@@ -1,0 +1,15 @@
+{
+  "description": "A header-only keepalive at the largest tick, with RESET and VIEW_COMPLETE.",
+  "catalog": "catalog-kitchen-sink",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 4294967295,
+      "flags": 3,
+      "periodUs": 0
+    },
+    {
+      "call": "endTick"
+    }
+  ]
+}

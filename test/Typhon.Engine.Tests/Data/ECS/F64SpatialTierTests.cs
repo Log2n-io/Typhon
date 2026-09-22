@@ -172,7 +172,7 @@ class F64SpatialTierTests : TestBase<F64SpatialTierTests>
         {
             while (q.MoveNext())
             {
-                hits.Add(q.Current.EntityId);
+                hits.Add(unchecked((long)q.Current.Entity.RawValue));
             }
         }
         finally
@@ -442,7 +442,7 @@ class F64SpatialTierTests : TestBase<F64SpatialTierTests>
             {
                 while (q.MoveNext())
                 {
-                    hits.Add(q.Current.EntityId);
+                    hits.Add(unchecked((long)q.Current.Entity.RawValue));
                 }
             }
             finally

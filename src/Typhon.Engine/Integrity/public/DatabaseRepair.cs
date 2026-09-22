@@ -1,10 +1,10 @@
 ﻿using JetBrains.Annotations;
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using Typhon.Protocol;
 
 namespace Typhon.Engine;
 
@@ -389,31 +389,19 @@ public static class DatabaseRepair
             return byPage != 0 ? byPage : x.Occurrences.CompareTo(y.Occurrences);
         });
 
-        const ulong offsetBasis = 14695981039346656037;
-        const ulong prime = 1099511628211;
-        var hash = offsetBasis;
-        Span<byte> intBytes = stackalloc byte[sizeof(int)];
-        Span<byte> longBytes = stackalloc byte[sizeof(long)];
+        // This method re-implemented the construction deliberately once, and the remarks above say why. CanonicalHashBuilder (#957) is that decision taken
+        // once rather than per site: same basis, same prime, same UTF-8 bytes, same little-endian integers, same 0xFF separator, and the same x16 invariant
+        // rendering. Byte-identical to the loop it replaces, pinned by CanonicalHashTests against a verbatim copy. The sort above stays here.
+        var hash = CanonicalHashBuilder.Create();
         foreach (var (code, page, occurrences) in entries)
         {
-            foreach (var b in Encoding.UTF8.GetBytes(code))
-            {
-                hash = (hash ^ b) * prime;
-            }
-            BinaryPrimitives.WriteInt32LittleEndian(intBytes, page);
-            foreach (var b in intBytes)
-            {
-                hash = (hash ^ b) * prime;
-            }
-            BinaryPrimitives.WriteInt64LittleEndian(longBytes, occurrences);
-            foreach (var b in longBytes)
-            {
-                hash = (hash ^ b) * prime;
-            }
-            hash = (hash ^ 0xFF) * prime;
+            hash.AddUtf8(code);
+            hash.AddInt32(page);
+            hash.AddInt64(occurrences);
+            hash.EndEntry();
         }
 
-        sb.Append(hash.ToString("x16", CultureInfo.InvariantCulture));
+        sb.Append(hash.ToHex());
         return sb.ToString();
     }
 

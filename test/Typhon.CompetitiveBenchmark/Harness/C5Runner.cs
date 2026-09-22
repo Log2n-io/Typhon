@@ -95,7 +95,7 @@ public static class C5Runner
         using (EpochGuard.Enter(dbe.EpochManager))
         {
             var box = new AABB2F { MinX = qx[0], MinY = qy[0], MaxX = qx[0] + QueryBox, MaxY = qy[0] + QueryBox };
-            foreach (var hit in dbe.ClusterSpatialQuery<SpArch>().AABB<AABB2F>(in box)) { hits += hit.EntityId; }
+            foreach (var hit in dbe.ClusterSpatialQuery<SpArch>().AABB<AABB2F>(in box)) { hits += hit.Entity.EntityKey; }
         }
 
         hits = 0;
@@ -106,7 +106,7 @@ public static class C5Runner
             for (int i = 0; i < queries; i++)
             {
                 var box = new AABB2F { MinX = qx[i], MinY = qy[i], MaxX = qx[i] + QueryBox, MaxY = qy[i] + QueryBox };
-                foreach (var hit in dbe.ClusterSpatialQuery<SpArch>().AABB<AABB2F>(in box)) { found++; hits += hit.EntityId; }
+                foreach (var hit in dbe.ClusterSpatialQuery<SpArch>().AABB<AABB2F>(in box)) { found++; hits += hit.Entity.EntityKey; }
             }
         }
         sw.Stop();

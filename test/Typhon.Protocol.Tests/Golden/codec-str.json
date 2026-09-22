@@ -1,0 +1,30 @@
+{
+  "description": "str with maxBytes 16: empty, ASCII, multi-byte UTF-8, exactly at the cap.",
+  "codec": {
+    "t": "str",
+    "maxBytes": 16
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "text": "",
+      "offset": 0,
+      "length": 1
+    },
+    {
+      "text": "6869",
+      "offset": 1,
+      "length": 3
+    },
+    {
+      "text": "5461746f6f696e6520e29880",
+      "offset": 4,
+      "length": 13
+    },
+    {
+      "text": "78787878787878787878787878787878",
+      "offset": 17,
+      "length": 17
+    }
+  ]
+}

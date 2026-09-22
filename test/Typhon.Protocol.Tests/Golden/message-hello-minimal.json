@@ -1,0 +1,14 @@
+{
+  "description": "HELLO with every optional field absent: zero resume token, zero hash, empty payload (W19).",
+  "type": 129,
+  "message": {
+    "major": 2,
+    "minor": 0,
+    "caps": 0,
+    "kind": "god",
+    "token": "",
+    "resumeToken": "00000000000000000000000000000000",
+    "clientCatalogHash": "0000000000000000",
+    "helloPayload": ""
+  }
+}

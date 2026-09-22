@@ -1,0 +1,47 @@
+{
+  "description": "snorm at 32 bits: \u00B11, a quarter, and the wire-only code \u22122\u00B3\u00B9 decoding as \u22121.",
+  "codec": {
+    "t": "snorm",
+    "bits": 32
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "bff0000000000000"
+      ],
+      "offset": 0,
+      "length": 4,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 4,
+      "length": 4,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3fd0000000000000"
+      ],
+      "offset": 8,
+      "length": 4,
+      "decoded": [
+        "3fd0000000200000"
+      ]
+    },
+    {
+      "offset": 12,
+      "length": 4,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    }
+  ]
+}

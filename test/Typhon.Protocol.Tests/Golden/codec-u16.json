@@ -1,0 +1,39 @@
+{
+  "description": "u16 at 0 and 65535, little-endian.",
+  "codec": {
+    "t": "u16"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "40b2340000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "40b2340000000000"
+      ]
+    },
+    {
+      "input": [
+        "40efffe000000000"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "40efffe000000000"
+      ]
+    }
+  ]
+}

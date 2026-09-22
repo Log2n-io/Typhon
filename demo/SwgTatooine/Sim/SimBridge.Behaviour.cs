@@ -47,7 +47,15 @@ public sealed partial class SimBridge
             }
 
             var places = cluster.GetReadOnlySpan(Creature.Bounds);
-            var brains = cluster.GetSpan(Creature.Ai);
+
+            // READ-ONLY by default, and taken mutably only on the tick a mode actually changes. GetSpan marks the cluster changed on the HANDOUT, so a
+            // mutable span taken every tick to read Mode claims a change on every tick whether or not one happened — which is the whole of what the
+            // projected-component mask cannot see through, since CreatureBrain genuinely is projected.
+            var brains = cluster.GetReadOnlySpan(Creature.Ai);
+            Span<CreatureBrain> brainsRw = default;
+
+            // Scheduling: written every tick by design, read by nobody on the wire, and in a component no projection names.
+            var timers = cluster.GetSpan(Creature.Timers);
             var motions = cluster.GetSpan(Creature.Move);
             var vitals = cluster.GetReadOnlySpan(Creature.Vitals);
             var chunk = cluster.ChunkId;
@@ -58,19 +66,29 @@ public sealed partial class SimBridge
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
 
-                ref var ai = ref brains[idx];
+                // A COPY, not a ref: the span above is read-only. Every mode write below ends its iteration, so the copy is never read after being stale.
+                var ai = brains[idx];
+                ref var t = ref timers[idx];
                 if (ai.Mode == AiMode.Dead)
                 {
                     continue;
                 }
 
-                if (ai.ThinkCooldown > 0)
+                // AMBIENT population, skipped BEFORE the write below, and the order is the whole point. A creature that merely counts down still writes
+                // its brain on every tick of its life, which keeps its cluster permanently dirty and defeats every change-detection mechanism
+                // downstream. See SimConfig.IdleCreatureFraction.
+                if (ai.Mode == AiMode.Idle)
                 {
-                    ai.ThinkCooldown--;
                     continue;
                 }
 
-                ai.ThinkCooldown = thinkMin + (int)(Hash01(Salt(tick, chunk, idx, 0x51ED2701u)) * thinkSpan);
+                if (t.ThinkCooldown > 0)
+                {
+                    t.ThinkCooldown--;
+                    continue;
+                }
+
+                t.ThinkCooldown = thinkMin + (int)(Hash01(Salt(tick, chunk, idx, 0x51ED2701u)) * thinkSpan);
 
                 ref var move = ref motions[idx];
                 var x = places[idx].X;
@@ -83,7 +101,7 @@ public sealed partial class SimBridge
                 // the way. Without it one kited creature walks off the map and its cluster's bound follows.
                 if (homeSq > ai.LeashRadius * ai.LeashRadius)
                 {
-                    ai.Mode = AiMode.Leashing;
+                    SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Leashing);
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, ai.HomeX, ai.HomeZ);
                     continue;
                 }
@@ -92,7 +110,7 @@ public sealed partial class SimBridge
                 {
                     if (homeSq < 16f)
                     {
-                        ai.Mode = AiMode.Wander;
+                        SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
                         PickWanderDestination(ref move, in ai, tick, chunk, idx);
                     }
                     else
@@ -105,20 +123,65 @@ public sealed partial class SimBridge
 
                 if (ai.Mode is AiMode.Pursue or AiMode.Fighting)
                 {
-                    // Keep closing on where the target was last seen; combat owns the transition out of these modes.
-                    Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                    // Close to weapon range, then STAND AND SHOOT.
+                    //
+                    // A pursuer that keeps steering once it is already in range writes a new position on every tick of every fight, which is the same
+                    // defect as a creature that never rests and costs the same downstream. Real combat is a closing phase and then a stationary one: the
+                    // creature walks until the target is within its weapon's reach and holds position while it attacks.
+                    //
+                    // The break range is deliberately wider than the attack range. At equal thresholds a creature sitting on the boundary alternates
+                    // between stopping and closing on successive decisions, which writes MORE than pursuing would.
+                    var dxT = move.DestX - x;
+                    var dzT = move.DestZ - z;
+                    var targetSq = (dxT * dxT) + (dzT * dzT);
+
+                    if (ai.Mode == AiMode.Fighting)
+                    {
+                        var breakRange = _creatureAttackRange * AttackRangeHysteresis;
+                        if (targetSq > breakRange * breakRange)
+                        {
+                            SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
+                            Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                        }
+
+                        // Otherwise in range and already stopped: nothing is written, which is the whole gain.
+                        continue;
+                    }
+
+                    if (targetSq <= _creatureAttackRange * _creatureAttackRange)
+                    {
+                        SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Fighting);
+                        StandStill(ref move);
+                    }
+                    else
+                    {
+                        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                    }
+
                     continue;
                 }
 
-                var dxd = move.DestX - x;
-                var dzd = move.DestZ - z;
-                if ((dxd * dxd) + (dzd * dzd) < 4f)
+                // Wander as amble-then-graze rather than a permanent walk.
+                //
+                // Three states, distinguished by two absolute tick stamps so that neither of the two common ones writes anything: walking the current leg
+                // (the velocity already points the right way and the Move system applies it), standing still (written once, on the transition), and
+                // picking the next leg. See CreatureBrain.MoveUntilTick.
+                if (tick < t.MoveUntilTick)
                 {
-                    PickWanderDestination(ref move, in ai, tick, chunk, idx);
+                    // Mid-leg. Re-steering here would only re-derive the velocity it already has.
+                }
+                else if (tick < t.RestUntilTick)
+                {
+                    StandStill(ref move);
                 }
                 else
                 {
+                    PickWanderDestination(ref move, in ai, tick, chunk, idx);
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+
+                    var legTicks = 1 + (int)(Hash01(Salt(tick, chunk, idx, 0x1B873593u)) * _wanderLegTicks);
+                    t.MoveUntilTick = tick + legTicks;
+                    t.RestUntilTick = t.MoveUntilTick + (legTicks * WanderRestToMoveRatio);
                 }
 
                 // The aggro query. A 24 m bubble against a few hundred players spread over a 16 km planet returns
@@ -128,7 +191,6 @@ public sealed partial class SimBridge
                 {
                     aggroQueries++;
                     var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = ai.AggroRadius };
-                    using var epoch = EpochGuard.Enter(Dbe.EpochManager);
                     var e = Dbe.ClusterSpatialQuery<Player>().Radius(in sphere);
                     try
                     {
@@ -151,7 +213,7 @@ public sealed partial class SimBridge
                         if (found)
                         {
                             aggroHits++;
-                            ai.Mode = AiMode.Pursue;
+                            SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
                             move.DestX = tx;
                             move.DestZ = tz;
                             Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, tx, tz);
@@ -179,6 +241,41 @@ public sealed partial class SimBridge
         var r = ai.LeashRadius * 0.7f * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0x85EBCA6Bu)));
         move.DestX = ai.HomeX + (MathF.Cos(a) * r);
         move.DestZ = ai.HomeZ + (MathF.Sin(a) * r);
+    }
+
+    /// <summary>Writes a creature's mode, taking the mutable brain span on the first write of this cluster and not before.</summary>
+    /// <param name="cluster">The cluster being walked.</param>
+    /// <param name="rw">The mutable span, empty until the first write.</param>
+    /// <param name="idx">The slot.</param>
+    /// <param name="mode">The new mode.</param>
+    /// <remarks>
+    /// <c>GetSpan</c> marks its cluster changed on the handout rather than on a write, so taking one per tick to read a field claims a change per tick.
+    /// Mode transitions are rare — a creature aggroes, leashes, engages or dies — so deferring the handout to the tick one happens is the difference
+    /// between a cluster that is dirty always and one that is dirty when something actually changed.
+    /// </remarks>
+    private static void SetCreatureMode(in ClusterRef<Creature> cluster, ref Span<CreatureBrain> rw, int idx, int mode)
+    {
+        if (rw.IsEmpty)
+        {
+            rw = cluster.GetSpan(Creature.Ai);
+        }
+
+        rw[idx].Mode = mode;
+    }
+
+    /// <summary>Stops a mover, writing only when it was actually moving.</summary>
+    /// <param name="move">The motion component.</param>
+    /// <remarks>
+    /// The guard is the point rather than a micro-optimisation: these components are <c>GetSpan</c>-backed, so an unconditional store marks the cluster
+    /// changed on every tick of a rest and gives back exactly what the rest was introduced to save.
+    /// </remarks>
+    private static void StandStill(ref CreatureMotion move)
+    {
+        if (move.VelX != 0f || move.VelZ != 0f)
+        {
+            move.VelX = 0f;
+            move.VelZ = 0f;
+        }
     }
 
     /// <summary>
@@ -406,6 +503,7 @@ public sealed partial class SimBridge
     {
         var half = _config.WorldEdgeM * 0.5f;
         var batched = _config.BatchedSpatialWrites;
+        var dormancy = _config.DormancyTicks > 0;
         Span<CreaturePlacement> next = stackalloc CreaturePlacement[64];
 
         using var clusters = ctx.ClusterIds != null
@@ -423,6 +521,7 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(Creature.Bounds);
             var motions = cluster.GetReadOnlySpan(Creature.Move);
             var brains = cluster.GetReadOnlySpan(Creature.Ai);
+            var timers = cluster.GetReadOnlySpan(Creature.Timers);
 
             var moved = 0UL;
             var bits = bits0;
@@ -437,7 +536,7 @@ public sealed partial class SimBridge
                 var h = p.HalfExtent;
                 float x, z;
 
-                if (ai.Mode == AiMode.Wander && ai.ThinkCooldown == 1 && p.X != ai.HomeX)
+                if (ai.Mode == AiMode.Wander && timers[idx].ThinkCooldown == 1 && p.X != ai.HomeX)
                 {
                     // Just revived: teleport home. The largest position jump the simulation makes, and the one that
                     // forces both a cell change and a cluster-bound recomputation in the same tick.
@@ -467,12 +566,23 @@ public sealed partial class SimBridge
                 {
                     cluster.WriteSpatial(Creature.Bounds, idx, nb);
                 }
+
+                moved |= 1UL << idx;
             }
 
             // The moved slots in one call: the barrier's bookkeeping once per cluster rather than once per creature.
-            if (batched)
+            if (batched && moved != 0)
             {
                 cluster.WriteSpatial(Creature.Bounds, moved, next);
+            }
+
+            // WriteSpatial raises no dirty bit by design, so under dormancy a cluster whose creatures only MOVE looks clean to the fence's sweep, is put
+            // to sleep, stops being dispatched, and freezes in place. Marking the column is the documented contract for combining the two. Once per
+            // CLUSTER, and only for a cluster that actually moved something — marking unconditionally would keep every cluster awake forever, which is
+            // the same as not having dormancy at all.
+            if (dormancy && moved != 0)
+            {
+                cluster.MarkDirty(Creature.Bounds);
             }
         }
     }
@@ -563,7 +673,11 @@ public sealed partial class SimBridge
             }
 
             var places = cluster.GetReadOnlySpan(CityNpc.Bounds);
-            var brains = cluster.GetSpan(CityNpc.Ai);
+
+            // Read-only: this loop only ever READS Mode. Nothing here changes an NPC's mode, so the mutable span it used to take claimed a change on
+            // every tick of every city in the world for no write at all.
+            var brains = cluster.GetReadOnlySpan(CityNpc.Ai);
+            var timers = cluster.GetSpan(CityNpc.Timers);
             var motions = cluster.GetSpan(CityNpc.Move);
             var chunk = cluster.ChunkId;
 
@@ -574,27 +688,45 @@ public sealed partial class SimBridge
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
 
-                ref var ai = ref brains[idx];
-                if (ai.Mode != AiMode.Wander)
+                if (brains[idx].Mode != AiMode.Wander)
                 {
                     continue;
                 }
 
+                ref var ai = ref timers[idx];
                 ref var move = ref motions[idx];
                 var p = places[idx];
-                if (ai.ThinkCooldown > 0)
+
+                // The same amble-then-stand cycle the creatures use, and for the same reason: the countdown this replaced wrote the brain on every tick of
+                // every wandering NPC, and the steer below it wrote a new position on every tick as well. A city NPC shuffles between stalls; it does not
+                // march. Only 12 % of NPCs wander at all (WorldBuilder), so this is a small population writing continuously rather than a large one.
+                if (tick < ai.MoveUntilTick)
                 {
-                    ai.ThinkCooldown--;
+                    // Mid-leg: the velocity already points at the destination.
+                }
+                else if (tick < ai.RestUntilTick)
+                {
+                    if (move.VelX != 0f || move.VelZ != 0f)
+                    {
+                        move.VelX = 0f;
+                        move.VelZ = 0f;
+                    }
+
+                    continue;
                 }
                 else
                 {
-                    ai.ThinkCooldown = 20 + (int)(Hash01(Salt(tick, chunk, idx, 0x7FEB352Du)) * 60);
+                    var brain = brains[idx];
                     var ang = Hash01(Salt(tick, chunk, idx, 0x846CA68Bu)) * MathF.PI * 2f;
-                    move.DestX = ai.HomeX + (MathF.Cos(ang) * ai.LeashRadius);
-                    move.DestZ = ai.HomeZ + (MathF.Sin(ang) * ai.LeashRadius);
+                    move.DestX = brain.HomeX + (MathF.Cos(ang) * brain.LeashRadius);
+                    move.DestZ = brain.HomeZ + (MathF.Sin(ang) * brain.LeashRadius);
+                    Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, p.X, p.Z, move.DestX, move.DestZ);
+
+                    var legTicks = 1 + (int)(Hash01(Salt(tick, chunk, idx, 0x7FEB352Du)) * _wanderLegTicks);
+                    ai.MoveUntilTick = tick + legTicks;
+                    ai.RestUntilTick = ai.MoveUntilTick + (legTicks * WanderRestToMoveRatio);
                 }
 
-                Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, p.X, p.Z, move.DestX, move.DestZ);
                 if (move.VelX == 0f && move.VelZ == 0f)
                 {
                     continue;
@@ -694,7 +826,6 @@ public sealed partial class SimBridge
 
                 var sphere = new BSphere2F { CenterX = places[idx].X, CenterY = places[idx].Z, Radius = AwarenessRadius };
                 var sample = probe && ((cluster.ChunkId * 64) + idx) % WorkProbeSampleEvery == 0;
-                using var epoch = EpochGuard.Enter(Dbe.EpochManager);
                 if (only is null or AwarenessTarget.Structures)
                 {
                     var n = CountInRadius<WorldObject>(in sphere);
@@ -811,7 +942,8 @@ public sealed partial class SimBridge
     }
 
     /// <summary>
-    /// <see cref="AwarenessApi.Batch"/>: one <c>CountRadius</c> per target archetype for a source cluster's players, under one epoch scope. Each player's
+    /// <see cref="AwarenessApi.Batch"/>: one <c>CountRadius</c> per target archetype for a source cluster's players, inside the epoch
+    /// scope RT-01 supplies. Each player's
     /// count is exactly its own query's, so the statistics are those of the per-player path.
     /// </summary>
     private void AwarenessBatch(
@@ -823,7 +955,6 @@ public sealed partial class SimBridge
         ref long queries,
         ref long hits)
     {
-        using var epoch = EpochGuard.Enter(Dbe.EpochManager);
         if (only is null or AwarenessTarget.Structures)
         {
             hits += CountBatch<WorldObject>(members, counts, 0, sampled, work);

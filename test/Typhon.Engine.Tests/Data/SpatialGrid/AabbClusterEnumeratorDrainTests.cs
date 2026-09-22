@@ -110,10 +110,26 @@ unsafe class AabbClusterEnumeratorDrainTests : TestBase<AabbClusterEnumeratorDra
                 }
             }
 
-            expected[s.Id] = new ClusterSpatialQueryResult(s.Id, 0, 0, s.MinX, s.MinY, minZ, s.MaxX, s.MaxY, maxZ, distSq);
+            expected[s.Id] = new ClusterSpatialQueryResult(EntityId.FromRaw(s.Id), 0, 0, s.MinX, s.MinY, minZ, s.MaxX, s.MaxY, maxZ, distSq);
         }
 
         return expected;
+    }
+
+    /// <summary>
+    /// The result struct's size is part of its contract: it is filled into caller-supplied spans by <see cref="AabbClusterEnumerator.Fill"/> and copied once
+    /// per iteration, so a member that silently widens it is a per-hit cost nothing else would catch.
+    /// </summary>
+    /// <remarks>
+    /// Asserted because #909 retyped <c>EntityId</c> (a raw <c>long</c>) to <c>Entity</c> (an <see cref="EntityId"/>), and the whole case for doing so rests on
+    /// the replacement being the same 8 bytes in the same position. Nothing in the repository asserted this before, which is exactly why it was worth adding
+    /// with the change that depends on it.
+    /// </remarks>
+    [Test]
+    public void TheResultStructIsUnchangedInSize()
+    {
+        Assert.That(System.Runtime.CompilerServices.Unsafe.SizeOf<ClusterSpatialQueryResult>(), Is.EqualTo(72),
+            "ClusterSpatialQueryResult must stay 72 bytes: EntityId is Size = 8, exactly like the long it replaced");
     }
 
     private static bool SameBits(double a, double b) => BitConverter.DoubleToInt64Bits(a) == BitConverter.DoubleToInt64Bits(b);
@@ -141,8 +157,8 @@ unsafe class AabbClusterEnumeratorDrainTests : TestBase<AabbClusterEnumeratorDra
         }
 
         var expected = Oracle(population, q);
-        var missing = expected.Keys.Except(actual.Select(r => r.EntityId)).ToList();
-        var extra = actual.Select(r => r.EntityId).Except(expected.Keys).ToList();
+        var missing = expected.Keys.Except(actual.Select(r => unchecked((long)r.Entity.RawValue))).ToList();
+        var extra = actual.Select(r => unchecked((long)r.Entity.RawValue)).Except(expected.Keys).ToList();
         if (missing.Count > 0 || extra.Count > 0)
         {
             var byId = population.ToDictionary(s => s.Id);
@@ -160,10 +176,10 @@ unsafe class AabbClusterEnumeratorDrainTests : TestBase<AabbClusterEnumeratorDra
         }
         foreach (var r in actual)
         {
-            var x = expected[r.EntityId];
+            var x = expected[unchecked((long)r.Entity.RawValue)];
             Assert.That(SameBits(r.MinX, x.MinX) && SameBits(r.MinY, x.MinY) && SameBits(r.MinZ, x.MinZ) && SameBits(r.MaxX, x.MaxX)
                         && SameBits(r.MaxY, x.MaxY) && SameBits(r.MaxZ, x.MaxZ) && SameBits(r.DistanceSq, x.DistanceSq),
-                Is.True, $"{what}: entity {r.EntityId} came back as {Describe(r)}, the oracle says {Describe(x)}, for {q}");
+                Is.True, $"{what}: entity {r.Entity} came back as {Describe(r)}, the oracle says {Describe(x)}, for {q}");
         }
 
         e = Open(dbe, cs, q);

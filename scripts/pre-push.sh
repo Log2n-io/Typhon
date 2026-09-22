@@ -119,7 +119,11 @@ step "rule scopes (gate: invariants)"          python3 scripts/check-rule-scopes
 step "rule coverage (gate: rule-coverage)"     python3 scripts/audit-rule-coverage.py
 step "test suppressions (gate: invariants)"    python3 scripts/lint-test-suppressions.py
 step "runsettings (gate: invariants)"          python3 scripts/check-runsettings.py
-step "doc links (gate: doc-accuracy)"          python3 scripts/check-doc-links.py
+step "gate filters (gate: invariants)"         python3 scripts/check-gate-filters.py --quiet --no-github
+step "blueprint public API (gate: invariants)" python3 scripts/check-blueprint-public-api.py --quiet
+# Label corrected (#942): there is no `doc-accuracy` job in merge-gate.yml — check-doc-links.py runs in
+# build-docs.yml. The whole point of these labels is that a local failure names the CI job it mirrors.
+step "doc links (workflow: build-docs)"        python3 scripts/check-doc-links.py
 step "script unit tests (gate: invariants)"    python3 -m unittest discover -s scripts/tests
 
 if [ "$POLICY_ONLY" -eq 1 ]; then
@@ -155,6 +159,26 @@ else
   suite_step "engine suite (Release)"    "$ENGINE"    pre-push-engine.trx
 fi
 suite_step "workbench suite (Release)" "$WORKBENCH" pre-push-workbench.trx
+
+# ── client SDKs (gate: subscriptions-sdk) ────────────────────────────────────────────────────────────────────────────
+CLIENT=test/Typhon.Client.Tests/Typhon.Client.Tests.csproj
+if [ "$BUILD" -eq 1 ]; then
+  step "build client tests (Release)" dotnet build "$CLIENT" -c Release
+fi
+suite_step "client suite (Release)" "$CLIENT" pre-push-client.trx
+
+# The browser's door (gate: aux-tests). It runs locally because a WebSocket endpoint that stopped accepting is invisible
+# to every engine suite, which is the shape of gap #774 was about.
+WSADAPTER=test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj
+if [ "$BUILD" -eq 1 ]; then
+  step "build websocket adapter tests (Release)" dotnet build "$WSADAPTER" -c Release
+fi
+suite_step "websocket adapter suite (Release)" "$WSADAPTER" pre-push-ws-adapter.trx
+if command -v npm >/dev/null 2>&1; then
+  step "TypeScript SDK check (gate: subscriptions-sdk)" bash -c 'cd src/Typhon.Client.TypeScript && npm ci --silent && npm run check'
+else
+  printf '\n\033[33m   SKIP\033[0m  TypeScript SDK check — Node is not installed; the gate runs it on subscriptions-sdk\n'
+fi
 
 echo ""
 if [ "$RC" -eq 0 ]; then

@@ -210,9 +210,12 @@ public class RuntimeScheduleTests
         var physics = schedule.DeclareTrack("Physics");
         var ai = schedule.DeclareTrack("AI");
 
+        // Engine-Subscriptions (#955) is last, so replication sees a completed fence. App tracks still slot before Engine-Post, which is what this test is
+        // about — and is exactly why DeclareTrack anchors on Engine-Post's own position rather than on the end of the list: while Engine-Post was last
+        // the two were the same, and a fourth built-in track behind it would otherwise have pushed every app track past the fence.
         Assert.That(
             schedule.Tracks.Select(t => t.Name),
-            Is.EqualTo(new[] { "Engine-Pre", "Public", "Physics", "AI", "Engine-Post" }));
+            Is.EqualTo(new[] { "Engine-Pre", "Public", "Physics", "AI", "Engine-Post", "Engine-Subscriptions" }));
 
         // OrderIndex always equals the track's execution position.
         for (var i = 0; i < schedule.Tracks.Count; i++)

@@ -1,0 +1,1964 @@
+{
+  "description": "Seventeen TICK frames against catalog-kitchen-sink, each framed as u32 length \u002B message, with the replica after each. Motion only: no STATS, no AGG, no events, no owner state. Buoy 10 (model: none) enters on frame 0 and takes a sample on every frame after it \u2014 seventeen segments over a ring eight deep, so the head returns to 0 twice and the oldest segment held is seven ticks old, not the stream\u0027s start. Its samples walk y = x\u00B2/4, so every interval has its own velocity and interpolation between two of them is visibly not the curve. Buoy 11 and Drone 100 enter on frame 12 and teleport on frame 14 (epoch 4 \u2192 5 and 1 \u2192 2), with samples either side: the none model must hold rather than interpolate across the change, and the linear model must keep extrapolating the segment in force.",
+  "catalog": "catalog-kitchen-sink",
+  "snapshots": [
+    {
+      "tick": 2000,
+      "flags": 3,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2000,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [
+            10
+          ],
+          "updated": [],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2001,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "3ff0000000000000",
+                "3fd0000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2001,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2002,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4000000000000000",
+                "3ff0000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2002,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2003,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4008000000000000",
+                "4002000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2003,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2004,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4010000000000000",
+                "4010000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2004,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2005,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4014000000000000",
+                "4019000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2005,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2006,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4018000000000000",
+                "4022000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2006,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2007,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "401c000000000000",
+                "4028800000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2007,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2008,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4020000000000000",
+                "4030000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2008,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2009,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4022000000000000",
+                "4034400000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2009,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2010,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4024000000000000",
+                "4039000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2010,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2011,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4026000000000000",
+                "403e400000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2011,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2012,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4028000000000000",
+                "4042000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2012,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            },
+            {
+              "netId": 11,
+              "position": [
+                "4059000000000000",
+                "4069000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2012,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c01c000000000000"
+                ],
+                "reading": [
+                  "40b0920000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [
+            11
+          ],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [
+            {
+              "netId": 100,
+              "position": [
+                "4024000000000000",
+                "4034000000000000",
+                "c03e000000000000"
+              ],
+              "velocity": [
+                "3fe0000000000000",
+                "0000000000000000",
+                "bfd0000000000000"
+              ],
+              "t0": 2012,
+              "epoch": 1,
+              "fields": {
+                "label": "64313030",
+                "serial": "07070764",
+                "armed": [
+                  "3ff0000000000000"
+                ],
+                "lights": [
+                  "0000000000000000"
+                ],
+                "stance": [
+                  "4000000000000000"
+                ],
+                "heading": [
+                  "3fdfffb3ed998d2a"
+                ],
+                "rotation": [
+                  "0000000000000000",
+                  "0000000000000000",
+                  "0000000000000000",
+                  "3ff0000000000000"
+                ],
+                "thrust": [
+                  "3ff0000000000000",
+                  "4000000000000000",
+                  "4008000000000000"
+                ],
+                "battery": [
+                  "3ff0000000000000"
+                ],
+                "lastHit": [
+                  "409f480000000000"
+                ],
+                "target": [
+                  "4024000000000000"
+                ],
+                "temperature": [
+                  "4034000000000000"
+                ],
+                "tilt": [
+                  "0000000000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [
+            100
+          ],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2013,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "402a000000000000",
+                "4045200000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2013,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            },
+            {
+              "netId": 11,
+              "position": [
+                "4059800000000000",
+                "4069000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2013,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c01c000000000000"
+                ],
+                "reading": [
+                  "40b0920000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            },
+            {
+              "netId": 11,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [
+            {
+              "netId": 100,
+              "position": [
+                "4025000000000000",
+                "4034000000000000",
+                "c03e400000000000"
+              ],
+              "velocity": [
+                "bfe8000000000000",
+                "0000000000000000",
+                "3fc0000000000000"
+              ],
+              "t0": 2013,
+              "epoch": 1,
+              "fields": {
+                "label": "64313030",
+                "serial": "07070764",
+                "armed": [
+                  "3ff0000000000000"
+                ],
+                "lights": [
+                  "0000000000000000"
+                ],
+                "stance": [
+                  "4000000000000000"
+                ],
+                "heading": [
+                  "3fdfffb3ed998d2a"
+                ],
+                "rotation": [
+                  "0000000000000000",
+                  "0000000000000000",
+                  "0000000000000000",
+                  "3ff0000000000000"
+                ],
+                "thrust": [
+                  "3ff0000000000000",
+                  "4000000000000000",
+                  "4008000000000000"
+                ],
+                "battery": [
+                  "3ff0000000000000"
+                ],
+                "lastHit": [
+                  "409f480000000000"
+                ],
+                "target": [
+                  "4024000000000000"
+                ],
+                "temperature": [
+                  "4034000000000000"
+                ],
+                "tilt": [
+                  "0000000000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 100,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2014,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "402c000000000000",
+                "4048800000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2014,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            },
+            {
+              "netId": 11,
+              "position": [
+                "407f400000000000",
+                "4082c00000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2014,
+              "epoch": 5,
+              "fields": {
+                "depth": [
+                  "c01c000000000000"
+                ],
+                "reading": [
+                  "40b0920000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            },
+            {
+              "netId": 11,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [
+            {
+              "netId": 100,
+              "position": [
+                "c069000000000000",
+                "c044000000000000",
+                "4072c00000000000"
+              ],
+              "velocity": [
+                "3fd0000000000000",
+                "3f90000000000000",
+                "3fe0000000000000"
+              ],
+              "t0": 2014,
+              "epoch": 2,
+              "fields": {
+                "label": "64313030",
+                "serial": "07070764",
+                "armed": [
+                  "3ff0000000000000"
+                ],
+                "lights": [
+                  "0000000000000000"
+                ],
+                "stance": [
+                  "4000000000000000"
+                ],
+                "heading": [
+                  "3fdfffb3ed998d2a"
+                ],
+                "rotation": [
+                  "0000000000000000",
+                  "0000000000000000",
+                  "0000000000000000",
+                  "3ff0000000000000"
+                ],
+                "thrust": [
+                  "3ff0000000000000",
+                  "4000000000000000",
+                  "4008000000000000"
+                ],
+                "battery": [
+                  "3ff0000000000000"
+                ],
+                "lastHit": [
+                  "409f480000000000"
+                ],
+                "target": [
+                  "4024000000000000"
+                ],
+                "temperature": [
+                  "4034000000000000"
+                ],
+                "tilt": [
+                  "0000000000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 100,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2015,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "402e000000000000",
+                "404c200000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2015,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            },
+            {
+              "netId": 11,
+              "position": [
+                "407f600000000000",
+                "4082c80000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2015,
+              "epoch": 5,
+              "fields": {
+                "depth": [
+                  "c01c000000000000"
+                ],
+                "reading": [
+                  "40b0920000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            },
+            {
+              "netId": 11,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [
+            {
+              "netId": 100,
+              "position": [
+                "c068f80000000000",
+                "c043fe0000000000",
+                "4072c80000000000"
+              ],
+              "velocity": [
+                "bfe0000000000000",
+                "bfa0000000000000",
+                "3fd0000000000000"
+              ],
+              "t0": 2015,
+              "epoch": 2,
+              "fields": {
+                "label": "64313030",
+                "serial": "07070764",
+                "armed": [
+                  "3ff0000000000000"
+                ],
+                "lights": [
+                  "0000000000000000"
+                ],
+                "stance": [
+                  "4000000000000000"
+                ],
+                "heading": [
+                  "3fdfffb3ed998d2a"
+                ],
+                "rotation": [
+                  "0000000000000000",
+                  "0000000000000000",
+                  "0000000000000000",
+                  "3ff0000000000000"
+                ],
+                "thrust": [
+                  "3ff0000000000000",
+                  "4000000000000000",
+                  "4008000000000000"
+                ],
+                "battery": [
+                  "3ff0000000000000"
+                ],
+                "lastHit": [
+                  "409f480000000000"
+                ],
+                "target": [
+                  "4024000000000000"
+                ],
+                "temperature": [
+                  "4034000000000000"
+                ],
+                "tilt": [
+                  "0000000000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 100,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    },
+    {
+      "tick": 2016,
+      "flags": 0,
+      "periodUs": 0,
+      "archetypes": {
+        "Beacon": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Buoy": {
+          "entities": [
+            {
+              "netId": 10,
+              "position": [
+                "4030000000000000",
+                "4050000000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2016,
+              "epoch": 4,
+              "fields": {
+                "depth": [
+                  "c008000000000000"
+                ],
+                "reading": [
+                  "40c81c8000000000"
+                ]
+              }
+            },
+            {
+              "netId": 11,
+              "position": [
+                "407f600000000000",
+                "4082c80000000000"
+              ],
+              "velocity": [
+                "0000000000000000",
+                "0000000000000000"
+              ],
+              "t0": 2015,
+              "epoch": 5,
+              "fields": {
+                "depth": [
+                  "c01c000000000000"
+                ],
+                "reading": [
+                  "40b0920000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [
+            {
+              "netId": 10,
+              "groups": 0,
+              "moved": true
+            }
+          ],
+          "left": []
+        },
+        "Drone": {
+          "entities": [
+            {
+              "netId": 100,
+              "position": [
+                "c068f80000000000",
+                "c043fe0000000000",
+                "4072c80000000000"
+              ],
+              "velocity": [
+                "bfe0000000000000",
+                "bfa0000000000000",
+                "3fd0000000000000"
+              ],
+              "t0": 2015,
+              "epoch": 2,
+              "fields": {
+                "label": "64313030",
+                "serial": "07070764",
+                "armed": [
+                  "3ff0000000000000"
+                ],
+                "lights": [
+                  "0000000000000000"
+                ],
+                "stance": [
+                  "4000000000000000"
+                ],
+                "heading": [
+                  "3fdfffb3ed998d2a"
+                ],
+                "rotation": [
+                  "0000000000000000",
+                  "0000000000000000",
+                  "0000000000000000",
+                  "3ff0000000000000"
+                ],
+                "thrust": [
+                  "3ff0000000000000",
+                  "4000000000000000",
+                  "4008000000000000"
+                ],
+                "battery": [
+                  "3ff0000000000000"
+                ],
+                "lastHit": [
+                  "409f480000000000"
+                ],
+                "target": [
+                  "4024000000000000"
+                ],
+                "temperature": [
+                  "4034000000000000"
+                ],
+                "tilt": [
+                  "0000000000000000"
+                ]
+              }
+            }
+          ],
+          "entered": [],
+          "updated": [],
+          "left": []
+        },
+        "Ledger": {
+          "entities": [],
+          "entered": [],
+          "updated": [],
+          "left": []
+        }
+      },
+      "events": [],
+      "self": null,
+      "acks": [],
+      "sources": [],
+      "aggregates": [
+        {
+          "grid": 0,
+          "cells": [],
+          "changed": []
+        }
+      ],
+      "metrics": {
+        "typhon.tick.p50": [
+          "0000000000000000"
+        ],
+        "typhon.system.mean": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "app.load": [
+          "0000000000000000"
+        ],
+        "typhon.session.skippedFrames": [
+          "0000000000000000"
+        ],
+        "app.queue": [
+          "0000000000000000"
+        ]
+      },
+      "anomalies": 0
+    }
+  ]
+}

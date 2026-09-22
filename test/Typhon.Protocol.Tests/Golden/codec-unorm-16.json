@@ -1,0 +1,30 @@
+{
+  "description": "unorm at 16 bits.",
+  "codec": {
+    "t": "unorm",
+    "bits": 16
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "3fd0000000000000"
+      ],
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "3fd0001000100010"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    }
+  ]
+}

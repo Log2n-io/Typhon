@@ -74,7 +74,7 @@ class MinChunkSizeTests : TestBase<MinChunkSizeTests>
         Assert.That(Volatile.Read(ref chunksRun), Is.GreaterThanOrEqualTo(1), "the parallel system never ran, so its chunk count was never resolved");
 
         var parallelIdx = -1;
-        for (var i = 0; i < runtime.Scheduler.SystemCount; i++)
+        for (var i = 0; i < runtime.Scheduler.AllSystemCount; i++)
         {
             if (runtime.Scheduler.Systems[i].Name == "Parallel")
             {
@@ -191,7 +191,7 @@ class MinChunkSizeTests : TestBase<MinChunkSizeTests>
 
         var fine = 0;
         var coarse = 0;
-        for (var i = 0; i < runtime.Scheduler.SystemCount; i++)
+        for (var i = 0; i < runtime.Scheduler.AllSystemCount; i++)
         {
             var s = runtime.Scheduler.Systems[i];
             if (s.Name == "Fine")

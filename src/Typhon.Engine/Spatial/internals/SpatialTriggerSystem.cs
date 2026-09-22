@@ -331,7 +331,8 @@ internal sealed class SpatialTriggerSystem
 
             foreach (var hit in cs.QueryAabb(grid, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, categoryMask))
             {
-                into.Add(hit.EntityId);
+                // The set is keyed by the raw packed value and compared against ids from other sources; only the query result became typed (#909).
+                into.Add(unchecked((long)hit.Entity.RawValue));
             }
         }
     }

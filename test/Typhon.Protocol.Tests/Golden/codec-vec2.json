@@ -1,0 +1,67 @@
+{
+  "description": "vec2 with scale 0.5 at 8 bits (W4): symmetric clamp, ties away from zero; the wire-only code \u2212128 decodes as \u2212127.",
+  "codec": {
+    "t": "vec2",
+    "bits": 8,
+    "scale": 0.5
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000",
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "0000000000000000",
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3fd0000000000000",
+        "bfd0000000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "3fe0000000000000",
+        "bfe0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "408f400000000000",
+        "c08f400000000000"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "404fc00000000000",
+        "c04fc00000000000"
+      ]
+    },
+    {
+      "input": [
+        "nan",
+        "404fc00000000000"
+      ],
+      "offset": 6,
+      "length": 2,
+      "decoded": [
+        "0000000000000000",
+        "404fc00000000000"
+      ]
+    },
+    {
+      "offset": 8,
+      "length": 2,
+      "decoded": [
+        "c04fc00000000000",
+        "c04fc00000000000"
+      ]
+    }
+  ]
+}

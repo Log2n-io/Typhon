@@ -1,0 +1,61 @@
+{
+  "_comment": [
+    "Which merge-gate job runs which test suites, and which path-filter outputs enable it (#942).",
+    "",
+    "Declared, not derived: the `dotnet test` invocations are NOT in the workflow. merge-gate.yml launches",
+    "bench/aws/run-gate.sh and its maintained parallel copy bench/aws/ci.sky.yaml, and those scripts name the",
+    "projects. Deriving 'which job runs which suite' from the workflow alone would report full coverage of",
+    "whatever those scripts do not run, which is the false green check-gate-filters.py exists to remove.",
+    "",
+    "The checker asserts every job named here is defined in the workflow, and that every project exists, so the",
+    "table cannot silently claim coverage that does not exist. `filters` is an OR: the job runs when any is true."
+  ],
+  "jobs": {
+    "aws-gate": {
+      "filters": [
+        "engine",
+        "workbench"
+      ],
+      "projects": [
+        "test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj",
+        "test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj"
+      ],
+      "runs_via": "bench/aws/ci.sky.yaml"
+    },
+    "aws-gate-selfhosted": {
+      "filters": [
+        "engine",
+        "workbench"
+      ],
+      "projects": [
+        "test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj",
+        "test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj"
+      ],
+      "runs_via": "bench/aws/run-gate.sh"
+    },
+    "aux-tests": {
+      "filters": [
+        "aux"
+      ],
+      "projects": [
+        "test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj",
+        "test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj",
+        "test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj",
+        "test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj",
+        "test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj",
+        "demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj",
+        "test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj"
+      ],
+      "runs_via": "merge-gate.yml (free runner)"
+    },
+    "subscriptions-sdk": {
+      "filters": [
+        "sdk"
+      ],
+      "projects": [
+        "test/Typhon.Client.Tests/Typhon.Client.Tests.csproj"
+      ],
+      "runs_via": "merge-gate.yml (free runner)"
+    }
+  }
+}

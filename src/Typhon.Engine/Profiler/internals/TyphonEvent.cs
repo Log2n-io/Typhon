@@ -92,10 +92,6 @@ internal static partial class TyphonEvent
         // UoW State/Deadline fire at the per-tick rate (~60-300/sec at 60 TPS) and are exactly what an operator wants to see when diagnosing
         // a slow UoW.Flush. Both came off the deny-list — they are gated by Durability:* in JSON like the rest.
         SuppressedKinds[(int)TraceEventKind.DurabilityWalFrame] = true;
-
-        // High-frequency Subscription leaves.
-        SuppressedKinds[(int)TraceEventKind.RuntimeSubscriptionSubscriber] = true;
-        SuppressedKinds[(int)TraceEventKind.RuntimeSubscriptionDeltaSerialize] = true;
     }
 
     /// <summary>

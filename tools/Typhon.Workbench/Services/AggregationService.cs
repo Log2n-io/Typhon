@@ -17,9 +17,14 @@ public static class AggregationService
     private const int StackallocThreshold = 1024;
 
     // Allowed posttick phase names (must match DataController.GetPostTickTrackData).
+    //
+    // `subscriptionOutput` is NOT one of them. It named a post-tick phase of the old subscription server, which #205 deleted; the field it read
+    // (PostTickSummary.SubscriptionOutputUs) went with it, and the name was left behind here alone. This list is the allow-list, so keeping the name meant
+    // every query for it passed validation and fell through ExtractPostTickField's default to a silent 0.0 — while the controller's own switch rejected the
+    // same name with a 400. Replication in v2 is a DAG TRACK, not a post-tick phase, so there is nothing to repoint this at.
     private static readonly HashSet<string> PostTickPhases = new(StringComparer.Ordinal)
     {
-        "walFlush", "writeTickFence", "tierBudget", "subscriptionOutput", "tierIndexRebuild", "dormancySweep",
+        "walFlush", "writeTickFence", "tierBudget", "tierIndexRebuild", "dormancySweep",
     };
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -239,7 +244,7 @@ public static class AggregationService
             if (!PostTickPhases.Contains(phase))
             {
                 throw new WorkbenchException(400, "unknown-posttick-phase",
-                    $"Unknown post-tick phase '{phase}'. Available: walFlush, writeTickFence, tierBudget, subscriptionOutput, tierIndexRebuild, dormancySweep.");
+                    $"Unknown post-tick phase '{phase}'. Available: walFlush, writeTickFence, tierBudget, tierIndexRebuild, dormancySweep.");
             }
             if (query.Field != "durationUs")
             {
@@ -740,7 +745,6 @@ public static class AggregationService
         "walFlush"           => r.WalFlushUs,
         "writeTickFence"     => r.WriteTickFenceUs,
         "tierBudget"         => r.TierBudgetUs,
-        "subscriptionOutput" => r.SubscriptionOutputUs,
         "tierIndexRebuild"   => r.TierIndexRebuildUs,
         "dormancySweep"      => r.DormancySweepUs,
         _                    => 0.0,

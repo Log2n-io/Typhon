@@ -109,9 +109,6 @@ public abstract class ViewBase : IView, IDisposable, IEnumerable<long>
         return this;
     }
 
-    /// <summary>True if this View has been published for client subscriptions via <c>PublishView()</c>.</summary>
-    public bool IsPublished { get; internal set; }
-
     /// <summary>True if this View is used as a system input in the DAG scheduler.</summary>
     public bool IsSystemInput { get; internal set; }
 

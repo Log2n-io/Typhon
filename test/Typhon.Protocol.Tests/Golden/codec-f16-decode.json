@@ -1,0 +1,23 @@
+{
+  "description": "Decode-only f16: a negative quiet NaN (0xFE00) and a signalling NaN (0x7C01) both decode as the canonical NaN.",
+  "codec": {
+    "t": "f16"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "nan"
+      ]
+    },
+    {
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "nan"
+      ]
+    }
+  ]
+}

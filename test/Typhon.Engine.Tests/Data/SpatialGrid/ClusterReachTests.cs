@@ -92,7 +92,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         {
             while (e.MoveNext())
             {
-                hits.Add(e.Current.EntityId);
+                hits.Add(unchecked((long)e.Current.Entity.RawValue));
             }
         }
         finally
@@ -128,7 +128,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
             {
                 for (int i = 0; i < n; i++)
                 {
-                    hits.Add(buffer[i].EntityId);
+                    hits.Add(unchecked((long)buffer[i].Entity.RawValue));
                 }
             }
         }
@@ -149,7 +149,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         {
             while (e.MoveNext())
             {
-                hits.Add(e.Current.EntityId);
+                hits.Add(unchecked((long)e.Current.Entity.RawValue));
             }
         }
         finally

@@ -9,10 +9,11 @@
         <Project Path="src/Typhon.Analyzers/Typhon.Analyzers.csproj" />
         <Project Path="src/Typhon.Generators/Typhon.Generators.csproj" />
         <Project Path="src/Typhon.Generators.Consumer/Typhon.Generators.Consumer.csproj" />
+        <Project Path="src/Typhon.Client/Typhon.Client.csproj" />
         <Project Path="src/Typhon.Engine/Typhon.Engine.csproj" />
         <Project Path="src/Typhon.Protocol/Typhon.Protocol.csproj" />
+        <Project Path="src/Typhon.Subscriptions.AspNetCore/Typhon.Subscriptions.AspNetCore.csproj" />
         <Project Path="src/Typhon.Schema.Definition/Typhon.Schema.Definition.csproj" />
-        <Project Path="src/Typhon.Client/Typhon.Client.csproj" />
         <Project Path="src/Typhon.Shell/Typhon.Shell.csproj" />
         <Project Path="src/Typhon.Shell.Extensibility/Typhon.Shell.Extensibility.csproj" />
         <Project Path="src/Typhon.Profiler/Typhon.Profiler.csproj" />
@@ -24,9 +25,11 @@
         <Project Path="test/Typhon.CompetitiveBenchmark/Typhon.CompetitiveBenchmark.csproj" />
         <Project Path="test/Typhon.Engine.Tests/Typhon.Engine.Tests.csproj" />
         <Project Path="test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj" />
+        <Project Path="test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj" />
         <Project Path="test/Typhon.IOProfileRunner/Typhon.IOProfileRunner.csproj" />
         <Project Path="test/Typhon.MonitoringDemo/Typhon.MonitoringDemo.csproj" />
         <Project Path="test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj" />
+        <Project Path="test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj" />
         <Project Path="test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj" />
         <Project Path="test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj" />
     </Folder>
@@ -43,6 +46,7 @@
         <Project Path="demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj" />
         <Project Path="demo/SpaceBattle/SpaceBattle.csproj" />
         <Project Path="demo/SwgTatooine/SwgTatooine.csproj" />
+        <Project Path="demo/SwgTatooine.Bots/SwgTatooine.Bots.csproj" />
     </Folder>
     <Folder Name="/tools/">
         <Project Path="tools/Typhon.Workbench/Typhon.Workbench.csproj" />

@@ -3,3 +3,10 @@
 *.sh       text eol=lf
 *.service  text eol=lf
 *.timer    text eol=lf
+
+# Golden vectors are byte-exact witnesses, so a checkout that rewrote their line endings would corrupt the very bytes
+# they exist to pin — and it would surface as a cross-platform test failure rather than as a diff anyone reads. Today's
+# canonical catalog happens to contain no newline at all, which is luck, not a property: a frame vector will.
+# The .bin is never converted; the .json expectation is emitted with "\n" by the generator, so it is pinned to LF.
+test/Typhon.Protocol.Tests/Golden/*.bin   -text
+test/Typhon.Protocol.Tests/Golden/*.json  text eol=lf

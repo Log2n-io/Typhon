@@ -46,6 +46,9 @@
         <ProjectReference Include="..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
         <!-- Direct ref (#427): Protocol ships bundled inside the Typhon package (TickDeltaMessage), no longer transitive. -->
         <ProjectReference Include="..\..\src\Typhon.Protocol\Typhon.Protocol.csproj" />
+        <!-- The client half of the motion rule (P1-10): MotionSegmentTests feeds the segments the engine produces through Typhon.Client's MotionEvaluator and
+             asserts the reconstructed position, rather than re-deriving the extrapolation here where the two could drift apart. -->
+        <ProjectReference Include="..\..\src\Typhon.Client\Typhon.Client.csproj" />
         <!-- Fixture project — Workbench schema DLL the generator populates and ships alongside the .bin.
              Lives in tools/ because the Workbench also references it at runtime (DEBUG-only Dev Fixture tab). -->
         <ProjectReference Include="..\..\tools\Typhon.Workbench.Fixtures\Typhon.Workbench.Fixtures.csproj" />

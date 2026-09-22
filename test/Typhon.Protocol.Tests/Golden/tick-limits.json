@@ -1,0 +1,521 @@
+{
+  "description": "Against catalog-wide: archetype index 127 as a one-byte varint, 128 and 254 and event index 135 as two-byte varints; leave gaps at the varint edges 127/128 and 16383/16384 and a netId of 2\u00B3\u00B2 \u2212 1; a state record with mask 0xFF over 32 fields, a u8 enum at 255 and a varu enum at 128.",
+  "catalog": "catalog-wide",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 1,
+      "flags": 0,
+      "periodUs": 0
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "A127"
+    },
+    {
+      "call": "enter",
+      "netId": 2,
+      "position": [],
+      "velocity": [],
+      "t0": 0,
+      "epoch": 0
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "A128"
+    },
+    {
+      "call": "leave",
+      "netId": 127
+    },
+    {
+      "call": "leave",
+      "netId": 256
+    },
+    {
+      "call": "leave",
+      "netId": 16640
+    },
+    {
+      "call": "leave",
+      "netId": 33025
+    },
+    {
+      "call": "leave",
+      "netId": 4294967295
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "A254"
+    },
+    {
+      "call": "enter",
+      "netId": 1,
+      "position": [],
+      "velocity": [],
+      "t0": 0,
+      "epoch": 0
+    },
+    {
+      "call": "number",
+      "field": "f00",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f01",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f02",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f03",
+      "values": [
+        "4008000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f04",
+      "values": [
+        "4010000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f05",
+      "values": [
+        "4014000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f06",
+      "values": [
+        "4018000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f07",
+      "values": [
+        "401c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f08",
+      "values": [
+        "4020000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f09",
+      "values": [
+        "4022000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f10",
+      "values": [
+        "4024000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f11",
+      "values": [
+        "4026000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f12",
+      "values": [
+        "4028000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f13",
+      "values": [
+        "402a000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f14",
+      "values": [
+        "402c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f15",
+      "values": [
+        "402e000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f16",
+      "values": [
+        "4030000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f17",
+      "values": [
+        "4031000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f18",
+      "values": [
+        "4032000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f19",
+      "values": [
+        "4033000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f20",
+      "values": [
+        "4034000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f21",
+      "values": [
+        "4035000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f22",
+      "values": [
+        "4036000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f23",
+      "values": [
+        "4037000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f24",
+      "values": [
+        "4038000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "wide",
+      "values": [
+        "406fe00000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "tall",
+      "values": [
+        "4060000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "h3",
+      "values": [
+        "403b000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "h4",
+      "values": [
+        "403c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "h5",
+      "values": [
+        "403d000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "h6",
+      "values": [
+        "403e000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "h7",
+      "values": [
+        "403f000000000000"
+      ]
+    },
+    {
+      "call": "state",
+      "netId": 1,
+      "groupMask": 255
+    },
+    {
+      "call": "number",
+      "field": "f00",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f01",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f02",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f03",
+      "values": [
+        "4008000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f04",
+      "values": [
+        "4010000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f05",
+      "values": [
+        "4014000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f06",
+      "values": [
+        "4018000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f07",
+      "values": [
+        "401c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f08",
+      "values": [
+        "4020000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f09",
+      "values": [
+        "4022000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f10",
+      "values": [
+        "4024000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f11",
+      "values": [
+        "4026000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f12",
+      "values": [
+        "4028000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f13",
+      "values": [
+        "402a000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f14",
+      "values": [
+        "402c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f15",
+      "values": [
+        "402e000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f16",
+      "values": [
+        "4030000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f17",
+      "values": [
+        "4031000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f18",
+      "values": [
+        "4032000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f19",
+      "values": [
+        "4033000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f20",
+      "values": [
+        "4034000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f21",
+      "values": [
+        "4035000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f22",
+      "values": [
+        "4036000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f23",
+      "values": [
+        "4037000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "f24",
+      "values": [
+        "4038000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "wide",
+      "values": [
+        "406fe00000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "tall",
+      "values": [
+        "4060000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "h3",
+      "values": [
+        "403b000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "h4",
+      "values": [
+        "403c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "h5",
+      "values": [
+        "403d000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "h6",
+      "values": [
+        "403e000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "h7",
+      "values": [
+        "403f000000000000"
+      ]
+    },
+    {
+      "call": "event",
+      "type": "E119",
+      "idx": 135
+    },
+    {
+      "call": "endTick"
+    }
+  ]
+}

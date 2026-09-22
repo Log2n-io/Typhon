@@ -328,6 +328,10 @@ Compile-time stripped in RELEASE; active in DEBUG to catch declaration drift.
     cluster mutation acknowledged this tick can be lost by a crash before the next one
   rationale: the ordering is deliberate (issue #229) and the code documents it inline, but no rule stated it. A design
     doc had the order backwards with nothing in the rule database to contradict it.
+  note AMENDED by SUB-02 (`rules/subscriptions.md`, #955): "output" splits into replication COMPUTE, which runs after the
+    fence and before the flush on the Engine-Subscriptions track, and replication PUBLISH, which runs after the flush.
+    That four-step form is the only reading: nothing remains that runs "output" as a single post-flush step.
+  verified: SubscriptionsTrackTests.NormalTick_RunsFenceThenComputeThenFlushThenPublish [VerifiesRule]
 
 ### TP-01a: The fence and the flush are mandatory on EVERY tick `[fatal][silent]` (issue #567)
   invariant WriteTickFence and the UoW flush run on every tick, including a tick aborted by a fatal system exception
@@ -349,6 +353,11 @@ Compile-time stripped in RELEASE; active in DEBUG to catch declaration drift.
     engine relied on the fence being unconditional but nothing said so, and the request was reasonable from outside.
     Recorded so a future "abort the tick" variant cannot re-derive the same wrong conclusion. See
     design/Runtime/08-strict-tick-abort.md §"Why the fence must still run".
+  note the skippable "output" step is BOTH halves of replication and nothing else — compute and publish are skipped
+    together and only together. Engine-tagged systems are exempt from the scheduler's tick-abort guard, which is what
+    makes the fence run on an aborted tick, so the replication track does NOT inherit the suppression: it opts out
+    itself, in every stage's ShouldRun.
+  verified: SubscriptionsTrackTests.AbortedTick_StillFencesAndFlushes_ButNeitherComputesNorPublishes [VerifiesRule]
 
 ### TP-02: Parallel cluster dispatch binds to the system's own view archetype `[fatal][silent]`
   invariant a system's cluster-range dispatch binds to the ArchetypeClusterState of THAT system's queried archetype,
@@ -481,6 +490,45 @@ descends from this one property.
   note: no RuleMutant. Putting the live read back on the chunk path would take a seam there; the verifier was run against the code that did it,
         and failed as quoted
 
+## Module: RT — Epoch scope around system bodies
+
+### RT-01: Every system body runs inside an epoch scope, and must not block in it `[fatal]` `[silent]`
+  invariant ∀ system S dispatched by the runtime: S's body executes with a live EpochGuard scope on the executing thread, whatever S's shape —
+            a serial CallbackSystem / non-parallel QuerySystem gets it from the transaction OnSystemStartInternal creates (Transaction.Init calls
+            EnterScope unconditionally); a parallel QuerySystem from the per-worker EntityAccessor (InitLightweight, for the accessor's lifetime);
+            a ChunkedCallbackSystem from the dispatcher itself, once per chunk (ExecuteChunkedCallback); and a parallel QuerySystem that WritesVersioned
+            from its per-chunk Transaction (ExecuteChunkWithTransaction) rather than from an accessor — four mechanisms, not three
+  note the parallel-query accessor pins for the ACCESSOR'S lifetime and never exits inside the tick (EntityAccessor.InitLightweight, "No epoch exit
+       here"): a standing pin rather than a scope. The guarantee holds, but this rule now makes that pin load-bearing for a public contract
+  note the dispatcher's own EpochGuard.Dispose THROWS on a depth mismatch (EpochThreadRegistry.UnpinCurrentThread), so a body that leaks a scope —
+       an undisposed Transaction, say — fails loudly here rather than corrupting reclamation silently. That is deliberate: swallowing it would hide
+       epoch-depth corruption, which is worse than a loud failure, but it does put a throw on the tick path
+  invariant the scopes NEST: EpochGuard.Enter increments a depth and only the outermost scope advances the global epoch, so a body that opens its
+            own guard — or the fence, which opens one in its own Execute override — stays correct and costs one atomic pair
+  never a system body that blocks — a lock held across I/O, a wait on another tick's work — because the scope pins an epoch for the body's whole
+        duration and page eviction plus view-buffer reclamation wait on the oldest live epoch (PS-09)
+  note the guarantee is scoped to a runtime WITH a live engine. ExecuteChunkedCallback runs the body unscoped when Engine or its EpochManager is
+       null, because throwing an NRE on the tick path would be worse and this file guards Engine at ten other sites (TyphonRuntime.cs:588, :1064
+       and the Engine?.SpatialGrid reads). That case is pre-#909 behaviour for this shape, not a regression — but it IS the one hole in the ∀, and
+       a body that reaches it can take no page access safely
+  requires: PS-02 (every page access sits inside an EpochGuard scope — this rule is how a system body satisfies it without saying so)
+  rationale: ClusterSpatialQuery is PUBLIC and its enumerator builds a ChunkAccessor over cluster pages, so it needs the pages pinned. EpochGuard is
+    internal and stays internal (a public RAII pin is the footgun PS-09 describes), so the guarantee has to come from the framework rather than from
+    the caller. Before this rule, ChunkedCallbackSystem — also public — was the one shape the dispatcher gave no scope: a user could write that shape
+    and then had NO legal way to call the public spatial query from it, because the only way to satisfy the documented precondition was a friend
+    declaration. Making the dispatcher open the scope costs one Interlocked pair per chunk against a per-dispatch overhead already in the 10-30 µs
+    range, and it is what lets the query's XML doc stop naming a precondition its caller cannot express.
+  on_violation: a body reading cluster or component pages with no live scope can have those pages reclaimed under it mid-read — a torn read or a
+    use-after-free, silent, and only under eviction pressure. The reverse violation, blocking inside the scope, is silent too: reclamation stalls
+    behind the oldest live epoch and the page cache grows until something else fails
+  scope: TyphonRuntime.cs (ExecuteChunkedCallback, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction, OnParallelQueryChunk), Transaction.cs (Init),
+         ChunkedCallbackSystem.cs,
+         EntityAccessor.cs (InitLightweight), EpochGuard.cs (Enter, Dispose), ClusterSpatialQuery.cs
+  verified: EpochScopeAroundSystemBodiesTests — one test per mechanism, each asserting a live scope from inside the body:
+            ASerialCallbackSystemBody_RunsInsideAnEpochScope, AParallelQuerySystemBody_RunsInsideAnEpochScope,
+            AChunkedCallbackSystemBody_RunsInsideAnEpochScope (the last fails on the pre-fix dispatcher, which called CallbackAction with no guard), plus
+            AChunkedCallbackBody_CanRunThePublicClusterSpatialQuery, the case the rule exists for
+
 ## Module: Worker Wake
 
 Between dispatches every worker parks in a kernel wait. These rules say how a dispatch gets each one back.
@@ -533,6 +581,37 @@ Between dispatches every worker parks in a kernel wait. These rules say how a di
             telemetry); ABackstopFiringBeforeItsSetArrives_IsNotALostWake; ASetLandingAfterTheBackstop_IsNotALostWake
   note: no RuleMutant. When the counter landed, hand-made mutants of the check, one of them dropping the clear-event clause, were each caught
         by these tests
+
+### WK-03: A worker parked inside a dispatch is woken for the work it is needed for, and when the dispatch ends `[perf]` `[silent]`
+  invariant under the parking policy (HotSpinners >= 0) an idle worker spins with PAUSE, never a yield, and after ParkAfterUs parks on its OWN in-tick
+            event (_parkWake[workerId]) unless fewer than HotSpinners other workers are spinning; its state (_idleState) is busy, spinning or parked
+  invariant a worker parks by storing "parked" and counting itself (_parkedCount, an interlocked increment: a full fence) BEFORE it re-checks for work,
+            the dispatch's end and shutdown; a publisher stores the ready flag and claim word BEFORE a full fence and only then reads the parked count
+            and the states (WakeParked). One of the two sees the other: the fenced store-buffer pattern
+  invariant a wake is claimed by compare-exchanging a state from parked to busy; the claimer alone Sets the event, and the worker alone Resets it, only
+            after consuming that Set (also when it un-parks itself and loses the race to a claimer): an event is set exactly when a claimed wake is
+            unconsumed
+  invariant a multi-chunk dispatch (DispatchParallelQuery, a pipeline's successor publish) wakes one parked worker per chunk beyond the publishing worker
+            and the workers spinning at that moment (WakeForChunks); the completion that takes _systemsRemaining to zero wakes every parked worker, and so do
+            the end of DispatchTrackMultiThreaded, Shutdown and Dispose
+  invariant the park wait's backstop (ParkBackstop, 2 ms) is a liveness net, not a way to be woken
+  rationale: the legacy policy spun, then yielded forever. Thread.Yield gives the core up only to a thread ready on it and otherwise returns at once, so
+    an idle worker was a tight loop at 100 % of a core — measured on the SWG demo at 1 000 sessions as ~36 % of worker time inside dispatches — which
+    starved the thread pool running the sends and ASP.NET Core. Parking (no hot spinner, park after 10 µs) returned ~2.9 cores and made the tick 4.3 %
+    shorter at P50 and 6.2 % at P99 over six interleaved pairs, with the same worker work per tick. A worker left parked when its dispatch ends is still
+    inside it: the next dispatch's wake Sets the between-tick events (WK-01), not the park events, so it stays there until its backstop or until some later
+    multi-chunk dispatch happens to wake it — which is why the end of a track must wake it
+  on_violation: a worker sleeps through work it was needed for until the backstop — latency, not corruption: the dispatch completes on the other
+    workers, later. Silent: nothing counts a late wake
+  scope: DagScheduler.Idle.cs (ParkIdleWorker, WakeParked, WakeForChunks, CountSpinning), DagScheduler.cs (WorkerLoop, DispatchParallelQuery,
+         OnSystemComplete, DispatchTrackMultiThreaded, Shutdown, Dispose)
+  verified: WorkerParkingTests — every test with no hot spinner, parking at once and a 30 s backstop, over all-hands parallel systems whose chunks wait
+            for the whole pool: AParallelDispatchAfterASerialGap_WakesTheParkedPool (the pool parks during a serial gate, the dispatch after it must wake
+            it); TheEndOfADispatch_ReturnsEveryParkedWorkerToTheBetweenTickWait (one serial system per tick: every worker must reach the between-tick
+            wait on most ticks); NoWakeIsLost_AcrossThousandsOfParks
+  note: no RuleMutant. Hand-made mutants, each caught (2026-09-22): WakeForChunks made a no-op fails the serial-gap and churn tests; both track-end
+        wakes removed fails the end-of-dispatch test. That test replaced one that ended a track and needed all hands in the next, which the mutant
+        passed: the next track's multi-chunk root dispatch woke the leftover workers itself
 
 ## Module: API Contract Stability
 

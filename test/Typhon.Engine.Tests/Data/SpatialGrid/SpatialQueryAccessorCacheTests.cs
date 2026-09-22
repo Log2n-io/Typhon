@@ -219,7 +219,7 @@ class SpatialQueryAccessorCacheTests : TestBase<SpatialQueryAccessorCacheTests>
         {
             while (e.MoveNext())
             {
-                outerAlone.Add(e.Current.EntityId);
+                outerAlone.Add(unchecked((long)e.Current.Entity.RawValue));
             }
         }
         finally
@@ -234,7 +234,7 @@ class SpatialQueryAccessorCacheTests : TestBase<SpatialQueryAccessorCacheTests>
         {
             while (o.MoveNext())
             {
-                outer.Add(o.Current.EntityId);
+                outer.Add(unchecked((long)o.Current.Entity.RawValue));
                 if (outer.Count % 97 == 0)
                 {
                     // The inner query walks the same segment's pages while the outer one holds a cluster open.

@@ -18,10 +18,29 @@ namespace Typhon.Engine;
 /// Step 13 removed that tree, moved both systems onto the per-cell cluster index, and had to resolve which of the two outcomes the design allowed: port them,
 /// or delete them together with their <c>rules/spatial.md</c> modules. They are ported, and this surface is what makes that a fact a test can check rather
 /// than a claim.</para>
+/// <para><b>And it is deprecated as of Phase 1 of engine-owned replication</b> (<c>design/Subscriptions/README.md</c> Q9, decided by Loïc 2026-09-17), so
+/// that "observer" names one concept. What replaces it is a declared observer on a subscriptions profile — <c>subs.Profile(name, p =&gt; p.World()...)</c>,
+/// with <c>Sphere</c> and <c>ClientRegion</c> in Phase 2 — which differs in three ways that matter: it reports leaves as well as movement, it costs
+/// <c>O(hits)</c> rather than <c>O(dirty × observers)</c>, and its state is per entity rather than per observer. Nothing is deleted here: this type and
+/// <see cref="SpatialObserverHandle"/> keep working for the callers that still hold them, and go once none is left.</para>
 /// </remarks>
 [PublicAPI]
+[Obsolete(DeprecationMessage)]
 public readonly struct SpatialObserverSet
 {
+    /// <summary>
+    /// The one spelling of the deprecation, shared with <see cref="SpatialObserverHandle"/> so the two cannot drift apart.
+    /// </summary>
+    /// <remarks>
+    /// <c>internal const</c> rather than a literal at each attribute: an <see cref="ObsoleteAttribute"/> message is what a caller reads instead of the
+    /// documentation, and two copies of it is two chances to update only one.
+    /// </remarks>
+    internal const string DeprecationMessage =
+        "Superseded by engine-owned subscriptions: declare interest on a profile - "
+        + "TyphonRuntime.Subscriptions.Profile(name, p => p.World().Of<TArchetype>()) - and let the replication track resolve it. "
+        + "That surface reports leaves, costs O(hits) rather than O(dirty x observers), and keeps its state per entity. "
+        + "See design/Subscriptions/01-model.md section 4.";
+
     private readonly SpatialInterestSystem _system;
 
     internal SpatialObserverSet(SpatialInterestSystem system) => _system = system;
@@ -132,6 +151,9 @@ public static class SpatialObserverExtensions
     /// The underlying state is created on first use and lives as long as the component's <c>ComponentTable</c> does — which is the engine's lifetime in
     /// ordinary use, but NOT across a schema migration that reconstructs the table. Obtain the façade again after one rather than holding it across.
     /// </remarks>
+    // CS0618: this IS the entry point to the deprecated surface, so it necessarily names it. Marking the method obsolete as well would say the same thing
+    // twice at every call site and is not what README Q9 asked for; the type's own attribute is what a caller sees.
+#pragma warning disable CS0618
     public static SpatialObserverSet SpatialObservers<T>(this DatabaseEngine engine) where T : unmanaged
     {
         ArgumentNullException.ThrowIfNull(engine);
@@ -143,6 +165,7 @@ public static class SpatialObserverExtensions
 
         return new SpatialObserverSet(table.SpatialIndex.GetOrCreateInterestSystem(table));
     }
+#pragma warning restore CS0618
 
     /// <summary>
     /// Trigger volumes for component <typeparamref name="T"/>, which must carry a <c>[SpatialIndex]</c> field.

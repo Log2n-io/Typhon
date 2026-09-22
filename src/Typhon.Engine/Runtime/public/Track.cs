@@ -56,6 +56,25 @@ public sealed class Track
     /// <summary>True when this track carries the <see cref="EngineTag"/> — it holds engine-internal DAGs not surfaced as user systems.</summary>
     public bool IsEngine => _tags.Contains(EngineTag);
 
+    /// <summary>
+    /// Whether a system failing on this track ends the runtime. True for every track by default; engine tracks whose work is not a durability precondition set
+    /// it false.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A throw on an engine track latches <c>DagScheduler.IsFenceFailed</c>, and that latch is <b>terminal</b> — <c>ExecuteCallbacks</c> returns early
+    /// on every subsequent tick. That is right for the fence: a tick whose fence did not finish leaves cluster pages mutated, dirty and un-logged, which
+    /// the checkpoint then persists with no WAL record behind it (rule TP-01a), so continuing to tick layers more of the same on top.
+    /// </para>
+    /// <para>
+    /// It is <b>wrong</b> for engine work with no durability role. Replication writes only its own RAM-only blocks — never checkpointed, never
+    /// WAL-logged — so a bug in a replication stage endangers nothing a later tick could compound. Letting it stop the database would make a defect in
+    /// the newest, least-proven subsystem strictly more damaging than the same defect in a user system, and would report it to the host as a *fence*
+    /// failure, which it is not.
+    /// </para>
+    /// </remarks>
+    internal bool FailureIsTerminal { get; init; } = true;
+
     /// <summary>True when <paramref name="tag"/> is present in this track's tag set.</summary>
     public bool HasTag(string tag) => _tags.Contains(tag);
 

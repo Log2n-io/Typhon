@@ -109,7 +109,7 @@ class CostChunkingTests : TestBase<CostChunkingTests>
         Assert.That(Volatile.Read(ref ticksSeen), Is.GreaterThanOrEqualTo(4), "precondition: the runtime did not reach tick 4");
 
         var idx = -1;
-        for (var i = 0; i < runtime.Scheduler.SystemCount; i++)
+        for (var i = 0; i < runtime.Scheduler.AllSystemCount; i++)
         {
             if (runtime.Scheduler.Systems[i].Name == "Heavy")
             {

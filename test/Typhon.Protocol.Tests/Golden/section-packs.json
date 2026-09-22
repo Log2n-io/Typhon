@@ -1,0 +1,90 @@
+{
+  "description": "A section with packed fields 3 \u002B 4 \u002B 24 \u002B 1 \u002B 2 bits \u2014 the 24-bit field at offset 7 spans four bytes; a 5-byte pack whose six padding bits are zero \u2014 followed by a byte-aligned u8 (W12).",
+  "fields": [
+    {
+      "name": "a",
+      "codec": {
+        "t": "bits",
+        "n": 3
+      },
+      "bitOffset": 0
+    },
+    {
+      "name": "b",
+      "codec": {
+        "t": "bits",
+        "n": 4
+      },
+      "bitOffset": 3
+    },
+    {
+      "name": "c",
+      "codec": {
+        "t": "bits",
+        "n": 24
+      },
+      "bitOffset": 7
+    },
+    {
+      "name": "d",
+      "codec": {
+        "t": "bool"
+      },
+      "bitOffset": 31
+    },
+    {
+      "name": "f",
+      "codec": {
+        "t": "bits",
+        "n": 2
+      },
+      "bitOffset": 32
+    },
+    {
+      "name": "e",
+      "codec": {
+        "t": "u8"
+      },
+      "bitOffset": -1
+    }
+  ],
+  "packBytes": 5,
+  "cases": [
+    {
+      "values": {
+        "a": "4014000000000000",
+        "b": "4022000000000000",
+        "c": "416579bde0000000",
+        "d": "3ff0000000000000",
+        "f": "4000000000000000",
+        "e": "401c000000000000"
+      },
+      "offset": 0,
+      "length": 6
+    },
+    {
+      "values": {
+        "a": "401c000000000000",
+        "b": "402e000000000000",
+        "c": "416fffffe0000000",
+        "d": "0000000000000000",
+        "f": "4008000000000000",
+        "e": "406fe00000000000"
+      },
+      "offset": 6,
+      "length": 6
+    },
+    {
+      "values": {
+        "a": "0000000000000000",
+        "b": "0000000000000000",
+        "c": "0000000000000000",
+        "d": "3ff0000000000000",
+        "f": "0000000000000000",
+        "e": "0000000000000000"
+      },
+      "offset": 12,
+      "length": 6
+    }
+  ]
+}

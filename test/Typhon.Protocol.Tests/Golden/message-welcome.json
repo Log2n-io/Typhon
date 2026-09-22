@@ -1,0 +1,15 @@
+{
+  "description": "WELCOME carrying the catalog-swg vector\u0027s bytes and hash.",
+  "type": 1,
+  "message": {
+    "major": 2,
+    "minor": 0,
+    "capsGranted": 1,
+    "sessionId": 42,
+    "resumeToken": "0102030405060708090a0b0c0d0e0f10",
+    "tick": 70000,
+    "tickPeriodUs": 100000,
+    "catalogHash": "39044b7a054f7f28",
+    "catalogBytes": 1972
+  }
+}

@@ -87,6 +87,17 @@ public unsafe ref struct AabbClusterEnumerator
     private int _warmToken;
     private ref ChunkAccessor<PersistentStore> _warm;
 
+    /// <summary>
+    /// When set, <see cref="NextCluster"/> names the next admitted cluster without opening its page.
+    /// </summary>
+    /// <remarks>
+    /// <b>Finding a cluster and opening it are different costs, and a caller that shares clusters between queries only wants the first.</b> Opening is a
+    /// page-cache request per cluster; profiled at d06 with a thousand subscription sessions it is most of this enumerator's time, because every one of
+    /// about 165 overlapping interest cells re-opens the same clusters — each roughly fifteen times a tick. A caller that opens each cluster once and shares
+    /// what it read sets this and calls <see cref="OpenCluster"/> itself, at most once per cluster.
+    /// </remarks>
+    private bool _noOpen;
+
     // Iteration state.
     private int _currentCellX;
     private int _currentCellY;
@@ -437,6 +448,270 @@ public unsafe ref struct AabbClusterEnumerator
         }
     }
 
+    /// <summary>
+    /// Write up to <paramref name="destination"/>.Length further CLUSTERS the broadphase admits, and return how many were written.
+    /// </summary>
+    /// <param name="destination">Where to write them.</param>
+    /// <returns>How many were written; 0 once the query is exhausted, or for an empty destination.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>No entity is read.</b> The broadphase — the per-cell cluster index, its SIMD half, the cell tree and the escaped-cluster tail — runs exactly as
+    /// it does for <see cref="MoveNext"/>, and the narrowphase that would split each admitted cluster back into entities does not. For a caller whose unit
+    /// of interest is the cluster that is the whole query: measured on the SWG demo at d06 with 200 sessions, the entity-level form reports about 416 000
+    /// hits per tick where this reports about 19 000 clusters, and the 54 ns each of those hits costs is what it removes.
+    /// </para>
+    /// <para>
+    /// <b>It abandons whatever the previous call left open.</b> This enumeration answers per cluster, so a cluster is reported once and its remaining slots
+    /// are dropped rather than carried; mixing it with <see cref="MoveNext"/> or <see cref="Fill"/> on one enumerator therefore loses the entities of the
+    /// cluster in hand. Nothing forbids it, and nothing needs it.
+    /// </para>
+    /// <para>
+    /// <b>The bounds are the cluster's own, read back into world space.</b> They come from the archetype's <c>ClusterAabbs</c> in the frame of the cell
+    /// <c>ClusterCellMap</c> files the cluster under, rather than from whichever of the three broadphase branches admitted it — one conversion that is
+    /// right for all of them, against three that would each have to be kept right separately.
+    /// </para>
+    /// </remarks>
+    public int FillClusters(scoped Span<ClusterBroadphaseHit> destination)
+    {
+        if (destination.IsEmpty)
+        {
+            return 0;
+        }
+
+        ThrowIfRentStale();
+        var aabbs = Volatile.Read(ref _state.ClusterAabbs);
+        var cellMap = Volatile.Read(ref _state.ClusterCellMap);
+        var written = 0;
+        while (written < destination.Length)
+        {
+            // Drop the cluster in hand rather than draining it: this enumeration's unit is the cluster.
+            _currentOccupancyBits = 0UL;
+            _decidedHits = 0UL;
+            if (!NextCluster())
+            {
+                ReleaseRentAfterDrain();
+                break;
+            }
+
+            var chunkId = _currentClusterChunkId;
+            var slots = _currentOccupancyBits;
+            if (slots == 0UL)
+            {
+                // An empty cluster the broadphase still holds bounds for. It names no entity, so it is not a hit.
+                continue;
+            }
+
+            // An unbounded box for a cluster whose bounds cannot be read is the SAFE direction: the caller's own test then admits it and looks inside,
+            // where the truth is. Narrowing on a missing entry would drop entities, which is SQ-01's silent direction.
+            var minX = double.NegativeInfinity;
+            var minY = double.NegativeInfinity;
+            var maxX = double.PositiveInfinity;
+            var maxY = double.PositiveInfinity;
+            if (aabbs != null && cellMap != null && (uint)chunkId < (uint)aabbs.Length && (uint)chunkId < (uint)cellMap.Length)
+            {
+                ref readonly var box = ref aabbs[chunkId];
+                _grid.CellOrigin(cellMap[chunkId], out var originX, out var originY, out _);
+                minX = ClusterSpatialAabb.ToWorldExact(box.MinX, originX);
+                minY = ClusterSpatialAabb.ToWorldExact(box.MinY, originY);
+                maxX = ClusterSpatialAabb.ToWorldExact(box.MaxX, originX);
+                maxY = ClusterSpatialAabb.ToWorldExact(box.MaxY, originY);
+            }
+
+            destination[written++] = new ClusterBroadphaseHit(chunkId, slots, minX, minY, maxX, maxY);
+        }
+
+        _tallyHits += written;
+        return written;
+    }
+
+    /// <summary>
+    /// Advance to the next cluster the broadphase admits WITHOUT opening its page, reporting its id and world-space bounds.
+    /// </summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <param name="minX">Bounds minimum X, from the archetype's cluster AABBs — no page is read for it.</param>
+    /// <param name="minY">Bounds minimum Y.</param>
+    /// <param name="maxX">Bounds maximum X.</param>
+    /// <param name="maxY">Bounds maximum Y.</param>
+    /// <returns><see langword="false"/> once the query is exhausted.</returns>
+    /// <remarks>
+    /// The occupancy and the entities are not known here — a caller that needs them calls <see cref="OpenCluster"/>, once, and shares the result. An
+    /// unbounded box for a cluster whose bounds cannot be read is the safe direction: the caller's own tests then admit it and look inside.
+    /// </remarks>
+    public bool MoveNextClusterUnopened(out int chunkId, out double minX, out double minY, out double maxX, out double maxY)
+    {
+        ThrowIfRentStale();
+        _noOpen = true;
+        _currentOccupancyBits = 0UL;
+        _decidedHits = 0UL;
+        bool advanced;
+        try
+        {
+            advanced = NextCluster();
+        }
+        finally
+        {
+            // Reset whatever happened: a throw inside the walk would otherwise leave every later MoveNext in unopened mode, silently yielding nothing.
+            _noOpen = false;
+        }
+
+        if (!advanced)
+        {
+            ReleaseRentAfterDrain();
+            chunkId = -1;
+            minX = minY = maxX = maxY = 0d;
+            return false;
+        }
+
+        chunkId = _currentClusterChunkId;
+        minX = double.NegativeInfinity;
+        minY = double.NegativeInfinity;
+        maxX = double.PositiveInfinity;
+        maxY = double.PositiveInfinity;
+        var aabbs = Volatile.Read(ref _state.ClusterAabbs);
+        var cellMap = Volatile.Read(ref _state.ClusterCellMap);
+        if (aabbs != null && cellMap != null && (uint)chunkId < (uint)aabbs.Length && (uint)chunkId < (uint)cellMap.Length)
+        {
+            ref readonly var box = ref aabbs[chunkId];
+            _grid.CellOrigin(cellMap[chunkId], out var originX, out var originY, out _);
+            minX = ClusterSpatialAabb.ToWorldExact(box.MinX, originX);
+            minY = ClusterSpatialAabb.ToWorldExact(box.MinY, originY);
+            maxX = ClusterSpatialAabb.ToWorldExact(box.MaxX, originX);
+            maxY = ClusterSpatialAabb.ToWorldExact(box.MaxY, originY);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Adds a cluster's occupancy, read by the caller from its own copy, to the query's candidate tally — which the unopened walk cannot count itself and
+    /// which feeds the maintenance budget (SO-02).
+    /// </summary>
+    /// <param name="occupancy">The cluster's occupancy.</param>
+    public void TallyOccupancy(ulong occupancy) => _tallyCandidates += BitOperations.PopCount(occupancy);
+
+    /// <summary>Opens a cluster's page through this enumerator's warm accessor and returns its base address.</summary>
+    /// <param name="chunkId">The cluster.</param>
+    /// <returns>The cluster's base; its first eight bytes are the occupancy word.</returns>
+    public byte* OpenCluster(int chunkId)
+    {
+        ThrowIfRentStale();
+        EnsureAccessor();
+        return _warm.GetChunkAddress(chunkId);
+    }
+
+    /// <summary>Byte offset of the spatial field's column from a cluster's base.</summary>
+    public int SpatialFieldsOffset => _layout.FieldsOffset;
+
+    /// <summary>The spatial column's stride.</summary>
+    public int SpatialStride => _layout.Stride;
+
+    /// <summary>Whether the spatial field is the flat f32 box a shared snapshot can copy.</summary>
+    public bool IsAabb2F => _layout.FieldType == SpatialFieldType.AABB2F;
+
+    /// <summary>
+    /// Advance to the next CLUSTER the broadphase admits, reading no entity, and leave it open so the caller may decide whether to drain it.
+    /// </summary>
+    /// <param name="cluster">The cluster: its chunk id, its occupied slots and its tight bounds in world space.</param>
+    /// <returns><see langword="false"/> once the query is exhausted.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>The caller-driven half of <see cref="FillClusters"/>.</b> That method answers "every cluster, no entities" in one frame, which suits a caller
+    /// whose unit of interest is only ever the cluster. This one stops on each cluster so the caller can answer a question about the BOX and then either
+    /// walk the entities with <see cref="FillCurrentCluster"/> or move on, paying the narrowphase for the clusters where the box was not decisive and for
+    /// no others.
+    /// </para>
+    /// <para>
+    /// <b>Why that split is worth an API.</b> A subscription's broad phase is centred on an interest CELL rather than on any one observer, so a cluster
+    /// lying wholly inside the cell's inscribed disc is visible to every member of the cell and one lying outside the enlarged disc to none — in both cases
+    /// without a single entity being read or tested. On the SWG demo at d06 that is about 838 clusters reached per cell resolution against 13.2 entities
+    /// each, so the decision this exposes is taken 838 times to avoid up to eleven thousand reads.
+    /// </para>
+    /// <para>
+    /// <b>It abandons the entities of the cluster in hand</b>, exactly as <see cref="FillClusters"/> does: advancing is what the caller asked for. The
+    /// bounds come from the archetype's <c>ClusterAabbs</c> read back into world space, and a cluster whose bounds cannot be read reports an UNBOUNDED box
+    /// so that the caller's own test admits it and looks inside — narrowing on a missing entry would drop entities, which is SQ-01's silent direction.
+    /// </para>
+    /// </remarks>
+    public bool MoveNextCluster(out ClusterBroadphaseHit cluster)
+    {
+        ThrowIfRentStale();
+        var aabbs = Volatile.Read(ref _state.ClusterAabbs);
+        var cellMap = Volatile.Read(ref _state.ClusterCellMap);
+
+        while (true)
+        {
+            // Drop the cluster in hand rather than draining it: advancing by cluster is what this method is.
+            _currentOccupancyBits = 0UL;
+            _decidedHits = 0UL;
+            if (!NextCluster())
+            {
+                ReleaseRentAfterDrain();
+                cluster = default;
+                return false;
+            }
+
+            var chunkId = _currentClusterChunkId;
+            var slots = _currentOccupancyBits;
+            if (slots == 0UL)
+            {
+                // An empty cluster the broadphase still holds bounds for. It names no entity, so it is not a hit.
+                continue;
+            }
+
+            var minX = double.NegativeInfinity;
+            var minY = double.NegativeInfinity;
+            var maxX = double.PositiveInfinity;
+            var maxY = double.PositiveInfinity;
+            if (aabbs != null && cellMap != null && (uint)chunkId < (uint)aabbs.Length && (uint)chunkId < (uint)cellMap.Length)
+            {
+                ref readonly var box = ref aabbs[chunkId];
+                _grid.CellOrigin(cellMap[chunkId], out var originX, out var originY, out _);
+                minX = ClusterSpatialAabb.ToWorldExact(box.MinX, originX);
+                minY = ClusterSpatialAabb.ToWorldExact(box.MinY, originY);
+                maxX = ClusterSpatialAabb.ToWorldExact(box.MaxX, originX);
+                maxY = ClusterSpatialAabb.ToWorldExact(box.MaxY, originY);
+            }
+
+            _tallyHits++;
+            cluster = new ClusterBroadphaseHit(chunkId, slots, minX, minY, maxX, maxY);
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Write up to <paramref name="destination"/>.Length further matches from the CURRENT cluster only, and return how many were written.
+    /// </summary>
+    /// <param name="destination">Where to write them.</param>
+    /// <returns>How many were written; 0 once this cluster is drained.</returns>
+    /// <remarks>
+    /// <b>Never advances.</b> <see cref="Fill"/> opens the next cluster when the one in hand runs out, which is right for a caller walking the whole query
+    /// and wrong for one stepping cluster by cluster with <see cref="MoveNextCluster"/> — there, advancing here would silently skip the box test the caller
+    /// stepped in order to make. Resumable against one cluster: call until it returns 0, then step.
+    /// </remarks>
+    public int FillCurrentCluster(scoped Span<ClusterSpatialQueryResult> destination)
+    {
+        if (destination.IsEmpty)
+        {
+            return 0;
+        }
+
+        ThrowIfRentStale();
+        var sink = new SpanSink(destination);
+        while (_currentOccupancyBits != 0UL)
+        {
+            DecideBlocks(3);
+            _currentOccupancyBits = DrainTier(_currentOccupancyBits, ref sink);
+            _decidedHits &= _currentOccupancyBits;
+            if (sink.Written == destination.Length)
+            {
+                break;
+            }
+        }
+
+        _tallyHits += sink.Written;
+        return sink.Written;
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Narrowphase: one drain loop per storage tier
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -619,7 +894,9 @@ public unsafe ref struct AabbClusterEnumerator
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ClusterSpatialQueryResult ResultAt(byte* clusterBase, int chunkId, int slot, int idsOffset, double minX, double minY, double minZ,
         double maxX, double maxY, double maxZ, double distSq) =>
-        new(*(long*)(clusterBase + idsOffset + (slot * 8)), chunkId, slot, minX, minY, minZ, maxX, maxY, maxZ, distSq);
+        // The slab holds the packed EntityId bit pattern, so the typed wrap happens HERE — once per hit, with the bytes already in a register — rather than
+        // at every call site through an internal FromRaw the public API could not reach (#909 part 2).
+        new(EntityId.FromRaw(*(long*)(clusterBase + idsOffset + (slot * 8))), chunkId, slot, minX, minY, minZ, maxX, maxY, maxZ, distSq);
 
     /// <summary>Drain the current cluster's slots in <paramref name="bits"/> into <paramref name="sink"/> through this archetype's tier reader.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -843,6 +1120,15 @@ public unsafe ref struct AabbClusterEnumerator
                         continue;
                     }
 
+                    if (_noOpen)
+                    {
+                        _currentClusterChunkId = treeChunkId;
+                        _currentOccupancyBits = 0UL;
+                        _currentClusterBase = null;
+                        _tallyClusters++;
+                        return true;
+                    }
+
                     EnsureAccessor();
                     _currentClusterBase = _warm.GetChunkAddress(treeChunkId);
                     _currentClusterChunkId = treeChunkId;
@@ -863,6 +1149,15 @@ public unsafe ref struct AabbClusterEnumerator
                 }
 
                 int batchedChunkId = _currentCellIndex.ClusterIds[batchedIdx];
+                if (_noOpen)
+                {
+                    _currentClusterChunkId = batchedChunkId;
+                    _currentOccupancyBits = 0UL;
+                    _currentClusterBase = null;
+                    _tallyClusters++;
+                    return true;
+                }
+
                 EnsureAccessor();
                 _currentClusterBase = _warm.GetChunkAddress(batchedChunkId);
                 _currentClusterChunkId = batchedChunkId;
@@ -910,6 +1205,15 @@ public unsafe ref struct AabbClusterEnumerator
 
                 // Broadphase hit — open the cluster for narrowphase scanning.
                 int chunkId = _currentCellIndex.ClusterIds[idx];
+                if (_noOpen)
+                {
+                    _currentClusterChunkId = chunkId;
+                    _currentOccupancyBits = 0UL;
+                    _currentClusterBase = null;
+                    _tallyClusters++;
+                    return true;
+                }
+
                 EnsureAccessor();
                 _currentClusterBase = _warm.GetChunkAddress(chunkId);
                 _currentClusterChunkId = chunkId;
@@ -1034,6 +1338,15 @@ public unsafe ref struct AabbClusterEnumerator
             }
 
             int chunkId = escaped.ChunkIds[i];
+            if (_noOpen)
+            {
+                _currentClusterChunkId = chunkId;
+                _currentOccupancyBits = 0UL;
+                _currentClusterBase = null;
+                _tallyClusters++;
+                return true;
+            }
+
             EnsureAccessor();
             _currentClusterBase = _warm.GetChunkAddress(chunkId);
             _currentClusterChunkId = chunkId;

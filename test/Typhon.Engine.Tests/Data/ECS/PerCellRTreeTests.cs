@@ -47,7 +47,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
         {
             while (enumerator.MoveNext())
             {
-                results.Add(enumerator.Current.EntityId);
+                results.Add(unchecked((long)enumerator.Current.Entity.RawValue));
             }
         }
         finally
@@ -330,7 +330,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
             {
                 while (enumerator.MoveNext())
                 {
-                    results.Add(enumerator.Current.EntityId);
+                    results.Add(unchecked((long)enumerator.Current.Entity.RawValue));
                 }
             }
             finally
@@ -513,7 +513,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
                 while (en.MoveNext())
                 {
                     var c = en.Current;
-                    hits.Add((c.EntityId, (float)c.MinX, (float)c.MinY, (float)c.MaxX, (float)c.MaxY));
+                    hits.Add((unchecked((long)c.Entity.RawValue), (float)c.MinX, (float)c.MinY, (float)c.MaxX, (float)c.MaxY));
                 }
             }
             finally { en.Dispose(); }
@@ -553,7 +553,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
                 while (en.MoveNext())
                 {
                     var c = en.Current;
-                    results.Add((c.EntityId, (float)c.DistanceSq));
+                    results.Add((unchecked((long)c.Entity.RawValue), (float)c.DistanceSq));
                 }
             }
             finally { en.Dispose(); }

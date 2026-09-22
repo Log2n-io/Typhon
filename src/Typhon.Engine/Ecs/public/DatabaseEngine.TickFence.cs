@@ -732,12 +732,15 @@ public partial class DatabaseEngine
         // per-slice accessor cost is sub-microsecond. Not worth caching.
         var accessor = clusterState.ClusterSegment.CreateChunkAccessor();
         // Worker-local outlier buffer (review D-2): RecomputeDirtyClusterAabbsSlice appends here per-entity without locking; we bulk-enqueue under
-        // _finalizeLock once after the slice finishes. List is short-lived per slice (no pooling — outlier fires are rare; allocations are bounded by the
-        // AABB-Refresh chunk count per tick).
-        var outlierBuffer = new List<MigrationRequest>(0);
-        // Worker-local deferral buffer for promoted cells, same shape and lifetime as the outlier buffer above and merged the same way. Allocated only when
-        // this archetype actually has a promoted cell — the overwhelmingly common case is none, and an empty List per slice per tick is not free.
-        var promotedBuffer = clusterState.PromotedCellCount > 0 ? new List<ArchetypeClusterState.PromotedAabbApply>(0) : null;
+        // _finalizeLock once after the slice finishes, which clears it. Held PER WORKER, like the repair nominations below: a fresh List per slice was
+        // measured at nearly half of the process's steady-state allocation (hundreds of slices a tick, each allocating even when it stays empty). Cleared
+        // on acquisition too, so a slice that threw before its merge cannot hand its entries to the next one.
+        var outlierBuffer = ArchetypeClusterState.OutlierScratch ??= [];
+        outlierBuffer.Clear();
+        // Worker-local deferral buffer for promoted cells, same shape and lifetime as the outlier buffer above and merged the same way. Only when this
+        // archetype actually has a promoted cell — the overwhelmingly common case is none.
+        var promotedBuffer = clusterState.PromotedCellCount > 0 ? ArchetypeClusterState.PromotedScratch ??= [] : null;
+        promotedBuffer?.Clear();
         // Worker-local repair nominations (#872 step 12), merged the same way as the outlier buffer above — but held PER WORKER rather than allocated per
         // slice. With ReclusterBudgetMs at its default of 1.0 this path is live out of the box, so a fresh List per slice per tick is a real per-tick
         // allocation on the fence; step 11 also doubled the element width, so each growth doubling costs twice what it did. EnqueueRepairNominationsBulk
@@ -1935,6 +1938,18 @@ public partial class DatabaseEngine
             // No fence work on this path — a pure-Transient archetype, or a Static one nobody wrote — but its queries still ran and the budget controller
             // still moved, and a trace that skipped the record would sum to less than the accessors do.
             EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, _spatialGrid);
+
+            // The changed-cluster list is published on THIS branch too (#205). A GetSpan write to a non-spatial column raises nothing the branch
+            // selection looks at, so an archetype can reach here with content bits set; skipping the publish would leave them to be drained by some later
+            // tick and reported as that tick's change, which is a stale answer rather than a missing one — worse, because it is believable.
+            clusterState.PublishChangedClusters(null, tickNumber);
+
+            // Branch 0 ran no refresh, so nothing moved and the list is legitimately empty. Publishing the EMPTY list rather than skipping the call is the
+            // point: a consumer distinguishes "this tick named no movers" from "this tick did not answer" by the tick stamp alone, and a skipped publish
+            // would leave the stamp at the last tick that did run and be read as that tick's answer.
+            clusterState.PublishAabbMovedClusters(tickNumber);
+            clusterState.PublishRetirements(tickNumber);
+            clusterState.PublishStructureChanges(tickNumber);
             return false;
         }
 
@@ -1957,6 +1972,26 @@ public partial class DatabaseEngine
         //
         // The bookkeeping clear lives here (single-threaded, per-archetype) — it ran inside the legacy RecomputeDirtyClusterAabbs tail before and must run
         // AFTER all AABB slices finished, which the phase barrier guarantees.
+        // ── The changed-cluster list, published from what this method already holds (#205) ──────────────────────────────────────────────────────
+        //
+        // HERE, and the position is the whole of its correctness. Before ClearAabbRefreshBookkeeping, which zeroes the process bitmap this reads;
+        // and before branch path 1's early return below, because path 1 IS the WriteSpatial-only path — the case whose signal lives in the process
+        // bitmap rather than in the dirty bits. Published after the migration compaction and the pending-finalization drain above, so the ids it
+        // names are the ones the tick ends with.
+        clusterState.PublishChangedClusters(dirtyBits, tickNumber);
+
+        // The AABB-moved list, from the same window and for the same reason. Its producer is NoteAabbChange inside the refresh slices, which the phase
+        // barrier above has already joined, so the bitmap is complete; ClearAabbRefreshBookkeeping below does not touch it, but keeping the two publishes
+        // adjacent is what stops a later edit from separating one of them from the barrier it depends on.
+        clusterState.PublishAabbMovedClusters(tickNumber);
+
+        // AFTER DrainPendingClusterFinalizations above, which is where a cluster emptied this tick is actually retired — publishing before it would stamp
+        // the retirement onto the NEXT tick, and a consumer on this tick would read the retired cluster as merely unchanged.
+        clusterState.PublishRetirements(tickNumber);
+
+        // The membership signal, from the same window: after the finalization drain, so a slot released and a cluster retired this tick are both in it.
+        clusterState.PublishStructureChanges(tickNumber);
+
         if (clusterState.SpatialSlot.HasSpatialIndex && clusterState.SpatialSlot.FieldInfo.Mode == SpatialMode.Dynamic)
         {
             clusterState.ClearAabbRefreshBookkeeping();

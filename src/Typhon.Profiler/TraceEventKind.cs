@@ -659,10 +659,7 @@ public enum TraceEventKind : byte
     /// <summary>Per-system Transaction lifecycle span. Payload: <c>sysIdx: u16</c>, <c>txDurUs: u32</c>, <c>success: u8</c>.</summary>
     RuntimeTransactionLifecycle = 163,
 
-    // ── Runtime:Subscription (span) ──
-
-    /// <summary>Subscription output phase (per tick). Payload: <c>tick: i64</c>, <c>level: u8</c>, <c>clientCount: u16</c>, <c>viewsRefreshed: u16</c>, <c>deltasPushed: u32</c>, <c>overflowCount: u16</c>.</summary>
-    RuntimeSubscriptionOutputExecute = 164,
+    // 164 was the subscription output-phase span. Retired with the replication rewrite; the id is not reused.
 
     // ═══════════════════════════════════════════════════════════════════════════════════════
     // Storage & Memory tracing (Phase 5, #283) — IDs 165-172.
@@ -962,33 +959,8 @@ public enum TraceEventKind : byte
     /// <summary>UoW deadline check instant. Payload: <c>deadline: i64, remaining: i64, expired: u8</c>.</summary>
     DurabilityUowDeadline = 234,
 
-    // ═══════════════════════════════════════════════════════════════════════════════════════
-    // Subscription dispatch tracing (Phase 9, #287) — IDs 235-240. All spans.
-    //
-    // Phase 4 already shipped kind 164 (RuntimeSubscriptionOutputExecute) as the per-tick
-    // parent. Phase 9 fills in the per-subscriber/per-client children. Producer wiring is
-    // deferred per Q4 — dispatch path is still in flux per umbrella sequencing.
-    //
-    // See claude/design/Profiler/07-tracing-instrumentation/09-subscription-dispatch.md.
-    // ═══════════════════════════════════════════════════════════════════════════════════════
-
-    /// <summary>Per-subscriber invocation span (high-freq, deny-listed). Payload: <c>subscriberId: u32, viewId: u16, deltaCount: i32</c>.</summary>
-    RuntimeSubscriptionSubscriber = 235,
-
-    /// <summary>Delta-builder span. Payload: <c>viewId: u16, added: i32, removed: i32, modified: i32</c>.</summary>
-    RuntimeSubscriptionDeltaBuild = 236,
-
-    /// <summary>Per-client delta serialize span (high-freq, deny-listed). Payload: <c>clientId: u32, viewId: u16, bytes: i32, format: u8</c>.</summary>
-    RuntimeSubscriptionDeltaSerialize = 237,
-
-    /// <summary>Subscription transition (BeginSync) span. Payload: <c>clientId: u32, viewId: u16, entitySnapshot: i32</c>.</summary>
-    RuntimeSubscriptionTransitionBeginSync = 238,
-
-    /// <summary>Dead-client cleanup span. Payload: <c>deadCount: i32, deregCount: i32</c>.</summary>
-    RuntimeSubscriptionOutputCleanup = 239,
-
-    /// <summary>Dirty-bitmap supplement span (when ring overflows). Payload: <c>modifiedFromRing: i32, supplementCount: i32, unionSize: i32</c>.</summary>
-    RuntimeSubscriptionDeltaDirtyBitmapSupplement = 240,
+    // 235-240 were the per-subscriber dispatch spans. Their wire format shipped but no producer was ever wired, and the
+    // dispatch path they described was retired with the replication rewrite. The ids are not reused.
 
     // ── Scheduler:Metronome (span) — issue #289 follow-up: surface the timer thread's inter-tick wait ──
 

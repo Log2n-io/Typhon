@@ -1127,7 +1127,7 @@ internal static class GameScenarios
         var n = 0;
         foreach (var hit in cs.QueryAabb(dbe.SpatialGrid, at.X - radius, at.Y - radius, zLo, at.X + radius, at.Y + radius, zHi))
         {
-            n += hit.EntityId == 0 ? 0 : 1;
+            n += hit.Entity.IsNull ? 0 : 1;
         }
 
         return n;

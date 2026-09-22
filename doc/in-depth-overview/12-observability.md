@@ -170,12 +170,11 @@ Sparse by design — gaps left for related categories to grow contiguously. Appr
 | 80–89 | WAL + Checkpoint + Statistics | `WalFlush` (soft-deprecated), `WalSegmentRotate`, `WalWait`, `CheckpointCycle`/`Collect`/`Write`/`Fsync`/`Transition`/`Recycle`, `StatisticsRebuild` |
 | 90–116 | **Concurrency** | AccessControl / AccessControlSmall / ResourceAccessControl / Epoch / AdaptiveWaiter / OlcLatch instants |
 | 117–145 | **Spatial** | Query (AABB/Radius/Ray/Frustum/KNN/Count), RTree structural, Grid, Cell:Index, ClusterMigration, TierIndex, Maintain, Trigger |
-| 146–164 | **Scheduler / Runtime** | System lifecycle, Worker idle/wake/between-tick, Dependency, Overload trio, Graph build/rebuild, UoW create/flush, Transaction lifecycle, Subscription output |
+| 146–163 | **Scheduler / Runtime** | System lifecycle, Worker idle/wake/between-tick, Dependency, Overload trio, Graph build/rebuild, UoW create/flush, Transaction lifecycle |
 | 165–172 | **Storage / Memory** | DirtyWalk, Segment Create/Grow/Load, ChunkSegmentGrow, FileHandle, OccupancyMapGrow, AlignmentWaste |
 | 173–186 | **Data plane** | Transaction Init/Prepare/Validate/Conflict/Cleanup, MVCC ChainWalk / VersionCleanup, B+Tree Search/RangeScan/Rebalance/BulkInsert/Root/NodeCow |
 | 187–213 | **Query / ECS:Query / ECS:View** | Parse, DNF, Plan, Estimate, IndexScan, Iterate, Filter, Pagination, plus ECS depth |
 | 214–234 | **Durability** | WAL split (QueueDrain/OsWrite/Signal), GroupCommit, Queue, Buffer, Frame, Backpressure; Checkpoint depth; Recovery; UoW state/deadline |
-| 235–240 | **Subscription dispatch** | Subscriber, DeltaBuild, DeltaSerialize, TransitionBeginSync, Cleanup, DirtyBitmapSupplement |
 | 241–245 | Scheduler follow-ups | MetronomeWait (span), OverloadDetector (instant), RuntimePhaseSpan, QueueTickEnd, SchedulerSystemArchetype |
 | 246 | Fallback | `NamedSpan` — user-defined span with inline UTF-8 name |
 | 247–248 | Query Definition Export | `QueryDefinitionDescribe`, `QueryArgs` — variable-length payloads |

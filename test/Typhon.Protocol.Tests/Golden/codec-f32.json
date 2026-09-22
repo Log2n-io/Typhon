@@ -1,0 +1,103 @@
+{
+  "description": "f32: narrowing ties to even, signed zero, infinities, NaN encoded as 0x7FC00000 and decoded as the canonical NaN.",
+  "codec": {
+    "t": "f32"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 4,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "8000000000000000"
+      ],
+      "offset": 4,
+      "length": 4,
+      "decoded": [
+        "8000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff8000000000000"
+      ],
+      "offset": 8,
+      "length": 4,
+      "decoded": [
+        "3ff8000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3fb999999999999a"
+      ],
+      "offset": 12,
+      "length": 4,
+      "decoded": [
+        "3fb99999a0000000"
+      ]
+    },
+    {
+      "input": [
+        "47efffffe0000000"
+      ],
+      "offset": 16,
+      "length": 4,
+      "decoded": [
+        "47efffffe0000000"
+      ]
+    },
+    {
+      "input": [
+        "7ff0000000000000"
+      ],
+      "offset": 20,
+      "length": 4,
+      "decoded": [
+        "7ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "fff0000000000000"
+      ],
+      "offset": 24,
+      "length": 4,
+      "decoded": [
+        "fff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "nan"
+      ],
+      "offset": 28,
+      "length": 4,
+      "decoded": [
+        "nan"
+      ]
+    },
+    {
+      "offset": 32,
+      "length": 4,
+      "decoded": [
+        "nan"
+      ]
+    },
+    {
+      "offset": 36,
+      "length": 4,
+      "decoded": [
+        "nan"
+      ]
+    }
+  ]
+}

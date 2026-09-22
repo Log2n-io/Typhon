@@ -97,6 +97,77 @@ internal sealed class ComponentInfo
     /// </summary>
     internal Dictionary<long, StagedSlot> CommitStaged;
 
+    /// <summary>
+    /// Capacity above which a recycled entry's per-transaction dictionaries are replaced rather than cleared, so one bulk transaction does not leave a pooled
+    /// accessor holding its buckets forever.
+    /// </summary>
+    internal const int RetainedCacheCapacity = 1024;
+
+    /// <summary>
+    /// Binds this entry to <paramref name="table"/> for a new transaction: every field set, chunk accessors created against <paramref name="changeSet"/>, and
+    /// the per-transaction caches emptied.
+    /// </summary>
+    /// <param name="componentTypeId">The component's in-memory type id.</param>
+    /// <param name="table">The component table.</param>
+    /// <param name="changeSet">The accessor's change set; <see langword="null"/> for a read-only one.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>The one place an entry is initialised</b>, for a new entry and a recycled one alike, so the two can never disagree about a field. An accessor keeps
+    /// its entries across a pooled reuse (<c>EntityAccessor.ResetCore</c>) and rebinds them here, instead of allocating an entry and a dictionary per
+    /// component per transaction.
+    /// </para>
+    /// <para>
+    /// The accessors are overwritten, never disposed: the owning transaction flushed them before it was reset, and a read-only one never flushes — which is
+    /// exactly what dropping the entry did before recycling existed.
+    /// </para>
+    /// </remarks>
+    internal void Bind(int componentTypeId, ComponentTable table, ChangeSet changeSet)
+    {
+        ComponentTypeId = componentTypeId;
+        ComponentTable = table;
+        ComponentOverhead = table.ComponentOverhead;
+        CompContentSegment = null;
+        CompRevTableSegment = null;
+        CompContentAccessor = default;
+        CompRevTableAccessor = default;
+        TransientCompContentAccessor = default;
+
+        switch (table.StorageMode)
+        {
+            case StorageMode.Transient:
+                TransientCompContentAccessor = table.TransientComponentSegment.CreateChunkAccessor();
+                break;
+            case StorageMode.SingleVersion:
+                CompContentSegment = table.ComponentSegment;
+                CompContentAccessor = table.ComponentSegment.CreateChunkAccessor(changeSet);
+                break;
+            default: // Versioned
+                CompContentSegment = table.ComponentSegment;
+                CompRevTableSegment = table.CompRevTableSegment;
+                CompContentAccessor = table.ComponentSegment.CreateChunkAccessor(changeSet);
+                CompRevTableAccessor = table.CompRevTableSegment.CreateChunkAccessor(changeSet);
+                break;
+        }
+
+        if (SingleCache == null || SingleCache.Capacity > RetainedCacheCapacity)
+        {
+            SingleCache = new Dictionary<long, CompRevInfo>();
+        }
+        else
+        {
+            SingleCache.Clear();
+        }
+
+        if (CommitStaged != null && CommitStaged.Capacity > RetainedCacheCapacity)
+        {
+            CommitStaged = null;
+        }
+        else
+        {
+            CommitStaged?.Clear();
+        }
+    }
+
     public void AddNew(long pk, CompRevInfo entry) => SingleCache.Add(pk, entry);
 
     /// <summary>

@@ -536,7 +536,7 @@ static class MassArrivalProfile
         {
             foreach (var hit in cs.QueryAabb(grid, x, y, float.NegativeInfinity, x + QueryEdge, y + QueryEdge, float.PositiveInfinity))
             {
-                found += hit.EntityId == 0 ? 0 : 1;
+                found += hit.Entity.IsNull ? 0 : 1;
             }
         }
 

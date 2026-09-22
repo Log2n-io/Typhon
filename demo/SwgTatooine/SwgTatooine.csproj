@@ -16,6 +16,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />
+    <!-- The browser door (P1-08). It brings the ASP.NET Core framework reference with it, which is why this Exe needs no Web SDK. -->
+    <ProjectReference Include="..\..\src\Typhon.Subscriptions.AspNetCore\Typhon.Subscriptions.AspNetCore.csproj" />
     <ProjectReference Include="..\..\src\Typhon.Schema.Definition\Typhon.Schema.Definition.csproj" />
     <ProjectReference Include="..\..\src\Typhon.Profiler\Typhon.Profiler.csproj" />
     <PackageReference Include="JetBrains.Annotations" Version="2026.2.0" PrivateAssets="all" />

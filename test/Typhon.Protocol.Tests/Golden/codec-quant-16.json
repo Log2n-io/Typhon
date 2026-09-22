@@ -1,0 +1,56 @@
+{
+  "description": "quant at 16 bits: min, the top code at max, a tie.",
+  "codec": {
+    "t": "quant",
+    "bits": 16,
+    "min": [
+      -1
+    ],
+    "max": [
+      1
+    ]
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "bff0000000000000"
+      ],
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 2,
+      "length": 2,
+      "decoded": [
+        "3fefffc000000000"
+      ]
+    },
+    {
+      "input": [
+        "3fefffe000000000"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "3fefffc000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ef0000000000000"
+      ],
+      "offset": 6,
+      "length": 2,
+      "decoded": [
+        "3f00000000000000"
+      ]
+    }
+  ]
+}

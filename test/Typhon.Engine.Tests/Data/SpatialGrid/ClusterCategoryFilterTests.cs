@@ -147,7 +147,7 @@ class ClusterCategoryFilterTests : TestBase<ClusterCategoryFilterTests>
         {
             while (e.MoveNext())
             {
-                set.Add(e.Current.EntityId);
+                set.Add(unchecked((long)e.Current.Entity.RawValue));
             }
         }
         finally
@@ -168,7 +168,7 @@ class ClusterCategoryFilterTests : TestBase<ClusterCategoryFilterTests>
         {
             while (e.MoveNext())
             {
-                set.Add(e.Current.EntityId);
+                set.Add(unchecked((long)e.Current.Entity.RawValue));
             }
         }
         finally

@@ -1,4 +1,8 @@
-﻿using System;
+﻿// CS0618 (SpatialObserverHandle is obsolete) — this benchmark measures the deprecated surface, which is what makes the Phase 2 replacement's numbers
+// comparable (design/Subscriptions/README.md Q9). It goes when the surface does.
+#pragma warning disable CS0618
+
+using System;
 using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;

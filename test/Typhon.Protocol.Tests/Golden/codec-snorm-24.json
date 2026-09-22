@@ -1,0 +1,54 @@
+{
+  "description": "snorm at 24 bits: sign extension of an i24, \u00B11, a tie, and the wire-only code \u22122\u00B2\u00B3 decoding as \u22121.",
+  "codec": {
+    "t": "snorm",
+    "bits": 24
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "bff0000000000000"
+      ],
+      "offset": 0,
+      "length": 3,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 3,
+      "length": 3,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "be70000020000040"
+      ],
+      "offset": 6,
+      "length": 3,
+      "decoded": [
+        "be80000020000040"
+      ]
+    },
+    {
+      "offset": 9,
+      "length": 3,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    },
+    {
+      "offset": 12,
+      "length": 3,
+      "decoded": [
+        "be80000020000040"
+      ]
+    }
+  ]
+}

@@ -46,6 +46,20 @@ public sealed partial class TatooineSim : IDisposable
     {
         ArgumentNullException.ThrowIfNull(config);
         _config = config;
+
+        // A latency knob on the shared pool, set here rather than defaulted in the engine so a sweep can move it: see DagScheduler.WorkerIdleSpinBudget.
+        DagScheduler.WorkerIdleSpinBudget = config.WorkerIdleSpin;
+        if (config.WorkerHotSpinners is { } hot)
+        {
+            DagScheduler.WorkerHotSpinners = hot;
+        }
+
+        if (config.WorkerParkAfterUs is { } parkUs)
+        {
+            DagScheduler.WorkerParkAfterUs = parkUs;
+        }
+
+        DagScheduler.MeasureWorkerIdle = config.SubscriptionsPhaseTiming;
         _simdNarrowphaseBefore = Typhon.Engine.Internals.SpatialQueryTuning.SimdNarrowphase;
     }
 
@@ -103,6 +117,10 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<LairVitals>();
         Dbe.RegisterComponentFromAccessor<CreatureBrain>();
         Dbe.RegisterComponentFromAccessor<NpcBrain>();
+
+        // Scheduling, split out of the two brains above so a write to it reaches no subscriber. See CreatureTimers.
+        Dbe.RegisterComponentFromAccessor<CreatureTimers>();
+        Dbe.RegisterComponentFromAccessor<NpcTimers>();
         Dbe.RegisterComponentFromAccessor<PlayerState>();
         Dbe.RegisterComponentFromAccessor<Lair>();
         Dbe.RegisterComponentFromAccessor<Structure>();
@@ -131,6 +149,7 @@ public sealed partial class TatooineSim : IDisposable
 
         // Process-wide and read when each query is built, so setting it here covers every query the run makes.
         Typhon.Engine.Internals.SpatialQueryTuning.SimdNarrowphase = _config.SimdNarrowphase;
+        Typhon.Engine.Internals.FrameAssembler.PhaseTimingEnabled = _config.SubscriptionsPhaseTiming;
 
         // #927's A/B arm, process-wide and read per cell resolve. Same binary, one switch: two builds differ in JIT codegen as well as in the line under
         // test, which is why this repo's perf rule asks for a switch rather than a rebuild.
@@ -152,6 +171,17 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.SetSpatialBarrierOnly<CityNpc>();
         Dbe.SetSpatialBarrierOnly<Creature>();
         Dbe.SetSpatialBarrierOnly<Player>();
+
+        // Cluster dormancy, off unless asked for (--dormancy N). It is applied to the populations that can genuinely go quiet and NOT to Player: a
+        // player's cluster sleeping would stop dispatching the system that integrates its position, and a session's own avatar is the one entity whose
+        // latency is never worth trading. Creatures and NPCs mark their moved columns dirty (SimBridge), which is what keeps a moving cluster awake.
+        if (_config.DormancyTicks > 0)
+        {
+            Dbe.SetClusterDormancy<Creature>(_config.DormancyTicks);
+            Dbe.SetClusterDormancy<CityNpc>(_config.DormancyTicks);
+            Dbe.SetClusterDormancy<WorldObject>(_config.DormancyTicks);
+            Dbe.SetClusterDormancy<CreatureLair>(_config.DormancyTicks);
+        }
 
         Map = TatooineMap.Build(_config);
         Census = WorldBuilder.Populate(Dbe, Map, _config, Index);

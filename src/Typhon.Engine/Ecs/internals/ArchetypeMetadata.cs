@@ -12,7 +12,16 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 internal class ArchetypeMetadata
 {
-    /// <summary>Globally unique archetype ID from [Archetype] attribute. Embedded in EntityId.</summary>
+    /// <summary>
+    /// The archetype's <b>catalog id</b>: engine-assigned at registration (#514 D1 — not author-set, and not read from the <c>[Archetype]</c> attribute),
+    /// process-global and dense from 1. This is the id every per-archetype engine table is indexed by, and the one <c>Archetype&lt;T&gt;.CatalogId</c> exposes.
+    /// </summary>
+    /// <remarks>
+    /// <b>It is NOT the id embedded in an <see cref="EntityId"/>.</b> Those low 16 bits carry the per-database <i>routing</i> id
+    /// (<c>DatabaseEngine.RoutingIdOf</c>, persisted as <c>ArchetypeR1.RoutingId</c>); go from one to the other with
+    /// <c>DatabaseEngine.GetMetaByRouting</c>. The two counters start at 1 independently, so they often coincide in a single-database process and diverge
+    /// without warning as soon as they do not.
+    /// </remarks>
     public ushort ArchetypeId;
 
     /// <summary>Schema revision from [Archetype(Revision)] attribute.</summary>

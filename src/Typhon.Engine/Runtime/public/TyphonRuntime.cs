@@ -44,6 +44,40 @@ public sealed partial class TyphonRuntime : IDisposable
     private readonly LiveFenceCostModel _liveFenceCost;
     private readonly bool _parallelFenceEnabled;
 
+    // Engine-owned replication (#955). The track is always declared — unlike the Fence DAG it has no alternative implementation, so
+    // there is nothing to fall back to and no switch worth offering. With nothing subscribed its cost is the four gate checks, but only because
+    // DispatchTrackMultiThreaded now returns before waking the pool for a track that drained inline; until that was fixed a declared-but-idle track cost
+    // a full wake/barrier cycle every tick. The context is owned here rather than on DatabaseEngine because nothing in the engine touches v2; see
+    // SubscriptionsContext's remarks.
+    private readonly SubscriptionsContext _subscriptionsContext = new();
+
+    // The database's network identities, shared by every replicated archetype because netIds are global: the wire encodes an event once and memcpy's it to
+    // every receiver on the strength of that, and an entityRef arrives with no archetype to disambiguate it. Constructed in the ctor rather than inline
+    // because it is a resource-graph node and needs a parent.
+    private readonly NetIdAllocator _netIds;
+
+    // What the application declares about replication: projections, profiles, sessions, commands, events and metrics. Holds no tick-time state of its own —
+    // Start compiles it, and from then on it is frozen and the compiled plan is what the track reads.
+    private readonly SubscriptionsRegistry _subscriptions;
+
+    // What those declarations became: the compiled plan, the catalog WELCOME carries, the session table, the pools and the per-archetype replication state.
+    // Built at Start because compiling needs the engine's archetypes initialised, and disposed with the runtime. Every later replication field belongs on IT,
+    // not here and not on the tick context — see SubscriptionsRuntime's remarks.
+    private SubscriptionsRuntime _subscriptionsRuntime;
+
+    /// <summary>The replication track's tick-scoped context. Internal: the session count is written by ingress, and tests read its ordering journal.</summary>
+    internal SubscriptionsContext SubscriptionsContextForTest => _subscriptionsContext;
+
+    /// <summary>
+    /// Invoked on the TickDriver at the very end of every tick that ran, with the context whose ordering journal has just been sealed.
+    /// </summary>
+    /// <remarks>
+    /// The instrument SUB-02's verifier is written against. Asserting a phase ORDER from the test thread means reading four counters that the tick driver is
+    /// concurrently resetting, and any such read can straddle a tick boundary; handing the sealed journal to a callback ON the driver thread removes the race
+    /// rather than narrowing it. Null in every production path, so the cost is one null check per tick.
+    /// </remarks>
+    internal Action<SubscriptionsContext> SubscriptionsJournalObserver;
+
     // Per-system transaction tracking. Only one worker processes a given system index at a time (CAS on _isReady ensures single claimer), so no contention
     // on these slots.
     private readonly Transaction[] _systemTransactions;
@@ -104,15 +138,6 @@ public sealed partial class TyphonRuntime : IDisposable
     // DeltaTime tracking
     private long _previousTickTimestamp;
     private float _currentDeltaTime;
-
-    // ═══════════════════════════════════════════════════════════════
-    // Subscription server
-    // ═══════════════════════════════════════════════════════════════
-
-    private readonly PublishedViewRegistry _publishedViewRegistry = new();
-    private readonly ClientConnectionManager _clientConnectionManager = new();
-    private SubscriptionOutputPhase _subscriptionOutputPhase;
-    private TcpSubscriptionServer _tcpServer;
 
     // ═══════════════════════════════════════════════════════════════
     // Lifecycle events
@@ -229,6 +254,10 @@ public sealed partial class TyphonRuntime : IDisposable
             fenceBundle = FenceDagBuilder.DeclareFenceDag(schedule, engine);
         }
 
+        // Engine-owned replication on the Engine-Subscriptions track (#955). Declared unconditionally and with no option to suppress it: a disable switch would
+        // reintroduce, as configuration, the same "silently never runs" trap the serial-fence dispatch below closes.
+        SubscriptionsDagBuilder.DeclareSubscriptionsDag(schedule, engine);
+
         var resourceParent = parent ?? engine.Parent; // DatabaseEngine registers under DataEngine node
         var scheduler = schedule.Build(resourceParent, logger);
 
@@ -257,6 +286,15 @@ public sealed partial class TyphonRuntime : IDisposable
         Engine = engine;
         Scheduler = scheduler;
         Options = options;
+
+        // Parented under the scheduler, not under engine.Parent. The scheduler is always present, whereas a runtime built against an engine with no resource
+        // parent would otherwise throw here — during EVERY runtime construction, for a subsystem nothing has switched on yet.
+        // The quarantine spans the whole window a session may be stalled for, plus the tick of the release itself (D1): an identity must not be reissued
+        // while any session could still owe a frame that names its previous holder. It is derived from the SAME conversion the frame assembler does, at this
+        // runtime's own tick rate, so the two cannot drift: a quarantine sized from a different number than the one that closes sessions is a SUB-06 hole.
+        var closeBoundTicks = SkipPolicy.CloseBoundTicks(options.Subscriptions, SubscriptionsRuntime.NominalTickPeriodUsFor(options.BaseTickRate));
+        _netIds = new NetIdAllocator("Subscriptions.NetIds", scheduler, quarantineTicks: Math.Max(1, closeBoundTicks) + 1);
+        _subscriptions = new SubscriptionsRegistry(options.Subscriptions);
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];
         _systemViews = new ViewBase[scheduler.AllSystemCount];
@@ -287,10 +325,6 @@ public sealed partial class TyphonRuntime : IDisposable
 
         ResolveChangeFilters(scheduler);
 
-        // Initialize subscription infrastructure
-        var subOptions = options.SubscriptionServer ?? new SubscriptionServerOptions();
-        _subscriptionOutputPhase = new SubscriptionOutputPhase(engine, _publishedViewRegistry, _clientConnectionManager, subOptions, logger);
-
         // Wire tick lifecycle hooks
         Scheduler.TickStartCallback = OnTickStartInternal;
         Scheduler.TickEndCallback = OnTickEndInternal;
@@ -299,17 +333,6 @@ public sealed partial class TyphonRuntime : IDisposable
         Scheduler.ParallelQueryPrepareCallback = OnParallelQueryPrepare;
         Scheduler.ParallelQueryChunkCallback = OnParallelQueryChunk;
         Scheduler.ParallelQueryCleanupCallback = OnParallelQueryCleanup;
-
-        // Wire subscription telemetry enrichment
-        Scheduler.TelemetryEnrichCallback = (ref t) =>
-        {
-            if (_subscriptionOutputPhase != null)
-            {
-                t.OutputPhaseMs = _subscriptionOutputPhase.LastOutputPhaseMs;
-                t.SubscriptionDeltasPushed = _subscriptionOutputPhase.LastDeltasPushed;
-                t.SubscriptionOverflowCount = _subscriptionOutputPhase.LastOverflowCount;
-            }
-        };
 
         // Wire profiler gauge snapshot — only when gauges are enabled, so the callback pointer stays null otherwise and the scheduler's
         // null-check is the only cost. See TyphonRuntime.GaugeSnapshot.cs for the collection + emit implementation.
@@ -326,24 +349,111 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             Scheduler.RegisterContext(Engine.FenceContext);
         }
+
+        // Same window as the fence context: after Build, before Start, or Start's binding validation rejects the typed stages. Unconditional, because the
+        // Subscriptions track is unconditional — a stage left with a null Context would throw at Start rather than quietly not run.
+        _subscriptionsContext.AttachScheduler(Scheduler);
+        Scheduler.RegisterContext(_subscriptionsContext);
     }
 
     // ═══════════════════════════════════════════════════════════════
     // Lifecycle
     // ═══════════════════════════════════════════════════════════════
 
-    /// <summary>Starts the scheduler (worker threads + tick driver) and the subscription server (if configured).</summary>
+    /// <summary>
+    /// What clients may see, send and hear: projections, interest profiles, session kinds, commands, events and metrics. Configure it before
+    /// <see cref="Start"/>; afterwards it is frozen and every declaring call throws.
+    /// </summary>
+    /// <remarks>
+    /// <b>Replication belongs to the runtime, not to <see cref="DatabaseEngine"/>, because it rides the tick.</b> The declarations here are compiled exactly
+    /// once, at <see cref="Start"/>, into the plan the subscriptions track walks and the catalog clients negotiate against — which is why a late declaration
+    /// is refused loudly rather than silently ignored: it would be a declaration no client had ever been told about.
+    /// </remarks>
+    public SubscriptionsRegistry Subscriptions => _subscriptions;
+
+    /// <summary>
+    /// The canonical catalog this runtime compiled, as UTF-8 JSON. Empty before <c>Start</c>, and on a runtime that declares nothing.
+    /// </summary>
+    /// <remarks>
+    /// Exactly the bytes <c>WELCOME</c> carries, which is the point: a host serving them at <c>/typhon/catalog.json</c> for build-time codegen and for tools
+    /// must not be serving a second rendering of the same declarations, because the hash a client echoes is computed over these bytes. Never mutated after
+    /// <c>Start</c>, so it is handed out directly rather than copied.
+    /// </remarks>
+    public ReadOnlyMemory<byte> SubscriptionsCatalogJson => _subscriptionsRuntime?.Catalog?.Utf8;
+
+    /// <summary>
+    /// The acceptor a transport hands its connections to. <see langword="null"/> before <see cref="Start"/>, and on a runtime whose application declared no
+    /// subscriptions.
+    /// </summary>
+    /// <remarks>
+    /// <b>Public since P1-08, which is the slice that had to answer it.</b> The interfaces it is used through — <see cref="ISubscriptionTransport"/>,
+    /// <see cref="ISubscriptionAcceptor"/>, <see cref="ISubscriptionLink"/> — were public already, because a transport is a thing an application writes;
+    /// <c>Typhon.Subscriptions.AspNetCore</c> is a separate assembly and has to be able to register one. The shape is the smallest that works: hand the
+    /// listener over, it is started once and given the acceptor, and stopping it stays the caller's through its own <c>StopAsync</c>.
+    /// </remarks>
+    internal ISubscriptionAcceptor SubscriptionAcceptor => _subscriptionsRuntime?.Acceptor;
+
+    /// <summary>
+    /// Starts <paramref name="transport"/> against this runtime's replication.
+    /// </summary>
+    /// <param name="transport">The listener. It is started once and handed the acceptor; stopping it is the caller's, through its own <c>StopAsync</c>.</param>
+    /// <exception cref="InvalidOperationException">The runtime has not started, or it declares no subscriptions.</exception>
+    /// <remarks>
+    /// Both refusals are loud, and deliberately: a transport bound to a runtime that can never admit anyone is a listener that accepts connections and closes
+    /// every one of them, which reads to an operator as a network fault rather than as a missing declaration.
+    /// </remarks>
+    public void StartSubscriptionTransport(ISubscriptionTransport transport)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+
+        if (_subscriptionsRuntime == null)
+        {
+            throw new InvalidOperationException(
+                "A subscription transport can only be started after TyphonRuntime.Start(): the catalog a client negotiates against is compiled there.");
+        }
+
+        var acceptor = _subscriptionsRuntime.Acceptor;
+        if (acceptor == null)
+        {
+            throw new InvalidOperationException(
+                "This runtime declares no subscriptions, so it has no catalog, no session table and nothing to admit a client to. Declare at least one " +
+                "archetype, profile or session kind on TyphonRuntime.Subscriptions before Start().");
+        }
+
+        transport.Start(acceptor);
+    }
+
+    /// <summary>Starts the scheduler (worker threads + tick driver).</summary>
     public void Start()
     {
-        Scheduler.Start();
-
-        // Start TCP subscription server if a port is configured
-        var subOptions = Options.SubscriptionServer;
-        if (subOptions != null && subOptions.Port > 0)
+        // Before the scheduler, deliberately: compiling the declarations can refuse the configuration, and refusing it on a runtime whose workers have not yet
+        // started leaves nothing to unwind. Building here rather than in the constructor is equally deliberate — resolving a projection reads the engine's
+        // archetype layouts and its spatial grid, and an application configures both between Create and Start.
+        _subscriptions.Freeze();
+        if (_subscriptionsRuntime == null)
         {
-            _tcpServer = new TcpSubscriptionServer(subOptions, _clientConnectionManager, _subscriptionOutputPhase, _logger);
-            _tcpServer.Start();
+            // The context's telemetry, not a fresh one: the stages write to the instance the context owns, and STATS has to read the same object or the
+            // track metric would report zeros from a ring nothing fills.
+            var built = new SubscriptionsRuntime(Engine, _subscriptions, Options, Scheduler, _netIds, SystemNames(), _subscriptionsContext.Telemetry);
+            _subscriptionsRuntime = built;
+
+            // Published to the stages before a worker exists to read it: Scheduler.Start is what creates them, and starting a thread is itself a barrier.
+            _subscriptionsContext.AttachSubscriptions(built);
         }
+
+        Scheduler.Start();
+    }
+
+    /// <summary>The scheduled systems' names, in schedule order — the labels of the built-in per-system metric the catalog declares.</summary>
+    private string[] SystemNames()
+    {
+        var names = new string[Scheduler.AllSystemCount];
+        for (var i = 0; i < names.Length; i++)
+        {
+            names[i] = Scheduler.Systems[i]?.Name;
+        }
+
+        return names;
     }
 
     /// <summary>
@@ -393,9 +503,6 @@ public sealed partial class TyphonRuntime : IDisposable
         // No-op unless the profiler was self-wired by ProfilerBootstrap.TryStart.
         ProfilerBootstrap.BeginStop();
 
-        // Stop accepting new connections and flush remaining data
-        _tcpServer?.Shutdown();
-
         // Execute OnShutdown callback with a dedicated transaction
         if (runOnShutdown && OnShutdown != null)
         {
@@ -409,6 +516,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 Entities = PooledEntityList.Empty,
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                Subscriptions = _subscriptionsRuntime?.Commands,
                 // Runs on whichever thread called Shutdown()/FatalStop() — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
                 ChunkCount = 1
@@ -423,8 +531,19 @@ public sealed partial class TyphonRuntime : IDisposable
     /// <inheritdoc />
     public void Dispose()
     {
-        _tcpServer?.Dispose();
         Scheduler.Dispose();
+
+        // AFTER the scheduler too, and for the same reason as the identity allocator below, only harder: the replication state hands the ECS a reference the
+        // cluster-drain hook calls, and its directory holds raw pointers into the block pool's native slabs. Tearing it down while a tick could still reach
+        // it is a use-after-free rather than a disposed-object exception. Shutdown() is not the place either — neither it nor FatalStop is a quiescence
+        // point; Scheduler.Dispose is the line that joins the workers and stops the timer thread.
+        _subscriptionsRuntime?.Dispose();
+
+        // AFTER the scheduler, not before. A tick already past the shutdown check keeps dispatching on the timer thread, and every tick ends by draining this
+        // allocator's quarantine — so disposing it first opens a window where that drain runs against a disposed object. Scheduler.Dispose joins the workers
+        // and stops the timer thread, so nothing can reach it once this line is passed. DrainQuarantine tolerates disposal as well, because belt and braces is
+        // what the equivalent disposed-signal bug cost to learn the first time.
+        _netIds?.Dispose();
 
         // Dispose per-system PTAs AFTER scheduler — workers must be fully stopped
         // before we flush their per-thread EntityAccessors' ChangeSets.
@@ -438,54 +557,6 @@ public sealed partial class TyphonRuntime : IDisposable
         // every host AND after the engine's shutdown teardown, so those events still reach the trace. Stopping it here
         // would precede the engine teardown and drop it. Shutdown() above only pre-warms the async CPU-sampler stop.
     }
-
-    // ═══════════════════════════════════════════════════════════════
-    // Subscription API
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Publish a shared View for client subscriptions. All subscribers see the same data; the delta is serialized once and memcpy'd.
-    /// </summary>
-    /// <remarks>
-    /// <para>The View must be a dedicated instance — it must NOT be used as a system input. Published Views are refreshed only during
-    /// the Output phase; using the same View as system input would consume ring buffer entries needed by subscriptions.</para>
-    /// </remarks>
-    /// <param name="name">Human-readable name clients use to identify this subscription.</param>
-    /// <param name="view">A dedicated ViewBase instance for subscriptions.</param>
-    /// <param name="priority">Subscription priority for overload throttling.</param>
-    /// <returns>The published View handle.</returns>
-    public PublishedView PublishView(string name, ViewBase view, SubscriptionPriority priority = SubscriptionPriority.Normal) =>
-        _publishedViewRegistry.RegisterShared(name, view, priority);
-
-    /// <summary>
-    /// Publish a per-client View factory. A new View is created per subscriber, parameterized by <see cref="ClientContext"/>.
-    /// </summary>
-    /// <param name="name">Human-readable name clients use to identify this subscription.</param>
-    /// <param name="factory">Factory that creates a View for each subscribing client.</param>
-    /// <param name="priority">Subscription priority for overload throttling.</param>
-    /// <returns>The published View handle.</returns>
-    public PublishedView PublishView(string name, Func<ClientContext, ViewBase> factory, SubscriptionPriority priority = SubscriptionPriority.Normal) =>
-        _publishedViewRegistry.RegisterPerClient(name, factory, priority);
-
-    /// <summary>
-    /// Set a client's subscription set. Replaces the previous set atomically. The transition is applied during the next tick's Output phase.
-    /// Looks up the connection by <see cref="ClientContext.ConnectionId"/> — the public client identity. If the connection has been
-    /// dropped between the caller obtaining the context and this call, the request is silently ignored (the next tick will see no
-    /// pending change for a disposed client anyway).
-    /// </summary>
-    /// <remarks>If called multiple times within a tick, the last call wins.</remarks>
-    public void SetSubscriptions(ClientContext client, params PublishedView[] views)
-    {
-        ArgumentNullException.ThrowIfNull(client);
-        var connection = _clientConnectionManager.Get(client.ConnectionId);
-        connection?.SetSubscriptions(views);
-    }
-
-    /// <summary>The published View registry (for diagnostics and testing).</summary>
-    public PublishedViewRegistry PublishedViews => _publishedViewRegistry;
-
-    /// <summary>The client connection manager (for diagnostics and testing).</summary>
-    internal ClientConnectionManager ClientConnections => _clientConnectionManager;
 
     // ═══════════════════════════════════════════════════════════════
     // Side-transaction factory
@@ -525,13 +596,6 @@ public sealed partial class TyphonRuntime : IDisposable
                 if (_systemViews[i] == null)
                 {
                     throw new InvalidOperationException($"System '{sys.Name}': InputFactory returned null. The View must be created before the runtime starts.");
-                }
-
-                if (_systemViews[i].IsPublished)
-                {
-                    throw new InvalidOperationException(
-                        $"System '{sys.Name}': Input View (ViewId={_systemViews[i].ViewId}) is already published for subscriptions. " +
-                        "Published Views must be separate instances from system input Views. Create a new View with the same query.");
                 }
 
                 _systemViews[i].IsSystemInput = true;
@@ -1655,10 +1719,31 @@ public sealed partial class TyphonRuntime : IDisposable
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks,
             TierBudgetMetrics = _previousTickMetrics,
-            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid)
+            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            Subscriptions = _subscriptionsRuntime?.Commands
         };
         ctx.DebugValidateWorkerId(Scheduler.WorkerSlotCount, sys.Name);
-        sys.CallbackAction(ctx);
+
+        // RT-01: every system body runs inside an epoch scope. This shape is the one that had none — a serial system gets one from its transaction and a
+        // parallel query system from its per-worker accessor, but a chunked callback builds a bare TickContext and calls straight into user code. Without
+        // this, ChunkedCallbackSystem is a PUBLIC shape from which the public spatial query cannot legally be called (#909). EpochGuard nests and only the
+        // outermost scope advances the global epoch, so the fence's own guards stay correct and this costs one atomic pair per chunk.
+        // The null check is NOT dead code, whatever the construction path alone suggests. This file guards Engine at ten sites — two of them explicit
+        // `Engine != null` tests on dispatch paths (:588, :1064) — and the TickContext built just above already reads `Engine?.SpatialGrid`. A dispatch that
+        // reaches here without a live engine must not take an NullReferenceException on the tick path, which is what dereferencing unguarded would give it.
+        // When it does happen the body runs unscoped: that is exactly the pre-#909 behaviour for this shape, and strictly better than throwing, so RT-01
+        // carries the caveat rather than this method asserting it away.
+        var epochManager = Engine?.EpochManager;
+        if (epochManager == null)
+        {
+            sys.CallbackAction(ctx);
+            return;
+        }
+
+        using (EpochGuard.Enter(epochManager))
+        {
+            sys.CallbackAction(ctx);
+        }
     }
 
     /// <summary>Paths 1 &amp; 2: Non-Versioned chunk execution with per-worker EntityAccessor from per-system PTA.</summary>
@@ -1766,6 +1851,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ClusterIds = clusterIdArray,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            Subscriptions = _subscriptionsRuntime?.Commands,
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks
@@ -1909,6 +1995,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 ClusterIds = clusterIdArray,
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                Subscriptions = _subscriptionsRuntime?.Commands,
                 WorkerId = workerId,
                 ChunkIndex = chunkIndex,
                 ChunkCount = totalChunks
@@ -1978,6 +2065,11 @@ public sealed partial class TyphonRuntime : IDisposable
         _currentDeltaTime = _previousTickTimestamp > 0 ? (float)((now - _previousTickTimestamp) / (double)Stopwatch.Frequency) : 0f;
         _previousTickTimestamp = now;
 
+        // Where the tick is, for the transport threads that answer WELCOME and PONG: the tick number, the period it is running at, and the instant it began.
+        // Here rather than from a timer of replication's own, because this is the statement that already knows all three — `now` is the tick's origin, and it
+        // has just been taken. Three volatile writes, no allocation, and nothing at all when the application declared no subscriptions.
+        _subscriptionsRuntime?.PublishTickState(scheduler.CurrentTickNumber, now, scheduler.CurrentTickMultiplier);
+
         // Every checkerboard system starts the tick at phase 0 (CB-02). A system that failed in its Red phase starts no Black phase, and its cleanup has left
         // phase 1 behind; kept, it would make this tick's first prepare serve the previous tick's Black list and skip Red.
         Array.Clear(_checkerboardPhase);
@@ -2009,6 +2101,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 Entities = PooledEntityList.Empty,
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                Subscriptions = _subscriptionsRuntime?.Commands,
                 // Runs on the tick thread before any worker wakes — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
                 ChunkCount = 1
@@ -2171,6 +2264,16 @@ public sealed partial class TyphonRuntime : IDisposable
         // outcome stayed the PREVIOUS tick's `Success`, and the runtime went on ticking — the same silence the parallel arm had, reached a different way.
         // The parallel arm's own phases are caught by the scheduler and reported through RecordSystemFailure; what can still reach here from it is a throw
         // in RunParallelFence's serial prep, which is engine code on the tick driver and belongs in the same verdict.
+
+        // Reset the replication context BEFORE the fence, not beside the dispatch. A fence that throws never reaches its dispatch, so a reset placed there
+        // would leave the previous tick's journal standing on exactly the tick whose emptiness is the thing worth observing.
+        _subscriptionsContext.Reset(scheduler.CurrentTickNumber, scheduler.WorkerCount);
+
+        // The tick boundary the identity quarantine is defined against. Every netId released during the previous tick becomes reissuable here and not before,
+        // so no frame can carry both the leave of an identity's old holder and the enter of its new one — the wire applies leaves last, so such a frame would
+        // land the leave on the entity that just entered. Once per tick, on the driver thread, before the track dispatches.
+        _netIds.DrainQuarantine();
+
         try
         {
             if (_parallelFenceEnabled)
@@ -2194,7 +2297,19 @@ public sealed partial class TyphonRuntime : IDisposable
             }
             else
             {
+                // EW-01's window is opened INSIDE DatabaseEngine.WriteTickFence and closes when that returns, so a track dispatched afterwards would run
+                // OUTSIDE it — while the parallel path runs the same track inside one. Opening a window here holds it across both the fence and the dispatch,
+                // so the two fence paths offer the same quiescence, which is what SingleVersion and Transient reads require (AC-05 / SNAP-02: no snapshot to
+                // read from, so the guarantee has to be that nothing is writing). ExclusiveWindow keeps a DEPTH rather than a flag precisely so this nests —
+                // the inner Open() takes it to 2 and back to 1, and the track still sees an open window.
+                using var window = Engine.EpochManager.FenceWindow.Open();
                 InspectorPhase(TickPhase.WriteTickFence, () => Engine.WriteTickFence(scheduler.CurrentTickNumber, _currentUow?.ChangeSet));
+
+                // The trap #955 closes. DispatchDeferredTracks had exactly ONE call site — inside RunParallelFence — so with EnableParallelFence = false
+                // every deferred track silently never executed. That was invisible while the Fence DAG was the only one, because it is not declared in
+                // serial mode at all: the loop was empty, so nothing was missing. A second deferred track inherits the trap instead of revealing it.
+                _subscriptionsContext.NoteFence();
+                scheduler.DispatchDeferredTracks();
             }
         }
         catch (Exception ex)
@@ -2214,11 +2329,23 @@ public sealed partial class TyphonRuntime : IDisposable
             {
                 _currentUow?.Flush();
             }
+            catch (Exception)
+            {
+                // SUB-02's fourth clause, at the only point it can be observed: the flush throws out of this phase and the publication gate below is never
+                // reached, so the frames this tick produced would sit in their slots forever. Every session that produced one is closed here instead.
+                _subscriptionsRuntime?.DiscardFrames();
+                throw;
+            }
             finally
             {
                 _currentUow?.Dispose();
                 _currentUow = null;
                 TyphonEvent.EmitRuntimePhaseUoWFlush(scheduler.CurrentTickNumber, 0);
+
+                // In the `finally`, so a flush that THREW still stamps. SUB-02's fourth clause is about exactly that tick — a flush that fails after
+                // frames were produced has to close every session, because produced-but-unpublished frames leave client baselines ahead of the
+                // clients — and a verifier for it needs to see that the flush was reached at all.
+                _subscriptionsContext.NoteFlush();
             }
         });
 
@@ -2237,29 +2364,37 @@ public sealed partial class TyphonRuntime : IDisposable
         LastTickOutcome = tickAborted ? scheduler.AbortedOutcome : fenceFailed 
             ? scheduler.FenceFailureOutcome : TickOutcome.ForSuccess(scheduler.CurrentTickNumber);
 
-        // #199: Output phase — subscription deltas.
-        // Runs AFTER WriteTickFence so that:
-        //   1. Ring buffer has ALL entries (commit-time + shadow-time) for correct View membership
-        //   2. PreviousTickDirtyBitmap has this tick's dirty chunks for Modified detection
-        //   3. All state is quiescent (no concurrent writers)
-        //
-        // Suppressed on an aborted tick (#567): publication is the ONE tick-end act carrying tick-wide "this was a good tick" semantics, so it is the only one
-        // of the three that may be skipped. The fence and the flush above ran unconditionally and must keep doing so — rule TP-01a.
-        // Suppressed on a fence failure for the same reason as on an abort, and with a sharper one: the output phase reads this tick's dirty bitmap and the
-        // ring buffer, and a fence that did not reach Finalize left neither of them complete. Publishing deltas from it would tell subscribers a story the
-        // WAL does not carry.
+        // Publication is the ONE tick-end act carrying tick-wide "this was a good tick" semantics, so it is the only one of the three that may be skipped on an
+        // aborted or fence-failed tick (#567) — the fence and the flush above ran unconditionally and must keep doing so, rule TP-01a.
         if (!tickAborted && !fenceFailed)
         {
-            InspectorPhase(TickPhase.OutputPhase, () =>
+            // Replication publishes here, after the flush, under the same gate as the compute half PLUS the fault check — SUB-02 makes the two skippable
+            // together and only together. The extra condition exists because making a replication failure non-terminal (Track.FailureIsTerminal) removed the
+            // signal this gate used to key on: a stage throw latches neither `tickAborted` nor `fenceFailed`, so without it a tick whose compute blew up would
+            // publish as though it had succeeded — moving every receiving session's baseline past records it was never sent.
+            if (!_subscriptionsContext.Faulted)
             {
-                using var subSpan = TyphonEvent.BeginRuntimeSubscriptionOutputExecute(
-                    scheduler.CurrentTickNumber, (byte)Scheduler.CurrentOverloadLevel);
-                _subscriptionOutputPhase?.Execute(scheduler.CurrentTickNumber, Scheduler.CurrentOverloadLevel);
-                // Stats fields (clientCount, viewsRefreshed, deltasPushed, overflowCount) populated when Phase 9 wires per-tick subscription metrics back from
-                // SubscriptionOutputPhase.
-            });
+                _subscriptionsContext.NotePublish();
+
+                // The frames themselves leave here, and nowhere else. Releasing the committed tick is what makes them sendable, and it happens after the
+                // flush above because a frame must never tell a session a story the WAL does not carry (SUB-02).
+                _subscriptionsRuntime?.PublishFrames(scheduler.CurrentTickNumber);
+            }
+            else
+            {
+                // A replication stage faulted after frames were produced. They describe a tick that will never be published, so they can never be sent —
+                // and the sessions holding them would fill their slots and stall. Closing them is SUB-02's fourth clause.
+                _subscriptionsRuntime?.DiscardFrames();
+            }
         }
-        else if (!_tickAbortedNotified)
+        else
+        {
+            // Aborted or fence-failed: same reasoning as the faulted case above, and it has to happen on every such tick rather than only on the first, since
+            // each one can have produced frames of its own.
+            _subscriptionsRuntime?.DiscardFrames();
+        }
+
+        if ((tickAborted || fenceFailed) && !_tickAbortedNotified)
         {
             // One event for both verdicts: a host that reacts to OnTickAborted by stopping the runtime wants to do exactly that here too, and
             // TickOutcome.Reason tells the two apart.
@@ -2268,6 +2403,10 @@ public sealed partial class TyphonRuntime : IDisposable
             _tickAbortedNotified = true;
             OnTickAborted?.Invoke(this, LastTickOutcome);
         }
+
+        // Last statement of the tick, and on EVERY path through it — an aborted or fence-failed tick seals a journal too, because "nothing was computed or
+        // published" is an observation that needs a sealed record to be read from, not an absence of one.
+        SubscriptionsJournalObserver?.Invoke(_subscriptionsContext);
     }
 
     /// <summary>
@@ -2328,6 +2467,10 @@ public sealed partial class TyphonRuntime : IDisposable
         // Dispatch the deferred Engine-Post track (the Fence DAG) — OUTSIDE the WriteTickFence marker (see above). The scheduler walks Prep → Migrate →
         // AabbRefresh → Finalize via the declared `.After()` edges. Each phase's Prepare(ctx) builds its plan from FenceContext and sets RuntimeChunkCount;
         // ShouldRun/Prepare returning 0 skips cleanly with successor fan-out.
+        // Stamped immediately before the dispatch, because this ONE call walks Engine-Post and Engine-Subscriptions in order: there is no statement between
+        // the Fence DAG and the replication track to stamp from. Track order is a barrier (PH-01), and THAT is what guarantees every fence phase completes
+        // before replication's first stage starts — the stamp records the serial fence prep, and the barrier does the rest.
+        _subscriptionsContext.NoteFence();
         scheduler.DispatchDeferredTracks();
 
         ctx.HighestArchetypeLsn = _fenceFinalizeExec.HighestLsn;
@@ -2631,6 +2774,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ConsumedQueues = _systemConsumedQueues[sysIdx],
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            Subscriptions = _subscriptionsRuntime?.Commands,
             WorkerId = workerId,
             // Single-invocation system: one chunk, index 0. Left at the default 0 before #860, which made the documented slicing formula
             // (start = ChunkIndex * len / ChunkCount) divide by zero for any non-chunked system that used it.

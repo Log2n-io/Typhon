@@ -14,10 +14,10 @@ namespace Typhon.Engine;
 /// </summary>
 /// <remarks>
 /// <para>
-/// A schedule owns three built-in <see cref="Track"/>s — Engine-Pre, <see cref="PublicTrack"/>, Engine-Post — in that execution order. Apps declare their DAGs
-/// on the Public track (<c>schedule.PublicTrack.DeclareDag("Game").Add(...)</c>) and may add further app tracks via <see cref="DeclareTrack"/>; those slot into
-/// the app region between Public and Engine-Post in declaration (execution) order. The engine declares its own DAGs (the Fence) on the Engine-Post track.
-/// Declaring a DAG is mandatory — there is no default-DAG convenience.
+/// A schedule owns four built-in <see cref="Track"/>s — Engine-Pre, <see cref="PublicTrack"/>, Engine-Post, Engine-Subscriptions — in that execution order.
+/// Apps declare their DAGs on the Public track (<c>schedule.PublicTrack.DeclareDag("Game").Add(...)</c>) and may add further app tracks via
+/// <see cref="DeclareTrack"/>; those slot into the app region between Public and Engine-Post in declaration (execution) order. The engine declares its own DAGs
+/// on the engine tracks: the Fence on Engine-Post, replication on Engine-Subscriptions. Declaring a DAG is mandatory — there is no default-DAG convenience.
 /// </para>
 /// </remarks>
 [PublicAPI]
@@ -34,12 +34,20 @@ public sealed class RuntimeSchedule
     {
         _options = options ?? new RuntimeOptions();
 
-        // Built-in tracks, in execution order. Engine-Pre / Engine-Post carry the `engine` tag so tooling can hide them by default; Public is the app's track.
-        // Engine-Pre is empty initially — declared for symmetry.
+        // Built-in tracks, in execution order. The three engine tracks carry the `engine` tag so tooling can hide them by default; Public is the app's track.
+        // Engine-Pre is empty initially — declared for symmetry, and it is where the Subscriptions ingress drain will land.
+        //
+        // Engine-Subscriptions is LAST, after Engine-Post, and that position is the ordering guarantee rather than a convention: a track is a barrier (PH-01),
+        // so every fence phase has completed before replication's first stage starts, and DeclareTrack cannot place an app track after it.
         EnginePreTrack = new Track(this, "Engine-Pre", 0, [Track.EngineTag]);
         PublicTrack = new Track(this, "Public", 1, []);
         EnginePostTrack = new Track(this, "Engine-Post", 2, [Track.EngineTag]);
-        _tracks = [EnginePreTrack, PublicTrack, EnginePostTrack];
+        //
+        // FailureIsTerminal: false. A throw in a replication stage must not stop the engine. Every other engine track's work is a durability precondition, so
+        // its failure is terminal by design; replication's is not — it writes only RAM-only blocks that no checkpoint or WAL ever sees, so there is nothing a
+        // later tick could compound. Without this the newest subsystem in the engine would also be the one most able to kill it.
+        EngineSubscriptionsTrack = new Track(this, "Engine-Subscriptions", 3, [Track.EngineTag]) { FailureIsTerminal = false };
+        _tracks = [EnginePreTrack, PublicTrack, EnginePostTrack, EngineSubscriptionsTrack];
     }
 
     /// <summary>Creates a new runtime schedule builder.</summary>
@@ -59,7 +67,14 @@ public sealed class RuntimeSchedule
     /// <summary>The built-in Engine-Post track — engine work after the app (currently the parallel Fence DAG).</summary>
     public Track EnginePostTrack { get; }
 
-    /// <summary>All tracks in execution order: Engine-Pre, Public, any app tracks (see <see cref="DeclareTrack"/>), Engine-Post.</summary>
+    /// <summary>
+    /// The built-in Engine-Subscriptions track — engine-owned replication, dispatched after the fence and before the durability flush.
+    /// </summary>
+    public Track EngineSubscriptionsTrack { get; }
+
+    /// <summary>
+    /// All tracks in execution order: Engine-Pre, Public, any app tracks (see <see cref="DeclareTrack"/>), Engine-Post, Engine-Subscriptions.
+    /// </summary>
     public IReadOnlyList<Track> Tracks => _tracks;
 
     /// <summary>
@@ -106,9 +121,13 @@ public sealed class RuntimeSchedule
         }
 
         // Slot into the app region: after the last app track, before Engine-Post. OrderIndex is reassigned by position so the execution-order contract
-        // (Engine-Pre → app tracks → Engine-Post) always holds.
+        // (Engine-Pre → app tracks → Engine-Post → Engine-Subscriptions) always holds.
+        //
+        // Anchored on Engine-Post's position, NOT on `_tracks.Count - 1`. The two agreed only while Engine-Post was the last track; once Engine-Subscriptions
+        // was added behind it, inserting at Count-1 would have placed every app track AFTER the fence — silently, since nothing validates that an app track
+        // precedes the engine's post-tick work.
         var track = new Track(this, name, 0, tags ?? []);
-        _tracks.Insert(_tracks.Count - 1, track);
+        _tracks.Insert(_tracks.IndexOf(EnginePostTrack), track);
         for (var i = 0; i < _tracks.Count; i++)
         {
             _tracks[i].OrderIndex = i;
@@ -529,8 +548,8 @@ public sealed class RuntimeSchedule
             orderedDags[i].SystemIndices = [.. dagSystemIndices[i]];
         }
 
-        // Phase 6: create the scheduler. Engine-Post is dispatched by the runtime after serial fence prep,
-        // so the in-tick track loop stops at it.
+        // Phase 6: create the scheduler. Engine-Post and everything after it — currently Engine-Subscriptions — are dispatched by the runtime after serial
+        // fence prep, so the in-tick track loop stops at Engine-Post's index and DispatchDeferredTracks walks from there to the end.
         return new DagScheduler(systems, topologicalOrder, _tracks, EnginePostTrack.OrderIndex, _options, parent, [.. _eventQueues], logger);
     }
 

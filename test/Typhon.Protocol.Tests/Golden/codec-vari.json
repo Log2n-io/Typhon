@@ -1,0 +1,79 @@
+{
+  "description": "vari zigzag at small magnitudes and both extremes.",
+  "codec": {
+    "t": "vari"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "bff0000000000000"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "bff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 2,
+      "length": 1,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "c050000000000000"
+      ],
+      "offset": 3,
+      "length": 1,
+      "decoded": [
+        "c050000000000000"
+      ]
+    },
+    {
+      "input": [
+        "4050000000000000"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "4050000000000000"
+      ]
+    },
+    {
+      "input": [
+        "c1e0000000000000"
+      ],
+      "offset": 6,
+      "length": 5,
+      "decoded": [
+        "c1e0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "41dfffffffc00000"
+      ],
+      "offset": 11,
+      "length": 5,
+      "decoded": [
+        "41dfffffffc00000"
+      ]
+    }
+  ]
+}

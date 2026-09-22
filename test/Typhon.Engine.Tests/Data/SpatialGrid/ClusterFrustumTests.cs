@@ -121,7 +121,7 @@ class ClusterFrustumTests : TestBase<ClusterFrustumTests>
             {
                 if (OracleAccepts(planes, 4, (float)r.MinX, (float)r.MinY, (float)r.MaxX, (float)r.MaxY))
                 {
-                    oracle.Add(r.EntityId);
+                    oracle.Add(unchecked((long)r.Entity.RawValue));
                 }
             }
         }

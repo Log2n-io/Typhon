@@ -101,10 +101,16 @@ public static class WorldBuilder
                         HomeX = x,
                         HomeZ = z,
                         LeashRadius = 8f,
-                        ThinkCooldown = rng.NextInt(1, 40),
                     };
+
+                    // Staggered so a city's NPCs do not all pick a leg on the same tick. Absolute stamps, so standing still writes nothing.
+                    var npcTimers = new NpcTimers { MoveUntilTick = 0, RestUntilTick = rng.NextInt(1, 40) };
                     var move = new NpcMotion { SpeedMps = 1.2f };
-                    tx.Spawn<CityNpc>(CityNpc.Bounds.Set(in bounds), CityNpc.Ai.Set(in ai), CityNpc.Move.Set(in move));
+                    tx.Spawn<CityNpc>(
+                        CityNpc.Bounds.Set(in bounds),
+                        CityNpc.Ai.Set(in ai),
+                        CityNpc.Timers.Set(in npcTimers),
+                        CityNpc.Move.Set(in move));
                     census.CityNpcs++;
                 }
 
@@ -221,30 +227,41 @@ public static class WorldBuilder
         var bounds = default(CreaturePlacement);
         bounds.SetAt(x, z, 1.5f);
 
+        // AMBIENT: a creature that never thinks and never moves, so its cluster can actually go quiet.
+        //
+        // Decided PER LAIR, not per creature, and that is the whole difference between a knob that works and one that does not. Clusters are spatial and
+        // a lair's creatures are spawned inside one disc, so they share clusters; drawing the coin per creature leaves every cluster holding a mix, one
+        // active member is enough to keep a cluster dirty, and nothing ever sleeps. Measured: half the creatures ambient, drawn per creature, produced
+        // ZERO dormant clusters. The hash is of the lair's own position, so it is stable across arms without threading extra state through the call.
+        var lairHash = (uint)(BitConverter.SingleToInt32Bits(lairX) * 0x9E3779B1) ^ (uint)(BitConverter.SingleToInt32Bits(lairZ) * 0x85EBCA77);
+        var ambient = config.IdleCreatureFraction > 0d
+            && (lairHash % 1000u) < (uint)(config.IdleCreatureFraction * 1000d);
+
         var ai = new CreatureBrain
         {
-            Mode = AiMode.Wander,
+            Mode = ambient ? AiMode.Idle : AiMode.Wander,
             HomeX = lairX,
             HomeZ = lairZ,
             LeashRadius = TatooineData.LeashRadiusM * config.ContentScale,
             AggroRadius = CreatureTemplates.Aggressive[template] ? TatooineData.AggroRadiusM * config.ContentScale : 0f,
 
-            // Staggered so a lair's creatures do not all think on the same tick. Core3's own interval is 400-1000 ms,
-            // which at this tick rate is four to ten ticks — the AI is deliberately not a per-tick cost.
-            ThinkCooldown = rng.NextInt(1, AiTicksMax(config)),
             Lair = lairId,
         };
+
+        // Staggered so a lair's creatures do not all think on the same tick. Core3's own interval is 400-1000 ms, which at this tick rate is four to ten
+        // ticks — the AI is deliberately not a per-tick cost. In its own component, because nothing on the wire reads it (see CreatureTimers).
+        var timers = new CreatureTimers { ThinkCooldown = rng.NextInt(1, AiTicksMax(config)), AttackCooldown = rng.NextInt(0, 8) };
         var move = new CreatureMotion { SpeedMps = CreatureTemplates.SpeedMps[template] };
         var vitals = new CreatureVitals
         {
             Health = CreatureTemplates.Health[template],
             MaxHealth = CreatureTemplates.Health[template],
             AttackDamage = CreatureTemplates.Damage[template],
-            AttackCooldown = rng.NextInt(0, 8),
         };
         return tx.Spawn<Creature>(
             Creature.Bounds.Set(in bounds),
             Creature.Ai.Set(in ai),
+            Creature.Timers.Set(in timers),
             Creature.Move.Set(in move),
             Creature.Vitals.Set(in vitals));
     }

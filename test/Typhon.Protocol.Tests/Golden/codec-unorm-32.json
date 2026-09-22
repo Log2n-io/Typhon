@@ -1,0 +1,40 @@
+{
+  "description": "unorm at 32 bits, codes \u2265 2\u00B3\u00B9: 1, 0.5, one step.",
+  "codec": {
+    "t": "unorm",
+    "bits": 32
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "3ff0000000000000"
+      ],
+      "offset": 0,
+      "length": 4,
+      "decoded": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3fe0000000000000"
+      ],
+      "offset": 4,
+      "length": 4,
+      "decoded": [
+        "3fe0000000100000"
+      ]
+    },
+    {
+      "input": [
+        "3df0000000100000"
+      ],
+      "offset": 8,
+      "length": 4,
+      "decoded": [
+        "3df0000000100000"
+      ]
+    }
+  ]
+}

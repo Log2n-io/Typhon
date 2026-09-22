@@ -58,36 +58,7 @@ public readonly struct RuntimeTransactionLifecycleData
     { ThreadSlot = threadSlot; StartTimestamp = startTimestamp; DurationTicks = durationTicks; SysIdx = sysIdx; TxDurUs = txDurUs; Success = success; }
 }
 
-/// <summary>Decoded Runtime Subscription Output Execute span. Payload: <c>tick i64, level u8, clientCount u16, viewsRefreshed u16, deltasPushed u32, overflowCount u16</c> (17 B).</summary>
-[PublicAPI]
-public readonly struct RuntimeSubscriptionOutputExecuteData
-{
-    /// <summary>Producer thread slot (0-255, from the thread-slot registry) the span was emitted on.</summary>
-    public byte ThreadSlot { get; }
-    /// <summary>Span start timestamp in <c>Stopwatch.GetTimestamp()</c> ticks.</summary>
-    public long StartTimestamp { get; }
-    /// <summary>Span duration in <c>Stopwatch.GetTimestamp()</c> ticks.</summary>
-    public long DurationTicks { get; }
-    /// <summary>Engine tick number when the subscription output phase ran.</summary>
-    public long Tick { get; }
-    /// <summary>Output-phase level byte (subscription tier).</summary>
-    public byte Level { get; }
-    /// <summary>Number of connected subscription clients served this output phase.</summary>
-    public ushort ClientCount { get; }
-    /// <summary>Number of published Views refreshed this output phase.</summary>
-    public ushort ViewsRefreshed { get; }
-    /// <summary>Number of delta records pushed to clients.</summary>
-    public uint DeltasPushed { get; }
-    /// <summary>Number of clients whose delta buffer overflowed during the push.</summary>
-    public ushort OverflowCount { get; }
-    /// <summary>Constructs the decoded subscription-output-execute record from its wire fields.</summary>
-    public RuntimeSubscriptionOutputExecuteData(byte threadSlot, long startTimestamp, long durationTicks, long tick, byte level,
-        ushort clientCount, ushort viewsRefreshed, uint deltasPushed, ushort overflowCount)
-    { ThreadSlot = threadSlot; StartTimestamp = startTimestamp; DurationTicks = durationTicks; Tick = tick; Level = level;
-      ClientCount = clientCount; ViewsRefreshed = viewsRefreshed; DeltasPushed = deltasPushed; OverflowCount = overflowCount; }
-}
-
-/// <summary>Wire codec for Runtime events (kinds 161-164).</summary>
+/// <summary>Wire codec for Runtime events (kinds 161-163).</summary>
 public static class RuntimeEventCodec
 {
     /// <summary>Fixed wire size in bytes of a UoWCreate record (common header + 8-byte tick).</summary>
@@ -95,12 +66,9 @@ public static class RuntimeEventCodec
     /// <summary>Fixed wire size in bytes of a UoWFlush record (common header + tick + changeCount).</summary>
     public const int UoWFlushSize  = TraceRecordHeader.CommonHeaderSize + 8 + 4;       // 24
     private const int LifecyclePayload = 2 + 4 + 1;                                    // 7
-    private const int OutputExecutePayload = 8 + 1 + 2 + 2 + 4 + 2;                    // 19
 
     /// <summary>Wire size in bytes of a Transaction-Lifecycle span, including the 16-byte trace context when <paramref name="hasTraceContext"/> is <c>true</c>.</summary>
     public static int ComputeSizeLifecycle(bool hasTraceContext) => TraceRecordHeader.SpanHeaderSize(hasTraceContext) + LifecyclePayload;
-    /// <summary>Wire size in bytes of a Subscription-Output-Execute span, including the trace context when <paramref name="hasTraceContext"/> is <c>true</c>.</summary>
-    public static int ComputeSizeOutputExecute(bool hasTraceContext) => TraceRecordHeader.SpanHeaderSize(hasTraceContext) + OutputExecutePayload;
 
     /// <summary>Encode a UoWCreate instant into <paramref name="destination"/> (must be at least <see cref="UoWCreateSize"/> bytes).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -181,22 +149,4 @@ public static class RuntimeEventCodec
             p[6]);
     }
 
-    /// <summary>Decode a Subscription-Output-Execute span from <paramref name="source"/>.</summary>
-    /// <returns>The decoded <see cref="RuntimeSubscriptionOutputExecuteData"/>.</returns>
-    public static RuntimeSubscriptionOutputExecuteData DecodeOutputExecute(ReadOnlySpan<byte> source)
-    {
-        TraceRecordHeader.ReadCommonHeader(source, out _, out _, out var threadSlot, out var startTimestamp);
-        TraceRecordHeader.ReadSpanHeaderExtension(source[TraceRecordHeader.CommonHeaderSize..],
-            out var durationTicks, out _, out _, out var spanFlags);
-        var hasTC = (spanFlags & TraceRecordHeader.SpanFlagsHasTraceContext) != 0;
-        var hasSL = (spanFlags & TraceRecordHeader.SpanFlagsHasSourceLocation) != 0;
-        var p = source[TraceRecordHeader.SpanHeaderSize(hasTC, hasSL)..];
-        return new RuntimeSubscriptionOutputExecuteData(threadSlot, startTimestamp, durationTicks,
-            BinaryPrimitives.ReadInt64LittleEndian(p),
-            p[8],
-            BinaryPrimitives.ReadUInt16LittleEndian(p[9..]),
-            BinaryPrimitives.ReadUInt16LittleEndian(p[11..]),
-            BinaryPrimitives.ReadUInt32LittleEndian(p[13..]),
-            BinaryPrimitives.ReadUInt16LittleEndian(p[17..]));
-    }
 }

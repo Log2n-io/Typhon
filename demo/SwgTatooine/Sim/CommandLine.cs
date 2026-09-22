@@ -70,6 +70,88 @@ public static class CommandLine
             c.SplitAwareness = true;
         }
 
+        c.SubscriptionsHysteresis = Str(args, "--subs-band", "on") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-band takes on or off, not '{other}'"),
+        };
+
+        c.SubscriptionsCellKeyedInterest = Str(args, "--subs-interest", "cell") switch
+        {
+            "cell" => true,
+            "pull" => false,
+            var other => throw new ArgumentException($"--subs-interest takes cell or pull, not '{other}'"),
+        };
+        c.WorkerIdleSpin = Int(args, "--idle-spin", c.WorkerIdleSpin);
+        if (Array.IndexOf(args, "--sched-hot") >= 0)
+        {
+            c.WorkerHotSpinners = Int(args, "--sched-hot", 0);
+        }
+
+        if (Array.IndexOf(args, "--sched-park-us") >= 0)
+        {
+            c.WorkerParkAfterUs = Int(args, "--sched-park-us", 0);
+        }
+        c.SubscriptionsDynamicSchedule = Str(args, "--subs-sched", "dynamic") switch
+        {
+            "dynamic" => true,
+            "static" => false,
+            var other => throw new ArgumentException($"--subs-sched takes dynamic or static, not '{other}'"),
+        };
+
+        c.SubscriptionsSharedClusterBlocks = Str(args, "--subs-shared", "off") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-shared takes on or off, not '{other}'"),
+        };
+
+        c.SubscriptionsIncrementalInterest = Str(args, "--subs-incremental", "on") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-incremental takes on or off, not '{other}'"),
+        };
+
+        c.DormancyTicks = Int(args, "--dormancy", 0);
+        c.SubscriptionsPhaseTiming = Array.IndexOf(args, "--subs-phases") >= 0;
+        c.SubscriptionsInterestPhases = Array.IndexOf(args, "--subs-interest-phases") >= 0;
+        c.SubscriptionsGroupCap = Int(args, "--subs-group-cap", 0);
+        c.SubscriptionsSparse = Str(args, "--subs-sparse", "off") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-sparse takes on or off, not '{other}'"),
+        };
+        c.SubscriptionsContentGate = Str(args, "--subs-content-gate", "on") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-content-gate takes on or off, not '{other}'"),
+        };
+        c.SubscriptionsOwedSlice = Int(args, "--subs-owed-slice", 2);
+        c.SubscriptionsGatherPrefetch = Str(args, "--subs-prefetch", "off") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-prefetch takes on or off, not '{other}'"),
+        };
+        c.SubscriptionsOwedSlotCarry = Str(args, "--subs-owed", "on") switch
+        {
+            "on" => true,
+            "off" => false,
+            var other => throw new ArgumentException($"--subs-owed takes on or off, not '{other}'"),
+        };
+        c.IdleCreatureFraction = Math.Clamp(Dbl(args, "--idle-creatures", 0d), 0d, 1d);
+
+        c.SubscriptionsCollapseWorkUnits = Str(args, "--subs-pipeline", "staged") switch
+        {
+            "staged" => 0,
+            "collapsed" => int.MaxValue,
+            var other => throw new ArgumentException($"--subs-pipeline takes collapsed or staged, not '{other}'"),
+        };
+
         c.DatabaseDirectory = Str(args, "--db-dir", c.DatabaseDirectory);
         if (Array.IndexOf(args, "--serial-fence") >= 0)
         {
@@ -100,5 +182,11 @@ public static class CommandLine
     {
         var i = Array.IndexOf(args, name);
         return i >= 0 && i + 1 < args.Length && int.TryParse(args[i + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : fallback;
+    }
+
+    private static double Dbl(string[] args, string name, double fallback)
+    {
+        var i = Array.IndexOf(args, name);
+        return i >= 0 && i + 1 < args.Length && double.TryParse(args[i + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : fallback;
     }
 }

@@ -273,7 +273,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
         {
-            found.Add(r.EntityId);
+            found.Add(unchecked((long)r.Entity.RawValue));
         }
 
         return found;
@@ -365,7 +365,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         {
             foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
             {
-                expected.Add(r.EntityId);
+                expected.Add(unchecked((long)r.Entity.RawValue));
             }
         }
 
@@ -403,7 +403,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         {
             foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
             {
-                after.Add(r.EntityId);
+                after.Add(unchecked((long)r.Entity.RawValue));
             }
         }
 
@@ -461,7 +461,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         {
             foreach (var r in cs.QueryAabb(dbe.SpatialGrid, QMin, QMin, float.NegativeInfinity, QMax, QMax, float.PositiveInfinity))
             {
-                found += r.EntityId == 0 ? 0 : 1;
+                found += r.Entity.IsNull ? 0 : 1;
             }
         }
 
@@ -500,7 +500,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         var found = 0;
         foreach (var r in cs.QueryAabb(dbe.SpatialGrid, qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity))
         {
-            found += r.EntityId == 0 ? 0 : 1;
+            found += r.Entity.IsNull ? 0 : 1;
         }
 
         return found;

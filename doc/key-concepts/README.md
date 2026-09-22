@@ -53,7 +53,7 @@ Asking questions of your data, and keeping the answers current.
 |---|---|
 | **[Query](xref:concept-query)** | A one-shot question — by shape, field value, or geometry. |
 | **[View](xref:concept-view)** | A query kept current, reporting Added / Removed / Modified deltas. |
-| **[Subscription](xref:concept-subscription)** | A view published to remote clients over a transport. |
+| **[Subscription](xref:concept-subscription)** | Engine state replicated outward to remote clients. Under construction. |
 
 ## Systems & the runtime
 

@@ -70,10 +70,19 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
             EnableParallelFence = false,
         });
 
-        // EnableParallelFence=false → no Fence DAG declared → the Engine-Post track is empty, so no engine-internal
-        // systems exist (AllSystemCount, counting every track, equals the user-only SystemCount).
-        Assert.That(runtime.Scheduler.AllSystemCount, Is.EqualTo(runtime.Scheduler.SystemCount),
-            "No engine-internal systems should exist when EnableParallelFence=false.");
+        // EnableParallelFence=false → no Fence DAG declared → the Engine-Post track is empty. Asserted BY NAME, mirroring
+        // OptIn_FenceExecRegisteredAsInternalSystem below.
+        //
+        // This used to compare AllSystemCount against SystemCount, which held only while the Fence DAG was the ONLY engine-internal
+        // DAG in the schedule. Since #955 the Engine-Subscriptions track is declared unconditionally — replication has no alternative
+        // implementation to fall back to, so unlike the fence there is no switch that could turn it off — and its four stages are
+        // engine-internal on every runtime. "No engine-internal systems at all" is therefore no longer the fact this test is about;
+        // the fence's absence is.
+        for (var i = 0; i < runtime.Scheduler.AllSystemCount; i++)
+        {
+            Assert.That(runtime.Scheduler.Systems[i].Name, Does.Not.StartWith("Fence"),
+                "No Fence-DAG system should be registered when EnableParallelFence=false.");
+        }
 
         runtime.Start();
         SpinWait.SpinUntil(() => ticksObserved >= 3, TimeSpan.FromSeconds(5));

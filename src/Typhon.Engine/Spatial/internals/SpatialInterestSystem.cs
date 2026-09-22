@@ -1,3 +1,8 @@
+// CS0618 (SpatialObserverHandle is obsolete) — file-wide, deliberately. This file IS the implementation the handle names, deprecated with it in Phase 1 of
+// engine-owned replication (design/Subscriptions/README.md Q9). Deprecating the public surface is the point of Q9; making its own implementation unbuildable
+// is not, and removing the attribute to quiet the build would throw away the whole signal. The suppression goes when the surface does.
+#pragma warning disable CS0618
+
 using System;
 using System.Buffers;
 using System.Numerics;
@@ -421,7 +426,11 @@ internal sealed unsafe class SpatialInterestSystem
                     foreach (var hit in clusterState.QueryAabb(grid, qMinX, qMinY, qMinZ, qMaxX, qMaxY, qMaxZ, config.CategoryMask))
                     {
                         EnsureChangeBufferCapacity(state);
-                        state.ChangeBuffer[state.ChangeCount++] = hit.EntityId;
+
+                        // The buffer stays raw packed longs: it is handed out as a ReadOnlySpan<long> through SpatialChangeResult, and the other producer
+                        // (:349) already writes one. Only the query RESULT became typed (#909), so the unpacking happens here rather than the buffer changing
+                        // shape underneath its consumers.
+                        state.ChangeBuffer[state.ChangeCount++] = unchecked((long)hit.Entity.RawValue);
                     }
                 }
             }

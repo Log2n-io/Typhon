@@ -2092,7 +2092,7 @@ public sealed class TyphonBridge : IDisposable
                                 if (d2 <= SpiderKillRangeSq && killsLeft > 0
                                     && _spiderTicksSinceKill[i] >= SpiderKillCooldownTicks)
                                 {
-                                    var antId = EntityId.FromRaw(hit.EntityId);
+                                    var antId = hit.Entity;
                                     sharedTx.Destroy(antId);
                                     // Phase 6 polish — Fight alarm phero (3×3 stamp) at the victim
                                     // position so the colony "hears the scream". Drives workers to flee

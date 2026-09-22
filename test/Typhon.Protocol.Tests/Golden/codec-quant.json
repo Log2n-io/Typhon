@@ -1,0 +1,126 @@
+{
+  "description": "quant over [\u221240, 88) at 8 bits (W2): min, below min, max \u2212 step, the tie at max \u2212 step/2, max, NaN, \u00B1\u221E, a tie at k \u002B 0.5.",
+  "codec": {
+    "t": "quant",
+    "bits": 8,
+    "min": [
+      -40
+    ],
+    "max": [
+      88
+    ]
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "c044000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "c044000000000000"
+      ]
+    },
+    {
+      "input": [
+        "c044800000000000"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "c044000000000000"
+      ]
+    },
+    {
+      "input": [
+        "4055e00000000000"
+      ],
+      "offset": 2,
+      "length": 1,
+      "decoded": [
+        "4055e00000000000"
+      ]
+    },
+    {
+      "input": [
+        "4055f00000000000"
+      ],
+      "offset": 3,
+      "length": 1,
+      "decoded": [
+        "4055e00000000000"
+      ]
+    },
+    {
+      "input": [
+        "4056000000000000"
+      ],
+      "offset": 4,
+      "length": 1,
+      "decoded": [
+        "4055e00000000000"
+      ]
+    },
+    {
+      "input": [
+        "4056400000000000"
+      ],
+      "offset": 5,
+      "length": 1,
+      "decoded": [
+        "4055e00000000000"
+      ]
+    },
+    {
+      "input": [
+        "nan"
+      ],
+      "offset": 6,
+      "length": 1,
+      "decoded": [
+        "c044000000000000"
+      ]
+    },
+    {
+      "input": [
+        "7ff0000000000000"
+      ],
+      "offset": 7,
+      "length": 1,
+      "decoded": [
+        "4055e00000000000"
+      ]
+    },
+    {
+      "input": [
+        "fff0000000000000"
+      ],
+      "offset": 8,
+      "length": 1,
+      "decoded": [
+        "c044000000000000"
+      ]
+    },
+    {
+      "input": [
+        "3fd0000000000000"
+      ],
+      "offset": 9,
+      "length": 1,
+      "decoded": [
+        "3fe0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "c043e00000000000"
+      ],
+      "offset": 10,
+      "length": 1,
+      "decoded": [
+        "c043c00000000000"
+      ]
+    }
+  ]
+}

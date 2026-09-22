@@ -197,6 +197,119 @@ public sealed class SimConfig
     public bool ParallelFence = true;
 
     /// <summary>
+    /// <c>--subs-pipeline collapsed|staged</c>: which shape the replication track runs in, as a value for
+    /// <c>SubscriptionsOptions.CollapseBelowWorkUnits</c>. <c>staged</c> is 0 (the engine default, four dispatched stages); <c>collapsed</c> is
+    /// <see cref="int.MaxValue"/> (one dispatched system, whatever the load).
+    /// </summary>
+    /// <remarks>
+    /// A same-binary switch, because the two shapes are an A/B and the repository's A/B rule requires both arms to be the same build — a threshold compiled
+    /// in would make them two. It is a demo knob and a measurement instrument; it says nothing about what the engine should default to, which is what the
+    /// measurement it enables is for. It reaches only the <c>serve</c> path, which is the only one that has sessions.
+    /// </remarks>
+    public int SubscriptionsCollapseWorkUnits;
+
+    /// <summary><c>--subs-interest cell|resident|pull</c>: whether sessions sharing an interest cell resolve from one query or one each.</summary>
+    /// <remarks>
+    /// A same-binary switch, because the two shapes are an A/B and this repository's rule requires both arms to be one build. It reaches only the
+    /// <c>serve</c> path, which is the only one that has sessions.
+    /// </remarks>
+    public bool SubscriptionsCellKeyedInterest = true;
+
+    /// <summary>
+    /// <c>--subs-incremental on|off</c>: whether interest is a difference against each session's previous tick, or re-derived whole every tick.
+    /// </summary>
+    /// <remarks>
+    /// A same-binary switch, for the same reason as <see cref="SubscriptionsCellKeyedInterest"/>. Off is Phase 1's frame stage exactly: every hit probed
+    /// against the known-set, and the whole known-set walked to find what left.
+    /// </remarks>
+    public bool SubscriptionsIncrementalInterest = true;
+
+    /// <summary>
+    /// <c>--dormancy N</c>: consecutive clean ticks before a cluster is put to sleep. 0 disables cluster dormancy, which is the engine default.
+    /// </summary>
+    /// <remarks>
+    /// <b>A sleeping cluster is skipped by system dispatch AND by the replication projection pass.</b> The engine computes this at the tick fence from
+    /// the per-entity dirty bitmap, so it costs replication nothing to consult and nothing to maintain.
+    /// <para>
+    /// <b>It requires the simulation to mark its spatial writes.</b> <c>ClusterRef.WriteSpatial</c> deliberately raises no dirty bit, so a cluster whose
+    /// creatures only MOVE looks clean to the sweep and would be put to sleep while still in motion — after which nothing dispatches it and the creatures
+    /// freeze. <see cref="SimBridge"/> therefore marks a moved cluster dirty whenever this is non-zero. That is the documented contract for combining
+    /// <c>WriteSpatial</c> with dormancy, not a workaround.
+    /// </para>
+    /// </remarks>
+    public int DormancyTicks;
+
+    /// <summary>
+    /// <c>--subs-phases</c>: accumulate per-phase timings inside the frame stage (gather, select, sweep, sort, encode, publish).
+    /// </summary>
+    /// <remarks>
+    /// Off by default because it costs one static read per phase boundary. It exists because a sampling profiler cannot answer the question: the frame
+    /// stage is one method and every callee that matters is inlined in Release, so the profile attributes the whole stage to <c>Assemble</c> itself.
+    /// </remarks>
+    public bool SubscriptionsPhaseTiming;
+
+    /// <summary>Whether the interest stage times its broad phase, narrow phase and run assembly separately. <c>--subs-interest-phases</c>.</summary>
+    public bool SubscriptionsInterestPhases;
+
+    /// <summary>Whether up-to-date sessions stop re-stating unchanged membership. A same-binary switch, so one build is both arms.</summary>
+    public bool SubscriptionsSparse;
+
+    /// <summary>Whether projection re-encodes only slots the engine marked changed (<c>--subs-content-gate on|off</c>, default on). A same-binary switch.</summary>
+    public bool SubscriptionsContentGate = true;
+
+    /// <summary>The interest cell-group cap; zero is automatic. <c>--subs-group-cap</c>.</summary>
+    public int SubscriptionsGroupCap;
+
+    /// <summary>
+    /// <c>--subs-owed on|off</c>: whether a reused slot costs the session that slot on its next frame, or its whole next frame.
+    /// </summary>
+    public bool SubscriptionsOwedSlotCarry = true;
+
+    /// <summary>
+    /// <c>--subs-owed-slice N</c>: how much of a session's slot debt one frame serves, as a multiple of the enter budget. 0 serves all of it.
+    /// </summary>
+    public int SubscriptionsOwedSlice = 2;
+
+    /// <summary>Whether the gather prefetches the lines it is about to read (<c>--subs-prefetch on|off</c>).</summary>
+    public bool SubscriptionsGatherPrefetch;
+
+    /// <summary>Whether the frame stage takes sessions from a shared cursor (<c>--subs-sched static|dynamic</c>).</summary>
+    public bool SubscriptionsDynamicSchedule = true;
+
+    /// <summary>Whether each cluster's records are encoded once and referenced by every session (<c>--subs-shared on|off</c>).</summary>
+    public bool SubscriptionsSharedClusterBlocks;
+
+    /// <summary><c>--subs-band on|off</c>: whether the player disc keeps a hysteresis band between its enter and leave radii.</summary>
+    /// <remarks>
+    /// A same-binary switch, and both arms query the same radius: off declares one disc at the LEAVE radius, on declares the pair. What moves is whether
+    /// an entity between the two is admitted to a session that does not already hold it, which is the only difference the measurement is about.
+    /// </remarks>
+    public bool SubscriptionsHysteresis = true;
+
+    /// <summary>Idle iterations a scheduler worker spins inside a tick before yielding (<c>--idle-spin N</c>).</summary>
+    public int WorkerIdleSpin = 100;
+
+    /// <summary>
+    /// <c>--sched-hot N</c>: idle workers that keep spinning inside a dispatch while the rest park; negative for the legacy spin-then-yield loop. Unset
+    /// leaves the engine's default (<see cref="Typhon.Engine.DagScheduler.WorkerHotSpinners"/>).
+    /// </summary>
+    public int? WorkerHotSpinners;
+
+    /// <summary><c>--sched-park-us N</c>: how long an idle worker spins before it may park. Unset leaves the engine's default.</summary>
+    public int? WorkerParkAfterUs;
+
+    /// <summary>
+    /// <c>--idle-creatures F</c>: the fraction of spawned creatures that are ambient — never think, never move. 0 by default.
+    /// </summary>
+    /// <remarks>
+    /// <b>This exists so the demo can express more than one workload shape.</b> Its default simulation writes <c>CreatureBrain</c> for every living
+    /// creature on every tick (<c>ai.ThinkCooldown--</c>), which is one shape among many and happens to be the shape that defeats every change-detection
+    /// mechanism. A real world has large ambient populations — vendors, civilians, distant spawns nobody has aggroed — and <see cref="AiMode.Idle"/>
+    /// already names exactly that. Raising this makes whole clusters genuinely quiet, which is what dormancy is for.
+    /// </remarks>
+    public double IdleCreatureFraction;
+
+    /// <summary>
     /// Smallest entity count the runtime will give a parallel chunk. The engine default is 64.
     /// </summary>
     /// <remarks>

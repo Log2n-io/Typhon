@@ -140,7 +140,7 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
                 // 4 000 entities — which reads as a kNN bug and is not one.
                 double dx = Math.Max(Math.Max(r.MinX - px, 0d), px - r.MaxX);
                 double dy = Math.Max(Math.Max(r.MinY - py, 0d), py - r.MaxY);
-                all.Add((r.EntityId, (dx * dx) + (dy * dy)));
+                all.Add((unchecked((long)r.Entity.RawValue), (dx * dx) + (dy * dy)));
             }
         }
 

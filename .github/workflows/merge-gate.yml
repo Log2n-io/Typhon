@@ -39,6 +39,8 @@ jobs:
     outputs:
       engine: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.engine }}
       workbench: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.workbench }}
+      aux: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.aux }}
+      sdk: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.sdk }}
       tla: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.tla }}
       rules: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.rules }}
       # `[no-ut]` in the PR head commit message → skip the heavy aws-gate suites (self-declared small-fix bypass).
@@ -91,11 +93,75 @@ jobs:
         if: ${{ !steps.dispatch.outputs.pr }}
         with:
           filters: |
+            # #942: these lists are the ProjectReference CLOSURE of the suites each job runs, not the directory the
+            # suite lives in. `engine` covered only src/Typhon.Engine + the test project until then, so a PR touching
+            # only src/Typhon.Protocol/** ran ZERO tests and the gate reported green — the #774 failure class, and
+            # the closure drifts again the moment someone adds a reference. scripts/check-gate-filters.py derives the
+            # closure from the project graph and fails when this block stops covering it, so edit them together.
             engine:
               - 'src/Typhon.Engine/**'
+              - 'src/Typhon.Protocol/**'
+              # The engine suite reaches Typhon.Client: MotionSegmentTests feeds the segments the engine produces through
+              # the client's evaluator, so the two motion halves are pinned to one another (P1-10). Missed when that
+              # reference was added, which is exactly the drift this block exists to catch.
+              - 'src/Typhon.Client/**'
+              - 'src/Typhon.Profiler/**'
+              - 'src/Typhon.Schema.Definition/**'
+              - 'src/Typhon.Analyzers/**'
+              - 'src/Typhon.Generators/**'
+              - 'src/Typhon.Generators.Consumer/**'
+              - 'tools/Typhon.Workbench.Fixtures/**'
+              - 'samples/Typhon.Samples.Swg/**'
               - 'test/Typhon.Engine.Tests/**'
+              # Build-wide inputs: one file that changes how everything compiles, and the scripts that RUN the suites.
+              - 'Directory.Build.props'
+              - 'Typhon.slnx'
+              - '.github/workflows/merge-gate.yml'
+              - 'bench/aws/**'
             workbench:
               - 'tools/Typhon.Workbench/**'
+              # The suite's own directory was missing: a change confined to a Workbench TEST file ran nothing.
+              - 'test/Typhon.Workbench.Tests/**'
+            # Suites that ran in no job at all before #942 — small, and on the free runner.
+            aux:
+              - 'src/Typhon.Engine/**'
+              - 'src/Typhon.Analyzers/**'
+              - 'src/Typhon.Generators/**'
+              - 'src/Typhon.Generators.Consumer/**'
+              - 'src/Typhon.Schema.Definition/**'
+              - 'src/Typhon.Profiler/**'
+              - 'src/Typhon.Protocol/**'
+              # The browser's door (P1-08). It runs here rather than with the SDKs because its build closure is the
+              # whole engine, and gating it on `sdk` would make the SDK job run on every engine change.
+              - 'src/Typhon.Subscriptions.AspNetCore/**'
+              - 'test/Typhon.Subscriptions.AspNetCore.Tests/**'
+              - 'src/Typhon.Shell/**'
+              - 'src/Typhon.Shell.Extensibility/**'
+              - 'samples/Typhon.Samples.Swg/**'
+              - 'test/Typhon.Analyzers.Tests/**'
+              - 'test/Typhon.Generators.Tests/**'
+              - 'test/Typhon.Protocol.Tests/**'
+              - 'test/Typhon.Shell.Tests/**'
+              - 'test/Typhon.Shell.Tests.SchemaFixture/**'
+              - 'test/Typhon.Samples.Swg.Tests/**'
+              - 'demo/AntHill/**'
+              # Typhon.Shell.Tests reaches the Workbench through its own references — surfaced by the closure check,
+              # not by reading the csproj.
+              - 'tools/Typhon.Workbench/**'
+              - 'tools/Typhon.Workbench.Fixtures/**'
+              - 'Directory.Build.props'
+              - 'Typhon.slnx'
+            # The client SDKs (05-sdks § 6): the .NET client's build closure, the TypeScript SDK, and the golden vectors both
+            # decode — a vector changed by a Protocol PR must re-run the decoders that consume it.
+            sdk:
+              - 'src/Typhon.Protocol/**'
+              - 'src/Typhon.Client/**'
+              - 'src/Typhon.Client.TypeScript/**'
+              - 'test/Typhon.Client.Tests/**'
+              - 'test/Typhon.Protocol.Tests/Golden/**'
+              - 'Directory.Build.props'
+              - 'Typhon.slnx'
+              - '.github/workflows/merge-gate.yml'
             tla:
               - 'src/Typhon.Engine/Durability/**'
               - 'rules/tla/**'
@@ -532,6 +598,30 @@ jobs:
       - name: Check .runsettings files are well-formed
         run: python3 scripts/check-runsettings.py
 
+      # ---- #942: the gate must not be able to report green on code no job ran. ----
+      #
+      # The path filters above decide whether a suite runs, and they were hand-written: `engine` covered
+      # src/Typhon.Engine and the test project while the suite compiles against eight further directories, so a PR
+      # touching only src/Typhon.Protocol/** ran zero tests and the verdict (which counts a SKIPPED suite as a pass)
+      # went green. This derives each gated suite's ProjectReference closure and fails when the filters stop covering
+      # it — the drift returns the moment someone adds a reference, so it is checked every run, not fixed once.
+      #
+      # Also fails when a real test suite runs in no job and is not on the allow-list, which is how nine of them
+      # came to exist. Here rather than in a path-gated job for the same reason as the scope check above: the defect
+      # is introduced by the SOURCE side (a new ProjectReference), and no filter file changes when it happens.
+      - name: Gate filters cover their suites' build closures (#942)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check-gate-filters.py
+
+      # AC-20's blueprint claim, mechanically. The demo is Typhon's worked example of an application declaring WHAT
+      # to replicate while the engine owns HOW; a hand-rolled varint or a socket in its replication code would mean
+      # the public surface was insufficient and nobody noticed. The internals allow-list is a ratchet rather than a
+      # ban because the honest state today is "partly clean" — the measurement code still needs cluster state — and
+      # a ban would have to be switched off, which proves nothing.
+      - name: The SWG blueprint is written against the public API (AC-20)
+        run: python3 scripts/check-blueprint-public-api.py
+
       # The lints are themselves tested: each check has a planted violation it must reject, including a planted
       # zero-test shard and the exact double-hyphen comment that shipped. A lint that has never rejected anything
       # is the same false green it exists to remove.
@@ -666,9 +756,94 @@ jobs:
           # --no-github: IGNORE_CLOSED_ISSUE is `invariants`' job, and this runner has no reason to re-probe the API.
           python3 scripts/lint-test-suppressions.py --no-github --closing "$CLOSES"
 
+  # ---- Suites that ran in NO job at all before #942. Free runner, never the billed c6id. ----
+  #
+  # Six real test suites existed that no workflow executed. That is not a coverage gap so much as unknown
+  # territory: a suite that has never run cannot be said to pass. Five run here. The sixth, Client.Tests, runs in
+  # subscriptions-sdk beside the TypeScript SDK, since both decode the same golden vectors. If one of these is red,
+  # quarantine it against an issue — better than the suite being invisible.
+  aux-tests:
+    needs: changes
+    if: needs.changes.outputs.aux == 'true' && needs.changes.outputs.skip_ut != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      # One step, all five: a per-project step would stop at the first failure and hide the rest, and the whole
+      # point is to learn the state of suites nobody has run. `rc` accumulates so every project reports.
+      - name: Test — analyzers, generators, protocol, shell, samples, websocket adapter, anthill harness
+        run: |
+          set -uo pipefail
+          rc=0
+          for proj in \
+            test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj \
+            test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj \
+            test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj \
+            test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj \
+            test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj \
+            test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj \
+            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj ; do
+            name=$(basename "$proj" .csproj)
+            echo "::group::${name}"
+            # Same category exclusion the gate's other suites apply, so "excluded from the gate" has one meaning.
+            dotnet test "$proj" -c Release --filter "TestCategory!=Quarantine" \
+              --logger "trx;LogFileName=${name}.trx" --results-directory TestResults || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
+
+      - name: Upload trx
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: aux-tests-trx
+          path: TestResults/*.trx
+          if-no-files-found: ignore
+
+  # ---- The client SDKs: the .NET client suite and the TypeScript SDK, both against the golden vectors. Free runner. ----
+  subscriptions-sdk:
+    needs: changes
+    if: needs.changes.outputs.sdk == 'true' && needs.changes.outputs.skip_ut != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+
+      - name: Test — .NET client
+        run: |
+          dotnet test test/Typhon.Client.Tests/Typhon.Client.Tests.csproj -c Release --filter "TestCategory!=Quarantine" \
+            --logger "trx;LogFileName=Typhon.Client.Tests.trx" --results-directory TestResults
+
+      # typecheck + eslint + prettier + vitest, the vitest suites decoding the same golden vectors as the .NET client.
+      - name: Check — TypeScript SDK
+        working-directory: src/Typhon.Client.TypeScript
+        run: |
+          npm ci
+          npm run check
+          # Node 22 has no Float16Array unless V8's flag is on; this suite compares the hand-written f16 (W10) with the native one over every pattern.
+          npm run test:f16-native
+
+      - name: Upload trx
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: subscriptions-sdk-trx
+          path: TestResults/*.trx
+          if-no-files-found: ignore
+
   # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
   gate:
-    needs: [changes, aws-gate, aws-gate-selfhosted, tla, rule-coverage, invariants, closing-keywords]
+    needs: [changes, aws-gate, aws-gate-selfhosted, aux-tests, subscriptions-sdk, tla, rule-coverage, invariants, closing-keywords]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -682,7 +857,10 @@ jobs:
           inv='${{ needs.invariants.result }}'
           keywords='${{ needs.closing-keywords.result }}'
           fork='${{ needs.changes.outputs.is_fork }}'
-          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords  is_fork=$fork"
+          # Hyphenated job names need bracket notation in an expression — `needs.aux-tests` parses as subtraction.
+          auxt="${{ needs['aux-tests'].result }}"
+          sdk="${{ needs['subscriptions-sdk'].result }}"
+          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  aux-tests=$auxt  subscriptions-sdk=$sdk  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords  is_fork=$fork"
           fail=0
           # changes must succeed; the two aws-gate variants + tla may legitimately be 'skipped' (nothing relevant
           # changed, or the other runner variant is inactive), and closing-keywords is 'skipped' on push/dispatch.
@@ -690,6 +868,10 @@ jobs:
           case "$aws" in failure|cancelled) echo "aws-gate failed"; fail=1 ;; esac
           case "$awssh" in failure|cancelled) echo "aws-gate-selfhosted failed"; fail=1 ;; esac
           case "$tla" in failure|cancelled) echo "tla failed"; fail=1 ;; esac
+          # aux-tests is path-gated like tla, so 'skipped' is legitimate; a failure is not (#942).
+          case "$auxt" in failure|cancelled) echo "aux-tests failed"; fail=1 ;; esac
+          # subscriptions-sdk is path-gated the same way.
+          case "$sdk" in failure|cancelled) echo "subscriptions-sdk failed"; fail=1 ;; esac
           # rule-coverage is path-gated like tla, so 'skipped' is legitimate; a REGRESSION is not (#703).
           case "$rules" in failure|cancelled) echo "rule-coverage audit failed"; fail=1 ;; esac
           # invariants has no `if:` guard — it runs on every event, so anything but success is a red gate.

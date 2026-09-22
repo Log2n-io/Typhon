@@ -86,9 +86,6 @@ public unsafe partial class EntityAccessor
             startIndex, endIndex);
     }
 
-    /// <summary>Pre-warm the ComponentInfo cache for a given component type. Called by ArchetypeAccessor during construction.</summary>
-    internal void EnsureComponentInfoCached(Type componentType) => GetComponentInfo(componentType);
-
     /// <summary>Get cached ComponentInfo by type ID. For ArchetypeAccessor's Versioned chain walk.</summary>
     internal ComponentInfo GetComponentInfoInternal(int componentTypeId, Type componentType) =>
         GetComponentInfoByTypeId(componentTypeId, componentType);

@@ -3,19 +3,23 @@
     <PropertyGroup>
         <TargetFramework>net10.0</TargetFramework>
         <LangVersion>default</LangVersion>
+        <RootNamespace>Typhon.Client</RootNamespace>
+        <!-- XML doc file: the SDK is a product, raised to the engine's documentation bar (05-sdks § 3). -->
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <!-- Zero-warning policy, matching Typhon.Engine and Typhon.Profiler. -->
+        <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+        <!-- Packaged with the release work (07-delivery § 5), not before: release.yml packs every packable project. -->
+        <IsPackable>false</IsPackable>
     </PropertyGroup>
-
-    <PropertyGroup>
-        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    </PropertyGroup>
-
-    <ItemGroup>
-        <PackageReference Include="MemoryPack" Version="1.21.4" />
-        <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.9" />
-    </ItemGroup>
 
     <ItemGroup>
         <ProjectReference Include="..\Typhon.Protocol\Typhon.Protocol.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!-- Entering and releasing slots is the applier's business, not an application's; the motion tests drive it the way the TypeScript SDK's vitest twins
+             drive their public `WorldStore.enter`, so they need the same reach. -->
+        <InternalsVisibleTo Include="Typhon.Client.Tests" />
     </ItemGroup>
 
 </Project>

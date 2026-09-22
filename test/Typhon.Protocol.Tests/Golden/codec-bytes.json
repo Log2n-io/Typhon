@@ -1,0 +1,15 @@
+{
+  "description": "bytes with n 4: raw, no length.",
+  "codec": {
+    "t": "bytes",
+    "n": 4
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "bytes": "01020304",
+      "offset": 0,
+      "length": 4
+    }
+  ]
+}

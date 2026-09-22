@@ -605,6 +605,17 @@ public readonly struct SpatialMigrationTelemetry
     public float DriftTargetBoost { get; init; }
 
     /// <summary>
+    /// Which branch the tick fence's Prep phase selected for this archetype: <c>0</c> no work, <c>1</c> the clean-bitmap spatial refresh (local occupancy
+    /// bits, no WAL), <c>2</c> the dirty-bitmap path (full snapshot plus WAL). A LEVEL describing the last fence, not a counter.
+    /// </summary>
+    /// <remarks>
+    /// The one number that says <i>why</i> a tick's fence cost what it did: the same archetype alternating between 1 and 2 is the difference between a refresh
+    /// and a full snapshot, and a steady 0 means the fence did nothing for it at all. <see cref="DatabaseEngine.GetSpatialTelemetryTotal()"/> takes the
+    /// maximum across archetypes, which reports the heaviest branch any of them ran.
+    /// </remarks>
+    public byte FenceBranchPath { get; init; }
+
+    /// <summary>
     /// Clusters currently live. The denominator for every ratio above — a migration count means nothing without the population it came from.
     /// </summary>
     public int ActiveClusterCount { get; }

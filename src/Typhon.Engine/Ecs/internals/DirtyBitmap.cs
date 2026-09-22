@@ -142,6 +142,121 @@ internal sealed class DirtyBitmap
     }
 
     /// <summary>
+    /// Clears one whole word — the 64 ids <paramref name="wordIndex"/> covers — in a single interlocked operation.
+    /// </summary>
+    /// <param name="wordIndex">The word, which for a cluster-indexed bitmap is the cluster's chunk id.</param>
+    /// <remarks>
+    /// For a caller that is retiring the thing the word describes, so the bits must not survive into a drain that would then name a chunk id which
+    /// has been freed and may already have been handed to something else. Out-of-range indices are ignored rather than faulting: this is called on
+    /// the tick path, where throwing is the worse failure.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void ClearWord(int wordIndex)
+    {
+        if (wordIndex < 0)
+        {
+            return;
+        }
+
+        var blocks = Volatile.Read(ref _blocks);
+        var blockIndex = wordIndex >> WordsPerBlockShift;
+        if (blockIndex >= blocks.Length)
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref blocks[blockIndex][wordIndex & WordInBlockMask], 0L);
+    }
+
+    /// <summary>
+    /// ORs a mask into one whole word — the 64 ids <paramref name="wordIndex"/> covers — in a single interlocked operation.
+    /// </summary>
+    /// <param name="wordIndex">The word, which for a cluster-indexed bitmap is the cluster's chunk id.</param>
+    /// <param name="mask">The bits to set.</param>
+    /// <remarks>
+    /// <see cref="Set"/> costs one interlocked operation per bit, which is the wrong shape for a caller that already holds a mask of every slot it
+    /// wrote — <c>WriteSpatial</c>'s batched overload receives exactly that. Same growth and same block identity as <see cref="Set"/>, so a
+    /// concurrent drain sees this OR either wholly or not at all.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void OrWord(int wordIndex, long mask)
+    {
+        // Negative is checked as well as zero, and deliberately: ResolveBlock's `blockIndex < blocks.Length` is TRUE for a negative index, so the
+        // array access below would throw — on a call made unconditionally from the tick path, where throwing is the worse failure by a distance.
+        if (mask == 0 || wordIndex < 0)
+        {
+            return;
+        }
+
+        var block = ResolveBlock(wordIndex >> WordsPerBlockShift);
+        Interlocked.Or(ref block[wordIndex & WordInBlockMask], mask);
+    }
+
+    /// <summary>
+    /// Drains into a buffer the caller owns, growing it if needed, and returns how many words are valid.
+    /// </summary>
+    /// <param name="buffer">The caller's buffer, reused across calls. Replaced with a larger array when the bitmap has outgrown it.</param>
+    /// <returns>The number of valid words.</returns>
+    /// <remarks>
+    /// <see cref="Snapshot"/> allocates a <c>long[]</c> per call, which is fine for the once-per-fence WAL drain it was written for and is not fine
+    /// for a caller that runs every tick: a steady-state tick must reach the allocator zero times. Same drain semantics otherwise — an
+    /// <see cref="Interlocked.Exchange(ref long, long)"/> per word, so a concurrent <see cref="Set"/> either lands before it and is reported, or
+    /// after it and stays set for the next one.
+    /// </remarks>
+    internal int DrainInto(ref long[] buffer)
+    {
+        lock (_growLock)
+        {
+            var blocks = _blocks;
+            var wordCount = _wordCount;
+            if (buffer == null || buffer.Length < wordCount)
+            {
+                buffer = new long[Math.Max(wordCount, 8)];
+            }
+
+            // Block at a time, and the block IS a cache line (8 words), so a quiet one costs one line and one branch rather than eight volatile reads.
+            // A drained bitmap is mostly quiet by construction — that is what makes it worth publishing — and the caller runs this every tick, so the
+            // per-word form showed up as 57 us per archetype-tick on the SWG demo against 11 for the same work skipping empties.
+            var blockCount = (wordCount + WordInBlockMask) >> WordsPerBlockShift;
+            for (var b = 0; b < blockCount; b++)
+            {
+                var block = blocks[b];
+                var any = 0L;
+                for (var k = 0; k < WordsPerBlock; k++)
+                {
+                    any |= Volatile.Read(ref block[k]);
+                }
+
+                var baseWord = b << WordsPerBlockShift;
+                if (any == 0)
+                {
+                    var end = Math.Min(baseWord + WordsPerBlock, wordCount);
+                    for (var w = baseWord; w < end; w++)
+                    {
+                        buffer[w] = 0L;
+                    }
+
+                    continue;
+                }
+
+                for (var k = 0; k < WordsPerBlock; k++)
+                {
+                    var w = baseWord + k;
+                    if (w >= wordCount)
+                    {
+                        break;
+                    }
+
+                    ref var word = ref block[k];
+                    buffer[w] = Volatile.Read(ref word) == 0 ? 0L : Interlocked.Exchange(ref word, 0L);
+                }
+            }
+
+            return wordCount;
+        }
+    }
+
+    /// <summary>
     /// Drain the bitmap: returns the dirty words accumulated since the last call, and clears them.
     /// Called by tick fence serialization (3.4) — outside the hot write path.
     /// </summary>

@@ -234,4 +234,23 @@ public struct TickContext
     /// <see cref="SpatialGridAccessor.SetTierInAABB"/>). Check <see cref="SpatialGridAccessor.IsValid"/> before use — false when no grid is configured.
     /// </summary>
     public SpatialGridAccessor SpatialGrid { get; init; }
+
+    /// <summary>
+    /// What a system reads this tick's client commands through, and answers them with — <c>ctx.Subscriptions.Commands&lt;MoveIntent&gt;()</c>
+    /// (design/Subscriptions/01-model.md § 7). <see langword="null"/> when the application declared no subscriptions, and on a context built without a
+    /// <see cref="TyphonRuntime"/> at all (standalone scheduler tests).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>It is the runtime's own object, not a per-tick wrapper.</b> <c>SubscriptionsRuntime</c> creates exactly one at <c>Start</c> and never replaces it,
+    /// so this is one reference copied into the context — no allocation per tick, per system or per chunk, and nothing to dispose. Everything it exposes
+    /// describes the tick the context belongs to, because the Engine-Pre drain refills the buffers it reads before the application's track runs.
+    /// </para>
+    /// <para>
+    /// <b>Null is a real answer, and the reason to check it is the same as for <see cref="Transaction"/>.</b> A runtime whose application never touched
+    /// <c>TyphonRuntime.Subscriptions</c> builds no session table, no pools and no command registry — "an unused subsystem costs a database exactly nothing" —
+    /// so there is no empty instance to hand out that would not be a 544 KiB allocation for nobody.
+    /// </para>
+    /// </remarks>
+    public SubscriptionsCommands Subscriptions { get; init; }
 }

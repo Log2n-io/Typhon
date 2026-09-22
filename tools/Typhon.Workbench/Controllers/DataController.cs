@@ -79,8 +79,7 @@ public sealed class DataController : WorkbenchControllerBase
             new TrackFieldDescriptorDto("consumed",       "u32"),
         ]),
         // Post-tick tracks: per-tick scalar duration for one of the named post-tick phases. Track id family:
-        // posttick/walFlush, posttick/writeTickFence, posttick/tierBudget, posttick/subscriptionOutput,
-        // posttick/tierIndexRebuild, posttick/dormancySweep.
+        // posttick/walFlush, posttick/writeTickFence, posttick/tierBudget, posttick/tierIndexRebuild, posttick/dormancySweep.
         new TrackSchemaDto("posttick/<phase>", "perTick",
         [
             new TrackFieldDescriptorDto("tickNumber", "u32"),
@@ -616,14 +615,13 @@ public sealed class DataController : WorkbenchControllerBase
                 "walFlush" => r.WalFlushUs,
                 "writeTickFence" => r.WriteTickFenceUs,
                 "tierBudget" => r.TierBudgetUs,
-                "subscriptionOutput" => r.SubscriptionOutputUs,
                 "tierIndexRebuild" => r.TierIndexRebuildUs,
                 "dormancySweep" => r.DormancySweepUs,
                 _ => float.NaN,
             };
             if (float.IsNaN(us))
             {
-                return BadRequest(new ProblemDetails { Title = "unknown-posttick-phase", Detail = $"Unknown post-tick phase '{phase}'. Available: walFlush, writeTickFence, tierBudget, subscriptionOutput, tierIndexRebuild, dormancySweep.", Status = StatusCodes.Status400BadRequest });
+                return BadRequest(new ProblemDetails { Title = "unknown-posttick-phase", Detail = $"Unknown post-tick phase '{phase}'. Available: walFlush, writeTickFence, tierBudget, tierIndexRebuild, dormancySweep.", Status = StatusCodes.Status400BadRequest });
             }
             output.Add(new PostTickRecordDto(r.TickNumber, us));
         }

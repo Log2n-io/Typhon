@@ -371,9 +371,10 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
 
         Assert.That(ring.TotalTicksRecorded, Is.GreaterThanOrEqualTo(2));
 
-        // Check per-system entity count
+        // Check per-system entity count. By NAME, not by index 0: system indices are global and assigned in track order, so the engine's own tracks own the
+        // low indices whenever they carry a system — the Engine-Pre ingress drain is the first that does.
         var systems = ring.GetSystemMetrics(ring.NewestTick);
-        Assert.That(systems[0].EntitiesProcessed, Is.EqualTo(3),
+        Assert.That(systems[IndexOfSystem(runtime, "Counter")].EntitiesProcessed, Is.EqualTo(3),
             "QuerySystem should report 3 entities processed");
 
         // Check tick-level aggregate
@@ -402,7 +403,22 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
         var ring = runtime.Telemetry;
         var systems = ring.GetSystemMetrics(ring.NewestTick);
 
-        Assert.That(systems[0].EntitiesProcessed, Is.EqualTo(0),
+        Assert.That(systems[IndexOfSystem(runtime, "Noop")].EntitiesProcessed, Is.EqualTo(0),
             "CallbackSystem should report 0 entities (no input View)");
+    }
+
+    /// <summary>The global index of a system by name. Indices are assigned in track order, so index 0 is an engine system, not the app's first.</summary>
+    private static int IndexOfSystem(TyphonRuntime runtime, string name)
+    {
+        for (var i = 0; i < runtime.Scheduler.AllSystemCount; i++)
+        {
+            if (runtime.Scheduler.Systems[i].Name == name)
+            {
+                return i;
+            }
+        }
+
+        Assert.Fail($"system '{name}' is not in the schedule");
+        return -1;
     }
 }
