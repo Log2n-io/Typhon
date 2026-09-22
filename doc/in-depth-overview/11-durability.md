@@ -41,10 +41,11 @@ The rationale (per ADR) is that any half-broken WAL is worse than a stopped engi
 ### Pipeline-level invariants
 
 ```
-CheckpointLSN ≤ DurableLSN ≤ CurrentLSN
+CheckpointLSN ≤ DurableLSN ≤ LastPublishedLsn ≤ LastAppendedLsn
 ```
 
-- `CurrentLSN` — the highest LSN allocated by the commit buffer (may not be written yet).
+- `LastAppendedLsn` — the highest LSN allocated by the commit buffer (`NextLsn - 1`, the allocation frontier). It may name an LSN no frame will ever publish — an abandoned claim, or a producer that timed out at the buffer boundary — so it is never a durability wait target.
+- `LastPublishedLsn` — the highest LSN carried by a frame that reached `Publish` (#937). Every LSN it names belongs to a frame that will drain, which makes it the sound target for "flush everything the WAL holds as of now": a UoW flush and the checkpoint barrier both wait on it.
 - `DurableLSN` — the highest LSN durably on disk via `fsync` / FUA. Honest by construction (LOG-05): the drain records each slot's `LastLsn` at publish, so the watermark never exceeds what is physically fsynced.
 - `CheckpointLSN` — the highest LSN whose effects are consolidated into the data file.
 

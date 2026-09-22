@@ -16,7 +16,7 @@ Set per [Unit of Work](xref:concept-unit-of-work). Applies to every commit in th
 
 | Mode | Flush | Commit latency | At risk on crash |
 |---|---|---|---|
-| `Deferred` | on explicit `Flush()` / dispose | ~1–2 µs | everything since last flush |
+| `Deferred` | only on explicit `Flush()` / `FlushAsync()` — dispose does not flush | ~1–2 µs | everything since last flush |
 | `GroupCommit` | automatically, ~every 5 ms | ~1–2 µs | ≤ one flush interval |
 | `Immediate` | `fsync` on every `Commit` | ~15–85 µs | nothing |
 

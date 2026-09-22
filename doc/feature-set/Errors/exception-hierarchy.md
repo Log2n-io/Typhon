@@ -55,6 +55,8 @@ catch (TyphonException ex)
 | `DatabaseLockedException` | `StorageException` | `false` | `OwnerPid`, `OwnerMachine`, `StartedAt` |
 | `DurabilityException` | `TyphonException` | `false` | — |
 | `WalWriteException`, `WalSegmentException`, `WalClaimTooLargeException` | `DurabilityException` | `false` | `SegmentPath` / `RequestedBytes`, `BufferCapacity` |
+| `CommitDurabilityUncertainException` | `DurabilityException` | `false` | `HighLsn` |
+| `BulkSessionAlreadyActiveException`, `BulkSessionClosedException`, `BulkLoadCheckpointTimeoutException` | `DurabilityException` | `false` | `ActiveBulkSessionId` / `BulkSessionId` / `BulkSessionId`, `Timeout` |
 | `ResourceExhaustedException` | `TyphonException` | `true` | see [Resource Exhaustion Handling](./resource-exhaustion-handling.md) |
 | `SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException` | `TyphonException` | `false` | `Diff`, `Failures`, `PersistedRevision`/`RuntimeRevision` |
 | `UniqueConstraintViolationException` | `TyphonException` | `false` | — |

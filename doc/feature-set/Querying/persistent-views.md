@@ -19,6 +19,8 @@ Game loops and UI panels routinely need to know "which entities currently match 
 
 `ToView()` on an indexed-field query (`WhereField`) builds the initial entity set once via the same selectivity-driven execution plan as a one-shot query, then registers the view to receive change notifications for every field it depends on. At commit time, the field-update path that already touches old/new values for the B+Tree index also pushes a small delta record (entity, before-key, after-key) into the view's lock-free multi-producer/single-consumer ring buffer — no extra scan, no polling. `Refresh(tx)` drains that buffer up to the transaction's snapshot, re-evaluates only the changed entities' predicates, and updates the entity set plus an Added/Removed/Modified delta. If the buffer fills up between refreshes (too many changes, too long a gap), the view self-heals by falling back to one full re-query using its cached execution plan, then resumes incremental mode.
 
+A `ToView()` on a **bare archetype query** (no `WhereField`, no `.Where`, no spatial predicate, no `Enabled<T>()`/`Disabled<T>()` filter — `.With`/`.Without` still qualify) takes the **Membership** path instead: the view subscribes to the per-archetype spawn/destroy channel. `Refresh(tx)` checks a structural epoch first — O(1) when nothing spawned or died — then drains the channel for any commits that did change membership. The result is the same `Added`/`Removed` delta interface, but with a cost proportional to how much the membership actually changed rather than to the archetype size.
+
 ## 💻 Usage
 
 ```csharp
@@ -53,7 +55,8 @@ while (running)
 |---|---|---|
 | Incremental | Single `WhereField` branch | O(changes since last refresh) |
 | OR | `WhereField` with `\|\|` (multiple branches, max 16) | O(changes), per-entity branch bitmap |
-| Pull | No `WhereField` (opaque `Where` or no predicate) | O(full result set), every call — correct, but not incremental |
+| Membership | No predicate (archetype-only: no `WhereField`, no `.Where`, no spatial, no `Enabled`/`Disabled` filter) | O(1) when nothing spawned/died; O(changes) otherwise — fed by the per-archetype spawn/destroy channel, never a full rescan |
+| Pull | No `WhereField`, but an opaque `.Where(lambda)`, a spatial predicate, or an `Enabled`/`Disabled` filter | O(full result set), every call — correct, but not incremental |
 
 ## ⚠️ Guarantees & limits
 
@@ -63,7 +66,7 @@ while (running)
 - **Delta is net change since `ClearDelta()`**, not a raw log — an entity that enters and leaves between two `ClearDelta()` calls produces no event; one that leaves and re-enters reports as Modified.
 - **`ViewDelta`/`GetDelta()` is zero-allocation** and references the view's internal state directly; it is only valid until the next `ClearDelta()`.
 - **Overflow is graceful, not fatal.** A full ring buffer sets `HasOverflow`; the next `Refresh()` rebuilds the entity set from the cached execution plan and computes Added/Removed from the diff — but per-field Modified granularity for that cycle is lost.
-- **AND, OR, and plain-scan (pull) predicates are all supported** by the same `EcsView<TArchetype>` type — the refresh mode is selected automatically from the predicate shape; OR predicates are capped at 16 DNF branches.
+- **All four refresh modes — Incremental, OR, Membership, and Pull — are served by the same `EcsView<TArchetype>` type.** The mode is selected automatically from the predicate shape at `ToView()` time. OR predicates are capped at 16 DNF branches.
 - **Not ordered.** A view is an unordered live set; `OrderByField`/`Skip`/`Take` are rejected on `ToView()`. Re-run `ExecuteOrdered()` per cycle if you need a sorted/paged snapshot.
 - **Must be disposed.** `view.Dispose()` deregisters it from change notifications and frees its unmanaged ring buffer; un-drained entries are discarded.
 - **Cost profile:** commit-time notification is sub-microsecond per (changed field, watching view); draining ~100-200 changes on refresh is single-digit microseconds.

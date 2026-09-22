@@ -88,10 +88,8 @@ set the dirty bit. It costs the engine a wider fall-back scan at the fence, beca
 per-cluster bitmaps untouched. The `TYPHON009` analyzer warning flags the raw-span form of that write so the choice
 is deliberate rather than accidental.
 
-> ⚠️ **`WriteSpatial` accepts `AABB2F` only today.** It throws `NotSupportedException` for the other seven field
-> shapes — `AABB3F`, the four `BSphere` types and the `f64` variants — so an archetype with a 3D or sphere spatial
-> field cannot use the barrier at all. Registration succeeds and the first write throws. Such an archetype
-> must write its spatial field the plain way and accept the wider fence-time scan.
+`WriteSpatial` handles all eight spatial field shapes — `AABB2F`/`AABB3F`, the `BSphere` types and their `f64`
+variants — so 2D, 3D and sphere archetypes all use the same barrier.
 
 | Config field (`SpatialGridConfig`) | Default | Effect |
 |---|---|---|

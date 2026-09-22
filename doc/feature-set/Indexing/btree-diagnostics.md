@@ -59,7 +59,7 @@ tsh> btree-validate Player.Name
 | `btree-dump <Component.Field> [--level N \| --chunk N]` | Raw node/chunk inspection |
 | `btree-validate <Component.Field>` | Full structural walk; reports pass or the first violation |
 
-The contention counters (`OptimisticRestarts`, `PessimisticFallbacks`, `SplitCount`, `MergeCount`, …) aren't
+The contention counters (`OptimisticRestarts`, `PessimisticRestarts`, `PessimisticFallbacks`, `SplitCount`, `MergeCount`, …) aren't
 wired to a `tsh` command yet — today they're consumed by the engine's own stress-test and benchmark harnesses,
 which read them straight off the index instance to confirm a concurrent workload actually exercised the
 retry/fallback paths it was meant to:
@@ -67,8 +67,10 @@ retry/fallback paths it was meant to:
 ```csharp
 // Engine-internal / stress-harness code (InternalsVisibleTo), not part of the public Typhon.Engine surface.
 TestContext.Out.WriteLine(
-    $"Restarts={tree.OptimisticRestarts} Fallbacks={tree.PessimisticFallbacks} " +
-    $"Splits={tree.SplitCount} Merges={tree.MergeCount}");
+    $"OptRestarts={tree.OptimisticRestarts} PessRestarts={tree.PessimisticRestarts} Fallbacks={tree.PessimisticFallbacks} " +
+    $"WriteLockFails={tree.WriteLockFailures} Splits={tree.SplitCount} Merges={tree.MergeCount} " +
+    $"ContentionSplits={tree.ContentionSplitCount} Deferred={tree.DeferredNodeCount} " +
+    $"RetryExits=[{tree.DescribeInsertRetryExits()}]");
 ```
 
 ## ⚠️ Guarantees & limits
@@ -88,7 +90,7 @@ TestContext.Out.WriteLine(
 
 ## 🧪 Tests
 
-- [OlcBTreeStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcBTreeStressTests.cs) — `LogDiagnostics`/`tree.ResetDiagnostics()`: reads `OptimisticRestarts`/`PessimisticFallbacks`/`SplitCount`/`MergeCount`/`ContentionSplitCount` straight off a stressed tree instance, the same counters this feature documents
+- [OlcBTreeStressTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/OlcBTreeStressTests.cs) — `LogDiagnostics`/`tree.ResetDiagnostics()`: reads `OptimisticRestarts`/`PessimisticRestarts`/`PessimisticFallbacks`/`SplitCount`/`MergeCount`/`ContentionSplitCount` and calls `DescribeInsertRetryExits()` straight off a stressed tree instance, the same counters this feature documents
 - [BTreeTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Data/BTreeTests.cs) — pervasive `tree.CheckConsistency(...)` calls exercise the same structural walk (key ordering, parent/child linkage, B-link sibling chaining) that `tsh btree-validate` runs via `DiagnosticCommandExecutor`
 
 ## 🔗 Related
