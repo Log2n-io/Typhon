@@ -26,7 +26,7 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions;
 /// </para>
 /// <para>
 /// <b>What this does NOT cover.</b> AC-9's first half — enter/leave balance per session over an hour of entity churn — is a different run and
-/// is not attempted here; see <c>10-measurements.md § 6</c>.
+/// is not attempted here; see <c>design/Subscriptions/08-measurements.md § 1</c>.
 /// </para>
 /// </remarks>
 [TestFixture]

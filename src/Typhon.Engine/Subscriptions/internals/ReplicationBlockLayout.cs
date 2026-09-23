@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// Header of one replication state block — the block that describes a single cluster holding at least one watched entity. Padded to a full cache line so
+/// Header of one replication state block — the block that describes one cluster of an observed archetype. Padded to a full cache line so
 /// the first hot entry is line-aligned.
 /// </summary>
 /// <remarks>
@@ -169,7 +169,8 @@ internal readonly struct ReplicationBlockLayout
     public const int HotFixedBytes = 32;
 
     /// <summary>
-    /// The cold entry's fixed head: the last-watched tick. It sits <i>after</i> the two regions, as <see cref="ReplicationColdEntry"/> lays it out.
+    /// The cold entry's fixed head: the tick of the entity's last event (SUB-19). It sits <i>after</i> the two regions, as <see
+    /// cref="ReplicationColdEntry"/> lays it out.
     /// </summary>
     public const int ColdFixedBytes = 4;
 

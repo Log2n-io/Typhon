@@ -185,7 +185,7 @@
   invariant once the pushed set has stopped growing, a replication tick allocates no managed memory
   never `new`, LINQ, lambda capture or boxing on the per-hit or per-entity replication path
   scope: ReplicationDirectory, ReplicationBlockPool, NetIdAllocator, ArchetypeReplicationState
-  on_violation: replication adds GC pressure proportional to the watched set every tick, which shows up as
+  on_violation: replication adds GC pressure proportional to the push set every tick, which shows up as
     tick-time jitter rather than as a failure — the hardest class of regression to attribute after the fact
   note structural growth is exempt and deliberate: the block pool commits a slab, the directory rehashes, and the
     identity allocator grows its side arrays. These happen at the track prologue AND at the single-threaded blocks
@@ -218,7 +218,7 @@
     the process lifetime, which is why 16 bits suffice. A wrap needs 65 536 reuses of one identity.
   note the generation is bumped on RELEASE, not on the next allocate, so an entity that leaves and is never replaced
     still reads as gone to a session holding the old pair.
-  note the window is the SKIP window and not one tick (D1, design/Subscriptions/02-execution.md § 5). One tick keeps a leave and an enter out of the same
+  note the window is the SKIP window and not one tick (D1, design/Subscriptions/02-execution.md § 4). One tick keeps a leave and an enter out of the same
     frame of a session that receives every tick. It does not keep them out of the same frame of a SKIPPED session, which receives everything since its
     baseline in one message: an identity released at N and reissued at N+1 reaches such a session as a leave and an enter for the same number, in one frame,
     in an order it cannot recover. The alternatives considered and rejected were putting the generation on the wire beside every netId (a byte per record,
@@ -234,8 +234,8 @@
     NetIdAllocatorTests.AReleasedIdentityIsHeldForTheSkipWindow
 
 ### SUB-09: State follows its entity, and never survives slot reuse `[fatal][silent]`
-  invariant ∀ watched entity e: the hot/cold entry describing e is reachable from e's CURRENT (cluster, slot)
-  invariant ∀ move of a watched e from (c1,s1) to (c2,s2): e's entry is written to (c2,s2) and (c1,s1) is CLEARED — the entry exists at exactly one
+  invariant ∀ entity e with a replication entry: the hot/cold entry describing e is reachable from e's CURRENT (cluster, slot)
+  invariant ∀ move of such an e from (c1,s1) to (c2,s2): e's entry is written to (c2,s2) and (c1,s1) is CLEARED — the entry exists at exactly one
     address, never at two and never at none
   invariant [the destination cluster has no block when the move executes] → the entry is copied aside, BY VALUE, and written by the next
     single-threaded point after the blocks step; never held as a pointer to the source, whose slot can be reused in the same step
@@ -518,7 +518,7 @@
     socket that is already writing them, so what arrives is the tail of one frame behind the head of another. Sending past CommittedTick is a third
     failure with a different cost — the session is told a story the WAL does not carry, and a crash leaves the client ahead of the database.
   rationale: this is the only structure in the engine a thread outside the scheduler writes into on a per-message basis, so it is the only one where the
-    ordering cannot be inherited from the tick's own barriers. The pairs are named in design/Subscriptions/foundation/05-ingress-rings.md § 4.1 and are
+    ordering cannot be inherited from the tick's own barriers. The pairs are named in archive/Subscriptions/foundation/05-ingress-rings.md § 4.1 and are
     deliberately the same shape as TraceRecordRing's, which is the engine's existing SPSC precedent.
   rationale: outbound, the same argument reaches the other way — a send pump is a ThreadPool task, not a scheduler worker, so nothing the tick does
     orders its reads either. K = 2 is the smallest window that keeps a link busy (one frame on the socket, one ready behind it) without letting a slow
@@ -586,11 +586,11 @@
 ## Module: Push Replication (ADR-067)
 
 ### SUB-19: A push entity's slot stamp is the tick of its last event, and every change makes one `[fatal][silent]`
-  invariant ∀ push archetype, ∀ live slot s: cold LastWatchedTick(s) = the tick of the latest PushEvent recorded for the entity in s
+  invariant ∀ push archetype, ∀ live slot s: cold LastEventTick(s) = the tick of the latest PushEvent recorded for the entity in s
   invariant ∀ change to an entity's projected state or motion in tick T: a PushEvent for it is recorded in T, and it names the block and slot the
     entity is in at the end of T — an arrival by migration included, even when no byte changed
   invariant the far flush of an entity at its phase tick p ((netId mod N + p mod N) mod N = 0) carries every group whose stamp is in (p − N, p]
-  never write a push slot's LastWatchedTick anywhere but PushReplication.AddEvent — not for a slot the change gate skipped, not on a dormant path
+  never write a push slot's LastEventTick anywhere but PushReplication.AddEvent — not for a slot the change gate skipped, not on a dormant path
   never drop an arrival's event as a byte-identical no-op
   scope: PushReplication.AddEvent, PushReplication.FoldFarChunk, PushReplication.FarSweepCell, PushReplication.CollectLog, ProjectionPass.ProjectBlock,
     ReplicationBlockLayout.LastEventTickOffsetInColdEntry, PushEvent.Arrived, PushEvent.FarFlush

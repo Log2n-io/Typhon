@@ -8,7 +8,7 @@ using Typhon.Protocol;
 namespace Typhon.Engine.Tests.Runtime.Subscriptions;
 
 /// <summary>
-/// P1-03 + P1-06 — step 1 of <c>design/Subscriptions/09-phase1-build-plan.md § 5</c>: an in-process client completes the handshake against a
+/// P1-03 + P1-06 — step 1 of <c>archive/Subscriptions/09-phase1-build-plan.md § 5</c>: an in-process client completes the handshake against a
 /// <b>live <see cref="TyphonRuntime"/></b>, and the <c>WELCOME</c> it receives carries the real catalog built from the real compiled plan.
 /// </summary>
 /// <remarks>
@@ -216,7 +216,7 @@ class LiveHandshakeTests : TestBase<LiveHandshakeTests>
         first.OnMessage(ClientMessages.Hello("god"));
         var carried = WelcomeMessage.Parse(firstLink.Take());
 
-        // Exactly what an SDK does on reconnect: echo the hash it was given, having computed nothing itself (foundation/06 § 2).
+        // Exactly what an SDK does on reconnect: echo the hash it was given, having computed nothing itself (archive/Subscriptions/foundation/06 § 2).
         var secondLink = new InProcessLink();
         var second = Connect(acceptor, secondLink);
         second.OnMessage(ClientMessages.Hello("god", clientCatalogHash: carried.CatalogHash));

@@ -98,7 +98,7 @@ internal sealed class CommandAckLog
 /// <remarks>
 /// <para>
 /// <b>The <c>EventQueue</c> shape, for the same reason.</b> Each drain chunk owns one segment, so appending needs no synchronization at all; the merge is
-/// hidden behind the batch's enumerator, exactly as <c>EventQueue.Drain</c> hides its own (foundation/05 § 4.2).
+/// hidden behind the batch's enumerator, exactly as <c>EventQueue.Drain</c> hides its own (archive/Subscriptions/foundation/05 § 4.2).
 /// </para>
 /// <para>
 /// <b>Structure of arrays, not an array of <c>Command&lt;T&gt;</c>.</b> The payloads are raw bytes with a per-type stride because the drain is not generic —

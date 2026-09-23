@@ -4,22 +4,21 @@ using System.Threading;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// The whole replication pipeline as ONE dispatched system: prologue → interest → blocks → project → events → frames, inline, with no barrier between them.
-/// D4 of <c>design/Subscriptions/09-phase1-build-plan.md § 2</c>, and the answer to open item 5 of <c>foundation/03 § 6</c>.
+/// The whole replication pipeline as ONE dispatched system: blocks step → project → events → frames (whose prologue builds the push index serially),
+/// inline, with no barrier between them (<c>design/Subscriptions/02-execution.md § 2</c>).
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>What it buys.</b> The staged shape's critical path is three sequential dispatches — <c>Interest → Project → Frames</c> — and a dispatch is a worker
-/// wake/barrier cycle, ≈ 0.1 ms measured (<c>foundation/03 § 4</c>). That is ≈ 0.3 ms of pure scheduling before any replication work happens, which is the
-/// entirety of AC-1's budget. Below some amount of work the barriers cost more than the parallelism they buy back, and this shape pays one dispatch instead
-/// of three. Where that crossing point is, is a MEASUREMENT (Q-M1); this file builds the mechanism, and
+/// <b>What it buys.</b> The staged shape's critical path is a chain of dispatches — <c>Project → PushIndex → PushFar → Frames</c> — and a dispatch is a
+/// worker wake/barrier cycle, ≈ 0.1 ms measured. Below some amount of work the barriers cost more than the parallelism they buy back, and this shape pays
+/// one dispatch instead. Where that crossing point is, is a MEASUREMENT (Q-M1); this file builds the mechanism, and
 /// <see cref="SubscriptionsOptions.CollapseBelowWorkUnits"/> defaults to 0 so nothing selects it until somebody measures.
 /// </para>
 /// <para>
 /// <b>It executes the same chunk counts, serially — it does not re-partition.</b> Each stage's own <c>Prepare</c> decides the chunk count exactly as it does
 /// in the staged shape, and this system then runs chunks <c>0 … n-1</c> in order on one thread. That is not an accident of implementation, it is what makes
-/// the two shapes comparable: a record's arena is chosen by its chunk index, a netId lease is held per chunk index, and the frame assembler walks the arenas
-/// in index order — so identical chunk counts give byte-identical frames whichever shape produced them, and <c>CollapsePathTests</c> asserts exactly that.
+/// the two shapes comparable: a netId lease is held per chunk index and each chunk's events land in its own list — so identical chunk counts give
+/// byte-identical frames whichever shape produced them, and <c>CollapsePathTests</c> asserts exactly that.
 /// Collapsing the partition to one chunk as well would have been the obvious reading of "inline", and it would have changed the output.
 /// </para>
 /// <para>
@@ -46,10 +45,6 @@ internal sealed class SubscriptionsCollapsedExecSystem : SubscriptionsExecSystem
     protected override bool RunsInThisShape(bool collapsed) => collapsed;
 
     /// <summary>
-    /// One chunk, always. The stages' own chunk counts are computed inside <see cref="ExecuteChunk"/>, because each depends on the stage before it having
-    /// already RUN — the frame prologue reads the index the projection counted, not one a <c>Prepare</c> produced.
-    /// </summary>
-    /// <summary>
     /// The collapsed shape reports as one stage, not several.
     /// </summary>
     /// <remarks>
@@ -59,6 +54,10 @@ internal sealed class SubscriptionsCollapsedExecSystem : SubscriptionsExecSystem
     /// </remarks>
     protected override SubscriptionsStage Stage => SubscriptionsStage.Collapsed;
 
+    /// <summary>
+    /// One chunk, always. The stages' own chunk counts are computed inside <see cref="ExecuteChunk"/>, because each depends on the stage before it having
+    /// already RUN — the frame prologue reads the events the projection produced, not ones a <c>Prepare</c> predicted.
+    /// </summary>
     protected override int PrepareChunks(SubscriptionsContext ctx) => 1;
 
     protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount)

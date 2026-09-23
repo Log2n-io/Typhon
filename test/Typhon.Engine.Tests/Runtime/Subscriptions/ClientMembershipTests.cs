@@ -52,11 +52,11 @@ class ClientMembershipTests : TestBase<ClientMembershipTests>
     /// The client holds exactly the entities that are geometrically inside the observer's radius, on every tick, while the spatial layer repairs clusters.
     /// </summary>
     /// <remarks>
-    /// <b>Brute force is the oracle.</b> The interest pass reaches entities through a broad phase over CLUSTER boxes and then a per-entity distance test,
-    /// and repair rewrites those boxes continuously. If a cluster's stored bounds ever lag its contents, the broad phase drops the cluster and every
-    /// entity in it vanishes from the view for a tick — the client is told to forget them and told about them again in full when the box catches up. That
-    /// is invisible to any assertion that only checks convergence at the end, because the world does converge; it is the cost of getting there that is
-    /// wrong. So the count is checked EVERY tick against a loop over every entity's actual position.
+    /// <b>Brute force is the oracle.</b> The push path decides membership from each entity's last pushed position against the session's anchor, and its
+    /// sweeps prune whole clusters by their boxes, which repair rewrites continuously. If a cluster's stored bounds ever lagged its contents, a sweep would
+    /// skip entities it should have tested — an enter or a leave missed until something else moves them. That is invisible to any assertion that only checks
+    /// convergence at the end; it is the cost of getting there that is wrong. So the count is checked EVERY tick against a loop over every entity's actual
+    /// position.
     /// </remarks>
     [Test]
     public void TheClientHoldsExactlyWhatIsInsideTheRadiusOnEveryTick()

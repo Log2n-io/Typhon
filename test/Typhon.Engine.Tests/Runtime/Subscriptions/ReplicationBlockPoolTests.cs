@@ -8,8 +8,8 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The pool is the piece of v2 sized by <i>client</i> behaviour rather than by the database, so the properties worth pinning are the ones that keep an
-/// untrusted watched set from becoming a memory-exhaustion path: it commits nothing until asked, never commits past its budget, and reports exhaustion by
+/// The pool is sized by what the application replicates rather than by the database, so the properties worth pinning are the ones that keep an
+/// untrusted load from becoming a memory-exhaustion path: it commits nothing until asked, never commits past its budget, and reports exhaustion by
 /// returning <see langword="false"/> rather than by throwing on a tick-path call.
 /// </para>
 /// <para>

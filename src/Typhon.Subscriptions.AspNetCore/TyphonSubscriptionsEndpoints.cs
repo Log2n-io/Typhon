@@ -199,7 +199,7 @@ public static class TyphonSubscriptionsEndpoints
 
         // One report, from a finally, whatever the loop does. Every path below used to report for itself, which worked until a path appeared that did not: a
         // connection whose OnMessage throws something other than a WireFormatException — an application's Admit hook, say — escaped the loop with the session
-        // still open, and a session nothing ever closes holds its slot, its known-set and its ingress ring for the life of the process.
+        // still open, and a session nothing ever closes holds its slot, its frames and its ingress ring for the life of the process.
         var closeCode = (ushort)0;
 
         try

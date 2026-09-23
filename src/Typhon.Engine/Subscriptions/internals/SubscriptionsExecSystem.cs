@@ -18,7 +18,7 @@ namespace Typhon.Engine.Internals;
 /// columns is page access and PS-02 requires every page access to be inside one. It does NOT call <c>FenceWindow.EnterWorker()</c>, which
 /// <c>FencePhaseExecSystemBase</c> does: that enrolment exists to make a worker's writes to FENCE-OWNED structures legal (<c>FenceExecSystem.cs:237-238</c>),
 /// and these stages read engine data while writing only replication's own native blocks. <see cref="EpochGuard"/> nests, so this stays correct when
-/// <c>foundation/04-public-spatial-api.md</c> makes the dispatcher enter the scope for every chunked callback.
+/// <c>archive/Subscriptions/foundation/04-public-spatial-api.md</c> makes the dispatcher enter the scope for every chunked callback.
 /// </para>
 /// <para>
 /// <b>No stage enrols in the fence window.</b> The stages run on pool workers that never enrol, inside an open EW-01 window on both fence paths, so their
@@ -179,9 +179,9 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
 /// skips cleanly — successors still fan out.
 /// </para>
 /// <para>
-/// <b>Its <c>Prepare</c> is also the track's blocks step</b> (<c>foundation/03 § 2.5</c>): serial work the scheduler already runs single-threaded before the
-/// dispatch, so it costs no barrier of its own. The push set is gathered and every cluster in it given a block, the fence's parked migrations land, the
-/// pushed slots are marked, and last tick's released identities go back to the allocator as the leases refill.
+/// <b>Its <c>Prepare</c> is also the track's blocks step</b> (<c>design/Subscriptions/02-execution.md § 3.2</c>): serial work the scheduler already runs
+/// single-threaded before the dispatch, so it costs no barrier of its own. The push set is gathered and every cluster in it given a block, the fence's
+/// parked migrations land, the pushed slots are marked, and last tick's released identities go back to the allocator as the leases refill.
 /// </para>
 /// </remarks>
 internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecSystemBase
@@ -492,8 +492,8 @@ internal sealed class SubscriptionsPushFarExecSystem : SubscriptionsExecSystemBa
 /// <b>The chunk count is the assembler's:</b> the partition is over the sessions bound to a profile that reaches something, taken from a shared cursor.
 /// </para>
 /// <para>
-/// <b>Its <c>Prepare</c> is the stage's prologue</b> (<c>foundation/03 § 2.5</c>): the serial half of S2b, where the skip policy runs, a re-leased slot is
-/// rebound, a profile switch becomes the next frame's <c>RESET</c>, and the push index is built when its stage did not.
+/// <b>Its <c>Prepare</c> is the stage's prologue</b> (<c>design/Subscriptions/02-execution.md § 3.5</c>): the serial half of S2b, where the skip policy
+/// runs, a re-leased slot is rebound, a profile switch becomes the next frame's <c>RESET</c>, and the push index is built when its stage did not.
 /// </para>
 /// </remarks>
 internal sealed class SubscriptionsFramesExecSystem : SubscriptionsExecSystemBase

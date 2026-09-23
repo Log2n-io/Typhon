@@ -4,7 +4,7 @@ using NUnit.Framework;
 namespace Typhon.Engine.Tests;
 
 /// <summary>
-/// #954 — the replication directory: chunk id to state block, sized by the watched set.
+/// #954 — the replication directory: chunk id to state block, sized by the blocks it holds, never by the chunk-id space.
 /// </summary>
 /// <remarks>
 /// The property worth defending here is SUB-13: the directory must cost what is <i>watched</i>, never what the database holds. A flat array indexed by chunk

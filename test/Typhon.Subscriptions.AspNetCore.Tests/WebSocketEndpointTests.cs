@@ -229,7 +229,7 @@ public class WebSocketEndpointTests
     /// </summary>
     /// <remarks>
     /// The hole this closes: <c>SubscriptionConnection.OnMessage</c> catches wire faults, but an application's admission hook can throw anything, and such an
-    /// exception escaped the receive loop with the session still open. A session nothing ever closes holds its slot, its known-set and its ingress ring for
+    /// exception escaped the receive loop with the session still open. A session nothing ever closes holds its slot, its frames and its ingress ring for
     /// the life of the process — a leak with no error anywhere.
     /// </remarks>
     [Test]

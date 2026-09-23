@@ -241,8 +241,8 @@ internal static unsafe class MotionTracker
         if (initialize)
         {
             // No history any session could hold, and none this rule could fit a velocity from: the entry enters with a stationary segment at where it is,
-            // and the first measurement happens on its second watched tick. The epoch is whatever the entry already carried — zero on a fresh or reused
-            // slot, because the entry was cleared, and unchanged for an entity that was merely unwatched for a tick.
+            // and the first measurement happens on its second projected tick. The epoch is whatever the entry already carried — zero on a fresh or reused
+            // slot, because the entry was cleared, and unchanged for an entity that was merely not pushed for a tick.
             StartRun(policy, runStart, runTick, current, tick);
             EmitSegment(policy, segment, current, default, tick, segment[policy.SegmentEpochOffset]);
             hot->GroupTicks[0] = tick;

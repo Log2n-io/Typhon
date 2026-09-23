@@ -46,7 +46,7 @@ public readonly struct ClientCommand<T> where T : unmanaged
 /// <para>
 /// <b>Order within a session is the contract; order between sessions is not.</b> A session is drained by exactly one worker, which appends its records to that
 /// worker's own segment in arrival order, so walking the segments preserves each client's order without preserving any order between clients — which nothing
-/// needs (SUB-08, foundation/05 § 4.2).
+/// needs (SUB-08, archive/Subscriptions/foundation/05 § 4.2).
 /// </para>
 /// <para>
 /// <b>Nothing here allocates.</b> The batch is a view over the drain's buffers; the enumerator is a struct whose <c>Current</c> is a reference to its own

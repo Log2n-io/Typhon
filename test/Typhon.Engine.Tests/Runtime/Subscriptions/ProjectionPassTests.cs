@@ -544,7 +544,7 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
     }
 
     /// <summary>
-    /// SUB-07's shape for this pass: once the watched set is stable, a projection tick allocates no managed memory at all.
+    /// SUB-07's shape for this pass: once the push set is stable, a projection tick allocates no managed memory at all.
     /// </summary>
     /// <remarks>
     /// The measured region is the pass and nothing else — the accessor, the epoch scope and the marking are taken outside it, because they belong to the

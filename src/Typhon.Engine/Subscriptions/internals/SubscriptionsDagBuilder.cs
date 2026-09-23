@@ -6,12 +6,10 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Three dispatched stages on the critical path, not six chained ones.</b> Every dispatch is a worker wake/barrier cycle (≈ 0.1 ms), so the stage
-/// count is a cost rather than a description of reading order. The pipeline's serial steps — the prologue, and creating the blocks of newly watched
-/// clusters — run inside
-/// the following stage's single-threaded <c>Prepare</c>, where they cost a function call instead of a whole barrier; and <c>Events</c> runs as a parallel
-/// branch because it depends on neither interest nor projection. The critical path is <c>Interest → Project → Frames</c>
-/// (<c>design/Subscriptions/foundation/03-subscriptions-track.md § 2.5</c>).
+/// <b>Serial work lives in <c>Prepare</c>, not in systems of its own.</b> Every dispatch is a worker wake/barrier cycle (≈ 0.1 ms), so the stage count is
+/// a cost rather than a description of reading order. The pipeline's serial steps — the blocks step, the index offsets, the session prologue — run in
+/// their stage's single-threaded <c>Prepare</c>, where they cost a function call instead of a whole barrier; <c>Events</c> depends on nothing and runs as a
+/// parallel branch. The chain is <c>Project → PushIndex → PushFar → Frames</c> (<c>design/Subscriptions/02-execution.md § 2</c>).
 /// </para>
 /// <para>
 /// <b>Declared unconditionally, unlike the Fence DAG.</b> <see cref="FenceDagBuilder"/> is called only when <c>RuntimeOptions.EnableParallelFence</c> is set,
@@ -27,8 +25,8 @@ namespace Typhon.Engine.Internals;
 /// a comment contradicted by the code beside it.
 /// </para>
 /// <para>
-/// <b>Two shapes are declared, and exactly one of them prepares chunks per tick.</b> D4 of <c>09-phase1-build-plan § 2</c>: below a measured amount of work the
-/// four staged systems are replaced by <see cref="SubscriptionsCollapsedExecSystem"/>, which runs the same stage bodies inline with no barrier between them.
+/// <b>Two shapes are declared, and exactly one of them prepares chunks per tick.</b> Below a configured amount of work the staged systems are replaced
+/// by <see cref="SubscriptionsCollapsedExecSystem"/>, which runs the same stage bodies inline with no barrier between them.
 /// Both are members of the one DAG and both are gated on <see cref="SubscriptionsPipelineShape"/>, which decides once per tick; the losing shape's systems
 /// clear no gate, prepare nothing and complete inline, which is the same cost an idle track already pays. Declaring the collapsed system conditionally — at
 /// Build time, from the option — was the alternative, and it is the § 2.3 trap again in a new place: the threshold is measured per tick, not per runtime, so a

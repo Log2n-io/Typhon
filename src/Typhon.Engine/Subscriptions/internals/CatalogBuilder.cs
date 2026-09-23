@@ -11,16 +11,16 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The plan is the source, not the schema</b> (foundation/06 D1). Re-deriving the wire shape from <c>ComponentSchemaSpec</c> would make "the catalog says
-/// what the encoder does" a thing to be reviewed; emitting it from the same structure S1 reads makes it true by construction. Where the plan cannot carry
-/// something the wire needs — an <c>enum</c>'s value set, an event's routing, a command's rate — the declaration it was compiled from is read beside it, by
-/// name, never a third source.
+/// <b>The plan is the source, not the schema</b> (archive/Subscriptions/foundation/06 D1). Re-deriving the wire shape from <c>ComponentSchemaSpec</c>
+/// would make "the catalog says what the encoder does" a thing to be reviewed; emitting it from the same structure S1 reads makes it true by construction.
+/// Where the plan cannot carry something the wire needs — an <c>enum</c>'s value set, an event's routing, a command's rate — the declaration it was
+/// compiled from is read beside it, by name, never a third source.
 /// </para>
 /// <para>
-/// <b>Nothing about server memory leaves here</b> (foundation/06 D2, D3). A <see cref="CompiledField"/> carries a component slot, a column offset, a stride
-/// and a field offset; not one of them is read by this file. What is read is the wire name, the codec, the section and the group bit — which is the whole of
-/// what a byte stream means. No CLR type name is emitted either: an archetype, a field, a command and an event travel under the name the projection declared,
-/// so renaming a C# type is not a wire break.
+/// <b>Nothing about server memory leaves here</b> (archive/Subscriptions/foundation/06 D2, D3). A <see cref="CompiledField"/> carries a component slot, a
+/// column offset, a stride and a field offset; not one of them is read by this file. What is read is the wire name, the codec, the section and the group
+/// bit — which is the whole of what a byte stream means. No CLR type name is emitted either: an archetype, a field, a command and an event travel under
+/// the name the projection declared, so renaming a C# type is not a wire break.
 /// </para>
 /// <para>
 /// <b>Canonicalization is not repeated here.</b> Indices, sort order and the reserved ranges are <see cref="CatalogSerializer.Canonicalize"/>'s job and this

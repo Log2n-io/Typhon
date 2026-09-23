@@ -13,7 +13,7 @@ namespace Typhon.Engine.Tests;
 /// <para>
 /// <b>What this can and cannot prove.</b> On x64 the hardware supplies the ordering whether or not the code asks for it, so a green run here is evidence of
 /// framing correctness rather than of memory ordering; the ordering claim is only genuinely exercised on arm64, which is why this fixture is one of the cases
-/// the nightly runs natively there (design/Subscriptions/foundation/05-ingress-rings.md § 5, criterion 7). What the fixture buys on every architecture is a
+/// the nightly runs natively there (archive/Subscriptions/foundation/05-ingress-rings.md § 5, criterion 7). What the fixture buys on every architecture is a
 /// check that CAN fail — see the mutant below, which drives the same assertion over a buffer that publishes its cursor before its bytes.
 /// </para>
 /// <para>

@@ -12,9 +12,9 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>This is where a later slice adds its field, not <see cref="SubscriptionsContext"/></b> (09-phase1-build-plan § 4). The context is tick-scoped and shared
-/// by every stage; it holds this object through one field and nothing else. Without that boundary, eight independently-built slices would each add a member to
-/// one file and every merge would conflict over it.
+/// <b>This is where a later slice adds its field, not <see cref="SubscriptionsContext"/></b> (archive/Subscriptions/09-phase1-build-plan § 4). The context
+/// is tick-scoped and shared by every stage; it holds this object through one field and nothing else. Without that boundary, eight independently-built
+/// slices would each add a member to one file and every merge would conflict over it.
 /// </para>
 /// <para>
 /// <b>It is also where the replication state is first constructed in production.</b> <see cref="ArchetypeReplicationState"/>,

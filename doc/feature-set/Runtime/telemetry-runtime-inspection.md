@@ -63,7 +63,7 @@ for (var n = ring.OldestAvailableTick; n <= ring.NewestTick; n++)
 - [TickTelemetryRingTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TickTelemetryRingTests.cs) — record/read round-trip, ring-wrap eviction of the oldest tick, out-of-window `GetTick` throws
 
 ## 🔗 Related
-- Related feature: [Subscriptions](../Subscriptions/README.md) — replication reports its own per-tick cost once it ships; `TickTelemetry` carries no replication counters today.
+- Related feature: [Subscriptions](../Subscriptions/README.md) — replication reports its per-stage cost through its own diagnostics; `TickTelemetry` carries no replication counters.
 
 <!-- Deep dive: claude/design/Runtime/03-overload.md — Tick Telemetry & Runtime Inspection -->
 <!-- Deep dive: claude/overview/13-runtime.md — Telemetry -->

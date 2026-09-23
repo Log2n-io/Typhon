@@ -147,11 +147,11 @@ A view gives you:
 
 ## 4. Subscriptions — pushing state to clients
 
-When the consumer is remote (a connected game client, a browser, another process), **subscriptions** are what carry engine state there and keep it current, so a client can mirror "the characters near my camera" without re-querying.
+When the consumer is remote (a connected game client, a browser, another process), **subscriptions** are what carry engine state there and keep it current, so a client can mirror "the characters near my player" without re-querying.
 
-You declare what each archetype exposes and who sees what; the engine handles per-client interest, change detection, encoding, sessions and backpressure, plus an inbound path for typed commands that enter the tick and are validated by ordinary systems. Clients decode against a catalog rather than C# type layouts, so browsers and native clients share one wire.
+You declare what each archetype exposes and which profile a session follows — the whole world, or a radius around a point you place — and after each write you want seen, your system calls `ctx.Subscriptions.Replicate(in cluster, slot)`. The engine compares and encodes each changed entity once, gives every session the changes around it, and drains typed commands from clients into the next tick, where ordinary systems validate them. Clients decode against a catalog rather than C# type layouts, so browsers and native clients share one wire.
 
-> 🚧 **Under construction — no public API yet.** Track [#205](https://github.com/Log2n-io/Typhon/issues/205). Everything in §3 above is unaffected.
+> 🚧 **Partial.** World and radius observers, the TCP and WebSocket transports and both client SDKs are built; hysteresis, client regions, aggregates and events come next. See [Subscriptions](../feature-set/Subscriptions/README.md). Everything in §3 above is unaffected.
 
 ---
 

@@ -32,7 +32,7 @@ description: 'Documentation for every feature in src/Typhon.Engine, tagged Publi
 | Spatial | R-Tree spatial indexing, spatial query predicates, trigger volumes, and cluster-based tiered simulation dispatch. | Mixed | [→](Spatial/README.md) |
 | Querying | The fluent query builder, execution planning, statistics, and incrementally-refreshed persistent Views. | Public | [→](Querying/README.md) |
 | Transactions | The three-tier execution model (Engine → UoW → Transaction) — durability modes/discipline, commit/rollback, conflict resolution. | Public | [→](Transactions/README.md) |
-| Subscriptions | Engine-owned replication: declared archetype state streamed to remote clients, typed commands drained back into the tick. Under construction. | Public | [→](Subscriptions/README.md) |
+| Subscriptions | Engine-owned replication: declared archetype state pushed to remote clients around each session, typed commands drained back into the tick. | Public | [→](Subscriptions/README.md) |
 | Runtime | The DAG-scheduled tick loop that dispatches systems — scheduling, system types, spatial-tier dispatch, overload management. | Public | [→](Runtime/README.md) |
 | Resources | The runtime resource graph tracking every engine resource's metrics, budgets, snapshots, and exhaustion handling. | Mixed | [→](Resources/README.md) |
 | Observability | Zero-overhead telemetry gating, distributed tracing, OpenTelemetry metrics export, and health/alerting. | Public | [→](Observability/README.md) |
@@ -193,7 +193,7 @@ Every Public feature, one line each — the application-facing surface, complete
 
 | Feature | Summary | Status | Level | Link |
 |---|---|---|---|---|
-| Engine-owned replication | Declared archetype state streamed to remote clients with per-client interest, and typed commands drained back into the tick. Under construction — no public API yet. | 🚧 Partial | 🟣 Advanced | [→](Subscriptions/README.md) |
+| Engine-owned replication | Declared archetype state pushed to remote clients around each session, and typed commands drained back into the tick. World and radius observers, TCP and WebSocket, .NET and TypeScript clients built; hysteresis, regions, aggregates and events next. | 🚧 Partial | 🟣 Advanced | [→](Subscriptions/README.md) |
 
 ### Runtime
 

@@ -121,8 +121,8 @@ internal sealed class SessionIngress
 /// <remarks>
 /// <para>
 /// <b>Where the two threads meet is the ring and nowhere else.</b> The transport side validates, decodes, rate-limits and frames; the tick side drains,
-/// coalesces and indexes. The ring is the whole interface between them (foundation/05), which is why neither side takes a lock on the hot path and why a late
-/// tick can never make a network thread wait.
+/// coalesces and indexes. The ring is the whole interface between them (archive/Subscriptions/foundation/05), which is why neither side takes a lock on
+/// the hot path and why a late tick can never make a network thread wait.
 /// </para>
 /// <para>
 /// <b>Records carry a small header of their own inside the ring's framing</b> — <c>u16 wireIdx | u16 seq | u32 clientTick</c>, then the decoded command. The
@@ -371,7 +371,7 @@ internal sealed class SubscriptionsIngress : IDisposable
         ReturnRetiredRings();
 
         // Closes a transport thread asked for become real closes, then this tick's lifecycle batch is published — both before any application system runs,
-        // which is what lets an app react to an Opened or a Closed with an ordinary transaction in the same tick (foundation/05 § 4.2).
+        // which is what lets an app react to an Opened or a Closed with an ordinary transaction in the same tick (archive/Subscriptions/foundation/05 § 4.2).
         _sessions.ApplyPendingCloses();
 
         // What last tick's systems asked for, applied before the table publishes this tick's open set — so a profile bound in an Opened handler is in force

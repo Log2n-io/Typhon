@@ -1,34 +1,111 @@
 ---
 uid: feature-subscriptions-index
 title: 'Subscriptions'
-description: 'Engine-owned replication: the engine streams declared archetype state to remote clients and drains their typed commands back into the tick. Under construction.'
+description: 'Engine-owned replication: declared archetype state pushed to remote clients around each session, typed commands drained back into the tick.'
 ---
 
 # Subscriptions
 
-> Engine-owned replication. An application declares what each archetype exposes and who sees what; the engine does the rest — per-client interest, change detection, quantized encoding, sessions, backpressure and typed inbound commands — in parallel on the worker pool, to native and browser clients.
+> Engine-owned replication. An application declares what each archetype exposes and who sees what, and says what it changed; the engine
+> does the rest — change detection, quantized encoding, motion segments, per-session visibility, sessions, backpressure and typed inbound
+> commands — in parallel on the worker pool, to native and browser clients.
 
-> 🚧 **Under construction — no public API yet.** The foundation is in the engine and covered by tests, but nothing here is reachable from application code: there is no session, no transport and no registration surface. Track [#205](https://github.com/Log2n-io/Typhon/issues/205).
+**Status:** 🚧 Partial · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** Subscriptions
 
-## What the design commits to
+## 🎯 What it solves
 
-| Guarantee | Meaning |
-|---|---|
-| Cost follows the watched set | Per-entity work happens once per tick, for the entities some client can see — never proportional to an archetype's size. A database can hold a billion entities of a type; replication costs what clients are looking at |
-| Correct on x64 **and** arm64 | Every cross-thread publication is a named release/acquire pair, not an assumption about store ordering |
-| Zero steady-state allocation | Native pools, no managed allocation once running |
-| No silent divergence | There is no mode in which a client's view of the world drifts from the server's without saying so |
+A game server's state has to reach thousands of clients, each seeing only the part of the world around it, at tick rate, without the
+application writing change detection, encoding or networking — and without the cost growing with every client times every entity it
+could see. Subscriptions runs replication as an engine track after the tick fence, encodes each changed entity once, and gives each
+session only what lies around it.
 
-## What exists in the engine today
+## ⚙️ How it works (in brief)
 
-| Piece | What it does |
-|---|---|
-| Replication state blocks | Native per-cluster storage sized by the watched set, with a directory keyed by cluster chunk id and a hook in the fence's migration step |
-| The Engine-Subscriptions track | A built-in track between the tick fence and the flush. Compute runs after the fence, publish after the flush, and the two are skippable only together (rule `SUB-02`) |
-| Network identities | Process-global netIds; a released one waits a tick before reuse, so no frame carries both an identity's leave and its re-enter (rule `SUB-06`) |
-| Ingress rings | Per-session SPSC command rings over native memory, carved from a slab pool. A full ring drops and counts — it never blocks the transport thread or throws |
-| Canonical hashing | The shared FNV-1a construction behind the catalog digest |
+**Replication is pushed and explicit.** A system that writes a replicated field calls `Replicate` for that slot; the engine pushes spawns,
+destroys, `WriteSpatial` moves and migrations on its own. After the fence, each pushed entity's declared fields are quantized and compared
+with what was last encoded — a push that changed nothing costs an encode and no bytes — and what changed is encoded once. The changed
+entities are bucketed by cell, and each session's frame is gathered from the cells around it.
 
-## Where the design lives
+**What a session holds is geometry.** A `Sphere` session holds the entities within its radius of its viewpoint, in the cells delivered to
+it so far (the enter budget delivers a new view cell by cell, nearest first); a `World` session holds everything. Nothing is stored per
+(session, entity), so a session costs a few hundred bytes plus its frames. A session that falls behind is never queued: its next frame
+carries the union of what it missed, replayed from an 8-tick push log, or a reset.
 
-`claude/design/Subscriptions/` in the knowledge base: the model and public API, execution, the wire protocol, transports, the SDKs, per-entity state and the delivery plan, plus a `foundation/` folder with one document per prerequisite.
+Frames are published after the tick's durability flush, handed to the transport by engine-owned send pumps, and decoded by the clients
+against a catalog sent at connection — never against C# layouts.
+
+## 💻 Usage
+
+```csharp
+var subs = runtime.Subscriptions;                                   // before runtime.Start()
+subs.Sessions.Kinds("player");
+
+subs.Archetype<Creature>(a => a
+    .Motion(Creature.Bounds, m => m.Tolerance(0.05).Teleport(maxSpeedMps: 12))   // position as motion segments
+    .Field(Creature.Ai, x => x.Mode, Codec.U8, name: "mode")
+    .Fraction(Creature.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals"));
+
+subs.Profile("player", p => p
+    .Sphere(192)                                                     // Detection(PushDetection.Explicit) is the default
+    .Of<Creature>());
+
+// In a system: say what you changed.
+ai[slot].Mode = AiMode.Flee;
+ctx.Subscriptions.Replicate(in cluster, slot);
+
+// Bind sessions to a profile, and place them where their player stands.
+foreach (ref readonly var e in ctx.Subscriptions.SessionEvents)
+{
+    if (e.Kind == SessionEventKind.Opened) { ctx.Subscriptions.Session(e.Session).Profile("player"); }
+}
+ctx.Subscriptions.Place(session, playerPosition);
+
+// Commands from clients arrive in the tick, per session, in order.
+foreach (ref readonly var c in ctx.Subscriptions.Commands<MoveIntent>()) { /* validate, then apply */ }
+```
+
+Clients connect over the built-in TCP transport or through ASP.NET Core (`services.AddTyphonSubscriptions(…)`,
+`app.MapTyphonSubscriptions("/ws")` from `Typhon.Subscriptions.AspNetCore`), and decode with `Typhon.Client` (.NET) or the TypeScript SDK.
+
+| Option | Default | Effect |
+|--------|---------|--------|
+| `SubscriptionsOptions.MaxSessions` | 8 192 | Session table size (hard max 65 535) |
+| `SubscriptionsOptions.EnterBudgetPerFrame` | 500 | Enter records per frame; a new view fills cell by cell under it |
+| `SubscriptionsOptions.CloseStalledAfter` | 3 s | A session denied frames this long is closed with 1013; it is degraded a rate class first |
+| `SubscriptionsOptions.StatePoolBudgetBytes` | 256 MiB | Ceiling for per-entity replication state (every entity of an observed archetype) |
+| `SubscriptionsOptions.FramePoolBudgetBytes` | 256 MiB | Ceiling for frames in flight; exhaustion skips sessions, never allocates |
+| `ProfileBuilder.Every(n)` | 1 | Serve the profile's sessions one tick in n (1, 2 or 4); missed ticks are replayed |
+| `ProfileBuilder.Detection(PushDetection.Automatic)` | `Explicit` | Engine compares every live entity each tick — experimental, needs `AllowAutomaticPushDetection` |
+
+## ⚠️ Guarantees & limits
+
+- **A write you do not push is not sent.** Clients keep the old value until the entity changes again or is pushed. Spawns, destroys,
+  `WriteSpatial` and migrations are pushed for you; content writes are yours. `TYPHON_PUSH_VALIDATE=N` samples whole clusters each tick and
+  counts (and heals) unpushed changes, for use in development.
+- **Cost follows what changed:** per-tick work is proportional to the entities pushed, never to an archetype's size. An archetype no
+  profile observes costs nothing; an observed one keeps ≈ 96 B of state per live entity.
+- **Records are absolute and skips are unions:** a session that misses frames converges on its next one, with no retransmission.
+- **Correct on x64 and arm64:** every cross-thread hand-off is a named release/acquire pair.
+- **Zero steady-state managed allocation** in the replication path.
+- **Built today:** one `World` or one `Sphere` observer per profile, centred on the viewpoint the application places; 2D positions;
+  one Sphere radius shared by every profile; at most 64 observed archetypes. **Refused at `Start` until they are built:** a leave radius
+  (hysteresis), a Sphere following an entity, several observers or near/far tiers in one profile, `ClientRegion`, `Aggregate`, headings,
+  shared sources. Events are declared and exported but not delivered yet.
+- **A session never placed holds nothing** — not the area around the origin.
+
+## 🧪 Tests
+
+- [PushOracleTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushOracleTests.cs) — decoded clients compared with the server under seeded churn, skips of 0–90 %, walking and teleporting sessions, both detection modes, the forgotten-push mutant
+- [FrameAssemblerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/FrameAssemblerTests.cs) — skipped sessions caught up from the log; identical bytes for sessions in the same state
+- [SphereObserverTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SphereObserverTests.cs) — a session holds exactly its disc
+- Correctness rules: [`rules/subscriptions.md`](https://github.com/Log2n-io/Typhon/blob/main/rules/subscriptions.md) (SUB-01 … SUB-19)
+
+## 🔗 Related
+
+- Related feature: [Overload Management](../Runtime/overload-management.md) — a lagging session is degraded one rate class at a time before it is closed
+- Related feature: [Persistent Views](../Querying/persistent-views.md) — shared View sources are a later phase
+- Concept: [Subscription](xref:concept-subscription)
+
+<!-- Deep dive: claude/design/Subscriptions/README.md -->
+<!-- Deep dive: claude/design/Subscriptions/02-execution.md — the push pipeline -->
+<!-- Deep dive: claude/adr/067-push-replication.md -->

@@ -232,7 +232,7 @@ public sealed class SubscriptionsOptions
     /// dispatches and a dispatch is a worker wake/barrier cycle — ≈ 0.1 ms measured, so ≈ 0.3 ms of scheduling before any replication work happens. Below
     /// some amount of work those barriers cost more than the parallelism they buy, and the collapsed shape pays one dispatch instead of three. WHERE that
     /// crossing point is depends on the worker count, the machine and the projection, and the only honest way to find it is to measure both shapes on the
-    /// same binary (<c>design/Subscriptions/09-phase1-build-plan.md</c>, Q-M1). A number shipped here before that measurement would be an engine default
+    /// same binary (<c>archive/Subscriptions/09-phase1-build-plan.md</c>, Q-M1). A number shipped here before that measurement would be an engine default
     /// derived from nothing, so this ships as an opt-in and the collapsed path stays unreachable until an operator or a benchmark names a value.
     /// </para>
     /// <para>

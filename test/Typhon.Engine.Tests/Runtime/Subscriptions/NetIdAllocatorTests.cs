@@ -290,7 +290,7 @@ class NetIdAllocatorTests
     }
 
     /// <summary>
-    /// The property that keeps this bounded by the watched set: churn at a stable watched count must not grow the identity space. An allocator that bumped a
+    /// The property that keeps this bounded by the live population: churn at a stable live count must not grow the identity space. An allocator that bumped a
     /// counter per allocation would pass every other test here and still grow without bound.
     /// </summary>
     /// <remarks>

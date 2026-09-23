@@ -138,7 +138,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     /// <summary>How many ticks a released identity is held before it can be reissued.</summary>
     public int QuarantineTicks => _bucketHeads.Length;
 
-    /// <summary>Largest identity ever handed out. Tracks the PEAK watched count, and never falls.</summary>
+    /// <summary>Largest identity ever handed out. Tracks the PEAK live identity count, and never falls.</summary>
     public uint HighWaterMark => _highWaterMark;
 
     /// <summary>Identities the side arrays can currently address without growing.</summary>
@@ -152,7 +152,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     /// archetypes each adding these bytes to their own total would report the same memory N times. <see cref="IMemoryResource"/> requires a node to exclude
     /// what it does not solely own, and after the move no archetype owns this.
     /// <para>
-    /// Like the directory's, this memory follows the PEAK watched count and never shrinks — <see cref="HighWaterMark"/> does not fall and there is no
+    /// Like the directory's, this memory follows the PEAK live identity count and never shrinks — <see cref="HighWaterMark"/> does not fall and there is no
     /// compaction pass.
     /// </para>
     /// </remarks>

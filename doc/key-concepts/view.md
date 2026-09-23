@@ -17,7 +17,7 @@ A view built on an [indexed](xref:concept-index) `WhereField` predicate updates 
 - **[Query](xref:concept-query)** — a view is a query made durable-over-time.
 - **[Index](xref:concept-index)** — an indexed predicate makes the view incremental.
 - **[System](xref:concept-system)** — a `QuerySystem` takes a view as its input set.
-- **[Subscription](xref:concept-subscription)** — publishes a view's deltas to remote clients.
+- **[Subscription](xref:concept-subscription)** — replicates engine state to remote clients; publishing a view's members to them is a later phase.
 
 ## In the API
 
