@@ -51,11 +51,15 @@ internal sealed class OracleWorkload
     private const float EdgeMarginM = 64f;
 
     private readonly FrameHarness _harness;
+    private readonly DatabaseEngine _engine;
     private readonly Random _random;
     private readonly List<EntityId> _creatures = [];
     private readonly List<EntityId> _rocks = [];
 
     private int _nextTemplate = 1;
+
+    // Stands in for the spatial column when a writer does not touch it.
+    private readonly ProjBounds[] _noBounds = new ProjBounds[64];
 
     /// <summary>Builds a workload over a harness's engine.</summary>
     /// <param name="harness">The harness whose engine is churned.</param>
@@ -65,6 +69,18 @@ internal sealed class OracleWorkload
         ArgumentNullException.ThrowIfNull(harness);
 
         _harness = harness;
+        _engine = harness.Engine;
+        _random = new Random(seed);
+    }
+
+    /// <summary>A workload over a bare engine, with no replication at all — for reproducing an engine defect the oracle surfaced.</summary>
+    /// <param name="engine">The engine.</param>
+    /// <param name="seed">The generator's seed.</param>
+    public OracleWorkload(DatabaseEngine engine, int seed)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+
+        _engine = engine;
         _random = new Random(seed);
     }
 
@@ -83,6 +99,15 @@ internal sealed class OracleWorkload
     /// <summary>How many teleports were applied, each of which forces a motion epoch change.</summary>
     public int Teleports { get; private set; }
 
+    /// <summary>
+    /// What the workload last wrote through a span, per live creature: <c>mode</c> and <c>level</c>. Not a shadow of the world — only what the ECS was told,
+    /// so a value that later reads differently was changed by something that is not the workload.
+    /// </summary>
+    public Dictionary<long, (int Mode, int Level)> LastWritten { get; } = [];
+
+    /// <summary>The entities whose position the last <see cref="Step"/> wrote (a drift or a teleport).</summary>
+    public HashSet<long> MovedLastStep { get; } = [];
+
     /// <summary>Seeds the world with a starting population, before any session is opened.</summary>
     /// <param name="creatures">How many moving entities.</param>
     /// <param name="rocks">How many static ones.</param>
@@ -99,9 +124,14 @@ internal sealed class OracleWorkload
     /// The mix leans towards movement and state writes because that is what a running world mostly does; spawns and destroys are rarer and are what put
     /// pressure on identity. Each branch commits its own transaction, which is also what a real schedule produces — several systems committing in one tick.
     /// </remarks>
+    public string LastAction { get; private set; }
+
     public void Step()
     {
+        MovedLastStep.Clear();
         var roll = _random.Next(100);
+        LastAction = roll < 12 ? "spawn" : roll < 24 ? "destroy creature" : roll < 30 ? "spawn rock" : roll < 34 ? "destroy rock" : roll < 60 ? "drift"
+            : roll < 74 ? "teleport" : roll < 88 ? "vitals" : "mode";
         if (roll < 12)
         {
             SpawnCreatures(1 + _random.Next(2));
@@ -138,7 +168,7 @@ internal sealed class OracleWorkload
 
     private void SpawnCreatures(int count)
     {
-        using var tx = _harness.Engine.CreateQuickTransaction();
+        using var tx = _engine.CreateQuickTransaction();
         for (var i = 0; i < count; i++)
         {
             var bounds = BoundsAt(RandomCoordinate(), RandomCoordinate());
@@ -161,7 +191,7 @@ internal sealed class OracleWorkload
 
     private void SpawnRocks(int count)
     {
-        using var tx = _harness.Engine.CreateQuickTransaction();
+        using var tx = _engine.CreateQuickTransaction();
         for (var i = 0; i < count; i++)
         {
             var bounds = BoundsAt(RandomCoordinate(), RandomCoordinate());
@@ -180,11 +210,12 @@ internal sealed class OracleWorkload
             return;
         }
 
-        using var tx = _harness.Engine.CreateQuickTransaction();
+        using var tx = _engine.CreateQuickTransaction();
         for (var i = 0; i < count && from.Count > 0; i++)
         {
             var index = _random.Next(from.Count);
             tx.Destroy(from[index]);
+            LastWritten.Remove((long)from[index].RawValue);
             from.RemoveAt(index);
             Destroyed++;
         }
@@ -206,7 +237,7 @@ internal sealed class OracleWorkload
         {
             // A drift, through the write path that signals nothing (SUB-10). It stays inside the cluster's bounds, so nothing migrates and the projection
             // is entitled to send no segment at all.
-            ForEachChosenCreature((ref ProjBounds bounds, ref ProjAi ai, ref ProjVitals vitals) =>
+            ForEachChosenCreature(spatial: true, (ref ProjBounds bounds, ref ProjAi ai, ref ProjVitals vitals) =>
             {
                 var x = Clamp(Centre(bounds.Bounds.MinX, bounds.Bounds.MaxX) + (((float)_random.NextDouble() - 0.5f) * 2f * SmallMoveM));
                 var y = Clamp(Centre(bounds.Bounds.MinY, bounds.Bounds.MaxY) + (((float)_random.NextDouble() - 0.5f) * 2f * SmallMoveM));
@@ -245,7 +276,7 @@ internal sealed class OracleWorkload
 
         var moved = 0;
         var seen = 0;
-        using var tx = _harness.Engine.CreateQuickTransaction();
+        using var tx = _engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
         try
         {
@@ -261,6 +292,7 @@ internal sealed class OracleWorkload
                         continue;
                     }
 
+                    MovedLastStep.Add((long)cluster.GetEntityId(slot).RawValue);
                     cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(Clamp(RandomCoordinate()), Clamp(RandomCoordinate())));
                     moved++;
                 }
@@ -276,14 +308,14 @@ internal sealed class OracleWorkload
     }
 
     /// <summary>Writes the <c>vitals</c> group — <c>level</c> and the health fraction — on a few creatures.</summary>
-    private void WriteVitals() => ForEachChosenCreature((ref ProjBounds bounds, ref ProjAi ai, ref ProjVitals vitals) =>
+    private void WriteVitals() => ForEachChosenCreature(spatial: false, (ref ProjBounds bounds, ref ProjAi ai, ref ProjVitals vitals) =>
     {
         ai.Level = (ushort)_random.Next(1, 500);
         vitals.Health = _random.Next(0, vitals.MaxHealth + 1);
     });
 
     /// <summary>Writes the ungrouped fields — <c>mode</c> and <c>alerted</c> — plus the field nobody replicates, which must reach no client.</summary>
-    private void WriteMode() => ForEachChosenCreature((ref ProjBounds bounds, ref ProjAi ai, ref ProjVitals vitals) =>
+    private void WriteMode() => ForEachChosenCreature(spatial: false, (ref ProjBounds bounds, ref ProjAi ai, ref ProjVitals vitals) =>
     {
         ai.Mode = (ProjAiMode)_random.Next(5);
         ai.Alerted = (byte)_random.Next(2);
@@ -299,7 +331,10 @@ internal sealed class OracleWorkload
     /// Chosen by position in the cluster walk rather than by <see cref="EntityId"/>, because the point of writing through <c>GetSpan</c> is to write the
     /// cluster the way a system does. The choice is still seeded, so the run replays.
     /// </remarks>
-    private int ForEachChosenCreature(SlotWriter write)
+    /// <param name="spatial">
+    /// Whether the writer touches the spatial column. Only then is its span taken, and only then are the slots it writes recorded as moved.
+    /// </param>
+    private int ForEachChosenCreature(bool spatial, SlotWriter write)
     {
         if (_creatures.Count == 0)
         {
@@ -315,7 +350,7 @@ internal sealed class OracleWorkload
 
         var written = 0;
         var seen = 0;
-        using var tx = _harness.Engine.CreateQuickTransaction();
+        using var tx = _engine.CreateQuickTransaction();
         var accessor = tx.For<ProjCreature>();
         try
         {
@@ -323,10 +358,11 @@ internal sealed class OracleWorkload
         {
             var occupancy = cluster.OccupancyBits;
 #pragma warning disable TYPHON009
-            var bounds = cluster.GetSpan(ProjCreature.Bounds);
+            Span<ProjBounds> bounds = spatial ? cluster.GetSpan(ProjCreature.Bounds) : _noBounds;
             var ai = cluster.GetSpan(ProjCreature.Ai);
             var vitals = cluster.GetSpan(ProjCreature.Vitals);
 #pragma warning restore TYPHON009
+            var touched = false;
             while (occupancy != 0)
             {
                 var slot = BitOperations.TrailingZeroCount(occupancy);
@@ -335,6 +371,24 @@ internal sealed class OracleWorkload
                 {
                     write(ref bounds[slot], ref ai[slot], ref vitals[slot]);
                     written++;
+                    touched = true;
+                    LastWritten[(long)cluster.GetEntityId(slot).RawValue] = ((int)ai[slot].Mode, ai[slot].Level);
+                    if (spatial)
+                    {
+                        MovedLastStep.Add((long)cluster.GetEntityId(slot).RawValue);
+                    }
+                }
+            }
+
+            // GetSpan's contract: a durable column written through a span is marked dirty by the caller, or the page holding it is free to be evicted and
+            // reloaded without the write. The pull oracle's small world never evicted; the walking one's 500 clusters do.
+            if (touched)
+            {
+                cluster.MarkDirty(ProjCreature.Ai);
+                cluster.MarkDirty(ProjCreature.Vitals);
+                if (spatial)
+                {
+                    cluster.MarkDirty(ProjCreature.Bounds);
                 }
             }
             }

@@ -444,6 +444,19 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     // Allocation and deallocation
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Records that a chunk's bytes were modified in place by a path that holds no ChangeSet — a span handed out over a cluster, written by the caller —
+    /// so its page carries writeback debt: never evicted, always collected by the next checkpoint, until a durable write discharges it (PS-10).
+    /// </summary>
+    /// <param name="chunkId">The chunk written.</param>
+    /// <remarks>Call inside an epoch scope, as every page access is (PS-02); the page is resident, since it was just written.</remarks>
+    internal void MarkChunkModified(int chunkId)
+    {
+        var (pageIndex, _) = GetChunkLocation(chunkId);
+        GetPage(pageIndex, _store.EpochManager.GlobalEpoch, out var memPageIdx);
+        _store.MarkPageModified(memPageIdx);
+    }
+
     public void ReserveChunk(int index)
     {
         var (pageIndex, chunkInPage) = GetChunkLocation(index);

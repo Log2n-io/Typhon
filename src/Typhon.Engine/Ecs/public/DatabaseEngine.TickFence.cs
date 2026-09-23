@@ -2241,6 +2241,12 @@ public partial class DatabaseEngine
                 batchBytes = 0;
             }
 
+            // The page carries what is being serialised, so it owes a writeback (PS-10): not evictable, collected by the next checkpoint. The in-place
+            // writers record it themselves at the write; this is the backstop for any that do not, because a page holding bytes the WAL describes and the
+            // data file does not is evictable otherwise — the next load returns the older image — and invisible to the checkpoint, so CheckpointLSN passes
+            // this record and the write is gone once its segment is recycled. Writeback debt rather than a dirty mark through a ChangeSet: the serial
+            // fence's own ChangeSet is SAVED when it closes, which would write these data pages outside the checkpoint's WAL barrier (CK-02).
+            clusterState.NoteClusterPageModified(wi);
             blocks[blockCount++] = new RecordCodec.FenceBlockDescriptor(
                 (nint)accessor.GetChunkAddress(wi), wi, (byte)firstSlot, (byte)slotSpan, (ulong)word >> firstSlot);
             batchBytes += recWire;

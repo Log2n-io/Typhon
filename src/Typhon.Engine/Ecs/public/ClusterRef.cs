@@ -67,7 +67,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     }
 
     /// <summary>Bitmask of occupied slots. Bit i = 1 means slot i contains a live entity.</summary>
-    public ulong OccupancyBits
+    public readonly ulong OccupancyBits
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => *(ulong*)_base;
@@ -75,35 +75,35 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
     /// <summary>Bitmask of entities with component at <paramref name="slot"/> enabled.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ulong EnabledBits(int slot) => *(ulong*)(_base + _layout.EnabledBitsOffset(slot));
+    public readonly ulong EnabledBits(int slot) => *(ulong*)(_base + _layout.EnabledBitsOffset(slot));
 
     /// <summary>Combined mask: alive AND component at slot enabled.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ulong ActiveBits(int slot) => OccupancyBits & EnabledBits(slot);
+    public readonly ulong ActiveBits(int slot) => OccupancyBits & EnabledBits(slot);
 
     /// <summary>Number of live entities in this cluster (PopCount of OccupancyBits).</summary>
-    public int LiveCount
+    public readonly int LiveCount
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => BitOperations.PopCount(OccupancyBits);
     }
 
     /// <summary>True when all slots are occupied.</summary>
-    public bool IsFull
+    public readonly bool IsFull
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => OccupancyBits == _layout.FullMask;
     }
 
     /// <summary>Cluster size N (number of slots, 8..64).</summary>
-    public int ClusterSize
+    public readonly int ClusterSize
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => _layout.ClusterSize;
     }
 
     /// <summary>Full mask with lower N bits set.</summary>
-    public ulong FullMask
+    public readonly ulong FullMask
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => _layout.FullMask;
@@ -111,7 +111,21 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
     /// <summary>Resolve the correct base pointer for a component slot (Transient → _transientBase, else → _base).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private byte* ResolveBase(byte slot) => (_transientBase != null && (_meta.TransientSlotMask & (1 << slot)) != 0) ? _transientBase : _base;
+    private readonly byte* ResolveBase(byte slot) => (_transientBase != null && (_meta.TransientSlotMask & (1 << slot)) != 0) ? _transientBase : _base;
+
+    /// <summary>
+    /// Records that this cluster's page was written in place, when <paramref name="slot"/>'s column lives on it (PS-10). The span and spatial-write paths map
+    /// the page clean, so without this the page cache may evict it with the write in memory only and reload the older image from disk; a Transient column
+    /// lives off the page cache and needs nothing.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private readonly void NotePageWritten(byte slot)
+    {
+        if ((_meta.TransientSlotMask & (1 << slot)) == 0)
+        {
+            _state.NoteClusterPageModified(_chunkId);
+        }
+    }
 
     /// <summary>
     /// Assert that <typeparamref name="T"/> strides the column exactly. Every accessor below hands out a <c>Span&lt;T&gt;</c> or a <c>ref T</c>, both of which
@@ -123,7 +137,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// message is built only on the throw path.</para>
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void CheckStride<T>(byte slot) where T : unmanaged
+    private readonly void CheckStride<T>(byte slot) where T : unmanaged
     {
         if (CheckConfig.Enabled && sizeof(T) != _layout.ComponentSize(slot))
         {
@@ -144,7 +158,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// Thrown, when strict checks are enabled (<see cref="CheckConfig.Enabled"/>), if <typeparamref name="T"/> is a Versioned component.
     /// </exception>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public Span<T> GetSpan<T>(Comp<T> comp) where T : unmanaged
+    public readonly Span<T> GetSpan<T>(Comp<T> comp) where T : unmanaged
     {
         var slot = _meta.GetSlot(comp._componentTypeId);
         if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
@@ -230,7 +244,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// </summary>
     /// <typeparam name="T">Component value type.</typeparam>
     /// <param name="comp">Handle identifying the component column that was written.</param>
-    public void MarkDirty<T>(Comp<T> comp) where T : unmanaged
+    public readonly void MarkDirty<T>(Comp<T> comp) where T : unmanaged
     {
         var componentSlot = _meta.GetSlot(comp._componentTypeId);
         var bits = OccupancyBits;
@@ -240,11 +254,14 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             bits &= bits - 1;
             _state.SetDirty(_chunkId, slot, componentSlot);
         }
+
+        // The page too, not only the entities: the span wrote it in place through a clean mapping (PS-10).
+        NotePageWritten(componentSlot);
     }
 
     /// <summary>Get a read-only span of component data for all N slots.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ReadOnlySpan<T> GetReadOnlySpan<T>(Comp<T> comp) where T : unmanaged
+    public readonly ReadOnlySpan<T> GetReadOnlySpan<T>(Comp<T> comp) where T : unmanaged
     {
         var slot = _meta.GetSlot(comp._componentTypeId);
         CheckStride<T>(slot);
@@ -253,7 +270,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
     /// <summary>Get a mutable reference to a single component value at the given slot index.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref T Get<T>(Comp<T> comp, int slotIndex) where T : unmanaged
+    public readonly ref T Get<T>(Comp<T> comp, int slotIndex) where T : unmanaged
     {
         var slot = _meta.GetSlot(comp._componentTypeId);
         if (CheckConfig.Enabled && (_meta.VersionedSlotMask & (1 << slot)) != 0)
@@ -274,7 +291,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     }
 
     /// <summary>Entity keys for all N slots. Use with slot index to reconstruct EntityId.</summary>
-    public ReadOnlySpan<long> EntityIds
+    public readonly ReadOnlySpan<long> EntityIds
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => new(_base + _layout.EntityIdsOffset, _layout.ClusterSize);
@@ -282,11 +299,11 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
     /// <summary>Read EntityId for the entity at the given slot (stored as full packed EntityId).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public EntityId GetEntityId(int slotIndex) =>
+    public readonly EntityId GetEntityId(int slotIndex) =>
         EntityId.FromRaw(*(long*)(_base + _layout.EntityIdsOffset + slotIndex * 8));
 
     /// <summary>The chunk ID of this cluster within the archetype's segment.</summary>
-    public int ChunkId
+    public readonly int ChunkId
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         get => _chunkId;
@@ -396,6 +413,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         // Same claim as the batched overload, for the one-slot form: this path raises no dirty bit either, and the slot is named right here (#205).
         _state.NoteSlotsChanged(_chunkId, 1UL << slotIndex);
         _state.NoteStructureSlots(_chunkId, 1UL << slotIndex);
+        NotePageWritten(slot);
 
         var spatialSlot = _state.SpatialSlot;
         var slotBytes = ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T);
@@ -483,6 +501,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         // interlocked OR per CALL, not per entity, on a call that already dispatches a field type and unions boxes.
         _state.NoteSlotsChanged(_chunkId, slots);
         _state.NoteStructureSlots(_chunkId, slots);
+        NotePageWritten(slot);
 
         // Checked in every build, not only in strict mode: a slot past the cluster would write past its column, into the next one.
         var highest = 63 - BitOperations.LeadingZeroCount(slots);
@@ -744,7 +763,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         // The bound as the call begins, grown by each write as the loop goes: what the single write finds at each slot on one thread, so the shrink
         // test below gives its flags. A concurrent writer on this cluster is seen by single writes as they go and here only at the publication, so the
         // shrink flags and the process bit can then differ (CA-03).
-        var start = Volatile.Read(ref _state.ClusterAabbs)[_chunkId];
+        var start = Volatile.Read(ref _state.ClusterAabbs)![_chunkId];
         float runMinX = start.MinX, runMinY = start.MinY, runMinZ = start.MinZ, runMaxX = start.MaxX, runMaxY = start.MaxY, runMaxZ = start.MaxZ;
 
         var grid = _state.Grid;
@@ -1129,7 +1148,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// transaction's commit can replace that array while this write is in flight, and a bit left in the abandoned one is a bound never refreshed.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void SetClusterProcessBit() => _state.SetClusterProcessBit(_chunkId);
+    private readonly void SetClusterProcessBit() => _state.SetClusterProcessBit(_chunkId);
 }
 
 /// <summary>
@@ -1275,6 +1294,9 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
             occupancy &= occupancy - 1;
             _state.SetDirty(chunkId, slot);
         }
+
+        // The page too, not only the entities: the span wrote it in place through a clean mapping (PS-10).
+        _state.NoteClusterPageModified(chunkId);
     }
 
     /// <summary>
@@ -1282,8 +1304,14 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
     /// use when only specific entities changed (e.g., after a cell-boundary crossing check). The slot index
     /// is the bit position from the <see cref="ClusterRef{TArch}.OccupancyBits"/> TZCNT loop.
     /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void MarkSlotDirty(int slotIndex) => _state.SetDirty(_clusterIds[_index], slotIndex);
+    public void MarkSlotDirty(int slotIndex)
+    {
+        var chunkId = _clusterIds[_index];
+        _state.SetDirty(chunkId, slotIndex);
+
+        // The page too, not only the entity: the span wrote it in place through a clean mapping (PS-10).
+        _state.NoteClusterPageModified(chunkId);
+    }
 
     /// <summary>
     /// Advance to the next active cluster in the range, skipping drained clusters (<see cref="ClusterRef{TArch}.OccupancyBits"/> == 0) left in
