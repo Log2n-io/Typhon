@@ -1354,8 +1354,16 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never record the mark without recording the modification — a repeated AddByMemPageIndex takes no second mark but
         must still record the write, or a checkpoint that settled the page between the two calls loses it
   scope: PagedMMF.MarkPageModified / MarkCaptured / HasWritebackDebt / WritePagesForCheckpoint / SavePages /
-         CollectDirtyMemPageIndices / TryAcquire, IPageStore.MarkPageModified, CheckpointManager.RunCheckpointCycle
-  verified: ChangeSetDirtyMarkConservationTests
+         CollectDirtyMemPageIndices / TryAcquire, IPageStore.MarkPageModified, CheckpointManager.RunCheckpointCycle,
+         ChunkBasedSegment.MarkChunkModified, ArchetypeClusterState.NoteClusterPageModified, ClusterRef.MarkDirty, ClusterRef.WriteSpatial,
+         ClusterEnumerator.MarkCurrentDirty, ClusterEnumerator.MarkSlotDirty, DatabaseEngine.EmitArchetypeFenceRange
+  verified: ChangeSetDirtyMarkConservationTests; InPlaceClusterWriteSurvivalTests (a span write and a spatial write, each through a path that maps the
+            page clean, must still read back after allocations have cycled the page cache — both fail with the page record removed)
+  note the in-place cluster writers hold no ChangeSet: a span over a cluster column (declared by MarkDirty) and WriteSpatial. They record the page at the
+       write (MarkPageModified), and the fence's WAL emit records every cluster page it serialises besides — as writeback debt, not as a dirty mark in a
+       ChangeSet, because the serial fence SAVES its own ChangeSet and would then write data pages outside the checkpoint's WAL barrier (CK-02). Before 2026-09-23 neither did: committed values reverted to the
+       on-disk image whenever an unrelated allocation evicted the page (found by the push-replication oracle; seed 9160 reverted four creatures inside a
+       rock spawn), and the checkpoint never collected those pages.
   on_violation: an unrecorded modification is never written and is lost at eviction (#385, #301, #30);
     a debt never discharged pins the page for ever (#824)
   rationale: NEW 2026-08-16. Replaces the counter-floor idiom (EnsureDirtyAtLeast(memPage, 2)) that the paths without a

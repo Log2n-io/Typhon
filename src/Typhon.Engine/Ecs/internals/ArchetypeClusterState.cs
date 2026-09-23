@@ -3080,6 +3080,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal int PrimarySegmentCapacity => ClusterSegment?.ChunkCapacity ?? TransientSegment.ChunkCapacity;
 
     /// <summary>
+    /// Records that a cluster's page holds bytes written in place through a span (PS-10): what makes that write survive the page cache — the page is not
+    /// evicted, and the checkpoint writes it — until the checkpoint has made it durable. The span path maps pages clean, so without this the committed value
+    /// lives only in memory and in the WAL, and the next reload of the page returns the older image from disk.
+    /// </summary>
+    /// <param name="clusterChunkId">The cluster written.</param>
+    internal void NoteClusterPageModified(int clusterChunkId) => ClusterSegment?.MarkChunkModified(clusterChunkId);
+
+    /// <summary>
     /// Mark an entity slot dirty for tick-fence processing, recording WHICH component slot was written so the fence can emit only
     /// the columns that actually changed (#559 §4.5).
     /// </summary>

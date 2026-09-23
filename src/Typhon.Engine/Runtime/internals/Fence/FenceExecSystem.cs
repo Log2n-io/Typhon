@@ -18,7 +18,8 @@ namespace Typhon.Engine.Internals;
 ///
 /// <para><b>Per-chunk ChangeSet ownership.</b> The shared UoW <see cref="ChangeSet"/> is single-thread-affine
 /// (<c>claude/design/Transactions/transaction-overview.md §3.2</c>) — it cannot be threaded into parallel workers. Each chunk that needs page-dirty tracking
-/// creates a LOCAL ChangeSet via <see cref="CreateChunkChangeSet"/> (overridden by Prep / Migrate; returns null for Finalize which doesn't dirty pages).
+/// creates a LOCAL ChangeSet via <see cref="CreateChunkChangeSet"/> (overridden by Prep / Migrate; returns null for Finalize, which records its pages
+/// as modified instead).
 /// The base <see cref="Execute"/> caps the local <c>DirtyCounter</c>s via <c>ReleaseDirtyMarks</c> at chunk end, then discards the ChangeSet.
 /// Capping (not <c>SaveChanges</c>) is the correct lifecycle because WAL + checkpoint are mandatory (ADR-054): the checkpoint thread always drains the capped
 /// pages.</para>
@@ -897,8 +898,9 @@ internal sealed class FenceAabbRefreshExecSystem : FencePhaseExecSystemBase
 
 /// <summary>
 /// Phase 4 — runs <see cref="DatabaseEngine.FinalizeArchetypeFence"/> on each <see cref="FenceWorkKind.ArchetypeFinalize"/> item; returns the per-archetype
-/// highest WAL LSN so the runtime can fold it into <c>_lastTickFenceLSN</c>. Finalize reads cluster bytes via accessors without a ChangeSet (no dirty
-/// marking needed for WAL emit), so this system has no per-chunk ChangeSet to manage.
+/// highest WAL LSN so the runtime can fold it into <c>_lastTickFenceLSN</c>. Finalize reads cluster bytes via accessors without a ChangeSet, and records
+/// every cluster page it serialises as modified (writeback debt, PS-10) so the checkpoint collects it and the page is never evicted before — so this system
+/// has no per-chunk ChangeSet to manage.
 /// </summary>
 internal sealed class FenceFinalizeExecSystem : FencePhaseExecSystemBase
 {
