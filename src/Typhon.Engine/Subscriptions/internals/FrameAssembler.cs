@@ -677,7 +677,7 @@ internal sealed class SessionFrameState
 /// sessions, each owning its scratch and its sessions' state outright.
 /// </para>
 /// </remarks>
-internal sealed unsafe class FrameAssembler : IDisposable
+internal sealed unsafe partial class FrameAssembler : IDisposable
 {
     private readonly SubscriptionsOptions _options;
     private readonly CompiledProjectionPlan[] _plans;
@@ -1304,8 +1304,11 @@ internal sealed unsafe class FrameAssembler : IDisposable
             _sweepTicks2 += Stopwatch.GetTimestamp() - sweepFrom;
         }
 
+        // PROTOTYPE (push): push sessions are not in the interest pass's list; they are collected, prepared and indexed here.
+        BeginPushTick();
+
         _tickSessionCount = interest?.TickSessionCount ?? 0;
-        if (_tickSessionCount == 0)
+        if (_tickSessionCount == 0 && _pushSessionCount == 0)
         {
             return 0;
         }
@@ -1339,7 +1342,7 @@ internal sealed unsafe class FrameAssembler : IDisposable
             _prologueTicks += Stopwatch.GetTimestamp() - prologueFrom;
         }
 
-        var chunks = Math.Min(workers, _tickSessionCount);
+        var chunks = Math.Min(workers, Math.Max(_tickSessionCount, _pushSessionCount));
         _lastChunkCount = chunks;
         if (_chunkBusy.Length < chunks)
         {
@@ -1500,6 +1503,8 @@ internal sealed unsafe class FrameAssembler : IDisposable
                 Assemble(i, scratch, ref counters);
             }
         }
+
+        ExecutePushSessions(scratch, ref counters);
 
         if (from != 0L)
         {

@@ -38,6 +38,22 @@ public sealed class ProfileBuilder
     }
 
     /// <summary>
+    /// PROTOTYPE (push replication, <c>design/Subscriptions/research/push-model.md</c>): serve this profile by the push path instead of the interest stage.
+    /// </summary>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// Every archetype such a profile observes becomes a push archetype: its entities are projected only when the application pushes them
+    /// (<see cref="SubscriptionsCommands.Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/>) or when the engine does — a spawn, a destroy, a
+    /// <c>WriteSpatial</c> — and a session learns about them from its own geometry rather than from a per-session known-set. A push archetype may not be
+    /// observed by a pull profile. Only a single <c>Sphere</c> observer is supported.
+    /// </remarks>
+    public ProfileBuilder Push()
+    {
+        _profile.IsPush = true;
+        return this;
+    }
+
+    /// <summary>
     /// Everything, of the archetypes named with <see cref="ObserverBuilder.Of{TArchetype}"/>. For a tool, a viewer bot, or a world small enough that the whole
     /// of it is the interesting part; sessions holding only this and fully synced are byte-identical, so the engine encodes one frame for all of them.
     /// </summary>
@@ -129,6 +145,9 @@ public sealed class ProfileDeclaration
     /// it; a session's own <see cref="SessionLimits.MaxObservers"/> is enforced at admission, not here.
     /// </summary>
     public int MaxObservers { get; private set; } = SessionLimits.DefaultMaxObservers;
+
+    /// <summary>PROTOTYPE: whether this profile is served by the push path. See <see cref="ProfileBuilder.Push"/>.</summary>
+    public bool IsPush { get; internal set; }
 
     /// <inheritdoc/>
     public override string ToString() => $"{Name}: {_observers.Count} observer(s)";

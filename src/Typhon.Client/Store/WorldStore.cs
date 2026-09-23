@@ -38,11 +38,21 @@ public sealed class WorldStore
     /// it was built with another one.
     /// </param>
     public WorldStore(CatalogPlan plan, uint maxNetId = 1 << 22, double maxRenderDelayMs = SegmentRing.DefaultMaxRenderDelayMs)
+        : this(plan, 0, maxNetId, maxRenderDelayMs)
+    {
+    }
+
+    /// <summary>Creates a store with an explicit motion history depth; <c>0</c> sizes it from <paramref name="maxRenderDelayMs"/>.</summary>
+    /// <param name="plan">The compiled catalog.</param>
+    /// <param name="segmentHistory">Segments kept per entity, 1..<see cref="SegmentRing.MaxDepth"/>, or 0 for the render-delay default.</param>
+    /// <param name="maxNetId">The largest netId the map accepts.</param>
+    /// <param name="maxRenderDelayMs">The largest render delay motion will be evaluated at, when <paramref name="segmentHistory"/> is 0.</param>
+    public WorldStore(CatalogPlan plan, int segmentHistory, uint maxNetId = 1 << 22, double maxRenderDelayMs = SegmentRing.DefaultMaxRenderDelayMs)
     {
         ArgumentNullException.ThrowIfNull(plan);
         Plan = plan;
         MaxNetId = maxNetId;
-        SegmentHistory = SegmentRing.DepthFor(plan.Catalog.Tick.PeriodUs, maxRenderDelayMs);
+        SegmentHistory = segmentHistory > 0 ? segmentHistory : SegmentRing.DepthFor(plan.Catalog.Tick.PeriodUs, maxRenderDelayMs);
         Archetypes = new ArchetypeStore[plan.Archetypes.Length];
         for (var i = 0; i < Archetypes.Length; i++)
         {

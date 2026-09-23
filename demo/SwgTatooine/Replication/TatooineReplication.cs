@@ -79,8 +79,32 @@ public static class TatooineReplication
     /// the two radii is admitted to a session that does not already hold it. That is what makes the comparison a measurement of the band rather than of
     /// the disc's size.
     /// </param>
-    public static void Declare(SubscriptionsRegistry subs, bool hysteresis)
+    public static void Declare(SubscriptionsRegistry subs, bool hysteresis) => Declare(subs, hysteresis, push: false);
+
+    /// <summary>PROTOTYPE: whether the player profile is push-served (<c>--subs-mode push</c>).</summary>
+    public static bool PushMode { get; private set; }
+
+    private static SubscriptionsCommands _pushCommands;
+
+    /// <summary>
+    /// PROTOTYPE: the simulation's "this entity changed something a client sees" — a no-op in pull mode, where the engine finds changes itself.
+    /// </summary>
+    /// <param name="cluster">The cluster being iterated.</param>
+    /// <param name="slot">The entity's slot.</param>
+    public static void Replicate<T>(in ClusterRef<T> cluster, int slot) where T : class => _pushCommands?.Replicate(in cluster, slot);
+
+    /// <summary>PROTOTYPE: <see cref="Replicate{T}(in ClusterRef{T}, int)"/> for a set of slots.</summary>
+    /// <param name="cluster">The cluster being iterated.</param>
+    /// <param name="slots">The slots.</param>
+    public static void Replicate<T>(in ClusterRef<T> cluster, ulong slots) where T : class => _pushCommands?.Replicate(in cluster, slots);
+
+    /// <summary>Declares everything a client can see; <paramref name="push"/> serves the player profile by the push path (PROTOTYPE).</summary>
+    /// <param name="subs">The runtime's registry, before <c>Start</c>.</param>
+    /// <param name="hysteresis">See the two-argument overload.</param>
+    /// <param name="push">Whether the player profile is push-served.</param>
+    public static void Declare(SubscriptionsRegistry subs, bool hysteresis, bool push)
     {
+        PushMode = push;
         ArgumentNullException.ThrowIfNull(subs);
 
         subs.Sessions.Kinds(GodKind, PlayerKind);
@@ -108,6 +132,24 @@ public static class TatooineReplication
             .Position(WorldObject.Bounds)
             .OnEnter(WorldObject.Struct, s => s.Kind, Codec.U8, name: "kind")
             .OnEnter(WorldObject.Struct, s => s.OwnerRegion, Codec.I16, name: "region"));
+
+        if (push)
+        {
+            // PROTOTYPE: an archetype is served one way only, so the god camera keeps the static scenery and the movers go to the push profile. The push
+            // disc has no band: the anchor's slack is its hysteresis for observer motion (push-model.md § 4.5).
+            subs.Profile(GodProfile, p => p
+                .World()
+                .Of<CreatureLair>()
+                .Of<WorldObject>());
+
+            subs.Profile(PlayerProfile, p => p
+                .Push()
+                .Sphere(PlayerRadiusM)
+                .Of<Player>()
+                .Of<CityNpc>()
+                .Of<Creature>());
+            return;
+        }
 
         subs.Profile(GodProfile, p => p
             .World()
@@ -138,6 +180,11 @@ public static class TatooineReplication
         if (subs == null)
         {
             return;
+        }
+
+        if (PushMode)
+        {
+            _pushCommands = subs;
         }
 
         foreach (ref readonly var e in subs.SessionEvents)

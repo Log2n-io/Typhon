@@ -286,6 +286,13 @@ public sealed class SimConfig
     /// </remarks>
     public bool SubscriptionsHysteresis = true;
 
+    /// <summary>
+    /// <c>--subs-mode pull|push</c>: PROTOTYPE. <c>push</c> serves the player profile through the push path
+    /// (<c>claude/design/Subscriptions/research/push-model.md</c>): creatures, city NPCs and players are sent when the simulation pushes them (and when they
+    /// spawn, die or move), and a session's knowledge is geometric. The simulation is identical in both arms; only replication changes.
+    /// </summary>
+    public bool SubscriptionsPush;
+
     /// <summary>Idle iterations a scheduler worker spins inside a tick before yielding (<c>--idle-spin N</c>).</summary>
     public int WorkerIdleSpin = 100;
 

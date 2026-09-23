@@ -261,6 +261,7 @@ public sealed partial class SimBridge
         }
 
         rw[idx].Mode = mode;
+        SwgTatooine.Replication.TatooineReplication.Replicate(in cluster, idx);
     }
 
     /// <summary>Stops a mover, writing only when it was actually moving.</summary>
@@ -347,6 +348,8 @@ public sealed partial class SimBridge
             var motions = cluster.GetSpan(Player.Move);
             var chunk = cluster.ChunkId;
 
+            // Push replication (--subs-mode push): the players whose replicated activity this pass changes. Positions are pushed by WriteSpatial.
+            var pushSlots = 0UL;
             var bits = bits0;
             while (bits != 0)
             {
@@ -376,6 +379,7 @@ public sealed partial class SimBridge
                                 // before giving up and deciding something else.
                                 state.Activity = PlayerActivity.AwaitingShuttle;
                                 state.ActivityTicks = ShuttleWaitTicks;
+                                pushSlots |= 1UL << idx;
                             }
                             else if (state.Activity != PlayerActivity.Combat)
                             {
@@ -451,7 +455,12 @@ public sealed partial class SimBridge
                     state.ActivityTicks = 60 * hz;
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
                 }
+
+                // Every branch above assigns an activity.
+                pushSlots |= 1UL << idx;
             }
+
+            SwgTatooine.Replication.TatooineReplication.Replicate(in cluster, pushSlots);
         }
     }
 

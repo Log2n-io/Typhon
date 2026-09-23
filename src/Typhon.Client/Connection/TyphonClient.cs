@@ -336,7 +336,7 @@ public sealed class TyphonClient : IAsyncDisposable
             // A catalog arrived, so this is a new world: recompile and start from an empty store. Keeping the old store would carry entities the new catalog
             // may not even be able to describe.
             Plan = CatalogPlan.Compile(CatalogSerializer.FromUtf8(welcome.CatalogJson));
-            Store = new WorldStore(Plan);
+            Store = new WorldStore(Plan, _options.SegmentHistory);
             _applier = new FrameApplier(Store);
             return;
         }

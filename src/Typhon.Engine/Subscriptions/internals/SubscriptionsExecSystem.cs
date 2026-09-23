@@ -317,6 +317,10 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         // AFTER the blocks above, which is the whole point: a cluster that became watched this tick now has somewhere for its arrivals to go. One that
         // still has none is watched by nobody, so dropping its parked entries loses nothing — the entity is initialised from current values the first
         // time somebody does watch it. Single-threaded here, and separated from the slices that filled the lists by the fence's own barrier.
+        // PROTOTYPE (push): the push set, and a block for every cluster in it — BEFORE the drain, so an entity that migrated into a cluster with no block
+        // lands in one this tick.
+        subs.Push?.PrepareBlocks(tick);
+
         var t1 = timed ? Stopwatch.GetTimestamp() : 0L;
         for (var i = 0; i < states.Length; i++)
         {
@@ -331,6 +335,9 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         {
             Gather(interest, states, tick);
         }
+
+        // PROTOTYPE (push): after the watched lists were reset by the gather, so the push marks are this tick's.
+        subs.Push?.MarkPushed(Math.Max(1, ctx.WorkerCount));
 
         if (timed)
         {

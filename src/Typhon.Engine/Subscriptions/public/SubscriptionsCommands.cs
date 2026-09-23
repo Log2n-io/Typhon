@@ -319,6 +319,41 @@ public sealed class SubscriptionsCommands
     /// </remarks>
     public bool Place(SessionId session, Vector3D position) => _ingress.Sessions.SetViewpoint(session, position);
 
+    /// <summary>
+    /// PROTOTYPE (push replication, <c>design/Subscriptions/research/push-model.md</c>): tells the engine that the entity in <paramref name="slot"/> of
+    /// <paramref name="cluster"/> changed something a push-served client sees.
+    /// </summary>
+    /// <param name="cluster">The cluster the system is iterating.</param>
+    /// <param name="slot">The entity's slot.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>A mark, not a send.</b> One interlocked OR into a per-cluster bitmap the fence already drains; duplicates are free. After the fence the entity is
+    /// encoded once, compared against what was last encoded (so a spurious push costs an encode and no wire), and fanned out to the sessions around it.
+    /// </para>
+    /// <para>
+    /// <b>The contract is the developer's.</b> A change that is never pushed is never sent. Spawns, destroys and <c>WriteSpatial</c> moves are pushed by the
+    /// engine; a component written through <c>GetSpan</c> or <c>EntityRef</c> is not. A no-op for an archetype no push profile observes.
+    /// </para>
+    /// </remarks>
+    public void Replicate<TArchetype>(in ClusterRef<TArchetype> cluster, int slot) where TArchetype : class
+    {
+        if ((uint)slot < 64u)
+        {
+            cluster.NotePushed(1UL << slot);
+        }
+    }
+
+    /// <summary>PROTOTYPE: <see cref="Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/> for a set of slots of one cluster.</summary>
+    /// <param name="cluster">The cluster.</param>
+    /// <param name="slots">The slots, as a mask.</param>
+    public void Replicate<TArchetype>(in ClusterRef<TArchetype> cluster, ulong slots) where TArchetype : class
+    {
+        if (slots != 0UL)
+        {
+            cluster.NotePushed(slots);
+        }
+    }
+
     /// <summary>Every session that is open right now, for an application that has to touch all of them — placing their observers, most of it.</summary>
     public OpenSessionView OpenSessions => new(_ingress.Sessions);
 

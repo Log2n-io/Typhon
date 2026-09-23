@@ -150,6 +150,30 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _frames = new FrameAssembler("Subscriptions.Frames", parent, engine.MemoryAllocator, Options, Plans, Catalog.Canonical, _sessions,
                 NominalTickPeriodUs, _views);
 
+            // PROTOTYPE (push, design/Subscriptions/research/push-model.md): archetypes observed by a push profile are served by the push path.
+            var pushArchetypes = Interest.PushArchetypes;
+            if (Array.IndexOf(pushArchetypes, true) >= 0)
+            {
+                Push = new PushReplication(Plans, _replicationStates, pushArchetypes, Interest.MaxPushRadius, Options.MaxSessions);
+                for (var a = 0; a < pushArchetypes.Length; a++)
+                {
+                    if (pushArchetypes[a])
+                    {
+                        _replicationStates[a].Push = Push;
+                        _replicationStates[a].PushArchetypeIndex = a;
+                    }
+                }
+
+                _frames.Push = Push;
+                var encodePlans = new ArchetypeEncodePlan[Plans.Length];
+                for (var a = 0; a < Plans.Length; a++)
+                {
+                    encodePlans[a] = _frames.EncodePlanOf(a);
+                }
+
+                Push.AttachEncodePlans(encodePlans);
+            }
+
             // Encode-once cluster runs (17 § 18). The projection builds them and the frame stage references them, so each side needs what the other owns:
             // S1 needs the wire encoding constants S2b resolved from the catalog, and S2b needs the tables and arenas S1 writes into. Wired only when the
             // option is on, so both sides decide the whole feature with one null check rather than an option read on a per-cluster path.
@@ -304,6 +328,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// tick-scoped <see cref="SubscriptionsContext"/> stays frozen and the slices built beside this one do not meet in it.
     /// </remarks>
     public FrameAssembler Frames => _frames;
+
+    /// <summary>PROTOTYPE: the push path, or <see langword="null"/> when no profile is push-served.</summary>
+    internal PushReplication Push { get; private set; }
 
     /// <summary>The send side: what carries a published frame to a link.</summary>
     public SendPump SendPump => _sendPump;

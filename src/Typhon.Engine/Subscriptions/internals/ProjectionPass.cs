@@ -152,6 +152,10 @@ internal static unsafe class ProjectionPass
         var leases = state.NetIdLeases;
         var arena = state.Records[worker];
 
+        // PROTOTYPE (push): a push-served archetype is projected only where pushed, and every slot projected here becomes one event the frame stage fans out.
+        var push = state.Push;
+        var pushIndex = state.PushArchetypeIndex;
+
         // ── 1. Slots that stopped being occupied give their identities back ─────────────────────────────────────────────────────────────────────────────
         var released = 0;
         var gone = watched & ~occupancy;
@@ -162,6 +166,11 @@ internal static unsafe class ProjectionPass
             var hot = (ReplicationHotEntry*)(blockBytes + layout.HotOffset + (slot * layout.HotStride));
             if (hot->NetId != NetIdAllocator.NoNetId)
             {
+                if (push != null)
+                {
+                    EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId);
+                }
+
                 leases.Release(worker, hot->NetId);
                 released++;
             }
@@ -193,7 +202,7 @@ internal static unsafe class ProjectionPass
         // tick there is nothing to narrow against, and accumulating the extrapolating mask would then be a velocity read per live slot for a mask
         // nobody reads. Measured with it unconditional: it is the residue that kept subs above baseline once the list itself was gated off.
         var clusterStateForGate = state.ClusterState;
-        var gated = clusterStateForGate != null
+        var gated = push == null && clusterStateForGate != null
             && !clusterStateForGate.ChangedClustersCoverAll
             && clusterStateForGate.ChangedClusterTick == tick;
 
@@ -218,6 +227,11 @@ internal static unsafe class ProjectionPass
             {
                 if (hot->NetId != NetIdAllocator.NoNetId)
                 {
+                    if (push != null)
+                    {
+                        EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId);
+                    }
+
                     leases.Release(worker, hot->NetId);
                     released++;
                 }
@@ -227,7 +241,9 @@ internal static unsafe class ProjectionPass
                 continue;
             }
 
-            if (hot->NetId == NetIdAllocator.NoNetId || LastWatchedTick(blockBytes, layout, slot) != previousTick)
+            // PROTOTYPE (push): a push entity is projected only when pushed, so "nobody watched it last tick" is its normal state and says nothing about
+            // what a client holds — the geometric known-set does. Only an entry with no identity is (re-)initialized.
+            if (hot->NetId == NetIdAllocator.NoNetId || (push == null && LastWatchedTick(blockBytes, layout, slot) != previousTick))
             {
                 initializing |= 1UL << slot;
             }
@@ -363,6 +379,7 @@ internal static unsafe class ProjectionPass
                         // demand — initializes it. Deferring an entity by a tick is the only failure available here that neither allocates on a worker nor
                         // hands two entities one identity; it is counted so a lease that is chronically too small is visible rather than inferred.
                         state.NoteNetIdStarvation();
+                        push?.Repush(pushIndex, block->ChunkId, 1UL << slot);
                         continue;
                     }
 
@@ -378,11 +395,26 @@ internal static unsafe class ProjectionPass
                 hot->Flags = 0;
             }
 
+            // PROTOTYPE (push): where the entity was when last projected, and where it is now — the decoded wire positions.
+            float pushOldX = 0f, pushOldY = 0f, pushNewX = 0f, pushNewY = 0f;
+            var pushFlags = (byte)0;
+
             // ── Position: quantized, compared, stored; then the motion rule decides whether it becomes a SEGMENT (P1-10) ──────────────────────────────────
             if (position != null && positionBytes > 0)
             {
                 QuantizePosition(position, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
                 var stored = coldBytes + layout.PrevPositionOffsetInColdEntry;
+                if (push != null)
+                {
+                    if (!initialize)
+                    {
+                        push.Decode(pushIndex, stored, out pushOldX, out pushOldY);
+                        pushFlags |= PushEvent.HasOld;
+                    }
+
+                    push.Decode(pushIndex, quantizedBuffer, out pushNewX, out pushNewY);
+                    pushFlags |= PushEvent.HasNew;
+                }
                 var moved = initialize || !new ReadOnlySpan<byte>(stored, positionBytes).SequenceEqual(quantizedPosition[..positionBytes]);
 
                 // BEFORE the previous position is overwritten, because the rule's teleport and run-departure tests are about this tick's STEP, which only
@@ -396,6 +428,13 @@ internal static unsafe class ProjectionPass
                 {
                     quantizedPosition[..positionBytes].CopyTo(new Span<byte>(stored, positionBytes));
                     hot->Flags |= FlagPositionChanged;
+                }
+
+                // PROTOTYPE (push): a client dead-reckons a mover until told it stopped, so a slot still extrapolating is pushed by the engine next tick —
+                // the one push a developer cannot be asked to make, because nothing the application writes marks a stop.
+                if (push != null && motion.Enabled && MotionTracker.IsExtrapolating(in motion, hotBytes))
+                {
+                    push.Repush(pushIndex, block->ChunkId, 1UL << slot);
                 }
             }
             else if (position != null && initialize && layout.EnterPositionBytes > 0)
@@ -419,6 +458,11 @@ internal static unsafe class ProjectionPass
             }
 
             SetLastWatchedTick(blockBytes, layout, slot, tick);
+
+            if (push != null)
+            {
+                push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushNewX, pushNewY);
+            }
 
             // The published change mask names every slot a session might need to visit, and that is BROADER than "a record was assembled here". A motion-only
             // change stamps the motion tick through MotionTracker and assembles no state record at all, so a mask built from the record branches alone let the
@@ -942,6 +986,14 @@ internal static unsafe class ProjectionPass
             default:
                 return Unsafe.ReadUnaligned<double>(ref value[axis * 8]);
         }
+    }
+
+    /// <summary>PROTOTYPE (push): a slot whose identity ends here — destroyed, or displaced by a reuse — leaves every session that holds it.</summary>
+    private static void EmitPushLeave(PushReplication push, int archetype, int worker, ReplicationBlockHeader* block, byte* blockBytes,
+        in ReplicationBlockLayout layout, int slot, uint netId)
+    {
+        push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + layout.PrevPositionOffsetInColdEntry, out var x, out var y);
+        push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, 0f, 0f);
     }
 
     // ── Entry helpers ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

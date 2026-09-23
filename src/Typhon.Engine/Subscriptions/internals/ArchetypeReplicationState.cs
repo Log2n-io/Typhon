@@ -271,6 +271,20 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>The blocks this tick's interest hits marked, and the list S1 is partitioned over (SUB-13).</summary>
     public WatchedBlockList WatchedBlocks => _watchedBlocks;
 
+    private static readonly bool NoOrphanScan = Environment.GetEnvironmentVariable("TYPHON_PUSH_NO_ORPHAN_SCAN") == "1";
+
+    /// <summary>PROTOTYPE: the push path, when this archetype is push-served; <see langword="null"/> otherwise.</summary>
+    internal PushReplication Push;
+
+    /// <summary>
+    /// PROTOTYPE (push): every block by chunk id. A push archetype has a block for every live cluster and looks one up per pushed cluster per tick and per
+    /// cluster a sweep reaches, so the directory's hash probe is replaced by an index. Written only by attach and release, which are serial.
+    /// </summary>
+    internal nint[] BlockByChunk = [];
+
+    /// <summary>PROTOTYPE: this archetype's plan index, for the push path's events.</summary>
+    internal int PushArchetypeIndex;
+
     /// <summary>One record arena per S1 chunk: this tick's pre-encoded enter and state bodies.</summary>
     public RecordArenaSet Records => _records;
 
@@ -454,6 +468,13 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return ReplicationMigrationOutcome.NothingToCarry;
         }
 
+        // PROTOTYPE (push): an arrival is a push. The claim that received the entity raises no membership mark of its own, and without one the arrival —
+        // which carries the entity's new position — would sit unprojected until something else pushed it. The fence publishes the marks after migrations.
+        if (Push != null)
+        {
+            _attachedTo?.NoteStructureSlots(dstChunkId, 1UL << dstSlot);
+        }
+
         if (!Directory.TryGetBlock(srcChunkId, out var source))
         {
             // Nobody watches the cluster it left, so there is no entry to carry. The destination will initialise one the first time it is projected.
@@ -473,6 +494,15 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         if (Directory.TryGetBlock(dstChunkId, out var destination))
         {
             var dstBytes = (byte*)destination;
+            if (Push != null)
+            {
+                var overwritten = ((ReplicationHotEntry*)(dstBytes + Layout.HotOffset + (dstSlot * Layout.HotStride)))->NetId;
+                if (overwritten != NetIdAllocator.NoNetId)
+                {
+                    Push.Orphan(PushArchetypeIndex, destination, dstBytes + Layout.ColdOffset + (dstSlot * Layout.ColdStride), Layout, overwritten, 1);
+                }
+            }
+
             Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (dstSlot * Layout.HotStride), hotSource, (uint)Layout.HotStride);
             Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (dstSlot * Layout.ColdStride), coldSource, (uint)Layout.ColdStride);
 
@@ -605,6 +635,15 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             if ((uint)slot < (uint)Layout.SlotCount && Directory.TryGetBlock(chunkId, out var block))
             {
                 var dstBytes = (byte*)block;
+                if (Push != null)
+                {
+                    var overwritten = ((ReplicationHotEntry*)(dstBytes + Layout.HotOffset + (slot * Layout.HotStride)))->NetId;
+                    if (overwritten != NetIdAllocator.NoNetId)
+                    {
+                        Push.Orphan(PushArchetypeIndex, block, dstBytes + Layout.ColdOffset + (slot * Layout.ColdStride), Layout, overwritten, 2);
+                    }
+                }
+
                 Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (slot * Layout.HotStride), bytes, (uint)Layout.HotStride);
                 Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (slot * Layout.ColdStride), bytes + Layout.HotStride, (uint)Layout.ColdStride);
                 if (Layout.OwnerEntrySize > 0)
@@ -836,6 +875,20 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
         try
         {
+            // PROTOTYPE (push): a block released with live entries takes identities clients may hold; each becomes a leave.
+            if (Push != null && !NoOrphanScan && Directory.TryGetBlock(chunkId, out var releasing))
+            {
+                var rb = (byte*)releasing;
+                for (var s = 0; s < Layout.SlotCount; s++)
+                {
+                    var netId = ((ReplicationHotEntry*)(rb + Layout.HotOffset + (s * Layout.HotStride)))->NetId;
+                    if (netId != NetIdAllocator.NoNetId)
+                    {
+                        Push.Orphan(PushArchetypeIndex, releasing, rb + Layout.ColdOffset + (s * Layout.ColdStride), Layout, netId, 0);
+                    }
+                }
+            }
+
             return TryReleaseBlock(chunkId);
         }
         catch (Exception ex)
@@ -891,6 +944,15 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             // rejects as a double release, from inside a parallel pass. One memset per newly watched cluster, on a path that has just rented a block, buys
             // the whole initialization path a known starting state.
             NativeMemory.Clear((byte*)rented + ReplicationBlockLayout.HeaderSize, (nuint)(Layout.BlockSize - ReplicationBlockLayout.HeaderSize));
+            if (Push != null)
+            {
+                if (chunkId >= BlockByChunk.Length)
+                {
+                    Array.Resize(ref BlockByChunk, Math.Max(chunkId + 1, BlockByChunk.Length * 2));
+                }
+
+                BlockByChunk[chunkId] = (nint)rented;
+            }
         }
         else
         {
@@ -920,6 +982,11 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         if (!Directory.TryRemove(chunkId, out var block))
         {
             return false;
+        }
+
+        if (Push != null && (uint)chunkId < (uint)BlockByChunk.Length)
+        {
+            BlockByChunk[chunkId] = 0;
         }
 
         Pool.Return(block);

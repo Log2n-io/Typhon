@@ -138,6 +138,9 @@ internal sealed unsafe class InterestPass
         /// </para>
         /// </remarks>
         public double EnterRadius { get; init; }
+
+        /// <summary>PROTOTYPE: served by the push path (<see cref="PushReplication"/>), never by this pass.</summary>
+        public bool IsPush { get; init; }
     }
 
     private readonly CompiledProjectionPlan[] _plans;
@@ -2945,7 +2948,67 @@ internal sealed unsafe class InterestPass
             return -1;
         }
 
-        return _profiles[index].ArchetypeIndices.Length == 0 ? -1 : index;
+        // PROTOTYPE: a push-served session has no interest to resolve; the frame stage serves it from the push index.
+        return _profiles[index].ArchetypeIndices.Length == 0 || _profiles[index].IsPush ? -1 : index;
+    }
+
+    /// <summary>PROTOTYPE: the push profile a session is bound to, as (radius, archetypes), or <see langword="false"/> when it is not push-served.</summary>
+    /// <param name="session">The session.</param>
+    /// <param name="radius">The sphere's enter radius.</param>
+    /// <param name="archetypes">The plan indices the profile observes.</param>
+    /// <returns>Whether the session is push-served.</returns>
+    internal bool TryGetPushProfile(SessionId session, out double radius, out int[] archetypes)
+    {
+        radius = 0d;
+        archetypes = null;
+        var name = _sessions.ProfileName(session);
+        if (name == null || !_profileByName.TryGetValue(name, out var index) || !_profiles[index].IsPush || _profiles[index].ArchetypeIndices.Length == 0)
+        {
+            return false;
+        }
+
+        radius = _profiles[index].EnterRadius;
+        archetypes = _profiles[index].ArchetypeIndices;
+        return true;
+    }
+
+    /// <summary>PROTOTYPE: which plan indices a push profile observes. Fixed at construction.</summary>
+    internal bool[] PushArchetypes
+    {
+        get
+        {
+            var result = new bool[_clusterStates.Length];
+            foreach (var profile in _profiles)
+            {
+                if (profile.IsPush)
+                {
+                    foreach (var a in profile.ArchetypeIndices)
+                    {
+                        result[a] = true;
+                    }
+                }
+            }
+
+            return result;
+        }
+    }
+
+    /// <summary>PROTOTYPE: the largest push radius any profile declares, or zero.</summary>
+    internal double MaxPushRadius
+    {
+        get
+        {
+            var r = 0d;
+            foreach (var profile in _profiles)
+            {
+                if (profile.IsPush)
+                {
+                    r = Math.Max(r, profile.EnterRadius);
+                }
+            }
+
+            return r;
+        }
     }
 
     private void EnsureArenas(int workers)
@@ -3055,7 +3118,35 @@ internal sealed unsafe class InterestPass
                 // the width that would stop an entity flapping is a function of how fast things move relative to an observer and how long a tick is, and
                 // an engine default guessed without those is a number derived from nothing.
                 EnterRadius = enterRadius > 0d ? enterRadius : queryRadius,
+                IsPush = declaration.IsPush,
             };
+
+            if (declaration.IsPush && (kind != ObserverKind.Sphere || declaration.Observers.Count != 1))
+            {
+                throw new NotSupportedException(
+                    $"Profile '{declaration.Name}' is push-served; the push prototype supports exactly one Sphere observer.");
+            }
+        }
+
+        // PROTOTYPE: an archetype is either push or pull, never both. A push archetype is projected only when pushed, and its entries are not re-initialized
+        // when nobody watched them last tick — the pull path's frames would then read state that no longer means what they assume.
+        var push = new bool[plans.Length];
+        var pull = new bool[plans.Length];
+        for (var p = 0; p < profiles.Length; p++)
+        {
+            foreach (var a in profiles[p].ArchetypeIndices)
+            {
+                (profiles[p].IsPush ? push : pull)[a] = true;
+            }
+        }
+
+        for (var a = 0; a < plans.Length; a++)
+        {
+            if (push[a] && pull[a])
+            {
+                throw new NotSupportedException(
+                    $"Archetype '{plans[a].Name}' is observed by both a push profile and a pull profile. The push prototype serves an archetype one way only.");
+            }
         }
 
         return profiles;
