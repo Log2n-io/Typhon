@@ -267,6 +267,18 @@ internal sealed unsafe class OracleHarness : IDisposable
     }
 
     /// <summary>
+    /// Churn and the ECS fence with no track: a tick the gate skipped, as it does while no session is connected or when the tick aborts. The fence still
+    /// drains the tick's structure words, so the track must recover what it never saw.
+    /// </summary>
+    public void StepWithoutTrack()
+    {
+        Workload.Step();
+        _tick++;
+        Engine.WriteTickFence(_tick);
+        _harness.SkipTick(_tick);
+    }
+
+    /// <summary>
     /// One tick with no write at all, the sessions still walking and every frame delivered: what moves is only the viewers. An entity whose last change a
     /// session was never sent is reached by the session's disc, not by an event.
     /// </summary>

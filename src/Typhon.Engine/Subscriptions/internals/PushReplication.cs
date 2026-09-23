@@ -268,6 +268,13 @@ internal sealed unsafe class PushReplication
 
     private PushSessionState[] _sessions;
     private uint _tick;
+
+    // The last tick the blocks step ran for; zero before the first. A tick the track did not run for (no session, an aborted tick, a failed fence) still
+    // ran the fence, which drained that tick's structure words: its pushes are gone, and only re-pushing every live entity recovers them.
+    private uint _preparedTick;
+
+    /// <summary>Blocks steps that followed a tick the track did not run for, and so re-pushed every live entity — cumulative.</summary>
+    public long GapRepushes;
     private ArchetypeEncodePlan[] _encodePlans = [];
 
     /// <summary>The frame stage's encode plans, whose group tick slots decide what an update carries.</summary>
@@ -707,6 +714,17 @@ internal sealed unsafe class PushReplication
     {
         var from = Stopwatch.GetTimestamp();
         _tick = tick;
+        var resumed = _preparedTick != 0 && tick != _preparedTick + 1;
+        _preparedTick = tick;
+        if (resumed)
+        {
+            GapRepushes++;
+
+            // The orphans queued across the gap are leaves nobody needs: a session connected before it misses a tick the log never held, so it resets, and
+            // one connected since holds nothing. Dropped rather than kept, because with no session connected nothing else ever empties the list.
+            _orphanCount = 0;
+        }
+
         foreach (var a in _pushIndices)
         {
             var state = _states[a];
@@ -730,11 +748,12 @@ internal sealed unsafe class PushReplication
             }
 
             var slotMask = state.Layout.SlotCount >= 64 ? ulong.MaxValue : (1UL << state.Layout.SlotCount) - 1;
-            var everything = _automatic[a] || !_bootstrapped[a] || (Volatile.Read(ref cs.StructureTick) == tick && cs.StructureCoversAll);
+            var everything = _automatic[a] || !_bootstrapped[a] || resumed || (Volatile.Read(ref cs.StructureTick) == tick && cs.StructureCoversAll);
             if (everything)
             {
-                // First tick (or a tick the fence could not describe): every live entity is pushed, which is what gives every entity of a push archetype an
-                // identity and an encoded state before any session asks — the geometric known-set assumes a described entity for every position.
+                // First tick, a tick after a gap, or a tick the fence could not describe: every live entity is pushed, which is what gives every entity of a
+                // push archetype an identity and an encoded state before any session asks — the geometric known-set assumes a described entity for every
+                // position. Every slot of an active cluster is visited, so a slot emptied during a gap gives its identity back too.
                 var ids = cs.ReadActiveClusterList(out var active);
                 for (var i = 0; ids != null && i < active; i++)
                 {

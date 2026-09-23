@@ -538,6 +538,44 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         Assert.That(oracle.Push.ForgottenPushes, Is.Zero, "every write was pushed, so anything the validator reports is a false positive");
     }
 
+    /// <summary>
+    /// Ticks the track skipped — no session connected, an aborted tick — lose their pushes at the fence; the next tick re-pushes every live entity, so spawns,
+    /// destroys and writes made in the gap still reach the client.
+    /// </summary>
+    /// <param name="skippedTicks">How many consecutive ticks run the fence without the track.</param>
+    [Test]
+    [VerifiesRule("SUB-10")]
+    public void TicksTheTrackSkippedStillReachTheClient([Values(1, 20)] int skippedTicks)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 4246 + skippedTicks, [0], nameof(PushOracleTests),
+            detection: PushDetection.Explicit);
+        for (var i = 0; i < 20; i++)
+        {
+            oracle.Step();
+        }
+
+        var destroyed = oracle.Workload.Destroyed;
+        var pushed = oracle.Workload.Pushed;
+        for (var i = 0; i < skippedTicks; i++)
+        {
+            oracle.StepWithoutTrack();
+        }
+
+        oracle.Workload.WriteModeOnEveryCreature();
+        oracle.StepWithoutTrack();
+
+        Assert.That(oracle.Workload.Pushed, Is.GreaterThan(pushed), "the gap pushed nothing, so there was nothing for the fence to lose");
+        if (skippedTicks > 1)
+        {
+            Assert.That(oracle.Workload.Destroyed, Is.GreaterThan(destroyed), "the gap destroyed nothing, so no ghost could have been left behind");
+        }
+
+        oracle.Quiesce();
+        oracle.AssertConverged($"after {skippedTicks + 1} ticks the track did not run");
+        Assert.That(oracle.Push.GapRepushes, Is.EqualTo(1), "the tick after the gap should re-push every live entity once");
+        AssertLookedAtSomething(oracle);
+    }
+
     private static void AssertLookedAtSomething(OracleHarness oracle)
     {
         var live = oracle.LiveEntityCount;

@@ -132,6 +132,18 @@ sealed unsafe class FrameHarness : IDisposable
         Assembler.Gate.Publish(tick);
     }
 
+    /// <summary>Advances to <paramref name="tick"/> without running the track: a tick its gate skipped (no session connected, an aborted tick).</summary>
+    /// <param name="tick">The tick number, which must advance.</param>
+    public void SkipTick(long tick)
+    {
+        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        Tick = tick;
+        if (RunFence)
+        {
+            Engine.WriteTickFence(tick);
+        }
+    }
+
     /// <summary>Runs a tick's blocks and projection steps but not the frame stage — what an allocation measurement brackets.</summary>
     /// <param name="tick">The tick number.</param>
     /// <param name="workers">Worker-pool width.</param>
