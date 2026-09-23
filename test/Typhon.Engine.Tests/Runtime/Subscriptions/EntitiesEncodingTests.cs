@@ -25,8 +25,8 @@ namespace Typhon.Engine.Tests.Runtime;
 /// </para>
 /// <para>
 /// <b>The vector is self-contained</b>, and deliberately so. <c>stream-kitchen-sink</c> names a companion catalog vector; this one cannot, because the
-/// engine's own catalog vector (<c>catalog-engine</c>) is emitted from declarations that include a <c>ClientRegion</c> observer, and Phase 1's interest pass
-/// refuses to compile one — so no runtime can both produce frames and emit that catalog. The stream therefore opens with the <c>WELCOME</c> that carries its
+/// engine's own catalog vector (<c>catalog-engine</c>) is emitted from declarations that include a <c>ClientRegion</c> observer, and a runtime refuses to
+/// start with one — so no runtime can both produce frames and emit that catalog. The stream therefore opens with the <c>WELCOME</c> that carries its
 /// own catalog, exactly as a TCP client sees it, and a reader of the file needs nothing else.
 /// </para>
 /// </remarks>
@@ -64,7 +64,14 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
             FramePoolBudgetBytes = 16L * 1024 * 1024,
         };
 
-    private FrameHarness Create() => FrameHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), Declare, "EntitiesEncodingTests", Options());
+    private FrameHarness Create()
+    {
+        var harness = FrameHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), Declare, "EntitiesEncodingTests", Options());
+
+        // The fence publishes the structure marks the engine's own pushes ride: a spawn, a destroy, a spatial write.
+        harness.RunFence = true;
+        return harness;
+    }
 
     // ── The decoder a client runs ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -79,12 +86,11 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
         SpawnRocks(harness, 3);
         var session = harness.OpenSessions(1, Profile)[0];
 
-        harness.PrimeBlocks();
-        harness.RunTick(2);
+        harness.RunTick(1);
         Assert.That(harness.Deliver(session), Is.EqualTo(1), "the fill frame decoded");
 
         SetLevels(harness, 4242);
-        harness.RunTick(3);
+        harness.RunTick(2);
         Assert.That(harness.Deliver(session), Is.EqualTo(1), "the update frame decoded");
 
         var replica = harness.Replica(session);
@@ -122,8 +128,7 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
         SpawnRocks(harness, 4);
         var session = harness.OpenSessions(1, Profile)[0];
 
-        harness.PrimeBlocks();
-        harness.RunTick(2);
+        harness.RunTick(1);
         var frame = harness.Read(session);
 
         // Moving a static archetype is a leave and a later enter, never a segment, so nothing this fixture does can produce one — and the decoder would
@@ -173,28 +178,26 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
         }.Write(ref writer);
         Append(stream, writer.Written);
 
-        harness.PrimeBlocks();
-
-        // 2 — the initial fill: every archetype, VIEW_COMPLETE.
-        // 3 — motion: three creatures teleport, which the motion rule turns into segments.
-        // 4 — state: every creature's vitals group changes, and nothing else does.
-        // 5 — churn: two creatures leave and one enters, in one frame.
-        // 6 — RESET: a profile switch, so the whole view is re-sent.
-        for (var tick = 2; tick <= 6; tick++)
+        // 1 — the initial fill: every archetype, VIEW_COMPLETE.
+        // 2 — motion: three creatures teleport, which the motion rule turns into segments.
+        // 3 — state: every creature's vitals group changes, and nothing else does.
+        // 4 — churn: two creatures leave and one enters, in one frame.
+        // 5 — RESET: a profile switch, so the whole view is re-sent.
+        for (var tick = 1; tick <= 5; tick++)
         {
             switch (tick)
             {
-                case 3:
+                case 2:
                     MoveCreatures(harness, 3);
                     break;
-                case 4:
+                case 3:
                     SetLevels(harness, 777);
                     break;
-                case 5:
+                case 4:
                     Destroy(harness, creatures.Take(2));
                     SpawnCreatures(harness, 1);
                     break;
-                case 6:
+                case 5:
                     Assert.That(harness.Sessions.SetProfile(session, OtherProfile), Is.True);
                     break;
             }
@@ -347,6 +350,7 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
         tx.Commit();
     }
 
+    /// <summary>Writes every creature's level through the span path, and pushes each slot it wrote, as an explicit profile's system must.</summary>
     private static void SetLevels(FrameHarness harness, ushort level)
     {
         using var tx = harness.Engine.CreateQuickTransaction();
@@ -362,6 +366,7 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
                 var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
                 occupancy &= occupancy - 1;
                 ai[slot].Level = level;
+                harness.Subscriptions.Commands.Replicate(in cluster, slot);
             }
         }
 

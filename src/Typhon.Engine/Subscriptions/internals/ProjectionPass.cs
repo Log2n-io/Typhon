@@ -8,13 +8,12 @@ using Typhon.Protocol;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// S1 — the per-block pass that turns one tick's watched entities into per-entity replication state and pre-encoded records.
+/// S1 — the per-block pass that turns one tick's pushed entities into per-entity replication state and one push event each.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <b>Once per entity, never once per session.</b> Every session that will receive an entity this tick reads the same hot entry and copies the same bytes;
-/// nothing below is parameterised by a session, and no session is reachable from here. That is what turns the per-client cost of the previous implementation
-/// into a lookup and a memcpy (02 § 4).
+/// nothing below is parameterised by a session, and no session is reachable from here (02 § 4).
 /// </para>
 /// <para>
 /// <b>Column by column, then slot by slot.</b> The first half walks each projected field's column across every live watched slot of the cluster, producing one
@@ -25,9 +24,8 @@ namespace Typhon.Engine.Internals;
 /// <para>
 /// <b>The comparison is on codes, and an entity is quantized exactly once</b> (SUB-10). A value is read from the column, quantized, and the resulting code is
 /// what is encoded, what is compared, and what is stored — it is never decoded and re-quantized, so the value that decided "this changed" is bit-for-bit the
-/// value that reaches the wire. Nothing here reads a dirty bit, a modified flag or a change set, because the two write paths that matter set none:
-/// <c>ClusterRef.GetSpan</c> is "the one write path that signals nothing" (<c>ClusterRef.cs:157-162</c>) and <c>WriteSpatial</c> does not mark the slot dirty
-/// (<c>ClusterRef.cs:342-348</c>).
+/// value that reaches the wire. WHICH entities are projected is the push set (ADR-067): the application's <c>Replicate</c> calls and the engine's own pushes.
+/// Whether a pushed entity's bytes changed is still decided here, by the comparison, so a redundant push costs an encode and never a byte on the wire.
 /// </para>
 /// <para>
 /// <b>Group bodies are stored zero-padded to their widest form, and that is what makes a byte comparison exact.</b> A section's
@@ -66,13 +64,13 @@ internal static unsafe class ProjectionPass
     public const ushort FlagPositionChanged = 1 << 9;
 
     /// <summary>
-    /// Projects one watched block: releases the identities of slots that stopped being occupied, (re-)initializes the entries that need it, compares every
-    /// other watched entity's projection with what it held, and appends this tick's records to <paramref name="worker"/>'s arena.
+    /// Projects one block's pushed slots: releases the identities of slots that stopped being occupied, (re-)initializes the entries that need it, compares
+    /// every other pushed entity's projection with what it held, and records one push event per slot.
     /// </summary>
     /// <param name="plan">The archetype's compiled plan.</param>
     /// <param name="archetypeIndex">The plan's index in the runtime's plan list, carried on every record it produces.</param>
-    /// <param name="state">The archetype's replication state: the leases the identities come from, the arenas, and the counters.</param>
-    /// <param name="worker">The chunk index, which is also the index of the arena and the identity lease this call owns exclusively.</param>
+    /// <param name="state">The archetype's replication state: the leases the identities come from, the scratch arenas, and the counters.</param>
+    /// <param name="worker">The chunk index, which is also the index of the scratch arena and the identity lease this call owns exclusively.</param>
     /// <param name="block">The block describing the cluster.</param>
     /// <param name="clusterBase">The cluster chunk's base address in the persistent store.</param>
     /// <param name="transientBase">
@@ -110,7 +108,7 @@ internal static unsafe class ProjectionPass
             var sleepStates = clusterState.SleepStates;
             var chunkId = block->ChunkId;
             // Two things a sleeping cluster can still change under us, and neither raises a dirty bit:
-            //   - a newly WATCHED slot needs its identity minted, and only this pass mints one (ProjectedWatchedMask);
+            //   - a newly PUSHED slot needs its identity minted, and only this pass mints one (ProjectedWatchedMask);
             //   - a DESTROY clears an occupancy bit, which is detected nowhere else in the engine (ProjectedOccupancy). No destroy path wakes a cluster,
             //     so without this the identity is never released, the block goes on describing a dead entity, and a respawn into that slot reaches
             //     clients as the OLD entity under the OLD netId — which the frame stage's reuse check cannot see, because it compares against the block's
@@ -120,11 +118,6 @@ internal static unsafe class ProjectionPass
                 && (block->WatchedMask & ~block->ProjectedWatchedMask) == 0
                 && *(ulong*)clusterBase == block->ProjectedOccupancy)
             {
-                // The stamp still moves. The frame stage reads (ChangedTick, ChangedSlots) as a pair and treats any tick but this one as "the mask is
-                // stale, read every retained slot", so leaving a declined block on last tick's tick would turn this saving into a frame-stage loss
-                // several times its size. Two stores, against a slot loop of read, re-encode and compare.
-                block->ChangedSlots = 0;
-                Volatile.Write(ref block->ChangedTick, tick);
                 state.NoteBlockDormant();
                 return;
             }
@@ -140,8 +133,6 @@ internal static unsafe class ProjectionPass
         var occupancy = *(ulong*)clusterBase & slotMask;
         var watched = block->WatchedMask & slotMask;
 
-        // Accumulated across the per-slot loop and published at the end; see ReplicationBlockHeader.ChangedSlots.
-        var changedSlots = 0UL;
         if (watched == 0)
         {
             return;
@@ -150,7 +141,11 @@ internal static unsafe class ProjectionPass
         var entityIds = (long*)(clusterBase + clusterLayout.EntityIdsOffset);
         var blockBytes = (byte*)block;
         var leases = state.NetIdLeases;
-        var arena = state.Records[worker];
+        var arena = state.Scratch[worker];
+
+        // A push-served archetype is projected only where pushed, and every slot projected here becomes one event the frame stage fans out.
+        var push = state.Push;
+        var pushIndex = state.PushArchetypeIndex;
 
         // ── 1. Slots that stopped being occupied give their identities back ─────────────────────────────────────────────────────────────────────────────
         var released = 0;
@@ -162,6 +157,11 @@ internal static unsafe class ProjectionPass
             var hot = (ReplicationHotEntry*)(blockBytes + layout.HotOffset + (slot * layout.HotStride));
             if (hot->NetId != NetIdAllocator.NoNetId)
             {
+                if (push != null)
+                {
+                    EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId);
+                }
+
                 leases.Release(worker, hot->NetId);
                 released++;
             }
@@ -178,29 +178,9 @@ internal static unsafe class ProjectionPass
 
         // ── 2. Which entries have to be (re-)initialized ─────────────────────────────────────────────────────────────────────────────────────────────────
         //
-        // Three causes, one answer: the entry does not describe the entity in the slot (a spawn, or a slot the engine reused), or it holds no identity, or
-        // nobody was looking at this entity last tick — in which case no session holds any history of it and a full enter is both correct and cheaper than
-        // reasoning about what a session might remember.
+        // Two causes, one answer: the entry does not describe the entity in the slot (a spawn, or a slot the engine reused), or it holds no identity.
         ulong initializing = 0;
 
-        // Slots whose client is still dead-reckoning them, accumulated HERE because this loop already touches every live slot's hot entry — asking the
-        // question in its own pass would double the walk to learn something this one is a few bytes away from. See MotionTracker.IsExtrapolating.
-        ulong extrapolating = 0;
-
-        // ── Whether the gate can fire AT ALL, decided before the loop that feeds it ───────────────────────────────────────────────────────────────
-        //
-        // Hoisted here, above the per-slot work, because everything the gate needs is per-BLOCK: if the changed-cluster list was not published for this
-        // tick there is nothing to narrow against, and accumulating the extrapolating mask would then be a velocity read per live slot for a mask
-        // nobody reads. Measured with it unconditional: it is the residue that kept subs above baseline once the list itself was gated off.
-        var clusterStateForGate = state.ClusterState;
-        var gated = clusterStateForGate != null
-            && !clusterStateForGate.ChangedClustersCoverAll
-            && clusterStateForGate.ChangedClusterTick == tick;
-
-        // A struct over values the plan and the layout already hold — no allocation, no page access. Built only when the gate can use it.
-        var gatePosition = gated ? plan.Position : null;
-        var gateMotion = gatePosition != null ? MotionPolicy.For(gatePosition, layout, state.TickPeriodSeconds) : default;
-        var previousTick = tick - 1;
         var bits = live;
         while (bits != 0)
         {
@@ -208,16 +188,15 @@ internal static unsafe class ProjectionPass
             bits &= bits - 1;
             var hot = (ReplicationHotEntry*)(blockBytes + layout.HotOffset + (slot * layout.HotStride));
             var entity = (ulong)entityIds[slot];
-
-            if (gatePosition != null && MotionTracker.IsExtrapolating(in gateMotion, (byte*)hot))
-            {
-                extrapolating |= 1UL << slot;
-            }
-
             if (hot->Entity.RawValue != entity)
             {
                 if (hot->NetId != NetIdAllocator.NoNetId)
                 {
+                    if (push != null)
+                    {
+                        EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId);
+                    }
+
                     leases.Release(worker, hot->NetId);
                     released++;
                 }
@@ -227,70 +206,26 @@ internal static unsafe class ProjectionPass
                 continue;
             }
 
-            if (hot->NetId == NetIdAllocator.NoNetId || LastWatchedTick(blockBytes, layout, slot) != previousTick)
+            // An entity is projected only when pushed, so "not projected last tick" is its normal state and says nothing about what a client holds — the
+            // geometric known-set does. Only an entry with no identity is (re-)initialized.
+            if (hot->NetId == NetIdAllocator.NoNetId)
             {
                 initializing |= 1UL << slot;
             }
         }
 
-        // ── 2b. The gate: which live slots can possibly have something to say (#205, design/Subscriptions/21 slice 3) ───────────────────────────────────
-        //
-        // S1's cost has always been O(watched), not O(changed), because there was no signal it could trust: GetSpan and WriteSpatial raise no dirty bit
-        // (SUB-10), so the only sound answer was to re-encode every watched slot and compare the bytes. Slice 1 gave the fence a signal it CAN trust —
-        // one that may only over-approximate — so the pass can now narrow the set it considers while keeping the byte comparison exactly as it was. The
-        // comparison still decides whether a group's tick advances; the mask only decides which entities are looked at.
-        //
-        // Four things must be visited whatever the change signal says, and each is a bug if dropped:
-        //   - a slot being (re-)initialized: it has no valid entry to compare against;
-        //   - a slot that ARRIVED by migration: its bytes came across unchanged, so nothing else names it and the session watching the destination would
-        //     never see it;
-        //   - a slot nobody watched last tick: no session holds history for it, so it owes a full enter;
-        //   - a slot whose client is still EXTRAPOLATING it: motion is the one projected thing that is stateful on the client, so identical bytes mean
-        //     the entity has stopped and the client does not know yet — the opposite of "nothing to send";
-        //   - everything, when the signal degraded to "cannot say" for this archetype this tick.
-        var visit = live;
-        if (gated)
-        {
-            var newlyWatched = live & ~block->ProjectedWatchedMask;
-            var arrivedPeek = Volatile.Read(ref block->ArrivedSlots);
-            visit = live & (clusterStateForGate.ChangedSlotsOf(block->ChunkId) | initializing | newlyWatched | arrivedPeek | extrapolating);
-        }
-
-        var skipped = live & ~visit;
-        if (skipped != 0)
-        {
-            // A skipped slot is unchanged, not unwatched, and the difference is one field. LastWatchedTick is what tells the NEXT tick that a session
-            // held this entity, and section 2 above turns a stale one into a re-initialization — so leaving it behind would make every gated slot take a
-            // full enter on the following tick, which is the opposite of the saving. A four-byte store against a column walk, an encode and a memcmp.
-            var stamp = skipped;
-            while (stamp != 0)
-            {
-                var slot = BitOperations.TrailingZeroCount(stamp);
-                stamp &= stamp - 1;
-                SetLastWatchedTick(blockBytes, layout, slot, tick);
-            }
-        }
-
-        if (visit == 0)
-        {
-            // Nothing to encode, but the block's published state still has to move: the frame stage reads (ChangedTick, ChangedSlots) as a pair and
-            // treats any other tick as "the mask is stale, read every retained slot", so a block left on last tick's stamp turns this saving into a
-            // frame-stage loss several times its size — the same reasoning the dormancy skip above states.
-            block->ChangedSlots = 0;
-            block->ProjectedWatchedMask = watched;
-            block->ProjectedOccupancy = *(ulong*)clusterBase;
-            Volatile.Write(ref block->ChangedTick, tick);
-            state.NoteProjected(blocks: 1, slots: 0, records: 0, releases: released);
-            return;
-        }
+        // The slots an entity was carried into this tick. Their event is never a no-op: the entity's latest event must name the slot it is
+        // in now, and a migration that changed no byte would otherwise leave it naming the one it left. A bit left over from a tick that returned early only
+        // costs one event with no record.
+        var pushArrived = push != null ? Volatile.Read(ref block->ArrivedSlots) : 0UL;
 
         // ── 3. One column walk per projected field, over the live watched slots ─────────────────────────────────────────────────────────────────────────
         var fields = plan.Fields;
         var ownerFields = plan.OwnerFields;
         var codeRows = fields.Length + ownerFields.Length;
         var codes = arena.Codes(Math.Max(1, codeRows) * MaxSlots);
-        Quantize(fields, 0, clusterLayout, clusterBase, transientBase, slotCount, visit, codes);
-        Quantize(ownerFields, fields.Length, clusterLayout, clusterBase, transientBase, slotCount, visit, codes);
+        Quantize(fields, 0, clusterLayout, clusterBase, transientBase, slotCount, live, codes);
+        Quantize(ownerFields, fields.Length, clusterLayout, clusterBase, transientBase, slotCount, live, codes);
 
         // ── 4. Scratch, carved once per block ────────────────────────────────────────────────────────────────────────────────────────────────────────────
         var packBytes = MaxPackBytes(plan);
@@ -323,7 +258,7 @@ internal static unsafe class ProjectionPass
         // Everything the rule needs that is a property of the ARCHETYPE rather than of the entity: the tolerance and teleport thresholds pre-squared, the
         // heartbeat in ticks, and the four offsets a segment is written at. The scratch is carved once for the whole block, so the per-slot call allocates no
         // stack of its own and stays inlinable.
-        var motion = gated && gatePosition != null ? gateMotion : MotionPolicy.For(position, layout, state.TickPeriodSeconds);
+        var motion = MotionPolicy.For(position, layout, state.TickPeriodSeconds);
         byte* velocityColumn = null;
         if (motion.Enabled && motion.VelocityDeclared)
         {
@@ -336,7 +271,7 @@ internal static unsafe class ProjectionPass
 
         var visited = 0;
         var records = 0;
-        bits = visit;
+        bits = live;
         while (bits != 0)
         {
             var slot = BitOperations.TrailingZeroCount(bits);
@@ -363,6 +298,7 @@ internal static unsafe class ProjectionPass
                         // demand — initializes it. Deferring an entity by a tick is the only failure available here that neither allocates on a worker nor
                         // hands two entities one identity; it is counted so a lease that is chronically too small is visible rather than inferred.
                         state.NoteNetIdStarvation();
+                        push?.Repush(pushIndex, block->ChunkId, 1UL << slot);
                         continue;
                     }
 
@@ -378,11 +314,26 @@ internal static unsafe class ProjectionPass
                 hot->Flags = 0;
             }
 
+            // Where the entity was when last projected, and where it is now — the decoded wire positions.
+            float pushOldX = 0f, pushOldY = 0f, pushNewX = 0f, pushNewY = 0f;
+            var pushFlags = (byte)0;
+
             // ── Position: quantized, compared, stored; then the motion rule decides whether it becomes a SEGMENT (P1-10) ──────────────────────────────────
             if (position != null && positionBytes > 0)
             {
                 QuantizePosition(position, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
                 var stored = coldBytes + layout.PrevPositionOffsetInColdEntry;
+                if (push != null)
+                {
+                    if (!initialize)
+                    {
+                        push.Decode(pushIndex, stored, out pushOldX, out pushOldY);
+                        pushFlags |= PushEvent.HasOld;
+                    }
+
+                    push.Decode(pushIndex, quantizedBuffer, out pushNewX, out pushNewY);
+                    pushFlags |= PushEvent.HasNew;
+                }
                 var moved = initialize || !new ReadOnlySpan<byte>(stored, positionBytes).SequenceEqual(quantizedPosition[..positionBytes]);
 
                 // BEFORE the previous position is overwritten, because the rule's teleport and run-departure tests are about this tick's STEP, which only
@@ -397,6 +348,13 @@ internal static unsafe class ProjectionPass
                     quantizedPosition[..positionBytes].CopyTo(new Span<byte>(stored, positionBytes));
                     hot->Flags |= FlagPositionChanged;
                 }
+
+                // A client dead-reckons a mover until told it stopped, so a slot still extrapolating is pushed by the engine next tick —
+                // the one push a developer cannot be asked to make, because nothing the application writes marks a stop.
+                if (push != null && motion.Enabled && MotionTracker.IsExtrapolating(in motion, hotBytes))
+                {
+                    push.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                }
             }
             else if (position != null && initialize && layout.EnterPositionBytes > 0)
             {
@@ -405,6 +363,19 @@ internal static unsafe class ProjectionPass
                 QuantizePosition(position, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
                 var staticBytes = layout.EnterPositionBytes;
                 quantizedPosition[..staticBytes].CopyTo(new Span<byte>(coldBytes + layout.EnterPositionOffsetInColdEntry, staticBytes));
+                if (push != null)
+                {
+                    push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY);
+                    pushFlags |= PushEvent.HasNew;
+                }
+            }
+            else if (push != null && position != null && layout.EnterPositionBytes > 0)
+            {
+                // A static entity pushed again is where it always was.
+                push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY);
+                pushOldX = pushNewX;
+                pushOldY = pushNewY;
+                pushFlags |= PushEvent.HasOld | PushEvent.HasNew;
             }
 
             // ── Groups: encode, compare, stamp ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -418,30 +389,27 @@ internal static unsafe class ProjectionPass
                 hot->Flags |= (ushort)(ownerChanged << OwnerChangedMaskShift);
             }
 
-            SetLastWatchedTick(blockBytes, layout, slot, tick);
-
-            // The published change mask names every slot a session might need to visit, and that is BROADER than "a record was assembled here". A motion-only
-            // change stamps the motion tick through MotionTracker and assembles no state record at all, so a mask built from the record branches alone let the
-            // fast gather skip a moving entity and never send its segment — caught by the differential oracle as a position that drifted apart. Reading the
-            // stamps is the one test that covers every producer of a reason-to-send, including ones added later.
-            for (var g = 0; g < MaxGroupTicks; g++)
+            if (push != null)
             {
-                if (hot->GroupTicks[g] == tick)
+                // The stamp is the tick of the entity's last EVENT, written by AddEvent when it records one. The sweep, the cell delivery and the push
+                // log's catch-up all read it as "the push step owns this entity from that tick on".
+                if ((pushArrived & (1UL << slot)) != 0)
                 {
-                    changedSlots |= 1UL << slot;
-                    break;
+                    pushFlags |= PushEvent.Arrived;
                 }
+
+                push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushNewX, pushNewY);
             }
 
-            // ── The records ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+            // ── The enter cache ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
             if (initialize)
             {
                 var onEnterLength = EncodeSection(fields, plan.OnEnter, codes, 0, slot, pack, new Span<byte>(enterScratch, enterBytes));
 
-                // The enter cache (03 § 5's body(onEnter)). It is kept as well as emitted because an onEnter field appears in no state record and no
-                // group body: a session that first sees this entity on a later tick would otherwise have no enter body to be sent, and S2b would have to
-                // re-encode one per session from the columns. Zero-padded to the section's widest form, exactly as a stored group body is, so the frame
-                // stage recovers the real length by walking the section rather than by storing one.
+                // 03 § 5's body(onEnter). An onEnter field appears in no state record and no group body, so a session that first sees this entity on a later
+                // tick would otherwise have no enter body to be sent, and the frame stage would have to re-encode one per session from the columns.
+                // Zero-padded to the section's widest form, exactly as a stored group body is, so the frame stage recovers the real length by walking the
+                // section rather than by storing one.
                 if (layout.EnterBodyBytes > 0)
                 {
                     var cache = new Span<byte>(coldBytes + layout.EnterBodyOffsetInColdEntry, layout.EnterBodyBytes);
@@ -449,309 +417,22 @@ internal static unsafe class ProjectionPass
                     new ReadOnlySpan<byte>(enterScratch, onEnterLength).CopyTo(cache);
                 }
 
-                var total = onEnterLength;
-                for (var g = 0; g < plan.Groups.Length; g++)
-                {
-                    total += groupLength[g];
-                }
-
-                var body = arena.Reserve(total, out var offset);
-                new ReadOnlySpan<byte>(enterScratch, onEnterLength).CopyTo(body);
-                var at = onEnterLength;
-                for (var g = 0; g < plan.Groups.Length; g++)
-                {
-                    new ReadOnlySpan<byte>(groupScratch + groupOffset[g], groupLength[g]).CopyTo(body[at..]);
-                    at += groupLength[g];
-                }
-
-                arena.Append(new ReplicationRecordRef
-                {
-                    NetId = hot->NetId,
-                    Generation = hot->Generation,
-                    ArchetypeIndex = (ushort)archetypeIndex,
-                    Kind = ReplicationRecordKind.Enter,
-                    GroupMask = 0,
-                    Offset = offset,
-                    Length = (ushort)total,
-                });
                 records++;
-                changedSlots |= 1UL << slot;
             }
             else if (changed != 0)
             {
-                var total = 0;
-                for (var g = 0; g < plan.Groups.Length; g++)
-                {
-                    if ((changed & (1 << g)) != 0)
-                    {
-                        total += groupLength[g];
-                    }
-                }
-
-                var body = arena.Reserve(total, out var offset);
-                var at = 0;
-                for (var g = 0; g < plan.Groups.Length; g++)
-                {
-                    if ((changed & (1 << g)) == 0)
-                    {
-                        continue;
-                    }
-
-                    new ReadOnlySpan<byte>(groupScratch + groupOffset[g], groupLength[g]).CopyTo(body[at..]);
-                    at += groupLength[g];
-                }
-
-                arena.Append(new ReplicationRecordRef
-                {
-                    NetId = hot->NetId,
-                    Generation = hot->Generation,
-                    ArchetypeIndex = (ushort)archetypeIndex,
-                    Kind = ReplicationRecordKind.State,
-                    GroupMask = (byte)changed,
-                    Offset = offset,
-                    Length = (ushort)total,
-                });
                 records++;
-                changedSlots |= 1UL << slot;
             }
         }
-
-        // The change set, published for the frame stage (12 — the per-session walk). It is written unconditionally, including when it is zero: a block that
-        // was projected and changed nothing must say so, or a reader cannot tell "nothing changed here" from "not projected this tick" and would have to
-        // assume the worst.
+        // ── Arrivals, consumed ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         //
-        // RELEASE on the tick, which is what makes the pair readable — see ChangedTick's remarks. Writing the tick "last" in program order proves nothing on
-        // its own: arm64 may commit the two plain stores in either order, and a reader that saw the new tick against the old mask would apply a stale change
-        // set to a live tick. The stage join between S1 and S2b happens to separate this writer from that reader today, but the pair is documented as
-        // self-describing and read as such, so it carries its own ordering. Free on x64, one stlr on arm64.
-        // ── Arrivals, folded in and consumed ────────────────────────────────────────────────────────────────────────────────────────────────────────
-        //
-        // An entity carried in from another cluster since this block was last projected. A migration copies the entry whole — the identity, the group
-        // stamps and the quantized state all arrive unchanged — so if the entity's bytes did not change on that tick NOTHING else names the slot: not the
-        // change mask, not the initialisation test, not the occupancy compare. The session that reaches the destination never visits it, and the session
-        // that reached the SOURCE sees its slot change occupant, calls the entity displaced and retracts an entity still inside its own view.
-        //
-        // Restricted to what is LIVE AND WATCHED, because a slot no session reaches needs no visit. Exchanged rather than read-then-cleared: the fence's
-        // migration slices are the other writer and they run in parallel with each other.
-        var arrived = Interlocked.Exchange(ref block->ArrivedSlots, 0UL) & live;
-        changedSlots |= arrived;
-
-        block->ChangedSlots = changedSlots;
+        // An entity carried in from another cluster since this block was last projected. Read above (pushArrived) to flag its event; cleared here.
+        // Exchanged rather than read-then-cleared: the fence's migration slices are the other writer and they run in parallel with each other.
+        Interlocked.Exchange(ref block->ArrivedSlots, 0UL);
         block->ProjectedWatchedMask = watched;
         block->ProjectedOccupancy = *(ulong*)clusterBase;
-        Volatile.Write(ref block->ChangedTick, tick);
-
-        if (changedSlots != 0UL)
-        {
-            state.NoteChangedBlock(block->ChunkId, block, changedSlots, tick);
-        }
-
-        // The watched mask is deliberately LEFT SET. It is the interest stage's, cleared by its own prologue at the start of the next tick, and the frame
-        // stage still has to read it after this one has run — a pass that tidied up after itself would erase the very thing S2b is about to consult.
-        PublishSharedRun(state, worker, block, blockBytes, arena, changedSlots, released, initializing, arrived, tick);
-
-        state.NoteChangedSlots(BitOperations.PopCount(changedSlots));
         state.NoteProjected(blocks: 1, slots: visited, records: records, releases: released);
         state.NoteSegments(segmentsEmitted, shadowSegments);
-    }
-
-    /// <summary>
-    /// Encodes this cluster's changed records ONCE, as two <c>ENTITIES</c> sub-list runs every session watching the cluster can reference (17 § 18).
-    /// </summary>
-    /// <param name="state">The archetype's replication state, which owns the run table and hands out identity versions.</param>
-    /// <param name="worker">The chunk index, which names the arena the bytes are written into.</param>
-    /// <param name="block">The block being projected.</param>
-    /// <param name="blockBytes">Its first byte.</param>
-    /// <param name="arena">This worker's record arena, where the bytes live until the tick ends.</param>
-    /// <param name="changedSlots">The slots this tick changed.</param>
-    /// <param name="released">How many identities this projection gave back.</param>
-    /// <param name="initializing">The slots this projection had to (re-)initialize.</param>
-    /// <param name="arrived">The slots an entity was carried into from another cluster.</param>
-    /// <param name="tick">The tick.</param>
-    /// <remarks>
-    /// <para>
-    /// <b>Built here because this is where the bytes are already hot.</b> The slot loop above has just read every one of these hot entries to decide that
-    /// they changed; encoding the run in a later stage would read them all again, from a cache a stage barrier has had time to spoil.
-    /// </para>
-    /// <para>
-    /// <b>A cluster whose identities moved publishes nothing</b>, and that is the whole of the correctness argument on this side. A mint, a release or a
-    /// slot whose occupant was replaced all mean that some session's per-slot memory of this cluster is now wrong, and telling which sessions would be per
-    /// session — the work being removed. Refusing to share the cluster for that one tick costs those sessions an ordinary per-session encode, which is what
-    /// they did before this existed. The SWG demo measures a few tens of such events a tick across a world of a quarter of a million entities.
-    /// </para>
-    /// <para>
-    /// <b>The mask is "changed in THIS tick", which is why a reader has to be exactly one tick behind.</b> The per-session encoder asks for the groups whose
-    /// stamp is past its baseline; with a baseline of <c>tick - 1</c> that is the same set, and with any older baseline it is a superset this run does not
-    /// carry. The frame stage tests the baseline before it reads anything here.
-    /// </para>
-    /// </remarks>
-    private static void PublishSharedRun(ArchetypeReplicationState state, int worker, ReplicationBlockHeader* block, byte* blockBytes, RecordArena arena,
-        ulong changedSlots, int released, ulong initializing, ulong arrived, uint tick)
-    {
-        var encode = state.EncodePlan;
-        if (encode == null)
-        {
-            return;
-        }
-
-        var table = state.SharedRuns;
-        var chunkId = block->ChunkId;
-
-        // One statement for the three ways this pass changes who a slot holds: a released identity, a slot whose entity differs from the one the entry
-        // described, and a slot watched now but not last tick. All three are already accumulated above, so this costs two comparisons.
-        // ── A cluster whose identities moved publishes nothing ──────────────────────────────────────────────────────────────────────────────────────
-        //
-        // Three ways a slot can change WHICH ENTITY it holds, and all three have to be here. A release and a re-initialisation are the obvious two. The
-        // third is an ARRIVAL, and it is the one that is invisible from everything else: a migration copies the entry whole, so the destination's entity
-        // matches, its last-watched tick matches, and nothing marks it as new. A session that already had that slot in its committed mask would then
-        // reference the run without walking it, never learn the occupant changed, and go on naming the previous entity in its own view — which is the
-        // disagreement FindViewIdentityDisagreement exists to catch. Arrivals are a few tens a tick across a quarter-million entities, so refusing their
-        // clusters for one tick costs nothing measurable.
-        if (released != 0 || initializing != 0 || arrived != 0)
-        {
-            state.NoteSharedSkip(released != 0 ? 1 : 2);
-            table.Retire(chunkId);
-            return;
-        }
-
-        if (changedSlots == 0)
-        {
-            state.NoteSharedSkip(3);
-            table.Retire(chunkId);
-            return;
-        }
-
-        var layout = encode.Layout;
-        var groupCount = encode.GroupCount;
-        var moving = encode.Moving;
-
-        // The slots, ordered by netId, because a run's gaps are relative and must ascend. At most sixty-four of them, so an insertion sort over two parallel
-        // stack arrays beats anything with an allocation in it — and the array is almost always nearly sorted, since netIds are leased as slots fill.
-        var netIds = stackalloc uint[MaxSlots];
-        var slotOf = stackalloc byte[MaxSlots];
-        var maskOf = stackalloc byte[MaxSlots];
-        var segmentOf = stackalloc bool[MaxSlots];
-        var count = 0;
-        var stateCount = 0;
-        var segmentCount = 0;
-
-        var bits = changedSlots;
-        while (bits != 0)
-        {
-            var slot = BitOperations.TrailingZeroCount(bits);
-            bits &= bits - 1;
-            var hot = (ReplicationHotEntry*)(blockBytes + layout.HotOffset + (slot * layout.HotStride));
-            if (hot->NetId == NetIdAllocator.NoNetId)
-            {
-                // No identity to name the record with. The slot is owed to every session by the ordinary path, which is where it is already handled.
-                table.Retire(chunkId);
-                return;
-            }
-
-            var mask = 0;
-            for (var g = 0; g < groupCount; g++)
-            {
-                if (hot->GroupTicks[encode.GroupTickSlot[g]] == tick)
-                {
-                    mask |= 1 << g;
-                }
-            }
-
-            var segment = moving && hot->GroupTicks[encode.MotionTickSlot] == tick;
-            if (mask == 0 && !segment)
-            {
-                continue;
-            }
-
-            var netId = hot->NetId;
-            var at = count++;
-            while (at > 0 && netIds[at - 1] > netId)
-            {
-                netIds[at] = netIds[at - 1];
-                slotOf[at] = slotOf[at - 1];
-                maskOf[at] = maskOf[at - 1];
-                segmentOf[at] = segmentOf[at - 1];
-                at--;
-            }
-
-            netIds[at] = netId;
-            slotOf[at] = (byte)slot;
-            maskOf[at] = (byte)mask;
-            segmentOf[at] = segment;
-            if (mask != 0)
-            {
-                stateCount++;
-            }
-
-            if (segment)
-            {
-                segmentCount++;
-            }
-        }
-
-        if (stateCount == 0 && segmentCount == 0)
-        {
-            table.Retire(chunkId);
-            return;
-        }
-
-        var run = new SharedClusterRun
-        {
-            Tick = tick,
-            Slots = changedSlots,
-            Worker = worker,
-            StateOffset = -1,
-            SegmentOffset = -1,
-            StateCount = (ushort)stateCount,
-            SegmentCount = (ushort)segmentCount,
-        };
-
-        var address = (nint)blockBytes;
-        if (segmentCount > 0)
-        {
-            var bound = EntitiesEncoder.MaxGapBytes + (segmentCount * encode.MaxSegmentBytes);
-            var bytes = arena.Reserve(bound, out var offset);
-            var w = new WireWriter(bytes);
-            w.WriteVaru((uint)segmentCount);
-            var prev = -1L;
-            for (var i = 0; i < count; i++)
-            {
-                if (segmentOf[i])
-                {
-                    EntitiesEncoder.WriteSegmentRecord(ref w, encode, ref prev, netIds[i], address, slotOf[i]);
-                }
-            }
-
-            arena.TrimReserve(offset, w.Position);
-            run.SegmentOffset = offset;
-            run.SegmentBytes = (ushort)w.Position;
-        }
-
-        if (stateCount > 0)
-        {
-            var bound = EntitiesEncoder.MaxGapBytes + (stateCount * encode.MaxStateBytes);
-            var bytes = arena.Reserve(bound, out var offset);
-            var w = new WireWriter(bytes);
-            w.WriteVaru((uint)stateCount);
-            var prev = -1L;
-            for (var i = 0; i < count; i++)
-            {
-                if (maskOf[i] != 0)
-                {
-                    EntitiesEncoder.WriteStateRecord(ref w, encode, ref prev, netIds[i], address, slotOf[i], maskOf[i]);
-                }
-            }
-
-            arena.TrimReserve(offset, w.Position);
-            run.StateOffset = offset;
-            run.StateBytes = (ushort)w.Position;
-        }
-
-        if (table.Publish(chunkId, in run))
-        {
-            state.NoteSharedRun(stateCount + segmentCount);
-            state.NoteSharedSkip(0);
-        }
     }
 
     // ── Column walk ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -944,6 +625,14 @@ internal static unsafe class ProjectionPass
         }
     }
 
+    /// <summary>A slot whose identity ends here — destroyed, or displaced by a reuse — leaves every session that holds it.</summary>
+    private static void EmitPushLeave(PushReplication push, int archetype, int worker, ReplicationBlockHeader* block, byte* blockBytes,
+        in ReplicationBlockLayout layout, int slot, uint netId)
+    {
+        push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + push.PositionOffset(archetype), out var x, out var y);
+        push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, 0f, 0f);
+    }
+
     // ── Entry helpers ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -963,14 +652,6 @@ internal static unsafe class ProjectionPass
             NativeMemory.Clear(blockBytes + layout.OwnerOffset + (slot * layout.OwnerEntrySize), (nuint)layout.OwnerEntrySize);
         }
     }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static uint LastWatchedTick(byte* blockBytes, in ReplicationBlockLayout layout, int slot) =>
-        *(uint*)(blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + layout.LastWatchedTickOffsetInColdEntry);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void SetLastWatchedTick(byte* blockBytes, in ReplicationBlockLayout layout, int slot, uint tick) =>
-        *(uint*)(blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + layout.LastWatchedTickOffsetInColdEntry) = tick;
 
     private static void Fill(CompiledGroup[] groups, Span<int> offsets)
     {
@@ -1131,8 +812,8 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
     /// <param name="allocator">The database's identity allocator.</param>
     /// <param name="workers">The chunk count S1 is about to dispatch; leases beyond it are emptied rather than kept stocked.</param>
     /// <param name="coldEstimate">
-    /// An upper bound on the identities the FIRST projected tick can need — the watched slots. It is used once, because until a tick has run there is no
-    /// demand to size a lease from and an initial fill of a large watched set would otherwise take several ticks to converge, each of them deferring
+    /// An upper bound on the identities the FIRST projected tick can need — the pushed slots. It is used once, because until a tick has run there is no
+    /// demand to size a lease from and an initial fill of a large archetype would otherwise take several ticks to converge, each of them deferring
     /// entities. Afterwards the demand-driven rule takes over and the leases shrink back.
     /// </param>
     public void BeginTick(NetIdAllocator allocator, int workers, int coldEstimate = 0)

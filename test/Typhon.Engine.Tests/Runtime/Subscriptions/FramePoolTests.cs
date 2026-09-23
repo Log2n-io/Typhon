@@ -8,7 +8,7 @@ namespace Typhon.Engine.Tests;
 /// </summary>
 /// <remarks>
 /// <para>
-/// The properties worth pinning here are the ones that keep an untrusted watched set from becoming a memory-exhaustion path: the pool commits nothing until
+/// The properties worth pinning here are the ones that keep untrusted client load from becoming a memory-exhaustion path: the pool commits nothing until
 /// asked, never commits past its budget, reports both kinds of refusal by returning <see langword="false"/> rather than by throwing on a tick-path call, and
 /// counts the two kinds apart — a bound budget is a sizing decision, an over-sized frame is a defect upstream.
 /// </para>

@@ -8,15 +8,14 @@ using Typhon.Protocol;
 namespace Typhon.Engine.Tests.Runtime;
 
 /// <summary>
-/// One tick of the whole Engine-Subscriptions track, driven by hand: interest, the blocks step, projection, then frame assembly — followed by the send
-/// side's half of the hand-off, so a test reads the bytes a client would.
+/// One tick of the whole Engine-Subscriptions track, driven by hand: the blocks step, projection, the push index and far fold, then frame assembly —
+/// followed by the send side's half of the hand-off, so a test reads the bytes a client would.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>It is the track's order, not an approximation of it.</b> S2b's inputs are the interest pass's per-session runs and the per-entity state S1 wrote into
-/// the replication blocks, so a fixture that synthesized either would be asserting against a world the engine does not produce. The two steps this harness
-/// re-implements rather than calls — the blocks step's gather, and the projection dispatch — are `private static` members of the stage classes; both are a
-/// dozen lines of partitioning with no behaviour of their own, and <c>ProjectionPassTests</c> already drives the pass the same way.
+/// <b>It is the track's order, not an approximation of it.</b> The frame stage's inputs are the push index and the per-entity state S1 wrote into the
+/// replication blocks, so a fixture that synthesized either would be asserting against a world the engine does not produce. The blocks step and the
+/// projection dispatch are re-implemented here rather than called: both are a dozen lines of partitioning with no behaviour of their own.
 /// </para>
 /// <para>
 /// <b>The send side is real.</b> A published frame is claimed through <see cref="SessionSendState.TryClaimFrame"/> against the publication gate and released
@@ -26,23 +25,23 @@ namespace Typhon.Engine.Tests.Runtime;
 /// </remarks>
 sealed unsafe class FrameHarness : IDisposable
 {
-    private readonly InterestHarness _interest;
+    private readonly ReplicationHarness _replication;
     private readonly Dictionary<uint, SessionReplica> _replicas = [];
 
-    private FrameHarness(InterestHarness interest)
+    private FrameHarness(ReplicationHarness replication)
     {
-        _interest = interest;
-        CatalogPlan = CatalogPlan.Compile(interest.Subscriptions.Catalog.Canonical);
+        _replication = replication;
+        CatalogPlan = CatalogPlan.Compile(replication.Subscriptions.Catalog.Canonical);
     }
 
     /// <summary>The engine whose clusters are projected.</summary>
-    public DatabaseEngine Engine => _interest.Engine;
+    public DatabaseEngine Engine => _replication.Engine;
 
-    /// <summary>The interest half of the harness, for a fixture that has to read the cluster occupancy the track ran against.</summary>
-    public InterestHarness Interest => _interest;
+    /// <summary>The runtime half of the harness, for a fixture that has to read the cluster occupancy the track ran against.</summary>
+    public ReplicationHarness Replication => _replication;
 
     /// <summary>Everything replication owns.</summary>
-    public SubscriptionsRuntime Subscriptions => _interest.Subscriptions;
+    public SubscriptionsRuntime Subscriptions => _replication.Subscriptions;
 
     /// <summary>The assembler under test.</summary>
     public FrameAssembler Assembler => Subscriptions.Frames;
@@ -64,14 +63,14 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns>The harness.</returns>
     public static FrameHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null)
     {
-        var interest = InterestHarness.Create(engine, declare, name, options);
+        var replication = ReplicationHarness.Create(engine, declare, name, options);
         try
         {
-            return new FrameHarness(interest);
+            return new FrameHarness(replication);
         }
         catch
         {
-            interest.Dispose();
+            replication.Dispose();
             throw;
         }
     }
@@ -82,7 +81,7 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns>The identities.</returns>
     public SessionId[] OpenSessions(int count, string profile)
     {
-        var sessions = _interest.OpenSessions(count, profile);
+        var sessions = _replication.OpenSessions(count, profile);
         foreach (var session in sessions)
         {
             _replicas[session.Value] = new SessionReplica(CatalogPlan);
@@ -104,7 +103,7 @@ sealed unsafe class FrameHarness : IDisposable
     /// <summary>The plan index of a replicated archetype, by wire name.</summary>
     /// <param name="name">The archetype's wire name.</param>
     /// <returns>The index.</returns>
-    public int PlanIndex(string name) => _interest.PlanIndex(name);
+    public int PlanIndex(string name) => _replication.PlanIndex(name);
 
     /// <summary>
     /// Whether each tick runs the engine's tick fence first, as the runtime does. The fence publishes the structure signal, and every path that rests on
@@ -112,11 +111,13 @@ sealed unsafe class FrameHarness : IDisposable
     /// </summary>
     public bool RunFence { get; set; }
 
-    /// <summary>Runs one whole tick of the track: interest, blocks, projection, frames, then the durability gate.</summary>
+    /// <summary>Runs one whole tick of the track: blocks, projection, the push index, frames, then the durability gate.</summary>
     /// <param name="tick">The tick number, which must advance.</param>
-    /// <param name="workers">Worker-pool width for the two partitioned stages.</param>
+    /// <param name="workers">Worker-pool width for the frame stage; the projection runs as one chunk.</param>
+    /// <remarks>Ticks must be consecutive: a gap is a missed tick to the push log, and a session that seems to have missed one is caught up or reset.</remarks>
     public void RunTick(long tick, int workers = 1)
     {
+        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
         Tick = tick;
         if (RunFence)
         {
@@ -124,7 +125,6 @@ sealed unsafe class FrameHarness : IDisposable
         }
 
         Sessions.BeginTick();
-        RunInterest(tick, workers);
         RunProject(tick);
         RunFrames(tick, workers);
 
@@ -132,43 +132,19 @@ sealed unsafe class FrameHarness : IDisposable
         Assembler.Gate.Publish(tick);
     }
 
-    /// <summary>
-    /// Runs the tick that gives every hit cluster its replication block, which produces no frame at all.
-    /// </summary>
-    /// <param name="tick">The tick number, normally 1.</param>
-    /// <remarks>
-    /// <b>The one-tick lag is the track's, not the harness's.</b> The interest stage is the only writer of a watched bit and it only ever sets one on a block
-    /// that already exists; a cluster hit for the first time is put on the blocks step's new-block list, gets its block there, and is marked on the FOLLOWING
-    /// tick (<c>SubscriptionsProjectExecSystem.CreateNewBlocks</c>). So a session's first tick legitimately has hits and no records — and the assembler
-    /// counts those hits as owed rather than producing an empty frame that claims a complete view.
-    /// </remarks>
-    public void PrimeBlocks(long tick = 1)
-    {
-        RunTick(tick);
-        Assert.That(HasFrameForAnyone(), Is.False, "the priming tick describes nothing, so it produces no frame");
-    }
-
-    private bool HasFrameForAnyone()
-    {
-        foreach (var session in _replicas.Keys)
-        {
-            if (HasFrame(new SessionId((ushort)session, (ushort)(session >> 16))))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    /// <summary>Runs a tick's interest, blocks and projection steps but not the frame stage — what an allocation measurement brackets.</summary>
+    /// <summary>Runs a tick's blocks and projection steps but not the frame stage — what an allocation measurement brackets.</summary>
     /// <param name="tick">The tick number.</param>
     /// <param name="workers">Worker-pool width.</param>
     public void RunUpToFrames(long tick, int workers = 1)
     {
+        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
         Tick = tick;
+        if (RunFence)
+        {
+            Engine.WriteTickFence(tick);
+        }
+
         Sessions.BeginTick();
-        RunInterest(tick, workers);
         RunProject(tick);
     }
 
@@ -246,33 +222,24 @@ sealed unsafe class FrameHarness : IDisposable
     public SessionFrameState StateOf(SessionId session) => Assembler.StateOf(session);
 
     /// <inheritdoc />
-    public void Dispose() => _interest.Dispose();
+    public void Dispose() => _replication.Dispose();
 
-    private void RunInterest(long tick, int workers)
-    {
-        var chunks = Subscriptions.Interest.BeginTick(tick, workers);
-        for (var c = 0; c < chunks; c++)
-        {
-            using (EpochGuard.Enter(Engine.EpochManager))
-            {
-                Subscriptions.Interest.ExecuteChunk(c, chunks);
-            }
-        }
-    }
-
-    /// <summary>The blocks step and S1, single-threaded: create the blocks the hits asked for, gather the watched lists, then project each block.</summary>
+    /// <summary>The blocks step and S1, single-threaded: the push set and its blocks, the parked drain, the marks, then each block's projection.</summary>
     private void RunProject(long tick)
     {
-        var interest = Subscriptions.Interest;
+        var push = Subscriptions.Push;
+        if (push == null)
+        {
+            return;
+        }
+
         var states = Subscriptions.ReplicationStates;
         var plans = Subscriptions.Plans;
         var stamp = (uint)tick;
 
-        _interest.CreateRequestedBlocks();
-
-        // The entries the fence's migration step parked because their destination had no block yet, placed now that the blocks above exist. This
-        // harness reimplements the track's blocks step by hand, so anything added there has to be added here too or the harness quietly tests a
-        // pipeline the runtime does not have — which is exactly how the migration hook first appeared to do nothing.
+        // The runtime's order (SubscriptionsProjectExecSystem.BlocksStep): the push set and a block for every cluster in it, before the parked drain, so an
+        // entity that migrated into a cluster with no block lands in one this tick.
+        push.PrepareBlocks(stamp);
         for (var a = 0; a < states.Length; a++)
         {
             states[a].DrainParkedEntries();
@@ -283,65 +250,73 @@ sealed unsafe class FrameHarness : IDisposable
             states[a].BeginWatchedBlocks(stamp);
         }
 
-        for (var w = 0; w < interest.ArenaCount; w++)
-        {
-            var watched = interest.Arena(w).WatchedBlocks;
-            for (var i = 0; i < watched.Count; i++)
-            {
-                var block = (ReplicationBlockHeader*)watched[i];
-                if (block->ChunkId < 0)
-                {
-                    continue;
-                }
-
-                for (var a = 0; a < states.Length; a++)
-                {
-                    if (states[a].Directory.TryGetBlock(block->ChunkId, out var found) && found == block)
-                    {
-                        states[a].WatchedBlocks.Add(block);
-                        break;
-                    }
-                }
-            }
-        }
+        // The projection counts its events for the parallel index, which the push index stage then places (SubscriptionsPushIndexExecSystem).
+        push.MarkPushed(workers: 1, countInProject: !Subscriptions.Options.DeterministicProjection);
 
         for (var a = 0; a < states.Length; a++)
         {
             states[a].BeginProjectTick(workers: 1);
         }
 
-        using var guard = EpochGuard.Enter(Engine.EpochManager);
-        for (var a = 0; a < plans.Length; a++)
+        using (EpochGuard.Enter(Engine.EpochManager))
         {
-            var state = states[a];
-            var clusterState = state.ClusterState;
-            if (clusterState?.ClusterSegment == null || state.WatchedBlocks.Count == 0)
+            for (var a = 0; a < plans.Length; a++)
             {
-                continue;
-            }
-
-            using var accessor = clusterState.ClusterSegment.CreateChunkAccessor();
-            var transient = clusterState.TransientSegment;
-            var transientAccessor = transient != null ? transient.CreateChunkAccessor() : default;
-            try
-            {
-                for (var i = 0; i < state.WatchedBlocks.Count; i++)
+                var state = states[a];
+                var clusterState = state.ClusterState;
+                if (clusterState == null || state.WatchedBlocks.Count == 0)
                 {
-                    var block = state.WatchedBlocks[i];
-                    var transientBase = transient != null ? transientAccessor.GetChunkAddress(block->ChunkId) : null;
-                    ProjectionPass.ProjectBlock(plans[a], a, state, 0, block, accessor.GetChunkAddress(block->ChunkId), transientBase, stamp);
+                    continue;
+                }
+
+                // Both stores, as SubscriptionsProjectExecSystem.ProjectOne reads them: a transient-only archetype has no persistent segment at all.
+                var persistent = clusterState.ClusterSegment;
+                var transient = clusterState.TransientSegment;
+                var persistentAccessor = persistent != null ? persistent.CreateChunkAccessor() : default;
+                var transientAccessor = transient != null ? transient.CreateChunkAccessor() : default;
+                try
+                {
+                    for (var i = 0; i < state.WatchedBlocks.Count; i++)
+                    {
+                        var block = state.WatchedBlocks[i];
+                        var chunkId = block->ChunkId;
+                        if (chunkId < 0)
+                        {
+                            continue;
+                        }
+
+                        var clusterBase = persistent != null ? persistentAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
+                        var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
+                        ProjectionPass.ProjectBlock(plans[a], a, state, 0, block, clusterBase, transientBase, stamp);
+                    }
+                }
+                finally
+                {
+                    persistentAccessor.Dispose();
+                    transientAccessor.Dispose();
                 }
             }
-            finally
-            {
-                transientAccessor.Dispose();
-            }
+        }
+
+        // The push index stage: counted by the projection above, offset, then placed one worker list at a time.
+        push.CountWorker(0);
+        var lists = push.BeginParallelIndex();
+        for (var w = 0; w < lists; w++)
+        {
+            push.PlaceWorker(w);
+        }
+
+        // The far-flush stage (SubscriptionsPushFarExecSystem), in two chunks so a chunk boundary is crossed — and, as there, only with a session open.
+        var chunks = Sessions.OpenCount > 0 ? push.BeginFarFold(2) : 0;
+        for (var c = 0; c < chunks; c++)
+        {
+            push.FoldFarChunk(c);
         }
     }
 
     private void RunFrames(long tick, int workers)
     {
-        var chunks = Assembler.BeginTick(Subscriptions.Interest, tick, workers);
+        var chunks = Assembler.BeginTick(tick, workers);
         for (var c = 0; c < chunks; c++)
         {
             using (EpochGuard.Enter(Engine.EpochManager))

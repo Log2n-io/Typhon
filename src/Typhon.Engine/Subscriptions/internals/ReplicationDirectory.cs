@@ -8,22 +8,22 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Sized by the watched set, not by the chunk-id space.</b> This is rule SUB-13 in a single data-structure choice. A flat array indexed by chunk id — the
-/// shape the engine's own <c>ClusterAabbs</c> / <c>ClusterCellMap</c> / <c>ClusterSpatialIndexSlot</c> side tables use — would cost 8 B for every cluster the
-/// <i>database</i> holds, because a chunk id is a persisted file address rather than a residency measure: roughly 381 MB at a billion entities to track
-/// perhaps 170 k watched clusters. That is memory following the database, which is exactly what SUB-13 forbids, and no cluster-count threshold fixes it —
-/// a threshold only moves where it breaks.
+/// <b>Sized by the blocks that exist, not by the chunk-id space.</b> This is rule SUB-13 in a single data-structure choice. A flat array indexed by chunk id —
+/// the shape the engine's own <c>ClusterAabbs</c> / <c>ClusterCellMap</c> / <c>ClusterSpatialIndexSlot</c> side tables use — would cost 8 B for every cluster
+/// the <i>database</i> holds, because a chunk id is a persisted file address rather than a residency measure: roughly 381 MB at a billion entities to track
+/// perhaps 170 k replicated clusters. That is memory following the database, which is exactly what SUB-13 forbids, and no cluster-count threshold fixes it — a
+/// threshold only moves where it breaks.
 /// </para>
 /// <para>
-/// <b>The probe is not paid per hit.</b> Hits arrive grouped by cluster and a cluster holds up to 64 entities, so the directory is consulted once per
-/// <i>run</i> of hits, not once per hit. A ~10-20 ns probe amortised over a run of 10-60 hits is well under a nanosecond per hit.
+/// <b>The probe is not paid per entity.</b> Pushes arrive grouped by cluster and a cluster holds up to 64 entities, so the directory is consulted once per
+/// cluster, not once per entity.
 /// </para>
 /// <para>
 /// <b>Storage deviates from the design doc, deliberately, and the reason is narrower than it first looks.</b> § 4 specifies "native memory, like the blocks
 /// it points to". This uses <see cref="HashMap{TKey,TValue}"/>, whose entry array is an ordinary managed <c>byte[]</c> reached through <c>ref</c>s. The
 /// project rule that a raw pointer never addresses GC memory does not by itself decide this — a natively allocated map would satisfy that rule too, and the
 /// pool beside it does exactly that. What decides it is reuse: this primitive already provides open addressing with linear probing, backward-shift deletion
-/// (so a directory churning with the watched set accumulates no tombstones), a 0.75 load factor with doubling growth, and the hardened 4-byte key hash.
+/// (so a directory churning with its clusters accumulates no tombstones), a 0.75 load factor with doubling growth, and the hardened 4-byte key hash.
 /// Writing a second open-addressed map natively would duplicate all of it to satisfy a phrase rather than a requirement. Nothing here stores a pointer into
 /// managed memory: the values are block pointers into native pool slabs, and an <c>nint</c> held inside a managed array is not a pointer into that array.
 /// </para>
@@ -59,9 +59,9 @@ internal sealed unsafe class ReplicationDirectory : IDisposable
 
     /// <summary>Creates an empty directory.</summary>
     /// <param name="initialCapacity">
-    /// Starting SLOT count, rounded up to a power of two — not a watched-cluster count. The backing map grows at a 0.75 load factor and does not divide by
-    /// it, so a directory expected to hold <c>n</c> watched clusters wants roughly <c>n / 0.75</c> here if it is to avoid a rehash. Either way it is sized
-    /// by the watched set, never by the archetype.
+    /// Starting SLOT count, rounded up to a power of two — not a cluster count. The backing map grows at a 0.75 load factor and does not divide by it, so a
+    /// directory expected to hold <c>n</c> clusters wants roughly <c>n / 0.75</c> here if it is to avoid a rehash. Either way it is sized by the blocks that
+    /// exist, never by the chunk-id space.
     /// </param>
     public ReplicationDirectory(int initialCapacity = 64)
     {
@@ -78,7 +78,7 @@ internal sealed unsafe class ReplicationDirectory : IDisposable
         }
     }
 
-    /// <summary>Slots in the backing map. Grows with the watched set; unrelated to the archetype's chunk-id space.</summary>
+    /// <summary>Slots in the backing map. Grows with the blocks; unrelated to the archetype's chunk-id space.</summary>
     public int Capacity
     {
         get
@@ -93,7 +93,7 @@ internal sealed unsafe class ReplicationDirectory : IDisposable
     /// </summary>
     /// <remarks>
     /// The entry stride is 16 B — a 4-byte hash, a 4-byte key and an 8-byte value, rounded to 4 (<c>HashMapKV</c>'s <c>_entryStride</c>). This is the memory
-    /// that used to be invisible: it grows with the watched set, it is an LOH allocation past a capacity of 8 192, and its capacity never shrinks. It does
+    /// that used to be invisible: it grows with the blocks, it is an LOH allocation past a capacity of 8 192, and its capacity never shrinks. It does
     /// NOT include the dead doubling trail awaiting collection, which can briefly be as large again.
     /// </remarks>
     public long EstimatedBytes => _disposed ? 0L : ((long)_map.Capacity * 16L) + 64L;

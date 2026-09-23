@@ -31,8 +31,9 @@ namespace Typhon.Engine.Internals;
 /// </para>
 /// <para>
 /// <b>Why a flat array is right here, where it is wrong for the directory.</b> Identities are dense by construction: they come from a counter and are
-/// recycled, so the high-water mark is the PEAK number of simultaneously watched entities, not a persisted address space. That keeps the side arrays bounded
-/// by the watched set, which is what SUB-13 requires — unlike a cluster chunk id, which is a file address and would size an array by what the database holds.
+/// recycled, so the high-water mark is the PEAK number of simultaneously replicated entities, not a persisted address space. That keeps the side arrays
+/// bounded by what is replicated, which is what SUB-13 requires — unlike a cluster chunk id, which is a file address and would size an array by what the
+/// database holds.
 /// </para>
 /// <para>
 /// <b>Thread safety: none, by contract.</b> Touched only at the replication track's single-threaded points. The design's per-worker identity blocks are an
@@ -137,7 +138,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     /// <summary>How many ticks a released identity is held before it can be reissued.</summary>
     public int QuarantineTicks => _bucketHeads.Length;
 
-    /// <summary>Largest identity ever handed out. Tracks the PEAK watched count, and never falls.</summary>
+    /// <summary>Largest identity ever handed out. Tracks the PEAK live identity count, and never falls.</summary>
     public uint HighWaterMark => _highWaterMark;
 
     /// <summary>Identities the side arrays can currently address without growing.</summary>
@@ -151,7 +152,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     /// archetypes each adding these bytes to their own total would report the same memory N times. <see cref="IMemoryResource"/> requires a node to exclude
     /// what it does not solely own, and after the move no archetype owns this.
     /// <para>
-    /// Like the directory's, this memory follows the PEAK watched count and never shrinks — <see cref="HighWaterMark"/> does not fall and there is no
+    /// Like the directory's, this memory follows the PEAK live identity count and never shrinks — <see cref="HighWaterMark"/> does not fall and there is no
     /// compaction pass.
     /// </para>
     /// </remarks>
@@ -341,7 +342,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     }
 
     /// <summary>
-    /// Doubles the addressable capacity. Called only while the watched set is still growing.
+    /// Doubles the addressable capacity. Called only while the replicated population is still growing.
     /// </summary>
     /// <remarks>
     /// The <see cref="_nextFree"/> copy is load-bearing, not defensive: free AND quarantined entries carry their successors through it, so dropping it would

@@ -80,7 +80,7 @@ var level = runtime.CurrentOverloadLevel; // OverloadLevel.Normal / SystemThrott
 ## 🔗 Related
 - Related feature: [Telemetry & Runtime Inspection](./telemetry-runtime-inspection.md)
 - Related feature: [Declarative System Scheduling](./declarative-system-scheduling.md)
-- Sibling: [Subscriptions](../Subscriptions/README.md) — how replication responds to this same overload signal is designed but not built yet.
+- Sibling: [Subscriptions](../Subscriptions/README.md) — a lagging session is degraded one rate class at a time before it is closed; tying replication to this overload signal is designed but not built yet.
 
 <!-- Deep dive: claude/design/Runtime/03-overload.md -->
 <!-- Deep dive: claude/overview/13-runtime.md — Overrun handling -->

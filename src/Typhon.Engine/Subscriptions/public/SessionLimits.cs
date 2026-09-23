@@ -32,9 +32,6 @@ public sealed record SessionLimits
     /// </summary>
     public int MaxObservers { get; init; }
 
-    /// <summary>Known entities this session may hold. Zero takes <see cref="SubscriptionsOptions.KnownEntitiesPerSession"/>.</summary>
-    public int MaxKnownEntities { get; init; }
-
     /// <summary>Largest frame this session may be sent, in bytes. Zero takes <see cref="SubscriptionsOptions.FrameBytes"/>.</summary>
     public int FrameBytes { get; init; }
 

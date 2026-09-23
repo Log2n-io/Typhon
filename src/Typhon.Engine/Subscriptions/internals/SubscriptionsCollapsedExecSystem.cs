@@ -4,22 +4,21 @@ using System.Threading;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// The whole replication pipeline as ONE dispatched system: prologue → interest → blocks → project → events → frames, inline, with no barrier between them.
-/// D4 of <c>design/Subscriptions/09-phase1-build-plan.md § 2</c>, and the answer to open item 5 of <c>foundation/03 § 6</c>.
+/// The whole replication pipeline as ONE dispatched system: blocks step → project → events → frames (whose prologue builds the push index serially),
+/// inline, with no barrier between them (<c>design/Subscriptions/02-execution.md § 2</c>).
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>What it buys.</b> The staged shape's critical path is three sequential dispatches — <c>Interest → Project → Frames</c> — and a dispatch is a worker
-/// wake/barrier cycle, ≈ 0.1 ms measured (<c>foundation/03 § 4</c>). That is ≈ 0.3 ms of pure scheduling before any replication work happens, which is the
-/// entirety of AC-1's budget. Below some amount of work the barriers cost more than the parallelism they buy back, and this shape pays one dispatch instead
-/// of three. Where that crossing point is, is a MEASUREMENT (Q-M1); this file builds the mechanism, and
+/// <b>What it buys.</b> The staged shape's critical path is a chain of dispatches — <c>Project → PushIndex → PushFar → Frames</c> — and a dispatch is a
+/// worker wake/barrier cycle, ≈ 0.1 ms measured. Below some amount of work the barriers cost more than the parallelism they buy back, and this shape pays
+/// one dispatch instead. Where that crossing point is, is a MEASUREMENT (Q-M1); this file builds the mechanism, and
 /// <see cref="SubscriptionsOptions.CollapseBelowWorkUnits"/> defaults to 0 so nothing selects it until somebody measures.
 /// </para>
 /// <para>
 /// <b>It executes the same chunk counts, serially — it does not re-partition.</b> Each stage's own <c>Prepare</c> decides the chunk count exactly as it does
 /// in the staged shape, and this system then runs chunks <c>0 … n-1</c> in order on one thread. That is not an accident of implementation, it is what makes
-/// the two shapes comparable: a record's arena is chosen by its chunk index, a netId lease is held per chunk index, and the frame assembler walks the arenas
-/// in index order — so identical chunk counts give byte-identical frames whichever shape produced them, and <c>CollapsePathTests</c> asserts exactly that.
+/// the two shapes comparable: a netId lease is held per chunk index and each chunk's events land in its own list — so identical chunk counts give
+/// byte-identical frames whichever shape produced them, and <c>CollapsePathTests</c> asserts exactly that.
 /// Collapsing the partition to one chunk as well would have been the obvious reading of "inline", and it would have changed the output.
 /// </para>
 /// <para>
@@ -46,33 +45,28 @@ internal sealed class SubscriptionsCollapsedExecSystem : SubscriptionsExecSystem
     protected override bool RunsInThisShape(bool collapsed) => collapsed;
 
     /// <summary>
-    /// One chunk, always. The stages' own chunk counts are computed inside <see cref="ExecuteChunk"/>, because each depends on the stage before it having
-    /// already RUN — the blocks step reads the lists the interest pass produced, not the ones its <c>Prepare</c> produced.
-    /// </summary>
-    /// <summary>
-    /// The collapsed shape reports as one stage, not four.
+    /// The collapsed shape reports as one stage, not several.
     /// </summary>
     /// <remarks>
-    /// Deliberately not attributed across the four buckets. The whole point of collapsing is that the boundaries between the stages stop existing — there is
-    /// no dispatch between them to measure at — so splitting the span back into four would be inventing a breakdown the shape does not have. The track total
+    /// Deliberately not attributed across the stage buckets. The whole point of collapsing is that the boundaries between the stages stop existing — there
+    /// is no dispatch between them to measure at — so splitting the span back up would be inventing a breakdown the shape does not have. The track total
     /// stays comparable across both shapes, which is what the A/B actually needs.
     /// </remarks>
     protected override SubscriptionsStage Stage => SubscriptionsStage.Collapsed;
 
+    /// <summary>
+    /// One chunk, always. The stages' own chunk counts are computed inside <see cref="ExecuteChunk"/>, because each depends on the stage before it having
+    /// already RUN — the frame prologue reads the events the projection produced, not ones a <c>Prepare</c> predicted.
+    /// </summary>
     protected override int PrepareChunks(SubscriptionsContext ctx) => 1;
 
     protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
     {
         // The base has already entered the epoch scope PS-02 requires, and stamps the chunk on the way out. What is left is the pipeline's order, which is
-        // the one thing this shape may not get wrong: Events is a parallel BRANCH in the staged DAG and has no ordering constraint against Interest or
-        // Project, but Frames needs both, so running it here between Project and Frames satisfies the DAG's edges rather than merely reading well.
-        var chunks = SubscriptionsInterestExecSystem.Prologue(ctx);
-        for (var k = 0; k < chunks; k++)
-        {
-            SubscriptionsInterestExecSystem.Resolve(ctx, k, chunks);
-        }
-
-        chunks = SubscriptionsProjectExecSystem.BlocksStep(ctx);
+        // the one thing this shape may not get wrong: Events is a parallel BRANCH in the staged DAG and has no ordering constraint against Project, but
+        // Frames needs both, so running it here between Project and Frames satisfies the DAG's edges rather than merely reading well. The push index and
+        // the far fold are not run here: the frame prologue sees no index for the tick and builds it, and folds, serially.
+        var chunks = SubscriptionsProjectExecSystem.BlocksStep(ctx);
         for (var k = 0; k < chunks; k++)
         {
             SubscriptionsProjectExecSystem.Project(ctx, k, chunks);
@@ -97,8 +91,8 @@ internal sealed class SubscriptionsCollapsedExecSystem : SubscriptionsExecSystem
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why the decision is memoized rather than recomputed per stage.</b> Five systems ask, and three of them ask from a worker thread. A stage that answered
-/// differently from its siblings would run a half-staged, half-collapsed tick — the interest pass executed twice, or the frame assembler never prepared —
+/// <b>Why the decision is memoized rather than recomputed per stage.</b> Every system of the track asks, most of them from a worker thread. A stage that
+/// answered differently from its siblings would run a half-staged, half-collapsed tick — the projection executed twice, or the frame assembler never prepared —
 /// so the answer has to be one answer. It is keyed on the tick number because the context is reset per tick and carries no room for this (the collapse path
 /// adds one field to <see cref="SubscriptionsOptions"/> and none to <see cref="SubscriptionsContext"/>).
 /// </para>
@@ -110,7 +104,7 @@ internal sealed class SubscriptionsCollapsedExecSystem : SubscriptionsExecSystem
 /// acquire load costs nothing on x64 and one instruction on arm64.
 /// </para>
 /// <para>
-/// <b>The work estimate is the PREVIOUS tick's watched-block count.</b> This tick's is not knowable before the interest pass has run, which is itself one of
+/// <b>The work estimate is the PREVIOUS tick's projected-block count.</b> This tick's is not knowable before the blocks step has run, which is itself one of
 /// the stages being shaped; asking for it would be circular. A one-tick-stale estimate is the right accuracy for a dispatch-shape choice: the quantity moves
 /// with a camera, not with a frame, and the cost of being wrong for one tick is one shape's overhead, never a wrong result.
 /// </para>
@@ -139,10 +133,10 @@ internal sealed class SubscriptionsPipelineShape
     }
 
     /// <summary>
-    /// <c>sessions × watchedBlocks</c> against <see cref="SubscriptionsOptions.CollapseBelowWorkUnits"/>, with zero blocks counted as one.
+    /// <c>sessions × projected blocks</c> against <see cref="SubscriptionsOptions.CollapseBelowWorkUnits"/>, with zero blocks counted as one.
     /// </summary>
     /// <remarks>
-    /// Counting a blockless tick as one unit rather than zero is deliberate. A session with nothing watched still costs a frame prologue and a frame, so
+    /// Counting a blockless tick as one unit rather than zero is deliberate. A session with nothing pushed still costs a frame prologue and a frame, so
     /// zero would read as "no work" for a thousand sessions that have just connected — the one case where the barriers are worth paying for. With the floor,
     /// the estimate for that tick is the session count, which is the honest lower bound on what the tick will do.
     /// </remarks>

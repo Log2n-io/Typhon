@@ -10,19 +10,23 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Churn is what finds the leak, not load.</b> A session that stays open holds its row, its known-set and its identities legitimately, so
+/// <b>Churn is what finds the leak, not load.</b> A session that stays open holds its row, its frame slots and its ring legitimately, so
 /// no steady-state run can tell a held resource from a leaked one. Only the closing tells them apart: after a cycle completes, everything the
 /// session held has to be back where it came from, and the way to see a small per-cycle leak is to run enough cycles that it accumulates
 /// into a number.
 /// </para>
 /// <para>
-/// <b>The netId count is the sharper of the two.</b> A leaked session row shows up immediately in the open count; a leaked identity does not
-/// show up anywhere until the space is exhausted, which on a long-lived server is hours or days later and looks like a different bug
-/// entirely. The identity allocator is per DATABASE rather than per archetype, so every leak lands in the same space.
+/// <b>Rows and slots, not identities.</b> A netId belongs to an ENTITY and to the database, never to a session, so session churn cannot leak one;
+/// what a session holds is a row, and a leaked row shows as the open count and the slot numbers climbing with the cycle count.
+/// </para>
+/// <para>
+/// <b>A wide Sphere, not the World.</b> A World session's fill walks the whole delivery grid, and the push index is a dense grid rebuilt every
+/// tick whose size follows the world over the radius — both per-tick or per-connection costs that are correct and irrelevant to a leak, and at
+/// twenty thousand ticks they made this fixture take a minute and a half. A 2 km disc keeps the grid small and fills in one frame.
 /// </para>
 /// <para>
 /// <b>What this does NOT cover.</b> AC-9's first half — enter/leave balance per session over an hour of entity churn — is a different run and
-/// is not attempted here; see <c>10-measurements.md § 6</c>.
+/// is not attempted here; see <c>design/Subscriptions/08-measurements.md § 1</c>.
 /// </para>
 /// </remarks>
 [TestFixture]
@@ -42,7 +46,7 @@ class SessionChurnLeakTests : TestBase<SessionChurnLeakTests>
     private static void Declare(SubscriptionsRegistry subs)
     {
         ProjectionTestSchema.DeclareCreature(subs);
-        subs.Profile(Profile, p => p.World().Of<ProjCreature>());
+        subs.Profile(Profile, p => p.Sphere(2000).Of<ProjCreature>());
     }
 
     /// <summary>Ten thousand cycles later, the table is empty and every identity has come back.</summary>
@@ -53,7 +57,7 @@ class SessionChurnLeakTests : TestBase<SessionChurnLeakTests>
         Populate(dbe);
 
         using var harness = FrameHarness.Create(dbe, Declare, nameof(TenThousandConnectDisconnectCyclesLeakNothing));
-        harness.PrimeBlocks();
+        harness.RunTick(1);
 
         // One warm-up cycle, which is also what proves the measurement is not vacuous: a run that never leases an identity would return to a
         // baseline of zero from a peak of zero and report "no leak" about a mechanism it never exercised.
@@ -100,6 +104,10 @@ class SessionChurnLeakTests : TestBase<SessionChurnLeakTests>
     private static long Cycle(FrameHarness harness, long tick, int count)
     {
         var sessions = harness.OpenSessions(count, Profile);
+        foreach (var session in sessions)
+        {
+            harness.Sessions.SetViewpoint(session, new Vector3D(120d, 100d, 0d));
+        }
 
         // Two whole ticks: the first gives the sessions their blocks and their identities, the second serves them a frame from those identities. One tick
         // would lease and close in the same breath, which is not the shape a real session has.

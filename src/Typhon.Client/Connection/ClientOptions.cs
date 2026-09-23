@@ -43,6 +43,13 @@ public sealed class ClientOptions
     /// </remarks>
     public int PingHz { get; init; } = 4;
 
+    /// <summary>
+    /// Motion segments kept per entity, or <c>0</c> (the default) to size the history from the render delay the clock may evaluate at
+    /// (<see cref="SegmentRing.DepthFor"/>: 17 at 50 Hz). A client that never evaluates motion — a load generator, a recorder — sets <c>1</c>: the history is
+    /// the store's largest per-entity cost, about 0.6 KB per moving entity at 50 Hz, and such a client holds tens of thousands of entities.
+    /// </summary>
+    public int SegmentHistory { get; init; }
+
     /// <summary>How long to wait for <c>WELCOME</c> before giving up. The server's own <c>HELLO</c> timeout is five seconds.</summary>
     public TimeSpan HandshakeTimeout { get; init; } = TimeSpan.FromSeconds(10);
 

@@ -36,9 +36,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
     // ── The tick's projection state ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     //
-    // Three objects, one lifetime, and they hang here rather than off the runtime because every one of them is per ARCHETYPE: a record names a slot of an
-    // ENTITIES block, which is an archetype's block; a watched block belongs to one archetype's directory; and a lease is spent initializing this
-    // archetype's entries. They are created eagerly and reset per tick — none of them allocates once the watched set has stopped growing (SUB-07).
+    // Three objects, one lifetime, and they hang here rather than off the runtime because every one of them is per ARCHETYPE: a projected block belongs to
+    // one archetype's directory, the scratch is sized to this archetype's fields, and a lease is spent initializing this archetype's entries. They are
+    // created eagerly and reset per tick — none of them allocates once the pushed set has stopped growing (SUB-07).
     private readonly WatchedBlockList _watchedBlocks = new();
     private readonly Lock _parkLock = new();
     private ParkedEntryList _parked;
@@ -46,9 +46,8 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     private long _entriesParked;
     private long _parkedDropped;
     private long _migrationsAbandoned;
-    private readonly RecordArenaSet _records = new();
+    private readonly ProjectionScratchSet _scratch = new();
     private readonly NetIdLeaseSet _netIdLeases = new();
-    private readonly SharedRunTable _sharedRuns = new();
 
     private long _blocksProjected;
     private long _slotsProjected;
@@ -118,8 +117,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     {
         get
         {
-            var bytes = Directory.EstimatedBytes + _watchedBlocks.EstimatedBytes + _records.EstimatedBytes + _netIdLeases.EstimatedBytes
-                + _sharedRuns.EstimatedBytes + 128L;
+            var bytes = Directory.EstimatedBytes + _watchedBlocks.EstimatedBytes + _scratch.EstimatedBytes + _netIdLeases.EstimatedBytes + 128L;
             return bytes > int.MaxValue ? int.MaxValue : (int)bytes;
         }
     }
@@ -152,93 +150,6 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>Chunk id to block. Read directly by the projection passes.</summary>
     public ReplicationDirectory Directory { get; }
 
-    // ── This tick's changed blocks, by chunk ──────────────────────────────────────────────────────────────────────────────────────────────────────
-    //
-    // Written by projection for every block whose content changed this tick, read by the frame stage for the sessions that no longer re-state what they
-    // hold. The change is computed ONCE, here, per block; a session learns of it by testing the chunks it already holds against this table — its own view
-    // is the index, so there is no inverted list to maintain and no serial step to build one. Dense by chunk id and stamped, so it is never cleared: a
-    // stale entry names another tick and reads as "unchanged".
-    //
-    // One entry per chunk, so a write touches one line rather than one in each of two arrays, and a reader filters on the slots without a header miss.
-    // Each block is projected by exactly one worker, so entries are written once per tick; adjacent ids may belong to different workers, which costs a
-    // shared line on a store the store buffer hides. The tick is stored last and read first, with release and acquire, so the entry describes itself
-    // rather than relying on the stage join between projection and frames. Kept only while the sparse path reads it.
-    private ChangedBlock[] _changed = [];
-
-    /// <summary>Whether projection records its changed blocks for the sparse path. Set by the runtime from <see cref="SubscriptionsOptions.SparseTopology"/>.</summary>
-    internal bool TrackChangedBlocks;
-
-    private struct ChangedBlock
-    {
-        public nint Block;
-        public ulong Slots;
-        public uint Tick;
-    }
-
-    /// <summary>Records that <paramref name="block"/>'s content changed on <paramref name="tick"/>. Called by the projecting worker.</summary>
-    /// <param name="chunkId">The block's cluster.</param>
-    /// <param name="block">The block.</param>
-    /// <param name="slots">The slots whose content changed.</param>
-    /// <param name="tick">The tick.</param>
-    public void NoteChangedBlock(int chunkId, ReplicationBlockHeader* block, ulong slots, uint tick)
-    {
-        if (!TrackChangedBlocks || (uint)chunkId >= (uint)_changed.Length)
-        {
-            return;
-        }
-
-        ref var entry = ref _changed[chunkId];
-        entry.Block = (nint)block;
-        entry.Slots = slots;
-        Volatile.Write(ref entry.Tick, tick);
-    }
-
-    /// <summary>The block of <paramref name="chunkId"/> if its content changed on <paramref name="tick"/>, otherwise <see langword="null"/>.</summary>
-    /// <param name="chunkId">The cluster.</param>
-    /// <param name="tick">The tick.</param>
-    /// <param name="slots">The slots whose content changed.</param>
-    /// <returns>The block, or <see langword="null"/>.</returns>
-    public ReplicationBlockHeader* ChangedBlockOf(int chunkId, uint tick, out ulong slots)
-    {
-        slots = 0UL;
-        if ((uint)chunkId >= (uint)_changed.Length)
-        {
-            return null;
-        }
-
-        ref var entry = ref _changed[chunkId];
-        if (Volatile.Read(ref entry.Tick) != tick)
-        {
-            return null;
-        }
-
-        slots = entry.Slots;
-        return (ReplicationBlockHeader*)entry.Block;
-    }
-
-    private void EnsureChangedCapacity()
-    {
-        if (!TrackChangedBlocks)
-        {
-            return;
-        }
-
-        // Chunk ids are bounded by the cluster table's capacity, which only grows; the watched blocks are scanned only when the state has no cluster table.
-        var capacity = _attachedTo?.ClusterAabbs?.Length ?? 0;
-        if (capacity == 0)
-        {
-            for (var i = 0; i < _watchedBlocks.Count; i++)
-            {
-                capacity = Math.Max(capacity, _watchedBlocks[i]->ChunkId + 1);
-            }
-        }
-
-        if (capacity > _changed.Length)
-        {
-            Array.Resize(ref _changed, Math.Max(capacity, Math.Max(256, _changed.Length * 2)));
-        }
-    }
-
     /// <summary>
     /// The database's network identities and their reuse generations. Shared with every other replicated archetype and owned by neither — disposing this
     /// state leaves it alone.
@@ -268,84 +179,39 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// </remarks>
     public void NoteBlockDormant() => Interlocked.Increment(ref _blocksDormant);
 
-    /// <summary>The blocks this tick's interest hits marked, and the list S1 is partitioned over (SUB-13).</summary>
+    /// <summary>The blocks this tick's pushes marked, and the list S1 is partitioned over (SUB-13).</summary>
     public WatchedBlockList WatchedBlocks => _watchedBlocks;
 
-    /// <summary>One record arena per S1 chunk: this tick's pre-encoded enter and state bodies.</summary>
-    public RecordArenaSet Records => _records;
+    /// <summary>
+    /// The projection's shared block cursor (unless <see cref="SubscriptionsOptions.DeterministicProjection"/>): chunks claim watched blocks from it in small batches instead of a fixed stride, so a worker that
+    /// joins the stage late finds the work already shared out rather than its whole stride waiting for it. The live slot is element
+    /// <see cref="ProjectCursorSlot"/>, alone on its cache line; the rest is padding.
+    /// </summary>
+    internal readonly int[] ProjectCursor = new int[32];
 
-    /// <summary>This archetype's shared cluster runs for the tick being assembled (17 § 18).</summary>
-    public SharedRunTable SharedRuns => _sharedRuns;
+    internal const int ProjectCursorSlot = 16;
+
+    private static readonly bool NoOrphanScan = Environment.GetEnvironmentVariable("TYPHON_PUSH_NO_ORPHAN_SCAN") == "1";
+
+    /// <summary>The push path, when this archetype is push-served; <see langword="null"/> otherwise.</summary>
+    internal PushReplication Push;
 
     /// <summary>
-    /// The archetype's wire encoding constants, or <see langword="null"/> when shared cluster runs are off.
+    /// Every block by chunk id. A push archetype has a block for every live cluster and looks one up per pushed cluster per tick and per
+    /// cluster a sweep reaches, so the directory's hash probe is replaced by an index. Written only by attach and release, which are serial.
     /// </summary>
-    /// <remarks>
-    /// <b>Resolved by the frame stage and handed here, rather than resolved twice.</b> The constants are the catalog's — a wire index, the offsets a record
-    /// is copied from, the section walk that recovers a body's real length — and a second derivation of them is exactly the drift the golden vectors exist
-    /// to catch. It is null unless <c>SubscriptionsOptions.SharedClusterBlocks</c> is on, which is also how the projection pass decides whether to build a
-    /// run at all: one null check, not an option read.
-    /// </remarks>
-    public ArchetypeEncodePlan EncodePlan { get; set; }
+    internal nint[] BlockByChunk = [];
 
-    /// <summary>Records produced into a shared cluster run this tick — the encode-once count, against which the frame stage's is the multiplier.</summary>
-    public long SharedRunRecords => Volatile.Read(ref _sharedRunRecords);
+    /// <summary>This archetype's plan index, for the push path's events.</summary>
+    internal int PushArchetypeIndex;
 
-    private long _sharedRunRecords;
-
-    /// <summary>Counts one cluster's shared records.</summary>
-    /// <param name="records">State plus segment records in the run just published.</param>
-    public void NoteSharedRun(int records) => Interlocked.Add(ref _sharedRunRecords, records);
-
-    private long _skipReleased;
-    private long _skipInit;
-    private long _skipNoChange;
-    private long _published;
-
-    /// <summary>Clusters that published a shared run this run, and why the others did not.</summary>
-    public (long Published, long Released, long Init, long NoChange) SharedRunSkips =>
-        (Volatile.Read(ref _published), Volatile.Read(ref _skipReleased), Volatile.Read(ref _skipInit), Volatile.Read(ref _skipNoChange));
-
-    /// <summary>Counts one cluster's publish decision.</summary>
-    /// <param name="which">0 published, 1 an identity was released, 2 an entry was initialized, otherwise nothing changed.</param>
-    public void NoteSharedSkip(int which)
-    {
-        switch (which)
-        {
-            case 0: Interlocked.Increment(ref _published); break;
-            case 1: Interlocked.Increment(ref _skipReleased); break;
-            case 2: Interlocked.Increment(ref _skipInit); break;
-            default: Interlocked.Increment(ref _skipNoChange); break;
-        }
-    }
+    /// <summary>One projection scratch per S1 chunk.</summary>
+    public ProjectionScratchSet Scratch => _scratch;
 
     /// <summary>Per-worker slices of the database's identity space, so S1 can name new entities from several workers at once.</summary>
     public NetIdLeaseSet NetIdLeases => _netIdLeases;
 
     /// <summary>Blocks the projection pass has walked, cumulative.</summary>
-    /// <summary>
-    /// Slots the projection named as changed, summed over every block and tick — the number of records a per-CLUSTER encode would produce.
-    /// </summary>
-    /// <remarks>
-    /// <b>The ceiling of Layer 4, measured rather than argued.</b> A state record's bytes depend on the entity and the tick, not on who is watching, so
-    /// every session that holds a cluster and is one tick behind is owed the SAME bytes for every slot the projection named. This counts those slots once;
-    /// the frame stage counts the records it actually emits. The ratio between them is how many times the subsystem encodes the same thing, and therefore
-    /// the most an encode-once-per-cluster design could remove. Below about 2 it is not worth a wire format change.
-    /// </remarks>
-    public long ChangedSlotsPublished => Volatile.Read(ref _changedSlotsPublished);
-
-    private long _changedSlotsPublished;
-
-    /// <summary>Records the slots one block's projection named as changed.</summary>
-    /// <param name="slots">How many.</param>
-    public void NoteChangedSlots(int slots)
-    {
-        if (slots != 0)
-        {
-            Interlocked.Add(ref _changedSlotsPublished, slots);
-        }
-    }
-
     public long BlocksProjected => Volatile.Read(ref _blocksProjected);
 
     /// <summary>
@@ -358,7 +224,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// </remarks>
     public long SlotsProjected => Volatile.Read(ref _slotsProjected);
 
-    /// <summary>Records the projection pass has produced, cumulative. Never a function of how many sessions are connected.</summary>
+    /// <summary>Entities the projection pass found entered or changed, cumulative. Never a function of how many sessions are connected.</summary>
     public long RecordsProduced => Volatile.Read(ref _recordsProduced);
 
     /// <summary>Identities the projection pass has given back, cumulative: destroyed entities and reused slots.</summary>
@@ -454,6 +320,13 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return ReplicationMigrationOutcome.NothingToCarry;
         }
 
+        // An arrival is a push. The claim that received the entity raises no membership mark of its own, and without one the arrival —
+        // which carries the entity's new position — would sit unprojected until something else pushed it. The fence publishes the marks after migrations.
+        if (Push != null)
+        {
+            _attachedTo?.NoteStructureSlots(dstChunkId, 1UL << dstSlot);
+        }
+
         if (!Directory.TryGetBlock(srcChunkId, out var source))
         {
             // Nobody watches the cluster it left, so there is no entry to carry. The destination will initialise one the first time it is projected.
@@ -473,6 +346,15 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         if (Directory.TryGetBlock(dstChunkId, out var destination))
         {
             var dstBytes = (byte*)destination;
+            if (Push != null)
+            {
+                var overwritten = ((ReplicationHotEntry*)(dstBytes + Layout.HotOffset + (dstSlot * Layout.HotStride)))->NetId;
+                if (overwritten != NetIdAllocator.NoNetId)
+                {
+                    Push.Orphan(PushArchetypeIndex, destination, dstBytes + Layout.ColdOffset + (dstSlot * Layout.ColdStride), Layout, overwritten, 1);
+                }
+            }
+
             Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (dstSlot * Layout.HotStride), hotSource, (uint)Layout.HotStride);
             Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (dstSlot * Layout.ColdStride), coldSource, (uint)Layout.ColdStride);
 
@@ -605,6 +487,15 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             if ((uint)slot < (uint)Layout.SlotCount && Directory.TryGetBlock(chunkId, out var block))
             {
                 var dstBytes = (byte*)block;
+                if (Push != null)
+                {
+                    var overwritten = ((ReplicationHotEntry*)(dstBytes + Layout.HotOffset + (slot * Layout.HotStride)))->NetId;
+                    if (overwritten != NetIdAllocator.NoNetId)
+                    {
+                        Push.Orphan(PushArchetypeIndex, block, dstBytes + Layout.ColdOffset + (slot * Layout.ColdStride), Layout, overwritten, 2);
+                    }
+                }
+
                 Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (slot * Layout.HotStride), bytes, (uint)Layout.HotStride);
                 Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (slot * Layout.ColdStride), bytes + Layout.HotStride, (uint)Layout.ColdStride);
                 if (Layout.OwnerEntrySize > 0)
@@ -646,71 +537,24 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     public long ParkedDropped => Volatile.Read(ref _parkedDropped);
 
     /// <summary>
-    /// Marks slot <paramref name="slot"/> of cluster <paramref name="chunkId"/> watched for this tick — the seam the interest stage reaches S1 through.
-    /// </summary>
-    /// <param name="chunkId">The hit's cluster.</param>
-    /// <param name="slot">The hit's slot within it.</param>
-    /// <returns>
-    /// <see langword="false"/> when the cluster carries no block yet, which is not an error: the hit belongs on the worker's new-block list and the block is
-    /// created at the track's single-threaded blocks step.
-    /// </returns>
-    /// <remarks>Safe from any number of workers at once; see <see cref="WatchedBlockList.Mark"/>.</remarks>
-    public bool MarkWatched(int chunkId, int slot)
-    {
-        if (_disposed || chunkId < 0 || (uint)slot >= (uint)Layout.SlotCount)
-        {
-            return false;
-        }
-
-        if (!Directory.TryGetBlock(chunkId, out var block))
-        {
-            return false;
-        }
-
-        _watchedBlocks.Mark(block, slot);
-        return true;
-    }
-
-    /// <summary>
-    /// Opens the tick for the projection pass: hands back last tick's released identities, refills the leases and rewinds the record arenas. Single-threaded,
-    /// at the track's blocks step, before S1 dispatches.
+    /// Opens the tick for the projection pass: hands back last tick's released identities, refills the leases and sizes the scratch. Single-threaded, at
+    /// the track's blocks step, before S1 dispatches.
     /// </summary>
     /// <param name="workers">The chunk count S1 will dispatch.</param>
     /// <remarks>
-    /// It deliberately does NOT touch <see cref="WatchedBlocks"/>. The list is filled by whoever marks — the interest stage, which runs <i>before</i> this —
-    /// so resetting it here would drop the tick's marks a moment after they were made. <see cref="BeginWatchedBlocks"/> is the reset, and its caller is the
-    /// one that is about to refill the list.
+    /// It deliberately does NOT touch <see cref="WatchedBlocks"/>. The list is filled by whoever marks — the push path, which runs <i>before</i> this — so
+    /// resetting it here would drop the tick's marks a moment after they were made. <see cref="BeginWatchedBlocks"/> is the reset, and its caller is the one
+    /// that is about to refill the list.
     /// </remarks>
     public void BeginProjectTick(int workers)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ProjectCursor[ProjectCursorSlot] = 0;
 
-        // The cold estimate is the watched slots, which is an exact upper bound on the identities this tick can need: an entity gets one only when its entry
-        // has none, and only a watched slot is ever reached. It sizes the very first refill and nothing after it — see NetIdLeaseSet.BeginTick.
+        // The cold estimate is the pushed slots' blocks, an upper bound on the identities this tick can need: an entity gets one only when its entry has none,
+        // and only a pushed slot is ever reached. It sizes the very first refill and nothing after it — see NetIdLeaseSet.BeginTick.
         _netIdLeases.BeginTick(NetIds, workers, _watchedBlocks.Count * Layout.SlotCount);
-        _records.BeginTick(workers);
-        EnsureChangedCapacity();
-
-        // Sized HERE, serially, because the workers below publish into it from every chunk at once and a growth on that path is several threads
-        // reallocating one native buffer with nothing synchronizing them (17 § 18). A chunk id past the end simply publishes nothing and is encoded per
-        // session, so an under-estimate costs sharing and never correctness.
-        if (EncodePlan != null)
-        {
-            var highest = -1;
-            for (var i = 0; i < _watchedBlocks.Count; i++)
-            {
-                var chunkId = _watchedBlocks[i]->ChunkId;
-                if (chunkId > highest)
-                {
-                    highest = chunkId;
-                }
-            }
-
-            if (highest >= 0)
-            {
-                _sharedRuns.EnsureCapacity(highest + 1);
-            }
-        }
+        _scratch.BeginTick(workers);
     }
 
     /// <summary>
@@ -722,7 +566,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
 
-        // Sized by the directory, which is sized by the watched set: at most one listing per block that exists, so an append can never find the list full.
+        // Sized by the directory: at most one listing per block that exists, so an append can never find the list full.
         _watchedBlocks.BeginTick(tick, Directory.Count);
     }
 
@@ -836,6 +680,20 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
         try
         {
+            // A block released with live entries takes identities clients may hold; each becomes a leave.
+            if (Push != null && !NoOrphanScan && Directory.TryGetBlock(chunkId, out var releasing))
+            {
+                var rb = (byte*)releasing;
+                for (var s = 0; s < Layout.SlotCount; s++)
+                {
+                    var netId = ((ReplicationHotEntry*)(rb + Layout.HotOffset + (s * Layout.HotStride)))->NetId;
+                    if (netId != NetIdAllocator.NoNetId)
+                    {
+                        Push.Orphan(PushArchetypeIndex, releasing, rb + Layout.ColdOffset + (s * Layout.ColdStride), Layout, netId, 0);
+                    }
+                }
+            }
+
             return TryReleaseBlock(chunkId);
         }
         catch (Exception ex)
@@ -891,6 +749,15 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             // rejects as a double release, from inside a parallel pass. One memset per newly watched cluster, on a path that has just rented a block, buys
             // the whole initialization path a known starting state.
             NativeMemory.Clear((byte*)rented + ReplicationBlockLayout.HeaderSize, (nuint)(Layout.BlockSize - ReplicationBlockLayout.HeaderSize));
+            if (Push != null)
+            {
+                if (chunkId >= BlockByChunk.Length)
+                {
+                    Array.Resize(ref BlockByChunk, Math.Max(chunkId + 1, BlockByChunk.Length * 2));
+                }
+
+                BlockByChunk[chunkId] = (nint)rented;
+            }
         }
         else
         {
@@ -922,6 +789,11 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return false;
         }
 
+        if (Push != null && (uint)chunkId < (uint)BlockByChunk.Length)
+        {
+            BlockByChunk[chunkId] = 0;
+        }
+
         Pool.Return(block);
         return true;
     }
@@ -938,9 +810,8 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
         // Before the directory and the pool, because each of these names memory of its own and none of them names a block.
         _watchedBlocks.Dispose();
-        _records.Dispose();
+        _scratch.Dispose();
         _netIdLeases.Dispose();
-        _sharedRuns.Dispose();
 
         // The parked entries hold native memory of their own, and nothing else names it.
         lock (_parkLock)

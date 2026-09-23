@@ -409,20 +409,22 @@ A transaction can `Spawn` an entity and then immediately query — the query mus
 
 ---
 
-## 8. Subscriptions — pushing views to external clients
+## 8. Subscriptions — pushing state to external clients
 
 **Code:** [`src/Typhon.Engine/Subscriptions/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Subscriptions)
 
-Subscriptions are how Typhon ships engine state to external clients — game clients, browsers, observer processes — and how those clients send typed commands back into the tick. The application declares what each archetype exposes and who sees what; the engine does per-client interest, change detection, quantized encoding, sessions and backpressure, in parallel on the worker pool. Clients decode against a catalog rather than C# type layouts, so renaming a type is not a wire break.
+Subscriptions are how Typhon ships engine state to external clients — game clients, browsers, observer processes — and how those clients send typed commands back into the tick. The application declares what each archetype exposes and which profile a session follows, and says what it changed (`Replicate`); the engine does change detection, quantized encoding, per-session visibility, sessions and backpressure, in parallel on the worker pool. Clients decode against a catalog rather than C# type layouts, so renaming a type is not a wire break.
 
-**Under construction — none of it is reachable from application code yet.** What exists in the engine today is the foundation:
+**Replication is pushed** (ADR-067). The pieces:
 
-- **Replication state blocks** — native per-cluster storage sized by the *watched set*, not by the archetype, with a directory keyed by cluster chunk id and a hook in the fence's migration step.
-- **The Engine-Subscriptions track** — a built-in track between the tick fence and the flush. Compute runs after the fence, publish after the flush, skippable only together (rule `SUB-02`).
-- **Network identities** — process-global netIds, a released one quarantined for a tick before reuse so no frame carries both an identity's leave and its re-enter.
+- **The push set** — the slots systems marked with `Replicate`, plus the engine's own pushes (spawn, destroy, `WriteSpatial`, migration), recorded in the fence's per-cluster structure words.
+- **The Engine-Subscriptions track** — a built-in track between the tick fence and the flush. Compute runs after the fence, publish after the flush, skippable only together (rule `SUB-02`). Its stages project the pushed entities (compare quantized values, encode once), bucket the changes by cell, and gather each session's frame from the cells around it.
+- **A geometric known-set** — a session holds the entities within its radius of its anchor, in the cells delivered to it; nothing is stored per (session, entity). A lagging session is caught up from an 8-tick push log.
+- **Replication state blocks** — native per-cluster storage beside the clusters for every entity of an observed archetype, with a directory keyed by cluster chunk id and hooks in the fence's migration step and at the drain.
+- **Network identities** — one global netId space; a released id is quarantined for the skip window, so no frame carries both an identity's leave and its re-enter.
 - **Ingress rings** — per-session SPSC command rings over native memory, carved from a slab pool; a full ring drops and counts rather than blocking the transport thread.
 
-The view machinery documented in §5 above is unchanged, and replication reads the same `ViewRegistry` deltas. For the design see `claude/design/Subscriptions/`; for feature status, [feature-set/Subscriptions](../feature-set/Subscriptions/README.md).
+The view machinery documented in §5 above is unchanged; replication does not read views today (shared View sources are a later phase). For the design see `claude/design/Subscriptions/`; for feature status, [feature-set/Subscriptions](../feature-set/Subscriptions/README.md).
 
 
 ---

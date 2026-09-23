@@ -447,7 +447,7 @@ unsafe class SessionTableTests
         using var table = new SessionTable("Sessions", _registry.Runtime, _allocator,
             new SubscriptionsOptions
             {
-                MaxSessions = 4, FrameBytes = 64 * 1024, ClientMessageBytes = 1024, KnownEntitiesPerSession = 1000, ObserversPerSession = 6,
+                MaxSessions = 4, FrameBytes = 64 * 1024, ClientMessageBytes = 1024, ObserversPerSession = 6,
             },
             _sessions.SessionEvents);
 
@@ -461,8 +461,7 @@ unsafe class SessionTableTests
         {
             Assert.That(row.FrameBytes, Is.EqualTo(8 * 1024), "a session may ask for less than the operator allows");
             Assert.That(row.ClientMessageBytes, Is.EqualTo(1024), "and never for more");
-            Assert.That(row.MaxKnownEntities, Is.EqualTo(1000), "zero means the operator's number");
-            Assert.That(row.MaxObservers, Is.EqualTo(6), "and observers follow the same convention as every sibling limit");
+            Assert.That(row.MaxObservers, Is.EqualTo(6), "zero means the operator's number, as for every sibling limit");
         });
     }
 

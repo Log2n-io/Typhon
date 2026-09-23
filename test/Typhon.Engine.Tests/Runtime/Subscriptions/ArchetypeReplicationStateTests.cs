@@ -272,7 +272,7 @@ unsafe class ArchetypeReplicationStateTests
         Assert.Multiple(() =>
         {
             Assert.That(atRest, Is.GreaterThan(0), "the structures exist from construction, so they are never free");
-            Assert.That(afterGrowth, Is.GreaterThan(atRest), "the reported figure must follow the watched set — that is the whole point of reporting it");
+            Assert.That(afterGrowth, Is.GreaterThan(atRest), "the reported figure must follow the blocks held — that is the whole point of reporting it");
             Assert.That(afterIdentityGrowth, Is.EqualTo(afterGrowth),
                 "the shared allocator's bytes are reported by the allocator, exactly once, not per archetype");
             Assert.That(_netIds.EstimatedMemorySize, Is.GreaterThan(0), "and they are reported — excluding them here must not make them vanish");

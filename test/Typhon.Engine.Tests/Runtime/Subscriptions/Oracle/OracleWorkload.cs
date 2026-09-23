@@ -100,6 +100,18 @@ internal sealed class OracleWorkload
     public int Teleports { get; private set; }
 
     /// <summary>
+    /// Whether every slot written through <c>GetSpan</c> is also pushed, as a system serving an explicit push profile must. Spawns, destroys and
+    /// <c>WriteSpatial</c> are the engine's own pushes and need none.
+    /// </summary>
+    public bool Replicate { get; set; }
+
+    /// <summary>How many slots were written without the push <see cref="Replicate"/> asked for — the mutant a forgotten call produces.</summary>
+    public int ForgetPushesAfter { get; set; } = int.MaxValue;
+
+    /// <summary>How many slots were pushed.</summary>
+    public int Pushed { get; private set; }
+
+    /// <summary>
     /// What the workload last wrote through a span, per live creature: <c>mode</c> and <c>level</c>. Not a shadow of the world — only what the ECS was told,
     /// so a value that later reads differently was changed by something that is not the workload.
     /// </summary>
@@ -332,7 +344,8 @@ internal sealed class OracleWorkload
     /// cluster the way a system does. The choice is still seeded, so the run replays.
     /// </remarks>
     /// <param name="spatial">
-    /// Whether the writer touches the spatial column. Only then is its span taken, and only then are the slots it writes recorded as moved.
+    /// Whether the writer touches the spatial column. Only then is its span taken: a mutable span over the spatial column is a structure change the engine
+    /// pushes for the whole cluster, which would hide every forgotten push of the other columns.
     /// </param>
     private int ForEachChosenCreature(bool spatial, SlotWriter write)
     {
@@ -377,6 +390,11 @@ internal sealed class OracleWorkload
                     {
                         MovedLastStep.Add((long)cluster.GetEntityId(slot).RawValue);
                     }
+                    if (Replicate && Pushed < ForgetPushesAfter)
+                    {
+                        _harness?.Subscriptions.Commands.Replicate(in cluster, slot);
+                        Pushed++;
+                    }
                 }
             }
 
@@ -400,6 +418,41 @@ internal sealed class OracleWorkload
 
         tx.Commit();
         return written;
+    }
+
+    /// <summary>Writes a new <c>mode</c> on every live creature, through the same span path as the churn — the mutant's guaranteed forgotten push.</summary>
+    public void WriteModeOnEveryCreature()
+    {
+        using var tx = _engine.CreateQuickTransaction();
+        var accessor = tx.For<ProjCreature>();
+        try
+        {
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                var ai = cluster.GetSpan(ProjCreature.Ai);
+                var occupancy = cluster.OccupancyBits;
+                while (occupancy != 0)
+                {
+                    var slot = BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+                    ai[slot].Mode = (ProjAiMode)(1 + (((int)ai[slot].Mode) % 4));
+                    LastWritten[(long)cluster.GetEntityId(slot).RawValue] = ((int)ai[slot].Mode, ai[slot].Level);
+                    if (Replicate && Pushed < ForgetPushesAfter)
+                    {
+                        _harness?.Subscriptions.Commands.Replicate(in cluster, slot);
+                        Pushed++;
+                    }
+                }
+
+                cluster.MarkDirty(ProjCreature.Ai);
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        tx.Commit();
     }
 
     private float RandomCoordinate() => (float)(((_random.NextDouble() * 2.0) - 1.0) * (ProjectionTestSchema.WorldExtentM - EdgeMarginM));

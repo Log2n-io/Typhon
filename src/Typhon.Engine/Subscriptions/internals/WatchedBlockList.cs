@@ -5,26 +5,25 @@ using System.Threading;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// The blocks whose slots this tick's interest hits marked watched, for one archetype — the list S1 walks instead of the archetype.
+/// The blocks whose slots this tick's pushes marked, for one archetype — the list S1 walks instead of the archetype.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>This list is rule SUB-13 made into a data structure.</b> S1 is partitioned over what is in it, so per-tick replication work is bounded by the entities at
-/// least one session has in view rather than by how many entities the archetype holds. An archetype of ten million entities with a thousand watched costs a
-/// thousand: the other 9 999 000 are never addressed, because no block naming them is ever appended here.
+/// <b>This list is rule SUB-13 made into a data structure.</b> S1 is partitioned over what is in it, so per-tick replication work is bounded by the entities
+/// pushed this tick rather than by how many entities the archetype holds. An archetype of ten million entities with a thousand pushed costs a thousand: the
+/// other 9 999 000 are never addressed, because no block naming them is ever appended here.
 /// </para>
 /// <para>
 /// <b>Appending is the marking, and the two are one act.</b> <see cref="Mark"/> sets the slot's bit in the block's watched mask and, for the first caller to
 /// reach a given block this tick, appends the block. The claim is an <see cref="Interlocked.Exchange(ref uint, uint)"/> on
 /// <see cref="ReplicationBlockHeader.LastWatchedTick"/> — the field the block already carries for idle eviction — so a block is listed exactly once however
-/// many sessions, on however many workers, hit it. A separate "is it listed" flag would be a second piece of state saying the same thing, and the two would
+/// many workers mark it. A separate "is it listed" flag would be a second piece of state saying the same thing, and the two would
 /// disagree the first time one of them was updated and the other was not.
 /// </para>
 /// <para>
-/// <b>The mask is set here and cleared by the producer's prologue, never by the pass.</b> A block's watched mask has to survive the whole track — the frame
-/// stage reads it after the projection stage has run — so it is dropped at the start of the <i>next</i> tick, single-threaded, by whoever marked it:
-/// <see cref="ClearMasks"/> here, and the interest pass's own prologue for the blocks it claimed. A reset inside the pass would be both a lost-update race
-/// against a concurrent mark and an erasure of what the next stage is about to read.
+/// <b>The mask is set here and cleared at the next tick's blocks step, never by the pass.</b> A block's mask has to survive the whole track, so it is dropped
+/// at the start of the <i>next</i> tick, single-threaded, by the push path's preparation. A reset inside the pass would be both a lost-update race against a
+/// concurrent mark and an erasure of what a later stage is about to read.
 /// </para>
 /// <para>
 /// <b>Capacity cannot bind, by construction.</b> Only a block the directory names can be marked, so at most <c>Directory.Count</c> distinct blocks are ever
@@ -59,7 +58,7 @@ internal sealed unsafe class WatchedBlockList : IDisposable
         }
     }
 
-    /// <summary>Slots the array can hold without growing. Sized by the watched set, never by the archetype (SUB-13).</summary>
+    /// <summary>Slots the array can hold without growing. Sized by the blocks that exist, never by the chunk-id space (SUB-13).</summary>
     public int Capacity => _capacity;
 
     /// <summary>Marks that found no room. Always zero unless a block outside the directory was marked; see the class remarks.</summary>
@@ -126,8 +125,7 @@ internal sealed unsafe class WatchedBlockList : IDisposable
     }
 
     /// <summary>
-    /// Appends <paramref name="block"/> without claiming it — for a caller that has already established the block is listed once, such as the blocks step
-    /// gathering the interest stage's per-worker lists. Single-threaded.
+    /// Appends <paramref name="block"/> without claiming it — for a caller that has already established the block is listed once. Single-threaded.
     /// </summary>
     /// <param name="block">The block.</param>
     /// <returns><see langword="false"/> when the list had no room, which is counted in <see cref="Overflow"/>.</returns>

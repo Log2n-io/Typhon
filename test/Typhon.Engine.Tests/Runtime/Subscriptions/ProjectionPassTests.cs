@@ -17,9 +17,10 @@ namespace Typhon.Engine.Tests.Runtime;
 /// way SUB-01 is about and still pass.
 /// </para>
 /// <para>
-/// <b>The watched set is supplied by the fixture, not by the interest stage</b> (P1-12). What S1 consumes is a block, a watched mask and a claim stamp —
-/// data, not that slice's code — so the harness below marks slots through the same <see cref="WatchedBlockList"/> the interest stage's output is gathered
-/// into. Driving it from here is also what lets a case mark a slot the live occupancy no longer covers, which is the destroyed-entity path.
+/// <b>The pushed set is supplied by the fixture, not by the push path.</b> What S1 consumes is a block, a marked mask and a claim stamp — data, not the push
+/// path's code — so the harness below marks slots through the same <see cref="WatchedBlockList"/> the push marks go into. Driving it from here is also what
+/// lets a case mark a slot the live occupancy no longer covers, which is the destroyed-entity path. No push path is attached, so no event is recorded: what
+/// is asserted is the entry the event would name.
 /// </para>
 /// </remarks>
 [TestFixture]
@@ -82,7 +83,7 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
             Assert.That(State.WatchedBlocks.Overflow, Is.Zero, "the list is sized from the directory, so a mark can never find it full");
         }
 
-        /// <summary>Marks an explicit slot set of one block — used where the live occupancy is not what the interest stage would have seen.</summary>
+        /// <summary>Marks an explicit slot set of one block — used where the live occupancy is not what the push path would have marked.</summary>
         public void MarkSlots(ReplicationBlockHeader* block, ulong slots)
         {
             while (slots != 0)
@@ -93,10 +94,11 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
             }
         }
 
-        /// <summary>Runs the pass over every watched block, exactly as the Project stage's single chunk would.</summary>
+        /// <summary>Runs the pass over every marked block, exactly as the Project stage's single chunk would.</summary>
         public void Project(uint tick)
         {
             State.BeginProjectTick(workers: 1);
+            var before = State.RecordsProduced;
 
             using var guard = EpochGuard.Enter(Engine.EpochManager);
             using var accessor = ClusterState.ClusterSegment.CreateChunkAccessor();
@@ -106,7 +108,15 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
                 var block = State.WatchedBlocks[i];
                 ProjectionPass.ProjectBlock(Plan, 0, State, 0, block, accessor.GetChunkAddress(block->ChunkId), null, tick);
             }
+
+            Changed = State.RecordsProduced - before;
         }
+
+        /// <summary>Entities the last <see cref="Project"/> found entered or changed.</summary>
+        public long Changed;
+
+        /// <summary>Whether a slot's entry was (re-)initialized by the last projection — the entity enters.</summary>
+        public bool Entered(int slot) => (Hot(FirstBlock, slot)->Flags & ProjectionPass.FlagInitializedThisTick) != 0;
 
         /// <summary>Mark then project, which is one tick of the track for this archetype.</summary>
         public void Tick(uint tick)
@@ -114,8 +124,6 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
             MarkAllWatched(tick);
             Project(tick);
         }
-
-        public RecordArena Records => State.Records[0];
 
         public ReplicationHotEntry* Hot(ReplicationBlockHeader* block, int slot) =>
             (ReplicationHotEntry*)((byte*)block + Layout.HotOffset + (slot * Layout.HotStride));
@@ -229,13 +237,13 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
         using var harness = Harness.Create(ServiceProvider, entities: 8);
 
         harness.Tick(1);
-        Assert.That(harness.Records.Count, Is.EqualTo(8), "every entity enters on the tick it is first watched");
+        Assert.That(harness.Changed, Is.EqualTo(8), "every entity enters on the tick it is first watched");
 
         harness.Tick(2);
-        Assert.That(harness.Records.Count, Is.Zero, "nothing changed, so nothing is encoded");
+        Assert.That(harness.Changed, Is.Zero, "nothing changed, so nothing is encoded");
 
         harness.Tick(3);
-        Assert.That(harness.Records.Count, Is.Zero);
+        Assert.That(harness.Changed, Is.Zero);
     }
 
     /// <summary>A change confined to one group stamps that group's tick and leaves every other group's where it was.</summary>
@@ -248,46 +256,42 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
 
         var stateSlot = harness.TickSlotOf("state");
         var vitalsSlot = harness.TickSlotOf("vitals");
-        var vitalsBit = harness.BitOf("vitals");
-
         WriteLevelThroughGetSpan(harness, slot: 3, level: 4242);
         harness.Tick(3);
 
         var hot = harness.Hot(harness.FirstBlock, 3);
         Assert.Multiple(() =>
         {
-            Assert.That(harness.Records.Count, Is.EqualTo(1), "one entity changed, so one record");
-            Assert.That(harness.Records.Record(0).Kind, Is.EqualTo(ReplicationRecordKind.State));
-            Assert.That(harness.Records.Record(0).GroupMask, Is.EqualTo((byte)(1 << vitalsBit)), "only the group that changed is on the record");
+            Assert.That(harness.Changed, Is.EqualTo(1), "one entity changed");
+            Assert.That(harness.Entered(3), Is.False, "a change, not an enter");
+            Assert.That(hot->Flags & ProjectionPass.FlagInitializedThisTick, Is.Zero);
             Assert.That(hot->GroupTicks[vitalsSlot], Is.EqualTo(3u), "'level' is in the vitals group, whose tick moves");
             Assert.That(hot->GroupTicks[stateSlot], Is.EqualTo(1u), "the state group did not change, so its tick stays at the enter");
         });
     }
 
-    /// <summary>An entity watched now but not last tick has no history any session could hold, so it is rebuilt and enters in full.</summary>
+    /// <summary>
+    /// An entity projected again after ticks nobody pushed it is NOT re-initialized: what a client holds is geometry, not a per-session history, so an
+    /// entity's entry stays valid however long it goes unpushed.
+    /// </summary>
     [Test]
-    public void AnEntityWatchedNowButNotLastTickIsReinitializedAndEnters()
+    public void AnEntityProjectedAfterAGapKeepsItsEntry()
     {
         using var harness = Harness.Create(ServiceProvider, entities: 8);
         harness.Tick(1);
         harness.Tick(2);
-        Assert.That(harness.Records.Count, Is.Zero, "the quiet tick is quiet");
+        Assert.That(harness.Changed, Is.Zero, "the quiet tick is quiet");
 
         var before = harness.Hot(harness.FirstBlock, 0)->NetId;
 
-        // Tick 3 is skipped entirely — nobody has these entities in view — and tick 4 finds every entry stale.
+        // Tick 3 is skipped entirely — nobody pushed these entities — and tick 4 finds every entry as tick 2 left it.
         harness.Tick(4);
 
         Assert.Multiple(() =>
         {
-            Assert.That(harness.Records.Count, Is.EqualTo(8), "every entity is re-initialized and enters again");
-            for (var i = 0; i < harness.Records.Count; i++)
-            {
-                Assert.That(harness.Records.Record(i).Kind, Is.EqualTo(ReplicationRecordKind.Enter));
-            }
-
-            Assert.That(harness.Hot(harness.FirstBlock, 0)->NetId, Is.EqualTo(before),
-                "the entity never left, so its identity is kept — a re-initialization is about the VALUES it holds");
+            Assert.That(harness.Changed, Is.Zero, "nothing changed, so nothing enters again");
+            Assert.That(harness.Entered(0), Is.False);
+            Assert.That(harness.Hot(harness.FirstBlock, 0)->NetId, Is.EqualTo(before), "the entity never left, so its identity is kept");
         });
     }
 
@@ -304,7 +308,7 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
 
         DestroyOne(harness);
 
-        // Marked with the mask the interest stage would have carried in, not with the live one: the point of the case is an entry whose slot went away under
+        // Marked with the mask the push path would have carried in, not with the live one: the point of the case is an entry whose slot went away under
         // it.
         harness.State.WatchedBlocks.ClearMasks();
         harness.State.BeginWatchedBlocks(2);
@@ -356,8 +360,8 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
         {
             Assert.That(reused, Is.GreaterThanOrEqualTo(0), "the respawn took a slot whose entry described the entity that left");
             Assert.That(harness.State.IdentitiesReleased, Is.GreaterThanOrEqualTo(1), "the stale identity went back");
-            Assert.That(harness.Records.Count, Is.GreaterThanOrEqualTo(1));
-            Assert.That(harness.Records.Record(0).Kind, Is.EqualTo(ReplicationRecordKind.Enter), "a reused slot is a new entity, so it enters");
+            Assert.That(harness.Changed, Is.GreaterThanOrEqualTo(1));
+            Assert.That(harness.Entered(reused), Is.True, "a reused slot is a new entity, so it enters");
         });
     }
 
@@ -378,18 +382,17 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
         using var harness = Harness.Create(ServiceProvider, entities: 8);
         harness.Tick(1);
         harness.Tick(2);
-        Assert.That(harness.Records.Count, Is.Zero, "the baseline: an unchanged tick produces nothing, so the record below is the write and not noise");
+        Assert.That(harness.Changed, Is.Zero, "the baseline: an unchanged tick produces nothing, so the record below is the write and not noise");
 
         WriteLevelThroughGetSpan(harness, slot: 2, level: 777);
         harness.Tick(3);
 
-        var vitalsBit = harness.BitOf("vitals");
         Assert.Multiple(() =>
         {
-            Assert.That(harness.Records.Count, Is.EqualTo(1), "the un-signalled write produced a record");
-            Assert.That(harness.Records.Record(0).Kind, Is.EqualTo(ReplicationRecordKind.State));
-            Assert.That(harness.Records.Record(0).GroupMask & (1 << vitalsBit), Is.Not.Zero, "and it is the group the written field belongs to");
-            Assert.That(harness.Hot(harness.FirstBlock, 2)->GroupTicks[harness.TickSlotOf("vitals")], Is.EqualTo(3u));
+            Assert.That(harness.Changed, Is.EqualTo(1), "the un-signalled write was found by the comparison");
+            Assert.That(harness.Entered(2), Is.False, "as a change, not an enter");
+            Assert.That(harness.Hot(harness.FirstBlock, 2)->GroupTicks[harness.TickSlotOf("vitals")], Is.EqualTo(3u),
+                "and it is the group the written field belongs to whose tick moved");
         });
     }
 
@@ -445,24 +448,22 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
             Assert.That(harness.Hot(harness.FirstBlock, 2)->GroupTicks[harness.TickSlotOf("vitals")], Is.EqualTo(before),
                 "no write path stamped anything, so the verifier's assertion discriminates the pass from the write");
             Assert.That(harness.Hot(harness.FirstBlock, 1)->GroupTicks[0], Is.EqualTo(1u));
-            Assert.That(harness.Records.Count, Is.Zero);
+            Assert.That(harness.Changed, Is.Zero);
         });
     }
 
     // ── SUB-13 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// SUB-13 — per-tick work is bounded by the watched set, never by the archetype.
+    /// SUB-13 — per-tick work is bounded by the pushed set, never by the archetype.
     /// </summary>
     /// <remarks>
-    /// The rule's own text records that this half "is asserted by nothing yet: it needs a projection pass to measure". This is the measurement: an archetype
-    /// of N entities across many clusters, with W of them watched, and a count of the slots the pass addressed. The count is exact rather than asymptotic —
-    /// the pass either touched a slot or it did not — which is a stronger statement than O(W) and is what makes a regression to a whole-archetype walk
-    /// impossible to miss.
+    /// An archetype of N entities across many clusters, with W of them pushed, and a count of the slots the pass addressed. The count is exact rather than
+    /// asymptotic — the pass either touched a slot or it did not — which is what makes a regression to a whole-archetype walk impossible to miss.
     /// </remarks>
     [Test]
     [VerifiesRule("SUB-13")]
-    public void PerTickWorkFollowsTheWatchedSet()
+    public void PerTickWorkFollowsThePushedSet()
     {
         const int entities = 1024;
         using var harness = Harness.Create(ServiceProvider, entities, spread: 40f);
@@ -470,7 +471,7 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
         var (chunkId, occupancy) = FirstPopulatedCluster(harness);
         Assert.That(harness.State.TryAttachBlock(chunkId, out var block), Is.True);
 
-        // One cluster's worth of entities is watched; every other entity of the archetype is not.
+        // One cluster's worth of entities is pushed; every other entity of the archetype is not.
         harness.State.BeginWatchedBlocks(1);
         harness.MarkSlots(block, occupancy);
         var watched = BitOperations.PopCount(occupancy);
@@ -480,10 +481,9 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(harness.State.SlotsProjected, Is.EqualTo(watched), "the pass addressed exactly the watched slots");
-            Assert.That(harness.State.BlocksProjected, Is.EqualTo(1), "and exactly the watched block");
+            Assert.That(harness.State.SlotsProjected, Is.EqualTo(watched), "the pass addressed exactly the pushed slots");
+            Assert.That(harness.State.BlocksProjected, Is.EqualTo(1), "and exactly the pushed block");
             Assert.That(harness.State.SlotsProjected * 4, Is.LessThan(entities), "which is a small fraction of an archetype it never walked");
-            Assert.That(harness.State.WatchedClusterCount, Is.EqualTo(1), "replication MEMORY follows the same set — one block for one watched cluster");
         });
     }
 
@@ -506,22 +506,22 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
             Assert.That(visited, Is.EqualTo(entities), "marking the whole archetype makes the pass cost the whole archetype");
             Assert.That(harness.State.BlocksProjected, Is.GreaterThan(1), "over more than one cluster");
             Assert.That(visited * 4, Is.GreaterThanOrEqualTo(entities),
-                "so PerTickWorkFollowsTheWatchedSet's assertion would reject this — the verifier measures the watched set and not the pass's mere existence");
+                "so PerTickWorkFollowsThePushedSet's assertion would reject this — the verifier measures the pushed set and not the pass's mere existence");
         });
     }
 
     // ── Per-entity, per-tick, never per-session ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Over a thousand ticks, a record is produced once per changed entity per tick — and the count is a function of the changes alone.
+    /// Over a thousand ticks, a change is found once per changed entity per tick — and the count is a function of the changes alone.
     /// </summary>
     /// <remarks>
     /// "Never once per session" is a property of the pass's SHAPE rather than of a number: no session is reachable from
     /// <see cref="ProjectionPass.ProjectBlock"/>, so the totals below cannot vary with how many sessions are connected. What the thousand ticks add is that
-    /// the count does not drift — an entry that compared unequal against itself would show up here as a record per entity per tick.
+    /// the count does not drift — an entry that compared unequal against itself would show up here as a change per entity per tick.
     /// </remarks>
     [Test]
-    public void RecordsAreProducedOncePerChangedEntityPerTick()
+    public void ChangesAreFoundOncePerChangedEntityPerTick()
     {
         const int entities = 64;
         const uint ticks = 1000;
@@ -544,11 +544,11 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
     }
 
     /// <summary>
-    /// SUB-07's shape for this pass: once the watched set is stable, a projection tick allocates no managed memory at all.
+    /// SUB-07's shape for this pass: once the push set is stable, a projection tick allocates no managed memory at all.
     /// </summary>
     /// <remarks>
     /// The measured region is the pass and nothing else — the accessor, the epoch scope and the marking are taken outside it, because they belong to the
-    /// stage rather than to S1. Everything the pass touches is native (the block, the arena, the code and body scratch) or on the stack.
+    /// stage rather than to S1. Everything the pass touches is native (the block, the code and body scratch) or on the stack.
     /// </remarks>
     [Test]
     public void TheSteadyStatePassAllocatesNoManagedMemory()
@@ -584,32 +584,19 @@ unsafe class ProjectionPassTests : TestBase<ProjectionPassTests>
         Assert.That(allocated, Is.Zero, $"a steady-state projection allocated {allocated} managed bytes");
     }
 
-    /// <summary>
-    /// What a record costs for the SWG creature shape — one <c>onEnter</c> byte, a one-byte packed group and a three-byte one.
-    /// </summary>
+    /// <summary>What an entry costs for the SWG creature shape: the state bodies the hot entry reserves, and the entry strides.</summary>
     /// <remarks>
     /// Stated as a test rather than in prose because it is the number AC-13's byte budget is built on, and because every part of it is a consequence of the
-    /// compiled plan: change a codec and this moves. The bodies exclude the netId gap, the group mask and the enter position, which the frame stage adds.
+    /// compiled plan: change a codec and this moves.
     /// </remarks>
     [Test]
-    public void ARecordIsAsBigAsTheCompiledPlanMakesIt()
+    public void AnEntryIsAsBigAsTheCompiledPlanMakesIt()
     {
         using var harness = Harness.Create(ServiceProvider, entities: 8);
-        harness.Tick(1);
-
-        var enter = harness.Records.Record(0);
-        harness.Tick(2);
-        WriteLevelThroughGetSpan(harness, slot: 0, level: 4242);
-        harness.Tick(3);
-        var state = harness.Records.Record(0);
 
         Assert.Multiple(() =>
         {
-            Assert.That(enter.Kind, Is.EqualTo(ReplicationRecordKind.Enter));
-            Assert.That(enter.Length, Is.EqualTo(5), "onEnter 'template' u8, the packed 'state' group, and 'vitals' as u16 + unorm8");
-            Assert.That(state.Kind, Is.EqualTo(ReplicationRecordKind.State));
-            Assert.That(state.Length, Is.EqualTo(3), "only the vitals group travels");
-            Assert.That(harness.Plan.MaxStateBodyBytes, Is.EqualTo(4), "both group bodies, which is what the hot entry reserves");
+            Assert.That(harness.Plan.MaxStateBodyBytes, Is.EqualTo(4), "the packed 'state' group and 'vitals' as u16 + unorm8");
             Assert.That(harness.Layout.HotStride, Is.EqualTo(64), "32 fixed + a 14 B segment + a 4 B state body still fits one cache line (AC-5)");
             Assert.That(harness.Layout.ColdStride, Is.EqualTo(32));
         });

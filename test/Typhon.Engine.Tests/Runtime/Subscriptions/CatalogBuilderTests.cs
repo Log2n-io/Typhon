@@ -18,9 +18,9 @@ namespace Typhon.Engine.Tests.Runtime;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>The scan is the point of this fixture</b> (foundation/06 § 4 criterion 4). "No CLR type name and no byte offset appears in the catalog" is a property of
-/// the OUTPUT, and reviewing the builder for it proves nothing about the next field somebody adds — so it is asserted against the emitted bytes, three ways:
-/// a forbidden-substring scan, a closed whitelist of property names, and a sweep for the plan's own offsets as numbers.
+/// <b>The scan is the point of this fixture</b> (archive/Subscriptions/foundation/06 § 4 criterion 4). "No CLR type name and no byte offset appears in the
+/// catalog" is a property of the OUTPUT, and reviewing the builder for it proves nothing about the next field somebody adds — so it is asserted against
+/// the emitted bytes, three ways: a forbidden-substring scan, a closed whitelist of property names, and a sweep for the plan's own offsets as numbers.
 /// </para>
 /// <para>
 /// <b>What "no CLR type name" can and cannot mean.</b> An archetype, a command and an event travel under the name the projection declared, and that name
@@ -76,7 +76,7 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
     private static void DeclareMessages(SubscriptionsRegistry subs)
     {
         // A ClientRegion observer is what enables the built-in command (W27). Phase 1 refuses the observer itself at Start — the catalog is built from the
-        // declarations, not from what the interest pass can serve yet, so the command's reserved index is testable now and the observer is not.
+        // declarations, not from what the pipeline can serve yet, so the command's reserved index is testable now and the observer is not.
         subs.Profile("god-world", p => p.World().Of<ProjCreature>().Of<ProjPlayer>().Of<ProjRock>());
         subs.Profile("region", p => p.ClientRegion(maxEdgeM: 512));
 
@@ -260,7 +260,7 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
     // ── Nothing about server memory ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// The emitted bytes name no component type, no namespace, no assembly and no source field the projection renamed (foundation/06 D3).
+    /// The emitted bytes name no component type, no namespace, no assembly and no source field the projection renamed (archive/Subscriptions/foundation/06 D3).
     /// </summary>
     [Test]
     public void NoClrTypeNameThePlanReadsThroughReachesTheBytes()
@@ -333,7 +333,7 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
 
     /// <summary>
     /// None of the plan's storage numbers appears in the catalog: not a column offset, not a stride, not a field offset, not the cluster's slot count
-    /// (foundation/06 D2).
+    /// (archive/Subscriptions/foundation/06 D2).
     /// </summary>
     /// <remarks>
     /// Small numbers are excluded, and deliberately: a field offset of 0 or 8 is indistinguishable from a codec width or an index, so asserting on those
@@ -491,9 +491,10 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
     /// The committed vector: the bytes this builder produced in an earlier process, byte for byte.
     /// </summary>
     /// <remarks>
-    /// <b>This is the cross-process half of foundation/06 § 4 criterion 2.</b> Two builds in one process share every string's identity and the process's hash
-    /// seed; a committed artefact does not, so a digest that depended on <c>string.GetHashCode</c>, on a dictionary's enumeration order or on anything else
-    /// the runtime randomizes per process fails here and nowhere else. It is also what the TypeScript SDK reads — one set of bytes, two decoders.
+    /// <b>This is the cross-process half of archive/Subscriptions/foundation/06 § 4 criterion 2.</b> Two builds in one process share every string's
+    /// identity and the process's hash seed; a committed artefact does not, so a digest that depended on <c>string.GetHashCode</c>, on a dictionary's
+    /// enumeration order or on anything else the runtime randomizes per process fails here and nowhere else. It is also what the TypeScript SDK reads —
+    /// one set of bytes, two decoders.
     /// </remarks>
     [Test]
     public void TheEmittedCatalogMatchesTheCommittedVector()

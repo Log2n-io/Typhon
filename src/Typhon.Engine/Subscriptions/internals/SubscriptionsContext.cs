@@ -64,9 +64,10 @@ internal sealed class SubscriptionsContext
     /// <see langword="null"/> until <c>Start</c> has built it.
     /// </summary>
     /// <remarks>
-    /// <b>The one field this file gains, and the reason it gains only one</b> (09-phase1-build-plan § 4). This context is tick-scoped and shared by every
-    /// stage of the track; everything a stage needs to reach at tick time hangs off <see cref="SubscriptionsRuntime"/>, which every later slice extends
-    /// instead of extending this class. Read through a volatile load because it is published from the thread that calls <c>Start</c> and read by workers.
+    /// <b>The one field this file gains, and the reason it gains only one</b> (archive/Subscriptions/09-phase1-build-plan § 4). This context is
+    /// tick-scoped and shared by every stage of the track; everything a stage needs to reach at tick time hangs off <see cref="SubscriptionsRuntime"/>,
+    /// which every later slice extends instead of extending this class. Read through a volatile load because it is published from the thread that calls
+    /// <c>Start</c> and read by workers.
     /// </remarks>
     public SubscriptionsRuntime Subscriptions => Volatile.Read(ref _subscriptions);
 
@@ -87,10 +88,10 @@ internal sealed class SubscriptionsContext
     /// The whole track's gate: nothing is computed for an aborted or fence-failed tick, and nothing is computed when no session is connected.
     /// </summary>
     /// <remarks>
-    /// Evaluated by EVERY stage rather than only the DAG's root. The design (<c>foundation/03 § 2.4</c>) gates the root alone, reasoning that "the DAG is a
-    /// chain, so one gate suppresses all six stages" — but § 2.5 replaced that chain: <c>Events</c> is a parallel BRANCH with no predecessor, so it becomes
-    /// ready on its own and a root-only gate would let it dispatch on an aborted tick. Gating in the shared base is both the fix and the cheaper thing to
-    /// reason about, since no future re-shaping of the DAG can silently un-gate a stage.
+    /// Evaluated by EVERY stage rather than only the DAG's root. The design (<c>archive/Subscriptions/foundation/03 § 2.4</c>) gates the root alone,
+    /// reasoning that "the DAG is a chain, so one gate suppresses all six stages" — but § 2.5 replaced that chain: <c>Events</c> is a parallel BRANCH with
+    /// no predecessor, so it becomes ready on its own and a root-only gate would let it dispatch on an aborted tick. Gating in the shared base is both the
+    /// fix and the cheaper thing to reason about, since no future re-shaping of the DAG can silently un-gate a stage.
     /// </remarks>
     public bool ShouldTrackRun
     {

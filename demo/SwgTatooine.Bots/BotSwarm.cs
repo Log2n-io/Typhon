@@ -591,6 +591,10 @@ public sealed class BotSwarm : IAsyncDisposable
                 PingHz = 0,
                 Reconnect = false,
 
+                // A bot applies every frame and evaluates no motion, so it keeps one segment per entity instead of the 17 a 300 ms render delay needs at
+                // 50 Hz. At d07 a bot holds ~25 000 entities, and the history was ~20 MB of each bot's ~32 MB.
+                SegmentHistory = 1,
+
                 // STATS is opt-in per session (W23): a server emits the block only to a client that asked for it, so a load generator that does not ask
                 // reports the run with every server number reading zero — which is what the first AC-1 run did.
                 Caps = Capabilities.Stats,

@@ -7,20 +7,17 @@ namespace Typhon.Engine.Internals;
 /// <summary>Which member of the replication track a duration belongs to. The order is the track's own, and the values index the per-tick record.</summary>
 internal enum SubscriptionsStage
 {
-    /// <summary>S2a: the interest pass.</summary>
-    Interest = 0,
-
-    /// <summary>The blocks step and S1, the per-entity projection.</summary>
-    Project = 1,
+    /// <summary>The blocks step, S1 (the per-entity projection), and the push index and far-flush fold it feeds.</summary>
+    Project = 0,
 
     /// <summary>The event drain.</summary>
-    Events = 2,
+    Events = 1,
 
     /// <summary>S2b: frame assembly.</summary>
-    Frames = 3,
+    Frames = 2,
 
-    /// <summary>The collapsed shape, which is all four inline in one dispatch.</summary>
-    Collapsed = 4,
+    /// <summary>The collapsed shape, which is every stage inline in one dispatch.</summary>
+    Collapsed = 3,
 }
 
 /// <summary>
@@ -28,7 +25,7 @@ internal enum SubscriptionsStage
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why the track needs its own timing when every system already reports one.</b> The scheduler times systems; it does not know that these four are one
+/// <b>Why the track needs its own timing when every system already reports one.</b> The scheduler times systems; it does not know that these systems are one
 /// subsystem. "What does replication cost this server" is therefore a question nobody could answer without knowing which system names to add up — which is
 /// exactly what the first cut of <c>typhon.subscriptions.track.p99</c> did, by summing every scheduler system whose name began with <c>Subscriptions</c>.
 /// That works until an application declares a system with the same prefix, and it silently reports the wrong number rather than failing. This class is the
@@ -54,7 +51,7 @@ internal enum SubscriptionsStage
 internal sealed class SubscriptionsTelemetry
 {
     /// <summary>How many stages a per-tick record holds.</summary>
-    public const int StageCount = 5;
+    public const int StageCount = 4;
 
     /// <summary>How many ticks of history the ring keeps. A power of two so the index is a mask, and more than a second at any sane rate.</summary>
     public const int Depth = 256;

@@ -1,22 +1,20 @@
 using NUnit.Framework;
 using System;
-using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime;
 
 /// <summary>
-/// The <c>Sphere</c> observer: interest bounded by a radius around the session's own viewpoint, resolved through the engine's spatial index.
+/// The <c>Sphere</c> observer: a session holds the entities within a radius of its own viewpoint, and nothing else.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>What this is for.</b> Until it existed every session watched everything its profile's archetypes contained, whatever the profile was called. A
-/// "player" profile that names fewer archetypes is still a whole-world view, so every per-session cost measured through one described a client no game
-/// would ever have: two hundred such sessions performed close to three hundred thousand entity visits to deliver thirteen thousand records.
+/// <b>What a session holds is geometry.</b> An entity is held when it lies within the radius of the session's anchor and its cell has been delivered to
+/// the session; nothing is stored per (session, entity). These cases read what the CLIENT holds after its fill, through the frames it was actually sent.
 /// </para>
 /// <para>
-/// <b>The assertions are counts and memberships, never timings.</b> "The sphere narrows interest" is a claim about which entities are watched, and it is
-/// checked by reading the watched set back. A wall-clock assertion would measure the box.
+/// <b>The assertions are counts and memberships, never timings.</b> "The sphere narrows what a session holds" is checked by reading the client's replica
+/// back against the arithmetic count of grid points inside the disc.
 /// </para>
 /// </remarks>
 [TestFixture]
@@ -32,6 +30,9 @@ class SphereObserverTests : TestBase<SphereObserverTests>
     private const int CreatureCount = 1600;
 
     private const double Radius = 45d;
+
+    /// <summary>Ticks after which every cell a disc reaches has been delivered.</summary>
+    private const int FillTicks = 6;
 
     private DatabaseEngine SetupEngine() => ProjectionTestSchema.SetupEngine(ServiceProvider);
 
@@ -53,17 +54,13 @@ class SphereObserverTests : TestBase<SphereObserverTests>
     /// <summary>A square grid of point entities, so the count inside a radius is arithmetic rather than a guess.</summary>
     private static void Populate(DatabaseEngine dbe)
     {
-        using (var tx = dbe.CreateQuickTransaction())
+        using var tx = dbe.CreateQuickTransaction();
+        for (var i = 0; i < CreatureCount; i++)
         {
-            for (var i = 0; i < CreatureCount; i++)
-            {
-                tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(PointAt(i % Columns * Spacing, i / Columns * Spacing)));
-            }
-
-            tx.Commit();
+            tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(PointAt(i % Columns * Spacing, i / Columns * Spacing)));
         }
 
-        dbe.WriteTickFence(1);
+        tx.Commit();
     }
 
     /// <summary>How many of the spawned grid points lie within <paramref name="radius"/> of a centre.</summary>
@@ -83,146 +80,144 @@ class SphereObserverTests : TestBase<SphereObserverTests>
         return inside;
     }
 
-    /// <summary>
-    /// A placed session watches what is near it and nothing else, and the count matches the geometry.
-    /// </summary>
+    /// <summary>Runs the fill: enough ticks, every frame delivered, for every cell a disc reaches to have been delivered.</summary>
+    private static void Fill(FrameHarness harness, params SessionId[] sessions)
+    {
+        for (var tick = 1; tick <= FillTicks; tick++)
+        {
+            harness.RunTick(tick);
+            foreach (var session in sessions)
+            {
+                harness.Deliver(session);
+            }
+        }
+    }
+
+    private static int Held(FrameHarness harness, SessionId session) =>
+        harness.Replica(session).NetIds(harness.CatalogPlan.ArchetypeByName(nameof(ProjCreature)).Idx).Length;
+
+    /// <summary>A placed session holds what is near it and nothing else, and the count matches the geometry.</summary>
     /// <remarks>
-    /// The comparison is against the arithmetic answer rather than against a recorded number, so the test states the property — interest is the disc — rather
-    /// than pinning whatever the implementation happened to return the day it was written. The slack is one-sided and small: a cluster's slots are all tested
-    /// individually by the narrowphase, so a hit outside the disc would be a defect, while a miss inside it can only come from an entity the spatial index
-    /// has not yet been told about.
+    /// The comparison is against the arithmetic answer rather than against a recorded number, so the test states the property — a session holds the disc —
+    /// rather than pinning whatever the implementation happened to return the day it was written.
     /// </remarks>
     [Test]
     [VerifiesRule("SUB-16")]
-    public void APlacedSessionWatchesTheDiscAroundItAndNothingElse()
+    public void APlacedSessionHoldsTheDiscAroundItAndNothingElse()
     {
         var dbe = SetupEngine();
         Populate(dbe);
 
-        using var harness = InterestHarness.Create(dbe, DeclareSphere, nameof(APlacedSessionWatchesTheDiscAroundItAndNothingElse));
-        var sessions = harness.OpenSessions(1, "near");
-        harness.RunPass(1);
-        harness.CreateRequestedBlocks();
-
+        using var harness = FrameHarness.Create(dbe, DeclareSphere, nameof(APlacedSessionHoldsTheDiscAroundItAndNothingElse));
+        harness.RunFence = true;
+        var session = harness.OpenSessions(1, "near")[0];
         var centre = new Vector3D(200d, 200d, 0d);
-        Assert.That(harness.Sessions.SetViewpoint(sessions[0], centre), Is.True, "a just-opened session can be placed");
+        Assert.That(harness.Sessions.SetViewpoint(session, centre), Is.True, "a just-opened session can be placed");
 
-        harness.RunPass(2);
-        harness.CreateRequestedBlocks();
-        harness.RunPass(3);
+        Fill(harness, session);
 
-        var plan = harness.PlanIndex(nameof(ProjCreature));
-        var watched = harness.WatchedSlotCount(plan);
+        var held = Held(harness, session);
         var expected = PointsWithin(centre.X, centre.Y, Radius);
 
         Assert.Multiple(() =>
         {
             Assert.That(expected, Is.GreaterThan(0).And.LessThan(CreatureCount / 4),
                 "the fixture must put a meaningful minority of the world inside the disc, or it proves nothing about narrowing");
-            Assert.That(watched, Is.EqualTo(expected),
-                $"a session at {centre.X},{centre.Y} with radius {Radius} should watch the {expected} grid points inside that disc, not {watched}");
+            Assert.That(held, Is.EqualTo(expected),
+                $"a session at {centre.X},{centre.Y} with radius {Radius} should hold the {expected} grid points inside that disc, not {held}");
         });
     }
 
-    /// <summary>The same world, the same profile shape, but a World observer: every entity is watched, which is what the sphere is measured against.</summary>
+    /// <summary>The same world, a World observer: every entity is held, which is what the sphere is measured against.</summary>
     [Test]
     [VerifiesRule("SUB-16")]
-    public void AWorldObserverOverTheSameEntitiesWatchesAllOfThem()
+    public void AWorldObserverOverTheSameEntitiesHoldsAllOfThem()
     {
         var dbe = SetupEngine();
         Populate(dbe);
 
-        using var harness = InterestHarness.Create(dbe, DeclareWorld, nameof(AWorldObserverOverTheSameEntitiesWatchesAllOfThem));
-        harness.OpenSessions(1, "world");
-        harness.RunPass(1);
-        harness.CreateRequestedBlocks();
-        harness.RunPass(2);
+        using var harness = FrameHarness.Create(dbe, DeclareWorld, nameof(AWorldObserverOverTheSameEntitiesHoldsAllOfThem),
+            new SubscriptionsOptions { MaxSessions = 16, EnterBudgetPerFrame = CreatureCount });
+        harness.RunFence = true;
+        var session = harness.OpenSessions(1, "world")[0];
 
-        var plan = harness.PlanIndex(nameof(ProjCreature));
-        Assert.That(harness.WatchedSlotCount(plan), Is.EqualTo(harness.LiveEntityCount(plan)),
-            "the World observer watches everything, which is the cost the Sphere observer exists to avoid");
+        Fill(harness, session);
+
+        Assert.That(Held(harness, session), Is.EqualTo(CreatureCount), "the World observer holds everything, which is the cost the Sphere avoids");
     }
 
-    /// <summary>
-    /// Two sessions placed apart watch different entities, which is what makes per-session interest worth resolving at all.
-    /// </summary>
+    /// <summary>Two sessions placed apart hold different entities, which is what makes a per-session region worth anything at all.</summary>
     /// <remarks>
     /// Without this, a sphere that silently ignored the viewpoint and returned the whole world would still pass the count test above if the radius happened
-    /// to cover everything. Two disjoint discs cannot both be the whole world, so this is what discriminates "bounded by the radius" from "bounded at all".
+    /// to cover everything. Two disjoint discs cannot both be the whole world, so this discriminates "bounded by the radius" from "bounded at all".
     /// </remarks>
     [Test]
     [VerifiesRule("SUB-16")]
-    public void TwoSessionsPlacedApartWatchDisjointSets()
+    public void TwoSessionsPlacedApartHoldDisjointSets()
     {
         var dbe = SetupEngine();
         Populate(dbe);
 
-        using var harness = InterestHarness.Create(dbe, DeclareSphere, nameof(TwoSessionsPlacedApartWatchDisjointSets));
+        using var harness = FrameHarness.Create(dbe, DeclareSphere, nameof(TwoSessionsPlacedApartHoldDisjointSets));
+        harness.RunFence = true;
         var sessions = harness.OpenSessions(2, "near");
-        harness.RunPass(1);
-        harness.CreateRequestedBlocks();
-
         harness.Sessions.SetViewpoint(sessions[0], new Vector3D(50d, 50d, 0d));
         harness.Sessions.SetViewpoint(sessions[1], new Vector3D(330d, 330d, 0d));
 
-        harness.RunPass(2);
-        harness.CreateRequestedBlocks();
-        harness.RunPass(3);
+        Fill(harness, sessions);
 
-        var plan = harness.PlanIndex(nameof(ProjCreature));
-        var watched = harness.WatchedSlotCount(plan);
-        var union = PointsWithin(50d, 50d, Radius) + PointsWithin(330d, 330d, Radius);
+        var creature = harness.CatalogPlan.ArchetypeByName(nameof(ProjCreature)).Idx;
+        var first = harness.Replica(sessions[0]).NetIds(creature);
+        var second = harness.Replica(sessions[1]).NetIds(creature);
 
         Assert.Multiple(() =>
         {
-            Assert.That(union, Is.LessThan(CreatureCount / 2), "two discs this far apart cannot cover the world, or the fixture proves nothing");
-            Assert.That(watched, Is.EqualTo(union),
-                $"the two sessions together should watch {union} entities — their two discs — and not the whole world");
+            Assert.That(first, Has.Length.EqualTo(PointsWithin(50d, 50d, Radius)), "the first session holds its own disc");
+            Assert.That(second, Has.Length.EqualTo(PointsWithin(330d, 330d, Radius)), "the second session holds its own disc");
+            Assert.That(first, Has.No.AnyOf(second), "two discs this far apart share no entity");
         });
     }
 
-    /// <summary>
-    /// A session nobody placed watches nothing, rather than everything near the origin.
-    /// </summary>
+    /// <summary>A session nobody placed holds nothing, rather than everything near the origin.</summary>
     /// <remarks>
-    /// A default position is a legal world position, so an implementation that could not tell "never placed" from "placed at zero" would give every unplaced
-    /// session a disc around the origin. In this fixture the origin is populated, so that mistake would show up as a session watching entities it was never
-    /// pointed at — which in a real world means an application that forgot to place its sessions ships a subtly wrong view instead of an obviously empty one.
+    /// A default position is a legal world position, so an implementation that could not tell "never placed" from "placed at zero" would give every
+    /// unplaced session a disc around the origin. In this fixture the origin is populated, so that mistake would show up as a client holding entities it was
+    /// never pointed at.
     /// </remarks>
     [Test]
     [VerifiesRule("SUB-16")]
-    public void AnUnplacedSessionWatchesNothing()
+    public void AnUnplacedSessionHoldsNothing()
     {
         var dbe = SetupEngine();
         Populate(dbe);
 
-        using var harness = InterestHarness.Create(dbe, DeclareSphere, nameof(AnUnplacedSessionWatchesNothing));
-        harness.OpenSessions(1, "near");
-        harness.RunPass(1);
-        harness.CreateRequestedBlocks();
-        harness.RunPass(2);
+        using var harness = FrameHarness.Create(dbe, DeclareSphere, nameof(AnUnplacedSessionHoldsNothing));
+        harness.RunFence = true;
+        var sessions = harness.OpenSessions(2, "near");
+        var unplaced = sessions[0];
 
-        var plan = harness.PlanIndex(nameof(ProjCreature));
+        // The control: a session placed at the origin, which must hold the origin's disc — so a pipeline that delivered nothing at all fails here.
+        var control = sessions[1];
+        harness.Sessions.SetViewpoint(control, new Vector3D(0d, 0d, 0d));
+
+        Fill(harness, sessions);
+
         Assert.Multiple(() =>
         {
             Assert.That(PointsWithin(0d, 0d, Radius), Is.GreaterThan(0), "the origin must be populated, or this test cannot fail");
-            Assert.That(harness.WatchedSlotCount(plan), Is.Zero, "a session that was never placed is nowhere, not at the origin");
+            Assert.That(Held(harness, control), Is.EqualTo(PointsWithin(0d, 0d, Radius)), "a session placed at the origin holds the origin's disc");
+            Assert.That(Held(harness, unplaced), Is.Zero, "a session that was never placed is nowhere, not at the origin");
         });
     }
 
     /// <summary>A profile whose observers have different shapes is refused, rather than resolved as some union of them.</summary>
-    /// <remarks>
-    /// It builds ONE profile with two shapes on the same builder. An earlier version of this declared two SEPARATE profiles and asserted that nothing
-    /// threw, which tests the opposite of its own name: declaring a World profile beside a Sphere profile is ordinary and always worked, so that
-    /// assertion could only have failed if something unrelated broke.
-    /// </remarks>
     [Test]
     public void AProfileMixingObserverShapesIsRefused()
     {
         var dbe = SetupEngine();
 
         Assert.That(
-            () => InterestHarness.Create(dbe, subs =>
+            () => FrameHarness.Create(dbe, subs =>
             {
                 ProjectionTestSchema.DeclareCreature(subs);
                 subs.Profile("mixed", p =>
@@ -232,7 +227,7 @@ class SphereObserverTests : TestBase<SphereObserverTests>
                     p.Sphere(Radius).Of<ProjCreature>();
                 });
             }, nameof(AProfileMixingObserverShapesIsRefused)),
-            Throws.TypeOf<NotSupportedException>(),
+            Throws.TypeOf<NotSupportedException>().With.Message.Contains("observers"),
             "a profile with a World observer and a Sphere observer is a near/far tier, and the tiers differ in budget, rate and record kind — resolving "
             + "them as one union would be a quiet wrong answer");
     }

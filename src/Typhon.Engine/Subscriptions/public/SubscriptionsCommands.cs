@@ -46,7 +46,7 @@ public readonly struct ClientCommand<T> where T : unmanaged
 /// <para>
 /// <b>Order within a session is the contract; order between sessions is not.</b> A session is drained by exactly one worker, which appends its records to that
 /// worker's own segment in arrival order, so walking the segments preserves each client's order without preserving any order between clients — which nothing
-/// needs (SUB-08, foundation/05 § 4.2).
+/// needs (SUB-08, archive/Subscriptions/foundation/05 § 4.2).
 /// </para>
 /// <para>
 /// <b>Nothing here allocates.</b> The batch is a view over the drain's buffers; the enumerator is a struct whose <c>Current</c> is a reference to its own
@@ -319,6 +319,41 @@ public sealed class SubscriptionsCommands
     /// </remarks>
     public bool Place(SessionId session, Vector3D position) => _ingress.Sessions.SetViewpoint(session, position);
 
+    /// <summary>
+    /// Tells the engine that the entity in <paramref name="slot"/> of <paramref name="cluster"/> changed something a client sees (ADR-067: replication is
+    /// explicit).
+    /// </summary>
+    /// <param name="cluster">The cluster the system is iterating.</param>
+    /// <param name="slot">The entity's slot.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>A mark, not a send.</b> One interlocked OR into a per-cluster bitmap the fence already drains; duplicates are free. After the fence the entity is
+    /// encoded once, compared against what was last encoded (so a spurious push costs an encode and no wire), and fanned out to the sessions around it.
+    /// </para>
+    /// <para>
+    /// <b>The contract is the developer's.</b> A change that is never pushed is never sent. Spawns, destroys and <c>WriteSpatial</c> moves are pushed by the
+    /// engine; a component written through <c>GetSpan</c> or <c>EntityRef</c> is not. A no-op for an archetype no push profile observes.
+    /// </para>
+    /// </remarks>
+    public void Replicate<TArchetype>(in ClusterRef<TArchetype> cluster, int slot) where TArchetype : class
+    {
+        if ((uint)slot < 64u)
+        {
+            cluster.NotePushed(1UL << slot);
+        }
+    }
+
+    /// <summary><see cref="Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/> for a set of slots of one cluster.</summary>
+    /// <param name="cluster">The cluster.</param>
+    /// <param name="slots">The slots, as a mask.</param>
+    public void Replicate<TArchetype>(in ClusterRef<TArchetype> cluster, ulong slots) where TArchetype : class
+    {
+        if (slots != 0UL)
+        {
+            cluster.NotePushed(slots);
+        }
+    }
+
     /// <summary>Every session that is open right now, for an application that has to touch all of them — placing their observers, most of it.</summary>
     public OpenSessionView OpenSessions => new(_ingress.Sessions);
 
@@ -327,195 +362,23 @@ public sealed class SubscriptionsCommands
     /// <returns>The kind.</returns>
     public string SessionKindOf(SessionId session) => _ingress.Sessions.SessionKind(session);
 
-    /// <summary>
-    /// Last tick: how many interest cells the broad phase resolved, and how many sessions were served from a resolution somebody else paid for.
-    /// </summary>
-    /// <returns>The cells resolved and the sessions shared.</returns>
-    /// <remarks>
-    /// <b>A diagnostic, and the one the cell-keyed broad phase is judged by.</b> Its whole benefit is that co-located observers resolve once, so a
-    /// deployment whose sessions never share a cell pays the grouping's sort and gets nothing back — and no timing comparison can tell that case from a
-    /// design that does not work, because both look like "no change". Reading it is how an operator, or a measurement, tells them apart.
-    /// <para>
-    /// <b>Cumulative since start, and it was per tick until a zero from it was believed.</b> Sampled after a load generator disconnects, the per-tick
-    /// form read "0 cells, 0 sessions" and was written up as the grouping failing at the density where it matters most. There were simply no sessions
-    /// left to group. See the note at the reset site in <c>InterestPass</c>.
-    /// </para>
-    /// </remarks>
-    public (long Cells, long SessionsShared) InterestSharing =>
-        _ingress.Interest == null ? (0L, 0L) : (_ingress.Interest.CellsResolved, _ingress.Interest.SessionsShared);
-
-    /// <summary>
-    /// How many frames since start were built as a difference against the session's previous tick, and how many walked the whole view (15 § 3.2).
-    /// </summary>
-    /// <remarks>
-    /// <b>Cumulative, as <see cref="InterestSharing"/> now is.</b> It exists for the same reason: a measurement showing no change means "the
-    /// difference does not pay" or "the difference never happened", and those call for opposite next steps. A ratio near zero is the second.
-    /// </remarks>
-    public (long Difference, long Full) GatherShape =>
-        _ingress.Frames == null ? (0L, 0L) : (_ingress.Frames.TemporalGathers, _ingress.Frames.FullGathers);
-
-    /// <summary>Hit slots the difference read, and hit slots it carried forward without reading, since start (15 § 3.2).</summary>
-    public (long Visited, long Carried) GatherSlots => _ingress.Frames == null ? (0L, 0L) : _ingress.Frames.TemporalSlots;
-
-    /// <summary>Blocks the projection pass read, and blocks it declined because their cluster was dormant, since start.</summary>
-    /// <remarks>
-    /// The second number is zero unless the application enabled cluster dormancy, which is what makes the pair readable: a projection cost that did not
-    /// move means one thing if nothing was declined and the opposite if most of it was.
-    /// </remarks>
     /// <summary>Clusters asleep across every replicated archetype, refreshed by each read of <see cref="ProjectionBlocks"/>. A diagnostic.</summary>
     public int SleepingClusters;
 
-    /// <summary>Why the incremental path fell back to the full walk: reset, forced, incomplete view, or behind by more
-    /// than one tick.</summary>
-    public (long Reset, long Forced, long Incomplete, long Behind) FullGatherCauses =>
-        _ingress.Frames == null ? default : _ingress.Frames.FullGatherCauses;
-
-    /// <summary>What the reduced gather's visited slots were made of: newly entered, named by the change mask, owed by an earlier frame.</summary>
-    public (long Entered, long Changed, long Owed) VisitParts => _ingress.Frames == null ? default : _ingress.Frames.VisitParts;
-
-    /// <summary>ENTER and LEAVE records published since start, beside the enters the per-frame budget deferred.</summary>
+    /// <summary>ENTER and LEAVE records published since start.</summary>
     /// <remarks>
-    /// <b>The ratio separates a view still filling from one being re-told what it already knew</b>, and the two want opposite fixes. Enters far above
-    /// leaves is a queue draining, and it drains faster with a larger budget. Enters and leaves in step, at a rate far above what the world actually
-    /// spawns and moves, is the same entities crossing the interest boundary and crossing back — there a larger budget spends more wire on the same
-    /// entities arriving again. Read it beside <see cref="ViewFill"/>, which says whether the client's world is still growing.
+    /// Enters far above leaves is a view still filling. Enters and leaves in step, at a rate far above what the world actually spawns and moves, is the same
+    /// entities crossing the observers' boundary and crossing back.
     /// </remarks>
-    public (long Entered, long Left, long Deferred) EnterFlow => _ingress.Frames == null ? default : _ingress.Frames.EnterFlow;
-
-    /// <summary>Mean entities a client holds, and mean enters still owed to it, over the frames that published.</summary>
-    public (double Known, double Owed, long Frames) ViewFill => _ingress.Frames == null ? default : _ingress.Frames.ViewFill;
-
-    /// <summary>Where the interest stage's time has gone since start, in microseconds. Needs <c>MeasureInterestPhases</c>.</summary>
-    public (double BroadUs, double NarrowUs, double FlushUs) InterestPhases =>
-        _ingress.Interest == null ? default : _ingress.Interest.InterestPhases;
-
-    /// <summary>The interest bookkeeping the phases leave out, and the resolved groups' total, in microseconds. Needs <c>MeasureInterestPhases</c>.</summary>
-    public (double InteriorUs, double RetainUs, double CloseUs, double GroupUs) InterestBookkeeping =>
-        _ingress.Interest == null ? default : _ingress.Interest.InterestBookkeeping;
-
-    /// <summary>How much of the interest answer has been what the sessions already held, since start.</summary>
-    public (long RunsUnchanged, long RunsTotal, long SessionsCoherent, long SessionsTotal) InterestCoherence =>
-        _ingress.Interest == null ? default : _ingress.Interest.InterestCoherence;
-
-    /// <summary>Clusters whose bounds moved per tick, against the active clusters there were — slice 5's gating quantity.</summary>
-    public (long Moved, long Active, long Ticks) AabbChurn
-    {
-        get
-        {
-            var states = _ingress.Interest?.ReplicationStates;
-            long m = 0, a = 0, t = 0;
-            if (states != null)
-            {
-                for (var i = 0; i < states.Length; i++)
-                {
-                    var cs = states[i]?.ClusterState;
-                    if (cs == null)
-                    {
-                        continue;
-                    }
-
-                    m += cs.AabbMovedClusters;
-                    a += cs.AabbMovedActiveClusters;
-                    t += cs.AabbMovedTicks;
-                }
-            }
-
-            return (m, a, t);
-        }
-    }
-
-    /// <summary>
-    /// The changed-cluster list's census: clusters named, ticks published, ticks that degraded to "all", and the stopwatch ticks spent publishing.
-    /// </summary>
-    /// <remarks>
-    /// <b>Slice 1 ships a measurement, and this is it.</b> 9.2 % of watched SLOTS change per tick (20 § 3.1); the CLUSTER figure is what decides
-    /// whether gating the projection pass on it is worth building, and it was unknown. Cumulative, for the reason 18 § 8.4 records.
-    /// </remarks>
-    public (long Named, long Ticks, long CoverAll, long StopwatchTicks) ChangedClusterCensus
-    {
-        get
-        {
-            var states = _ingress.Interest?.ReplicationStates;
-            long named = 0, ticks = 0, coverAll = 0, sw = 0;
-            if (states != null)
-            {
-                for (var i = 0; i < states.Length; i++)
-                {
-                    var cs = states[i]?.ClusterState;
-                    if (cs == null)
-                    {
-                        continue;
-                    }
-
-                    named += cs.ChangedFromSlots + cs.ChangedFromProcess;
-                    ticks += cs.ChangedPublishedTicks;
-                    coverAll += cs.ChangedCoverAllTicks;
-                    sw += cs.ChangedPublishStopwatchTicks;
-                }
-            }
-
-            return (named, ticks, coverAll, sw);
-        }
-    }
-
-    /// <summary>Cluster runs accepted whole against runs the disc clipped, and the slots each accounted for.</summary>
-        /// <summary>Why cell sharing did or did not happen: ungroupable sessions, keyed sessions, the viewpoint span and the interest cell side.</summary>
-    public (long Ungroupable, long Keyed, double SpanX, double SpanY, double CellSide) GroupingDiagnostic =>
-        _ingress.Interest == null ? default : _ingress.Interest.GroupingDiagnostic;
-
-    /// <summary>How a session's cluster set turns over: first seen since its last published frame, carried, and departed. Since start.</summary>
-    public (long FirstSeen, long Carried, long Departed) RunFlow =>
-        _ingress.Interest == null ? default : _ingress.Interest.RunFlow;
-
-    /// <summary>Occupied slots in clusters wholly inside the enter radius, beside those in clusters the disc clips. Cluster-granularity path only.</summary>
-    public (long Interior, long Boundary) ClusterContainment =>
-        _ingress.Interest == null ? default : _ingress.Interest.ClusterContainment;
-
-    /// <summary>Slots the projection addressed, and the subset it named as changed, since start.</summary>
-    public (long Addressed, long Changed) ProjectionSlots =>
-        _ingress.Interest == null ? default : _ingress.Interest.ProjectionSlots;
-
-    /// <summary>
-    /// How far the OBSERVERS moved: steps compared, total displacement in millimetres, and placed session-ticks seen.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>The quantity every enter and leave rate is a consequence of.</b> An observer advancing <c>d</c> in a tick sweeps about <c>2Rd</c> of area out of
-    /// the back of its disc, so at a known density the entities it must drop are arithmetic, and a churn figure read without it is a number with no
-    /// expected value beside it.
-    /// </para>
-    /// <para>
-    /// <b>It is the counter that found the SWG demo binding its sessions to an unstable iteration order.</b> The viewpoints were moving 118.8 m per tick
-    /// against the 0.1 m a player covers at 50 Hz, and every symptom read as an engine fault — an enter-to-leave ratio of 1.05, an enter backlog that
-    /// never drained, leaves naming entities that had not moved — followed from it. Nothing else in the track reported observer speed, so nothing else
-    /// could tell a busy world from a teleporting camera.
-    /// </para>
-    /// </remarks>
-    public (long Steps, long Millimetres, long Placed) ObserverMotion =>
-        _ingress.Interest == null ? default : _ingress.Interest.ObserverMotion;
-
-    /// <summary>Session-ticks whose viewpoint did not move at all.</summary>
-    public long ObserverStationary => _ingress.Interest == null ? 0L : _ingress.Interest.ObserverStationary;
-
-    /// <summary>Runs a session re-emitted from its maintained topology without running the kernel.</summary>
-    public long TopologyRunsRetained => _ingress.Interest == null ? 0L : _ingress.Interest.TopologyRunsRetained;
-
-    /// <summary>Why the leaves were sent: geometry, a reissued identity, or the known-set sweep — beside what the interest pass merely stopped reaching.</summary>
-    public (long Considered, long Interest, long Stale, long Swept) LeaveCauses => _ingress.Frames == null ? default : _ingress.Frames.LeaveCauses;
+    public (long Entered, long Left) EnterFlow => _ingress.Frames == null ? default : _ingress.Frames.EnterFlow;
 
     /// <summary>Replication entries carried from one cluster to another since start, summed over every archetype.</summary>
-    /// <remarks>
-    /// <b>A relocation is invisible to the world and loud on the wire.</b> The entity did not move and nothing about it changed, but it now sits in a
-    /// different cluster — so a session that watches the source and not the destination is told the entity LEFT, and one that watches the destination and
-    /// not the source is told it ENTERED. Only a session holding both suppresses the pair. Read against <see cref="LeaveCauses"/>: if the two rates track,
-    /// the churn belongs to whatever relocates entities rather than to observers moving.
-    /// </remarks>
     public long EntriesMigrated
     {
         get
         {
             var total = 0L;
-            var states = _ingress.Interest?.ReplicationStates;
+            var states = _ingress.ReplicationStates;
             for (var i = 0; states != null && i < states.Length; i++)
             {
                 total += states[i] == null ? 0 : states[i].EntriesMigrated;
@@ -525,13 +388,13 @@ public sealed class SubscriptionsCommands
         }
     }
 
-    /// <summary>Network identities minted, released and reused since start — the denominator for <see cref="LeaveCauses"/>'s stale term.</summary>
+    /// <summary>Network identities minted, released and reused since start.</summary>
     /// <remarks>Every archetype shares one allocator, so the first non-null state answers for all of them.</remarks>
     public (long Minted, long Released, long Reused) IdentityFlow
     {
         get
         {
-            var states = _ingress.Interest?.ReplicationStates;
+            var states = _ingress.ReplicationStates;
             for (var i = 0; states != null && i < states.Length; i++)
             {
                 if (states[i] != null)
@@ -544,149 +407,12 @@ public sealed class SubscriptionsCommands
         }
     }
 
-    /// <summary>Distinct clusters every cell's broad phase reached, against the entity candidates it collected from them.</summary>
-    public long BroadClustersReached => _ingress.Interest == null ? 0L : _ingress.Interest.BroadClustersReached;
-
-    /// <summary>Cluster radius (box half-diagonal), mean and largest, against the grid cell hosting clusters and the interest cell.</summary>
-    public (double MeanRadius, double MaxRadius, double GridCellSide, double InterestCellSide, long Samples) ClusterSize =>
-        _ingress.Interest == null ? default : _ingress.Interest.ClusterSize;
-
-    /// <summary>What moving members' views were made of: clusters wholly inside (admitted whole, or tested), partly inside, and those partial ones' entities.</summary>
-    public (long AdmittedWhole, long TestedWhole, long Partial, long PartialInside, long PartialTotal) ViewShape =>
-        _ingress.Interest == null ? default : _ingress.Interest.ViewShape;
-
-    /// <summary>Live slots the broad phase reached, and those whose structure changed this tick.</summary>
-    public (long Reached, long Changed) BroadSlots => _ingress.Interest == null ? default : _ingress.Interest.BroadSlots;
-
-    /// <summary>Runs a moving member's view retained in one sequential pass instead of a probe each.</summary>
-    public long RunsRetainedByView => _ingress.Interest == null ? 0L : _ingress.Interest.RunsRetainedByView;
-
-    /// <summary>Runs sparse sessions did not emit, and the content runs synthesized for them from the changed-block tables.</summary>
-    public (long Skipped, long Synthetic) SparseTopology =>
-        _ingress.Interest == null ? default : (_ingress.Interest.SparseRunsSkipped, _ingress.Interest.Frames?.SyntheticRuns ?? 0L);
-
-    /// <summary>The interest stage's parallel shape per tick: span, summed busy, slowest chunk, start spread, heaviest group and its size, serial prologue.</summary>
-    public (double SpanMs, double BusyMs, double MaxChunkMs, double StartSpreadMs, double HeaviestGroupMs, double HeaviestGroupMembers, double PrologueMs) InterestSpan =>
-        _ingress.Interest == null ? default : _ingress.Interest.ChunkSpan;
-
-    /// <summary>
-    /// The interest stage's shape, cumulative since start (design 23, phase 0): ticks folded, wall and summed busy, the heaviest group and how late it
-    /// started, chunks that did almost nothing, distinct threads that ran chunks, and the snapshot claims that read a cluster's page privately because
-    /// another worker was filling it. Durations in <see cref="System.Diagnostics.Stopwatch"/> ticks.
-    /// </summary>
-    public (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads,
-        long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) InterestStageShape =>
-        _ingress.Interest?.StageShape ?? default;
-
-    /// <summary>Copies the interest stage's cumulative log2 histogram of group microseconds (16 buckets) into <paramref name="into"/>.</summary>
-    /// <param name="into">At least 16 elements.</param>
-    public void CopyInterestGroupHistogram(Span<long> into) => _ingress.Interest?.CopyGroupHistogram(into);
-
     /// <summary>The send path, measured while phase timing is on — see <c>SendPump.SendPath</c>.</summary>
     public (double WakeMsPerPublish, double WokenPerPublish, double QueueDelayUs, double SendUs, long SendsSync, long SendsAsync) SendPath =>
         _ingress.SendPump == null ? default : _ingress.SendPump.SendPath;
 
     /// <summary>Frames and bytes handed to links since start.</summary>
     public (long Frames, long Bytes) SendTotals => _ingress.SendPump == null ? default : (_ingress.SendPump.FramesSent, _ingress.SendPump.BytesSent);
-
-    /// <summary>Clusters opened to fill the shared snapshot, against those read from it.</summary>
-    public (long Opens, long Reads) SnapshotUse => _ingress.Interest == null ? default : _ingress.Interest.SnapshotUse;
-
-    /// <summary>Clusters the broad phase reached whose structure changed.</summary>
-    public long BroadClustersStructureChanged => _ingress.Interest == null ? 0L : _ingress.Interest.BroadClustersStructureChanged;
-
-    /// <summary>Entity candidates every cell's broad phase collected.</summary>
-    public long EntityCandidatesCollected => _ingress.Interest == null ? 0L : _ingress.Interest.EntityCandidatesCollected;
-
-    /// <summary>Span handouts the projected-component mask dropped, against those it let through.</summary>
-    public (long Suppressed, long Admitted) SpanClaims => _ingress.Interest == null ? default : _ingress.Interest.SpanClaims;
-
-    /// <summary>Clusters an interest cell admitted whole, and the entity reads that avoided.</summary>
-    public (long Clusters, long EntitiesSkipped) InteriorAdmission =>
-        _ingress.Interest == null ? default : _ingress.Interest.InteriorAdmission;
-
-    /// <summary>
-    /// Runs referenced rather than encoded, the records they carried, the clusters that offered one and could not be shared, and the records the
-    /// projection encoded once (17 § 18).
-    /// </summary>
-    public (long Runs, long Records, long Refused, long Built) SharedRuns
-    {
-        get
-        {
-            if (_ingress.Frames == null)
-            {
-                return default;
-            }
-
-            var use = _ingress.Frames.SharedRunUse;
-            var built = 0L;
-            var states = _ingress.Interest?.ReplicationStates;
-            if (states != null)
-            {
-                for (var i = 0; i < states.Length; i++)
-                {
-                    built += states[i] == null ? 0 : states[i].SharedRunRecords;
-                }
-            }
-
-            return (use.Runs, use.Records, use.Refused, built);
-        }
-    }
-
-    /// <summary>Clusters that published a shared cluster run, and why the others did not (17 § 18).</summary>
-    public (long Published, long Released, long Init, long NoChange) SharedRunSkips
-    {
-        get
-        {
-            var states = _ingress.Interest?.ReplicationStates;
-            var t = (0L, 0L, 0L, 0L);
-            if (states != null)
-            {
-                for (var i = 0; i < states.Length; i++)
-                {
-                    if (states[i] == null)
-                    {
-                        continue;
-                    }
-
-                    var s = states[i].SharedRunSkips;
-                    t = (t.Item1 + s.Published, t.Item2 + s.Released, t.Item3 + s.Init, t.Item4 + s.NoChange);
-                }
-            }
-
-            return t;
-        }
-    }
-
-    /// <summary>Why a run with something to say did not reference shared bytes (17 § 18).</summary>
-    public (long Gated, long NoRun, long NotReached) SharedRunMisses =>
-        _ingress.Frames == null ? default : _ingress.Frames.SharedRunMisses;
-
-    /// <summary>
-    /// Slots the projection named as changed, against the records the frame stage actually emitted — Layer 4's sharing ratio.
-    /// </summary>
-    public (long ChangedSlots, long Records) ShareCensus
-    {
-        get
-        {
-            if (_ingress.Frames == null)
-            {
-                return default;
-            }
-
-            var changed = 0L;
-            var states = _ingress.Interest?.ReplicationStates;
-            if (states != null)
-            {
-                for (var i = 0; i < states.Length; i++)
-                {
-                    changed += states[i] == null ? 0 : states[i].ChangedSlotsPublished;
-                }
-            }
-
-            return (changed, _ingress.Frames.RecordsEncoded);
-        }
-    }
 
     /// <summary>Mean microseconds a subscriptions chunk spends entering its epoch, and how many chunks were measured.</summary>
     public (double MeanUs, long Chunks) EpochEnter
@@ -704,10 +430,10 @@ public sealed class SubscriptionsCommands
     public (double SpanMs, double BusyMs, double Concurrency, double StartSpreadMs) FrameSpan => _ingress.Frames == null ? default : _ingress.Frames.ChunkSpan;
 
     /// <summary>
-    /// The projection stage's serial blocks step per tick, split into block creation, parked-entry drain and the watched-block gather, and its parallel
+    /// The projection stage's serial blocks step per tick, split into the push-set preparation, the parked-entry drain and the push marks, and its parallel
     /// busy time per tick, in ms. Zero unless phase timing is on.
     /// </summary>
-    public (double Create, double Drain, double Gather, double Busy) ProjectPrologueMs
+    public (double Prepare, double Drain, double Mark, double Busy) ProjectPrologueMs
     {
         get
         {
@@ -729,23 +455,21 @@ public sealed class SubscriptionsCommands
     /// <summary>The frame stage's effective worker count and parallel efficiency; zero unless phase timing is on.</summary>
     public (double Effective, double Efficiency, long Ticks) FrameBalance => _ingress.Frames == null ? default : _ingress.Frames.ChunkBalance;
 
-    /// <summary>Interest runs the gather walked, and how many of them had nothing to say.</summary>
-    public (long Walked, long Empty) GatherRunShape => _ingress.Frames == null ? default : _ingress.Frames.GatherShape;
-
-    /// <summary>Retained slots read in full because the block's change mask named another tick, and the runs that caused it.</summary>
-    public (long Slots, long Runs) StaleMask => _ingress.Frames == null ? default : _ingress.Frames.StaleMask;
-
     /// <summary>The frame stage's phases, in ms of CPU summed over workers since start. All zero unless phase timing was enabled.</summary>
-    public (double Gather, double Select, double Sweep, double Sort, double Encode, double Publish) FramePhases =>
+    public (double Gather, double Sort, double Encode, double Publish) FramePhases =>
         _ingress.Frames == null ? default : _ingress.Frames.PhaseMilliseconds;
 
     /// <summary>Blocks the projection pass read, and blocks it declined because their cluster was dormant, since start.</summary>
+    /// <remarks>
+    /// The second number is zero unless the application enabled cluster dormancy, which is what makes the pair readable: a projection cost that did not
+    /// move means one thing if nothing was declined and the opposite if most of it was.
+    /// </remarks>
     public (long Projected, long Dormant) ProjectionBlocks
     {
         get
         {
             SleepingClusters = 0;
-            var states = _ingress.Interest?.ReplicationStates;
+            var states = _ingress.ReplicationStates;
             if (states == null)
             {
                 return (0L, 0L);
@@ -828,9 +552,9 @@ public sealed class SubscriptionsCommands
     /// system decides what that means. Treating it as malformed input would let one stale reference close a connection.
     /// </para>
     /// <para>
-    /// <b>The known-set half of this check is not built yet.</b> 01-model § 7 requires that a client can only target what it was shown, which needs the
-    /// per-session known-set that P1-13a builds. Today the identity must merely be live and bound, so a client that guesses a valid netId is not refused for
-    /// it. That gap is stated here rather than hidden: the clause is added where the known-set arrives, and nothing above this line has to change for it.
+    /// <b>The "was shown" half of this check is not built.</b> 01-model § 7 requires that a client can only target what it was shown. What a session holds is
+    /// geometric (SUB-16), so the check is a distance and a delivered-cell test against the session's anchor, and it is not made here: today the identity
+    /// must merely be live and bound, so a client that guesses a valid netId is not refused for it. The gap is stated rather than hidden.
     /// </para>
     /// </remarks>
     public bool TryResolve(SessionId session, uint netId, out EntityId entity)

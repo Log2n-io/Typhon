@@ -1,24 +1,29 @@
 ---
 uid: concept-subscription
 title: 'Subscription'
-description: 'Engine state replicated outward to remote clients, with per-client interest and typed commands coming back. Under construction.'
+description: 'Engine state replicated outward to remote clients, each seeing what lies around it, with typed commands coming back.'
 ---
 
 # Subscription
 
 > **In one line:** engine state replicated outward to remote clients, and their typed commands drained back into the tick.
 
-When the consumer of engine state is remote — a connected game client, a browser, another process — a subscription is what carries it there and keeps it current, so a client can mirror "the characters near my camera" without re-querying and without the application writing change detection, encoding or networking.
+When the consumer of engine state is remote — a connected game client, a browser, another process — a subscription is what carries it
+there and keeps it current, so a client can mirror "the characters near my player" without re-querying and without the application
+writing encoding or networking.
 
-The application declares what each archetype exposes and who sees what. The engine does the rest: per-client interest, change detection, quantized encoding, sessions, backpressure, and an inbound path for typed commands that enter the tick and are validated by ordinary systems. Clients decode against a catalog rather than against C# type layouts, so renaming a type is not a wire break, and a browser is as much a client as a native one.
-
-> 🚧 **Under construction.** The foundation is in the engine — replication state sized by the watched set, a track between the tick fence and the flush, network identities, per-session ingress rings — but there is no public API yet. Track [#205](https://github.com/Log2n-io/Typhon/issues/205).
+The application declares what each archetype exposes and which profile a session follows — the whole world, or a radius around a point
+the application places — and it says, after each write it wants seen, that the entity changed (`Replicate`). The engine does the rest:
+it compares and encodes each changed entity once, gives every session the changes around it, fills a new view cell by cell, catches a
+lagging session up from a short log, and drains typed commands from clients into the next tick, where ordinary systems validate and apply
+them. Clients decode against a catalog rather than against C# type layouts, so a browser is as much a client as a native one.
 
 ## How it relates
 
-- **[View](xref:concept-view)** — replication reads the same delta machinery, but from declared projections rather than from a published view.
-- **[Query](xref:concept-query)** — the underlying question a projection answers.
-- **[System](xref:concept-system)** — replication runs on its own engine track: compute after the [tick](xref:concept-tick) fence, publish after the flush.
+- **[System](xref:concept-system)** — systems say what they changed; replication runs on its own engine track: compute after the
+  [tick](xref:concept-tick) fence, publish after the flush.
+- **[Query](xref:concept-query)** — a profile is a standing spatial question, answered per session from geometry rather than re-queried.
+- **[View](xref:concept-view)** — a later phase publishes shared views to subscribed clients; today replication reads declared projections.
 
 ## Learn & use
 

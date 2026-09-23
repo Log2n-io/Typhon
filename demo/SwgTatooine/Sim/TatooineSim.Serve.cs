@@ -52,27 +52,17 @@ public sealed partial class TatooineSim
             CostBasedChunking = _config.CostBasedChunking,
             EnableParallelFence = _config.ParallelFence,
 
-            // --subs-pipeline. Every other field of the options is left at its default: this is the one the A/B moves, and moving a second one would make the
-            // two arms differ in more than the thing being measured.
+            // --subs-pipeline and --subs-mode. Every other field of the options is left at its default: these are the ones an A/B moves, and moving another
+            // would make the two arms differ in more than the thing being measured.
             Subscriptions = new SubscriptionsOptions
             {
                 CollapseBelowWorkUnits = _config.SubscriptionsCollapseWorkUnits,
-                CellKeyedInterest = _config.SubscriptionsCellKeyedInterest,
-                IncrementalInterest = _config.SubscriptionsIncrementalInterest,
-                OwedSlotCarry = _config.SubscriptionsOwedSlotCarry,
-                OwedSliceMultiplier = _config.SubscriptionsOwedSlice,
-                GatherPrefetch = _config.SubscriptionsGatherPrefetch,
-                MeasureInterestPhases = _config.SubscriptionsInterestPhases,
-                SparseTopology = _config.SubscriptionsSparse,
-                GateProjectionOnChanges = _config.SubscriptionsContentGate,
-                InterestGroupCap = _config.SubscriptionsGroupCap,
-                DynamicFrameScheduling = _config.SubscriptionsDynamicSchedule,
-                SharedClusterBlocks = _config.SubscriptionsSharedClusterBlocks,
+                AllowAutomaticPushDetection = _config.SubscriptionsPushAutomatic,
             },
         });
 
         // Before Start, because the catalog a client negotiates against is compiled there and the declarations are its source.
-        TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsHysteresis);
+        TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
 
         _runtime.OnTickAborted += (_, outcome)
             => Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}'");

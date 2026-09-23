@@ -3,23 +3,35 @@
   "catalogHash": "6f0303c3e60363df",
   "frames": [
     {
+      "tick": 1,
+      "flags": 1,
+      "calls": [
+        "beginTick 1",
+        "beginEntities ProjCreature",
+        "enter 50",
+        "enter 51",
+        "enter 52",
+        "enter 53",
+        "enter 54",
+        "beginEntities ProjPlayer",
+        "enter 107",
+        "enter 108",
+        "beginEntities ProjRock",
+        "enter 155",
+        "enter 156",
+        "enter 157",
+        "endTick"
+      ]
+    },
+    {
       "tick": 2,
       "flags": 1,
       "calls": [
         "beginTick 2",
         "beginEntities ProjCreature",
-        "enter 114",
-        "enter 115",
-        "enter 116",
-        "enter 117",
-        "enter 118",
-        "beginEntities ProjPlayer",
-        "enter 139",
-        "enter 140",
-        "beginEntities ProjRock",
-        "enter 155",
-        "enter 156",
-        "enter 157",
+        "segment 52",
+        "segment 53",
+        "segment 54",
         "endTick"
       ]
     },
@@ -29,9 +41,11 @@
       "calls": [
         "beginTick 3",
         "beginEntities ProjCreature",
-        "segment 116",
-        "segment 117",
-        "segment 118",
+        "state 50 0x02",
+        "state 51 0x02",
+        "state 52 0x02",
+        "state 53 0x02",
+        "state 54 0x02",
         "endTick"
       ]
     },
@@ -41,39 +55,25 @@
       "calls": [
         "beginTick 4",
         "beginEntities ProjCreature",
-        "state 114 0x02",
-        "state 115 0x02",
-        "state 116 0x02",
-        "state 117 0x02",
-        "state 118 0x02",
+        "enter 32",
+        "leave 53",
+        "leave 54",
         "endTick"
       ]
     },
     {
       "tick": 5,
-      "flags": 1,
+      "flags": 3,
       "calls": [
         "beginTick 5",
         "beginEntities ProjCreature",
         "enter 32",
-        "leave 117",
-        "leave 118",
-        "endTick"
-      ]
-    },
-    {
-      "tick": 6,
-      "flags": 3,
-      "calls": [
-        "beginTick 6",
-        "beginEntities ProjCreature",
-        "enter 32",
-        "enter 114",
-        "enter 115",
-        "enter 116",
+        "enter 50",
+        "enter 51",
+        "enter 52",
         "beginEntities ProjPlayer",
-        "enter 139",
-        "enter 140",
+        "enter 107",
+        "enter 108",
         "beginEntities ProjRock",
         "enter 155",
         "enter 156",

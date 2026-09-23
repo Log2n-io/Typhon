@@ -359,7 +359,6 @@ internal sealed unsafe class SessionTable : IDisposable
             row->Resumable = 0;
             row->BytesPerSecond = limits.BytesPerSecond;
             row->MaxObservers = Resolve(limits.MaxObservers, _options.ObserversPerSession);
-            row->MaxKnownEntities = Resolve(limits.MaxKnownEntities, _options.KnownEntitiesPerSession);
             row->FrameBytes = Resolve(limits.FrameBytes, _options.FrameBytes);
             row->ClientMessageBytes = Resolve(limits.ClientMessageBytes, _options.ClientMessageBytes);
             row->Controlled = EntityId.Null;
@@ -1487,9 +1486,6 @@ internal struct SessionRow
     /// <summary>How many observers this session may hold.</summary>
     public int MaxObservers;
 
-    /// <summary>The largest known-set it may hold, resolved against the operator's ceiling.</summary>
-    public int MaxKnownEntities;
-
     /// <summary>The largest frame it may be sent, resolved against the operator's ceiling.</summary>
     public int FrameBytes;
 
@@ -1499,8 +1495,8 @@ internal struct SessionRow
     /// <summary>The entity this session controls, or <see cref="EntityId.Null"/>.</summary>
     public EntityId Controlled;
 
-    // The declared fields total 48 bytes; Size pads to a full cache line. The tail is deliberate headroom for the per-session state later slices add — a
-    // known-set handle, a frame slot, the skip counters — so that adding one does not silently take a session across two lines.
+    // Size pads the declared fields to a full cache line. The tail is deliberate headroom for the per-session state later slices add, so that adding
+    // one does not silently take a session across two lines.
 
     /// <summary>The identity occupying this slot, packed. Zero when free. A view onto <see cref="Gate"/>, which is where it lives.</summary>
     public readonly uint IdValue => (uint)Gate;
@@ -1537,7 +1533,6 @@ internal readonly struct SessionRowView
         State = Volatile.Read(ref row->State);
         BytesPerSecond = row->BytesPerSecond;
         MaxObservers = row->MaxObservers;
-        MaxKnownEntities = row->MaxKnownEntities;
         FrameBytes = row->FrameBytes;
         ClientMessageBytes = row->ClientMessageBytes;
         Controlled = row->Controlled;
@@ -1568,9 +1563,6 @@ internal readonly struct SessionRowView
 
     /// <summary>How many observers this session may hold.</summary>
     public int MaxObservers { get; }
-
-    /// <summary>The largest known-set it may hold, resolved against the operator's ceiling.</summary>
-    public int MaxKnownEntities { get; }
 
     /// <summary>The largest frame it may be sent, resolved against the operator's ceiling.</summary>
     public int FrameBytes { get; }

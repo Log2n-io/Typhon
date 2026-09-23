@@ -121,8 +121,8 @@ internal sealed class SessionIngress
 /// <remarks>
 /// <para>
 /// <b>Where the two threads meet is the ring and nowhere else.</b> The transport side validates, decodes, rate-limits and frames; the tick side drains,
-/// coalesces and indexes. The ring is the whole interface between them (foundation/05), which is why neither side takes a lock on the hot path and why a late
-/// tick can never make a network thread wait.
+/// coalesces and indexes. The ring is the whole interface between them (archive/Subscriptions/foundation/05), which is why neither side takes a lock on
+/// the hot path and why a late tick can never make a network thread wait.
 /// </para>
 /// <para>
 /// <b>Records carry a small header of their own inside the ring's framing</b> — <c>u16 wireIdx | u16 seq | u32 clientTick</c>, then the decoded command. The
@@ -136,13 +136,10 @@ internal sealed class SubscriptionsIngress : IDisposable
     internal const ushort AckRecordMarker = 0xFFFF;
 
     /// <summary>
-    /// The interest pass, for diagnostics only. Set by the runtime once both exist.
+    /// The per-archetype replication states, for diagnostics only. Set by the runtime once both exist, so <see cref="SubscriptionsCommands"/> can report
+    /// projection and migration counts without the application reaching into an internal type. Nothing on the tick path reads it.
     /// </summary>
-    /// <remarks>
-    /// It is here so that <see cref="SubscriptionsCommands"/> can report how much of the interest resolution was shared without the application reaching
-    /// into an internal type. Nothing on the tick path reads it.
-    /// </remarks>
-    internal InterestPass Interest;
+    internal ArchetypeReplicationState[] ReplicationStates;
 
     /// <summary>The frame assembler, for diagnostics only. Set by the runtime once both exist; nothing on the tick path reads it.</summary>
     internal FrameAssembler Frames;
@@ -374,11 +371,11 @@ internal sealed class SubscriptionsIngress : IDisposable
         ReturnRetiredRings();
 
         // Closes a transport thread asked for become real closes, then this tick's lifecycle batch is published — both before any application system runs,
-        // which is what lets an app react to an Opened or a Closed with an ordinary transaction in the same tick (foundation/05 § 4.2).
+        // which is what lets an app react to an Opened or a Closed with an ordinary transaction in the same tick (archive/Subscriptions/foundation/05 § 4.2).
         _sessions.ApplyPendingCloses();
 
         // What last tick's systems asked for, applied before the table publishes this tick's open set — so a profile bound in an Opened handler is in force
-        // for the first interest pass that can see the session, rather than one tick later.
+        // for the first frame that can see the session, rather than one tick later.
         Requests.Apply(_sessions);
 
         _sessions.BeginTick();
@@ -858,6 +855,15 @@ internal sealed class SubscriptionsIngressExecSystem : ChunkedCallbackSystem<Sub
 
         try
         {
+            // The shadow oracle's check runs HERE — after last tick's frames were published and before this tick's fence moves any
+            // replication entry. Anywhere later compares the clients against entries a migration has already carried or parked.
+            var push = ctx.Subscriptions.Push;
+            if (push != null && push.Shadow)
+            {
+                // Blocks are replication's own native memory and the active list is an array: no page is read, so no epoch is needed.
+                push.RunQueuedShadowChecks();
+            }
+
             return ingress.BeginTick(ctx);
         }
         catch (Exception e)

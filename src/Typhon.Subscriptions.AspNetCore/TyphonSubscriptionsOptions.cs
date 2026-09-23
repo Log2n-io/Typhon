@@ -31,8 +31,8 @@ public sealed class TyphonSubscriptionsOptions
 
     /// <summary>How often the endpoint sends a WebSocket ping frame. Default: 15 s.</summary>
     /// <remarks>
-    /// Set explicitly because the framework's default is two minutes, which is long enough that a client whose network vanished holds a session slot, a
-    /// known-set and an ingress ring for that whole time. It is the transport's liveness check, under the protocol's own <c>PING</c>, and the two answer
+    /// Set explicitly because the framework's default is two minutes, which is long enough that a client whose network vanished holds a session slot, its
+    /// frames and an ingress ring for that whole time. It is the transport's liveness check, under the protocol's own <c>PING</c>, and the two answer
     /// different questions: this one notices a dead TCP connection, the protocol's notices a client that is alive but no longer applying frames.
     /// </remarks>
     public TimeSpan KeepAliveInterval { get; set; } = TimeSpan.FromSeconds(15);

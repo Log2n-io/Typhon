@@ -16,7 +16,7 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions;
 /// <remarks>
 /// <para>
 /// <b>The differential is the whole point.</b> The collapsed shape exists to remove two of the critical path's three worker wake/barrier cycles
-/// (<c>design/Subscriptions/foundation/03-subscriptions-track.md § 4</c>). An optimization that also changed a byte of what a client receives would not be an
+/// (<c>archive/Subscriptions/foundation/03-subscriptions-track.md § 4</c>). An optimization that also changed a byte of what a client receives would not be an
 /// optimization; it would be a second replication implementation with half the test coverage. So the assertion is the strongest one available: the two shapes
 /// produce the same frames, message for message, byte for byte.
 /// </para>
@@ -47,14 +47,11 @@ class CollapsePathTests : TestBase<CollapsePathTests>
     private const int RockCount = 96;
 
     /// <summary>
-    /// <b>One, and that is a finding rather than a convenience.</b> The interest stage partitions over the tick's sessions —
-    /// <c>min(workers, tickSessionCount)</c> (<c>InterestPass.BeginTick</c>) — and a watched block is claimed by whichever worker's
-    /// <c>Interlocked.Or</c> reaches it first, into THAT worker's arena. With two sessions and four workers the gathered block order therefore depends on a
-    /// race, the projection's chunk assignment follows it, and the netId each entity is leased follows that. Nothing there is wrong: netIds are opaque, every
-    /// frame is still sorted ascending by netId, and each frame is internally consistent. But it means two runs of the SAME shape do not agree byte for byte,
-    /// so a byte-level differential over two runs cannot be built on top of it. With one session the interest stage prepares exactly one chunk, one arena
-    /// claims every block, and everything downstream — the block list, the per-chunk netId leases, the record order — is determined. The projection stage
-    /// still runs on as many chunks as there are workers, which is where the collapse could plausibly break something.
+    /// <b>One, and that is a finding rather than a convenience.</b> With several sessions, which worker gathers which session — and so the order in which
+    /// frames reach the pool — follows timing. Nothing there is wrong: netIds are opaque, every frame is still sorted ascending by netId, and each frame is
+    /// internally consistent. But a byte-level differential over two runs needs a run that is determined, and with one session the frame side is.
+    /// <see cref="TheHarnessIsDeterministic_TwoStagedRunsAgree"/> is what proves the whole run is, rather than this comment. The projection stage still runs
+    /// on as many chunks as there are workers, which is where the collapse could plausibly break something.
     /// </summary>
     private const int SessionCount = 1;
     private const string Profile = "god-world";
@@ -443,7 +440,8 @@ class CollapsePathTests : TestBase<CollapsePathTests>
     {
         WorkerCount = workerCount,
         BaseTickRate = TickRateHz,
-        Subscriptions = new SubscriptionsOptions { CollapseBelowWorkUnits = collapseWorkUnits },
+        // Byte-exact comparisons across runs and shapes: the projection must map blocks to chunks the same way every time.
+        Subscriptions = new SubscriptionsOptions { CollapseBelowWorkUnits = collapseWorkUnits, DeterministicProjection = true },
     });
 
     private static void Declare(SubscriptionsRegistry subs)

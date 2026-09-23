@@ -11,7 +11,7 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions;
 
 /// <summary>
 /// P1-14b — the send side: the thresholds of <see cref="SkipPolicy"/>, and the end-to-end path
-/// <c>design/Subscriptions/09-phase1-build-plan.md § 5</c> calls step 2, where a client receives <c>ENTITIES</c> from a live runtime.
+/// <c>archive/Subscriptions/09-phase1-build-plan.md § 5</c> calls step 2, where a client receives <c>ENTITIES</c> from a live runtime.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -20,7 +20,7 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions;
 /// live case proves the bytes actually leave.
 /// </para>
 /// <para>
-/// <b>The live case is the one that would have caught a missing wire.</b> Everything below the handshake — the interest pass, the projection, the frame
+/// <b>The live case is the one that would have caught a missing wire.</b> Everything below the handshake — the push pipeline, the projection, the frame
 /// assembler, the hand-off, the gate, the pump — is exercised by asserting on one thing a test cannot fake: a <c>TICK</c> message arriving on the link with an
 /// entity in it.
 /// </para>
@@ -286,7 +286,7 @@ class SendPumpTests : TestBase<SendPumpTests>
             Assert.That(frames, Is.GreaterThan(0),
                 $"no TICK reached the link. produced={subscriptions.Frames.FramesProduced} skipped={subscriptions.Frames.FramesSkipped} "
                 + $"sent={subscriptions.SendPump.FramesSent} failures={subscriptions.SendPump.SendFailures} open={subscriptions.Sessions.OpenCount} "
-                + $"tickSessions={subscriptions.Interest.TickSessionCount} committed={subscriptions.Frames.Gate.CommittedTick} "
+                + $"committed={subscriptions.Frames.Gate.CommittedTick} "
                 + $"watched={State(subscriptions).WatchedClusterCount} projectedBlocks={State(subscriptions).BlocksProjected} "
                 + $"slots={State(subscriptions).SlotsProjected} records={State(subscriptions).RecordsProduced}");
             Assert.That(entities, Is.GreaterThan(0), "TICK frames arrived but carried no entity: the world was never projected into them");

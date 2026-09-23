@@ -38,8 +38,42 @@ public sealed class ProfileBuilder
     }
 
     /// <summary>
+    /// Who says this profile's entities changed (ADR-067). Default <see cref="PushDetection.Explicit"/>: the application, by calling
+    /// <see cref="SubscriptionsCommands.Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/> after each replicated write.
+    /// </summary>
+    /// <param name="detection">The mode. <see cref="PushDetection.Automatic"/> is refused unless
+    /// <see cref="SubscriptionsOptions.AllowAutomaticPushDetection"/> is set.</param>
+    /// <returns>This builder.</returns>
+    /// <remarks>
+    /// An entity is projected only when it is pushed — by the application, or by the engine for a spawn, a destroy, a <c>WriteSpatial</c>, a migration or a
+    /// client still extrapolating it — and a session learns about it from its own geometry rather than from a per-session known-set.
+    /// </remarks>
+    public ProfileBuilder Detection(PushDetection detection)
+    {
+        _profile.PushDetection = detection;
+        return this;
+    }
+
+    /// <summary>
+    /// Serves this profile's sessions one tick in <paramref name="ticks"/>, staggered by session; each frame carries everything since the session's last
+    /// one, replayed from the push log.
+    /// </summary>
+    /// <param name="ticks">1, 2 or 4.</param>
+    /// <returns>This builder.</returns>
+    public ProfileBuilder Every(int ticks)
+    {
+        if (ticks is not (1 or 2 or 4))
+        {
+            throw new ArgumentOutOfRangeException(nameof(ticks), ticks, "A profile is served every 1, 2 or 4 ticks.");
+        }
+
+        _profile.TickDivisor = ticks;
+        return this;
+    }
+
+    /// <summary>
     /// Everything, of the archetypes named with <see cref="ObserverBuilder.Of{TArchetype}"/>. For a tool, a viewer bot, or a world small enough that the whole
-    /// of it is the interesting part; sessions holding only this and fully synced are byte-identical, so the engine encodes one frame for all of them.
+    /// of it is the interesting part. Cells are delivered in grid order behind one cursor, then every event of the tick.
     /// </summary>
     /// <returns>The observer's builder.</returns>
     public ObserverBuilder World() => _profile.Add(new ObserverDeclaration(ObserverKind.World));
@@ -48,11 +82,12 @@ public sealed class ProfileBuilder
     /// A radius around a point, an entity, or the session's controlled entity.
     /// </summary>
     /// <param name="radius">The enter radius, in metres.</param>
-    /// <param name="leave">The leave radius, in metres — larger than <paramref name="radius"/>. Zero leaves the hysteresis band to the engine.</param>
+    /// <param name="leave">The leave radius, in metres — larger than <paramref name="radius"/>. Zero: no band.</param>
     /// <returns>The observer's builder.</returns>
     /// <remarks>
     /// The two radii are not a refinement: an entity hovering on one boundary would enter and leave every tick, and every re-entry costs a full enter record.
-    /// Hysteresis is what makes the cost of jitter zero instead of unbounded. <b>Declared now, built in Phase 2.</b>
+    /// Hysteresis is what makes the cost of jitter zero instead of unbounded. <b>A leave radius is declared now and refused at <c>Start</c>: Phase 2 builds
+    /// it.</b>
     /// </remarks>
     public ObserverBuilder Sphere(double radius, double leave = 0)
     {
@@ -129,6 +164,12 @@ public sealed class ProfileDeclaration
     /// it; a session's own <see cref="SessionLimits.MaxObservers"/> is enforced at admission, not here.
     /// </summary>
     public int MaxObservers { get; private set; } = SessionLimits.DefaultMaxObservers;
+
+    /// <summary>Who signals a change for this profile's archetypes. See <see cref="ProfileBuilder.Detection"/>.</summary>
+    public PushDetection PushDetection { get; internal set; }
+
+    /// <summary>This profile's sessions are served one tick in this many. See <see cref="ProfileBuilder.Every"/>.</summary>
+    public int TickDivisor { get; internal set; } = 1;
 
     /// <inheritdoc/>
     public override string ToString() => $"{Name}: {_observers.Count} observer(s)";

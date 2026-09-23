@@ -310,6 +310,13 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     }
 
     /// <summary>
+    /// Records that <paramref name="slots"/> of this cluster have something a push-served client must be told. Rides the
+    /// membership signal (<see cref="ArchetypeClusterState.NoteStructureSlots"/>), which the fence drains and publishes every tick for a replicated archetype.
+    /// </summary>
+    /// <param name="slots">The slots.</param>
+    internal readonly void NotePushed(ulong slots) => _state?.NoteStructureSlots(_chunkId, slots);
+
+    /// <summary>
     /// Tight AABB of all entities in this cluster, in <b>world</b> coordinates. Returns the empty sentinel (min = +inf, max = -inf) when the archetype has
     /// no spatial index, or when the cluster is not attached to a cell. For 2D archetypes, MinZ/MaxZ are ±infinity sentinels — use MinX/MinY/MaxX/MaxY only.
     /// </summary>
