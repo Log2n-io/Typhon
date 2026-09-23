@@ -226,6 +226,80 @@ public static class TatooineReplication
     private static (double InDispatchMs, double IdleMs, double ParkedMs, long Parks, long Backstops, long Spells, long Wakes) IdleFrom;
     private static long IdleTickFrom;
     private static (double ActiveMs, double TickWallMs, long Ticks, int Workers) _utilFrom;
+
+    /// <summary>
+    /// Per system over the report window, from the scheduler's telemetry ring: its span per tick, the worker time summed over its chunks, and how much of
+    /// the pool that span left unused (span × pool − work). A span with idle workers can still be overlapped by a DAG sibling, so the unused figure is an
+    /// upper bound on what the system wastes, not a measure of it.
+    /// </summary>
+    private static void ReportSystemEfficiency()
+    {
+        var ring = Scheduler.Telemetry;
+        var systems = Scheduler.Systems;
+        var pool = Math.Max(1, Scheduler.WorkerCount);
+        var span = new double[systems.Length];
+        var work = new double[systems.Length];
+        var chunks = new long[systems.Length];
+        var ran = new int[systems.Length];
+        var first = Math.Max(IdleTickFrom, ring.OldestAvailableTick);
+        var ticks = 0;
+        var wall = 0d;
+        for (var t = first; t <= ring.NewestTick; t++)
+        {
+            ref readonly var tick = ref ring.GetTick(t);
+            if (tick.ActualDurationMs <= 0f)
+            {
+                continue;
+            }
+
+            ticks++;
+            wall += tick.ActualDurationMs;
+            var metrics = ring.GetSystemMetrics(t);
+            for (var i = 0; i < metrics.Length && i < systems.Length; i++)
+            {
+                if (metrics[i].WasSkipped)
+                {
+                    continue;
+                }
+
+                span[i] += metrics[i].DurationUs;
+                work[i] += metrics[i].WorkUs;
+                chunks[i] += metrics[i].WorkersTouched;
+                ran[i]++;
+            }
+        }
+
+        if (ticks == 0)
+        {
+            return;
+        }
+
+        var order = new int[systems.Length];
+        for (var i = 0; i < order.Length; i++)
+        {
+            order[i] = i;
+        }
+
+        Array.Sort(order, (a, b) => span[b].CompareTo(span[a]));
+        var line = new System.Text.StringBuilder();
+        line.Append($"  system efficiency over {ticks} ticks ({wall / ticks:F2} ms/tick, pool {pool}): name span/work ms per tick, chunks, eff, unused worker-ms");
+        for (var k = 0; k < Math.Min(14, order.Length); k++)
+        {
+            var i = order[k];
+            if (ran[i] == 0)
+            {
+                continue;
+            }
+
+            var s = span[i] / 1000d / ticks;
+            var w = work[i] / 1000d / ticks;
+            var c = (double)chunks[i] / ran[i];
+            var eff = s <= 0 ? 0 : w * 100d / (s * pool);
+            line.Append($"\n    {systems[i].Name,-34} span {s,6:F3} work {w,7:F3} chunks {c,5:F1} eff {eff,5:F1} % unused {(s * pool) - w,7:F2}");
+        }
+
+        Console.Error.WriteLine(line.ToString());
+    }
     private static long SendWindowFrom, SendFramesFrom, SendBytesFrom, SendAllocFrom, SendItemsFrom;
     private static (long Ticks, long SpanTicks, long BusyTicks, long HeaviestTicks, long HeaviestStartTicks, long PhantomChunks, long Threads,
         long PrivateReads, long Fills, long Reads, long ActiveClusters, long Prefills, long PrefillTicks) ShapeFrom;
@@ -416,6 +490,11 @@ public static class TatooineReplication
                         $"  worker utilization: {active / uTicks:F2} ms active per tick over {wall / uTicks:F2} ms tick wall, "
                         + $"{(wall <= 0 ? 0 : active * 100d / (wall * wu.Workers)):F1} % of {wu.Workers} workers");
                 }
+            }
+
+            if (Scheduler != null && SendWindowFrom != 0)
+            {
+                ReportSystemEfficiency();
             }
 
             if (Scheduler != null)

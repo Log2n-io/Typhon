@@ -227,6 +227,7 @@ internal sealed unsafe class PushReplication
     /// <summary>The frame stage's encode plans, whose group tick slots decide what an update carries.</summary>
     public void AttachEncodePlans(ArchetypeEncodePlan[] plans) => _encodePlans = plans;
 
+
     // Per archetype, this tick's push set's blocks, parallel to _pushChunks — looked up once in PrepareBlocks.
     private readonly nint[][] _pushBlocks;
 
@@ -824,8 +825,18 @@ internal sealed unsafe class PushReplication
     }
 
     /// <summary>After the watched lists were reset: marks the push set and lists each block once, so the projection pass visits exactly it.</summary>
-    public void MarkPushed(int workers)
+    public void MarkPushed(int workers, bool countInProject = false)
     {
+        // The parallel index (BeginParallelIndex): the projection's chunks count their events into the shared per-cell counts as they finish, so those
+        // start from zero here, before any chunk runs.
+        _countInProject = countInProject && ParallelIndex;
+        _indexedTick = uint.MaxValue;
+        if (_countInProject)
+        {
+            Array.Clear(_cellStart);
+            Array.Clear(_cellPrimaryEnd);
+        }
+
         foreach (var a in _pushIndices)
         {
             var state = _states[a];
@@ -1083,8 +1094,163 @@ internal sealed unsafe class PushReplication
         slot.CellCount = nonEmpty;
         slot.Tick = _tick;
         slot.Valid = true;
+        _indexedTick = _tick;
 
         IndexTicks += Stopwatch.GetTimestamp() - from;
+    }
+
+    /// <summary>
+    /// PROTOTYPE — the index is built in parallel (<c>TYPHON_PUSH_PARALLEL_INDEX=0</c> keeps <see cref="BuildIndex"/>, serial in the frame prologue, for the
+    /// A/B): counted by the projection's chunks, offset here, placed by one chunk per worker list.
+    /// </summary>
+    public bool ParallelIndex = Environment.GetEnvironmentVariable("TYPHON_PUSH_PARALLEL_INDEX") != "0";
+
+    private bool _countInProject;
+    private uint _indexedTick = uint.MaxValue;
+
+    /// <summary>Whether this tick's index is built, so the frame prologue does not build it again.</summary>
+    public bool Indexed => _indexedTick == _tick;
+
+    /// <summary>
+    /// Called by a projection chunk once its blocks are done: counts its worker's events into the shared per-cell counts — primaries under their cell,
+    /// secondaries under the cell a mover left. Atomic, because every chunk counts into the same cells; the events are still in this core's cache.
+    /// </summary>
+    public void CountWorker(int worker)
+    {
+        if (!_countInProject || (uint)worker >= (uint)_events.Length)
+        {
+            return;
+        }
+
+        const byte both = PushEvent.HasNew | PushEvent.HasOld;
+        var list = _events[worker];
+        var n = _eventCount[worker];
+        for (var i = 0; i < n; i++)
+        {
+            ref readonly var e = ref list[i];
+            Interlocked.Increment(ref _cellStart[e.Cell]);
+            if ((e.Flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
+            {
+                Interlocked.Increment(ref _cellPrimaryEnd[(e.OldCy * _gridW) + e.OldCx]);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The parallel index's serial half, after every projection chunk has counted: the fence's orphans, the offsets and the log's compact cell list. Returns
+    /// how many placement chunks follow — one per worker list — or 0 when the projection did not count this tick and the frame prologue builds it instead.
+    /// </summary>
+    public int BeginParallelIndex()
+    {
+        if (!_countInProject || _events.Length == 0)
+        {
+            return 0;
+        }
+
+        var from = Stopwatch.GetTimestamp();
+        const byte both = PushEvent.HasNew | PushEvent.HasOld;
+
+        // The fence's orphans ride worker 0's list, counted here: nothing else is running.
+        for (var i = 0; i < _orphanCount; i++)
+        {
+            var n = _eventCount[0];
+            if (n == _events[0].Length)
+            {
+                Array.Resize(ref _events[0], n * 2);
+            }
+
+            ref readonly var e = ref _orphans[i];
+            _events[0][n] = e;
+            _eventCount[0] = n + 1;
+            _cellStart[e.Cell]++;
+            if ((e.Flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
+            {
+                _cellPrimaryEnd[(e.OldCy * _gridW) + e.OldCx]++;
+            }
+        }
+
+        _orphanCount = 0;
+        var cells = _gridW * _gridH;
+        var running = 0;
+        var slot = _log[_tick % LogDepth];
+        var nonEmpty = 0;
+        for (var c = 0; c < cells; c++)
+        {
+            var primaries = _cellStart[c];
+            var secondaries = _cellPrimaryEnd[c];
+            _cellStart[c] = running;
+            _cellFill[c] = running;
+            running += primaries;
+            _cellPrimaryEnd[c] = running;
+            _cellSecondaryFill[c] = running;
+            running += secondaries;
+            if (primaries + secondaries != 0)
+            {
+                if (nonEmpty == slot.Cells.Length)
+                {
+                    var grown = Math.Max(64, nonEmpty * 2);
+                    Array.Resize(ref slot.Cells, grown);
+                    Array.Resize(ref slot.Starts, grown + 1);
+                    Array.Resize(ref slot.PrimaryEnds, grown);
+                }
+
+                slot.Cells[nonEmpty] = c;
+                slot.Starts[nonEmpty] = _cellStart[c];
+                slot.PrimaryEnds[nonEmpty] = _cellPrimaryEnd[c];
+                nonEmpty++;
+            }
+        }
+
+        _cellStart[cells] = running;
+        Events += running;
+        if (slot.Events.Length < running)
+        {
+            slot.Events = new PushEvent[Math.Max(running, slot.Events.Length * 2)];
+        }
+
+        if (slot.Starts.Length < nonEmpty + 1)
+        {
+            Array.Resize(ref slot.Starts, nonEmpty + 1);
+        }
+
+        slot.Starts[nonEmpty] = running;
+        slot.CellCount = nonEmpty;
+        slot.Tick = _tick;
+        slot.Valid = true;
+        _indexed = slot.Events;
+        _indexedTick = _tick;
+        IndexTicks += Stopwatch.GetTimestamp() - from;
+        return _events.Length;
+    }
+
+    /// <summary>
+    /// The parallel index's placement, for one worker's list: each event into its cell's next free position, claimed atomically since other lists place
+    /// into the same cells. The order inside a cell follows the race, which nothing reads: a cell's events are folded or tested one by one.
+    /// </summary>
+    public void PlaceWorker(int worker)
+    {
+        if ((uint)worker >= (uint)_events.Length)
+        {
+            return;
+        }
+
+        var from = Stopwatch.GetTimestamp();
+        const byte both = PushEvent.HasNew | PushEvent.HasOld;
+        var list = _events[worker];
+        var n = _eventCount[worker];
+        var indexed = _indexed;
+        for (var i = 0; i < n; i++)
+        {
+            ref readonly var e = ref list[i];
+            indexed[Interlocked.Increment(ref _cellFill[e.Cell]) - 1] = e;
+            if ((e.Flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
+            {
+                // A secondary keeps the PRIMARY cell in Cell, so a session can tell whether it already met this event there.
+                indexed[Interlocked.Increment(ref _cellSecondaryFill[(e.OldCy * _gridW) + e.OldCx]) - 1] = e;
+            }
+        }
+
+        Interlocked.Add(ref IndexTicks, Stopwatch.GetTimestamp() - from);
     }
 
     // ══ Per-session gather (parallel over sessions) ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1532,6 +1698,7 @@ internal sealed unsafe class PushReplication
             Interlocked.Add(ref UpdatesDeferred, Deferred);
             Deferred = 0;
         }
+
         st.PAnchorX = nx;
         st.PAnchorY = ny;
         st.POriginX = nOriginX;
@@ -1979,9 +2146,6 @@ internal sealed unsafe class PushReplication
         EmitUpdate(in merged, scratch, ref updates);
     }
 
-    [ThreadStatic]
-    private static LogTable Far;
-
     // Per worker: updates deferred this session, added to the shared counter once per gather rather than once per update.
     [ThreadStatic]
     private static long Deferred;
@@ -1994,15 +2158,27 @@ internal sealed unsafe class PushReplication
         double farR2, ulong archetypeMask, FrameWorkerScratch scratch, ref long updates)
     {
         Interlocked.Increment(ref FarFlushes);
-        var table = Far ??= new LogTable();
-        table.Clear();
         var minCx = CellX(nx - Radius);
         var maxCx = CellX(nx + Radius);
         var minCy = CellY(ny - Radius);
         var maxCy = CellY(ny + Radius);
-        for (var t = st.LastFarTick + 1; t != _tick + 1; t++)
+
+        var dense = Dense ??= new FarDense();
+        if (++dense.Stamp == 0)
         {
-            var slot = _log[t % LogDepth];
+            Array.Clear(dense.Slots);
+            dense.Stamp = 1;
+        }
+
+        // Newest tick first: the first meeting of an identity is its last event in the disc's cells, and every later one only widens the union.
+        var stamp = dense.Stamp;
+        var slots = dense.Slots;
+        var unique = 0;
+        for (var t = _tick; t != st.LastFarTick; t--)
+        {
+            var logSlot = (int)(t % LogDepth);
+            var slot = _log[logSlot];
+            var events = slot.Events;
             for (var cy = minCy; cy <= maxCy; cy++)
             {
                 var k = LowerBound(slot.Cells, slot.CellCount, (cy * _gridW) + minCx);
@@ -2010,47 +2186,84 @@ internal sealed unsafe class PushReplication
                 {
                     for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
                     {
-                        ref readonly var e = ref slot.Events[i];
+                        ref readonly var e = ref events[i];
                         if ((archetypeMask & (1UL << e.Archetype)) == 0)
                         {
                             continue;
                         }
 
-                        ref var entry = ref table.Find(e.NetId, out var found);
-                        if (!found)
+                        var id = e.NetId;
+                        if (id >= (uint)slots.Length)
                         {
-                            entry = default;
+                            Array.Resize(ref dense.Slots, Math.Max((int)id + 1, slots.Length * 2));
+                            slots = dense.Slots;
                         }
 
-                        entry.Last = e;
-                        entry.Groups |= e.Groups;
-                        entry.Segment |= (e.Flags & PushEvent.Segment) != 0;
+                        var acc = e.Groups | ((e.Flags & PushEvent.Segment) != 0 ? 0x100 : 0);
+                        ref var s = ref slots[id];
+                        if (s.Stamp != stamp)
+                        {
+                            s.Stamp = stamp;
+                            s.Acc = acc;
+                            s.LogSlot = logSlot;
+                            s.Index = i;
+                            if (unique == dense.Ids.Length)
+                            {
+                                Array.Resize(ref dense.Ids, unique * 2);
+                            }
+
+                            dense.Ids[unique++] = id;
+                        }
+                        else
+                        {
+                            s.Acc |= acc;
+                        }
                     }
                 }
             }
         }
 
-        for (var i = 0; i < table.Count; i++)
+        for (var u = 0; u < unique; u++)
         {
-            ref var entry = ref table.Entries[i];
-            ref readonly var e = ref entry.Last;
-            if ((e.Flags & PushEvent.HasNew) == 0 || (entry.Groups == 0 && !entry.Segment))
+            ref readonly var s = ref slots[dense.Ids[u]];
+            if (s.Acc == 0)
             {
                 continue;
             }
 
-            var held = Within(nx, ny, e.NewX, e.NewY, r2) && Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, e.NewCx, e.NewCy));
-            if (!held || Within(nx, ny, e.NewX, e.NewY, farR2))
+            ref readonly var e = ref _log[s.LogSlot].Events[s.Index];
+            if ((e.Flags & PushEvent.HasNew) == 0 || Within(nx, ny, e.NewX, e.NewY, farR2) || !Within(nx, ny, e.NewX, e.NewY, r2)
+                || !Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, e.NewCx, e.NewCy)))
             {
                 continue;
             }
 
             var merged = e;
-            merged.Groups = entry.Groups;
-            merged.Flags = entry.Segment ? (byte)(e.Flags | PushEvent.Segment) : (byte)(e.Flags & ~PushEvent.Segment);
+            merged.Groups = (byte)s.Acc;
+            merged.Flags = (s.Acc & 0x100) != 0 ? (byte)(e.Flags | PushEvent.Segment) : (byte)(e.Flags & ~PushEvent.Segment);
             EmitUpdate(in merged, scratch, ref updates);
         }
     }
+
+    /// <summary>One identity in a worker's dense fold: met in the fold stamped <see cref="Stamp"/>, with the union so far and its last event.</summary>
+    private struct FarSlot
+    {
+        public uint Stamp;
+        public int Acc;
+        public int LogSlot;
+        public int Index;
+    }
+
+    /// <summary>A worker's dense fold, indexed by net id, and the ids met in the current fold.</summary>
+    private sealed class FarDense
+    {
+        public FarSlot[] Slots = new FarSlot[1024];
+        public uint[] Ids = new uint[256];
+        public uint Stamp;
+    }
+
+    [ThreadStatic]
+    private static FarDense Dense;
 
     private static int LowerBound(int[] values, int count, int key)
     {

@@ -443,7 +443,8 @@ class CollapsePathTests : TestBase<CollapsePathTests>
     {
         WorkerCount = workerCount,
         BaseTickRate = TickRateHz,
-        Subscriptions = new SubscriptionsOptions { CollapseBelowWorkUnits = collapseWorkUnits },
+        // Byte-exact comparisons across runs and shapes: the projection must map blocks to chunks the same way every time.
+        Subscriptions = new SubscriptionsOptions { CollapseBelowWorkUnits = collapseWorkUnits, DeterministicProjection = true },
     });
 
     private static void Declare(SubscriptionsRegistry subs)

@@ -309,8 +309,9 @@ sealed unsafe class FrameHarness : IDisposable
             }
         }
 
-        // The pushed slots join the watched lists after the gather reset them, as in the runtime.
-        Subscriptions.Push?.MarkPushed(workers: 1);
+        // The pushed slots join the watched lists after the gather reset them, as in the runtime — and the projection counts its events for the parallel
+        // index, which the push index stage then places (SubscriptionsPushIndexExecSystem).
+        Subscriptions.Push?.MarkPushed(workers: 1, countInProject: true);
 
         for (var a = 0; a < states.Length; a++)
         {
@@ -342,6 +343,18 @@ sealed unsafe class FrameHarness : IDisposable
             finally
             {
                 transientAccessor.Dispose();
+            }
+        }
+
+        // The push index stage: counted by the projection above, offset, then placed one worker list at a time.
+        var push = Subscriptions.Push;
+        if (push != null)
+        {
+            push.CountWorker(0);
+            var lists = push.BeginParallelIndex();
+            for (var w = 0; w < lists; w++)
+            {
+                push.PlaceWorker(w);
             }
         }
     }

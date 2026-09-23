@@ -271,6 +271,15 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>The blocks this tick's interest hits marked, and the list S1 is partitioned over (SUB-13).</summary>
     public WatchedBlockList WatchedBlocks => _watchedBlocks;
 
+    /// <summary>
+    /// The projection's shared block cursor (unless <see cref="SubscriptionsOptions.DeterministicProjection"/>): chunks claim watched blocks from it in small batches instead of a fixed stride, so a worker that
+    /// joins the stage late finds the work already shared out rather than its whole stride waiting for it. The live slot is element
+    /// <see cref="ProjectCursorSlot"/>, alone on its cache line; the rest is padding.
+    /// </summary>
+    internal readonly int[] ProjectCursor = new int[32];
+
+    internal const int ProjectCursorSlot = 16;
+
     private static readonly bool NoOrphanScan = Environment.GetEnvironmentVariable("TYPHON_PUSH_NO_ORPHAN_SCAN") == "1";
 
     /// <summary>PROTOTYPE: the push path, when this archetype is push-served; <see langword="null"/> otherwise.</summary>
@@ -723,6 +732,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     public void BeginProjectTick(int workers)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ProjectCursor[ProjectCursorSlot] = 0;
 
         // The cold estimate is the watched slots, which is an exact upper bound on the identities this tick can need: an entity gets one only when its entry
         // has none, and only a watched slot is ever reached. It sizes the very first refill and nothing after it — see NetIdLeaseSet.BeginTick.

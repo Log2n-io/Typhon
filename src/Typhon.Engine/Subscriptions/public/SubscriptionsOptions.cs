@@ -442,6 +442,16 @@ public sealed class SubscriptionsOptions
     public bool GateProjectionOnChanges { get; init; } = true;
 
     /// <summary>
+    /// Whether the projection gives each chunk a fixed stride of the watched blocks instead of letting chunks claim them from a shared cursor. Off by default:
+    /// with a fixed stride the stage waits for its latest worker's whole share. The price of claiming is reproducibility — which chunk projects a block, and
+    /// so which identity lease names a new entity and where its bytes land, depends on timing. Set it where two runs must produce the same bytes.
+    /// </summary>
+    /// <remarks>
+    /// Measured at d06/1 000, 32 workers, six interleaved pairs: projection 1.18 → 0.98 ms, tick P50 −0.34 ms (6/6); the stage's pool efficiency 64 % → 85 %.
+    /// </remarks>
+    public bool DeterministicProjection { get; init; }
+
+    /// <summary>
     /// PROTOTYPE (ADR-067): whether a push profile may declare <see cref="PushDetection.Automatic"/>. Off: replication is explicit — a system that writes a
     /// replicated value calls <see cref="SubscriptionsCommands.Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/> — and a profile asking for automatic
     /// detection is refused when the runtime starts.

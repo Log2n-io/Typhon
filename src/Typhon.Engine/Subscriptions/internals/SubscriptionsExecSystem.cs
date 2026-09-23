@@ -337,7 +337,9 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         }
 
         // PROTOTYPE (push): after the watched lists were reset by the gather, so the push marks are this tick's.
-        subs.Push?.MarkPushed(Math.Max(1, ctx.WorkerCount));
+        // The index is counted by the projection's chunks unless reproducible bytes are asked for: its order inside a cell follows the race. The collapsed
+        // shape counts too but never places — its frame prologue sees no index for the tick and builds it serially, recounting from zero.
+        subs.Push?.MarkPushed(Math.Max(1, ctx.WorkerCount), countInProject: !subs.Options.DeterministicProjection);
 
         if (timed)
         {
@@ -383,6 +385,7 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 
         var from = FrameAssembler.PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
         ProjectAll(subs, ctx, chunkIndex, chunkCount);
+        subs.Push?.CountWorker(chunkIndex);
         if (from != 0L)
         {
             Interlocked.Add(ref ProjectBusyTicks, Stopwatch.GetTimestamp() - from);
@@ -394,14 +397,15 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         var tick = (uint)ctx.TickNumber;
         var plans = subs.Plans;
         var states = subs.ReplicationStates;
+        var claim = !subs.Options.DeterministicProjection;
         for (var a = 0; a < plans.Length && a < states.Length; a++)
         {
-            ProjectArchetype(plans[a], a, states[a], chunkIndex, chunkCount, tick);
+            ProjectArchetype(plans[a], a, states[a], chunkIndex, chunkCount, tick, claim);
         }
     }
 
     private static void ProjectArchetype(CompiledProjectionPlan plan, int archetypeIndex, ArchetypeReplicationState state, int chunkIndex, int chunkCount,
-        uint tick)
+        uint tick, bool claim)
     {
         var list = state.WatchedBlocks;
         var count = list.Count;
@@ -419,19 +423,32 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         var transientAccessor = transient != null ? transient.CreateChunkAccessor() : default;
         try
         {
-            for (var i = chunkIndex; i < count; i += chunkCount)
+            if (claim)
             {
-                var block = list[i];
-                var chunkId = block->ChunkId;
-                if (chunkId < 0)
+                // Claimed in batches from a shared cursor: whichever chunk is running takes the next blocks, so the stage ends when the work does, not when
+                // the last worker to arrive has finished its stride. The chunk index still names the arena and lease the blocks write into.
+                ref var cursor = ref state.ProjectCursor[ArchetypeReplicationState.ProjectCursorSlot];
+                while (true)
                 {
-                    // The block was released between the mark and here — a cluster that drained. Nothing describes it any more, so there is nothing to read.
-                    continue;
-                }
+                    var from = Interlocked.Add(ref cursor, ProjectBatch) - ProjectBatch;
+                    if (from >= count)
+                    {
+                        break;
+                    }
 
-                var clusterBase = persistent != null ? persistentAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
-                var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
-                ProjectionPass.ProjectBlock(plan, archetypeIndex, state, chunkIndex, block, clusterBase, transientBase, tick);
+                    var to = Math.Min(count, from + ProjectBatch);
+                    for (var i = from; i < to; i++)
+                    {
+                        ProjectOne(plan, archetypeIndex, state, chunkIndex, list[i], persistent, transient, ref persistentAccessor, ref transientAccessor, tick);
+                    }
+                }
+            }
+            else
+            {
+                for (var i = chunkIndex; i < count; i += chunkCount)
+                {
+                    ProjectOne(plan, archetypeIndex, state, chunkIndex, list[i], persistent, transient, ref persistentAccessor, ref transientAccessor, tick);
+                }
             }
         }
         finally
@@ -439,6 +456,26 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
             persistentAccessor.Dispose();
             transientAccessor.Dispose();
         }
+    }
+
+    // Blocks per claim: enough that the atomic is noise against a block's projection, few enough that the last claims even out the tail.
+    private const int ProjectBatch = 4;
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    private static void ProjectOne(CompiledProjectionPlan plan, int archetypeIndex, ArchetypeReplicationState state, int chunkIndex, ReplicationBlockHeader* block,
+        ChunkBasedSegment<PersistentStore> persistent, ChunkBasedSegment<TransientStore> transient, ref ChunkAccessor<PersistentStore> persistentAccessor,
+        ref ChunkAccessor<TransientStore> transientAccessor, uint tick)
+    {
+        var chunkId = block->ChunkId;
+        if (chunkId < 0)
+        {
+            // The block was released between the mark and here — a cluster that drained. Nothing describes it any more, so there is nothing to read.
+            return;
+        }
+
+        var clusterBase = persistent != null ? persistentAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
+        var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
+        ProjectionPass.ProjectBlock(plan, archetypeIndex, state, chunkIndex, block, clusterBase, transientBase, tick);
     }
 
     private static int WatchedBlocks(ArchetypeReplicationState[] states)
@@ -563,6 +600,27 @@ internal sealed class SubscriptionsEventsExecSystem : SubscriptionsExecSystemBas
 }
 
 /// <summary>
+/// PROTOTYPE (push) — places the tick's push events into the cell index, one chunk per worker list, after the projection counted them. Serial prefix in its
+/// prologue; nothing to do (zero chunks) on a tick the frame prologue indexes serially.
+/// </summary>
+internal sealed class SubscriptionsPushIndexExecSystem : SubscriptionsExecSystemBase
+{
+    public SubscriptionsPushIndexExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
+
+    protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
+        .Name("SubscriptionsPushIndex")
+        .After("SubscriptionsProject")
+        .ChunkedParallel(1);
+
+    /// <inheritdoc />
+    protected override SubscriptionsStage Stage => SubscriptionsStage.Project;
+
+    protected override int PrepareChunks(SubscriptionsContext ctx) => ctx.Subscriptions?.Push?.BeginParallelIndex() ?? 0;
+
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => ctx.Subscriptions?.Push?.PlaceWorker(chunkIndex);
+}
+
+/// <summary>
 /// S2b — copies each session's changed records into its frame. The critical path's last stage.
 /// </summary>
 /// <remarks>
@@ -601,7 +659,7 @@ internal sealed class SubscriptionsFramesExecSystem : SubscriptionsExecSystemBas
 
     protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
         .Name("SubscriptionsFrames")
-        .AfterAll("SubscriptionsProject", "SubscriptionsEvents")
+        .AfterAll("SubscriptionsProject", "SubscriptionsEvents", "SubscriptionsPushIndex")
         .ChunkedParallel(1);
 
     /// <inheritdoc />

@@ -79,7 +79,7 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         _pushSessionCount = n;
-        if (n > 0)
+        if (n > 0 && !Push.Indexed)
         {
             Push.BuildIndex();
         }
