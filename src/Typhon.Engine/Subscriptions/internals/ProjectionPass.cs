@@ -273,7 +273,10 @@ internal static unsafe class ProjectionPass
         }
 
         var skipped = live & ~visit;
-        if (skipped != 0)
+
+        // PROTOTYPE (push): defensive — the gate is off for push today, so nothing is skipped there. A push archetype's stamp is the tick of the entity's last
+        // EVENT (AddEvent): the sweep, the cell delivery, the log's catch-up and the far-flush fold all read it so, and a skipped slot made none.
+        if (skipped != 0 && push == null)
         {
             // A skipped slot is unchanged, not unwatched, and the difference is one field. LastWatchedTick is what tells the NEXT tick that a session
             // held this entity, and section 2 above turns a stale one into a re-initialization — so leaving it behind would make every gated slot take a
@@ -299,6 +302,11 @@ internal static unsafe class ProjectionPass
             state.NoteProjected(blocks: 1, slots: 0, records: 0, releases: released);
             return;
         }
+
+        // PROTOTYPE (push): the slots an entity was carried into this tick. Their event is never a no-op: the entity's latest event must name the slot it is
+        // in now, and a migration that changed no byte would otherwise leave it naming the one it left. A bit left over from a tick that returned early only
+        // costs one event with no record.
+        var pushArrived = push != null ? Volatile.Read(ref block->ArrivedSlots) : 0UL;
 
         // ── 3. One column walk per projected field, over the live watched slots ─────────────────────────────────────────────────────────────────────────
         var fields = plan.Fields;
@@ -474,6 +482,11 @@ internal static unsafe class ProjectionPass
             {
                 // PROTOTYPE (push): the stamp is the tick of the entity's last EVENT, written by AddEvent when it records one. The sweep, the cell delivery and
                 // the push log's catch-up all read it as "the push step owns this entity from that tick on".
+                if ((pushArrived & (1UL << slot)) != 0)
+                {
+                    pushFlags |= PushEvent.Arrived;
+                }
+
                 push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushNewX, pushNewY);
             }
             else

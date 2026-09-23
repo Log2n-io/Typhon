@@ -176,6 +176,9 @@ internal struct FrameCounters
 /// </remarks>
 internal sealed unsafe class FrameWorkerScratch : IDisposable
 {
+    /// <summary>Distance LOD: far updates withheld by this worker's current gather, added to the shared counter once per gather.</summary>
+    internal long Deferred;
+
     // A sparse session's synthetic runs — one per held cluster whose content changed this tick and that no interest run already covered — and the stamps that
     // say which of its view entries a real run covered. Per worker and reused, so a session's gather allocates nothing.
     internal InterestRun[] SparseRuns = new InterestRun[256];

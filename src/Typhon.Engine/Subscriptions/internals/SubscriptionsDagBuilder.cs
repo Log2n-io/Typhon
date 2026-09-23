@@ -63,6 +63,7 @@ internal static class SubscriptionsDagBuilder
         dag.Add(new SubscriptionsProjectExecSystem(engine, shape));
         dag.Add(new SubscriptionsEventsExecSystem(engine, shape));
         dag.Add(new SubscriptionsPushIndexExecSystem(engine, shape));
+        dag.Add(new SubscriptionsPushFarExecSystem(engine, shape));
         dag.Add(new SubscriptionsFramesExecSystem(engine, shape));
 
         // A root of its own, with no edge to any of the four above: it is their replacement, never their successor. Nothing orders it against them because

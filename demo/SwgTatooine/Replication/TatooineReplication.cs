@@ -241,6 +241,7 @@ public static class TatooineReplication
         var work = new double[systems.Length];
         var chunks = new long[systems.Length];
         var ran = new int[systems.Length];
+        var transition = new double[systems.Length];
         var first = Math.Max(IdleTickFrom, ring.OldestAvailableTick);
         var ticks = 0;
         var wall = 0d;
@@ -264,6 +265,7 @@ public static class TatooineReplication
 
                 span[i] += metrics[i].DurationUs;
                 work[i] += metrics[i].WorkUs;
+                transition[i] += metrics[i].TransitionLatencyUs;
                 chunks[i] += metrics[i].WorkersTouched;
                 ran[i]++;
             }
@@ -296,6 +298,19 @@ public static class TatooineReplication
             var c = (double)chunks[i] / ran[i];
             var eff = s <= 0 ? 0 : w * 100d / (s * pool);
             line.Append($"\n    {systems[i].Name,-34} span {s,6:F3} work {w,7:F3} chunks {c,5:F1} eff {eff,5:F1} % unused {(s * pool) - w,7:F2}");
+        }
+
+        // The replication track in DAG order, whatever its cost: an empty stage still costs its hand-off.
+        for (var i = 0; i < systems.Length; i++)
+        {
+            if (!systems[i].Name.StartsWith("Subscriptions", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var runs = Math.Max(1, ran[i]);
+            line.AppendLine().Append($"    track {systems[i].Name,-28} ran {ran[i],4} span {span[i] / runs,7:F1} us transition {transition[i] / runs,6:F1} us ")
+                .Append($"chunks {(double)chunks[i] / runs,5:F1}");
         }
 
         Console.Error.WriteLine(line.ToString());

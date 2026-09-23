@@ -214,14 +214,15 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// </param>
     /// <param name="worldObserver">With <paramref name="push"/>: serve the profile through a push <c>World</c> observer instead of a covering disc.</param>
     public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, bool sharedClusterBlocks = false,
-        PushDetection? push = null, double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false)
+        PushDetection? push = null, double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false,
+        bool deterministicProjection = false)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
         var walk = push.HasValue && walkRadius > 0;
         var radius = walk ? walkRadius : PushRadiusM;
         var harness = FrameHarness.Create(engine, push.HasValue ? subs => DeclarePush(subs, push.Value, radius, worldObserver && !walk, every) 
-            : Declare, name, Options(sharedClusterBlocks, push == PushDetection.Automatic));
+            : Declare, name, Options(sharedClusterBlocks, push == PushDetection.Automatic, push.HasValue, deterministicProjection));
         try
         {
             var oracle = new OracleHarness(harness, skipPercent, seed, push, radius, walk);
@@ -294,6 +295,36 @@ internal sealed unsafe class OracleHarness : IDisposable
             {
                 _harness.Deliver(_sessions[i]);
             }
+        }
+    }
+
+    /// <summary>
+    /// One tick with no write at all, the sessions still walking and every frame delivered: what moves is only the viewers. An entity whose last change a
+    /// session was never sent is reached by the session's disc, not by an event.
+    /// </summary>
+    /// <param name="strideOfRadius">How far every session steps this tick, as a fraction of the radius, in a random direction; never a teleport.</param>
+    public void StepWalkingOnly(double strideOfRadius)
+    {
+        Assert.That(_walk, Is.True, "only a walking oracle's sessions can walk");
+        Assert.That(_radius * strideOfRadius, Is.LessThan(Push.CellSize), "a step of a cell or more is a teleport, which resets instead of walking");
+        const double Limit = ProjectionTestSchema.WorldExtentM - 256.0;
+        for (var i = 0; i < _sessions.Length; i++)
+        {
+            var angle = _walker.NextDouble() * Math.PI * 2.0;
+            var stride = _radius * strideOfRadius;
+            _viewpoints[i] = new Vector3D(
+                Math.Clamp(_viewpoints[i].X + (Math.Cos(angle) * stride), -Limit, Limit),
+                Math.Clamp(_viewpoints[i].Y + (Math.Sin(angle) * stride), -Limit, Limit),
+                0d);
+            _harness.Sessions.SetViewpoint(_sessions[i], _viewpoints[i]);
+        }
+
+        _tick++;
+        Engine.WriteTickFence(_tick);
+        _harness.RunTick(_tick);
+        foreach (var session in _sessions)
+        {
+            _harness.Deliver(session);
         }
     }
 
@@ -376,6 +407,11 @@ internal sealed unsafe class OracleHarness : IDisposable
             {
                 divergences.Add($"{disagreement} ({because})");
             }
+        }
+
+        if (_push && Push.Shadow && Push.ShadowIllegal != 0)
+        {
+            divergences.Add($"the push path published {Push.ShadowIllegal} record(s) the client could not legally apply ({because})");
         }
 
         var truth = ServerTruth(divergences);
@@ -670,9 +706,15 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// induces on purpose — the run would still be correct but it would no longer be measuring what it says it measures. The enter budget is left at the
     /// engine's default: deferring enters across ticks is real behaviour that the quiet window is there to absorb, and raising it would hide it.
     /// </remarks>
-    private static SubscriptionsOptions Options(bool sharedClusterBlocks, bool automaticPush = false) => new()
+    private static SubscriptionsOptions Options(bool sharedClusterBlocks, bool automaticPush = false, bool push = false,
+        bool deterministicProjection = false) => new()
     {
         AllowAutomaticPushDetection = automaticPush,
+
+        // The push path's legality check: a record the client could not apply — an enter of a held entity, an update or a leave of an unheld one — is a
+        // divergence the comparison below may never see, since the client forgives some of them.
+        PushShadow = push,
+        DeterministicProjection = deterministicProjection,
         MaxSessions = 64,
         StatePoolBudgetBytes = 64L * 1024 * 1024,
         FramePoolBudgetBytes = 64L * 1024 * 1024,

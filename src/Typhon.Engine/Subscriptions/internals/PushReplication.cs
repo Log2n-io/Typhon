@@ -21,6 +21,18 @@ internal struct PushEvent
     public const byte HasNew = 2;
     public const byte Segment = 4;
 
+    /// <summary>Set by the projection on an arrival by migration: never dropped as a no-op, so the entity's latest event names the slot it is in now.</summary>
+    public const byte Arrived = 8;
+
+    /// <summary>
+    /// Distance LOD: this is the entity's far flush — its phase tick — and <see cref="FlushGroups"/> (with <see cref="FlushSegment"/>) is the union of what
+    /// changed since its previous one. A session that holds the entity far sends that union; any other treats the event as it would without the flag.
+    /// </summary>
+    public const byte FarFlush = 16;
+
+    /// <summary>Distance LOD: the far flush carries the motion segment.</summary>
+    public const byte FlushSegment = 32;
+
     public nint Block;
     public float OldX;
     public float OldY;
@@ -42,6 +54,9 @@ internal struct PushEvent
 
     /// <summary>The change groups this tick stamped — what an update to a session that already holds the entity carries.</summary>
     public byte Groups;
+
+    /// <summary>Distance LOD: with <see cref="FarFlush"/>, the groups changed since the entity's previous far flush.</summary>
+    public byte FlushGroups;
 }
 
 /// <summary>PROTOTYPE — what the push path remembers about one session: its visibility anchor and which cells around it it has been given.</summary>
@@ -59,10 +74,6 @@ internal struct PushSessionState
 
     /// <summary>The tick of the last committed frame: the push log replays every event after it.</summary>
     public uint LastTick;
-
-    /// <summary>Distance LOD: the tick up to which this session's deferred far updates have been sent.</summary>
-    public uint LastFarTick;
-    public uint PLastFarTick;
 
     /// <summary>A World session: the cells below this index, in grid order, have been delivered. Its whole known-set.</summary>
     public int Cursor;
@@ -176,10 +187,39 @@ internal sealed unsafe class PushReplication
     /// deferred and sent every N ticks as the union since the last time, folded from the push log. Enters and leaves are never deferred, and an entity
     /// crossing inward gets its whole state.
     /// </summary>
-    public int FarEvery = int.TryParse(Environment.GetEnvironmentVariable("TYPHON_PUSH_FAR_EVERY"), out var farEvery) ? farEvery : 0;
+    public int FarEvery
+    {
+        get => _farEvery;
+
+        // At most the log's depth: an entity's far flush is found among the events of the last N ticks, and the log holds LogDepth of them. Set before
+        // the first tick — the phase of every entity is taken against it.
+        set => _farEvery = Math.Clamp(value, 0, LogDepth);
+    }
+
+    private int _farEvery = Math.Clamp(int.TryParse(Environment.GetEnvironmentVariable("TYPHON_PUSH_FAR_EVERY"), out var farEvery) ? farEvery : 0, 0, 8);
 
     public long UpdatesDeferred;
+
+    /// <summary>Distance LOD: far flushes produced — events flagged in place plus flush entries appended — cumulative.</summary>
     public long FarFlushes;
+
+    /// <summary>Distance LOD: updates the inner crescent sent — held entities the anchor's move brought within R/2 — cumulative.</summary>
+    public long FarCrescentStates;
+
+    /// <summary>Distance LOD: time spent in <see cref="EndFarFold"/> — serial, in the frame prologue — cumulative, in Stopwatch ticks.</summary>
+    public long FarEndTicks;
+
+    // Distance LOD's per-tick fold (BeginFarFold): per chunk of cells, the flush entries it appended, in cell order, as a compact CSR.
+    private uint _farFoldTick = uint.MaxValue;
+    private uint _farEndTick = uint.MaxValue;
+    private int _farChunkCount;
+    private PushEvent[][] _farOut = [];
+    private int[] _farOutCount = [];
+    private int[][] _farOutCells = [];
+    private int[][] _farOutStarts = [];
+    private int[] _farOutCellCount = [];
+    private long[] _farOutFlagged = [];
+    private int[] _farBounds = [];
 
     /// <summary>How many ticks of indexes the push log keeps: a session that missed fewer frames than this catches up from them, an older one resets.</summary>
     /// <remarks>Covers <see cref="SkipPolicy.MaxDegradeLevel"/> (one frame in four) with room for a few back-pressure skips on top.</remarks>
@@ -197,6 +237,13 @@ internal sealed unsafe class PushReplication
         public int[] Starts = [];
         public int[] PrimaryEnds = [];
         public int CellCount;
+
+        // Distance LOD: this tick's far flushes for entities whose latest event is an earlier tick, by cell (compact, ascending). An entity whose latest
+        // event IS this tick carries its flush on that event instead.
+        public PushEvent[] Flush = [];
+        public int[] FlushCells = [];
+        public int[] FlushStarts = [];
+        public int FlushCellCount;
     }
 
     private static TickLog[] CreateLog()
@@ -250,7 +297,7 @@ internal sealed unsafe class PushReplication
     // What each client holds, rebuilt from the records the server actually PUBLISHED, and checked two ways: every record must be legal against it (no enter
     // of a held id, no state, segment or leave of an unheld one), and every few ticks it must equal the geometric known-set recomputed from the blocks.
     // Either failing is a divergence a client would carry for good. Off by default: it is a HashSet per session.
-    public readonly bool Shadow = Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
+    public readonly bool Shadow;
     private readonly HashSet<uint>[] _shadow = [];
     private readonly ushort[] _shadowGen = [];
     public long ShadowIllegal;
@@ -303,8 +350,10 @@ internal sealed unsafe class PushReplication
         }
     }
 
-    public PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic, double radius, int maxSessions)
+    public PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic, double radius, int maxSessions,
+        bool shadow = false)
     {
+        Shadow = shadow || Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
         _plans = plans;
         _states = states;
         _isPush = isPush;
@@ -917,7 +966,9 @@ internal sealed unsafe class PushReplication
         // Pushed, re-encoded, and nothing moved or changed: no session can learn anything from it. Dropped here, in parallel, rather than filtered by
         // every session that reaches its cell.
         const byte both = PushEvent.HasOld | PushEvent.HasNew;
-        if ((flags & (both | PushEvent.Segment)) == both && groups == 0 && ox == nx && oy == ny)
+        var arrived = (flags & PushEvent.Arrived) != 0;
+        flags &= unchecked((byte)~PushEvent.Arrived);
+        if (!arrived && (flags & (both | PushEvent.Segment)) == both && groups == 0 && ox == nx && oy == ny)
         {
             // No event, so the entity's stamp stays the tick of its last one: the sweep and the cell delivery must still own it.
             return;
@@ -1094,6 +1145,7 @@ internal sealed unsafe class PushReplication
         slot.CellCount = nonEmpty;
         slot.Tick = _tick;
         slot.Valid = true;
+        slot.FlushCellCount = 0;
         _indexedTick = _tick;
 
         IndexTicks += Stopwatch.GetTimestamp() - from;
@@ -1217,6 +1269,7 @@ internal sealed unsafe class PushReplication
         slot.CellCount = nonEmpty;
         slot.Tick = _tick;
         slot.Valid = true;
+        slot.FlushCellCount = 0;
         _indexed = slot.Events;
         _indexedTick = _tick;
         IndexTicks += Stopwatch.GetTimestamp() - from;
@@ -1283,7 +1336,6 @@ internal sealed unsafe class PushReplication
         st.D2 = st.P2;
         st.D3 = st.P3;
         st.Cursor = st.PCursor;
-        st.LastFarTick = st.PLastFarTick;
         st.Anchored = true;
         st.NeedsReset = false;
         st.LastTick = _tick;
@@ -1403,18 +1455,9 @@ internal sealed unsafe class PushReplication
         // Missed frames: replayed from the push log while every missed tick is still in it, reset otherwise (SUB-03: skip = union).
         var gap = st.Anchored && !reset && placed ? (int)(tick - st.LastTick - 1) : 0;
 
-        // Distance LOD: this frame flushes the deferred far updates when it is the session's far tick or one was missed; the log must still hold them.
+        // Distance LOD: an update to an entity far from the session before and after is sent only on the entity's far flush (BeginFarFold).
         var lod = FarEvery > 1 && placed;
         var farR2 = Radius * Radius * 0.25;
-        var flush = lod && st.Anchored && !reset
-            && (((tick + session.Slot) % (uint)FarEvery) == 0 || tick - st.LastFarTick >= (uint)FarEvery);
-        if (flush && (tick - st.LastFarTick >= LogDepth || !LogCovers(st.LastFarTick + 1, tick)))
-        {
-            Interlocked.Increment(ref LogTooOld);
-            reset = true;
-            flush = false;
-            gap = 0;
-        }
         var log = Log ??= new LogTable();
         log.Clear();
         if (gap > 0)
@@ -1609,7 +1652,8 @@ internal sealed unsafe class PushReplication
                     if (interior && i < pe && (e.Flags & (PushEvent.HasOld | PushEvent.HasNew)) == (PushEvent.HasOld | PushEvent.HasNew)
                         && e.OldCx == cx && e.OldCy == cy)
                     {
-                        EmitUpdateLod(in e, e.OldX, e.OldY, e.Groups, (e.Flags & PushEvent.Segment) != 0, ax, ay, nx, ny, lod, farR2, scratch, ref updates);
+                        EmitUpdateLod(in e, e.OldX, e.OldY, e.Groups, (e.Flags & PushEvent.Segment) != 0, e.FlushGroups, e.Flags, ax, ay, nx, ny, lod,
+                            farR2, scratch, ref updates);
                         continue;
                     }
 
@@ -1638,8 +1682,8 @@ internal sealed unsafe class PushReplication
                         }
                         else
                         {
-                            EmitUpdateLod(in e, e.OldX, e.OldY, e.Groups, (e.Flags & PushEvent.Segment) != 0, ax, ay, nx, ny, lod, farR2, scratch,
-                                ref updates);
+                            EmitUpdateLod(in e, e.OldX, e.OldY, e.Groups, (e.Flags & PushEvent.Segment) != 0, e.FlushGroups, e.Flags, ax, ay, nx, ny,
+                                lod, farR2, scratch, ref updates);
                         }
                     }
                     else if (was)
@@ -1684,19 +1728,50 @@ internal sealed unsafe class PushReplication
                     SweepCell(cx, cy, ax, ay, nx, ny, r2, archetypeMask, scratch, tick, gap, ref enters, ref leaves);
                 }
             }
+
+            // Distance LOD: the inner crescent. A held entity the anchor's move brought inside R/2 may have far changes it was never sent — they wait for
+            // its far flush, which a near session ignores — so it gets its whole state now. One with an event since the last frame is the event's.
+            for (var ly = 0; lod && ly < Window; ly++)
+            {
+                for (var lx = 0; lx < Window; lx++)
+                {
+                    var wi = (ly * Window) + lx;
+                    if (!Bit(d0, d1, d2, d3, wi) || Bit(n0, n1, n2, n3, wi))
+                    {
+                        continue;
+                    }
+
+                    var cx = nOriginX + lx;
+                    var cy = nOriginY + ly;
+                    if ((uint)cx >= (uint)_gridW || (uint)cy >= (uint)_gridH)
+                    {
+                        continue;
+                    }
+
+                    var x0 = _gridMinX + (cx * CellSize);
+                    var y0 = _gridMinY + (cy * CellSize);
+                    if (RectMin2(nx, ny, x0, y0, CellSize) > farR2 || RectMax2(ax, ay, x0, y0, CellSize) <= farR2)
+                    {
+                        continue;
+                    }
+
+                    FarSweepCell(cx, cy, ax, ay, oOriginX, oOriginY, o0, o1, o2, o3, nx, ny, r2, farR2, archetypeMask, scratch, tick, gap, ref updates);
+                }
+            }
         }
 
-        // ── 4. Distance LOD: the deferred far updates, folded ──
-        if (flush)
+        // ── 4. Distance LOD: this tick's far flushes of entities whose latest event is older, sent to the sessions that hold them far ─────────────
+        // After missed frames the log's replay folded them, with the events.
+        if (lod && gap == 0)
         {
-            FlushFar(ref st, nx, ny, nOriginX, nOriginY, d0, d1, d2, d3, r2, farR2, archetypeMask, scratch, ref updates);
+            FlushEntries(ax, ay, oOriginX, oOriginY, o0, o1, o2, o3, nx, ny, nOriginX, nOriginY, d0, d1, d2, d3, r2, farR2, archetypeMask, scratch,
+                ref updates);
         }
 
-        st.PLastFarTick = flush || !lod || reset || !st.Anchored ? tick : st.LastFarTick;
-        if (Deferred != 0)
+        if (scratch.Deferred != 0)
         {
-            Interlocked.Add(ref UpdatesDeferred, Deferred);
-            Deferred = 0;
+            Interlocked.Add(ref UpdatesDeferred, scratch.Deferred);
+            scratch.Deferred = 0;
         }
 
         st.PAnchorX = nx;
@@ -1986,6 +2061,12 @@ internal sealed unsafe class PushReplication
         public byte Groups;
         public bool Segment;
         public bool Replaced;
+
+        // Distance LOD: the far flushes folded in (flagged events and flush entries), and whether any real event was.
+        public byte FlushGroups;
+        public bool FlushSegment;
+        public bool Flushed;
+        public bool Real;
     }
 
     /// <summary>Whether the log holds every tick from <paramref name="first"/> to <paramref name="last"/>.</summary>
@@ -2045,7 +2126,15 @@ internal sealed unsafe class PushReplication
                         }
                         else if (entry.LastTick == t)
                         {
-                            // The same event, met again as a secondary.
+                            // The same event, met again — as a secondary, or as the primary after its secondary. A secondary is a copy taken before the
+                            // fold flagged the primary, so a far flush is only ever on the primary: take it from whichever copy carries it.
+                            if ((e.Flags & PushEvent.FarFlush) != 0)
+                            {
+                                entry.FlushGroups |= e.FlushGroups;
+                                entry.FlushSegment |= (e.Flags & PushEvent.FlushSegment) != 0;
+                                entry.Flushed = true;
+                            }
+
                             continue;
                         }
                         else if ((entry.Last.Flags & PushEvent.HasNew) == 0)
@@ -2058,6 +2147,53 @@ internal sealed unsafe class PushReplication
                         entry.LastTick = t;
                         entry.Groups |= e.Groups;
                         entry.Segment |= (e.Flags & PushEvent.Segment) != 0;
+                        entry.Real = true;
+                        if ((e.Flags & PushEvent.FarFlush) != 0)
+                        {
+                            entry.FlushGroups |= e.FlushGroups;
+                            entry.FlushSegment |= (e.Flags & PushEvent.FlushSegment) != 0;
+                            entry.Flushed = true;
+                        }
+                    }
+                }
+            }
+
+            // The tick's far flushes of entities whose latest event is older: their position is that event's, and nothing else changed since.
+            for (var cy = minCy; FarEvery > 1 && cy <= maxCy; cy++)
+            {
+                var lo = (cy * _gridW) + minCx;
+                var hi = (cy * _gridW) + maxCx;
+                var k = LowerBound(slot.FlushCells, slot.FlushCellCount, lo);
+                for (; k < slot.FlushCellCount && slot.FlushCells[k] <= hi; k++)
+                {
+                    for (var i = slot.FlushStarts[k]; i < slot.FlushStarts[k + 1]; i++)
+                    {
+                        ref readonly var f = ref slot.Flush[i];
+                        if ((archetypeMask & (1UL << f.Archetype)) == 0)
+                        {
+                            continue;
+                        }
+
+                        ref var entry = ref table.Find(f.NetId, out var found);
+                        if (!found)
+                        {
+                            entry = default;
+                            entry.FirstFlags = f.Flags;
+                            entry.OldX = f.OldX;
+                            entry.OldY = f.OldY;
+                            entry.OldCx = f.OldCx;
+                            entry.OldCy = f.OldCy;
+                        }
+                        else if ((entry.Last.Flags & PushEvent.HasNew) == 0)
+                        {
+                            entry.Replaced = true;
+                        }
+
+                        entry.Last = f;
+                        entry.LastTick = t;
+                        entry.FlushGroups |= f.FlushGroups;
+                        entry.FlushSegment |= (f.Flags & PushEvent.FlushSegment) != 0;
+                        entry.Flushed = true;
                     }
                 }
             }
@@ -2095,6 +2231,19 @@ internal sealed unsafe class PushReplication
                 && Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, entry.OldCx, entry.OldCy));
             var isIn = (e.Flags & PushEvent.HasNew) != 0 && Within(nx, ny, e.NewX, e.NewY, r2)
                 && Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, e.NewCx, e.NewCy));
+
+            // Only far flushes and no event: the entity neither moved nor changed since, and a flush entry stamps nothing — so an enter or a leave is the cell
+            // delivery's or the sweep's, and a crossing inward is the inner crescent's. It speaks only to a session holding it far before and after.
+            if (!entry.Real)
+            {
+                if (lod && was && isIn && !Within(nx, ny, e.NewX, e.NewY, farR2) && !Within(ax, ay, entry.OldX, entry.OldY, farR2))
+                {
+                    EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, entry.FlushGroups, entry.FlushSegment, scratch, ref updates);
+                }
+
+                continue;
+            }
+
             if (isIn && !was)
             {
                 scratch.Add(e.Archetype, FrameListKind.Enter, new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
@@ -2102,7 +2251,9 @@ internal sealed unsafe class PushReplication
             }
             else if (isIn)
             {
-                EmitUpdateLod(in e, entry.OldX, entry.OldY, entry.Groups, entry.Segment, ax, ay, nx, ny, lod, farR2, scratch, ref updates);
+                var flushFlags = entry.Flushed ? (byte)(PushEvent.FarFlush | (entry.FlushSegment ? PushEvent.FlushSegment : 0)) : (byte)0;
+                EmitUpdateLod(in e, entry.OldX, entry.OldY, entry.Groups, entry.Segment, entry.FlushGroups, flushFlags, ax, ay, nx, ny, lod, farR2,
+                    scratch, ref updates);
             }
             else if (was)
             {
@@ -2113,157 +2264,483 @@ internal sealed unsafe class PushReplication
     }
 
     /// <summary>
-    /// An update to an entity the session holds before and after: sent, deferred (far then and far now), or widened to the whole state (it crossed
-    /// inward, so updates deferred while it was far may be missing).
+    /// An update to an entity the session holds before and after: sent, withheld (far then and far now, not its far flush), the far flush's union, or
+    /// widened to the whole state (it crossed inward, so changes withheld while it was far may be missing). Of <c>flags</c> only
+    /// <see cref="PushEvent.FarFlush"/> and <see cref="PushEvent.FlushSegment"/> are read.
     /// </summary>
-    private void EmitUpdateLod(in PushEvent e, float oldX, float oldY, int groups, bool segment, double ax, double ay, double nx, double ny, bool lod,
-        double farR2, FrameWorkerScratch scratch, ref long updates)
+    private void EmitUpdateLod(in PushEvent e, float oldX, float oldY, int groups, bool segment, int flushGroups, byte flags, double ax, double ay, double nx,
+        double ny, bool lod, double farR2, FrameWorkerScratch scratch, ref long updates)
     {
-        var merged = e;
-        merged.Groups = (byte)groups;
-        merged.Flags = segment ? (byte)(e.Flags | PushEvent.Segment) : (byte)(e.Flags & ~PushEvent.Segment);
         if (lod)
         {
             var farNow = !Within(nx, ny, e.NewX, e.NewY, farR2);
             var farBefore = !Within(ax, ay, oldX, oldY, farR2);
             if (farNow && farBefore)
             {
-                Deferred++;
-                return;
-            }
+                if ((flags & PushEvent.FarFlush) == 0)
+                {
+                    scratch.Deferred++;
+                    return;
+                }
 
-            if (farBefore)
+                groups = flushGroups;
+                segment = (flags & PushEvent.FlushSegment) != 0;
+            }
+            else if (farBefore)
             {
                 var plan = _encodePlans[e.Archetype];
-                merged.Groups = (byte)((1 << plan.GroupCount) - 1);
-                if (plan.Moving)
-                {
-                    merged.Flags |= PushEvent.Segment;
-                }
+                groups = (1 << plan.GroupCount) - 1;
+                segment = plan.Moving;
             }
         }
 
-        EmitUpdate(in merged, scratch, ref updates);
+        EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, groups, segment, scratch, ref updates);
     }
 
-    // Per worker: updates deferred this session, added to the shared counter once per gather rather than once per update.
-    [ThreadStatic]
-    private static long Deferred;
-
-    /// <summary>
-    /// Distance LOD: every far entity the session holds that had an event since its last flush gets one update, the union of what changed since — folded
-    /// from the log, the way a skipped frame is replayed.
-    /// </summary>
-    private void FlushFar(ref PushSessionState st, double nx, double ny, int nOriginX, int nOriginY, ulong d0, ulong d1, ulong d2, ulong d3, double r2,
-        double farR2, ulong archetypeMask, FrameWorkerScratch scratch, ref long updates)
+    /// <summary>Distance LOD: this tick's flush entries in the disc, to a session that held the entity before this frame and holds it far now.</summary>
+    private void FlushEntries(double ax, double ay, int oOriginX, int oOriginY, ulong o0, ulong o1, ulong o2, ulong o3, double nx, double ny, int nOriginX,
+        int nOriginY, ulong d0, ulong d1, ulong d2, ulong d3, double r2, double farR2, ulong archetypeMask, FrameWorkerScratch scratch, ref long updates)
     {
-        Interlocked.Increment(ref FarFlushes);
+        var slot = _log[_tick % LogDepth];
+        if (slot.FlushCellCount == 0 || slot.Tick != _tick)
+        {
+            return;
+        }
+
         var minCx = CellX(nx - Radius);
         var maxCx = CellX(nx + Radius);
         var minCy = CellY(ny - Radius);
         var maxCy = CellY(ny + Radius);
-
-        var dense = Dense ??= new FarDense();
-        if (++dense.Stamp == 0)
+        for (var cy = minCy; cy <= maxCy; cy++)
         {
-            Array.Clear(dense.Slots);
-            dense.Stamp = 1;
-        }
-
-        // Newest tick first: the first meeting of an identity is its last event in the disc's cells, and every later one only widens the union.
-        var stamp = dense.Stamp;
-        var slots = dense.Slots;
-        var unique = 0;
-        for (var t = _tick; t != st.LastFarTick; t--)
-        {
-            var logSlot = (int)(t % LogDepth);
-            var slot = _log[logSlot];
-            var events = slot.Events;
-            for (var cy = minCy; cy <= maxCy; cy++)
+            var k = LowerBound(slot.FlushCells, slot.FlushCellCount, (cy * _gridW) + minCx);
+            for (; k < slot.FlushCellCount && slot.FlushCells[k] <= (cy * _gridW) + maxCx; k++)
             {
-                var k = LowerBound(slot.Cells, slot.CellCount, (cy * _gridW) + minCx);
-                for (; k < slot.CellCount && slot.Cells[k] <= (cy * _gridW) + maxCx; k++)
+                var cell = slot.FlushCells[k];
+                var x0 = _gridMinX + ((cell % _gridW) * CellSize);
+                var y0 = _gridMinY + ((cell / _gridW) * CellSize);
+                if (RectMax2(nx, ny, x0, y0, CellSize) <= farR2 || RectMin2(nx, ny, x0, y0, CellSize) > r2)
                 {
-                    for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
+                    continue;
+                }
+
+                for (var i = slot.FlushStarts[k]; i < slot.FlushStarts[k + 1]; i++)
+                {
+                    ref readonly var f = ref slot.Flush[i];
+                    if ((archetypeMask & (1UL << f.Archetype)) == 0 || Within(nx, ny, f.NewX, f.NewY, farR2) || !Within(nx, ny, f.NewX, f.NewY, r2)
+                        || !Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, f.NewCx, f.NewCy)) || !Within(ax, ay, f.NewX, f.NewY, r2)
+                        || !Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, f.NewCx, f.NewCy)))
                     {
-                        ref readonly var e = ref events[i];
-                        if ((archetypeMask & (1UL << e.Archetype)) == 0)
-                        {
-                            continue;
-                        }
-
-                        var id = e.NetId;
-                        if (id >= (uint)slots.Length)
-                        {
-                            Array.Resize(ref dense.Slots, Math.Max((int)id + 1, slots.Length * 2));
-                            slots = dense.Slots;
-                        }
-
-                        var acc = e.Groups | ((e.Flags & PushEvent.Segment) != 0 ? 0x100 : 0);
-                        ref var s = ref slots[id];
-                        if (s.Stamp != stamp)
-                        {
-                            s.Stamp = stamp;
-                            s.Acc = acc;
-                            s.LogSlot = logSlot;
-                            s.Index = i;
-                            if (unique == dense.Ids.Length)
-                            {
-                                Array.Resize(ref dense.Ids, unique * 2);
-                            }
-
-                            dense.Ids[unique++] = id;
-                        }
-                        else
-                        {
-                            s.Acc |= acc;
-                        }
+                        continue;
                     }
+
+                    EmitRecord(f.NetId, f.Block, f.Slot, f.Archetype, f.FlushGroups, (f.Flags & PushEvent.FlushSegment) != 0, scratch, ref updates);
                 }
             }
         }
+    }
 
-        for (var u = 0; u < unique; u++)
+    /// <summary>
+    /// Distance LOD: a cell of the inner crescent — the held entities the anchor's move brought from beyond R/2 to within it, with no event since the
+    /// session's last frame, get what changed in the last N ticks: older changes went out in the far flush before, and newer ones wait for one a near
+    /// session ignores.
+    /// </summary>
+    private void FarSweepCell(int cx, int cy, double ax, double ay, int oOriginX, int oOriginY, ulong o0, ulong o1, ulong o2, ulong o3, double nx, double ny,
+        double r2, double farR2, ulong archetypeMask, FrameWorkerScratch scratch, uint tick, int gap, ref long updates)
+    {
+        if (!Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, cx, cy)))
         {
-            ref readonly var s = ref slots[dense.Ids[u]];
-            if (s.Acc == 0)
+            return;
+        }
+
+        var x0 = _gridMinX + (cx * CellSize);
+        var y0 = _gridMinY + (cy * CellSize);
+        var near = Math.Sqrt(farR2);
+        foreach (var a in _pushIndices)
+        {
+            if ((archetypeMask & (1UL << a)) == 0)
             {
                 continue;
             }
 
-            ref readonly var e = ref _log[s.LogSlot].Events[s.Index];
-            if ((e.Flags & PushEvent.HasNew) == 0 || Within(nx, ny, e.NewX, e.NewY, farR2) || !Within(nx, ny, e.NewX, e.NewY, r2)
-                || !Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, e.NewCx, e.NewCy)))
+            var state = _states[a];
+            var cs = state.ClusterState;
+            if (cs == null)
             {
                 continue;
             }
 
-            var merged = e;
-            merged.Groups = (byte)s.Acc;
-            merged.Flags = (s.Acc & 0x100) != 0 ? (byte)(e.Flags | PushEvent.Segment) : (byte)(e.Flags & ~PushEvent.Segment);
-            EmitUpdate(in merged, scratch, ref updates);
+            var plan = _encodePlans[a];
+            var layout = state.Layout;
+            var lo = tick > (uint)FarEvery ? tick - (uint)FarEvery : 0u;
+
+            // The box is built from raw positions and the test below from decoded ones: a margin of a quantization step keeps the pruning sound.
+            var margin = 0.01 + Math.Max(_stepX[a], _stepY[a]);
+            using var e = cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, double.NegativeInfinity, x0 + CellSize + 1d, y0 + CellSize + 1d, double.PositiveInfinity);
+            while (e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out var bx1, out var by1))
+            {
+                // A box wholly beyond R/2 of the new anchor, or wholly within R/2 of the old one, holds nobody who crossed inward.
+                if (!double.IsInfinity(bx0) && !double.IsInfinity(bx1)
+                    && (BoxMin2(nx, ny, bx0, by0, bx1, by1) > (near + margin) * (near + margin)
+                        || BoxMax2(ax, ay, bx0, by0, bx1, by1) <= (near - margin) * (near - margin)))
+                {
+                    continue;
+                }
+
+                var block = BlockOf(a, chunkId);
+                if (block == null)
+                {
+                    continue;
+                }
+
+                var bytes = (byte*)block;
+                var occ = block->ProjectedOccupancy;
+                while (occ != 0)
+                {
+                    var slot = BitOperations.TrailingZeroCount(occ);
+                    occ &= occ - 1;
+                    var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (slot * layout.HotStride));
+                    if (hot->NetId == NetIdAllocator.NoNetId)
+                    {
+                        continue;
+                    }
+
+                    var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
+                    if (tick - *(uint*)(cold + layout.LastWatchedTickOffsetInColdEntry) <= (uint)gap)
+                    {
+                        continue;
+                    }
+
+                    Decode(a, cold + _positionOffset[a], out var px, out var py);
+                    if (CellX(px) != cx || CellY(py) != cy || !Within(nx, ny, px, py, farR2) || Within(ax, ay, px, py, farR2)
+                        || !Within(ax, ay, px, py, r2))
+                    {
+                        continue;
+                    }
+
+                    var groups = 0;
+                    for (var g = 0; g < plan.GroupCount; g++)
+                    {
+                        if (hot->GroupTicks[plan.GroupTickSlot[g]] > lo)
+                        {
+                            groups |= 1 << g;
+                        }
+                    }
+
+                    FarCrescentStates++;
+                    EmitRecord(hot->NetId, (nint)block, (byte)slot, (ushort)a, groups, plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > lo, scratch,
+                        ref updates);
+                }
+            }
         }
     }
 
-    /// <summary>One identity in a worker's dense fold: met in the fold stamped <see cref="Stamp"/>, with the union so far and its last event.</summary>
-    private struct FarSlot
+    // ══ Distance LOD: the far flushes (parallel stage after the index) ═══════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Whether this tick's far flushes have been folded.</summary>
+    public bool FarFolded => _farFoldTick == _tick;
+
+    /// <summary>
+    /// The far-flush fold's serial half: how many chunks of cells the stage runs, or 0 when the LOD is off, the index is not built yet (the frame
+    /// prologue then folds serially) or the fold already ran this tick.
+    /// </summary>
+    /// <remarks>
+    /// An entity's far flush is its phase tick, <c>(netId + tick) % N == 0</c>, and carries the groups it changed in the last N ticks — read from the
+    /// group stamps of its hot entry, which every change sets and which the previous phase flush, N ticks ago, covered up to. The candidates are the
+    /// primaries of the last N log slots; the one that is the entity's latest event (its cold stamp names that tick) speaks for it. A change always makes
+    /// an event, so an entity with anything to flush is always among them.
+    /// </remarks>
+    public int BeginFarFold(int workers)
     {
-        public uint Stamp;
-        public int Acc;
-        public int LogSlot;
-        public int Index;
+        if (FarEvery <= 1 || !Indexed || _farFoldTick == _tick)
+        {
+            return 0;
+        }
+
+        var k = Math.Max(1, Math.Min(workers, _gridH));
+        if (_farBounds.Length < k + 1)
+        {
+            _farBounds = new int[k + 1];
+        }
+
+        // Cell ranges of about equal event counts, from this tick's compact index: a population is clustered, so equal cell counts are not equal work.
+        var slot0 = _log[_tick % LogDepth];
+        var totalEvents = slot0.CellCount == 0 ? 0 : slot0.Starts[slot0.CellCount];
+        var cells = _gridW * _gridH;
+        _farBounds[0] = 0;
+        var at = 0;
+        for (var i = 1; i < k; i++)
+        {
+            var target = (int)((long)totalEvents * i / k);
+            while (at < slot0.CellCount && slot0.Starts[at] < target)
+            {
+                at++;
+            }
+
+            _farBounds[i] = at < slot0.CellCount ? Math.Max(_farBounds[i - 1], slot0.Cells[at]) : cells;
+        }
+
+        _farBounds[k] = cells;
+        if (_farOut.Length < k)
+        {
+            Array.Resize(ref _farOut, k);
+            Array.Resize(ref _farOutCount, k);
+            Array.Resize(ref _farOutCells, k);
+            Array.Resize(ref _farOutStarts, k);
+            Array.Resize(ref _farOutCellCount, k);
+            Array.Resize(ref _farOutFlagged, k);
+        }
+
+        for (var i = 0; i < k; i++)
+        {
+            _farOut[i] ??= new PushEvent[256];
+            _farOutCells[i] ??= new int[64];
+            _farOutStarts[i] ??= new int[65];
+            _farOutCount[i] = 0;
+            _farOutCellCount[i] = 0;
+            _farOutFlagged[i] = 0;
+        }
+
+        _farChunkCount = k;
+        _farFoldTick = _tick;
+        return k;
     }
 
-    /// <summary>A worker's dense fold, indexed by net id, and the ids met in the current fold.</summary>
-    private sealed class FarDense
+    /// <summary>
+    /// One chunk of the fold: a contiguous range of cells, walked in order across the window's slots, so its output is already grouped by cell. A chunk
+    /// owns its cells' events, which is what lets it flag this tick's in place.
+    /// </summary>
+    public void FoldFarChunk(int chunk)
     {
-        public FarSlot[] Slots = new FarSlot[1024];
-        public uint[] Ids = new uint[256];
-        public uint Stamp;
+        if ((uint)chunk >= (uint)_farChunkCount)
+        {
+            return;
+        }
+
+        var c0 = _farBounds[chunk];
+        var c1 = _farBounds[chunk + 1];
+        var n = FarEvery;
+        var t = _tick;
+
+        // The window's floor, wrap-safe for the run's first ticks; and the phase, wrap-safe for a tick counter or net id past 2^32 when N is no power of two.
+        var lo = t > (uint)n ? t - (uint)n : 0u;
+        var tickPhase = t % (uint)n;
+        Span<int> cursor = stackalloc int[LogDepth];
+        for (var age = 0; age < n; age++)
+        {
+            var slot = _log[(t - (uint)age) % LogDepth];
+            cursor[age] = slot.Valid && slot.Tick == t - (uint)age ? LowerBound(slot.Cells, slot.CellCount, c0) : int.MaxValue;
+        }
+
+        var output = _farOut[chunk];
+        var count = 0;
+        var cellsOut = _farOutCells[chunk];
+        var startsOut = _farOutStarts[chunk];
+        var cellCount = 0;
+        var flagged = 0L;
+        while (true)
+        {
+            // The next cell any slot has events in.
+            var cell = int.MaxValue;
+            for (var age = 0; age < n; age++)
+            {
+                var slot = _log[(t - (uint)age) % LogDepth];
+                if (cursor[age] < slot.CellCount && slot.Cells[cursor[age]] < cell)
+                {
+                    cell = slot.Cells[cursor[age]];
+                }
+            }
+
+            if (cell >= c1)
+            {
+                break;
+            }
+
+            var before = count;
+            for (var age = 0; age < n; age++)
+            {
+                var slot = _log[(t - (uint)age) % LogDepth];
+                if (cursor[age] >= slot.CellCount || slot.Cells[cursor[age]] != cell)
+                {
+                    continue;
+                }
+
+                var k = cursor[age]++;
+                var events = slot.Events;
+                for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
+                {
+                    ref var e = ref events[i];
+                    if ((e.Flags & PushEvent.HasNew) == 0 || ((e.NetId % (uint)n) + tickPhase) % (uint)n != 0)
+                    {
+                        continue;
+                    }
+
+                    var block = (ReplicationBlockHeader*)e.Block;
+                    if (block == null || block->ChunkId < 0)
+                    {
+                        continue;
+                    }
+
+                    var layout = _states[e.Archetype].Layout;
+                    var bytes = (byte*)block;
+                    var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (e.Slot * layout.HotStride));
+                    // This tick's event is the entity's latest by definition; an older one only if nothing came after it (its stamp) and its slot still
+                    // holds it (identity reuse).
+                    if (age != 0 && (hot->NetId != e.NetId
+                        || *(uint*)(bytes + layout.ColdOffset + (e.Slot * layout.ColdStride) + layout.LastWatchedTickOffsetInColdEntry) != slot.Tick))
+                    {
+                        continue;
+                    }
+
+                    var plan = _encodePlans[e.Archetype];
+                    var groups = 0;
+                    for (var g = 0; g < plan.GroupCount; g++)
+                    {
+                        if (hot->GroupTicks[plan.GroupTickSlot[g]] > lo)
+                        {
+                            groups |= 1 << g;
+                        }
+                    }
+
+                    var segment = plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > lo;
+                    if (groups == 0 && !segment)
+                    {
+                        continue;
+                    }
+
+                    if (age == 0)
+                    {
+                        e.FlushGroups = (byte)groups;
+                        e.Flags |= (byte)(PushEvent.FarFlush | (segment ? PushEvent.FlushSegment : 0));
+                        flagged++;
+                        continue;
+                    }
+
+                    if (count == output.Length)
+                    {
+                        Array.Resize(ref _farOut[chunk], count * 2);
+                        output = _farOut[chunk];
+                    }
+
+                    ref var f = ref output[count++];
+                    f = e;
+                    f.OldX = e.NewX;
+                    f.OldY = e.NewY;
+                    f.OldCx = e.NewCx;
+                    f.OldCy = e.NewCy;
+                    f.Cell = (e.NewCy * _gridW) + e.NewCx;
+                    f.Groups = 0;
+                    f.FlushGroups = (byte)groups;
+                    f.Flags = (byte)(PushEvent.HasOld | PushEvent.HasNew | PushEvent.FarFlush | (segment ? PushEvent.FlushSegment : 0));
+                }
+            }
+
+            if (count != before)
+            {
+                if (cellCount + 1 >= startsOut.Length)
+                {
+                    Array.Resize(ref _farOutCells[chunk], (cellCount + 1) * 2);
+                    Array.Resize(ref _farOutStarts[chunk], ((cellCount + 1) * 2) + 1);
+                    cellsOut = _farOutCells[chunk];
+                    startsOut = _farOutStarts[chunk];
+                }
+
+                cellsOut[cellCount] = cell;
+                startsOut[cellCount] = before;
+                cellCount++;
+            }
+        }
+
+        _farOutCount[chunk] = count;
+        _farOutCellCount[chunk] = cellCount;
+        _farOutFlagged[chunk] = flagged;
     }
 
-    [ThreadStatic]
-    private static FarDense Dense;
+    /// <summary>
+    /// The fold's serial tail, in the frame prologue: the chunks' flush entries concatenated, in chunk order — which is cell order — into the tick's log
+    /// slot. Folds serially first when no stage did (the LOD on a tick whose index the prologue built).
+    /// </summary>
+    public void EndFarFold()
+    {
+        if (_farEndTick == _tick)
+        {
+            return;
+        }
+
+        var from = Stopwatch.GetTimestamp();
+        try
+        {
+            EndFarFoldCore();
+        }
+        finally
+        {
+            FarEndTicks += Stopwatch.GetTimestamp() - from;
+        }
+    }
+
+    private void EndFarFoldCore()
+    {
+
+        if (!FarFolded)
+        {
+            var chunks = BeginFarFold(1);
+            for (var c = 0; c < chunks; c++)
+            {
+                FoldFarChunk(c);
+            }
+        }
+
+        _farEndTick = _tick;
+        var slot = _log[_tick % LogDepth];
+        slot.FlushCellCount = 0;
+        if (!FarFolded || slot.Tick != _tick)
+        {
+            return;
+        }
+
+        var total = 0;
+        var totalCells = 0;
+        for (var c = 0; c < _farChunkCount; c++)
+        {
+            total += _farOutCount[c];
+            totalCells += _farOutCellCount[c];
+            FarFlushes += _farOutFlagged[c];
+        }
+
+        FarFlushes += total;
+        if (slot.Flush.Length < total)
+        {
+            slot.Flush = new PushEvent[Math.Max(total, slot.Flush.Length * 2)];
+        }
+
+        if (slot.FlushCells.Length < totalCells)
+        {
+            slot.FlushCells = new int[Math.Max(totalCells, slot.FlushCells.Length * 2)];
+        }
+
+        if (slot.FlushStarts.Length < totalCells + 1)
+        {
+            slot.FlushStarts = new int[Math.Max(totalCells + 1, slot.FlushStarts.Length * 2)];
+        }
+
+        var at = 0;
+        var cellAt = 0;
+        for (var c = 0; c < _farChunkCount; c++)
+        {
+            Array.Copy(_farOut[c], 0, slot.Flush, at, _farOutCount[c]);
+            for (var k = 0; k < _farOutCellCount[c]; k++)
+            {
+                slot.FlushCells[cellAt] = _farOutCells[c][k];
+                slot.FlushStarts[cellAt] = at + _farOutStarts[c][k];
+                cellAt++;
+            }
+
+            at += _farOutCount[c];
+        }
+
+        slot.FlushStarts[cellAt] = at;
+        slot.FlushCellCount = cellAt;
+    }
 
     private static int LowerBound(int[] values, int count, int key)
     {
@@ -2283,6 +2760,23 @@ internal sealed unsafe class PushReplication
         }
 
         return lo;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void EmitRecord(uint netId, nint block, byte slot, ushort archetype, int groups, bool segment, FrameWorkerScratch scratch, ref long updates)
+    {
+        if (segment)
+        {
+            scratch.Add(archetype, FrameListKind.Segment, new FrameRecord { NetId = netId, Block = block, Slot = slot, Archetype = archetype });
+            updates++;
+        }
+
+        if (groups != 0)
+        {
+            scratch.Add(archetype, FrameListKind.State,
+                new FrameRecord { NetId = netId, Block = block, Slot = slot, GroupMask = (byte)groups, Archetype = archetype });
+            updates++;
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

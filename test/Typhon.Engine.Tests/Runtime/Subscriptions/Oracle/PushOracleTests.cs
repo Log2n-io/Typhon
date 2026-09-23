@@ -117,13 +117,17 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     /// </summary>
     /// <param name="detection">Who signals a change.</param>
     /// <param name="skipPercent">The percentage of ticks on which each session's frames are left undrained.</param>
+    /// <param name="deterministic">Whether the index and the far flushes are built serially, in the frame prologue.</param>
     [Test]
+    [VerifiesRule("SUB-19")]
     public void DeferredFarUpdatesStillConverge(
         [Values(PushDetection.Explicit, PushDetection.Automatic)] PushDetection detection,
-        [Values(0, 30)] int skipPercent)
+        [Values(0, 30)] int skipPercent,
+        [Values(false, true)] bool deterministic)
     {
+        // Deterministic projection builds the index, and so folds the far flushes, serially in the frame prologue rather than in their stages.
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7300 + skipPercent, [skipPercent, 0, 30, 0],
-            nameof(PushOracleTests), push: detection, walkRadius: 3000);
+            nameof(PushOracleTests), push: detection, walkRadius: 3000, deterministicProjection: deterministic);
         oracle.Push.FarEvery = 4;
 
         for (var i = 0; i < GateTicks; i++)
@@ -138,6 +142,72 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
 
         Assert.That(oracle.Push.UpdatesDeferred, Is.GreaterThan(20), "no far update was ever deferred, so the LOD was not exercised");
         Assert.That(oracle.Push.FarFlushes, Is.GreaterThan(20), "the deferred updates were never flushed");
+    }
+
+    /// <summary>
+    /// A far change whose update was deferred still reaches a session that then walks closer to the entity, with no further event from it: the only thing
+    /// that brings the entity inside half the radius is the viewer's own move.
+    /// </summary>
+    /// <param name="seed">The run's seed.</param>
+    /// <param name="skipPercent">The percentage of ticks on which half the sessions' frames are left undrained: the flushes then arrive by catch-up.</param>
+    [Test]
+    [VerifiesRule("SUB-19")]
+    public void ADeferredFarChangeReachesASessionThatWalksCloser([Range(7400, 7409)] int seed, [Values(0, 30)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed,
+            [skipPercent, 0, skipPercent, 0, skipPercent, 0, skipPercent, 0], nameof(PushOracleTests), push: PushDetection.Explicit, walkRadius: 3000);
+
+        // A long window, so many far changes are still pending when the sessions start to move — below the log depth, or every flush is a reset.
+        oracle.Push.FarEvery = 6;
+
+        for (var i = 0; i < 80; i++)
+        {
+            oracle.Step();
+        }
+
+        // Writes stop; only the viewers move, by 0.3 R a tick — under a cell (R/3), so no move reads as a teleport, and far enough that an entity just past
+        // R/2 is inside it before the session's next flush. Whatever a session was not told while an entity was far must reach it as its disc closes in.
+        // Two steps only: further, and the discs leave the entities behind, which then come back through an enter — with their whole state.
+        var crescentBefore = oracle.Push.FarCrescentStates;
+        for (var i = 0; i < 2; i++)
+        {
+            oracle.StepWalkingOnly(0.3);
+        }
+
+        Assert.That(oracle.Push.FarCrescentStates, Is.GreaterThan(crescentBefore), "no held entity crossed inside R/2 on a viewer's move: the case did not run");
+
+        oracle.Quiesce();
+        oracle.AssertConverged("far changes deferred, then the sessions walked closer with no further write");
+        Assert.That(oracle.Push.UpdatesDeferred, Is.GreaterThan(20), "no far update was ever deferred, so the case was not exercised");
+    }
+
+    /// <summary>
+    /// Far flushes delivered through the log's catch-up, with small cells that the workload's moves cross often and most frames skipped, under the shadow
+    /// legality check.
+    /// </summary>
+    /// <remarks>
+    /// Written for the catch-up meeting an entity's event twice on its phase tick — its secondary, a copy taken before the fold flagged the primary, first
+    /// — but it does not reliably reach that case: removing the fix (CollectLog's merge of the flag on the second meeting) leaves it green. That fix
+    /// stands on its argument, not on this test.
+    /// </remarks>
+    /// <param name="seed">The run's seed.</param>
+    [Test]
+    [VerifiesRule("SUB-19")]
+    public void FarFlushesConvergeThroughCatchUpWithSmallCells([Range(7500, 7507)] int seed)
+    {
+        // A small radius, so cells are small and the workload's moves cross them often; most frames skipped, so most flushes arrive by catch-up.
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed, [60, 60, 60, 60, 60, 60], nameof(PushOracleTests),
+            push: PushDetection.Explicit, walkRadius: 400);
+        oracle.Push.FarEvery = 4;
+
+        for (var i = 0; i < 150; i++)
+        {
+            oracle.Step();
+        }
+
+        oracle.Quiesce();
+        oracle.AssertConverged("far flushes on cell crossings, with most frames skipped");
+        Assert.That(oracle.Push.LogCatchUps, Is.GreaterThan(0), "no session ever caught up, so no flush travelled through the log");
     }
 
     /// <summary>Automatic detection is off unless the runtime is told otherwise (ADR-067): replication is explicit.</summary>

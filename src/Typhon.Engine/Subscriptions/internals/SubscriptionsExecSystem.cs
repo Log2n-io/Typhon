@@ -621,6 +621,28 @@ internal sealed class SubscriptionsPushIndexExecSystem : SubscriptionsExecSystem
 }
 
 /// <summary>
+/// PROTOTYPE (push, distance LOD) — folds the tick's far flushes: chunks of cells over the last N log slots, after the index is placed. Zero chunks when the
+/// LOD is off or the index is built later, serially, by the frame prologue — which then folds serially too.
+/// </summary>
+internal sealed class SubscriptionsPushFarExecSystem : SubscriptionsExecSystemBase
+{
+    public SubscriptionsPushFarExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
+
+    protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
+        .Name("SubscriptionsPushFar")
+        .After("SubscriptionsPushIndex")
+        .ChunkedParallel(1);
+
+    /// <inheritdoc />
+    protected override SubscriptionsStage Stage => SubscriptionsStage.Project;
+
+    // No session open, nobody to flush to: a session that opens later starts with a reset and its whole view, never with an old flush.
+    protected override int PrepareChunks(SubscriptionsContext ctx) => ctx.SessionCount > 0 ? ctx.Subscriptions?.Push?.BeginFarFold(ctx.WorkerCount) ?? 0 : 0;
+
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => ctx.Subscriptions?.Push?.FoldFarChunk(chunkIndex);
+}
+
+/// <summary>
 /// S2b — copies each session's changed records into its frame. The critical path's last stage.
 /// </summary>
 /// <remarks>
@@ -659,7 +681,7 @@ internal sealed class SubscriptionsFramesExecSystem : SubscriptionsExecSystemBas
 
     protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
         .Name("SubscriptionsFrames")
-        .AfterAll("SubscriptionsProject", "SubscriptionsEvents", "SubscriptionsPushIndex")
+        .AfterAll("SubscriptionsProject", "SubscriptionsEvents", "SubscriptionsPushIndex", "SubscriptionsPushFar")
         .ChunkedParallel(1);
 
     /// <inheritdoc />

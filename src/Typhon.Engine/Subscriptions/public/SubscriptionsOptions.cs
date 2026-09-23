@@ -452,6 +452,12 @@ public sealed class SubscriptionsOptions
     public bool DeterministicProjection { get; init; }
 
     /// <summary>
+    /// PROTOTYPE (tests): the push path's shadow oracle — every published record checked for legality against a shadow of what the client holds. Also on
+    /// with <c>TYPHON_PUSH_SHADOW=1</c>.
+    /// </summary>
+    internal bool PushShadow { get; init; }
+
+    /// <summary>
     /// PROTOTYPE (ADR-067): whether a push profile may declare <see cref="PushDetection.Automatic"/>. Off: replication is explicit — a system that writes a
     /// replicated value calls <see cref="SubscriptionsCommands.Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/> — and a profile asking for automatic
     /// detection is refused when the runtime starts.

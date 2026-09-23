@@ -676,3 +676,25 @@
     command to appear exactly once across every tick observed, and each session's commands to appear in the order that session framed them.
     Falsifiability is proved by IngressDrainTests.ADuplicatedOrReorderedDeliveryIsDetected, which drives the same assertion over an observation log that
     repeats one record and swaps two of a session's, and requires it to reject both.
+
+## Module: Push Replication (PROTOTYPE, ADR-067)
+
+### SUB-19: A push entity's slot stamp is the tick of its last event, and every change makes one `[fatal][silent]`
+  invariant ∀ push archetype, ∀ live slot s: cold LastWatchedTick(s) = the tick of the latest PushEvent recorded for the entity in s
+  invariant ∀ change to an entity's projected state or motion in tick T: a PushEvent for it is recorded in T, and it names the block and slot the
+    entity is in at the end of T — an arrival by migration included, even when no byte changed
+  invariant the far flush of an entity at its phase tick p ((netId mod N + p mod N) mod N = 0) carries every group whose stamp is in (p − N, p]
+  never write a push slot's LastWatchedTick anywhere but PushReplication.AddEvent — not for a slot the change gate skipped, not on a dormant path
+  never drop an arrival's event as a byte-identical no-op
+  scope: PushReplication.AddEvent, PushReplication.FoldFarChunk, PushReplication.FarSweepCell, PushReplication.CollectLog, ProjectionPass.ProjectBlock,
+    ReplicationBlockLayout.LastWatchedTickOffsetInColdEntry, PushEvent.Arrived, PushEvent.FarFlush
+  on_violation: the distance LOD's far-flush fold picks an entity's latest event by that stamp, and the sweep, the cell delivery and the log's catch-up
+    read it as "the push step owns this entity from that tick on". A stamp moved without an event makes the fold skip the entity, so a change a far
+    session was never sent is never flushed; a stamp that names a slot the entity left makes a flush point at the wrong entity. Both are silent: the
+    client simply keeps a stale value until the entity changes the same group again.
+  rationale: an explicit push model keeps no per-session record of what a client was told, so "what changed since" has to be recoverable from the
+    entity itself — its group stamps say what, the log's events say where, and this stamp ties the two to one event.
+  note the pull path uses the same field for "watched last tick"; ADR-067 retires pull, and the field is renamed then rather than a second one added.
+  verified: PushOracleTests.ADeferredFarChangeReachesASessionThatWalksCloser, PushOracleTests.DeferredFarUpdatesStillConverge,
+    PushOracleTests.FarFlushesConvergeThroughCatchUpWithSmallCells — oracle runs with the shadow legality check on. Falsifiability: removing the
+    far-flush fold's in-place flag, its flush entries or the inner-crescent sweep each turns ADeferredFarChangeReachesASessionThatWalksCloser red.

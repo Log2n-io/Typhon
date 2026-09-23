@@ -161,7 +161,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
             if (Array.IndexOf(pushArchetypes, true) >= 0)
             {
-                Push = new PushReplication(Plans, _replicationStates, pushArchetypes, Interest.AutomaticPushArchetypes, Interest.MaxPushRadius, Options.MaxSessions);
+                Push = new PushReplication(Plans, _replicationStates, pushArchetypes, Interest.AutomaticPushArchetypes, Interest.MaxPushRadius, Options.MaxSessions,
+                    Options.PushShadow);
                 for (var a = 0; a < pushArchetypes.Length; a++)
                 {
                     if (pushArchetypes[a])

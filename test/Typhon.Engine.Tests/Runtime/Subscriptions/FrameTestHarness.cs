@@ -311,7 +311,7 @@ sealed unsafe class FrameHarness : IDisposable
 
         // The pushed slots join the watched lists after the gather reset them, as in the runtime — and the projection counts its events for the parallel
         // index, which the push index stage then places (SubscriptionsPushIndexExecSystem).
-        Subscriptions.Push?.MarkPushed(workers: 1, countInProject: true);
+        Subscriptions.Push?.MarkPushed(workers: 1, countInProject: !Subscriptions.Options.DeterministicProjection);
 
         for (var a = 0; a < states.Length; a++)
         {
@@ -355,6 +355,13 @@ sealed unsafe class FrameHarness : IDisposable
             for (var w = 0; w < lists; w++)
             {
                 push.PlaceWorker(w);
+            }
+
+            // The far-flush stage (SubscriptionsPushFarExecSystem), in two chunks so a chunk boundary is crossed.
+            var chunks = push.BeginFarFold(2);
+            for (var c = 0; c < chunks; c++)
+            {
+                push.FoldFarChunk(c);
             }
         }
     }

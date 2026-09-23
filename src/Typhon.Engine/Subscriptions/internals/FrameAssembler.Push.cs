@@ -84,6 +84,12 @@ internal sealed unsafe partial class FrameAssembler
             Push.BuildIndex();
         }
 
+        // Distance LOD: the far flushes into the tick's log slot — folded by their stage, or here when the index was built here.
+        if (n > 0)
+        {
+            Push.EndFarFold();
+        }
+
         // Shadow oracle: every 50 ticks, up to eight sessions compared with the geometry. Serial, and before the frames: the anchors it reads are the
         // committed ones, which is what the shadows describe.
         if (Push.Shadow && _tick % 50 == 49)
@@ -112,7 +118,7 @@ internal sealed unsafe partial class FrameAssembler
             $"  PUSH: {_pushSessionCount} sessions; slots pushed {p.SlotsPushed}, events {p.Events}; enters {p.Enters}, leaves {p.Leaves}, updates {p.Updates}; "
             + $"cells delivered {p.CellsDelivered}, sweeps {p.Sweeps} ({p.SweepSlots} slots); resets {p.Resets}; "
             + $"serial prepare {p.PrepareTicks * f:F0} ms, index {p.IndexTicks * f:F0} ms, gather busy {p.GatherTicks * f:F0} ms (cumulative)");
-        Console.Error.WriteLine($"  PUSH LOD: far every {p.FarEvery}; updates deferred {p.UpdatesDeferred}, flushes {p.FarFlushes}");
+        Console.Error.WriteLine($"  PUSH LOD: far every {p.FarEvery}; updates withheld {p.UpdatesDeferred}, far flushes {p.FarFlushes}, crescent states {p.FarCrescentStates}, fold tail {p.FarEndTicks * f:F0} ms");
         Console.Error.WriteLine($"  PUSH LOG: catch-ups {p.LogCatchUps} over {p.LogCatchUpTicks} missed ticks; resets: too old {p.LogTooOld}, ambiguous {p.LogAmbiguous}");
         if (p.ValidateClustersPerTick > 0)
         {
@@ -238,18 +244,6 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         var records = SortAndCount(scratch);
-        if (Push.FarEvery > 1)
-        {
-            records = 0;
-            for (var a = 0; a < _plans.Length; a++)
-            {
-                scratch.DedupeUpdates(a);
-                for (var k = 0; k < 4; k++)
-                {
-                    records += scratch.Count(a, (FrameListKind)k);
-                }
-            }
-        }
         if (timing)
         {
             var now = Stopwatch.GetTimestamp();
