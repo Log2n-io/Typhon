@@ -43,6 +43,9 @@ public static class TatooineReplication
     /// </remarks>
     private const double PlayerRadiusM = 192d;
 
+    /// <summary>The replication grid's cell side (<see cref="SubscriptionsOptions.ReplicationCellM"/>): a third of <see cref="PlayerRadiusM"/>.</summary>
+    public const double ReplicationCellM = PlayerRadiusM / 3d;
+
     /// <summary>The fastest anything on Tatooine moves, in metres per second — a mounted player.</summary>
     /// <remarks>
     /// It sizes the motion codec: the teleport threshold is what separates "it moved" from "it was put somewhere else", and the velocity width is derived from

@@ -491,7 +491,10 @@ class SendPumpTests : TestBase<SendPumpTests>
                 subs.Session(SessionId.FromValue(alternating)).Profile((ctx.TickNumber & 1) == 0 ? FirstProfile : SecondProfile);
             }
         });
-    }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = TickRateHz });
+    }, new RuntimeOptions
+    {
+        WorkerCount = 1, BaseTickRate = TickRateHz, Subscriptions = new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
+    });
 
     private static ArchetypeReplicationState State(SubscriptionsRuntime subs) => subs.StateOf(subs.Plans[0].ArchetypeCatalogId);
 

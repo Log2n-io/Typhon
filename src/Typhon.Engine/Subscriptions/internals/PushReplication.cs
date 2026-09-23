@@ -148,7 +148,7 @@ internal sealed unsafe class PushReplication
     /// <summary>The visibility radius.</summary>
     public readonly double Radius;
 
-    /// <summary>The replication cell side: R / 3.</summary>
+    /// <summary>The replication cell side, declared (<see cref="SubscriptionsOptions.ReplicationCellM"/>).</summary>
     public readonly double CellSize;
 
     /// <summary>How far a viewpoint may drift from its anchor before the anchor moves.</summary>
@@ -356,8 +356,8 @@ internal sealed unsafe class PushReplication
         }
     }
 
-    public PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic, double radius, int maxSessions,
-        bool shadow = false)
+    public PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic, ReplicationGrid grid,
+        int maxSessions, bool shadow = false)
     {
         Shadow = shadow || Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
         _plans = plans;
@@ -400,10 +400,6 @@ internal sealed unsafe class PushReplication
         _pushCount = new int[plans.Length];
         _repush = new long[plans.Length][];
 
-        var gMinX = double.MaxValue;
-        var gMinY = double.MaxValue;
-        var gMaxX = double.MinValue;
-        var gMaxY = double.MinValue;
         foreach (var a in _pushIndices)
         {
             var position = plans[a].Position;
@@ -424,42 +420,27 @@ internal sealed unsafe class PushReplication
             _stepX[a] = WireMath.QuantStep(pos.Min[0], pos.Max[0], pos.Bits);
             _stepY[a] = WireMath.QuantStep(pos.Min[1], pos.Max[1], pos.Bits);
             _axisBytes[a] = pos.Bits / 8;
-            gMinX = Math.Min(gMinX, pos.Min[0]);
-            gMinY = Math.Min(gMinY, pos.Min[1]);
-            gMaxX = Math.Max(gMaxX, pos.Max[0]);
-            gMaxY = Math.Max(gMaxY, pos.Max[1]);
             _pushChunks[a] = new int[64];
             _pushBlocks[a] = new nint[64];
             _pushMasks[a] = new ulong[64];
             _repush[a] = [];
         }
 
-        // Only World profiles: no disc to size the grid by, so a grid of about 48 cells across the world, for delivery granularity and the index.
-        if (radius <= 0d)
-        {
-            radius = Math.Max(gMaxX - gMinX, gMaxY - gMinY) / 16d;
-        }
+        Radius = grid.Radius;
+        CellSize = grid.CellM;
+        AnchorSlack = grid.AnchorSlack;
+        Half = grid.Half;
+        Window = grid.Window;
+        _gridMinX = grid.OriginX;
+        _gridMinY = grid.OriginY;
+        _gridW = grid.DimX;
+        _gridH = grid.DimY;
 
-        Radius = radius;
-        CellSize = radius / 3d;
-        AnchorSlack = CellSize / 16d;
-        // Two cells of margin past the radius: the anchor moves at most one cell before a move is treated as a teleport, so a cell can leave the window
-        // only when every point of it is past R from both the old anchor and the new one — no known entity is ever dropped with its cell.
-        Half = (int)Math.Ceiling(radius / CellSize) + 2;
-        Window = (2 * Half) + 1;
-        if (Window > 16)
-        {
-            throw new NotSupportedException("Push window wider than 16 cells.");
-        }
-
-        _gridMinX = gMinX;
-        _gridMinY = gMinY;
-        _gridW = Math.Max(1, (int)Math.Ceiling((gMaxX - gMinX) / CellSize) + 1);
-        _gridH = Math.Max(1, (int)Math.Ceiling((gMaxY - gMinY) / CellSize) + 1);
+        // The dense index's own limit, gone with it (10 § 12, 1.5.1): it clears and walks four int arrays of this many cells every tick.
         if ((long)_gridW * _gridH > 16_000_000)
         {
             throw new NotSupportedException(
-                $"Push grid of {_gridW} x {_gridH} cells is too large for the dense index: the world is too wide for the observers' radius.");
+                $"Replication grid of {_gridW} x {_gridH} cells is too large for the dense push index: raise SubscriptionsOptions.ReplicationCellM.");
         }
 
         _cellStart = new int[(_gridW * _gridH) + 1];

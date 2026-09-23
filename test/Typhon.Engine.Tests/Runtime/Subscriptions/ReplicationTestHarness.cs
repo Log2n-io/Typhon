@@ -48,14 +48,24 @@ sealed unsafe class ReplicationHarness : IDisposable
     /// <param name="declare">Writes the projections and profiles.</param>
     /// <param name="name">A name for the resource registry, so two fixtures do not share one.</param>
     /// <param name="options">Replication options, or <see langword="null"/> for the fixtures' ample defaults.</param>
+    /// <param name="replicationCellM">
+    /// The cell side the defaults declare; zero for <c>ProjectionTestSchema.ReplicationCellFor(0)</c>, the World fixtures' grid. Ignored when
+    /// <paramref name="options"/> is given, which declares its own.
+    /// </param>
     /// <returns>The harness.</returns>
-    public static ReplicationHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null)
+    public static ReplicationHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null,
+        double replicationCellM = 0)
     {
         var resources = new ResourceRegistry(new ResourceRegistryOptions { Name = name });
         try
         {
             var netIds = new NetIdAllocator("NetIds", resources.Runtime);
-            var declarations = new SubscriptionsRegistry(options ?? new SubscriptionsOptions { MaxSessions = 256, StatePoolBudgetBytes = PoolBudgetBytes });
+            var declarations = new SubscriptionsRegistry(options ?? new SubscriptionsOptions
+            {
+                MaxSessions = 256,
+                StatePoolBudgetBytes = PoolBudgetBytes,
+                ReplicationCellM = replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(0),
+            });
             declarations.Sessions.Kinds("god");
             declare(declarations);
 

@@ -245,6 +245,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
             MaxSessions = 4,
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
+            ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(Radius),
         });
 
         var push = harness.Subscriptions.Push;

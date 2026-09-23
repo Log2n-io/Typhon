@@ -56,6 +56,7 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
             EnterBudgetPerFrame = enterBudget,
+            ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0),
         };
 
     private FrameHarness Create(SubscriptionsOptions options = null)

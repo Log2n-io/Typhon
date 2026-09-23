@@ -58,6 +58,9 @@ public sealed partial class TatooineSim
             {
                 CollapseBelowWorkUnits = _config.SubscriptionsCollapseWorkUnits,
                 AllowAutomaticPushDetection = _config.SubscriptionsPushAutomatic,
+
+                // A third of the players' 192 m radius: an 11 x 11 window per session.
+                ReplicationCellM = TatooineReplication.ReplicationCellM,
             },
         });
 

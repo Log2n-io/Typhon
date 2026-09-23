@@ -108,7 +108,8 @@ class SphereObserverTests : TestBase<SphereObserverTests>
         var dbe = SetupEngine();
         Populate(dbe);
 
-        using var harness = FrameHarness.Create(dbe, DeclareSphere, nameof(APlacedSessionHoldsTheDiscAroundItAndNothingElse));
+        using var harness = FrameHarness.Create(dbe, DeclareSphere, nameof(APlacedSessionHoldsTheDiscAroundItAndNothingElse),
+            replicationCellM: ProjectionTestSchema.ReplicationCellFor(Radius));
         harness.RunFence = true;
         var session = harness.OpenSessions(1, "near")[0];
         var centre = new Vector3D(200d, 200d, 0d);
@@ -137,7 +138,10 @@ class SphereObserverTests : TestBase<SphereObserverTests>
         Populate(dbe);
 
         using var harness = FrameHarness.Create(dbe, DeclareWorld, nameof(AWorldObserverOverTheSameEntitiesHoldsAllOfThem),
-            new SubscriptionsOptions { MaxSessions = 16, EnterBudgetPerFrame = CreatureCount });
+            new SubscriptionsOptions
+            {
+                MaxSessions = 16, EnterBudgetPerFrame = CreatureCount, ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0),
+            });
         harness.RunFence = true;
         var session = harness.OpenSessions(1, "world")[0];
 
@@ -158,7 +162,8 @@ class SphereObserverTests : TestBase<SphereObserverTests>
         var dbe = SetupEngine();
         Populate(dbe);
 
-        using var harness = FrameHarness.Create(dbe, DeclareSphere, nameof(TwoSessionsPlacedApartHoldDisjointSets));
+        using var harness = FrameHarness.Create(dbe, DeclareSphere, nameof(TwoSessionsPlacedApartHoldDisjointSets),
+            replicationCellM: ProjectionTestSchema.ReplicationCellFor(Radius));
         harness.RunFence = true;
         var sessions = harness.OpenSessions(2, "near");
         harness.Sessions.SetViewpoint(sessions[0], new Vector3D(50d, 50d, 0d));
@@ -191,7 +196,8 @@ class SphereObserverTests : TestBase<SphereObserverTests>
         var dbe = SetupEngine();
         Populate(dbe);
 
-        using var harness = FrameHarness.Create(dbe, DeclareSphere, nameof(AnUnplacedSessionHoldsNothing));
+        using var harness = FrameHarness.Create(dbe, DeclareSphere, nameof(AnUnplacedSessionHoldsNothing),
+            replicationCellM: ProjectionTestSchema.ReplicationCellFor(Radius));
         harness.RunFence = true;
         var sessions = harness.OpenSessions(2, "near");
         var unplaced = sessions[0];

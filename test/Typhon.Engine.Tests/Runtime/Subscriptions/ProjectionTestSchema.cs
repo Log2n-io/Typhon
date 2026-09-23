@@ -144,6 +144,14 @@ static class ProjectionTestSchema
     /// <summary>The position quantum that follows from <see cref="WorldExtentM"/> at 24 bits per axis: 2⁻¹⁰ m.</summary>
     public const double PositionStepM = 1.0 / 1024.0;
 
+    /// <summary>
+    /// The replication cell side the fixtures declare for a Sphere radius: a third of it, the 11 × 11 window. For <paramref name="radius"/> zero (World
+    /// profiles only), a 48th of the world's width, so a World fixture's delivery walks the grid it was written against.
+    /// </summary>
+    /// <param name="radius">The largest Sphere radius the fixture declares, or zero.</param>
+    /// <returns>The side, for <see cref="SubscriptionsOptions.ReplicationCellM"/>.</returns>
+    public static double ReplicationCellFor(double radius) => radius > 0 ? radius / 3d : 2d * WorldExtentM / 48d;
+
     /// <summary>The cube the volumetric grid spans: +/-1 024 m on all three axes, so every axis shares one quantum.</summary>
     public const double VolumeExtentM = 1024.0;
 

@@ -62,6 +62,7 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
             MaxSessions = 16,
             StatePoolBudgetBytes = 16L * 1024 * 1024,
             FramePoolBudgetBytes = 16L * 1024 * 1024,
+            ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0),
         };
 
     private FrameHarness Create()

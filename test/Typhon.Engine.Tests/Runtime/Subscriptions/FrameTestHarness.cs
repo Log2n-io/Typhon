@@ -60,10 +60,12 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="declare">Writes the projections and profiles.</param>
     /// <param name="name">A name for the resource registry.</param>
     /// <param name="options">Replication options; the defaults are used for anything not set.</param>
+    /// <param name="replicationCellM">The cell side the defaults declare, as <see cref="ReplicationHarness.Create"/>.</param>
     /// <returns>The harness.</returns>
-    public static FrameHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null)
+    public static FrameHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null,
+        double replicationCellM = 0)
     {
-        var replication = ReplicationHarness.Create(engine, declare, name, options);
+        var replication = ReplicationHarness.Create(engine, declare, name, options, replicationCellM);
         try
         {
             return new FrameHarness(replication);

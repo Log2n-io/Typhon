@@ -91,6 +91,7 @@ class ClientMembershipTests : TestBase<ClientMembershipTests>
                 StatePoolBudgetBytes = 32L * 1024 * 1024,
                 FramePoolBudgetBytes = 32L * 1024 * 1024,
                 EnterBudgetPerFrame = 100_000,
+                ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(400),
             });
 
         var session = harness.OpenSessions(1, "reach")[0];

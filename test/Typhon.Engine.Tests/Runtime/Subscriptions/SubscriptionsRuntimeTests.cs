@@ -30,7 +30,10 @@ unsafe class SubscriptionsRuntimeTests : TestBase<SubscriptionsRuntimeTests>
 {
     private DatabaseEngine SetupEngine() => ProjectionTestSchema.SetupEngine(ServiceProvider);
 
-    private static RuntimeOptions Options() => new() { WorkerCount = 1, BaseTickRate = 1000 };
+    private static RuntimeOptions Options() => new()
+    {
+        WorkerCount = 1, BaseTickRate = 1000, Subscriptions = new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
+    };
 
     private static TyphonRuntime CreateRuntime(DatabaseEngine dbe) => TyphonRuntime.Create(dbe, schedule =>
     {

@@ -156,7 +156,10 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
             if (Array.IndexOf(observed, true) >= 0)
             {
-                Push = new PushReplication(Plans, _replicationStates, observed, automatic, Profiles.MaxRadius, Options.MaxSessions, Options.PushShadow);
+                // Null only when no spatial grid is configured, and then an observed archetype has no position, which the push path refuses by name first.
+                var spatial = engine.SpatialGrid;
+                Grid = spatial == null ? null : ReplicationGrid.Resolve(Options.ReplicationCellM, spatial.Config, Profiles.MaxRadius);
+                Push = new PushReplication(Plans, _replicationStates, observed, automatic, Grid, Options.MaxSessions, Options.PushShadow);
                 for (var a = 0; a < observed.Length; a++)
                 {
                     if (observed[a])
@@ -300,6 +303,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     /// <summary>The push path, or <see langword="null"/> when no profile observes anything.</summary>
     internal PushReplication Push { get; private set; }
+
+    /// <summary>The replication grid resolved at <c>Start</c>, or <see langword="null"/> when no profile observes anything.</summary>
+    internal ReplicationGrid Grid { get; private set; }
 
     /// <summary>The send side: what carries a published frame to a link.</summary>
     public SendPump SendPump => _sendPump;

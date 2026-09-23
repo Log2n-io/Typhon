@@ -203,6 +203,30 @@ public sealed class SubscriptionsOptions
     public int ObserversPerSession { get; init; } = 4;
 
     /// <summary>
+    /// The replication grid's cell side, in world units. <b>Required</b> whenever a profile observes an archetype; no default, and the runtime refuses to
+    /// start without it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Replication tracks what each session has been given cell by cell over this grid, which covers the spatial world's bounds
+    /// (<see cref="SpatialGridConfig.WorldMin"/>, <see cref="SpatialGridConfig.WorldMax"/>). It is a separate value from the spatial
+    /// <see cref="SpatialGridConfig.CellSize"/>: the spatial cells cluster entities for queries, these cells bound what a session is sent.
+    /// </para>
+    /// <para>
+    /// <b>It is load-bearing for the whole subsystem's cost, which is why it is declared rather than derived.</b> For an observer of radius <c>R</c>, each
+    /// session keeps a window of <c>W = 2⌈R / c⌉ + 5</c> cells per axis and reads that many cells every tick it moves, so a small side multiplies the
+    /// per-session work by <c>(R / c)²</c>. A large side makes each cell coarser, so the band a moving session is sent when it enters a cell grows with it.
+    /// The usual choice is about a third of the largest <see cref="ProfileBuilder.Sphere"/> radius: <c>R / c = 3</c> gives an 11 × 11 window. Profiles of
+    /// different radii share this one grid, so it is sized for the set of them, not for any one.
+    /// </para>
+    /// <para>
+    /// Refused at start: absent or not positive; a grid wider than 2²¹ cells on an axis; a window wider than 16 cells (<c>⌈R / c⌉ &gt; 5</c> for the largest
+    /// radius), the limit of the current window storage. The resolved grid is logged when the runtime starts.
+    /// </para>
+    /// </remarks>
+    public double ReplicationCellM { get; init; }
+
+    /// <summary>
     /// The largest frame the engine will send, in bytes. Default: 256 KiB.
     /// </summary>
     /// <remarks>

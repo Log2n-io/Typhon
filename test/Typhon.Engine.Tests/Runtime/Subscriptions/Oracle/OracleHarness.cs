@@ -217,7 +217,7 @@ internal sealed unsafe class OracleHarness : IDisposable
         var walk = walkRadius > 0;
         var radius = walk ? walkRadius : PushRadiusM;
         var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every), name,
-            Options(detection == PushDetection.Automatic, deterministicProjection));
+            Options(detection == PushDetection.Automatic, deterministicProjection, worldObserver && !walk ? 0 : radius));
         try
         {
             var oracle = new OracleHarness(harness, skipPercent, seed, detection, radius, walk);
@@ -664,8 +664,9 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// induces on purpose — the run would still be correct but it would no longer be measuring what it says it measures. The enter budget is left at the
     /// engine's default: deferring enters across ticks is real behaviour that the quiet window is there to absorb, and raising it would hide it.
     /// </remarks>
-    private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection) => new()
+    private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection, double radius) => new()
     {
+        ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(radius),
         AllowAutomaticPushDetection = automatic,
 
         // The push path's legality check: a record the client could not apply — an enter of a held entity, an update or a leave of an unheld one — is a

@@ -436,6 +436,11 @@ public sealed partial class TyphonRuntime : IDisposable
             // track metric would report zeros from a ring nothing fills.
             var built = new SubscriptionsRuntime(Engine, _subscriptions, Options, Scheduler, _netIds, SystemNames(), _subscriptionsContext.Telemetry);
             _subscriptionsRuntime = built;
+            if (built.Grid is { } grid)
+            {
+                LogReplicationGrid(grid.CellM, Engine.SpatialGrid.Config.CellSize, grid.DimX, grid.DimY, grid.DimZ, grid.Window, grid.Radius,
+                    grid.Flat ? "flat" : "deep");
+            }
 
             // Published to the stages before a worker exists to read it: Scheduler.Start is what creates them, and starting a thread is itself a barrier.
             _subscriptionsContext.AttachSubscriptions(built);
