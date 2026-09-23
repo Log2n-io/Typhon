@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 
-namespace SwgTatooine.Replication;
+namespace SwgTatooine;
 
 /// <summary>
 /// What a connected client sees of Tatooine, declared through the public replication API and nothing else.
@@ -79,7 +79,7 @@ public static class TatooineReplication
     /// the two radii is admitted to a session that does not already hold it. That is what makes the comparison a measurement of the band rather than of
     /// the disc's size.
     /// </param>
-    public static void Declare(SubscriptionsRegistry subs, bool hysteresis) => Declare(subs, hysteresis, push: false);
+    public static void Declare(SubscriptionsRegistry subs, bool hysteresis) => Declare(subs, hysteresis, push: false, automatic: false);
 
     /// <summary>PROTOTYPE: whether the player profile is push-served (<c>--subs-mode push</c>).</summary>
     public static bool PushMode { get; private set; }
@@ -102,7 +102,8 @@ public static class TatooineReplication
     /// <param name="subs">The runtime's registry, before <c>Start</c>.</param>
     /// <param name="hysteresis">See the two-argument overload.</param>
     /// <param name="push">Whether the player profile is push-served.</param>
-    public static void Declare(SubscriptionsRegistry subs, bool hysteresis, bool push)
+    /// <param name="automatic">With <paramref name="push"/>, whether the engine detects changes itself instead of relying on the simulation's pushes.</param>
+    public static void Declare(SubscriptionsRegistry subs, bool hysteresis, bool push, bool automatic)
     {
         PushMode = push;
         ArgumentNullException.ThrowIfNull(subs);
@@ -135,15 +136,20 @@ public static class TatooineReplication
 
         if (push)
         {
-            // PROTOTYPE: an archetype is served one way only, so the god camera keeps the static scenery and the movers go to the push profile. The push
-            // disc has no band: the anchor's slack is its hysteresis for observer motion (push-model.md § 4.5).
+            // PROTOTYPE: every profile push-served — the god camera through a push World observer, the players through a disc with no band (the anchor's
+            // slack is its hysteresis for observer motion, push-model.md § 4.5).
+            var detection = automatic ? PushDetection.Automatic : PushDetection.Explicit;
             subs.Profile(GodProfile, p => p
+                .Push(detection)
                 .World()
+                .Of<Creature>()
+                .Of<CityNpc>()
+                .Of<Player>()
                 .Of<CreatureLair>()
                 .Of<WorldObject>());
 
             subs.Profile(PlayerProfile, p => p
-                .Push()
+                .Push(detection)
                 .Sphere(PlayerRadiusM)
                 .Of<Player>()
                 .Of<CityNpc>()

@@ -77,12 +77,14 @@ public static class CommandLine
             var other => throw new ArgumentException($"--subs-band takes on or off, not '{other}'"),
         };
 
-        c.SubscriptionsPush = Str(args, "--subs-mode", "pull") switch
+        var subsMode = Str(args, "--subs-mode", "pull");
+        c.SubscriptionsPush = subsMode switch
         {
             "pull" => false,
-            "push" => true,
-            var other => throw new ArgumentException($"--subs-mode takes pull or push, not '{other}'"),
+            "push" or "push-auto" => true,
+            _ => throw new ArgumentException($"--subs-mode takes pull, push or push-auto, not '{subsMode}'"),
         };
+        c.SubscriptionsPushAutomatic = subsMode == "push-auto";
 
         c.SubscriptionsCellKeyedInterest = Str(args, "--subs-interest", "cell") switch
         {

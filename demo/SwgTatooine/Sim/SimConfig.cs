@@ -293,6 +293,12 @@ public sealed class SimConfig
     /// </summary>
     public bool SubscriptionsPush;
 
+    /// <summary>
+    /// <c>--subs-mode push-auto</c>: PROTOTYPE. As <c>push</c>, but the engine detects changes itself (<see cref="Typhon.Engine.PushDetection.Automatic"/>)
+    /// and the simulation's <c>Replicate</c> calls are redundant.
+    /// </summary>
+    public bool SubscriptionsPushAutomatic;
+
     /// <summary>Idle iterations a scheduler worker spins inside a tick before yielding (<c>--idle-spin N</c>).</summary>
     public int WorkerIdleSpin = 100;
 

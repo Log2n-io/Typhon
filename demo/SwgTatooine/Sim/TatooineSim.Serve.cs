@@ -68,11 +68,12 @@ public sealed partial class TatooineSim
                 InterestGroupCap = _config.SubscriptionsGroupCap,
                 DynamicFrameScheduling = _config.SubscriptionsDynamicSchedule,
                 SharedClusterBlocks = _config.SubscriptionsSharedClusterBlocks,
+                AllowAutomaticPushDetection = _config.SubscriptionsPushAutomatic,
             },
         });
 
         // Before Start, because the catalog a client negotiates against is compiled there and the declarations are its source.
-        TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsHysteresis, _config.SubscriptionsPush);
+        TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsHysteresis, _config.SubscriptionsPush, _config.SubscriptionsPushAutomatic);
 
         _runtime.OnTickAborted += (_, outcome)
             => Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}'");

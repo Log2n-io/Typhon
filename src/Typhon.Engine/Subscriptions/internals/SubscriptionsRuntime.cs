@@ -152,9 +152,16 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
             // PROTOTYPE (push, design/Subscriptions/research/push-model.md): archetypes observed by a push profile are served by the push path.
             var pushArchetypes = Interest.PushArchetypes;
+            if (Array.IndexOf(Interest.AutomaticPushArchetypes, true) >= 0 && !Options.AllowAutomaticPushDetection)
+            {
+                throw new NotSupportedException(
+                    "A push profile declares PushDetection.Automatic, which is off: replication is explicit (ADR-067). Call Replicate after each replicated "
+                    + "write, or set SubscriptionsOptions.AllowAutomaticPushDetection for the experimental automatic mode.");
+            }
+
             if (Array.IndexOf(pushArchetypes, true) >= 0)
             {
-                Push = new PushReplication(Plans, _replicationStates, pushArchetypes, Interest.MaxPushRadius, Options.MaxSessions);
+                Push = new PushReplication(Plans, _replicationStates, pushArchetypes, Interest.AutomaticPushArchetypes, Interest.MaxPushRadius, Options.MaxSessions);
                 for (var a = 0; a < pushArchetypes.Length; a++)
                 {
                     if (pushArchetypes[a])
@@ -222,7 +229,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // which is what keeps the assembler ignorant of every source but the one interface it calls once a tick.
             Stats = new StatsEncoder(CatalogPlan, registry, engine, Plans, _sessions, _sendPump, _ingress, systemNames, NominalTickPeriodUs,
                 telemetry ?? new SubscriptionsTelemetry());
-            _frames.AttachStats(Stats);
+            _frames!.AttachStats(Stats);
 
             // Before the first tick publishes anything, so a client that completes its handshake between Start and the first tick is told the period rather
             // than zero. The tick number and the origin stay zero until a tick runs, which is what they truthfully are.
@@ -250,7 +257,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     public SubscriptionsOptions Options { get; }
 
     /// <summary>One compiled plan per replicated archetype, in declaration order. Empty on an inactive runtime.</summary>
-    public CompiledProjectionPlan[] Plans { get; } = [];
+    public CompiledProjectionPlan[] Plans { get; }
 
     /// <summary>
     /// The catalog, its canonical bytes and their digest — what <c>WELCOME</c> carries, built exactly once. <see langword="null"/> on an inactive runtime.

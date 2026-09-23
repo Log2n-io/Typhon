@@ -210,7 +210,7 @@ public sealed partial class SimBridge
                 {
                     state.Activity = PlayerActivity.Idle;
                     state.ActivityTicks = 0;
-                    SwgTatooine.Replication.TatooineReplication.Replicate(in cluster, idx);
+                    TatooineReplication.Replicate(in cluster, idx);
                     continue;
                 }
 
@@ -243,7 +243,7 @@ public sealed partial class SimBridge
                 move.VelZ = 0f;
                 state.Activity = PlayerActivity.Idle;
                 state.ActivityTicks = (20 * _config.TickRateHz) + (int)(Hash01(Salt(tick, chunk, idx, 0x1B56C4E9u)) * 100 * _config.TickRateHz);
-                SwgTatooine.Replication.TatooineReplication.Replicate(in cluster, idx);
+                TatooineReplication.Replicate(in cluster, idx);
                 boardings++;
                 Interlocked.Increment(ref _portArrivals[dest]);
             }

@@ -141,6 +141,12 @@ internal sealed unsafe class InterestPass
 
         /// <summary>PROTOTYPE: served by the push path (<see cref="PushReplication"/>), never by this pass.</summary>
         public bool IsPush { get; init; }
+
+        /// <summary>PROTOTYPE: a push profile whose changes the engine detects itself.</summary>
+        public bool Automatic { get; init; }
+
+        /// <summary>PROTOTYPE: a push profile's sessions are served one tick in this many.</summary>
+        public int TickDivisor { get; init; } = 1;
     }
 
     private readonly CompiledProjectionPlan[] _plans;
@@ -2956,11 +2962,15 @@ internal sealed unsafe class InterestPass
     /// <param name="session">The session.</param>
     /// <param name="radius">The sphere's enter radius.</param>
     /// <param name="archetypes">The plan indices the profile observes.</param>
+    /// <param name="world">Whether the profile's observer is <c>World</c> rather than a sphere.</param>
+    /// <param name="divisor">The profile's tick divisor: its sessions are served one tick in this many.</param>
     /// <returns>Whether the session is push-served.</returns>
-    internal bool TryGetPushProfile(SessionId session, out double radius, out int[] archetypes)
+    internal bool TryGetPushProfile(SessionId session, out double radius, out int[] archetypes, out bool world, out int divisor)
     {
         radius = 0d;
         archetypes = null;
+        world = false;
+        divisor = 1;
         var name = _sessions.ProfileName(session);
         if (name == null || !_profileByName.TryGetValue(name, out var index) || !_profiles[index].IsPush || _profiles[index].ArchetypeIndices.Length == 0)
         {
@@ -2969,6 +2979,8 @@ internal sealed unsafe class InterestPass
 
         radius = _profiles[index].EnterRadius;
         archetypes = _profiles[index].ArchetypeIndices;
+        world = _profiles[index].Kind == ObserverKind.World;
+        divisor = _profiles[index].TickDivisor;
         return true;
     }
 
@@ -2993,6 +3005,27 @@ internal sealed unsafe class InterestPass
         }
     }
 
+    /// <summary>PROTOTYPE: which plan indices a push profile with automatic detection observes.</summary>
+    internal bool[] AutomaticPushArchetypes
+    {
+        get
+        {
+            var result = new bool[_clusterStates.Length];
+            foreach (var profile in _profiles)
+            {
+                if (profile.Automatic)
+                {
+                    foreach (var a in profile.ArchetypeIndices)
+                    {
+                        result[a] = true;
+                    }
+                }
+            }
+
+            return result;
+        }
+    }
+
     /// <summary>PROTOTYPE: the largest push radius any profile declares, or zero.</summary>
     internal double MaxPushRadius
     {
@@ -3001,7 +3034,7 @@ internal sealed unsafe class InterestPass
             var r = 0d;
             foreach (var profile in _profiles)
             {
-                if (profile.IsPush)
+                if (profile.IsPush && profile.Kind == ObserverKind.Sphere)
                 {
                     r = Math.Max(r, profile.EnterRadius);
                 }
@@ -3119,12 +3152,14 @@ internal sealed unsafe class InterestPass
                 // an engine default guessed without those is a number derived from nothing.
                 EnterRadius = enterRadius > 0d ? enterRadius : queryRadius,
                 IsPush = declaration.IsPush,
+                Automatic = declaration.IsPush && declaration.PushDetection == PushDetection.Automatic,
+                TickDivisor = declaration.IsPush ? declaration.TickDivisor : 1,
             };
 
-            if (declaration.IsPush && (kind != ObserverKind.Sphere || declaration.Observers.Count != 1))
+            if (declaration.IsPush && ((kind != ObserverKind.Sphere && kind != ObserverKind.World) || declaration.Observers.Count != 1))
             {
                 throw new NotSupportedException(
-                    $"Profile '{declaration.Name}' is push-served; the push prototype supports exactly one Sphere observer.");
+                    $"Profile '{declaration.Name}' is push-served; the push prototype supports exactly one Sphere or World observer.");
             }
         }
 

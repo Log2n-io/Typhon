@@ -3,7 +3,6 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
-using Typhon.Engine.Internals;
 
 namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 
@@ -56,20 +55,48 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <summary>How far a health fraction may sit from its true ratio: one step of its 8-bit codec.</summary>
     public const double FractionTolerance = 1.0 / 255.0;
 
+    /// <summary>
+    /// The push profile's radius: from the origin it reaches every corner of the test world, so a push session placed there is entitled to the whole of
+    /// it — the same set the <c>World</c> profile watches, which is what lets one truth walk serve both.
+    /// </summary>
+    public const double PushRadiusM = ProjectionTestSchema.WorldExtentM * 1.5;
+
     private readonly FrameHarness _harness;
     private readonly SessionId[] _sessions;
     private readonly int[] _skipPercent;
     private readonly Random[] _delivery;
     private readonly int _creatureIndex;
     private readonly int _rockIndex;
+    private readonly bool _push;
+
+    // The geometric mode (PROTOTYPE, push): sessions with a disc smaller than the world, walking and now and then teleporting. Their truth is the disc.
+    private readonly double _radius;
+    private readonly bool _walk;
+    private readonly Vector3D[] _viewpoints;
+    private readonly Random _walker;
 
     private long _tick;
 
-    private OracleHarness(FrameHarness harness, int[] skipPercent, int seed)
+    private OracleHarness(FrameHarness harness, int[] skipPercent, int seed, PushDetection? push, double radius, bool walk)
     {
         _harness = harness;
         _skipPercent = skipPercent;
+        _push = push.HasValue;
+        _radius = radius;
+        _walk = walk;
+        _walker = new Random(seed ^ 0x5EED);
         _sessions = harness.OpenSessions(skipPercent.Length, Profile);
+        _viewpoints = new Vector3D[_sessions.Length];
+        if (_push)
+        {
+            // A push session sees nothing until it is placed.
+            for (var i = 0; i < _sessions.Length; i++)
+            {
+                _viewpoints[i] = walk ? RandomViewpoint() : new Vector3D(0d, 0d, 0d);
+                Assert.That(harness.Sessions.SetViewpoint(_sessions[i], _viewpoints[i]), Is.True, "a just-opened session can be placed");
+            }
+        }
+
         _delivery = new Random[skipPercent.Length];
         for (var i = 0; i < skipPercent.Length; i++)
         {
@@ -80,7 +107,45 @@ internal sealed unsafe class OracleHarness : IDisposable
 
         _creatureIndex = harness.PlanIndex(nameof(ProjCreature));
         _rockIndex = harness.PlanIndex(nameof(ProjRock));
-        Workload = new OracleWorkload(harness, seed);
+        Workload = new OracleWorkload(harness, seed) { Replicate = push == PushDetection.Explicit };
+    }
+
+    /// <summary>How many entities the most recent <see cref="AssertConverged"/> REQUIRED a session to hold — in geometric mode, the ones well inside a disc.</summary>
+    public long RequiredAtLastPoint { get; private set; }
+
+    /// <summary>How many viewpoint teleports the walk made: each one resets the session.</summary>
+    public int ViewpointTeleports { get; private set; }
+
+    private Vector3D RandomViewpoint()
+    {
+        const double Limit = ProjectionTestSchema.WorldExtentM - 256.0;
+        return new Vector3D(((_walker.NextDouble() * 2.0) - 1.0) * Limit, ((_walker.NextDouble() * 2.0) - 1.0) * Limit, 0d);
+    }
+
+    /// <summary>Moves every session's viewpoint: mostly a stride that crosses the anchor's slack every few ticks, sometimes a teleport.</summary>
+    private void Walk()
+    {
+        const double Limit = ProjectionTestSchema.WorldExtentM - 256.0;
+        for (var i = 0; i < _sessions.Length; i++)
+        {
+            var roll = _walker.Next(100);
+            if (roll < 3)
+            {
+                _viewpoints[i] = RandomViewpoint();
+                ViewpointTeleports++;
+            }
+            else if (roll < 90)
+            {
+                var angle = _walker.NextDouble() * Math.PI * 2.0;
+                var stride = _radius * 0.01;
+                _viewpoints[i] = new Vector3D(
+                    Math.Clamp(_viewpoints[i].X + (Math.Cos(angle) * stride), -Limit, Limit),
+                    Math.Clamp(_viewpoints[i].Y + (Math.Sin(angle) * stride), -Limit, Limit),
+                    0d);
+            }
+
+            _harness.Sessions.SetViewpoint(_sessions[i], _viewpoints[i]);
+        }
     }
 
     /// <summary>The seeded churn driving the world.</summary>
@@ -97,6 +162,9 @@ internal sealed unsafe class OracleHarness : IDisposable
 
     /// <summary>The engine under test.</summary>
     public DatabaseEngine Engine => _harness.Engine;
+
+    /// <summary>The push path (PROTOTYPE), when the oracle was created with a push profile.</summary>
+    public PushReplication Push => _harness.Subscriptions.Push;
 
     /// <summary>The frame assembler, for the one test that has to break a rule on the production object to prove the oracle can see it.</summary>
     public FrameAssembler Assembler => _harness.Assembler;
@@ -136,20 +204,45 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <param name="name">A name for the resource registry.</param>
     /// <returns>The oracle.</returns>
     /// <param name="sharedClusterBlocks">Whether each cluster's records are encoded once and referenced by every session (17 § 18).</param>
-    public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, bool sharedClusterBlocks = false)
+    /// <param name="push">
+    /// When set, both archetypes are served by the push path (PROTOTYPE) with this change detection, to sessions placed where the profile's disc covers the
+    /// world; in <see cref="PushDetection.Explicit"/> the workload pushes every slot it writes.
+    /// </param>
+    /// <param name="walkRadius">
+    /// With <paramref name="push"/>: when positive, the disc's radius, and the sessions WALK — each is placed at random, strides every tick and now and then
+    /// teleports — and each is compared against its own disc rather than the whole world.
+    /// </param>
+    /// <param name="worldObserver">With <paramref name="push"/>: serve the profile through a push <c>World</c> observer instead of a covering disc.</param>
+    public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, bool sharedClusterBlocks = false,
+        PushDetection? push = null, double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
-        var harness = FrameHarness.Create(engine, Declare, name, Options(sharedClusterBlocks));
+        var walk = push.HasValue && walkRadius > 0;
+        var radius = walk ? walkRadius : PushRadiusM;
+        var harness = FrameHarness.Create(engine, push.HasValue ? subs => DeclarePush(subs, push.Value, radius, worldObserver && !walk, every) 
+            : Declare, name, Options(sharedClusterBlocks, push == PushDetection.Automatic));
         try
         {
-            var oracle = new OracleHarness(harness, skipPercent, seed);
-            oracle.Workload.Seed(creatures: 24, rocks: 8);
+            var oracle = new OracleHarness(harness, skipPercent, seed, push, radius, walk);
+
+            // A walking disc covers a few percent of the world, so the world is denser for it to hold anything worth comparing.
+            oracle.Workload.Seed(creatures: walk || bigWorld ? 400 : 24, rocks: walk || bigWorld ? 120 : 8);
 
             // The priming tick: every hit cluster is given its replication block here and is watched from the next one, so a session's first tick has hits
-            // and no records. Starting the run without it would make tick 2's comparison fail for a reason that is the track's design.
+            // and no records. Starting the run without it would make tick 2's comparison fail for a reason that is the track's design. The push path has no
+            // such lag — its first tick pushes every live entity — so there the priming tick is simply the first one.
             oracle._tick = 1;
-            harness.PrimeBlocks();
+            if (push.HasValue)
+            {
+                engine.WriteTickFence(1);
+                harness.RunTick(1);
+            }
+            else
+            {
+                harness.PrimeBlocks();
+            }
+
             return oracle;
         }
         catch
@@ -181,6 +274,11 @@ internal sealed unsafe class OracleHarness : IDisposable
     public void Step()
     {
         Workload.Step();
+        if (_walk)
+        {
+            Walk();
+        }
+
         _tick++;
 
         // The ECS fence, which RunTick does not run: a spatial write MARKS an entity, and the cluster change happens here. Without it the workload's
@@ -231,6 +329,27 @@ internal sealed unsafe class OracleHarness : IDisposable
         }
     }
 
+    /// <summary>
+    /// Asserts that every span write the workload made still reads back from the engine. Independent of replication: a failure here is the engine losing a
+    /// committed write, which every replication mode that re-encodes the world each tick would silently propagate.
+    /// </summary>
+    /// <param name="because">What the caller is proving.</param>
+    public void AssertWritesSurvived(string because)
+    {
+        var lost = new List<string>();
+        using var tx = Engine.CreateQuickTransaction();
+        foreach (var (raw, written) in Workload.LastWritten)
+        {
+            var ai = tx.Open(EntityId.FromRaw(raw)).Read(ProjCreature.Ai);
+            if ((int)ai.Mode != written.Mode || ai.Level != written.Level)
+            {
+                lost.Add($"entity {raw}: wrote mode {written.Mode} level {written.Level}, reads mode {(int)ai.Mode} level {ai.Level}");
+            }
+        }
+
+        Assert.That(lost, Is.Empty, $"{because}: the engine lost {lost.Count} committed span write(s) of {Workload.LastWritten.Count}");
+    }
+
     /// <summary>Asserts that every session's replica is the engine's world, field for field.</summary>
     /// <param name="because">What the caller is proving, printed with any divergence.</param>
     public void AssertConverged(string because)
@@ -240,13 +359,17 @@ internal sealed unsafe class OracleHarness : IDisposable
         // Watched must equal occupancy before truth means anything. The profile is World(), so every live entity of a replicated archetype is watched by
         // construction — and if it is not, it is missing from the server's truth set AND from the client's world, which is a PASS. That is the oracle's
         // worst failure mode: the two sides agreeing about a world neither of them has.
-        _harness.Interest.AssertWatchedMatchesOccupancy(_creatureIndex, because);
-        _harness.Interest.AssertWatchedMatchesOccupancy(_rockIndex, because);
+        // The push path has no watched set to check — an entity is described once, whoever sees it — and no view; its truth is every live slot.
+        if (!_push)
+        {
+            _harness.Interest.AssertWatchedMatchesOccupancy(_creatureIndex, because);
+            _harness.Interest.AssertWatchedMatchesOccupancy(_rockIndex, because);
+        }
 
         // The invariant a referenced cluster run rests on, checked over the WHOLE view rather than over the slots some run happened to name (17 § 18). A
         // disagreement here is latent: it sits in a quiet cluster until that cluster changes, and only then is a client handed a record for an entity it
         // has never heard of. Checked on every arm, because the invariant is the subsystem's and not the feature's.
-        foreach (var session in _sessions)
+        foreach (var session in _push ? [] : _sessions)
         {
             var disagreement = _harness.Assembler.FindViewIdentityDisagreement(session);
             if (disagreement != null)
@@ -257,6 +380,7 @@ internal sealed unsafe class OracleHarness : IDisposable
 
         var truth = ServerTruth(divergences);
         var before = Compared;
+        RequiredAtLastPoint = 0;
 
         // One transaction for the whole comparison. Opening one per entity was measurably the dominant cost of a run: a gate case compares tens of entities
         // across several sessions at five points, and a quick transaction is not free.
@@ -311,7 +435,8 @@ internal sealed unsafe class OracleHarness : IDisposable
                     continue;
                 }
 
-                var live = occupancy & block->WatchedMask;
+                // A push archetype describes every live entity, so its truth is occupancy alone; the watched mask there names only this tick's pushes.
+                var live = _push ? occupancy : occupancy & block->WatchedMask;
                 while (live != 0)
                 {
                     var slot = BitOperations.TrailingZeroCount(live);
@@ -356,6 +481,12 @@ internal sealed unsafe class OracleHarness : IDisposable
     private void CompareArchetype(Transaction tx, SessionReplica replica, int session, int plan, string name, Dictionary<uint, EntityId> expected,
         List<string> divergences)
     {
+        if (_walk)
+        {
+            CompareDisc(tx, replica, session, plan, name, expected, divergences);
+            return;
+        }
+
         var held = replica.NetIds(plan);
         // The SET is what the comparison below needs; the LENGTH is asserted first, because collapsing duplicates here would hide a replica holding one
         // identity twice — which is precisely the shape of a missed leave followed by a re-enter, the defect family this oracle exists for.
@@ -383,6 +514,60 @@ internal sealed unsafe class OracleHarness : IDisposable
 
             Compared++;
             CompareFields(tx, replica, session, plan, name, netId, entity, divergences);
+        }
+    }
+
+    /// <summary>
+    /// The geometric comparison: an entity well inside the session's disc must be held, one well outside it must not be, and one in the band between may
+    /// be either — the anchor trails the viewpoint by up to its slack, and a client's position may trail the entity's by the motion tolerance.
+    /// </summary>
+    private void CompareDisc(Transaction tx, SessionReplica replica, int session, int plan, string name, Dictionary<uint, EntityId> expected,
+        List<string> divergences)
+    {
+        var held = new HashSet<uint>(replica.NetIds(plan));
+        var slack = _radius / 3.0 / 16.0;
+        var margin = slack + MotionToleranceM + 0.01;
+        var inner = _radius - margin;
+        var outer = _radius + margin;
+        var viewpoint = _viewpoints[session];
+        foreach (var netId in held)
+        {
+            if (!expected.ContainsKey(netId))
+            {
+                divergences.Add($"session {session}: {name} netId {netId} is in the client's world and not in the server's");
+            }
+        }
+
+        foreach (var (netId, entity) in expected)
+        {
+            var reference = tx.Open(entity);
+            var bounds = plan == _creatureIndex ? reference.Read(ProjCreature.Bounds) : reference.Read(ProjRock.Bounds);
+            var dx = ((bounds.Bounds.MinX + bounds.Bounds.MaxX) * 0.5) - viewpoint.X;
+            var dy = ((bounds.Bounds.MinY + bounds.Bounds.MaxY) * 0.5) - viewpoint.Y;
+            var distance = Math.Sqrt((dx * dx) + (dy * dy));
+            var holds = held.Contains(netId);
+            if (distance <= inner)
+            {
+                RequiredAtLastPoint++;
+                if (!holds)
+                {
+                    divergences.Add($"session {session}: {name} netId {netId} (entity {entity.RawValue}) is {distance:F2} m from the viewpoint, inside the "
+                        + $"{_radius} m disc, and the client does not hold it");
+                    continue;
+                }
+            }
+            else if (distance > outer && holds)
+            {
+                divergences.Add($"session {session}: {name} netId {netId} is {distance:F2} m from the viewpoint, outside the {_radius} m disc, and the client "
+                    + "still holds it");
+                continue;
+            }
+
+            if (holds)
+            {
+                Compared++;
+                CompareFields(tx, replica, session, plan, name, netId, entity, divergences);
+            }
         }
     }
 
@@ -485,8 +670,9 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// induces on purpose — the run would still be correct but it would no longer be measuring what it says it measures. The enter budget is left at the
     /// engine's default: deferring enters across ticks is real behaviour that the quiet window is there to absorb, and raising it would hide it.
     /// </remarks>
-    private static SubscriptionsOptions Options(bool sharedClusterBlocks) => new()
+    private static SubscriptionsOptions Options(bool sharedClusterBlocks, bool automaticPush = false) => new()
     {
+        AllowAutomaticPushDetection = automaticPush,
         MaxSessions = 64,
         StatePoolBudgetBytes = 64L * 1024 * 1024,
         FramePoolBudgetBytes = 64L * 1024 * 1024,
@@ -496,6 +682,21 @@ internal sealed unsafe class OracleHarness : IDisposable
         // work the feature saves, which is why it is a harness switch and not a default.
         VerifySharedRuns = sharedClusterBlocks,
     };
+
+    /// <summary>The same projections, served by the push path to a disc that covers the world.</summary>
+    private static void DeclarePush(SubscriptionsRegistry subs, PushDetection detection, double radius, bool world, int every)
+    {
+        ProjectionTestSchema.DeclareCreature(subs);
+        ProjectionTestSchema.DeclareRock(subs);
+        if (world)
+        {
+            subs.Profile(Profile, p => p.Push(detection).Every(every).World().Of<ProjCreature>().Of<ProjRock>());
+        }
+        else
+        {
+            subs.Profile(Profile, p => p.Push(detection).Every(every).Sphere(radius).Of<ProjCreature>().Of<ProjRock>());
+        }
+    }
 
     /// <summary>The projections and the profile the oracle runs against: both test archetypes, watched whole.</summary>
     private static void Declare(SubscriptionsRegistry subs)

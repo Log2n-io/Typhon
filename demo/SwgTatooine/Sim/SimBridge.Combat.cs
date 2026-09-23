@@ -179,7 +179,7 @@ public sealed partial class SimBridge
             // this simulation makes, and it forces a cell change plus a cluster-bound recomputation.
             VitalsRw(in cluster, ref vitalsRw)[idx].Health = vitals[idx].MaxHealth;
             BrainsRw(in cluster, ref brainsRw)[idx].Mode = AiMode.Wander;
-            SwgTatooine.Replication.TatooineReplication.Replicate(in cluster, idx);
+            TatooineReplication.Replicate(in cluster, idx);
             t.ThinkCooldown = 1;
 
             // Cleared, or a creature revived part-way through an old rest keeps standing until a schedule from its previous life runs out. Zero is in the
@@ -306,7 +306,7 @@ public sealed partial class SimBridge
         if (health > 0)
         {
             VitalsRw(in cluster, ref vitalsRw)[idx].Health = health;
-            SwgTatooine.Replication.TatooineReplication.Replicate(in cluster, idx);
+            TatooineReplication.Replicate(in cluster, idx);
 
             // Wounded and now angry: the creature turns on whoever is shooting, which is what pulls a lair.
             if (brains[idx].Mode == AiMode.Wander)
@@ -320,7 +320,7 @@ public sealed partial class SimBridge
 
         VitalsRw(in cluster, ref vitalsRw)[idx].Health = 0;
         BrainsRw(in cluster, ref brainsRw)[idx].Mode = AiMode.Dead;
-        SwgTatooine.Replication.TatooineReplication.Replicate(in cluster, idx);
+        TatooineReplication.Replicate(in cluster, idx);
         t.ThinkCooldown = RespawnTicks;
         killed++;
     }

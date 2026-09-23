@@ -228,7 +228,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     {
         get
         {
-            var bytes = (long)_byteCapacity + ((long)_sortCapacity * sizeof(FrameRecord)) + ((long)_enterCandidates.Capacity * sizeof(FrameRecord));
+            var bytes = _byteCapacity + ((long)_sortCapacity * sizeof(FrameRecord)) + ((long)_enterCandidates.Capacity * sizeof(FrameRecord));
             for (var i = 0; i < _lists.Length; i++)
             {
                 bytes += (long)_lists[i].Capacity * sizeof(FrameRecord);
@@ -309,6 +309,45 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
         list.Items[list.Count++] = new SharedRunBytes { Bytes = bytes, Length = length };
         _sharedBytes += length;
         _sharedRecords += records;
+    }
+
+    /// <summary>
+    /// PROTOTYPE (push): after the sort, drops every update the frame's enter for the same identity already covers, and merges repeated updates of one
+    /// identity (their group masks OR'd) — a deferred far update and this tick's can name the same entity.
+    /// </summary>
+    /// <param name="archetype">The archetype's plan index.</param>
+    public void DedupeUpdates(int archetype)
+    {
+        ref var enters = ref _lists[(archetype * 4) + (int)FrameListKind.Enter];
+        foreach (var kind in (ReadOnlySpan<FrameListKind>)[FrameListKind.Segment, FrameListKind.State])
+        {
+            ref var list = ref _lists[(archetype * 4) + (int)kind];
+            var write = 0;
+            var e = 0;
+            for (var r = 0; r < list.Count; r++)
+            {
+                var id = list.Items[r].NetId;
+                while (e < enters.Count && enters.Items[e].NetId < id)
+                {
+                    e++;
+                }
+
+                if (e < enters.Count && enters.Items[e].NetId == id)
+                {
+                    continue;
+                }
+
+                if (write > 0 && list.Items[write - 1].NetId == id)
+                {
+                    list.Items[write - 1].GroupMask |= list.Items[r].GroupMask;
+                    continue;
+                }
+
+                list.Items[write++] = list.Items[r];
+            }
+
+            list.Count = write;
+        }
     }
 
     /// <summary>How many records one archetype's sub-list holds.</summary>
@@ -1166,7 +1205,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     public SessionFrameState StateOf(SessionId session)
     {
         var slot = session.Slot;
-        return (uint)slot < (uint)_states.Length ? _states[slot] : null;
+        return slot < (uint)_states.Length ? _states[slot] : null;
     }
 
     /// <summary>The archetype encoding constants, parallel to the runtime's plans.</summary>
@@ -1621,7 +1660,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     {
         get
         {
-            var scale = 1000d / System.Diagnostics.Stopwatch.Frequency;
+            var scale = 1000d / Stopwatch.Frequency;
             return (Volatile.Read(ref _gatherTicks) * scale,
                 Volatile.Read(ref _selectTicks) * scale,
                 Volatile.Read(ref _sweepTicks) * scale,
@@ -1751,7 +1790,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         {
             var session = sessions.Current;
             var slot = session.Slot;
-            if ((uint)slot >= (uint)_states.Length)
+            if (slot >= (uint)_states.Length)
             {
                 continue;
             }
@@ -1834,7 +1873,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     private void PrepareSession(SessionId session)
     {
         var slot = session.Slot;
-        if ((uint)slot >= (uint)_states.Length)
+        if (slot >= (uint)_states.Length)
         {
             return;
         }

@@ -261,7 +261,7 @@ public sealed partial class SimBridge
         }
 
         rw[idx].Mode = mode;
-        SwgTatooine.Replication.TatooineReplication.Replicate(in cluster, idx);
+        TatooineReplication.Replicate(in cluster, idx);
     }
 
     /// <summary>Stops a mover, writing only when it was actually moving.</summary>
@@ -460,7 +460,7 @@ public sealed partial class SimBridge
                 pushSlots |= 1UL << idx;
             }
 
-            SwgTatooine.Replication.TatooineReplication.Replicate(in cluster, pushSlots);
+            TatooineReplication.Replicate(in cluster, pushSlots);
         }
     }
 

@@ -444,6 +444,19 @@ internal static unsafe class ProjectionPass
                 QuantizePosition(position, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
                 var staticBytes = layout.EnterPositionBytes;
                 quantizedPosition[..staticBytes].CopyTo(new Span<byte>(coldBytes + layout.EnterPositionOffsetInColdEntry, staticBytes));
+                if (push != null)
+                {
+                    push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY);
+                    pushFlags |= PushEvent.HasNew;
+                }
+            }
+            else if (push != null && position != null && layout.EnterPositionBytes > 0)
+            {
+                // PROTOTYPE (push): a static entity pushed again is where it always was.
+                push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY);
+                pushOldX = pushNewX;
+                pushOldY = pushNewY;
+                pushFlags |= PushEvent.HasOld | PushEvent.HasNew;
             }
 
             // ── Groups: encode, compare, stamp ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -457,11 +470,15 @@ internal static unsafe class ProjectionPass
                 hot->Flags |= (ushort)(ownerChanged << OwnerChangedMaskShift);
             }
 
-            SetLastWatchedTick(blockBytes, layout, slot, tick);
-
             if (push != null)
             {
+                // PROTOTYPE (push): the stamp is the tick of the entity's last EVENT, written by AddEvent when it records one. The sweep, the cell delivery and
+                // the push log's catch-up all read it as "the push step owns this entity from that tick on".
                 push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushNewX, pushNewY);
+            }
+            else
+            {
+                SetLastWatchedTick(blockBytes, layout, slot, tick);
             }
 
             // The published change mask names every slot a session might need to visit, and that is BROADER than "a record was assembled here". A motion-only
@@ -992,7 +1009,7 @@ internal static unsafe class ProjectionPass
     private static void EmitPushLeave(PushReplication push, int archetype, int worker, ReplicationBlockHeader* block, byte* blockBytes,
         in ReplicationBlockLayout layout, int slot, uint netId)
     {
-        push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + layout.PrevPositionOffsetInColdEntry, out var x, out var y);
+        push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + push.PositionOffset(archetype), out var x, out var y);
         push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, 0f, 0f);
     }
 

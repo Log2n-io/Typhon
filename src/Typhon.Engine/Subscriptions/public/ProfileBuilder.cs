@@ -47,9 +47,31 @@ public sealed class ProfileBuilder
     /// <c>WriteSpatial</c> — and a session learns about them from its own geometry rather than from a per-session known-set. A push archetype may not be
     /// observed by a pull profile. Only a single <c>Sphere</c> observer is supported.
     /// </remarks>
-    public ProfileBuilder Push()
+    /// <param name="detection">
+    /// Who says an entity changed: the application (<see cref="PushDetection.Explicit"/>), or the engine comparing every live entity each tick
+    /// (<see cref="PushDetection.Automatic"/>).
+    /// </param>
+    public ProfileBuilder Push(PushDetection detection = PushDetection.Explicit)
     {
         _profile.IsPush = true;
+        _profile.PushDetection = detection;
+        return this;
+    }
+
+    /// <summary>
+    /// PROTOTYPE (push): serve this profile's sessions one tick in <paramref name="ticks"/>, staggered by session; each frame carries everything since
+    /// the session's last one, replayed from the push log.
+    /// </summary>
+    /// <param name="ticks">1, 2 or 4.</param>
+    /// <returns>This builder.</returns>
+    public ProfileBuilder Every(int ticks)
+    {
+        if (ticks is not (1 or 2 or 4))
+        {
+            throw new ArgumentOutOfRangeException(nameof(ticks), ticks, "A push profile is served every 1, 2 or 4 ticks.");
+        }
+
+        _profile.TickDivisor = ticks;
         return this;
     }
 
@@ -148,6 +170,12 @@ public sealed class ProfileDeclaration
 
     /// <summary>PROTOTYPE: whether this profile is served by the push path. See <see cref="ProfileBuilder.Push"/>.</summary>
     public bool IsPush { get; internal set; }
+
+    /// <summary>PROTOTYPE: who signals a change for this push profile's archetypes. See <see cref="ProfileBuilder.Push"/>.</summary>
+    public PushDetection PushDetection { get; internal set; }
+
+    /// <summary>PROTOTYPE: a push profile's sessions are served one tick in this many. See <see cref="ProfileBuilder.Every"/>.</summary>
+    public int TickDivisor { get; internal set; } = 1;
 
     /// <inheritdoc/>
     public override string ToString() => $"{Name}: {_observers.Count} observer(s)";

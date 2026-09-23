@@ -270,6 +270,10 @@ sealed unsafe class FrameHarness : IDisposable
 
         _interest.CreateRequestedBlocks();
 
+        // The push set and a block for every cluster in it, before the parked drain — the runtime's order (SubscriptionsProjectExecSystem), so an entity that
+        // migrated into a cluster with no block lands in one this tick.
+        Subscriptions.Push?.PrepareBlocks(stamp);
+
         // The entries the fence's migration step parked because their destination had no block yet, placed now that the blocks above exist. This
         // harness reimplements the track's blocks step by hand, so anything added there has to be added here too or the harness quietly tests a
         // pipeline the runtime does not have — which is exactly how the migration hook first appeared to do nothing.
@@ -304,6 +308,9 @@ sealed unsafe class FrameHarness : IDisposable
                 }
             }
         }
+
+        // The pushed slots join the watched lists after the gather reset them, as in the runtime.
+        Subscriptions.Push?.MarkPushed(workers: 1);
 
         for (var a = 0; a < states.Length; a++)
         {

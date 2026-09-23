@@ -57,6 +57,17 @@ internal struct PushSessionState
     public int OriginY;
     public ulong D0, D1, D2, D3;
 
+    /// <summary>The tick of the last committed frame: the push log replays every event after it.</summary>
+    public uint LastTick;
+
+    /// <summary>Distance LOD: the tick up to which this session's deferred far updates have been sent.</summary>
+    public uint LastFarTick;
+    public uint PLastFarTick;
+
+    /// <summary>A World session: the cells below this index, in grid order, have been delivered. Its whole known-set.</summary>
+    public int Cursor;
+    public int PCursor;
+
     // Computed by the gather, applied only when the frame is published (SUB-03's discipline: a frame that was not sent changes nothing).
     public double PAnchorX;
     public double PAnchorY;
@@ -84,6 +95,38 @@ internal sealed unsafe class PushReplication
     private readonly bool[] _isPush;
     private readonly int[] _pushIndices;
     private readonly bool[] _bootstrapped;
+
+    // Per plan index: the cold-entry offset of the entity's last projected position.
+    private readonly int[] _positionOffset;
+
+    /// <summary>The cold-entry offset of a push archetype's last projected position.</summary>
+    public int PositionOffset(int archetype) => _positionOffset[archetype];
+
+    // Per plan index: the engine, not the application, detects this archetype's changes. Every live entity is pushed every tick and the byte compare
+    // keeps only those that changed.
+    private readonly bool[] _automatic;
+
+    // ── The forgotten-push validator (explicit detection) ──
+    //
+    // A few clusters of each explicit archetype are projected whole every tick, round-robin. A slot among them that the application did not push and
+    // that still produces an event changed without a push: counted by group, and sent anyway, so the validator heals what it finds.
+
+    /// <summary>How many clusters per explicit archetype the validator projects whole each tick; zero turns it off.</summary>
+    public int ValidateClustersPerTick = int.TryParse(Environment.GetEnvironmentVariable("TYPHON_PUSH_VALIDATE"), out var v) ? v : 0;
+
+    private readonly int[] _validateCursor;
+    private readonly Dictionary<int, ulong>[] _validating;
+
+    /// <summary>Slots the validator found changed without a push, and of those, how many had moved (a segment) — cumulative.</summary>
+    public long ForgottenPushes;
+    public long ForgottenMotion;
+    public long ValidatedSlots;
+    private readonly long[][] _forgottenGroups;
+
+    /// <summary>Per plan index and change group, how many forgotten pushes changed it.</summary>
+    public long ForgottenGroups(int archetype, int group) =>
+        (uint)archetype < (uint)_forgottenGroups.Length && _forgottenGroups[archetype] != null && (uint)group < (uint)_forgottenGroups[archetype].Length
+            ? Interlocked.Read(ref _forgottenGroups[archetype][group]) : 0;
 
     // Position decode per archetype (2D: axes 0 and 1).
     private readonly double[] _minX;
@@ -113,24 +156,69 @@ internal sealed unsafe class PushReplication
     private readonly int _gridH;
 
     // Per archetype, this tick's push set as (chunk, mask) pairs.
-    private int[][] _pushChunks;
-    private ulong[][] _pushMasks;
-    private int[] _pushCount;
+    private readonly int[][] _pushChunks;
+    private readonly ulong[][] _pushMasks;
+    private readonly int[] _pushCount;
 
     // Per archetype, by chunk id: slots to push again next tick — still extrapolating, or denied an identity.
-    private long[][] _repush;
+    private readonly long[][] _repush;
 
-    // Per worker, this tick's events, and per worker per cell how many primaries and secondaries it filed (so the index needs no counting pass).
+    // Per worker, this tick's events.
     private PushEvent[][] _events = [];
     private int[] _eventCount = [];
-    private int[][] _primaryCounts = [];
-    private int[][] _secondaryCounts = [];
 
-    // The index: events bucketed by cell, primaries first, then the secondaries (leave-only views of a mover filed under the cell it left).
+    // The index: events bucketed by cell, primaries first, then the secondaries (leave-only views of a mover filed under the cell it left). It is the current
+    // tick's slot of the push log.
     private PushEvent[] _indexed = [];
-    private int[] _cellStart;
-    private int[] _cellPrimaryEnd;
-    private int[] _cellFill;
+
+    /// <summary>
+    /// PROTOTYPE — distance LOD (<c>TYPHON_PUSH_FAR_EVERY=N</c>, 0 = off): an update to an entity beyond half the radius, that was beyond it before too, is
+    /// deferred and sent every N ticks as the union since the last time, folded from the push log. Enters and leaves are never deferred, and an entity
+    /// crossing inward gets its whole state.
+    /// </summary>
+    public int FarEvery = int.TryParse(Environment.GetEnvironmentVariable("TYPHON_PUSH_FAR_EVERY"), out var farEvery) ? farEvery : 0;
+
+    public long UpdatesDeferred;
+    public long FarFlushes;
+
+    /// <summary>How many ticks of indexes the push log keeps: a session that missed fewer frames than this catches up from them, an older one resets.</summary>
+    /// <remarks>Covers <see cref="SkipPolicy.MaxDegradeLevel"/> (one frame in four) with room for a few back-pressure skips on top.</remarks>
+    public const int LogDepth = 8;
+
+    private readonly TickLog[] _log = CreateLog();
+
+    /// <summary>One tick of the push log: that tick's events in cell order, and the non-empty cells as a compact, ascending CSR.</summary>
+    private sealed class TickLog
+    {
+        public uint Tick;
+        public bool Valid;
+        public PushEvent[] Events = [];
+        public int[] Cells = [];
+        public int[] Starts = [];
+        public int[] PrimaryEnds = [];
+        public int CellCount;
+    }
+
+    private static TickLog[] CreateLog()
+    {
+        var log = new TickLog[LogDepth];
+        for (var i = 0; i < log.Length; i++)
+        {
+            log[i] = new TickLog();
+        }
+
+        return log;
+    }
+
+    // Counters for the log's catch-up.
+    public long LogCatchUps;
+    public long LogCatchUpTicks;
+    public long LogTooOld;
+    public long LogAmbiguous;
+    private readonly int[] _cellStart;
+    private readonly int[] _cellPrimaryEnd;
+    private readonly int[] _cellFill;
+    private readonly int[] _cellSecondaryFill;
 
     private PushSessionState[] _sessions;
     private uint _tick;
@@ -140,7 +228,7 @@ internal sealed unsafe class PushReplication
     public void AttachEncodePlans(ArchetypeEncodePlan[] plans) => _encodePlans = plans;
 
     // Per archetype, this tick's push set's blocks, parallel to _pushChunks — looked up once in PrepareBlocks.
-    private nint[][] _pushBlocks;
+    private readonly nint[][] _pushBlocks;
 
     // Counters, cumulative.
     public long Events;
@@ -162,8 +250,8 @@ internal sealed unsafe class PushReplication
     // of a held id, no state, segment or leave of an unheld one), and every few ticks it must equal the geometric known-set recomputed from the blocks.
     // Either failing is a divergence a client would carry for good. Off by default: it is a HashSet per session.
     public readonly bool Shadow = Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
-    private HashSet<uint>[] _shadow = [];
-    private ushort[] _shadowGen = [];
+    private readonly HashSet<uint>[] _shadow = [];
+    private readonly ushort[] _shadowGen = [];
     public long ShadowIllegal;
     public long ShadowMissing;
     public long ShadowExtra;
@@ -186,7 +274,7 @@ internal sealed unsafe class PushReplication
     /// <summary>Records an entry that is about to vanish at the fence, so every session holding it is told to drop it. Rare; locked.</summary>
     public void Orphan(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId, int cause)
     {
-        Decode(archetype, cold + layout.PrevPositionOffsetInColdEntry, out var x, out var y);
+        Decode(archetype, cold + _positionOffset[archetype], out var x, out var y);
         lock (_orphanLock)
         {
             if (_orphanCount == _orphans.Length)
@@ -214,11 +302,12 @@ internal sealed unsafe class PushReplication
         }
     }
 
-    public PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, double radius, int maxSessions)
+    public PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic, double radius, int maxSessions)
     {
         _plans = plans;
         _states = states;
         _isPush = isPush;
+        _automatic = automatic;
         var count = 0;
         for (var a = 0; a < isPush.Length; a++)
         {
@@ -236,11 +325,20 @@ internal sealed unsafe class PushReplication
         }
 
         _bootstrapped = new bool[plans.Length];
+        _validateCursor = new int[plans.Length];
+        _validating = new Dictionary<int, ulong>[plans.Length];
+        _forgottenGroups = new long[plans.Length][];
+        for (var a = 0; a < plans.Length; a++)
+        {
+            _validating[a] = [];
+            _forgottenGroups[a] = new long[8];
+        }
         _minX = new double[plans.Length];
         _minY = new double[plans.Length];
         _stepX = new double[plans.Length];
         _stepY = new double[plans.Length];
         _axisBytes = new int[plans.Length];
+        _positionOffset = new int[plans.Length];
         _pushChunks = new int[plans.Length][];
         _pushBlocks = new nint[plans.Length][];
         _pushMasks = new ulong[plans.Length][];
@@ -254,11 +352,15 @@ internal sealed unsafe class PushReplication
         foreach (var a in _pushIndices)
         {
             var position = plans[a].Position;
-            if (position == null || !position.Moving || position.Dims != 2 || plans[a].BlockLayout.PrevPositionBytes == 0)
+            var blockLayout = plans[a].BlockLayout;
+            if (position == null || position.Dims != 2 || (position.Moving ? blockLayout.PrevPositionBytes == 0 : blockLayout.EnterPositionBytes == 0))
             {
                 throw new NotSupportedException(
-                    $"Archetype '{plans[a].Name}' is push-served; the push prototype supports 2D moving positions only.");
+                    $"Archetype '{plans[a].Name}' is push-served; the push prototype supports 2D positions only.");
             }
+
+            // Where the entity's last projected position lives: a mover's previous-position copy, or a static entity's enter cache (it never moves).
+            _positionOffset[a] = position.Moving ? blockLayout.PrevPositionOffsetInColdEntry : blockLayout.EnterPositionOffsetInColdEntry;
 
             var pos = position.Pos;
             _minX[a] = pos.Min[0];
@@ -274,6 +376,12 @@ internal sealed unsafe class PushReplication
             _pushBlocks[a] = new nint[64];
             _pushMasks[a] = new ulong[64];
             _repush[a] = [];
+        }
+
+        // Only World profiles: no disc to size the grid by, so a grid of about 48 cells across the world, for delivery granularity and the index.
+        if (radius <= 0d)
+        {
+            radius = Math.Max(gMaxX - gMinX, gMaxY - gMinY) / 16d;
         }
 
         Radius = radius;
@@ -300,6 +408,7 @@ internal sealed unsafe class PushReplication
         _cellStart = new int[(_gridW * _gridH) + 1];
         _cellPrimaryEnd = new int[_gridW * _gridH];
         _cellFill = new int[_gridW * _gridH];
+        _cellSecondaryFill = new int[_gridW * _gridH];
         _sessions = new PushSessionState[Math.Max(1, maxSessions)];
         if (Shadow)
         {
@@ -470,7 +579,7 @@ internal sealed unsafe class PushReplication
                         continue;
                     }
 
-                    Decode(a, bytes + layout.ColdOffset + (s * layout.ColdStride) + layout.PrevPositionOffsetInColdEntry, out var px, out var py);
+                    Decode(a, bytes + layout.ColdOffset + (s * layout.ColdStride) + _positionOffset[a], out var px, out var py);
                     var delivered = Bit(st.D0, st.D1, st.D2, st.D3, WindowIndex(st.OriginX, st.OriginY, CellX(px), CellY(py)));
                     where[hot->NetId] = (px, py, delivered);
                     var known = Within(st.AnchorX, st.AnchorY, px, py, r2) && delivered;
@@ -573,7 +682,7 @@ internal sealed unsafe class PushReplication
             }
 
             var slotMask = state.Layout.SlotCount >= 64 ? ulong.MaxValue : (1UL << state.Layout.SlotCount) - 1;
-            var everything = !_bootstrapped[a] || (Volatile.Read(ref cs.StructureTick) == tick && cs.StructureCoversAll);
+            var everything = _automatic[a] || !_bootstrapped[a] || (Volatile.Read(ref cs.StructureTick) == tick && cs.StructureCoversAll);
             if (everything)
             {
                 // First tick (or a tick the fence could not describe): every live entity is pushed, which is what gives every entity of a push archetype an
@@ -597,6 +706,13 @@ internal sealed unsafe class PushReplication
                         AddPush(a, c, w & slotMask);
                     }
                 }
+            }
+
+            // The validator: a few whole clusters, noting which of their slots nobody pushed. Before the repush list is consumed, which it reads.
+            _validating[a].Clear();
+            if (!everything && ValidateClustersPerTick > 0)
+            {
+                Validate(a, cs, tick, slotMask);
             }
 
             // Slots still extrapolating or denied an identity last tick: the engine's own pushes. A client dead-reckons a mover until told it stopped, so a
@@ -632,6 +748,59 @@ internal sealed unsafe class PushReplication
         }
 
         PrepareTicks += Stopwatch.GetTimestamp() - from;
+    }
+
+    /// <summary>Adds the validator's clusters for this tick to the push set, remembering which of their slots were not pushed otherwise.</summary>
+    private void Validate(int a, ArchetypeClusterState cs, uint tick, ulong slotMask)
+    {
+        var ids = cs.ReadActiveClusterList(out var active);
+        if (ids == null || active == 0)
+        {
+            return;
+        }
+
+        var words = Volatile.Read(ref cs.StructureTick) == tick ? cs.StructureWords : default;
+        var repush = _repush[a];
+        var count = Math.Min(ValidateClustersPerTick, active);
+        for (var i = 0; i < count; i++)
+        {
+            var cursor = _validateCursor[a]++ % active;
+            var chunk = ids[cursor];
+            var pushed = ((uint)chunk < (uint)words.Length ? (ulong)words[chunk] : 0UL) | ((uint)chunk < (uint)repush.Length ? (ulong)repush[chunk] : 0UL);
+            var unpushed = slotMask & ~pushed;
+            if (unpushed == 0UL || !_validating[a].TryAdd(chunk, unpushed))
+            {
+                continue;
+            }
+
+            AddPush(a, chunk, unpushed);
+            ValidatedSlots += BitOperations.PopCount(unpushed);
+        }
+    }
+
+    /// <summary>Called by a projecting worker for an event: counts it as a forgotten push when only the validator asked for the slot.</summary>
+    private void NoteIfForgotten(int archetype, ReplicationBlockHeader* block, int slot, byte flags, int groups)
+    {
+        var validating = _validating[archetype];
+        if (validating.Count == 0 || !validating.TryGetValue(block->ChunkId, out var mask) || (mask & (1UL << slot)) == 0)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref ForgottenPushes);
+        if ((flags & PushEvent.Segment) != 0)
+        {
+            Interlocked.Increment(ref ForgottenMotion);
+        }
+
+        var perGroup = _forgottenGroups[archetype];
+        for (var g = 0; g < perGroup.Length; g++)
+        {
+            if ((groups & (1 << g)) != 0)
+            {
+                Interlocked.Increment(ref perGroup[g]);
+            }
+        }
     }
 
     private void AddPush(int a, int chunk, ulong mask)
@@ -684,25 +853,12 @@ internal sealed unsafe class PushReplication
         {
             Array.Resize(ref _events, workers);
             Array.Resize(ref _eventCount, workers);
-            Array.Resize(ref _primaryCounts, workers);
-            Array.Resize(ref _secondaryCounts, workers);
         }
 
-        var cells = _gridW * _gridH;
         for (var w = 0; w < _events.Length; w++)
         {
             _events[w] ??= new PushEvent[1024];
             _eventCount[w] = 0;
-            if (_primaryCounts[w] == null)
-            {
-                _primaryCounts[w] = new int[cells];
-                _secondaryCounts[w] = new int[cells];
-            }
-            else
-            {
-                Array.Clear(_primaryCounts[w]);
-                Array.Clear(_secondaryCounts[w]);
-            }
         }
     }
 
@@ -752,11 +908,20 @@ internal sealed unsafe class PushReplication
         const byte both = PushEvent.HasOld | PushEvent.HasNew;
         if ((flags & (both | PushEvent.Segment)) == both && groups == 0 && ox == nx && oy == ny)
         {
-            // Un-stamp it: the sweep and the cell delivery skip an entity "pushed this tick" because the push step owns it — and with no event, nothing
-            // would own it. An anchor that moves this tick must still see it.
-            var layout = _states[archetype].Layout;
-            *(uint*)((byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + layout.LastWatchedTickOffsetInColdEntry) = _tick - 1;
+            // No event, so the entity's stamp stays the tick of its last one: the sweep and the cell delivery must still own it.
             return;
+        }
+
+        if (ValidateClustersPerTick > 0 && hot != null)
+        {
+            NoteIfForgotten(archetype, block, slot, flags, groups);
+        }
+
+        if (hot != null)
+        {
+            // The push step owns this entity from this tick on; the sweep, the cell delivery and the log's catch-up skip it by this stamp.
+            var layout = _states[archetype].Layout;
+            *(uint*)((byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + layout.LastWatchedTickOffsetInColdEntry) = _tick;
         }
 
         var list = _events[worker];
@@ -783,12 +948,6 @@ internal sealed unsafe class PushReplication
         e.NewCx = (short)CellX(nx);
         e.NewCy = (short)CellY(ny);
         e.Cell = (flags & PushEvent.HasNew) != 0 ? (e.NewCy * _gridW) + e.NewCx : (e.OldCy * _gridW) + e.OldCx;
-        _primaryCounts[worker][e.Cell]++;
-        if ((flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
-        {
-            _secondaryCounts[worker][(e.OldCy * _gridW) + e.OldCx]++;
-        }
-
         _eventCount[worker] = n + 1;
     }
 
@@ -810,7 +969,7 @@ internal sealed unsafe class PushReplication
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int CellY(double y) => Math.Clamp((int)Math.Floor((y - _gridMinY) / CellSize), 0, _gridH - 1);
 
-    /// <summary>Buckets this tick's events by cell, primaries then secondaries within each cell, from counts the projecting workers already kept.</summary>
+    /// <summary>Buckets this tick's events by cell, primaries then secondaries within each cell: a counting sort over the events.</summary>
     public void BuildIndex()
     {
         var from = Stopwatch.GetTimestamp();
@@ -828,7 +987,6 @@ internal sealed unsafe class PushReplication
 
                 _events[0][n] = _orphans[i];
                 _eventCount[0] = n + 1;
-                _primaryCounts[0][_orphans[i].Cell]++;
             }
 
             _orphanCount = 0;
@@ -836,65 +994,98 @@ internal sealed unsafe class PushReplication
 
         var cells = _gridW * _gridH;
         var workers = _events.Length;
-        if (_workerOffsets.Length < workers)
-        {
-            Array.Resize(ref _workerOffsets, workers);
-            Array.Resize(ref _workerSecondaryOffsets, workers);
-        }
-
-        // Prefix over (cell, worker): each worker's primaries for a cell, then each worker's secondaries for it. The per-worker running offsets are the
-        // counts arrays themselves, rewritten in place.
-        var running = 0;
-        for (var c = 0; c < cells; c++)
-        {
-            _cellStart[c] = running;
-            for (var w = 0; w < workers; w++)
-            {
-                var k = _primaryCounts[w][c];
-                _primaryCounts[w][c] = running;
-                running += k;
-            }
-
-            _cellPrimaryEnd[c] = running;
-            for (var w = 0; w < workers; w++)
-            {
-                var k = _secondaryCounts[w][c];
-                _secondaryCounts[w][c] = running;
-                running += k;
-            }
-        }
-
-        _cellStart[cells] = running;
-        Events += running;
-        if (_indexed.Length < running)
-        {
-            _indexed = new PushEvent[Math.Max(running, _indexed.Length * 2)];
-        }
-
         const byte both = PushEvent.HasNew | PushEvent.HasOld;
+
+        // Count: the primary counts in _cellStart, the secondary ones in _cellPrimaryEnd, both turned into offsets below. Proportional to the events and
+        // the grid, never to the worker count.
+        Array.Clear(_cellStart);
+        Array.Clear(_cellPrimaryEnd);
         for (var w = 0; w < workers; w++)
         {
             var list = _events[w];
             var n = _eventCount[w];
-            var primary = _primaryCounts[w];
-            var secondary = _secondaryCounts[w];
             for (var i = 0; i < n; i++)
             {
-                ref var e = ref list[i];
-                _indexed[primary[e.Cell]++] = e;
+                ref readonly var e = ref list[i];
+                _cellStart[e.Cell]++;
                 if ((e.Flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
                 {
-                    // A secondary keeps the PRIMARY cell in Cell, so a session can tell whether it already met this event there.
-                    _indexed[secondary[(e.OldCy * _gridW) + e.OldCx]++] = e;
+                    _cellPrimaryEnd[(e.OldCy * _gridW) + e.OldCx]++;
                 }
             }
         }
 
+        var running = 0;
+        for (var c = 0; c < cells; c++)
+        {
+            var primaries = _cellStart[c];
+            var secondaries = _cellPrimaryEnd[c];
+            _cellStart[c] = running;
+            _cellFill[c] = running;
+            running += primaries;
+            _cellPrimaryEnd[c] = running;
+            _cellSecondaryFill[c] = running;
+            running += secondaries;
+        }
+
+        _cellStart[cells] = running;
+        Events += running;
+        var slot = _log[_tick % LogDepth];
+        if (slot.Events.Length < running)
+        {
+            slot.Events = new PushEvent[Math.Max(running, slot.Events.Length * 2)];
+        }
+
+        _indexed = slot.Events;
+        for (var w = 0; w < workers; w++)
+        {
+            var list = _events[w];
+            var n = _eventCount[w];
+            for (var i = 0; i < n; i++)
+            {
+                ref readonly var e = ref list[i];
+                _indexed[_cellFill[e.Cell]++] = e;
+                if ((e.Flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
+                {
+                    // A secondary keeps the PRIMARY cell in Cell, so a session can tell whether it already met this event there.
+                    _indexed[_cellSecondaryFill[(e.OldCy * _gridW) + e.OldCx]++] = e;
+                }
+            }
+        }
+
+        // The log's compact form of this tick: the non-empty cells, ascending, with their ranges. The dense arrays above are rebuilt every tick.
+        var nonEmpty = 0;
+        for (var c = 0; c < cells; c++)
+        {
+            if (_cellStart[c + 1] != _cellStart[c])
+            {
+                if (nonEmpty == slot.Cells.Length)
+                {
+                    var grown = Math.Max(64, nonEmpty * 2);
+                    Array.Resize(ref slot.Cells, grown);
+                    Array.Resize(ref slot.Starts, grown + 1);
+                    Array.Resize(ref slot.PrimaryEnds, grown);
+                }
+
+                slot.Cells[nonEmpty] = c;
+                slot.Starts[nonEmpty] = _cellStart[c];
+                slot.PrimaryEnds[nonEmpty] = _cellPrimaryEnd[c];
+                nonEmpty++;
+            }
+        }
+
+        if (slot.Starts.Length < nonEmpty + 1)
+        {
+            Array.Resize(ref slot.Starts, nonEmpty + 1);
+        }
+
+        slot.Starts[nonEmpty] = running;
+        slot.CellCount = nonEmpty;
+        slot.Tick = _tick;
+        slot.Valid = true;
+
         IndexTicks += Stopwatch.GetTimestamp() - from;
     }
-
-    private int[] _workerOffsets = [];
-    private int[] _workerSecondaryOffsets = [];
 
     // ══ Per-session gather (parallel over sessions) ══════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -905,14 +1096,12 @@ internal sealed unsafe class PushReplication
         return !st.Bound || st.Generation != session.Generation ? false : st.NeedsReset;
     }
 
-    /// <summary>A frame for the session was not published: what it would have said is lost, so the next one starts from a RESET.</summary>
+    /// <summary>
+    /// A frame for the session was not published. Nothing changes: its committed anchor, cells and <see cref="PushSessionState.LastTick"/> stand, and the
+    /// next frame replays the missed ticks from the push log — or resets, when they have left it.
+    /// </summary>
     public void NoteNotPublished(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
-        if (st.Bound && st.Generation == session.Generation && st.Anchored)
-        {
-            st.NeedsReset = true;
-        }
     }
 
     /// <summary>The frame was published: the anchor and the delivered cells it described become the session's.</summary>
@@ -927,13 +1116,16 @@ internal sealed unsafe class PushReplication
         st.D1 = st.P1;
         st.D2 = st.P2;
         st.D3 = st.P3;
+        st.Cursor = st.PCursor;
+        st.LastFarTick = st.PLastFarTick;
         st.Anchored = true;
         st.NeedsReset = false;
+        st.LastTick = _tick;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static bool Bit(ulong d0, ulong d1, ulong d2, ulong d3, int i) =>
-        i < 0 ? false : ((i >> 6) switch { 0 => d0, 1 => d1, 2 => d2, _ => d3 } >> (i & 63) & 1UL) != 0;
+        i >= 0 && ((i >> 6) switch { 0 => d0, 1 => d1, 2 => d2, _ => d3 } >> (i & 63) & 1UL) != 0;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void SetBit(ref ulong d0, ref ulong d1, ref ulong d2, ref ulong d3, int i)
@@ -1041,6 +1233,45 @@ internal sealed unsafe class PushReplication
         var reset = st.NeedsReset || forceReset;
         var r2 = Radius * Radius;
         var tick = _tick;
+
+        // Missed frames: replayed from the push log while every missed tick is still in it, reset otherwise (SUB-03: skip = union).
+        var gap = st.Anchored && !reset && placed ? (int)(tick - st.LastTick - 1) : 0;
+
+        // Distance LOD: this frame flushes the deferred far updates when it is the session's far tick or one was missed; the log must still hold them.
+        var lod = FarEvery > 1 && placed;
+        var farR2 = Radius * Radius * 0.25;
+        var flush = lod && st.Anchored && !reset
+            && (((tick + session.Slot) % (uint)FarEvery) == 0 || tick - st.LastFarTick >= (uint)FarEvery);
+        if (flush && (tick - st.LastFarTick >= LogDepth || !LogCovers(st.LastFarTick + 1, tick)))
+        {
+            Interlocked.Increment(ref LogTooOld);
+            reset = true;
+            flush = false;
+            gap = 0;
+        }
+        var log = Log ??= new LogTable();
+        log.Clear();
+        if (gap > 0)
+        {
+            if (gap >= LogDepth || !LogCovers(st.LastTick + 1, tick))
+            {
+                Interlocked.Increment(ref LogTooOld);
+                reset = true;
+                gap = 0;
+            }
+            else if (!CollectLog(ref st, viewpoint, archetypeMask, log, r2))
+            {
+                Interlocked.Increment(ref LogAmbiguous);
+                reset = true;
+                gap = 0;
+                log.Clear();
+            }
+            else
+            {
+                Interlocked.Increment(ref LogCatchUps);
+                Interlocked.Add(ref LogCatchUpTicks, gap);
+            }
+        }
 
         double ax, ay;
         int oOriginX, oOriginY;
@@ -1161,7 +1392,7 @@ internal sealed unsafe class PushReplication
 
                     SetBit(ref d0, ref d1, ref d2, ref d3, wi);
                     SetBit(ref n0, ref n1, ref n2, ref n3, wi);
-                    entered += DeliverCell(cx, cy, nx, ny, r2, archetypeMask, scratch, tick);
+                    entered += DeliverCell(cx, cy, nx, ny, r2, archetypeMask, scratch, tick, gap);
                     Interlocked.Increment(ref CellsDelivered);
                 }
             }
@@ -1172,11 +1403,17 @@ internal sealed unsafe class PushReplication
         enters += entered;
 
         // ── 2. The push events around both anchors ─────────────────────────────────────────────────────────────────────────────────────────────────
+        if (gap > 0)
+        {
+            EmitLog(log, ax, ay, oOriginX, oOriginY, o0, o1, o2, o3, nx, ny, nOriginX, nOriginY, d0, d1, d2, d3, r2, scratch, ref enters, ref leaves,
+                ref updates, lod, farR2);
+        }
+
         var minCx = CellX(Math.Min(ax, nx) - Radius);
         var maxCx = CellX(Math.Max(ax, nx) + Radius);
         var minCy = CellY(Math.Min(ay, ny) - Radius);
         var maxCy = CellY(Math.Max(ay, ny) + Radius);
-        for (var cy = minCy; cy <= maxCy; cy++)
+        for (var cy = minCy; gap == 0 && cy <= maxCy; cy++)
         {
             for (var cx = minCx; cx <= maxCx; cx++)
             {
@@ -1206,7 +1443,7 @@ internal sealed unsafe class PushReplication
                     if (interior && i < pe && (e.Flags & (PushEvent.HasOld | PushEvent.HasNew)) == (PushEvent.HasOld | PushEvent.HasNew)
                         && e.OldCx == cx && e.OldCy == cy)
                     {
-                        EmitUpdate(in e, scratch, ref updates);
+                        EmitUpdateLod(in e, e.OldX, e.OldY, e.Groups, (e.Flags & PushEvent.Segment) != 0, ax, ay, nx, ny, lod, farR2, scratch, ref updates);
                         continue;
                     }
 
@@ -1235,7 +1472,8 @@ internal sealed unsafe class PushReplication
                         }
                         else
                         {
-                            EmitUpdate(in e, scratch, ref updates);
+                            EmitUpdateLod(in e, e.OldX, e.OldY, e.Groups, (e.Flags & PushEvent.Segment) != 0, ax, ay, nx, ny, lod, farR2, scratch,
+                                ref updates);
                         }
                     }
                     else if (was)
@@ -1277,11 +1515,23 @@ internal sealed unsafe class PushReplication
                         continue;
                     }
 
-                    SweepCell(cx, cy, ax, ay, nx, ny, r2, archetypeMask, scratch, tick, ref enters, ref leaves);
+                    SweepCell(cx, cy, ax, ay, nx, ny, r2, archetypeMask, scratch, tick, gap, ref enters, ref leaves);
                 }
             }
         }
 
+        // ── 4. Distance LOD: the deferred far updates, folded ──
+        if (flush)
+        {
+            FlushFar(ref st, nx, ny, nOriginX, nOriginY, d0, d1, d2, d3, r2, farR2, archetypeMask, scratch, ref updates);
+        }
+
+        st.PLastFarTick = flush || !lod || reset || !st.Anchored ? tick : st.LastFarTick;
+        if (Deferred != 0)
+        {
+            Interlocked.Add(ref UpdatesDeferred, Deferred);
+            Deferred = 0;
+        }
         st.PAnchorX = nx;
         st.PAnchorY = ny;
         st.POriginX = nOriginX;
@@ -1292,6 +1542,534 @@ internal sealed unsafe class PushReplication
         st.P3 = d3;
         Interlocked.Add(ref GatherTicks, Stopwatch.GetTimestamp() - from);
         return reset;
+    }
+
+    // ══ World sessions ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>How many grid cells a World session's delivery may visit in one frame, empty or not: bounds the first frame's cost.</summary>
+    private const int WorldCellsPerFrame = 4096;
+
+    /// <summary>
+    /// A World session: it holds every entity of its archetypes whose cell it has been delivered, and cells are delivered in grid order behind one cursor
+    /// — so its whole known-set is <c>cell(v) &lt; cursor</c>. Each frame delivers cells onward under the enter budget, then carries the tick's events.
+    /// </summary>
+    public bool GatherWorld(SessionId session, bool forceReset, ulong archetypeMask, FrameWorkerScratch scratch, int enterBudget, ref long enters,
+        ref long leaves, ref long updates, out bool complete)
+    {
+        var from = Stopwatch.GetTimestamp();
+        ref var st = ref _sessions[session.Slot];
+        if (!st.Bound || st.Generation != session.Generation)
+        {
+            st = default;
+            st.Bound = true;
+            st.Generation = session.Generation;
+        }
+
+        var tick = _tick;
+        var cells = _gridW * _gridH;
+        var reset = st.NeedsReset || forceReset;
+        var gap = st.Anchored && !reset ? (int)(tick - st.LastTick - 1) : 0;
+        var log = Log ??= new LogTable();
+        log.Clear();
+        if (gap > 0)
+        {
+            if (gap >= LogDepth || !LogCovers(st.LastTick + 1, tick))
+            {
+                Interlocked.Increment(ref LogTooOld);
+                reset = true;
+                gap = 0;
+            }
+            else if (!CollectLogWorld(st.LastTick + 1, st.Cursor, archetypeMask, log))
+            {
+                Interlocked.Increment(ref LogAmbiguous);
+                reset = true;
+                gap = 0;
+                log.Clear();
+            }
+            else
+            {
+                Interlocked.Increment(ref LogCatchUps);
+                Interlocked.Add(ref LogCatchUpTicks, gap);
+            }
+        }
+
+        var flagged = reset && st.Anchored;
+        var oldCursor = reset || !st.Anchored ? 0 : st.Cursor;
+
+        // ── 1. Deliver cells onward, under the enter budget ──
+        var cursor = oldCursor;
+        var entered = 0;
+        var visited = 0;
+        while (cursor < cells && entered < enterBudget && visited < WorldCellsPerFrame)
+        {
+            entered += DeliverCell(cursor % _gridW, cursor / _gridW, 0d, 0d, double.PositiveInfinity, archetypeMask, scratch, tick, gap, everywhere: true);
+            cursor++;
+            visited++;
+        }
+
+        complete = cursor >= cells;
+        enters += entered;
+
+        // ── 2. The events: this tick's, or every missed tick's folded ──
+        if (gap > 0)
+        {
+            for (var i = 0; i < log.Count; i++)
+            {
+                ref var entry = ref log.Entries[i];
+                ref readonly var e = ref entry.Last;
+                var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && ((entry.OldCy * _gridW) + entry.OldCx) < oldCursor;
+                var isIn = (e.Flags & PushEvent.HasNew) != 0 && ((e.NewCy * _gridW) + e.NewCx) < cursor;
+                EmitWorld(in e, was, isIn, entry.Groups, entry.Segment, scratch, ref enters, ref leaves, ref updates);
+            }
+        }
+        else
+        {
+            var slot = _log[tick % LogDepth];
+            for (var k = 0; slot.Valid && slot.Tick == tick && k < slot.CellCount; k++)
+            {
+                for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
+                {
+                    ref readonly var e = ref slot.Events[i];
+                    if ((archetypeMask & (1UL << e.Archetype)) == 0)
+                    {
+                        continue;
+                    }
+
+                    var was = (e.Flags & PushEvent.HasOld) != 0 && ((e.OldCy * _gridW) + e.OldCx) < oldCursor;
+                    var isIn = (e.Flags & PushEvent.HasNew) != 0 && ((e.NewCy * _gridW) + e.NewCx) < cursor;
+                    EmitWorld(in e, was, isIn, e.Groups, (e.Flags & PushEvent.Segment) != 0, scratch, ref enters, ref leaves, ref updates);
+                }
+            }
+        }
+
+        st.PCursor = cursor;
+        Interlocked.Add(ref GatherTicks, Stopwatch.GetTimestamp() - from);
+        return flagged;
+    }
+
+    private static void EmitWorld(in PushEvent e, bool was, bool isIn, int groups, bool segment, FrameWorkerScratch scratch, ref long enters,
+        ref long leaves, ref long updates)
+    {
+        if (isIn && !was)
+        {
+            scratch.Add(e.Archetype, FrameListKind.Enter, new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
+            enters++;
+        }
+        else if (isIn)
+        {
+            var merged = e;
+            merged.Groups = (byte)groups;
+            merged.Flags = segment ? (byte)(e.Flags | PushEvent.Segment) : (byte)(e.Flags & ~PushEvent.Segment);
+            EmitUpdate(in merged, scratch, ref updates);
+        }
+        else if (was)
+        {
+            scratch.Add(e.Archetype, FrameListKind.Leave, new FrameRecord { NetId = e.NetId, Archetype = e.Archetype });
+            leaves++;
+        }
+    }
+
+    /// <summary>The World form of <see cref="CollectLog"/>: every cell, primaries only (each event once per tick).</summary>
+    private bool CollectLogWorld(uint first, int cursor, ulong archetypeMask, LogTable table)
+    {
+        for (var t = first; t != _tick + 1; t++)
+        {
+            var slot = _log[t % LogDepth];
+            for (var k = 0; k < slot.CellCount; k++)
+            {
+                for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
+                {
+                    ref readonly var e = ref slot.Events[i];
+                    if ((archetypeMask & (1UL << e.Archetype)) == 0)
+                    {
+                        continue;
+                    }
+
+                    ref var entry = ref table.Find(e.NetId, out var found);
+                    if (!found)
+                    {
+                        entry = default;
+                        entry.FirstFlags = e.Flags;
+                        entry.OldX = e.OldX;
+                        entry.OldY = e.OldY;
+                        entry.OldCx = e.OldCx;
+                        entry.OldCy = e.OldCy;
+                    }
+                    else if ((entry.Last.Flags & PushEvent.HasNew) == 0)
+                    {
+                        entry.Replaced = true;
+                    }
+
+                    entry.Last = e;
+                    entry.LastTick = t;
+                    entry.Groups |= e.Groups;
+                    entry.Segment |= (e.Flags & PushEvent.Segment) != 0;
+                }
+            }
+        }
+
+        for (var i = 0; i < table.Count; i++)
+        {
+            ref var entry = ref table.Entries[i];
+            if (entry.Replaced && (entry.FirstFlags & PushEvent.HasOld) != 0 && ((entry.OldCy * _gridW) + entry.OldCx) < cursor
+                && (entry.Last.Flags & PushEvent.HasNew) != 0)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // ══ The push log's catch-up ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    [ThreadStatic]
+    private static LogTable Log;
+
+    /// <summary>
+    /// Per worker: the missed ticks' events, folded per identity — the first event's old position, the last one's new, and the union of what changed.
+    /// </summary>
+    private sealed class LogTable
+    {
+        public uint[] Keys = new uint[256];
+        public int[] Index = new int[256];
+        public LogEntry[] Entries = new LogEntry[128];
+        public int Count;
+
+        public void Clear()
+        {
+            if (Count > 0)
+            {
+                Array.Clear(Keys);
+                Count = 0;
+            }
+        }
+
+        public ref LogEntry Find(uint netId, out bool found)
+        {
+            if (Count * 2 >= Keys.Length)
+            {
+                Grow();
+            }
+
+            var mask = Keys.Length - 1;
+            var h = (int)((netId * 0x9E3779B1u) >> 8) & mask;
+            while (true)
+            {
+                var k = Keys[h];
+                if (k == 0)
+                {
+                    Keys[h] = netId + 1;
+                    Index[h] = Count;
+                    if (Count == Entries.Length)
+                    {
+                        Array.Resize(ref Entries, Count * 2);
+                    }
+
+                    found = false;
+                    return ref Entries[Count++];
+                }
+
+                if (k == netId + 1)
+                {
+                    found = true;
+                    return ref Entries[Index[h]];
+                }
+
+                h = (h + 1) & mask;
+            }
+        }
+
+        private void Grow()
+        {
+            var keys = new uint[Keys.Length * 2];
+            var index = new int[keys.Length];
+            var mask = keys.Length - 1;
+            for (var i = 0; i < Keys.Length; i++)
+            {
+                if (Keys[i] == 0)
+                {
+                    continue;
+                }
+
+                var h = (int)(((Keys[i] - 1) * 0x9E3779B1u) >> 8) & mask;
+                while (keys[h] != 0)
+                {
+                    h = (h + 1) & mask;
+                }
+
+                keys[h] = Keys[i];
+                index[h] = Index[i];
+            }
+
+            Keys = keys;
+            Index = index;
+        }
+    }
+
+    private struct LogEntry
+    {
+        public PushEvent Last;
+        public float OldX;
+        public float OldY;
+        public short OldCx;
+        public short OldCy;
+        public uint LastTick;
+        public byte FirstFlags;
+        public byte Groups;
+        public bool Segment;
+        public bool Replaced;
+    }
+
+    /// <summary>Whether the log holds every tick from <paramref name="first"/> to <paramref name="last"/>.</summary>
+    private bool LogCovers(uint first, uint last)
+    {
+        for (var t = first; t != last + 1; t++)
+        {
+            var slot = _log[t % LogDepth];
+            if (!slot.Valid || slot.Tick != t)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Folds every event the session missed, in tick order, over the cells either disc can reach. Returns <see langword="false"/> when an identity it held
+    /// was reused inside the window and would be both left and entered in one frame (SUB-06), which only a RESET can say.
+    /// </summary>
+    private bool CollectLog(ref PushSessionState st, Vector3D viewpoint, ulong archetypeMask, LogTable table, double r2)
+    {
+        var ax = st.AnchorX;
+        var ay = st.AnchorY;
+        var minCx = CellX(Math.Min(ax, viewpoint.X) - Radius);
+        var maxCx = CellX(Math.Max(ax, viewpoint.X) + Radius);
+        var minCy = CellY(Math.Min(ay, viewpoint.Y) - Radius);
+        var maxCy = CellY(Math.Max(ay, viewpoint.Y) + Radius);
+        for (var t = st.LastTick + 1; t != _tick + 1; t++)
+        {
+            var slot = _log[t % LogDepth];
+            for (var cy = minCy; cy <= maxCy; cy++)
+            {
+                var lo = (cy * _gridW) + minCx;
+                var hi = (cy * _gridW) + maxCx;
+                var k = LowerBound(slot.Cells, slot.CellCount, lo);
+                for (; k < slot.CellCount && slot.Cells[k] <= hi; k++)
+                {
+                    for (var i = slot.Starts[k]; i < slot.Starts[k + 1]; i++)
+                    {
+                        ref readonly var e = ref slot.Events[i];
+                        if ((archetypeMask & (1UL << e.Archetype)) == 0)
+                        {
+                            continue;
+                        }
+
+                        ref var entry = ref table.Find(e.NetId, out var found);
+                        if (!found)
+                        {
+                            entry = default;
+                            entry.FirstFlags = e.Flags;
+                            entry.OldX = e.OldX;
+                            entry.OldY = e.OldY;
+                            entry.OldCx = e.OldCx;
+                            entry.OldCy = e.OldCy;
+                        }
+                        else if (entry.LastTick == t)
+                        {
+                            // The same event, met again as a secondary.
+                            continue;
+                        }
+                        else if ((entry.Last.Flags & PushEvent.HasNew) == 0)
+                        {
+                            // An event after the identity was released: it names somebody else now.
+                            entry.Replaced = true;
+                        }
+
+                        entry.Last = e;
+                        entry.LastTick = t;
+                        entry.Groups |= e.Groups;
+                        entry.Segment |= (e.Flags & PushEvent.Segment) != 0;
+                    }
+                }
+            }
+        }
+
+        // An identity the session held that now names another entity it would enter: leave and enter in one frame, which only a RESET can carry. The
+        // enter half is tested against the viewpoint, a superset of what the gather will deliver, so the refusal is conservative.
+        for (var i = 0; i < table.Count; i++)
+        {
+            ref var entry = ref table.Entries[i];
+            if (entry.Replaced && WasKnown(ref st, in entry, r2) && (entry.Last.Flags & PushEvent.HasNew) != 0
+                && Within(viewpoint.X, viewpoint.Y, entry.Last.NewX, entry.Last.NewY, (Radius + CellSize) * (Radius + CellSize)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private bool WasKnown(ref PushSessionState st, in LogEntry entry, double r2) =>
+        (entry.FirstFlags & PushEvent.HasOld) != 0 && Within(st.AnchorX, st.AnchorY, entry.OldX, entry.OldY, r2)
+        && Bit(st.D0, st.D1, st.D2, st.D3, WindowIndex(st.OriginX, st.OriginY, entry.OldCx, entry.OldCy));
+
+    /// <summary>The folded events against the committed disc and window (was) and the new ones (is).</summary>
+    private void EmitLog(LogTable table, double ax, double ay, int oOriginX, int oOriginY, ulong o0, ulong o1, ulong o2, ulong o3, double nx, double ny,
+        int nOriginX, int nOriginY, ulong d0, ulong d1, ulong d2, ulong d3, double r2, FrameWorkerScratch scratch, ref long enters, ref long leaves,
+        ref long updates, bool lod, double farR2)
+    {
+        for (var i = 0; i < table.Count; i++)
+        {
+            ref var entry = ref table.Entries[i];
+            ref readonly var e = ref entry.Last;
+            var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && Within(ax, ay, entry.OldX, entry.OldY, r2)
+                && Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, entry.OldCx, entry.OldCy));
+            var isIn = (e.Flags & PushEvent.HasNew) != 0 && Within(nx, ny, e.NewX, e.NewY, r2)
+                && Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, e.NewCx, e.NewCy));
+            if (isIn && !was)
+            {
+                scratch.Add(e.Archetype, FrameListKind.Enter, new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
+                enters++;
+            }
+            else if (isIn)
+            {
+                EmitUpdateLod(in e, entry.OldX, entry.OldY, entry.Groups, entry.Segment, ax, ay, nx, ny, lod, farR2, scratch, ref updates);
+            }
+            else if (was)
+            {
+                scratch.Add(e.Archetype, FrameListKind.Leave, new FrameRecord { NetId = e.NetId, Archetype = e.Archetype });
+                leaves++;
+            }
+        }
+    }
+
+    /// <summary>
+    /// An update to an entity the session holds before and after: sent, deferred (far then and far now), or widened to the whole state (it crossed
+    /// inward, so updates deferred while it was far may be missing).
+    /// </summary>
+    private void EmitUpdateLod(in PushEvent e, float oldX, float oldY, int groups, bool segment, double ax, double ay, double nx, double ny, bool lod,
+        double farR2, FrameWorkerScratch scratch, ref long updates)
+    {
+        var merged = e;
+        merged.Groups = (byte)groups;
+        merged.Flags = segment ? (byte)(e.Flags | PushEvent.Segment) : (byte)(e.Flags & ~PushEvent.Segment);
+        if (lod)
+        {
+            var farNow = !Within(nx, ny, e.NewX, e.NewY, farR2);
+            var farBefore = !Within(ax, ay, oldX, oldY, farR2);
+            if (farNow && farBefore)
+            {
+                Deferred++;
+                return;
+            }
+
+            if (farBefore)
+            {
+                var plan = _encodePlans[e.Archetype];
+                merged.Groups = (byte)((1 << plan.GroupCount) - 1);
+                if (plan.Moving)
+                {
+                    merged.Flags |= PushEvent.Segment;
+                }
+            }
+        }
+
+        EmitUpdate(in merged, scratch, ref updates);
+    }
+
+    [ThreadStatic]
+    private static LogTable Far;
+
+    // Per worker: updates deferred this session, added to the shared counter once per gather rather than once per update.
+    [ThreadStatic]
+    private static long Deferred;
+
+    /// <summary>
+    /// Distance LOD: every far entity the session holds that had an event since its last flush gets one update, the union of what changed since — folded
+    /// from the log, the way a skipped frame is replayed.
+    /// </summary>
+    private void FlushFar(ref PushSessionState st, double nx, double ny, int nOriginX, int nOriginY, ulong d0, ulong d1, ulong d2, ulong d3, double r2,
+        double farR2, ulong archetypeMask, FrameWorkerScratch scratch, ref long updates)
+    {
+        Interlocked.Increment(ref FarFlushes);
+        var table = Far ??= new LogTable();
+        table.Clear();
+        var minCx = CellX(nx - Radius);
+        var maxCx = CellX(nx + Radius);
+        var minCy = CellY(ny - Radius);
+        var maxCy = CellY(ny + Radius);
+        for (var t = st.LastFarTick + 1; t != _tick + 1; t++)
+        {
+            var slot = _log[t % LogDepth];
+            for (var cy = minCy; cy <= maxCy; cy++)
+            {
+                var k = LowerBound(slot.Cells, slot.CellCount, (cy * _gridW) + minCx);
+                for (; k < slot.CellCount && slot.Cells[k] <= (cy * _gridW) + maxCx; k++)
+                {
+                    for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
+                    {
+                        ref readonly var e = ref slot.Events[i];
+                        if ((archetypeMask & (1UL << e.Archetype)) == 0)
+                        {
+                            continue;
+                        }
+
+                        ref var entry = ref table.Find(e.NetId, out var found);
+                        if (!found)
+                        {
+                            entry = default;
+                        }
+
+                        entry.Last = e;
+                        entry.Groups |= e.Groups;
+                        entry.Segment |= (e.Flags & PushEvent.Segment) != 0;
+                    }
+                }
+            }
+        }
+
+        for (var i = 0; i < table.Count; i++)
+        {
+            ref var entry = ref table.Entries[i];
+            ref readonly var e = ref entry.Last;
+            if ((e.Flags & PushEvent.HasNew) == 0 || (entry.Groups == 0 && !entry.Segment))
+            {
+                continue;
+            }
+
+            var held = Within(nx, ny, e.NewX, e.NewY, r2) && Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, e.NewCx, e.NewCy));
+            if (!held || Within(nx, ny, e.NewX, e.NewY, farR2))
+            {
+                continue;
+            }
+
+            var merged = e;
+            merged.Groups = entry.Groups;
+            merged.Flags = entry.Segment ? (byte)(e.Flags | PushEvent.Segment) : (byte)(e.Flags & ~PushEvent.Segment);
+            EmitUpdate(in merged, scratch, ref updates);
+        }
+    }
+
+    private static int LowerBound(int[] values, int count, int key)
+    {
+        var lo = 0;
+        var hi = count;
+        while (lo < hi)
+        {
+            var mid = (lo + hi) >>> 1;
+            if (values[mid] < key)
+            {
+                lo = mid + 1;
+            }
+            else
+            {
+                hi = mid;
+            }
+        }
+
+        return lo;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1312,7 +2090,8 @@ internal sealed unsafe class PushReplication
     }
 
     /// <summary>Enters every entity of the cell inside the disc that was not pushed this tick (a pushed one is the push step's).</summary>
-    private int DeliverCell(int cx, int cy, double nx, double ny, double r2, ulong archetypeMask, FrameWorkerScratch scratch, uint tick)
+    private int DeliverCell(int cx, int cy, double nx, double ny, double r2, ulong archetypeMask, FrameWorkerScratch scratch, uint tick, int gap,
+        bool everywhere = false)
     {
         var entered = 0;
         var ax = nx;
@@ -1338,7 +2117,7 @@ internal sealed unsafe class PushReplication
             using var e = cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, double.NegativeInfinity, x0 + CellSize + 1d, y0 + CellSize + 1d, double.PositiveInfinity);
             while (e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out var bx1, out var by1))
             {
-                if (SkipCluster(bx0, by0, bx1, by1, ax, ay, nx, ny, sweeping))
+                if (!everywhere && SkipCluster(bx0, by0, bx1, by1, ax, ay, nx, ny, sweeping))
                 {
                     continue;
                 }
@@ -1362,13 +2141,14 @@ internal sealed unsafe class PushReplication
                     }
 
                     var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
-                    if (*(uint*)(cold + layout.LastWatchedTickOffsetInColdEntry) == tick)
+                    // Owned by the push step (or, after missed frames, by the log's replay): it had an event since the session's last frame.
+                    if (tick - *(uint*)(cold + layout.LastWatchedTickOffsetInColdEntry) <= (uint)gap)
                     {
                         continue;
                     }
 
-                    Decode(a, cold + layout.PrevPositionOffsetInColdEntry, out var px, out var py);
-                    if (CellX(px) != cx || CellY(py) != cy || !Within(nx, ny, px, py, r2))
+                    Decode(a, cold + _positionOffset[a], out var px, out var py);
+                    if (CellX(px) != cx || CellY(py) != cy || (!everywhere && !Within(nx, ny, px, py, r2)))
                     {
                         continue;
                     }
@@ -1384,7 +2164,7 @@ internal sealed unsafe class PushReplication
 
     /// <summary>Emits the enters and leaves the anchor's move caused among one delivered cell's entities that were not pushed this tick.</summary>
     private void SweepCell(int cx, int cy, double ax, double ay, double nx, double ny, double r2, ulong archetypeMask, FrameWorkerScratch scratch, uint tick,
-        ref long enters, ref long leaves)
+        int gap, ref long enters, ref long leaves)
     {
         var x0 = _gridMinX + (cx * CellSize);
         var y0 = _gridMinY + (cy * CellSize);
@@ -1432,12 +2212,13 @@ internal sealed unsafe class PushReplication
                     }
 
                     var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
-                    if (*(uint*)(cold + layout.LastWatchedTickOffsetInColdEntry) == tick)
+                    // Owned by the push step (or, after missed frames, by the log's replay): it had an event since the session's last frame.
+                    if (tick - *(uint*)(cold + layout.LastWatchedTickOffsetInColdEntry) <= (uint)gap)
                     {
                         continue;
                     }
 
-                    Decode(a, cold + layout.PrevPositionOffsetInColdEntry, out var px, out var py);
+                    Decode(a, cold + _positionOffset[a], out var px, out var py);
                     if (CellX(px) != cx || CellY(py) != cy)
                     {
                         continue;

@@ -442,6 +442,17 @@ public sealed class SubscriptionsOptions
     public bool GateProjectionOnChanges { get; init; } = true;
 
     /// <summary>
+    /// PROTOTYPE (ADR-067): whether a push profile may declare <see cref="PushDetection.Automatic"/>. Off: replication is explicit — a system that writes a
+    /// replicated value calls <see cref="SubscriptionsCommands.Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/> — and a profile asking for automatic
+    /// detection is refused when the runtime starts.
+    /// </summary>
+    /// <remarks>
+    /// Automatic detection encodes every live entity of the profile's archetypes every tick (+2.3 ms at d06/1 000). It stays behind this switch until it has
+    /// been optimised and measured again, and is re-introduced as a supported option only if it earns its cost.
+    /// </remarks>
+    public bool AllowAutomaticPushDetection { get; init; }
+
+    /// <summary>
     /// The most sessions one interest cell group may hold before a crowded cell is cut into pieces. Zero (the default) is the automatic cap: sessions
     /// divided by workers, at least eight.
     /// </summary>

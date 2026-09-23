@@ -26,6 +26,8 @@ internal sealed unsafe partial class FrameAssembler
     private Vector3D[] _pushViewpoints = [];
     private bool[] _pushPlaced = [];
     private ulong[] _pushMasks = [];
+    private bool[] _pushWorld = [];
+    private int[] _pushDivisor = [];
     private int _pushSessionCount;
     private int _pushCursor;
 
@@ -45,7 +47,7 @@ internal sealed unsafe partial class FrameAssembler
         var n = 0;
         foreach (var session in _sessions)
         {
-            if (!_interest.TryGetPushProfile(session, out _, out var archetypes))
+            if (!_interest.TryGetPushProfile(session, out _, out var archetypes, out var world, out var divisor))
             {
                 continue;
             }
@@ -57,8 +59,12 @@ internal sealed unsafe partial class FrameAssembler
                 Array.Resize(ref _pushViewpoints, grown);
                 Array.Resize(ref _pushPlaced, grown);
                 Array.Resize(ref _pushMasks, grown);
+                Array.Resize(ref _pushWorld, grown);
+                Array.Resize(ref _pushDivisor, grown);
             }
 
+            _pushWorld[n] = world;
+            _pushDivisor[n] = divisor;
             _pushPlaced[n] = _sessions.TryGetViewpoint(session, out var viewpoint);
             _pushViewpoints[n] = viewpoint;
             var mask = 0UL;
@@ -106,6 +112,27 @@ internal sealed unsafe partial class FrameAssembler
             $"  PUSH: {_pushSessionCount} sessions; slots pushed {p.SlotsPushed}, events {p.Events}; enters {p.Enters}, leaves {p.Leaves}, updates {p.Updates}; "
             + $"cells delivered {p.CellsDelivered}, sweeps {p.Sweeps} ({p.SweepSlots} slots); resets {p.Resets}; "
             + $"serial prepare {p.PrepareTicks * f:F0} ms, index {p.IndexTicks * f:F0} ms, gather busy {p.GatherTicks * f:F0} ms (cumulative)");
+        Console.Error.WriteLine($"  PUSH LOD: far every {p.FarEvery}; updates deferred {p.UpdatesDeferred}, flushes {p.FarFlushes}");
+        Console.Error.WriteLine($"  PUSH LOG: catch-ups {p.LogCatchUps} over {p.LogCatchUpTicks} missed ticks; resets: too old {p.LogTooOld}, ambiguous {p.LogAmbiguous}");
+        if (p.ValidateClustersPerTick > 0)
+        {
+            var groups = new System.Text.StringBuilder();
+            for (var a = 0; a < _plans.Length; a++)
+            {
+                var planGroups = _plans[a].Groups;
+                for (var g = 0; planGroups != null && g < planGroups.Length; g++)
+                {
+                    var n = p.ForgottenGroups(a, g);
+                    if (n > 0)
+                    {
+                        groups.Append($" {_plans[a].Name}.{planGroups[g].Name}={n}");
+                    }
+                }
+            }
+
+            Console.Error.WriteLine($"  PUSH VALIDATOR: {p.ValidatedSlots} slots checked, forgotten pushes {p.ForgottenPushes} (motion {p.ForgottenMotion});{groups}");
+        }
+
         Console.Error.WriteLine("  PUSH MIGRATION: " + p.MigrationSummary() + $"orphans: release {p.OrphanRelease}, migrate {p.OrphanMigrate}, drain {p.OrphanDrain}");
         if (p.Shadow)
         {
@@ -150,6 +177,14 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
+        // A rate class: not this session's tick. Not a skip — nothing was refused — and the log carries the union on its next one. Staggered by slot so a
+        // profile's sessions do not all land on the same tick.
+        var divisor = _pushDivisor[index];
+        if (divisor > 1 && ((_tick + (uint)session.Slot) % (uint)divisor) != 0)
+        {
+            return;
+        }
+
         var send = SendStateOf(session.Slot);
         if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick))
         {
@@ -177,8 +212,11 @@ internal sealed unsafe partial class FrameAssembler
         var mark = timing ? Stopwatch.GetTimestamp() : 0L;
 
         scratch.BeginSession(_plans.Length);
-        var reset = Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], state.PendingReset, _pushMasks[index], scratch, _encodePlans,
-            Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves, ref updates, out var complete);
+        var reset = _pushWorld[index]
+            ? Push.GatherWorld(session, state.PendingReset, _pushMasks[index], scratch, Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves,
+                ref updates, out var complete)
+            : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], state.PendingReset, _pushMasks[index], scratch, _encodePlans,
+                Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves, ref updates, out complete);
 
         if (timing)
         {
@@ -200,6 +238,18 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         var records = SortAndCount(scratch);
+        if (Push.FarEvery > 1)
+        {
+            records = 0;
+            for (var a = 0; a < _plans.Length; a++)
+            {
+                scratch.DedupeUpdates(a);
+                for (var k = 0; k < 4; k++)
+                {
+                    records += scratch.Count(a, (FrameListKind)k);
+                }
+            }
+        }
         if (timing)
         {
             var now = Stopwatch.GetTimestamp();
