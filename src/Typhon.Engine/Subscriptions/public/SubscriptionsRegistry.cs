@@ -368,7 +368,53 @@ public sealed class SubscriptionsRegistry
                     throw new NotSupportedException(
                         $"Profile '{profile.Name}' declares near/far tiers, which Phase 2 builds together with the observers that need them.");
                 }
+
+                if (observer.Kind == ObserverKind.Sphere && observer.LeaveRadius != 0)
+                {
+                    // An entity is held while it is within the radius of the session's anchor: one radius, no band. Ignoring a declared band would make the
+                    // declaration say something the engine does not do.
+                    throw new NotSupportedException(
+                        $"Profile '{profile.Name}' declares a Sphere with a leave radius. Hysteresis is Phase 2 work; declare the enter radius alone "
+                        + "until then.");
+                }
             }
+
+            if (profile.Observers.Count > 1)
+            {
+                throw new NotSupportedException(
+                    $"Profile '{profile.Name}' declares {profile.Observers.Count} observers. A profile is served through exactly one World or Sphere observer "
+                    + "until Phase 2 builds the tiers that give several a meaning.");
+            }
+        }
+
+        // One radius for every Sphere: the push index's cells are sized from it, so a second radius would be served at the first's without a word.
+        var radius = 0d;
+        var observed = new HashSet<Type>();
+        foreach (var profile in _profiles)
+        {
+            foreach (var observer in profile.Observers)
+            {
+                observed.UnionWith(observer.Archetypes);
+                if (observer.Kind != ObserverKind.Sphere)
+                {
+                    continue;
+                }
+
+                if (radius != 0d && observer.Radius != radius)
+                {
+                    throw new NotSupportedException(
+                        $"Profile '{profile.Name}' declares a Sphere of {observer.Radius} m where another profile declares {radius} m. Every Sphere shares one "
+                        + "radius until the push index is sized per profile.");
+                }
+
+                radius = observer.Radius;
+            }
+        }
+
+        if (observed.Count > 64)
+        {
+            throw new NotSupportedException(
+                $"The profiles observe {observed.Count} archetypes. A session's archetype set is a 64-bit mask, so at most 64 can be observed.");
         }
 
         if (_sources.Count > 0)

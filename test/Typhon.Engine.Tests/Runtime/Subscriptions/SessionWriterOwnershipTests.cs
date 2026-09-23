@@ -140,7 +140,6 @@ class SessionWriterOwnershipTests
         Check(before.Resumable, after.Resumable, nameof(SessionRow.Resumable), what);
         Check(before.BytesPerSecond, after.BytesPerSecond, nameof(SessionRow.BytesPerSecond), what);
         Check(before.MaxObservers, after.MaxObservers, nameof(SessionRow.MaxObservers), what);
-        Check(before.MaxKnownEntities, after.MaxKnownEntities, nameof(SessionRow.MaxKnownEntities), what);
         Check(before.FrameBytes, after.FrameBytes, nameof(SessionRow.FrameBytes), what);
         Check(before.ClientMessageBytes, after.ClientMessageBytes, nameof(SessionRow.ClientMessageBytes), what);
         Check(before.Controlled.EntityKey, after.Controlled.EntityKey, nameof(SessionRow.Controlled), what);

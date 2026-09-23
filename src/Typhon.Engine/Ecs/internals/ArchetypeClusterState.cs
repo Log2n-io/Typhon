@@ -2618,7 +2618,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     public ulong StructureSlotsOf(int chunkId) =>
         (uint)chunkId < (uint)_structureWordCount ? (ulong)_structureWords[chunkId] : 0UL;
 
-    /// <summary>PROTOTYPE (push replication): this tick's drained structure words, indexed by chunk id, for a consumer that must find every non-zero one.</summary>
+    /// <summary>This tick's drained structure words, indexed by chunk id, for a consumer that must find every non-zero one.</summary>
     /// <remarks>Valid only on <see cref="StructureTick"/>. Read-only by contract; the fence owns it.</remarks>
     internal ReadOnlySpan<long> StructureWords => new(_structureWords, 0, Math.Min(_structureWordCount, _structureWords.Length));
 

@@ -9,7 +9,7 @@ using Typhon.Protocol;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// PROTOTYPE — one projected slot of a push archetype this tick, with where it was and where it is. The unit the frame stage fans out.
+/// One projected slot of a push archetype this tick, with where it was and where it is. The unit the frame stage fans out.
 /// </summary>
 /// <remarks>
 /// Positions are the DECODED quantized positions — exactly what the wire carries — so every path that tests a distance (the push step, the sweep, a cell
@@ -59,7 +59,7 @@ internal struct PushEvent
     public byte FlushGroups;
 }
 
-/// <summary>PROTOTYPE — what the push path remembers about one session: its visibility anchor and which cells around it it has been given.</summary>
+/// <summary>What the push path remembers about one session: its visibility anchor and which cells around it it has been given.</summary>
 internal struct PushSessionState
 {
     public ushort Generation;
@@ -88,7 +88,7 @@ internal struct PushSessionState
 }
 
 /// <summary>
-/// PROTOTYPE — push replication (<c>claude/design/Subscriptions/research/push-model.md</c> § 4): the developer marks what changed, the engine encodes it
+/// Push replication (<c>claude/design/Subscriptions/research/push-model.md</c> § 4): the developer marks what changed, the engine encodes it
 /// once and fans it out to the sessions around it, and a session's knowledge of an entity is a function of geometry rather than a per-session table.
 /// </summary>
 /// <remarks>
@@ -103,7 +103,6 @@ internal sealed unsafe class PushReplication
 {
     private readonly CompiledProjectionPlan[] _plans;
     private readonly ArchetypeReplicationState[] _states;
-    private readonly bool[] _isPush;
     private readonly int[] _pushIndices;
     private readonly bool[] _bootstrapped;
 
@@ -356,7 +355,6 @@ internal sealed unsafe class PushReplication
         Shadow = shadow || Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
         _plans = plans;
         _states = states;
-        _isPush = isPush;
         _automatic = automatic;
         var count = 0;
         for (var a = 0; a < isPush.Length; a++)
@@ -406,7 +404,8 @@ internal sealed unsafe class PushReplication
             if (position == null || position.Dims != 2 || (position.Moving ? blockLayout.PrevPositionBytes == 0 : blockLayout.EnterPositionBytes == 0))
             {
                 throw new NotSupportedException(
-                    $"Archetype '{plans[a].Name}' is push-served; the push prototype supports 2D positions only.");
+                    $"Archetype '{plans[a].Name}' is observed by a profile and has no 2D position. Replication serves entities by where they are, and the "
+                    + "push index supports 2D positions only.");
             }
 
             // Where the entity's last projected position lives: a mover's previous-position copy, or a static entity's enter cache (it never moves).
@@ -452,7 +451,8 @@ internal sealed unsafe class PushReplication
         _gridH = Math.Max(1, (int)Math.Ceiling((gMaxY - gMinY) / CellSize) + 1);
         if ((long)_gridW * _gridH > 16_000_000)
         {
-            throw new NotSupportedException($"Push grid of {_gridW} x {_gridH} cells is too large for the prototype's dense index.");
+            throw new NotSupportedException(
+                $"Push grid of {_gridW} x {_gridH} cells is too large for the dense index: the world is too wide for the observers' radius.");
         }
 
         _cellStart = new int[(_gridW * _gridH) + 1];
@@ -696,8 +696,6 @@ internal sealed unsafe class PushReplication
         return (uint)chunkId < (uint)table.Length ? (ReplicationBlockHeader*)table[chunkId] : null;
     }
 
-    /// <summary>Whether plan <paramref name="archetype"/> is push-served.</summary>
-    public bool IsPush(int archetype) => (uint)archetype < (uint)_isPush.Length && _isPush[archetype];
 
     // ══ Blocks step (serial) ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -983,7 +981,7 @@ internal sealed unsafe class PushReplication
         {
             // The push step owns this entity from this tick on; the sweep, the cell delivery and the log's catch-up skip it by this stamp.
             var layout = _states[archetype].Layout;
-            *(uint*)((byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + layout.LastWatchedTickOffsetInColdEntry) = _tick;
+            *(uint*)((byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + layout.LastEventTickOffsetInColdEntry) = _tick;
         }
 
         var list = _events[worker];
@@ -1321,7 +1319,17 @@ internal sealed unsafe class PushReplication
     /// </summary>
     public void NoteNotPublished(SessionId session)
     {
+        if (CommitOnSkipForTest)
+        {
+            Commit(session);
+        }
     }
+
+    /// <summary>
+    /// <b>Test seam, and a deliberate one.</b> Commits a skipped session as though its frame had been published — the one move SUB-03 forbids — so the
+    /// rule's verifier can be shown to reject it. Nothing in production sets it.
+    /// </summary>
+    internal bool CommitOnSkipForTest;
 
     /// <summary>The frame was published: the anchor and the delivered cells it described become the session's.</summary>
     public void Commit(SessionId session)
@@ -2406,7 +2414,7 @@ internal sealed unsafe class PushReplication
                     }
 
                     var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
-                    if (tick - *(uint*)(cold + layout.LastWatchedTickOffsetInColdEntry) <= (uint)gap)
+                    if (tick - *(uint*)(cold + layout.LastEventTickOffsetInColdEntry) <= (uint)gap)
                     {
                         continue;
                     }
@@ -2587,7 +2595,7 @@ internal sealed unsafe class PushReplication
                     // This tick's event is the entity's latest by definition; an older one only if nothing came after it (its stamp) and its slot still
                     // holds it (identity reuse).
                     if (age != 0 && (hot->NetId != e.NetId
-                        || *(uint*)(bytes + layout.ColdOffset + (e.Slot * layout.ColdStride) + layout.LastWatchedTickOffsetInColdEntry) != slot.Tick))
+                        || *(uint*)(bytes + layout.ColdOffset + (e.Slot * layout.ColdStride) + layout.LastEventTickOffsetInColdEntry) != slot.Tick))
                     {
                         continue;
                     }
@@ -2849,7 +2857,7 @@ internal sealed unsafe class PushReplication
 
                     var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
                     // Owned by the push step (or, after missed frames, by the log's replay): it had an event since the session's last frame.
-                    if (tick - *(uint*)(cold + layout.LastWatchedTickOffsetInColdEntry) <= (uint)gap)
+                    if (tick - *(uint*)(cold + layout.LastEventTickOffsetInColdEntry) <= (uint)gap)
                     {
                         continue;
                     }
@@ -2920,7 +2928,7 @@ internal sealed unsafe class PushReplication
 
                     var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
                     // Owned by the push step (or, after missed frames, by the log's replay): it had an event since the session's last frame.
-                    if (tick - *(uint*)(cold + layout.LastWatchedTickOffsetInColdEntry) <= (uint)gap)
+                    if (tick - *(uint*)(cold + layout.LastEventTickOffsetInColdEntry) <= (uint)gap)
                     {
                         continue;
                     }

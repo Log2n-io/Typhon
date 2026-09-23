@@ -198,7 +198,7 @@ public sealed class SimConfig
 
     /// <summary>
     /// <c>--subs-pipeline collapsed|staged</c>: which shape the replication track runs in, as a value for
-    /// <c>SubscriptionsOptions.CollapseBelowWorkUnits</c>. <c>staged</c> is 0 (the engine default, four dispatched stages); <c>collapsed</c> is
+    /// <c>SubscriptionsOptions.CollapseBelowWorkUnits</c>. <c>staged</c> is 0 (the engine default, the dispatched stages); <c>collapsed</c> is
     /// <see cref="int.MaxValue"/> (one dispatched system, whatever the load).
     /// </summary>
     /// <remarks>
@@ -207,22 +207,6 @@ public sealed class SimConfig
     /// measurement it enables is for. It reaches only the <c>serve</c> path, which is the only one that has sessions.
     /// </remarks>
     public int SubscriptionsCollapseWorkUnits;
-
-    /// <summary><c>--subs-interest cell|resident|pull</c>: whether sessions sharing an interest cell resolve from one query or one each.</summary>
-    /// <remarks>
-    /// A same-binary switch, because the two shapes are an A/B and this repository's rule requires both arms to be one build. It reaches only the
-    /// <c>serve</c> path, which is the only one that has sessions.
-    /// </remarks>
-    public bool SubscriptionsCellKeyedInterest = true;
-
-    /// <summary>
-    /// <c>--subs-incremental on|off</c>: whether interest is a difference against each session's previous tick, or re-derived whole every tick.
-    /// </summary>
-    /// <remarks>
-    /// A same-binary switch, for the same reason as <see cref="SubscriptionsCellKeyedInterest"/>. Off is Phase 1's frame stage exactly: every hit probed
-    /// against the known-set, and the whole known-set walked to find what left.
-    /// </remarks>
-    public bool SubscriptionsIncrementalInterest = true;
 
     /// <summary>
     /// <c>--dormancy N</c>: consecutive clean ticks before a cluster is put to sleep. 0 disables cluster dormancy, which is the engine default.
@@ -240,62 +224,18 @@ public sealed class SimConfig
     public int DormancyTicks;
 
     /// <summary>
-    /// <c>--subs-phases</c>: accumulate per-phase timings inside the frame stage (gather, select, sweep, sort, encode, publish).
+    /// <c>--subs-phases</c>: accumulate per-phase timings inside the frame stage (gather, sort, encode, publish).
     /// </summary>
     /// <remarks>
     /// Off by default because it costs one static read per phase boundary. It exists because a sampling profiler cannot answer the question: the frame
-    /// stage is one method and every callee that matters is inlined in Release, so the profile attributes the whole stage to <c>Assemble</c> itself.
+    /// stage is one method and every callee that matters is inlined in Release, so the profile attributes the whole stage to one frame.
     /// </remarks>
     public bool SubscriptionsPhaseTiming;
 
-    /// <summary>Whether the interest stage times its broad phase, narrow phase and run assembly separately. <c>--subs-interest-phases</c>.</summary>
-    public bool SubscriptionsInterestPhases;
-
-    /// <summary>Whether up-to-date sessions stop re-stating unchanged membership. A same-binary switch, so one build is both arms.</summary>
-    public bool SubscriptionsSparse;
-
-    /// <summary>Whether projection re-encodes only slots the engine marked changed (<c>--subs-content-gate on|off</c>, default on). A same-binary switch.</summary>
-    public bool SubscriptionsContentGate = true;
-
-    /// <summary>The interest cell-group cap; zero is automatic. <c>--subs-group-cap</c>.</summary>
-    public int SubscriptionsGroupCap;
-
     /// <summary>
-    /// <c>--subs-owed on|off</c>: whether a reused slot costs the session that slot on its next frame, or its whole next frame.
-    /// </summary>
-    public bool SubscriptionsOwedSlotCarry = true;
-
-    /// <summary>
-    /// <c>--subs-owed-slice N</c>: how much of a session's slot debt one frame serves, as a multiple of the enter budget. 0 serves all of it.
-    /// </summary>
-    public int SubscriptionsOwedSlice = 2;
-
-    /// <summary>Whether the gather prefetches the lines it is about to read (<c>--subs-prefetch on|off</c>).</summary>
-    public bool SubscriptionsGatherPrefetch;
-
-    /// <summary>Whether the frame stage takes sessions from a shared cursor (<c>--subs-sched static|dynamic</c>).</summary>
-    public bool SubscriptionsDynamicSchedule = true;
-
-    /// <summary>Whether each cluster's records are encoded once and referenced by every session (<c>--subs-shared on|off</c>).</summary>
-    public bool SubscriptionsSharedClusterBlocks;
-
-    /// <summary><c>--subs-band on|off</c>: whether the player disc keeps a hysteresis band between its enter and leave radii.</summary>
-    /// <remarks>
-    /// A same-binary switch, and both arms query the same radius: off declares one disc at the LEAVE radius, on declares the pair. What moves is whether
-    /// an entity between the two is admitted to a session that does not already hold it, which is the only difference the measurement is about.
-    /// </remarks>
-    public bool SubscriptionsHysteresis = true;
-
-    /// <summary>
-    /// <c>--subs-mode pull|push</c>: PROTOTYPE. <c>push</c> serves the player profile through the push path
-    /// (<c>claude/design/Subscriptions/research/push-model.md</c>): creatures, city NPCs and players are sent when the simulation pushes them (and when they
-    /// spawn, die or move), and a session's knowledge is geometric. The simulation is identical in both arms; only replication changes.
-    /// </summary>
-    public bool SubscriptionsPush;
-
-    /// <summary>
-    /// <c>--subs-mode push-auto</c>: PROTOTYPE. As <c>push</c>, but the engine detects changes itself (<see cref="Typhon.Engine.PushDetection.Automatic"/>)
-    /// and the simulation's <c>Replicate</c> calls are redundant.
+    /// <c>--subs-mode push|push-auto</c>: who detects a change. <c>push</c> (default) is the simulation's <c>Replicate</c> calls (ADR-067);
+    /// <c>push-auto</c> is the engine comparing every live entity (<see cref="Typhon.Engine.PushDetection.Automatic"/>, experimental), which makes those
+    /// calls redundant.
     /// </summary>
     public bool SubscriptionsPushAutomatic;
 

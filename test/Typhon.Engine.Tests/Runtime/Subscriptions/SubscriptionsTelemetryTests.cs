@@ -59,11 +59,11 @@ sealed class SubscriptionsTelemetryTests : TestBase<SubscriptionsTelemetryTests>
     {
         var telemetry = new SubscriptionsTelemetry();
         telemetry.BeginTick(1);
-        telemetry.NoteStage(1, SubscriptionsStage.Interest, 0, 500);
+        telemetry.NoteStage(1, SubscriptionsStage.Project, 0, 500);
         Assert.That(telemetry.TrackMicroseconds(1), Is.GreaterThan(0));
 
         telemetry.BeginTick(1 + SubscriptionsTelemetry.Depth);
-        telemetry.NoteStage(1 + SubscriptionsTelemetry.Depth, SubscriptionsStage.Interest, 0, 900);
+        telemetry.NoteStage(1 + SubscriptionsTelemetry.Depth, SubscriptionsStage.Project, 0, 900);
 
         Assert.That(telemetry.Holds(1), Is.False, "the ring cannot still claim a tick whose slot was reused");
         Assert.That(telemetry.TrackMicroseconds(1), Is.Zero, "a recycled tick must report zero, not its successor's span");
@@ -118,7 +118,7 @@ sealed class SubscriptionsTelemetryTests : TestBase<SubscriptionsTelemetryTests>
         for (var tick = 1L; tick <= 10; tick++)
         {
             telemetry.BeginTick(tick);
-            telemetry.NoteStage(tick, SubscriptionsStage.Interest, 0, tick * 100);
+            telemetry.NoteStage(tick, SubscriptionsStage.Project, 0, tick * 100);
         }
 
         var p100 = telemetry.Percentile(10, window: 10, percentile: 1.0, scratch);
@@ -188,14 +188,14 @@ sealed class SubscriptionsTelemetryTests : TestBase<SubscriptionsTelemetryTests>
             TimeSpan.FromSeconds(10));
 
         var track = telemetry.TrackMicroseconds(measured);
-        var interest = telemetry.StageMicroseconds(measured, SubscriptionsStage.Interest);
+        var project = telemetry.StageMicroseconds(measured, SubscriptionsStage.Project);
         var frames = telemetry.StageMicroseconds(measured, SubscriptionsStage.Frames);
         runtime.Shutdown();
 
         Assert.Multiple(() =>
         {
             Assert.That(found, Is.True, "no tick of a running subscriptions track ever reported a duration");
-            Assert.That(interest, Is.GreaterThan(0), "the interest stage ran and reported nothing");
+            Assert.That(project, Is.GreaterThan(0), "the projection stage ran and reported nothing");
             Assert.That(frames, Is.GreaterThan(0), "the frames stage ran and reported nothing");
             Assert.That(track, Is.LessThan(1_000_000d), "the track's span for one tick exceeded a second, so it is summing rather than spanning");
         });

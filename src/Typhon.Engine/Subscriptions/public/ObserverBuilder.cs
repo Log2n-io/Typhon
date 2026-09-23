@@ -139,7 +139,7 @@ public sealed class ObserverBuilder
 }
 
 /// <summary>
-/// What an <see cref="ObserverBuilder"/> declared, as the interest pass reads it back.
+/// What an <see cref="ObserverBuilder"/> declared, as the runtime reads it back at <c>Start</c>.
 /// </summary>
 [PublicAPI]
 public sealed class ObserverDeclaration

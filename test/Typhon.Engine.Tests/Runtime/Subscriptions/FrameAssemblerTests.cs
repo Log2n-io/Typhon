@@ -10,12 +10,12 @@ using Typhon.Schema.Definition;
 namespace Typhon.Engine.Tests.Runtime;
 
 /// <summary>
-/// P1-13b — S2b: a session's hits become a <c>TICK</c> message.
+/// P1-13b — S2b: a session's share of the push events becomes a <c>TICK</c> message.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Every case drives the real track through <see cref="FrameHarness"/>: interest over a real engine's clusters, the blocks step, the projection pass, then
-/// the assembler — and reads the result back through the send side's own hand-off protocol. A fixture that fed the assembler synthetic records would prove
+/// Every case drives the real track through <see cref="FrameHarness"/>: the blocks step over a real engine's clusters, the projection pass, the push index,
+/// then the assembler — and reads the result back through the send side's own hand-off protocol. A fixture that fed the assembler synthetic records would prove
 /// nothing about the bytes, because the bytes come from the replication blocks S1 wrote.
 /// </para>
 /// <para>
@@ -23,8 +23,12 @@ namespace Typhon.Engine.Tests.Runtime;
 /// <see cref="SessionSendState.TryBeginFrame"/> then refuses it — which is the skip SUB-03 is about, reached the way production reaches it.
 /// </para>
 /// <para>
-/// <b>Entities are mutated through <c>ClusterRef.GetSpan</c></b>, the write path that signals nothing (SUB-10). It is what a system that does not move an
-/// entity between clusters uses, and it keeps a case's cluster layout still while its values change.
+/// <b>Sessions open after tick 1</b>, so their first frame is the fill, and ticks run back to back: a gap in the tick numbers is a missed tick to the push
+/// log, and a session that seems to have missed one is caught up or reset.
+/// </para>
+/// <para>
+/// <b>Entities are mutated through <c>ClusterRef.GetSpan</c></b>, the write path that signals nothing, and pushed with <c>Replicate</c> as an explicit
+/// profile's system must — or, where the span covers the spatial column, pushed by the engine for the whole cluster.
 /// </para>
 /// </remarks>
 [TestFixture]
@@ -45,18 +49,23 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         subs.Profile(OtherProfile, p => p.World().Of<ProjCreature>().Of<ProjRock>());
     }
 
-    private static SubscriptionsOptions Options(int enterBudget = 500, bool incrementalInterest = true) =>
+    private static SubscriptionsOptions Options(int enterBudget = 500) =>
         new()
         {
             MaxSessions = 64,
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
             EnterBudgetPerFrame = enterBudget,
-            IncrementalInterest = incrementalInterest,
         };
 
-    private FrameHarness Create(SubscriptionsOptions options = null) =>
-        FrameHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), Declare, "FrameAssemblerTests", options ?? Options());
+    private FrameHarness Create(SubscriptionsOptions options = null)
+    {
+        var harness = FrameHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), Declare, "FrameAssemblerTests", options ?? Options());
+
+        // The fence publishes the structure marks the engine's own pushes ride: a spawn, a destroy, a spatial write.
+        harness.RunFence = true;
+        return harness;
+    }
 
     // ── The grammar ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -70,9 +79,9 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         using var harness = Create();
         SpawnCreatures(harness, 12);
         SpawnRocks(harness, 5);
+        harness.RunTick(1);
         var session = harness.OpenSessions(1, Profile)[0];
 
-        harness.PrimeBlocks();
         harness.RunTick(2);
         var fill = harness.Read(session);
 
@@ -106,9 +115,9 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
     {
         using var harness = Create();
         var first = SpawnCreatures(harness, 6);
+        harness.RunTick(1);
         var session = harness.OpenSessions(1, Profile)[0];
 
-        harness.PrimeBlocks();
         harness.RunTick(2);
         Assert.That(harness.Read(session).Enters.Count, Is.EqualTo(6));
 
@@ -131,56 +140,6 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         });
     }
 
-    /// <summary>
-    /// A known entry whose generation no longer matches the hit leaves in this frame, and the hit enters in the next one (02 § 5).
-    /// </summary>
-    /// <remarks>
-    /// The stale state is written into the session's known-set directly. A correct server cannot reach it — the netId quarantine is longer than a session may
-    /// go without a frame — which is exactly why 02 § 5 calls this the defensive path, and why a test that waited for the engine to produce one would be
-    /// waiting for a bug.
-    /// <para>
-    /// <b>Pinned to the full walk</b> (<c>IncrementalInterest = false</c>). The reduction visits only the slots that
-    /// entered a session's view or that S1 reported as changed, and this corruption is by construction something nothing reported: the entity is untouched,
-    /// its slot carries no bit, it was in the session's view a tick ago and it still is, so no probe reaches it. That is sound where the state is REACHABLE
-    /// — a real reused identity bumps the hot entry's generation, and re-initializing a slot puts it in <c>ChangedSlots</c> unconditionally, so the slot is
-    /// visited on the tick the reuse happens; a session that missed that tick is by definition behind and reads every slot anyway. What a reduction cannot
-    /// do is discover a corruption that nothing reported, which is what the defensive branch is for and what this fixture exercises.
-    /// </para>
-    /// </remarks>
-    [Test]
-    public void AStaleGenerationLeavesInThisFrameAndEntersInTheNext()
-    {
-        using var harness = Create(Options(incrementalInterest: false));
-        SpawnCreatures(harness, 4);
-        var session = harness.OpenSessions(1, Profile)[0];
-
-        harness.PrimeBlocks();
-        harness.RunTick(2);
-        var target = harness.Read(session).Enters[1];
-
-        var known = harness.StateOf(session).Known;
-        Assert.That(known.Probe(target, 0, out var entry), Is.Not.EqualTo(KnownProbe.Unknown), "the fill made the entity known");
-        var real = entry->Generation;
-        known.Remove(target);
-        Assert.That(known.AddSource(target, (ushort)(real + 1), 1, 0, out _), Is.EqualTo(KnownAdd.Entered), "re-learned under a generation nobody carries");
-
-        harness.RunTick(3);
-        var leaving = harness.Read(session);
-
-        harness.RunTick(4);
-        var entering = harness.Read(session);
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(leaving, Is.Not.Null);
-            Assert.That(leaving.Leaves, Does.Contain(target), "a stale generation is a leave now");
-            Assert.That(leaving.Enters, Does.Not.Contain(target), "and never an enter in the same frame");
-            Assert.That(entering, Is.Not.Null);
-            Assert.That(entering.Enters, Does.Contain(target), "the hit enters in the following frame");
-            Assert.That(entering.Leaves, Is.Empty);
-        });
-    }
-
     // ── Flags ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary><c>VIEW_COMPLETE</c> is set on the frame that completes the initial fill, and on none before it.</summary>
@@ -188,28 +147,47 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
     public void ViewCompleteIsSetWhenTheFillUnderTheEnterBudgetCompletes()
     {
         using var harness = Create(Options(enterBudget: 4));
-        SpawnCreatures(harness, 10);
+
+        // Spread over several cells, so the budget has cells to spread over frames.
+        var positions = new double[10];
+        for (var i = 0; i < positions.Length; i++)
+        {
+            positions[i] = 10.0 + (i * 600.0);
+        }
+
+        SpawnCreaturesAt(harness, positions);
+        harness.RunTick(1);
         var session = harness.OpenSessions(1, Profile)[0];
 
-        harness.PrimeBlocks();
-        var flags = new List<TickFlags>();
         var entered = new List<uint>();
-        for (var tick = 2; tick <= 4; tick++)
+        var completeAt = -1;
+        var incompleteWhileMissing = true;
+        for (var tick = 2; tick <= 12 && completeAt < 0; tick++)
         {
             harness.RunTick(tick);
             var frame = harness.Read(session);
-            flags.Add(frame.Flags);
+            if (frame == null)
+            {
+                continue;
+            }
+
             entered.AddRange(frame.Enters);
+            if ((frame.Flags & TickFlags.ViewComplete) != 0)
+            {
+                completeAt = tick;
+            }
+            else
+            {
+                incompleteWhileMissing &= entered.Count < positions.Length;
+            }
         }
 
         Assert.Multiple(() =>
         {
-            Assert.That(flags[0] & TickFlags.ViewComplete, Is.EqualTo(TickFlags.None), "four of ten entered: the view is not filled");
-            Assert.That(flags[1] & TickFlags.ViewComplete, Is.EqualTo(TickFlags.None), "eight of ten");
-            Assert.That(flags[2] & TickFlags.ViewComplete, Is.EqualTo(TickFlags.ViewComplete), "the last two complete the fill");
-            Assert.That(entered.Count, Is.EqualTo(10), "nothing was lost to the budget");
+            Assert.That(completeAt, Is.GreaterThan(2), "the budget binds, so the fill takes more than one frame");
+            Assert.That(incompleteWhileMissing, Is.True, "no frame claimed an incomplete view before the last entity entered");
+            Assert.That(entered.Count, Is.EqualTo(positions.Length), "nothing was lost to the budget");
             Assert.That(entered, Is.Unique);
-            Assert.That(harness.Assembler.EntersDeferred, Is.EqualTo(8), "six deferred on the first frame, two on the second");
         });
     }
 
@@ -219,9 +197,9 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
     {
         using var harness = Create();
         SpawnCreatures(harness, 5);
+        harness.RunTick(1);
         var session = harness.OpenSessions(1, Profile)[0];
 
-        harness.PrimeBlocks();
         harness.RunTick(2);
         var first = harness.Read(session);
 
@@ -243,88 +221,6 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         });
     }
 
-    // ── The enter budget ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-
-    /// <summary>
-    /// When the budget binds, the candidates it lets through are the ones nearest the session's focus, and the rest are deferred rather than dropped.
-    /// </summary>
-    /// <remarks>
-    /// The expectation is computed from the CLIENT's own replica — the positions it decoded on the first frame — so "nearest" is measured in the same
-    /// coordinates the wire carries, and the fixture never has to agree with the engine about a quantization.
-    /// </remarks>
-    [Test]
-    public void TheEnterBudgetDefersNearestFirst()
-    {
-        const int Budget = 3;
-        const int Count = 10;
-
-        using var harness = Create(Options(enterBudget: Budget));
-
-        // Ten creatures on a line 4 m apart: far coarser than the 2^-10 m position quantum, so the ranking is unambiguous.
-        var positions = new double[Count];
-        for (var i = 0; i < Count; i++)
-        {
-            positions[i] = 100.0 + (i * 4.0);
-        }
-
-        SpawnCreaturesAt(harness, positions);
-        var session = harness.OpenSessions(1, Profile)[0];
-
-        harness.PrimeBlocks();
-
-        // The budget already binds on the initial fill, so it takes four frames to give every creature an identity — which is itself the "nothing is lost"
-        // half of the rule, and is what gives the replica the positions the expectation below is computed from.
-        var replica = harness.Replica(session);
-        var creatureIdx = harness.CatalogPlan.ArchetypeByName(nameof(ProjCreature)).Idx;
-        for (var tick = 2; tick <= 6; tick++)
-        {
-            harness.RunTick(tick);
-            harness.Deliver(session);
-        }
-
-        var all = replica.NetIds(creatureIdx);
-        Assert.That(all, Has.Length.EqualTo(Count), "the fill completed over several frames, losing nothing to the budget");
-
-        // The focus sits beyond the far end of the line, so the nearest are the entities furthest along it — an order that is neither hit order nor netId
-        // order, and therefore the only one the budget could have produced.
-        var focusX = positions[^1] + 20.0;
-        var plan = harness.Subscriptions.PlanNamed(nameof(ProjCreature));
-        var expected = all
-            .OrderBy(id => Math.Abs(replica.Position(creatureIdx, id)[0] - focusX))
-            .Take(Budget)
-            .OrderBy(id => id)
-            .ToArray();
-
-        harness.Assembler.SetFocus(session, Code(plan, 0, focusX), Code(plan, 1, 10.0));
-
-        // A fresh view over the same entities, so the budget selects from all ten at once.
-        harness.StateOf(session).PendingReset = true;
-        harness.RunTick(7);
-        var frame = harness.Read(session);
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(frame.Flags & TickFlags.Reset, Is.EqualTo(TickFlags.Reset));
-            Assert.That(frame.Enters.Count, Is.EqualTo(Budget), "the budget is what caps the frame");
-            Assert.That(frame.Enters.OrderBy(x => x).ToArray(), Is.EqualTo(expected), "the three nearest the focus entered");
-            Assert.That(frame.Flags & TickFlags.ViewComplete, Is.EqualTo(TickFlags.None), "seven are still owed, so the view is not complete");
-        });
-
-        // And the deferred ones arrive over the following frames, with nothing lost.
-        var seen = new List<uint>(frame.Enters);
-        for (var tick = 8; tick <= 12; tick++)
-        {
-            harness.RunTick(tick);
-            var next = harness.Read(session);
-            if (next != null)
-            {
-                seen.AddRange(next.Enters);
-            }
-        }
-
-        Assert.That(seen.OrderBy(x => x).ToArray(), Is.EqualTo(all), "every deferred entity entered in a later frame");
-    }
-
     // ── SUB-03 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -333,8 +229,8 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
     /// </summary>
     /// <remarks>
     /// The reference is a second session on the same profile drained every tick, so "the server's projection" is not a number this fixture computes — it is
-    /// what a session that missed nothing holds. That is what SUB-03 is about: records are absolute, so two sessions that were sent different subsets of the
-    /// frames must agree once both are current.
+    /// what a session that missed nothing holds. That is what SUB-03 is about: a session's state moves only with a published frame, and a skipped one is
+    /// caught up from the push log, so two sessions that were sent different subsets of the frames must agree once both are current.
     /// </remarks>
     [Test]
     [VerifiesRule("SUB-03")]
@@ -345,29 +241,29 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
     }
 
     /// <summary>
-    /// The same scenario against an assembler that advances a skipped session's baseline: the verifier above must reject it.
+    /// The same scenario against a push path that commits a skipped session as though its frame had been published: the verifier above must reject it.
     /// </summary>
     /// <remarks>
-    /// The mutant is the one move SUB-03 forbids — a baseline advanced by a tick that produced no frame — and it is applied to the production assembler
-    /// rather than to a copy of it, so what is proven falsifiable is the real path.
+    /// The mutant is the one move SUB-03 forbids, applied to the production path rather than to a copy of it: the session's last tick moves past ticks it
+    /// was never sent, so its next frame catches up from the wrong point and the changes in between never reach it.
     /// </remarks>
     [Test]
     [RuleMutant("SUB-03")]
-    public void ABaselineThatAdvancesOnASkippedTickIsDetected()
+    public void ASessionCommittedOnASkippedTickIsDetected()
     {
         using var harness = Create();
-        harness.Assembler.BaselineAdvancesOnSkipForTest = true;
+        harness.Subscriptions.Push.CommitOnSkipForTest = true;
         RuleMutants.AssertDetects("SUB-03", ConvergenceMarker, () => AssertConverges(harness));
     }
 
     private static void AssertConverges(FrameHarness harness)
     {
         var creatures = SpawnCreatures(harness, 8).ToList();
+        harness.RunTick(1);
         var sessions = harness.OpenSessions(2, Profile);
         var current = sessions[0];
         var skipped = sessions[1];
 
-        harness.PrimeBlocks();
         harness.RunTick(2);
         harness.Deliver(current);
         harness.Deliver(skipped);
@@ -395,6 +291,7 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         }
 
         Assert.That(harness.Assembler.FramesSkipped, Is.GreaterThan(0), "the scenario has to actually skip the session it is about");
+        var catchUps = harness.Subscriptions.Push.LogCatchUps;
 
         // The skipped session catches up: its slots free, and its next frame must carry everything it missed.
         harness.Deliver(skipped);
@@ -439,13 +336,105 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         {
             Assert.Fail($"{ConvergenceMarker}: the recovered replica counted {recovered.Store.Anomalies} anomalies");
         }
+
+        Assert.That(harness.Subscriptions.Push.LogCatchUps, Is.GreaterThan(catchUps), "the skipped session was caught up from the log, not reset");
+    }
+
+    // ── What is projected ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// SUB-10 — what is projected is exactly the push set: two slots written and pushed are the two slots the projection addresses, and nothing else is.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-10")]
+    [VerifiesRule("SUB-13")]
+    public void TheProjectionAddressesExactlyThePushedSlots()
+    {
+        using var harness = Create();
+        SpawnCreatures(harness, 12);
+        harness.RunTick(1);
+        var session = harness.OpenSessions(1, Profile)[0];
+        harness.RunTick(2);
+        harness.Deliver(session);
+
+        var state = harness.Subscriptions.ReplicationStates[harness.PlanIndex(nameof(ProjCreature))];
+        state.ResetProjectionCounters();
+        SetLevelOf(harness, [2, 5], 777);
+        harness.RunTick(3);
+        var frame = harness.Read(session);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(state.SlotsProjected, Is.EqualTo(2), "the two pushed slots, and not the other ten of the cluster");
+            Assert.That(frame, Is.Not.Null);
+            Assert.That(frame.States.Count, Is.EqualTo(2), "and the two changes reached the client");
+        });
+    }
+
+    /// <summary>SUB-13 — an archetype no profile observes gets no block, no identity and no projection, however many entities it holds.</summary>
+    [Test]
+    [VerifiesRule("SUB-13")]
+    public void AnArchetypeNoProfileObservesCostsNothing()
+    {
+        using var harness = FrameHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), subs =>
+        {
+            ProjectionTestSchema.DeclareCreature(subs);
+            ProjectionTestSchema.DeclareRock(subs);
+            subs.Profile(Profile, p => p.World().Of<ProjCreature>());
+        }, "FrameAssemblerTests", Options());
+        harness.RunFence = true;
+        SpawnCreatures(harness, 4);
+        SpawnRocks(harness, 20);
+        var session = harness.OpenSessions(1, Profile)[0];
+        for (var tick = 1; tick <= 3; tick++)
+        {
+            harness.RunTick(tick);
+            harness.Deliver(session);
+        }
+
+        var rocks = harness.Subscriptions.ReplicationStates[harness.PlanIndex(nameof(ProjRock))];
+        var creatures = harness.Subscriptions.ReplicationStates[harness.PlanIndex(nameof(ProjCreature))];
+        Assert.Multiple(() =>
+        {
+            Assert.That(creatures.Directory.Count, Is.GreaterThan(0), "the observed archetype has its blocks, or the contrast proves nothing");
+            Assert.That(rocks.Directory.Count, Is.Zero, "the unobserved archetype holds no block");
+            Assert.That(rocks.SlotsProjected, Is.Zero, "and is never projected");
+        });
+    }
+
+    /// <summary>Two sessions in the same state receive the same bytes, whether the frame stage runs on one worker or on several.</summary>
+    [Test]
+    public void TwoSessionsInTheSameStateReceiveTheSameBytes([Values(1, 4)] int workers)
+    {
+        using var harness = Create();
+        SpawnCreatures(harness, 16);
+        SpawnRocks(harness, 3);
+        harness.RunTick(1);
+        var sessions = harness.OpenSessions(2, Profile);
+
+        for (var tick = 2; tick <= 5; tick++)
+        {
+            if (tick == 4)
+            {
+                SetLevelOf(harness, [1, 3, 7], (ushort)(900 + tick));
+            }
+
+            harness.RunTick(tick, workers);
+            var first = harness.Collect(sessions[0]);
+            var second = harness.Collect(sessions[1]);
+            Assert.That(first, Has.Count.EqualTo(second.Count), $"tick {tick}: both sessions produced the same number of frames");
+            for (var i = 0; i < first.Count; i++)
+            {
+                Assert.That(Convert.ToHexString(second[i]), Is.EqualTo(Convert.ToHexString(first[i])), $"tick {tick}, frame {i}");
+            }
+        }
     }
 
     // ── Cost ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>A frame of ten thousand records is assembled, encoded and published without a single managed allocation.</summary>
     /// <remarks>
-    /// Measured across the frame stage alone — the interest pass, the projection and the mutation that produced the records are outside the window — because
+    /// Measured across the frame stage alone — the projection, the push index and the mutation that produced the records are outside the window — because
     /// SUB-07 is about the per-session path that runs once per session per tick. The two warm-up frames grow every native buffer and settle the pool's size
     /// class, which is the rule's "structural growth is exempt" note made concrete.
     /// </remarks>
@@ -456,9 +445,9 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
 
         using var harness = Create(Options(enterBudget: Entities * 2));
         SpawnCreatures(harness, Entities);
+        harness.RunTick(1);
         var session = harness.OpenSessions(1, Profile)[0];
 
-        harness.PrimeBlocks();
         harness.RunTick(2);
         harness.Deliver(session);
 
@@ -497,10 +486,6 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         .Select(kind => kind switch { "enter" => 0, "segment" => 1, "state" => 2, "leave" => 3, _ => -1 })
         .Where(rank => rank >= 0)
         .ToArray();
-
-    /// <summary>The wire code one axis of an archetype's position codec gives a world coordinate — the space the enter budget ranks in.</summary>
-    private static uint Code(CompiledProjectionPlan plan, int axis, double value) =>
-        WireMath.EncodeQuant(value, plan.Position.Pos.Min[axis], plan.Position.Pos.Max[axis], plan.Position.Pos.Bits);
 
     private static EntityId[] SpawnCreatures(FrameHarness harness, int count)
     {
@@ -561,7 +546,7 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
     private static void DamageFirst(FrameHarness harness, int from, int to, int seed = 200) => WriteFirstCluster(harness, from, to - from,
         (ref ProjBounds bounds, ref ProjAi ai, int slot) => ai.Level = (ushort)(seed + slot));
 
-    /// <summary>Changes the vitals group of every live creature in every cluster.</summary>
+    /// <summary>Changes the vitals group of every live creature in every cluster, and pushes each slot it wrote.</summary>
     private static void DamageAll(FrameHarness harness, int seed)
     {
         using var tx = harness.Engine.CreateQuickTransaction();
@@ -577,7 +562,32 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
                 var slot = BitOperations.TrailingZeroCount(occupancy);
                 occupancy &= occupancy - 1;
                 ai[slot].Level = (ushort)(seed + slot);
+                harness.Subscriptions.Commands.Replicate(in cluster, slot);
             }
+        }
+
+        accessor.Dispose();
+        tx.Commit();
+    }
+
+    /// <summary>Writes the level of the given slots of the first cluster through an Ai span only, and pushes each, as an explicit system must.</summary>
+    private static void SetLevelOf(FrameHarness harness, int[] slots, ushort level)
+    {
+        using var tx = harness.Engine.CreateQuickTransaction();
+        var accessor = tx.For<ProjCreature>();
+        foreach (var cluster in accessor.GetClusterEnumerator())
+        {
+#pragma warning disable TYPHON009
+            var ai = cluster.GetSpan(ProjCreature.Ai);
+#pragma warning restore TYPHON009
+            foreach (var slot in slots)
+            {
+                ai[slot].Level = level;
+                harness.Subscriptions.Commands.Replicate(in cluster, slot);
+            }
+
+            cluster.MarkDirty(ProjCreature.Ai);
+            break;
         }
 
         accessor.Dispose();

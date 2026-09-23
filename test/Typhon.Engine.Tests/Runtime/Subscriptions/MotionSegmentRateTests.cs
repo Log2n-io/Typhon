@@ -76,7 +76,11 @@ unsafe class MotionSegmentRateTests : TestBase<MotionSegmentRateTests>
 
         Populate(harness);
         var session = harness.OpenSessions(1, Profile)[0];
-        harness.PrimeBlocks();
+
+        // Every tick's WriteSpatial is a push the engine makes itself, and it rides the structure marks the fence publishes.
+        harness.RunFence = true;
+        harness.RunTick(1);
+        harness.Deliver(session);
 
         var creatures = harness.PlanIndex(nameof(ProjCreature));
         var state = harness.Subscriptions.ReplicationStates[creatures];

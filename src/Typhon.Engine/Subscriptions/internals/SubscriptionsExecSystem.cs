@@ -10,10 +10,8 @@ namespace Typhon.Engine.Internals;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>What exists here today is the vehicle, not the replication.</b> #955 adds the track, its ordering, its gating and its dispatch on both fence paths. The
-/// stage bodies — interest resolution, projection, event drain, frame assembly — are Phase 1 content and arrive with the state they operate on. Each stage
-/// therefore prepares a chunk count that is honest about what it can currently partition and executes an empty body. That is deliberate: a stage that invented
-/// work before its inputs exist would have to be un-invented, and the ordering this task is about is observable without it.
+/// The stages are the blocks step and projection, the push index, the far-flush fold, the event drain and frame assembly. Each prepares a chunk count that is
+/// honest about what it can partition this tick, and zero skips it cleanly.
 /// </para>
 /// <para>
 /// <b>Epoch scope, but not fence enrolment.</b> The dispatcher wraps no chunk body, so each chunk enters its own <see cref="EpochGuard"/> — reading cluster
@@ -23,14 +21,12 @@ namespace Typhon.Engine.Internals;
 /// <c>foundation/04-public-spatial-api.md</c> makes the dispatcher enter the scope for every chunked callback.
 /// </para>
 /// <para>
-/// <b>Open item 4 of <c>foundation/03 § 6</c> is now answered for S2a as well, and it was answered by a test.</b> The stages run on pool workers that never
-/// enrol, inside an open EW-01 window on both fence paths, so their <c>FenceThreadDepth</c> is zero — and <c>ExclusiveWindow.NoteMutation</c> throws for
-/// exactly that combination. Every call site of it is a mutation of a fence-owned structure (a cluster B+Tree, the EntityMap, a per-cell index). S2a's job is
-/// described as "marks the hit entities watched", and what marking turned out to touch is the replication block's own header word and nothing else, so it
-/// reaches no such site: <c>InterestEpochScopeTests</c> runs the stage at eight workers with <c>EnableParallelFence</c> on and reads zero violations off an
-/// engine whose fence DID mutate a guarded structure in the same window. No enrolment is taken, and taking one would have made the stage a legal writer of
-/// fence-owned structures for the length of its chunk — the licence EW-01 exists to withhold. A stage body that later writes an index must take
-/// <c>FenceWindow.EnterWorker()</c> as <c>FencePhaseExecSystemBase</c> does, and the guard failing loudly is what will say so.
+/// <b>No stage enrols in the fence window.</b> The stages run on pool workers that never enrol, inside an open EW-01 window on both fence paths, so their
+/// <c>FenceThreadDepth</c> is zero — and <c>ExclusiveWindow.NoteMutation</c> throws for exactly that combination. Every call site of it is a mutation of a
+/// fence-owned structure (a cluster B+Tree, the EntityMap, a per-cell index); the stages read engine data and write only replication's own native memory, so
+/// they reach no such site. Taking an enrolment anyway would make a stage a legal writer of fence-owned structures for the length of its chunk — the licence
+/// EW-01 exists to withhold. A stage body that later writes an index must take <c>FenceWindow.EnterWorker()</c> as <c>FencePhaseExecSystemBase</c> does,
+/// and the guard failing loudly is what will say so.
 /// </para>
 /// </remarks>
 internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<SubscriptionsContext>
@@ -69,16 +65,15 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
                 throw new InvalidOperationException("Injected replication-stage fault (test only).");
             }
 
-            // The shape gate comes AFTER the fault gate on purpose: the injected fault is the only reachable "a stage threw" path while the bodies are what
-            // they are, and it must reach whichever shape is running, or the collapsed path would have no failure case to be tested against at all.
+            // The shape gate comes AFTER the fault gate on purpose: the injected fault must reach whichever shape is running, or the collapsed path would
+            // have no failure case to be tested against at all.
             if (!RunsInThisShape(Shape.CollapsedFor(ctx)))
             {
                 return false;
             }
 
             // Stamped here rather than in Execute, so "compute happened" stays observable for a stage that clears its gate and then prepares zero chunks —
-            // which is every stage whose payload has not been built yet. Gating off leaves the stamp at zero, which is exactly what SUB-02's aborted-tick
-            // case asserts.
+            // a stage with nothing to do this tick. Gating off leaves the stamp at zero, which is exactly what SUB-02's aborted-tick case asserts.
             ctx.NoteCompute();
             return true;
         }
@@ -170,97 +165,23 @@ internal abstract class SubscriptionsExecSystemBase : ChunkedCallbackSystem<Subs
     /// <summary>The stage's chunk count for this tick. Wrapped by <see cref="Prepare"/> so a throw is recorded before it propagates.</summary>
     protected abstract int PrepareChunks(SubscriptionsContext ctx);
 
-    /// <summary>The stage's per-chunk work. Empty until the stage's inputs exist — see the class remarks.</summary>
+    /// <summary>The stage's per-chunk work.</summary>
     protected abstract void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount);
 
-    /// <summary>
-    /// Chunk count for a stage partitioned over sessions. One chunk per worker, capped by the session count so a handful of sessions do not pay a wake cycle
-    /// each.
-    /// </summary>
-    /// <remarks>
-    /// A computed count rather than a static <c>ChunkedParallel(N)</c>, which is open item 3 of <c>foundation/03 § 6</c> and stays open: the choice wants the
-    /// first real measurement, and this shape is the one that can be measured. It is a dispatch heuristic over the worker pool, not a policy derived from any
-    /// application's session mix.
-    /// </remarks>
-    protected static int SessionChunks(SubscriptionsContext ctx)
-    {
-        var workers = ctx.WorkerCount > 0 ? ctx.WorkerCount : 1;
-        return Math.Min(workers, ctx.SessionCount);
-    }
 }
 
 /// <summary>
-/// S2a — resolves each session's interest into hits and marks the hit entities watched. The critical path's first stage, and the DAG's root.
+/// S1 — projects and compares the pushed entities' declared fields, and records one push event per entity for the frame stage to fan out. The track's root.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The work itself is <see cref="InterestPass"/>, which hangs off <see cref="SubscriptionsRuntime"/>; this class is the stage that dispatches it. Its
-/// <c>Prepare</c> carries the track's PROLOGUE — serial work the scheduler already runs single-threaded before dispatch, which is why
-/// <c>foundation/03 § 2.5</c> puts it there instead of in a system of its own that would cost a whole barrier. Today the prologue clears the watched masks
-/// this pass set last tick and partitions the tick's sessions; freeing idle blocks and splicing the parked moves join it in P1-11.
-/// </para>
-/// <para>
-/// <b>The chunk count is the pass's, not <see cref="SubscriptionsExecSystemBase.SessionChunks"/>.</b> The two agree today, and they stop agreeing the moment
-/// a session is open without a profile bound: such a session has no interest to resolve, and dispatching a chunk for it would be a wake cycle spent on
-/// nothing.
-/// </para>
-/// <para>
-/// <b>It takes the epoch scope from its base and no fence enrolment</b> — open item 4 of <c>foundation/03 § 6</c>, answered with a test rather than an
-/// argument. <see cref="InterestPass"/> reads cluster occupancy words and writes replication's own block headers and arenas; it reaches no
-/// <see cref="ExclusiveWindow.NoteMutation"/> call site, and <c>InterestEpochScopeTests</c> asserts zero violations at eight workers with the parallel fence
-/// on, against a tick that did mutate a guarded structure inside the same window. Enrolling anyway would have been the cheap answer and the wrong one: it
-/// would have made this stage a legal writer of fence-owned structures for the length of its chunk, which is exactly the licence EW-01 exists to withhold.
-/// </para>
-/// </remarks>
-internal sealed class SubscriptionsInterestExecSystem : SubscriptionsExecSystemBase
-{
-    public SubscriptionsInterestExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
-
-    /// <summary>The stage's serial half — the prologue — and the chunk count it partitions the tick's sessions into.</summary>
-    /// <remarks>
-    /// Static, and called by <see cref="SubscriptionsCollapsedExecSystem"/> as well as by the dispatch below. The body reaches nothing but
-    /// <see cref="SubscriptionsContext"/>, so there is no instance state for the two shapes to disagree about — which is the whole reason the collapsed path
-    /// can be a second caller rather than a second implementation.
-    /// </remarks>
-    internal static int Prologue(SubscriptionsContext ctx)
-    {
-        var interest = ctx.Subscriptions?.Interest;
-        return interest == null ? 0 : interest.BeginTick(ctx.TickNumber, ctx.WorkerCount);
-    }
-
-    /// <summary>The stage's parallel half, for one chunk of <paramref name="chunkCount"/>.</summary>
-    internal static void Resolve(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
-        => ctx.Subscriptions?.Interest?.ExecuteChunk(chunkIndex, chunkCount);
-
-    protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
-        .Name("SubscriptionsInterest")
-        .ChunkedParallel(1);
-
-    /// <inheritdoc />
-    protected override SubscriptionsStage Stage => SubscriptionsStage.Interest;
-
-    protected override int PrepareChunks(SubscriptionsContext ctx) => Prologue(ctx);
-
-    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => Resolve(ctx, chunkIndex, chunkCount);
-}
-
-/// <summary>
-/// S1 — projects and compares the watched entities' declared fields, encoding each changed record once for every session that will receive it.
-/// </summary>
-/// <remarks>
-/// <para>
-/// Partitioned over WATCHED BLOCKS, which is SUB-13 in the dispatch itself: an archetype far larger than what clients see costs what they see. With no
-/// session looking at anything there is no block, so this prepares zero chunks and skips cleanly — successors still fan out.
+/// Partitioned over the blocks the push set names: an archetype costs what was pushed, not what it holds. With nothing pushed this prepares zero chunks and
+/// skips cleanly — successors still fan out.
 /// </para>
 /// <para>
 /// <b>Its <c>Prepare</c> is also the track's blocks step</b> (<c>foundation/03 § 2.5</c>): serial work the scheduler already runs single-threaded before the
-/// dispatch, so it costs no barrier of its own. Three things happen there — last tick's released identities go back to the allocator and the leases refill,
-/// the record arenas rewind, and the blocks the interest stage marked are gathered into one indexable partition per archetype.
-/// </para>
-/// <para>
-/// <b>The gather reads each block's archetype from the interest stage's watched list</b>, which records it beside the block. It used to recover it by
-/// asking each archetype's directory whether it named the chunk id — measured at d06 with a thousand sessions, that probe loop was 0.5 ms of SERIAL time
-/// per tick, a fifth of the stage's wall clock, spent rediscovering a number every caller of <c>MarkWatched</c> already held.
+/// dispatch, so it costs no barrier of its own. The push set is gathered and every cluster in it given a block, the fence's parked migrations land, the
+/// pushed slots are marked, and last tick's released identities go back to the allocator as the leases refill.
 /// </para>
 /// </remarks>
 internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecSystemBase
@@ -269,7 +190,6 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 
     protected override void Configure(SystemBuilder<SubscriptionsContext> b) => b
         .Name("SubscriptionsProject")
-        .After("SubscriptionsInterest")
         .ChunkedParallel(1);
 
     /// <inheritdoc />
@@ -281,7 +201,9 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 
     /// <summary>The stage's serial half — the blocks step — and the chunk count it partitions the watched blocks into.</summary>
     /// <remarks>
-    /// Static and shared with <see cref="SubscriptionsCollapsedExecSystem"/>; see the note on <see cref="SubscriptionsInterestExecSystem.Prologue"/>.
+    /// Static, and called by <see cref="SubscriptionsCollapsedExecSystem"/> as well as by the dispatch below. The body reaches nothing but
+    /// <see cref="SubscriptionsContext"/>, so there is no instance state for the two shapes to disagree about — which is why the collapsed path can be a second
+    /// caller rather than a second implementation.
     /// </remarks>
     internal static int BlocksStep(SubscriptionsContext ctx)
     {
@@ -300,28 +222,24 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
             return 0;
         }
 
-        var interest = subs.Interest;
         var timed = FrameAssembler.PhaseTimingEnabled;
         var t0 = timed ? Stopwatch.GetTimestamp() : 0L;
 
-        // Block creation comes BEFORE the "nothing is watched" exit, and the order is the whole of why the pipeline runs at all. A cluster becomes watchable
-        // by having a block, and the interest stage lists the clusters it hit that had none; skipping the stage because no block is watched yet would mean the
-        // first block is never created, so nothing is ever watched — a runtime that projects nothing, forever, with no error anywhere. The list is produced by
-        // the interest stage and does not depend on the watched count, so there is nothing to gain by deferring it.
-        if (interest != null)
+        // The push set, and a block for every cluster in it — BEFORE the drain, so an entity that migrated into a cluster with no block lands in one this
+        // tick. Nothing is observed when there is no push path, so there is nothing to project.
+        var push = subs.Push;
+        if (push == null)
         {
-            CreateNewBlocks(interest, states);
+            return 0;
         }
 
-        // Entries the fence's migration step could not place, because their destination cluster had no block when the entity arrived in it. This runs
-        // AFTER the blocks above, which is the whole point: a cluster that became watched this tick now has somewhere for its arrivals to go. One that
-        // still has none is watched by nobody, so dropping its parked entries loses nothing — the entity is initialised from current values the first
-        // time somebody does watch it. Single-threaded here, and separated from the slices that filled the lists by the fence's own barrier.
-        // PROTOTYPE (push): the push set, and a block for every cluster in it — BEFORE the drain, so an entity that migrated into a cluster with no block
-        // lands in one this tick.
-        subs.Push?.PrepareBlocks(tick);
+        push.PrepareBlocks(tick);
 
         var t1 = timed ? Stopwatch.GetTimestamp() : 0L;
+
+        // Entries the fence's migration step could not place, because their destination cluster had no block when the entity arrived in it. AFTER the blocks
+        // above, which is the point: a cluster pushed this tick now has somewhere for its arrivals to go. Single-threaded here, and separated from the slices
+        // that filled the lists by the fence's own barrier.
         for (var i = 0; i < states.Length; i++)
         {
             states[i]?.DrainParkedEntries();
@@ -329,17 +247,15 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 
         var t2 = timed ? Stopwatch.GetTimestamp() : 0L;
 
-        // The gather comes FIRST, because the identity leases are sized from the watched slots it produces. Refilling before the partition exists would size
-        // the very first tick's leases from nothing and defer most of an initial fill by a tick for no reason.
-        if (interest != null)
+        // The marks come BEFORE the leases, which are sized from the marked blocks. The index is counted by the projection's chunks unless reproducible bytes
+        // are asked for: its order inside a cell follows the race. The collapsed shape counts too but never places — its frame prologue sees no index for the
+        // tick and builds it serially, recounting from zero.
+        for (var i = 0; i < states.Length; i++)
         {
-            Gather(interest, states, tick);
+            states[i].BeginWatchedBlocks(tick);
         }
 
-        // PROTOTYPE (push): after the watched lists were reset by the gather, so the push marks are this tick's.
-        // The index is counted by the projection's chunks unless reproducible bytes are asked for: its order inside a cell follows the race. The collapsed
-        // shape counts too but never places — its frame prologue sees no index for the tick and builds it serially, recounting from zero.
-        subs.Push?.MarkPushed(Math.Max(1, ctx.WorkerCount), countInProject: !subs.Options.DeterministicProjection);
+        push.MarkPushed(Math.Max(1, ctx.WorkerCount), countInProject: !subs.Options.DeterministicProjection);
 
         if (timed)
         {
@@ -488,87 +404,13 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 
         return total;
     }
-
-    /// <summary>
-    /// The second half of the blocks step: gathers the interest stage's per-worker watched-block lists into one indexable partition per archetype.
-    /// </summary>
-    /// <remarks>
-    /// <see cref="CreateNewBlocks"/> runs before this, at the top of <c>PrepareChunks</c>, and the separation matters: the partition is SIZED from the
-    /// directory — at most one listing per block that exists — so a cluster that gained its block after the sizing would have nowhere to be listed. A block
-    /// created this tick carries no watched bit and is therefore not listed until the interest stage marks it on the next one, which is the only place a
-    /// watched bit is ever set.
-    /// </remarks>
-    private static void Gather(InterestPass interest, ArchetypeReplicationState[] states, uint tick)
-    {
-        for (var i = 0; i < states.Length; i++)
-        {
-            states[i].BeginWatchedBlocks(tick);
-        }
-
-        for (var w = 0; w < interest.ArenaCount; w++)
-        {
-            var arena = interest.Arena(w);
-            var watched = arena.WatchedBlocks;
-            for (var i = 0; i < watched.Count; i++)
-            {
-                // No read of the block itself: a header dereference per block is a cache miss per block on the serial path, and the only thing it could
-                // reject — a block released since the mark — is rejected again by the parallel half, which reads the header anyway (ProjectArchetype).
-                var archetype = arena.WatchedBlockArchetype(i);
-                if ((uint)archetype < (uint)states.Length)
-                {
-                    states[archetype].WatchedBlocks.Add((ReplicationBlockHeader*)watched[i]);
-                }
-            }
-        }
-
-    }
-
-    /// <summary>
-    /// Rents and registers a block for every cluster the interest stage hit and found none for. It sets <b>no</b> watched bit.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>A fresh block leaves here with an empty mask, and that is the contract rather than an omission.</b> The interest stage owns the mask end to end: it
-    /// is the only writer of a watched bit, it claims a block by being the worker whose <c>Interlocked.Or</c> saw a previous value of zero, and it clears the
-    /// mask of the blocks it claimed at the next tick's prologue. A mask written here belongs to nobody — no worker ever claimed the block, so it never
-    /// reaches an interest arena's watched list, never has its mask cleared, and stays watched for the life of the block. The cost of not writing it is that
-    /// a newly watched cluster is projected from the following tick, which is one tick of latency on an entity nobody has ever been sent.
-    /// </para>
-    /// <para>
-    /// The pool already hands back a zeroed header, so this is a matter of not undoing that.
-    /// </para>
-    /// </remarks>
-    private static void CreateNewBlocks(InterestPass interest, ArchetypeReplicationState[] states)
-    {
-        for (var w = 0; w < interest.ArenaCount; w++)
-        {
-            var created = interest.Arena(w).NewBlocks;
-            for (var i = 0; i < created.Count; i++)
-            {
-                var archetype = HitArena.NewBlockArchetype(created[i]);
-                var chunkId = HitArena.NewBlockChunkId(created[i]);
-                if ((uint)archetype >= (uint)states.Length || chunkId < 0)
-                {
-                    continue;
-                }
-
-                // Already created by another worker's entry for the same cluster, or the pool's budget binds. Neither is an error: the cluster gets its block
-                // on a tick that has room for it, and a refusal is counted by the pool.
-                var state = states[archetype];
-                if (!state.Directory.TryGetBlock(chunkId, out _))
-                {
-                    state.TryAttachBlock(chunkId, out _);
-                }
-            }
-        }
-    }
 }
 
 /// <summary>
 /// S1b — drains the replicated event queues and buckets their events by cell.
 /// </summary>
 /// <remarks>
-/// <b>A parallel branch, not a link in the chain.</b> Draining the queues depends on neither interest nor projection; only <c>Frames</c> needs both.
+/// <b>A parallel branch, not a link in the chain.</b> Draining the queues does not depend on projection; only <c>Frames</c> needs both.
 /// Chaining it would express reading order rather than a dependency and would add a barrier to the critical path. It declares no <c>.After()</c> for
 /// exactly that reason — which is also why the track's gate lives on every stage rather than on the root (see
 /// <see cref="SubscriptionsContext.ShouldTrackRun"/>).
@@ -600,7 +442,7 @@ internal sealed class SubscriptionsEventsExecSystem : SubscriptionsExecSystemBas
 }
 
 /// <summary>
-/// PROTOTYPE (push) — places the tick's push events into the cell index, one chunk per worker list, after the projection counted them. Serial prefix in its
+/// Places the tick's push events into the cell index, one chunk per worker list, after the projection counted them. Serial prefix in its
 /// prologue; nothing to do (zero chunks) on a tick the frame prologue indexes serially.
 /// </summary>
 internal sealed class SubscriptionsPushIndexExecSystem : SubscriptionsExecSystemBase
@@ -621,7 +463,7 @@ internal sealed class SubscriptionsPushIndexExecSystem : SubscriptionsExecSystem
 }
 
 /// <summary>
-/// PROTOTYPE (push, distance LOD) — folds the tick's far flushes: chunks of cells over the last N log slots, after the index is placed. Zero chunks when the
+/// Distance LOD — folds the tick's far flushes: chunks of cells over the last N log slots, after the index is placed. Zero chunks when the
 /// LOD is off or the index is built later, serially, by the frame prologue — which then folds serially too.
 /// </summary>
 internal sealed class SubscriptionsPushFarExecSystem : SubscriptionsExecSystemBase
@@ -643,21 +485,15 @@ internal sealed class SubscriptionsPushFarExecSystem : SubscriptionsExecSystemBa
 }
 
 /// <summary>
-/// S2b — copies each session's changed records into its frame. The critical path's last stage.
+/// S2b — gathers each session's records from the push index and publishes its frame. The critical path's last stage.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Partitioned over sessions on the same partition as <c>Interest</c>, so a session's hit list is still in the worker's cache when its frame is assembled.
+/// <b>The chunk count is the assembler's:</b> the partition is over the sessions bound to a profile that reaches something, taken from a shared cursor.
 /// </para>
 /// <para>
-/// <b>The chunk count is the assembler's, not <see cref="SubscriptionsExecSystemBase.SessionChunks"/>.</b> For the same reason the interest stage gives:
-/// the partition is over the sessions that HAVE interest to resolve, which is what <see cref="InterestPass.TickSessionCount"/> counts and what
-/// <see cref="InterestPass.HitsOf"/> is indexed by. Partitioning over the table's open rows instead would index the hit lists with the wrong numbers.
-/// </para>
-/// <para>
-/// <b>Its <c>Prepare</c> is the stage's prologue</b> (<c>foundation/03 § 2.5</c>): the serial half of S2b, where a session's known-set is created, a
-/// re-leased slot is rebound and a profile switch becomes the next frame's <c>RESET</c>. Doing it here rather than on a worker keeps the resource graph off
-/// the parallel path — a known-set registers under its parent, and two workers registering at once would race a structure with no reason to be concurrent.
+/// <b>Its <c>Prepare</c> is the stage's prologue</b> (<c>foundation/03 § 2.5</c>): the serial half of S2b, where the skip policy runs, a re-leased slot is
+/// rebound, a profile switch becomes the next frame's <c>RESET</c>, and the push index is built when its stage did not.
 /// </para>
 /// </remarks>
 internal sealed class SubscriptionsFramesExecSystem : SubscriptionsExecSystemBase
@@ -665,14 +501,12 @@ internal sealed class SubscriptionsFramesExecSystem : SubscriptionsExecSystemBas
     public SubscriptionsFramesExecSystem(DatabaseEngine engine, SubscriptionsPipelineShape shape) : base(engine, shape) { }
 
     /// <summary>The stage's serial half — the session prologue — and the chunk count it partitions the tick's sessions into.</summary>
-    /// <remarks>
-    /// Static and shared with <see cref="SubscriptionsCollapsedExecSystem"/>; see the note on <see cref="SubscriptionsInterestExecSystem.Prologue"/>.
-    /// </remarks>
+    /// <remarks>Static and shared with <see cref="SubscriptionsCollapsedExecSystem"/>; see the note on
+    /// <see cref="SubscriptionsProjectExecSystem.BlocksStep"/>.</remarks>
     internal static int Prologue(SubscriptionsContext ctx)
     {
-        var subs = ctx.Subscriptions;
-        var frames = subs?.Frames;
-        return frames == null ? 0 : frames.BeginTick(subs.Interest, ctx.TickNumber, ctx.WorkerCount);
+        var frames = ctx.Subscriptions?.Frames;
+        return frames == null ? 0 : frames.BeginTick(ctx.TickNumber, ctx.WorkerCount);
     }
 
     /// <summary>The stage's parallel half, for one chunk of <paramref name="chunkCount"/>.</summary>

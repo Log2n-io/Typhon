@@ -85,7 +85,7 @@ internal struct FrameBlockHeader
 /// <b>Exhaustion skips and counts.</b> When the budget binds, <see cref="TryRent"/> returns <see langword="false"/> and increments
 /// <see cref="BudgetSkipCount"/>; the caller skips that session for the tick and the session converges on its next frame, because records are absolute
 /// (SUB-03). It never evicts another session's frame — those bytes may be on a socket — and it never allocates "just this once", which is the failure mode
-/// this budget exists to prevent: the watched set is driven by untrusted client behaviour, so an unbounded frame pool is a memory-exhaustion path the
+/// this budget exists to prevent: what sessions are sent is driven by untrusted client behaviour, so an unbounded frame pool is a memory-exhaustion path the
 /// application cannot close.
 /// </para>
 /// <para>

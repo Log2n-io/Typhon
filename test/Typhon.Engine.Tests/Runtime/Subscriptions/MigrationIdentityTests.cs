@@ -43,8 +43,7 @@ unsafe class MigrationIdentityTests : TestBase<MigrationIdentityTests>
         Spawn(harness, 0f, 0f);
         var session = harness.OpenSessions(1, Profile)[0];
 
-        harness.PrimeBlocks();
-        for (var tick = 2L; tick <= 4; tick++)
+        for (var tick = 1L; tick <= 4; tick++)
         {
             harness.RunTick(tick);
             harness.Deliver(session);
@@ -110,8 +109,7 @@ unsafe class MigrationIdentityTests : TestBase<MigrationIdentityTests>
         Spawn(harness, 0f, 0f);
         var session = harness.OpenSessions(1, Profile)[0];
 
-        harness.PrimeBlocks();
-        for (var tick = 2L; tick <= 4; tick++)
+        for (var tick = 1L; tick <= 4; tick++)
         {
             harness.RunTick(tick);
             harness.Deliver(session);
@@ -161,8 +159,7 @@ unsafe class MigrationIdentityTests : TestBase<MigrationIdentityTests>
         Spawn(harness, 2f, 2f);
         var session = harness.OpenSessions(1, Profile)[0];
 
-        harness.PrimeBlocks();
-        for (var tick = 2L; tick <= 4; tick++)
+        for (var tick = 1L; tick <= 4; tick++)
         {
             harness.RunTick(tick);
             harness.Deliver(session);
@@ -194,7 +191,7 @@ unsafe class MigrationIdentityTests : TestBase<MigrationIdentityTests>
 
     private static int ClusterOf(FrameHarness harness, int plan)
     {
-        var clusters = harness.Interest.LiveClusters(plan);
+        var clusters = harness.Replication.LiveClusters(plan);
         Assert.That(clusters, Is.Not.Empty, "the archetype has no live cluster at all");
         return clusters[0].ChunkId;
     }

@@ -348,7 +348,7 @@ public sealed partial class SimBridge
             var motions = cluster.GetSpan(Player.Move);
             var chunk = cluster.ChunkId;
 
-            // Push replication (--subs-mode push): the players whose replicated activity this pass changes. Positions are pushed by WriteSpatial.
+            // Explicit replication (ADR-067): the players whose replicated activity this pass changes. Positions are pushed by WriteSpatial.
             var pushSlots = 0UL;
             var bits = bits0;
             while (bits != 0)

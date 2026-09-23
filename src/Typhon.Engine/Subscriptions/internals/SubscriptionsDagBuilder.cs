@@ -59,7 +59,6 @@ internal static class SubscriptionsDagBuilder
         var shape = new SubscriptionsPipelineShape();
 
         var dag = schedule.EngineSubscriptionsTrack.DeclareDag(DagName);
-        dag.Add(new SubscriptionsInterestExecSystem(engine, shape));
         dag.Add(new SubscriptionsProjectExecSystem(engine, shape));
         dag.Add(new SubscriptionsEventsExecSystem(engine, shape));
         dag.Add(new SubscriptionsPushIndexExecSystem(engine, shape));

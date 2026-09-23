@@ -1,6 +1,6 @@
 namespace Typhon.Engine;
 
-/// <summary>PROTOTYPE: who tells the push path that an entity changed (<c>design/Subscriptions/research/push-model.md</c>).</summary>
+/// <summary>Who tells the push path that an entity changed (<c>design/Subscriptions/research/push-model.md</c>).</summary>
 public enum PushDetection
 {
     /// <summary>

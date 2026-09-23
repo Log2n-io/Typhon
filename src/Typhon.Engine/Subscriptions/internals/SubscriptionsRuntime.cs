@@ -50,7 +50,6 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     private readonly IngressRingPool _ingressRings;
     private readonly SubscriptionsIngress _ingress;
     private readonly FrameAssembler _frames;
-    private readonly SessionViewStore _views;
     private readonly SendPump _sendPump;
     private bool _disposed;
 
@@ -135,37 +134,32 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _sessions = new SessionTable("Subscriptions.Sessions", parent, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
             _replicationStates = AttachReplicationStates(engine, parent, netIds);
 
-            // S2a (P1-12). Built after the states because it holds them, and after the session table because the table's open rows are its per-tick input. It
-            // resolves every profile to plan indices here, so the tick path never looks an archetype up by Type.
-            // Each session's interest membership, shared by S2a and S2b: S2a takes the difference against it, S2b commits it on a publish (15 § 3.2).
-            // Created only when the option is on, because the pass's null check is what selects Phase 1's shape and a store that existed but was unused
-            // would make the two arms differ by more than the shape under test.
-            _views = Options.IncrementalInterest ? new SessionViewStore(Options.MaxSessions) : null;
+            // Built after the session table, whose rows name each session's profile. It resolves every profile to plan indices here, so the tick path never
+            // looks an archetype up by Type.
+            Profiles = new SubscriptionProfiles(Plans, registry, _sessions);
 
-            Interest = new InterestPass(engine, Plans, _replicationStates, registry, _sessions, Options.CellKeyedInterest, _views,
-                Options.MeasureInterestPhases);
-
-            // S2b (P1-13b). It owns the frame pool, the per-session known-sets and the per-slot hand-off counters, so a frame's whole lifetime — gathered,
-            // encoded, published, released — lives behind one field here rather than spread across the tick-scoped context.
+            // S2b (P1-13b). It owns the frame pool and the per-slot hand-off counters, so a frame's whole lifetime — gathered, encoded, published, released —
+            // lives behind one field here rather than spread across the tick-scoped context.
             _frames = new FrameAssembler("Subscriptions.Frames", parent, engine.MemoryAllocator, Options, Plans, Catalog.Canonical, _sessions,
-                NominalTickPeriodUs, _views);
+                NominalTickPeriodUs);
+            _frames.Profiles = Profiles;
 
-            // PROTOTYPE (push, design/Subscriptions/research/push-model.md): archetypes observed by a push profile are served by the push path.
-            var pushArchetypes = Interest.PushArchetypes;
-            if (Array.IndexOf(Interest.AutomaticPushArchetypes, true) >= 0 && !Options.AllowAutomaticPushDetection)
+            // The push path (ADR-067): every archetype some profile observes is served by it.
+            var observed = Profiles.ObservedArchetypes;
+            var automatic = Profiles.AutomaticArchetypes;
+            if (Array.IndexOf(automatic, true) >= 0 && !Options.AllowAutomaticPushDetection)
             {
                 throw new NotSupportedException(
-                    "A push profile declares PushDetection.Automatic, which is off: replication is explicit (ADR-067). Call Replicate after each replicated "
+                    "A profile declares PushDetection.Automatic, which is off: replication is explicit (ADR-067). Call Replicate after each replicated "
                     + "write, or set SubscriptionsOptions.AllowAutomaticPushDetection for the experimental automatic mode.");
             }
 
-            if (Array.IndexOf(pushArchetypes, true) >= 0)
+            if (Array.IndexOf(observed, true) >= 0)
             {
-                Push = new PushReplication(Plans, _replicationStates, pushArchetypes, Interest.AutomaticPushArchetypes, Interest.MaxPushRadius, Options.MaxSessions,
-                    Options.PushShadow);
-                for (var a = 0; a < pushArchetypes.Length; a++)
+                Push = new PushReplication(Plans, _replicationStates, observed, automatic, Profiles.MaxRadius, Options.MaxSessions, Options.PushShadow);
+                for (var a = 0; a < observed.Length; a++)
                 {
-                    if (pushArchetypes[a])
+                    if (observed[a])
                     {
                         _replicationStates[a].Push = Push;
                         _replicationStates[a].PushArchetypeIndex = a;
@@ -182,19 +176,6 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 Push.AttachEncodePlans(encodePlans);
             }
 
-            // Encode-once cluster runs (17 § 18). The projection builds them and the frame stage references them, so each side needs what the other owns:
-            // S1 needs the wire encoding constants S2b resolved from the catalog, and S2b needs the tables and arenas S1 writes into. Wired only when the
-            // option is on, so both sides decide the whole feature with one null check rather than an option read on a per-cluster path.
-            if (Options.SharedClusterBlocks)
-            {
-                for (var a = 0; a < _replicationStates.Length; a++)
-                {
-                    _replicationStates[a].EncodePlan = _frames.EncodePlanOf(a);
-                }
-
-                _frames.AttachReplication(_replicationStates);
-            }
-
             // The send side (P1-14b). It holds no memory of its own beyond one view and one work item per slot; what it carries is the rule that a frame
             // leaves the engine only after the tick that produced it has flushed.
             _sendPump = new SendPump(_sessions, _frames, Options.MaxSessions, this);
@@ -206,23 +187,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _ingressRings = new IngressRingPool("Subscriptions.IngressRings", parent, engine.MemoryAllocator, Options);
             _ingress = new SubscriptionsIngress(_sessions, registry, CommandTypes, new CommandTypeBuffers(CommandTypes, Options.MaxSessions), _ingressRings,
                 Options.MaxSessions, _sendPump);
-            _ingress.Interest = Interest;
-            Interest.SparseTopology = Options.SparseTopology;
-            Interest.GroupCap = Options.InterestGroupCap;
-
-            // The sparse topology path, wired OUTSIDE the shared-blocks option on purpose: interest reads whether a session's next frame will be
-            // incremental, and the frame stage reads projection's changed-block tables. Attaching the replication states the usual way would also
-            // switch on encode sharing, which is a separate option and a separate measurement.
-            Interest.Frames = _frames;
-            _frames?.AttachChangeStates(_replicationStates);
-            foreach (var state in _replicationStates)
-            {
-                if (state != null)
-                {
-                    state.TrackChangedBlocks = Options.SparseTopology;
-                }
-            }
             _ingress.Frames = _frames;
+            _ingress.ReplicationStates = _replicationStates;
             Commands = new SubscriptionsCommands(_ingress);
 
             // STATS (P1-16). Last of the tick-path objects, because it reads across all of them — the session table's open count, the send pump's bytes, the
@@ -319,17 +285,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <summary>The per-archetype replication state, parallel to <see cref="Plans"/>. Empty on an inactive runtime.</summary>
     public ArchetypeReplicationState[] ReplicationStates => _replicationStates;
 
-    /// <summary>
-    /// S2a: the pass that turns each session's declared interest into hits and marks the hit entities watched. <see langword="null"/> on an inactive runtime.
-    /// </summary>
-    /// <remarks>
-    /// The one field P1-12 adds here, per <c>09-phase1-build-plan § 4</c>: everything the interest stage reaches at tick time hangs off this object, so the
-    /// tick-scoped <see cref="SubscriptionsContext"/> stays frozen and the slices built beside this one do not meet in it.
-    /// </remarks>
-    public InterestPass Interest { get; }
+    /// <summary>The declared profiles, resolved to plan indices. <see langword="null"/> on an inactive runtime.</summary>
+    public SubscriptionProfiles Profiles { get; }
 
     /// <summary>
-    /// S2b: the pass that turns each session's hits into a <c>TICK</c> message and hands it to the send side. <see langword="null"/> on an inactive runtime.
+    /// S2b: the pass that turns each session's share of the push events into a <c>TICK</c> message and hands it to the send side. <see langword="null"/> on
+    /// an inactive runtime.
     /// </summary>
     /// <remarks>
     /// The one field P1-13b adds here, for the reason the class remarks give: everything the frame stage reaches at tick time hangs off this object, so the
@@ -337,7 +298,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// </remarks>
     public FrameAssembler Frames => _frames;
 
-    /// <summary>PROTOTYPE: the push path, or <see langword="null"/> when no profile is push-served.</summary>
+    /// <summary>The push path, or <see langword="null"/> when no profile observes anything.</summary>
     internal PushReplication Push { get; private set; }
 
     /// <summary>The send side: what carries a published frame to a link.</summary>
@@ -612,17 +573,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // mask is all ones, which suppresses nothing — an archetype whose plan has not been published yet must not have its writes dropped.
             clusterState.ProjectedComponentMask = ProjectedComponentMaskOf(plan);
 
-            // The membership signal, on for every replicated archetype: interest's topology maintenance reads it, and without it every cluster reads as
-            // changed and retention never fires. The content signal is projection's, and follows its option.
+            // The membership signal, on for every replicated archetype: the engine's own pushes — spawns, destroys, WriteSpatial, migrations — ride it.
             clusterState.TrackStructureChanges = true;
-            if (Options.GateProjectionOnChanges)
-            {
-                clusterState.TrackContentChanges = true;
-                clusterState.PublishChangedClusterList = true;
-            }
-
-            // The span-claim counters behind the report's "span claims" line: a measurement, paid only when one is asked for.
-            clusterState.CountSpanClaims = Options.MeasureInterestPhases;
         }
 
         return states;

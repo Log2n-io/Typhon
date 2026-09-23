@@ -286,7 +286,7 @@ class SendPumpTests : TestBase<SendPumpTests>
             Assert.That(frames, Is.GreaterThan(0),
                 $"no TICK reached the link. produced={subscriptions.Frames.FramesProduced} skipped={subscriptions.Frames.FramesSkipped} "
                 + $"sent={subscriptions.SendPump.FramesSent} failures={subscriptions.SendPump.SendFailures} open={subscriptions.Sessions.OpenCount} "
-                + $"tickSessions={subscriptions.Interest.TickSessionCount} committed={subscriptions.Frames.Gate.CommittedTick} "
+                + $"committed={subscriptions.Frames.Gate.CommittedTick} "
                 + $"watched={State(subscriptions).WatchedClusterCount} projectedBlocks={State(subscriptions).BlocksProjected} "
                 + $"slots={State(subscriptions).SlotsProjected} records={State(subscriptions).RecordsProduced}");
             Assert.That(entities, Is.GreaterThan(0), "TICK frames arrived but carried no entity: the world was never projected into them");

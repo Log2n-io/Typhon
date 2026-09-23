@@ -310,7 +310,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     }
 
     /// <summary>
-    /// PROTOTYPE (push replication): records that <paramref name="slots"/> of this cluster have something a push-served client must be told. Rides the
+    /// Records that <paramref name="slots"/> of this cluster have something a push-served client must be told. Rides the
     /// membership signal (<see cref="ArchetypeClusterState.NoteStructureSlots"/>), which the fence drains and publishes every tick for a replicated archetype.
     /// </summary>
     /// <param name="slots">The slots.</param>

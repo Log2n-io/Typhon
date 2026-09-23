@@ -47,14 +47,14 @@ internal sealed class SubscriptionsCollapsedExecSystem : SubscriptionsExecSystem
 
     /// <summary>
     /// One chunk, always. The stages' own chunk counts are computed inside <see cref="ExecuteChunk"/>, because each depends on the stage before it having
-    /// already RUN — the blocks step reads the lists the interest pass produced, not the ones its <c>Prepare</c> produced.
+    /// already RUN — the frame prologue reads the index the projection counted, not one a <c>Prepare</c> produced.
     /// </summary>
     /// <summary>
-    /// The collapsed shape reports as one stage, not four.
+    /// The collapsed shape reports as one stage, not several.
     /// </summary>
     /// <remarks>
-    /// Deliberately not attributed across the four buckets. The whole point of collapsing is that the boundaries between the stages stop existing — there is
-    /// no dispatch between them to measure at — so splitting the span back into four would be inventing a breakdown the shape does not have. The track total
+    /// Deliberately not attributed across the stage buckets. The whole point of collapsing is that the boundaries between the stages stop existing — there
+    /// is no dispatch between them to measure at — so splitting the span back up would be inventing a breakdown the shape does not have. The track total
     /// stays comparable across both shapes, which is what the A/B actually needs.
     /// </remarks>
     protected override SubscriptionsStage Stage => SubscriptionsStage.Collapsed;
@@ -64,15 +64,10 @@ internal sealed class SubscriptionsCollapsedExecSystem : SubscriptionsExecSystem
     protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
     {
         // The base has already entered the epoch scope PS-02 requires, and stamps the chunk on the way out. What is left is the pipeline's order, which is
-        // the one thing this shape may not get wrong: Events is a parallel BRANCH in the staged DAG and has no ordering constraint against Interest or
-        // Project, but Frames needs both, so running it here between Project and Frames satisfies the DAG's edges rather than merely reading well.
-        var chunks = SubscriptionsInterestExecSystem.Prologue(ctx);
-        for (var k = 0; k < chunks; k++)
-        {
-            SubscriptionsInterestExecSystem.Resolve(ctx, k, chunks);
-        }
-
-        chunks = SubscriptionsProjectExecSystem.BlocksStep(ctx);
+        // the one thing this shape may not get wrong: Events is a parallel BRANCH in the staged DAG and has no ordering constraint against Project, but
+        // Frames needs both, so running it here between Project and Frames satisfies the DAG's edges rather than merely reading well. The push index and
+        // the far fold are not run here: the frame prologue sees no index for the tick and builds it, and folds, serially.
+        var chunks = SubscriptionsProjectExecSystem.BlocksStep(ctx);
         for (var k = 0; k < chunks; k++)
         {
             SubscriptionsProjectExecSystem.Project(ctx, k, chunks);
@@ -97,8 +92,8 @@ internal sealed class SubscriptionsCollapsedExecSystem : SubscriptionsExecSystem
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why the decision is memoized rather than recomputed per stage.</b> Five systems ask, and three of them ask from a worker thread. A stage that answered
-/// differently from its siblings would run a half-staged, half-collapsed tick — the interest pass executed twice, or the frame assembler never prepared —
+/// <b>Why the decision is memoized rather than recomputed per stage.</b> Every system of the track asks, most of them from a worker thread. A stage that
+/// answered differently from its siblings would run a half-staged, half-collapsed tick — the projection executed twice, or the frame assembler never prepared —
 /// so the answer has to be one answer. It is keyed on the tick number because the context is reset per tick and carries no room for this (the collapse path
 /// adds one field to <see cref="SubscriptionsOptions"/> and none to <see cref="SubscriptionsContext"/>).
 /// </para>
@@ -110,7 +105,7 @@ internal sealed class SubscriptionsCollapsedExecSystem : SubscriptionsExecSystem
 /// acquire load costs nothing on x64 and one instruction on arm64.
 /// </para>
 /// <para>
-/// <b>The work estimate is the PREVIOUS tick's watched-block count.</b> This tick's is not knowable before the interest pass has run, which is itself one of
+/// <b>The work estimate is the PREVIOUS tick's projected-block count.</b> This tick's is not knowable before the blocks step has run, which is itself one of
 /// the stages being shaped; asking for it would be circular. A one-tick-stale estimate is the right accuracy for a dispatch-shape choice: the quantity moves
 /// with a camera, not with a frame, and the cost of being wrong for one tick is one shape's overhead, never a wrong result.
 /// </para>
@@ -139,10 +134,10 @@ internal sealed class SubscriptionsPipelineShape
     }
 
     /// <summary>
-    /// <c>sessions × watchedBlocks</c> against <see cref="SubscriptionsOptions.CollapseBelowWorkUnits"/>, with zero blocks counted as one.
+    /// <c>sessions × projected blocks</c> against <see cref="SubscriptionsOptions.CollapseBelowWorkUnits"/>, with zero blocks counted as one.
     /// </summary>
     /// <remarks>
-    /// Counting a blockless tick as one unit rather than zero is deliberate. A session with nothing watched still costs a frame prologue and a frame, so
+    /// Counting a blockless tick as one unit rather than zero is deliberate. A session with nothing pushed still costs a frame prologue and a frame, so
     /// zero would read as "no work" for a thousand sessions that have just connected — the one case where the barriers are worth paying for. With the floor,
     /// the estimate for that tick is the session count, which is the honest lower bound on what the tick will do.
     /// </remarks>

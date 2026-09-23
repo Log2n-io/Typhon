@@ -5,22 +5,25 @@ using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
-/// <summary>PROTOTYPE — the frame stage's push half: sessions bound to a push profile, served from <see cref="PushReplication"/>'s cell index.</summary>
+/// <summary>The frame stage's session half: every session bound to a profile, served from <see cref="PushReplication"/>'s cell index.</summary>
 /// <remarks>
 /// <para>
-/// <b>Same wire, same hand-off, no known-set.</b> A push session's records are gathered by <see cref="PushReplication.Gather"/> into the same per-archetype
-/// sub-lists the pull path fills, encoded by the same <see cref="EntitiesEncoder"/>, and published through the same send state and frame pool — so a client
-/// cannot tell which path served it. What it does not have is a known-set, an interest view or an owed debt: what it knows is geometry.
+/// <b>No known-set.</b> A session's records are gathered by <see cref="PushReplication.Gather"/> into per-archetype sub-lists, encoded by
+/// <see cref="EntitiesEncoder"/>, and published through the send state and frame pool. What a session knows is geometry, not a per-entity set.
 /// </para>
 /// <para>
-/// <b>A frame that is not published costs a RESET.</b> The events of a skipped tick are gone (the push log that would replay them is step 4 of the build
-/// order and is not built), so the next frame clears the client and re-delivers its view cell by cell. Measured by <see cref="PushReplication.Resets"/>.
+/// <b>A frame that is not published is caught up from the push log</b> on the session's next frame, while every missed tick is still in it; after that, the
+/// next frame is a RESET that re-delivers the view cell by cell. Measured by <see cref="PushReplication.LogCatchUps"/> and
+/// <see cref="PushReplication.Resets"/>.
 /// </para>
 /// </remarks>
 internal sealed unsafe partial class FrameAssembler
 {
-    /// <summary>The push path, when some profile is push-served.</summary>
+    /// <summary>The push path, when some profile observes an archetype.</summary>
     internal PushReplication Push;
+
+    /// <summary>The declared profiles, which name each session's observer.</summary>
+    internal SubscriptionProfiles Profiles;
 
     private SessionId[] _pushSessions = [];
     private Vector3D[] _pushViewpoints = [];
@@ -31,15 +34,12 @@ internal sealed unsafe partial class FrameAssembler
     private int _pushSessionCount;
     private int _pushCursor;
 
-    /// <summary>How many sessions the push path serves this tick.</summary>
-    internal int PushSessionCount => _pushSessionCount;
-
     /// <summary>Serial: collects this tick's push sessions and their viewpoints, prepares their rows, and indexes the push events.</summary>
     private void BeginPushTick()
     {
         _pushSessionCount = 0;
         _pushCursor = 0;
-        if (Push == null || _interest == null)
+        if (Push == null || Profiles == null)
         {
             return;
         }
@@ -47,7 +47,7 @@ internal sealed unsafe partial class FrameAssembler
         var n = 0;
         foreach (var session in _sessions)
         {
-            if (!_interest.TryGetPushProfile(session, out _, out var archetypes, out var world, out var divisor))
+            if (!Profiles.TryGetProfile(session, out var archetypes, out var world, out var divisor))
             {
                 continue;
             }
@@ -104,7 +104,8 @@ internal sealed unsafe partial class FrameAssembler
             }
         }
 
-        if (_tick % 500 == 0)
+        // A diagnostic, and it allocates: only where phase timing was asked for.
+        if (PhaseTimingEnabled && _tick % 500 == 0)
         {
             ReportPush();
         }
@@ -278,7 +279,7 @@ internal sealed unsafe partial class FrameAssembler
             }
 
             EntitiesEncoder.WriteEntities(ref writer, _encodePlans[a], scratch.List(a, FrameListKind.Enter), scratch.List(a, FrameListKind.Segment),
-                scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave), default, default);
+                scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave));
         }
 
         if (emitStats)
@@ -324,7 +325,6 @@ internal sealed unsafe partial class FrameAssembler
         {
             Push.ShadowApply(session, scratch, _plans.Length, reset);
         }
-        state.Baseline = _tick;
         if (newlyComplete)
         {
             state.ViewComplete = true;
@@ -346,7 +346,6 @@ internal sealed unsafe partial class FrameAssembler
 
         state.BytesPublished += length;
         state.PendingReset = false;
-        state.DeferredEnters = 0;
         state.FramesProduced++;
         state.FramesSinceDegrade++;
         scratch.AddReady(session);

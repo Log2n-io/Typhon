@@ -4,7 +4,7 @@ using System.Runtime.InteropServices;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// One record of one session's frame, as the frame stage collects it: what it names, where its pre-encoded bytes live, and the two keys it is ordered by.
+/// One record of one session's frame, as the frame stage collects it: what it names, where its pre-encoded bytes live, and the key it is ordered by.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -13,8 +13,7 @@ namespace Typhon.Engine.Internals;
 /// and a mask rather than a copy. That is what makes a frame a sequence of <c>memcpy</c>s (02 § 4, 03 § 12.2).
 /// </para>
 /// <para>
-/// <b>Twenty-four bytes, and the first eight are the two keys.</b> The netId is the wire's order; the rank is the enter budget's. Both sorts read the first
-/// eight bytes of the struct and nothing else, so a sorting pass streams the array without touching the pointer half at all.
+/// <b>Twenty-four bytes, and the first four are the key.</b> The netId is the wire's order, and the sort reads nothing else.
 /// </para>
 /// </remarks>
 [StructLayout(LayoutKind.Sequential, Size = 24)]
@@ -23,19 +22,10 @@ internal struct FrameRecord
     /// <summary>The entity's network identity, which is the order every sub-list travels in (03 § 5).</summary>
     public uint NetId;
 
-    /// <summary>
-    /// The enter budget's ranking key: smaller is sent sooner. Zero for every record that is not an enter candidate, and zero for an enter candidate whose
-    /// session has declared no focus, which leaves the budget selecting in hit order.
-    /// </summary>
-    public uint Rank;
-
     /// <summary>The entity's replication block. An <see cref="nint"/> so the record can live in either managed or native storage.</summary>
     public nint Block;
 
-    /// <summary>
-    /// The archetype's plan index, which decides the <c>ENTITIES</c> block this record travels in. Carried per record because the enter budget ranks
-    /// candidates across every archetype at once, and a leave is discovered by sweeping a table that holds no block pointer at all.
-    /// </summary>
+    /// <summary>The archetype's plan index, which decides the <c>ENTITIES</c> block this record travels in.</summary>
     public ushort Archetype;
 
     /// <summary>The slot the entity occupies in that block. A cluster holds at most 64, so a byte is the honest width.</summary>
@@ -44,20 +34,6 @@ internal struct FrameRecord
     /// <summary>For a state record, the groups it carries as the wire's <c>u8</c> mask (W14); zero otherwise.</summary>
     public byte GroupMask;
 
-    /// <summary>
-    /// The session-view entry of the cluster this record came from, or <c>-1</c> where there is none.
-    /// </summary>
-    /// <remarks>
-    /// <b>Carried so that an enter the per-frame budget declines can be owed back to the view without a lookup.</b> The gather knows the entry index; the
-    /// budget, which runs later over a ranked list spanning every archetype, does not — and re-deriving it meant reading the block header for its chunk id
-    /// and hash-probing the view once per declined candidate. Measured at d07 with 200 sessions that cost 11.4 s of a 98 s profile and took the selection
-    /// phase to 22 % of the frame stage.
-    /// <para>
-    /// It is free: narrowing <see cref="Slot"/> to the byte a 64-slot cluster actually needs leaves exactly the four bytes this takes, so the record is
-    /// still 24 bytes and the sort still moves the same number of cache lines.
-    /// </para>
-    /// </remarks>
-    public int ViewIndex;
 }
 
 /// <summary>Orders records by netId, which is what the wire's gap encoding requires.</summary>
@@ -68,22 +44,13 @@ internal readonly struct FrameRecordNetIdKey : IRadixKey<FrameRecord>
 }
 
 /// <summary>
-/// Orders enter candidates by the budget's rank, netId breaking a tie so the selection is deterministic across runs and across worker counts.
-/// </summary>
-internal readonly struct FrameRecordRankKey : IRadixKey<FrameRecord>
-{
-    /// <inheritdoc />
-    public static ulong Key(in FrameRecord item) => ((ulong)item.Rank << 32) | item.NetId;
-}
-
-/// <summary>
 /// The frame stage's sort: insertion below <see cref="InsertionSortMaxCount"/> records, the engine's <see cref="RadixSort"/> above it.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Why a sort exists at all.</b> Interest hits arrive in spatial order — cluster by cluster, slot by slot — and the wire's records are gap-encoded against
-/// an ascending netId (03 § 5). Nothing upstream can produce that order: a netId is handed out when an entity is first watched, so a cluster's slots carry
-/// arbitrary identities, and two clusters interleave.
+/// <b>Why a sort exists at all.</b> Records are gathered in spatial order — cell by cell — and the wire's records are gap-encoded against an ascending
+/// netId (03 § 5). Nothing upstream can produce that order: a netId is handed out when an entity is first projected, so a cluster's slots carry arbitrary
+/// identities, and two clusters interleave.
 /// </para>
 /// <para>
 /// <b>Why the threshold.</b> A radix pass pays a fixed cost for its histogram and prefix sum — ~0.15 µs at 256 buckets — which is more than an insertion
@@ -92,9 +59,8 @@ internal readonly struct FrameRecordRankKey : IRadixKey<FrameRecord>
 /// it is the one Q-M6 asks for.
 /// </para>
 /// <para>
-/// <b>Both sorts are stable and both are in place.</b> Stability is what makes the rank sort's tie-break by netId meaningful, and what makes a sort of an
-/// already-sorted list a no-op — <see cref="RadixSort"/> skips a digit every key shares, so a list that is already ascending in a narrow range costs one
-/// pass over the keys and nothing else.
+/// <b>Stable and in place.</b> A sort of an already-sorted list is a no-op — <see cref="RadixSort"/> skips a digit every key shares, so a list that is
+/// already ascending in a narrow range costs one pass over the keys and nothing else.
 /// </para>
 /// </remarks>
 internal static class RecordSorter
@@ -102,7 +68,7 @@ internal static class RecordSorter
     /// <summary>At or below this many records the sort is an insertion sort; above it, a radix sort.</summary>
     public const int InsertionSortMaxCount = 64;
 
-    /// <summary>Histogram slots <see cref="SortByNetId"/> and <see cref="SortByRank"/> need when they reach the radix path.</summary>
+    /// <summary>Histogram slots <see cref="SortByNetId"/> needs when it reaches the radix path.</summary>
     public const int HistogramSlots = RadixSort.Buckets;
 
     /// <summary>Sorts <paramref name="records"/> ascending by netId.</summary>
@@ -118,21 +84,6 @@ internal static class RecordSorter
         }
 
         RadixSort.Sort<FrameRecord, FrameRecordNetIdKey>(records, scratch, counts);
-    }
-
-    /// <summary>Sorts <paramref name="records"/> ascending by rank, netId breaking ties.</summary>
-    /// <param name="records">The enter candidates. Sorted in place.</param>
-    /// <param name="scratch">Ping-pong scratch, at least as long as <paramref name="records"/> on the radix path.</param>
-    /// <param name="counts">Histogram scratch, at least <see cref="HistogramSlots"/> long.</param>
-    public static void SortByRank(Span<FrameRecord> records, Span<FrameRecord> scratch, Span<int> counts)
-    {
-        if (records.Length <= InsertionSortMaxCount)
-        {
-            InsertionSortByRank(records);
-            return;
-        }
-
-        RadixSort.Sort<FrameRecord, FrameRecordRankKey>(records, scratch, counts);
     }
 
     private static void InsertionSortByNetId(Span<FrameRecord> records)
@@ -151,20 +102,4 @@ internal static class RecordSorter
         }
     }
 
-    private static void InsertionSortByRank(Span<FrameRecord> records)
-    {
-        for (var i = 1; i < records.Length; i++)
-        {
-            var item = records[i];
-            var key = FrameRecordRankKey.Key(in item);
-            var j = i - 1;
-            while (j >= 0 && FrameRecordRankKey.Key(in records[j]) > key)
-            {
-                records[j + 1] = records[j];
-                j--;
-            }
-
-            records[j + 1] = item;
-        }
-    }
 }

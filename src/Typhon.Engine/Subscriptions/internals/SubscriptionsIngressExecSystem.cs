@@ -136,13 +136,10 @@ internal sealed class SubscriptionsIngress : IDisposable
     internal const ushort AckRecordMarker = 0xFFFF;
 
     /// <summary>
-    /// The interest pass, for diagnostics only. Set by the runtime once both exist.
+    /// The per-archetype replication states, for diagnostics only. Set by the runtime once both exist, so <see cref="SubscriptionsCommands"/> can report
+    /// projection and migration counts without the application reaching into an internal type. Nothing on the tick path reads it.
     /// </summary>
-    /// <remarks>
-    /// It is here so that <see cref="SubscriptionsCommands"/> can report how much of the interest resolution was shared without the application reaching
-    /// into an internal type. Nothing on the tick path reads it.
-    /// </remarks>
-    internal InterestPass Interest;
+    internal ArchetypeReplicationState[] ReplicationStates;
 
     /// <summary>The frame assembler, for diagnostics only. Set by the runtime once both exist; nothing on the tick path reads it.</summary>
     internal FrameAssembler Frames;
@@ -378,7 +375,7 @@ internal sealed class SubscriptionsIngress : IDisposable
         _sessions.ApplyPendingCloses();
 
         // What last tick's systems asked for, applied before the table publishes this tick's open set — so a profile bound in an Opened handler is in force
-        // for the first interest pass that can see the session, rather than one tick later.
+        // for the first frame that can see the session, rather than one tick later.
         Requests.Apply(_sessions);
 
         _sessions.BeginTick();
@@ -858,7 +855,7 @@ internal sealed class SubscriptionsIngressExecSystem : ChunkedCallbackSystem<Sub
 
         try
         {
-            // PROTOTYPE (push): the shadow oracle's check runs HERE — after last tick's frames were published and before this tick's fence moves any
+            // The shadow oracle's check runs HERE — after last tick's frames were published and before this tick's fence moves any
             // replication entry. Anywhere later compares the clients against entries a migration has already carried or parked.
             var push = ctx.Subscriptions.Push;
             if (push != null && push.Shadow)

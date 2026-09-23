@@ -70,28 +70,15 @@ public static class CommandLine
             c.SplitAwareness = true;
         }
 
-        c.SubscriptionsHysteresis = Str(args, "--subs-band", "on") switch
+        // Replication is push (ADR-067); the one choice left is who detects a change: the simulation (Replicate) or, experimentally, the engine.
+        var subsMode = Str(args, "--subs-mode", "push");
+        c.SubscriptionsPushAutomatic = subsMode switch
         {
-            "on" => true,
-            "off" => false,
-            var other => throw new ArgumentException($"--subs-band takes on or off, not '{other}'"),
+            "push" => false,
+            "push-auto" => true,
+            _ => throw new ArgumentException($"--subs-mode takes push or push-auto, not '{subsMode}' (the pull pipeline was removed, ADR-067)"),
         };
 
-        var subsMode = Str(args, "--subs-mode", "pull");
-        c.SubscriptionsPush = subsMode switch
-        {
-            "pull" => false,
-            "push" or "push-auto" => true,
-            _ => throw new ArgumentException($"--subs-mode takes pull, push or push-auto, not '{subsMode}'"),
-        };
-        c.SubscriptionsPushAutomatic = subsMode == "push-auto";
-
-        c.SubscriptionsCellKeyedInterest = Str(args, "--subs-interest", "cell") switch
-        {
-            "cell" => true,
-            "pull" => false,
-            var other => throw new ArgumentException($"--subs-interest takes cell or pull, not '{other}'"),
-        };
         c.WorkerIdleSpin = Int(args, "--idle-spin", c.WorkerIdleSpin);
         if (Array.IndexOf(args, "--sched-hot") >= 0)
         {
@@ -102,56 +89,8 @@ public static class CommandLine
         {
             c.WorkerParkAfterUs = Int(args, "--sched-park-us", 0);
         }
-        c.SubscriptionsDynamicSchedule = Str(args, "--subs-sched", "dynamic") switch
-        {
-            "dynamic" => true,
-            "static" => false,
-            var other => throw new ArgumentException($"--subs-sched takes dynamic or static, not '{other}'"),
-        };
-
-        c.SubscriptionsSharedClusterBlocks = Str(args, "--subs-shared", "off") switch
-        {
-            "on" => true,
-            "off" => false,
-            var other => throw new ArgumentException($"--subs-shared takes on or off, not '{other}'"),
-        };
-
-        c.SubscriptionsIncrementalInterest = Str(args, "--subs-incremental", "on") switch
-        {
-            "on" => true,
-            "off" => false,
-            var other => throw new ArgumentException($"--subs-incremental takes on or off, not '{other}'"),
-        };
-
         c.DormancyTicks = Int(args, "--dormancy", 0);
         c.SubscriptionsPhaseTiming = Array.IndexOf(args, "--subs-phases") >= 0;
-        c.SubscriptionsInterestPhases = Array.IndexOf(args, "--subs-interest-phases") >= 0;
-        c.SubscriptionsGroupCap = Int(args, "--subs-group-cap", 0);
-        c.SubscriptionsSparse = Str(args, "--subs-sparse", "off") switch
-        {
-            "on" => true,
-            "off" => false,
-            var other => throw new ArgumentException($"--subs-sparse takes on or off, not '{other}'"),
-        };
-        c.SubscriptionsContentGate = Str(args, "--subs-content-gate", "on") switch
-        {
-            "on" => true,
-            "off" => false,
-            var other => throw new ArgumentException($"--subs-content-gate takes on or off, not '{other}'"),
-        };
-        c.SubscriptionsOwedSlice = Int(args, "--subs-owed-slice", 2);
-        c.SubscriptionsGatherPrefetch = Str(args, "--subs-prefetch", "off") switch
-        {
-            "on" => true,
-            "off" => false,
-            var other => throw new ArgumentException($"--subs-prefetch takes on or off, not '{other}'"),
-        };
-        c.SubscriptionsOwedSlotCarry = Str(args, "--subs-owed", "on") switch
-        {
-            "on" => true,
-            "off" => false,
-            var other => throw new ArgumentException($"--subs-owed takes on or off, not '{other}'"),
-        };
         c.IdleCreatureFraction = Math.Clamp(Dbl(args, "--idle-creatures", 0d), 0d, 1d);
 
         c.SubscriptionsCollapseWorkUnits = Str(args, "--subs-pipeline", "staged") switch

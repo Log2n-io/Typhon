@@ -1,20 +1,24 @@
 using NUnit.Framework;
+using System;
+using System.Numerics;
+using Typhon.Engine.Internals;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 
 /// <summary>
-/// PROTOTYPE (push replication): the differential oracle's gate case, served by the push path in both change-detection modes.
+/// The differential oracle: seeded churn, decoded clients, and a comparison against the ECS whenever the world is quiet.
 /// </summary>
 /// <remarks>
 /// <para>
-/// The same seeded churn, the same decoded clients and the same comparison against the ECS as <see cref="DifferentialOracleTests"/>: spawns, destroys,
-/// sub-tolerance drifts, teleports through <c>WriteSpatial</c> that really migrate, and writes to both change groups through <c>GetSpan</c>. What differs is
-/// who decides an entity changed. In <see cref="PushDetection.Automatic"/> the engine compares every live entity; in <see cref="PushDetection.Explicit"/> the
-/// workload pushes each slot it writes, and the engine adds spawns, destroys, spatial writes and migrations itself.
+/// Spawns, destroys, sub-tolerance drifts, teleports through <c>WriteSpatial</c> that really migrate, and writes to both change groups through
+/// <c>GetSpan</c>. In <see cref="PushDetection.Automatic"/> the engine compares every live entity; in <see cref="PushDetection.Explicit"/> the workload
+/// pushes each slot it writes, and the engine adds spawns, destroys, spatial writes and migrations itself.
 /// </para>
 /// <para>
-/// The sessions sit at the origin with a disc that covers the world, so the truth set is every live entity and the comparison is exactly the pull oracle's.
-/// A skipped session is reset rather than caught up (the prototype has no push log), and converging after one is the claim the skip rates test.
+/// Sessions either sit at the origin with a disc that covers the world, so the truth set is every live entity, or walk with a smaller disc and are
+/// compared against it. A skipped session is caught up from the push log while its missed ticks are in it, and reset otherwise; converging after
+/// either is the claim the skip rates test.
 /// </para>
 /// </remarks>
 [TestFixture]
@@ -28,12 +32,14 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     /// <param name="detection">Who signals a change.</param>
     /// <param name="skipPercent">The percentage of ticks on which the session's frames are left undrained.</param>
     [Test]
+    [VerifiesRule("SUB-03")]
+    [VerifiesRule("SUB-10")]
     public void AClientsWorldIsTheServersUnderPush(
         [Values(PushDetection.Explicit, PushDetection.Automatic)] PushDetection detection,
         [Values(0, 30, 60, 90)] int skipPercent)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 20260923 + skipPercent, [skipPercent],
-            nameof(PushOracleTests), push: detection);
+            nameof(PushOracleTests), detection: detection);
 
         for (var i = 0; i < GateTicks; i++)
         {
@@ -67,7 +73,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         [Values(0, 30, 60, 90)] int skipPercent)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 20260924 + skipPercent, [skipPercent, 0],
-            nameof(PushOracleTests), push: detection, worldObserver: true);
+            nameof(PushOracleTests), detection: detection, worldObserver: true);
 
         for (var i = 0; i < GateTicks; i++)
         {
@@ -92,10 +98,11 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     /// <param name="every">The profile's tick divisor.</param>
     /// <param name="world">A World observer rather than a covering disc.</param>
     [Test]
+    [VerifiesRule("SUB-03")]
     public void AProfileServedEveryFewTicksConverges([Values(2, 4)] int every, [Values(false, true)] bool world)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 5150 + every, [0, 30, 0], nameof(PushOracleTests),
-            push: PushDetection.Explicit, worldObserver: world, every: every);
+            detection: PushDetection.Explicit, worldObserver: world, every: every);
 
         for (var i = 0; i < GateTicks; i++)
         {
@@ -127,7 +134,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     {
         // Deterministic projection builds the index, and so folds the far flushes, serially in the frame prologue rather than in their stages.
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7300 + skipPercent, [skipPercent, 0, 30, 0],
-            nameof(PushOracleTests), push: detection, walkRadius: 3000, deterministicProjection: deterministic);
+            nameof(PushOracleTests), detection: detection, walkRadius: 3000, deterministicProjection: deterministic);
         oracle.Push.FarEvery = 4;
 
         for (var i = 0; i < GateTicks; i++)
@@ -155,7 +162,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     public void ADeferredFarChangeReachesASessionThatWalksCloser([Range(7400, 7409)] int seed, [Values(0, 30)] int skipPercent)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed,
-            [skipPercent, 0, skipPercent, 0, skipPercent, 0, skipPercent, 0], nameof(PushOracleTests), push: PushDetection.Explicit, walkRadius: 3000);
+            [skipPercent, 0, skipPercent, 0, skipPercent, 0, skipPercent, 0], nameof(PushOracleTests), detection: PushDetection.Explicit, walkRadius: 3000);
 
         // A long window, so many far changes are still pending when the sessions start to move — below the log depth, or every flush is a reset.
         oracle.Push.FarEvery = 6;
@@ -187,8 +194,8 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     /// </summary>
     /// <remarks>
     /// Written for the catch-up meeting an entity's event twice on its phase tick — its secondary, a copy taken before the fold flagged the primary, first
-    /// — but it does not reliably reach that case: removing the fix (CollectLog's merge of the flag on the second meeting) leaves it green. That fix
-    /// stands on its argument, not on this test.
+    /// — but it does not reliably reach that case: removing the fix (CollectLog's merge of the flag on the second meeting) leaves it green.
+    /// <see cref="AFarFlushMetFirstAsASecondaryReachesACaughtUpSession"/> scripts it.
     /// </remarks>
     /// <param name="seed">The run's seed.</param>
     [Test]
@@ -197,7 +204,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     {
         // A small radius, so cells are small and the workload's moves cross them often; most frames skipped, so most flushes arrive by catch-up.
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed, [60, 60, 60, 60, 60, 60], nameof(PushOracleTests),
-            push: PushDetection.Explicit, walkRadius: 400);
+            detection: PushDetection.Explicit, walkRadius: 400);
         oracle.Push.FarEvery = 4;
 
         for (var i = 0; i < 150; i++)
@@ -210,6 +217,184 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         Assert.That(oracle.Push.LogCatchUps, Is.GreaterThan(0), "no session ever caught up, so no flush travelled through the log");
     }
 
+    /// <summary>
+    /// A far flush met first as a secondary during the log's catch-up still reaches the session: an entity beyond R/2 changes a group and crosses into the
+    /// next cell eastward on its phase tick, while the session's frames are full.
+    /// </summary>
+    /// <remarks>
+    /// The event is indexed twice: its primary in the new cell, flagged in place by the far fold, and a secondary in the old one, copied before the fold
+    /// ran and so unflagged. The catch-up walks cells in ascending order and meets the secondary first. Dropping the flag on the second meeting leaves the
+    /// change withheld for good: the entity's next flush, N ticks later, covers only the changes after this one.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-19")]
+    [VerifiesRule("SUB-03")]
+    public void AFarFlushMetFirstAsASecondaryReachesACaughtUpSession()
+    {
+        const double Radius = 3000;
+        const int Every = 4;
+        const string Profile = "far";
+        var engine = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        using var harness = FrameHarness.Create(engine, subs =>
+        {
+            ProjectionTestSchema.DeclareCreature(subs);
+            subs.Profile(Profile, p => p.Sphere(Radius).Of<ProjCreature>());
+        }, nameof(PushOracleTests), new SubscriptionsOptions
+        {
+            PushShadow = true,
+            MaxSessions = 4,
+            StatePoolBudgetBytes = 64L * 1024 * 1024,
+            FramePoolBudgetBytes = 64L * 1024 * 1024,
+        });
+
+        var push = harness.Subscriptions.Push;
+        push.FarEvery = Every;
+
+        // A cell edge past R/2 east of the viewer, with the grid starting at the world's west edge: the entity sits half a metre west of it, far.
+        Assert.That(push.CellSize, Is.EqualTo(Radius / 3));
+        var edge = (float)(-ProjectionTestSchema.WorldExtentM + (Math.Ceiling(((Radius * 0.5) + ProjectionTestSchema.WorldExtentM) / push.CellSize)
+            * push.CellSize));
+        Assert.That(edge - 0.5f, Is.GreaterThan(Radius * 0.5).And.LessThan(Radius * 0.75));
+
+        // A near entity too, whose changes fill the session's frames before the phase tick: an idle frame is abandoned rather than queued.
+        EntityId entity;
+        EntityId near;
+        using (var tx = engine.CreateQuickTransaction())
+        {
+            var ai = new ProjAi { Template = 1, Mode = ProjAiMode.Wander, Level = 10 };
+            var vitals = new ProjVitals { Health = 10, MaxHealth = 20 };
+            var bounds = BoundsAt(edge - 0.5f);
+            entity = tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(in bounds), ProjCreature.Ai.Set(in ai), ProjCreature.Vitals.Set(in vitals));
+            bounds = BoundsAt(100f);
+            near = tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(in bounds), ProjCreature.Ai.Set(in ai), ProjCreature.Vitals.Set(in vitals));
+            tx.Commit();
+        }
+
+        var session = harness.OpenSessions(1, Profile)[0];
+        Assert.That(harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d)), Is.True);
+        var replica = harness.Replica(session);
+        var creature = harness.CatalogPlan.ArchetypeByName(nameof(ProjCreature)).Idx;
+
+        long tick = 0;
+        void Run(bool deliver)
+        {
+            tick++;
+            engine.WriteTickFence(tick);
+            harness.RunTick(tick);
+            if (deliver)
+            {
+                harness.Deliver(session);
+            }
+        }
+
+        for (var i = 0; i < 4; i++)
+        {
+            Run(deliver: true);
+        }
+
+        Assert.That(replica.NetIds(creature), Has.Length.EqualTo(2), "the session holds both entities before the change");
+        var netId = NetIdAt(replica, creature, edge - 0.5);
+
+        // The entity's phase tick, far enough ahead to fill the session's two frame slots before it.
+        var phase = tick + 3;
+        while (((netId % Every) + (phase % Every)) % Every != 0)
+        {
+            phase++;
+        }
+
+        while (tick < phase - 3)
+        {
+            Run(deliver: true);
+        }
+
+        WriteLevel(harness, near, 11, null);
+        Run(deliver: false);
+        WriteLevel(harness, near, 12, null);
+        Run(deliver: false);
+        var catchUps = push.LogCatchUps;
+
+        // The phase tick: a new level and a step east across the cell edge, in one event.
+        WriteLevel(harness, entity, 4242, edge + 0.5f);
+        Run(deliver: false);
+        Run(deliver: false);
+
+        // Drained: the next frame is the catch-up over the phase tick. Then quiet ticks past the next flush, which carries nothing new.
+        harness.Deliver(session);
+        for (var i = 0; i < (2 * Every) + 2; i++)
+        {
+            Run(deliver: true);
+        }
+
+        Assert.That(push.LogCatchUps, Is.GreaterThan(catchUps), "the session was not caught up through the log, so the case did not run");
+        Assert.That(push.ShadowIllegal, Is.Zero, "a record the client could not apply was published");
+        Assert.That(replica.Value(creature, netId, "level"), Is.EqualTo(4242d), "the far flush on the phase tick was lost in the catch-up");
+        Assert.That(replica.Position(creature, netId)[0], Is.EqualTo(edge + 0.5).Within(OracleHarness.MotionToleranceM),
+            "the flushed segment was lost in the catch-up");
+    }
+
+    private static uint NetIdAt(SessionReplica replica, int archetype, double x)
+    {
+        foreach (var id in replica.NetIds(archetype))
+        {
+            if (Math.Abs(replica.Position(archetype, id)[0] - x) < 1)
+            {
+                return id;
+            }
+        }
+
+        Assert.Fail($"the replica holds no entity at x = {x}");
+        return 0;
+    }
+
+    private static void WriteLevel(FrameHarness harness, EntityId entity, ushort level, float? x)
+    {
+        var found = false;
+        using var tx = harness.Engine.CreateQuickTransaction();
+        var accessor = tx.For<ProjCreature>();
+        try
+        {
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                var occupancy = cluster.OccupancyBits;
+                while (occupancy != 0)
+                {
+                    var slot = BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+                    if (cluster.GetEntityId(slot).RawValue != entity.RawValue)
+                    {
+                        continue;
+                    }
+
+#pragma warning disable TYPHON009
+                    var ai = cluster.GetSpan(ProjCreature.Ai);
+#pragma warning restore TYPHON009
+                    ai[slot].Level = level;
+                    cluster.MarkDirty(ProjCreature.Ai);
+                    if (x.HasValue)
+                    {
+                        cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(x.Value));
+                    }
+
+                    harness.Subscriptions.Commands.Replicate(in cluster, slot);
+                    found = true;
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        tx.Commit();
+        Assert.That(found, Is.True, "the entity is live");
+    }
+
+    private static ProjBounds BoundsAt(float x) => new()
+    {
+        Bounds = new AABB2F { MinX = x - 0.5f, MinY = -0.5f, MaxX = x + 0.5f, MaxY = 0.5f },
+        Speed = 1f,
+    };
+
     /// <summary>Automatic detection is off unless the runtime is told otherwise (ADR-067): replication is explicit.</summary>
     [Test]
     public void AutomaticDetectionIsRefusedUnlessEnabled()
@@ -220,7 +405,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
             var refused = Assert.Throws<System.NotSupportedException>(() => FrameHarness.Create(engine, subs =>
             {
                 ProjectionTestSchema.DeclareCreature(subs);
-                subs.Profile("auto", p => p.Push(PushDetection.Automatic).Sphere(100).Of<ProjCreature>());
+                subs.Profile("auto", p => p.Detection(PushDetection.Automatic).Sphere(100).Of<ProjCreature>());
             }, nameof(AutomaticDetectionIsRefusedUnlessEnabled)));
             Assert.That(refused.Message, Does.Contain("AllowAutomaticPushDetection"));
         }
@@ -235,7 +420,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     public void SessionsAtDifferentDeliveryRatesConvergeUnderPush([Values(PushDetection.Explicit, PushDetection.Automatic)] PushDetection detection)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 778, [0, 85], nameof(PushOracleTests),
-            push: detection);
+            detection: detection);
 
         for (var i = 0; i < GateTicks; i++)
         {
@@ -259,12 +444,13 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     /// entity well inside a disc must be held and one well outside must not; the band between is the anchor's slack plus the motion tolerance.
     /// </remarks>
     [Test]
+    [VerifiesRule("SUB-16")]
     public void WalkingSessionsHoldExactlyWhatTheirDiscNames(
         [Values(PushDetection.Explicit, PushDetection.Automatic)] PushDetection detection,
         [Values(0, 60)] int skipPercent)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 9100 + skipPercent, [skipPercent, 0, 30, skipPercent],
-            nameof(PushOracleTests), push: detection, walkRadius: 3000);
+            nameof(PushOracleTests), detection: detection, walkRadius: 3000);
 
         var required = 0L;
         for (var i = 0; i < GateTicks; i++)
@@ -292,10 +478,11 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     /// <see cref="PushDetection.Automatic"/> exists. It is here so that the explicit arm above cannot pass because the oracle is blind to missing pushes.
     /// </remarks>
     [Test]
+    [VerifiesRule("SUB-10")]
     public void AForgottenPushLeavesTheClientStaleAndTheOracleSeesIt()
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 4243, [0], nameof(PushOracleTests),
-            push: PushDetection.Explicit);
+            detection: PushDetection.Explicit);
         oracle.Workload.ForgetPushesAfter = 0;
 
         RuleMutants.AssertDetects("SUB-10", "on the client and", () =>
@@ -319,7 +506,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     public void TheValidatorFindsAndHealsForgottenPushes()
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 4244, [0], nameof(PushOracleTests),
-            push: PushDetection.Explicit);
+            detection: PushDetection.Explicit);
         oracle.Workload.ForgetPushesAfter = 0;
         oracle.Push.ValidateClustersPerTick = int.MaxValue;
 
@@ -339,7 +526,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     public void TheValidatorIsSilentWhenEveryWriteIsPushed()
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 4245, [0], nameof(PushOracleTests),
-            push: PushDetection.Explicit);
+            detection: PushDetection.Explicit);
         oracle.Push.ValidateClustersPerTick = int.MaxValue;
 
         for (var i = 0; i < GateTicks; i++)

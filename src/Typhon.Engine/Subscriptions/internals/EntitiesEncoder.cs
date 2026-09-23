@@ -136,23 +136,6 @@ internal sealed unsafe class ArchetypeEncodePlan
 }
 
 /// <summary>
-/// A run of records some other pass has already encoded, to be copied into a frame verbatim: <c>varu count | records</c>, one <c>ENTITIES</c> sub-list run.
-/// </summary>
-/// <remarks>
-/// <b>The pointer is resolved by the caller and used immediately.</b> The bytes live in a projection worker's record arena, which grows by reallocation —
-/// so a reference kept across a tick would address freed memory. Every producer of this struct resolves it inside the frame it is written into, after the
-/// projection stage has joined and before anything can grow the arena again.
-/// </remarks>
-internal readonly unsafe struct SharedRunBytes
-{
-    /// <summary>The run's first byte: its <c>varu</c> record count.</summary>
-    public byte* Bytes { get; init; }
-
-    /// <summary>The run's length, the count prefix included.</summary>
-    public int Length { get; init; }
-}
-
-/// <summary>
 /// Writes one session's frame: the <c>TICK</c> header, then one <c>ENTITIES</c> block per archetype the session has records for (03 § 5, § 3).
 /// </summary>
 /// <remarks>
@@ -164,10 +147,8 @@ internal readonly unsafe struct SharedRunBytes
 /// run of <c>memcpy</c>s (02 § 7, SUB-07).
 /// </para>
 /// <para>
-/// <b>The block contents come from the BLOCK, never from S1's per-tick arena.</b> The arena holds the records of the tick that produced them; a session
-/// skipped for K ticks needs the union since its baseline, which only the per-entity state carries (SUB-03). Reading the hot entry's stored group bodies
-/// and choosing them by <c>GroupTicks[g] &gt; baseline</c> is the same operation for K = 1 and K = 50, so there is one path rather than a fast one and a
-/// rarely-exercised correct one.
+/// <b>The block contents come from the BLOCK.</b> A record names the groups it carries; their bodies are the hot entry's stored copies, which the
+/// projection keeps current, so a session caught up after K skipped ticks reads the same bytes as one that missed nothing (SUB-03).
 /// </para>
 /// <para>
 /// <b>Leaves are last in every block, and the record order inside a block is the grammar's.</b> A client applies leaves after everything else whatever order
@@ -205,28 +186,7 @@ internal static unsafe class EntitiesEncoder
     /// <param name="states">State records, each carrying a non-zero group mask.</param>
     /// <param name="leaves">Leaving entities.</param>
     public static void WriteEntities(ref WireWriter w, ArchetypeEncodePlan plan, ReadOnlySpan<FrameRecord> enters, ReadOnlySpan<FrameRecord> segments,
-        ReadOnlySpan<FrameRecord> states, ReadOnlySpan<FrameRecord> leaves) =>
-        WriteEntities(ref w, plan, enters, segments, states, leaves, [], []);
-
-    /// <summary>
-    /// Writes one archetype's <c>ENTITIES</c> block, with runs this frame merely references before the ones it owns.
-    /// </summary>
-    /// <param name="w">The writer.</param>
-    /// <param name="plan">The archetype's encoding constants.</param>
-    /// <param name="enters">Enter records.</param>
-    /// <param name="segments">Motion segments this session encodes itself.</param>
-    /// <param name="states">State records this session encodes itself.</param>
-    /// <param name="leaves">Leaving entities.</param>
-    /// <param name="sharedSegments">Segment runs encoded once per cluster, copied in verbatim.</param>
-    /// <param name="sharedStates">State runs encoded once per cluster, copied in verbatim.</param>
-    /// <remarks>
-    /// <b>The shared runs travel first and the private run last, which costs nothing and is worth fixing anyway.</b> A decoder applies a sub-list's runs in
-    /// order and every entity appears in exactly one of them — an entity lives in one cluster — so the order carries no meaning. Fixing it makes two
-    /// sessions with the same references produce the same bytes, which is what keeps whole-frame sharing a byte-for-byte proposition.
-    /// </remarks>
-    public static void WriteEntities(ref WireWriter w, ArchetypeEncodePlan plan, ReadOnlySpan<FrameRecord> enters, ReadOnlySpan<FrameRecord> segments,
-        ReadOnlySpan<FrameRecord> states, ReadOnlySpan<FrameRecord> leaves, ReadOnlySpan<SharedRunBytes> sharedSegments,
-        ReadOnlySpan<SharedRunBytes> sharedStates)
+        ReadOnlySpan<FrameRecord> states, ReadOnlySpan<FrameRecord> leaves)
     {
         ArgumentNullException.ThrowIfNull(plan);
 
@@ -269,7 +229,7 @@ internal static unsafe class EntitiesEncoder
         }
 
         // ── segments ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        WriteRunHeader(ref w, segments.Length, sharedSegments);
+        WriteRunHeader(ref w, segments.Length);
         prev = -1;
         for (var i = 0; i < segments.Length; i++)
         {
@@ -278,7 +238,7 @@ internal static unsafe class EntitiesEncoder
         }
 
         // ── state records ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        WriteRunHeader(ref w, states.Length, sharedStates);
+        WriteRunHeader(ref w, states.Length);
         prev = -1;
         for (var i = 0; i < states.Length; i++)
         {
@@ -350,7 +310,7 @@ internal static unsafe class EntitiesEncoder
     /// <remarks>
     /// <b>The run is what a netId gap is relative to</b> (03 § 5). A record's gap is a delta from the record before it, so a sub-list that was one
     /// ascending sequence could never be assembled from bytes encoded somewhere else — the first record's gap would depend on a predecessor the encoder
-    /// of those bytes never saw. A run restarts the delta, which is what lets a frame concatenate blocks encoded once per cluster (17 § 18).
+    /// of those bytes never saw. A run restarts the delta; a frame this encoder writes has at most one run per sub-list.
     /// </remarks>
     private static void WriteRunHeader(ref WireWriter w, int count)
     {
@@ -362,27 +322,6 @@ internal static unsafe class EntitiesEncoder
 
         w.WriteVaru(1);
         w.WriteVaru((uint)count);
-    }
-
-    /// <summary>
-    /// Writes a sub-list's run count, then copies in every run this frame only references, leaving the writer positioned where its own run begins.
-    /// </summary>
-    /// <param name="w">The writer.</param>
-    /// <param name="count">Records in the run this frame owns; zero when it owns none.</param>
-    /// <param name="shared">Runs encoded elsewhere.</param>
-    private static void WriteRunHeader(ref WireWriter w, int count, ReadOnlySpan<SharedRunBytes> shared)
-    {
-        var own = count == 0 ? 0 : 1;
-        w.WriteVaru((uint)(shared.Length + own));
-        for (var i = 0; i < shared.Length; i++)
-        {
-            w.WriteBytes(new ReadOnlySpan<byte>(shared[i].Bytes, shared[i].Length));
-        }
-
-        if (own != 0)
-        {
-            w.WriteVaru((uint)count);
-        }
     }
 
     private static void WriteSection(ref WireWriter w, in ArchetypeEncodePlan.SectionWalk walk, byte* region)
@@ -398,8 +337,8 @@ internal static unsafe class EntitiesEncoder
 
     private static void WriteGap(ref WireWriter w, ref long prev, uint netId)
     {
-        // The frame stage sorts every sub-list and probes a known-set that holds each netId once, so an out-of-order or repeated id here is a defect in this
-        // engine rather than bad input — and one that would silently shift every following record, since the gap is relative.
+        // The frame stage sorts every sub-list and names each entity once per sub-list, so an out-of-order or repeated id here is a defect in this engine
+        // rather than bad input — and one that would silently shift every following record, since the gap is relative.
         if (netId <= prev)
         {
             throw new InvalidOperationException(

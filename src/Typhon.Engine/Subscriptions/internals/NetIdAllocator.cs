@@ -31,8 +31,9 @@ namespace Typhon.Engine.Internals;
 /// </para>
 /// <para>
 /// <b>Why a flat array is right here, where it is wrong for the directory.</b> Identities are dense by construction: they come from a counter and are
-/// recycled, so the high-water mark is the PEAK number of simultaneously watched entities, not a persisted address space. That keeps the side arrays bounded
-/// by the watched set, which is what SUB-13 requires — unlike a cluster chunk id, which is a file address and would size an array by what the database holds.
+/// recycled, so the high-water mark is the PEAK number of simultaneously replicated entities, not a persisted address space. That keeps the side arrays
+/// bounded by what is replicated, which is what SUB-13 requires — unlike a cluster chunk id, which is a file address and would size an array by what the
+/// database holds.
 /// </para>
 /// <para>
 /// <b>Thread safety: none, by contract.</b> Touched only at the replication track's single-threaded points. The design's per-worker identity blocks are an
@@ -341,7 +342,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     }
 
     /// <summary>
-    /// Doubles the addressable capacity. Called only while the watched set is still growing.
+    /// Doubles the addressable capacity. Called only while the replicated population is still growing.
     /// </summary>
     /// <remarks>
     /// The <see cref="_nextFree"/> copy is load-bearing, not defensive: free AND quarantined entries carry their successors through it, so dropping it would

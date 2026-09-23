@@ -112,7 +112,7 @@ class ReplicationBlockLayoutTests
             Assert.That(baseline.ColdStride, Is.EqualTo(ReplicationBlockLayout.ColdEntrySize));
             Assert.That(baseline.SegmentOffsetInHotEntry, Is.EqualTo(ReplicationBlockLayout.HotFixedBytes));
             Assert.That(baseline.PackedStateOffsetInHotEntry, Is.EqualTo(ReplicationBlockLayout.HotFixedBytes + ReplicationBlockLayout.BaselineSegmentBytes));
-            Assert.That(baseline.LastWatchedTickOffsetInColdEntry,
+            Assert.That(baseline.LastEventTickOffsetInColdEntry,
                 Is.EqualTo(ReplicationBlockLayout.BaselinePrevPositionBytes + ReplicationBlockLayout.BaselineRunStartBytes));
         });
     }

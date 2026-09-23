@@ -13,10 +13,10 @@ namespace Typhon.Engine.Internals;
 [StructLayout(LayoutKind.Sequential, Size = 64)]
 internal struct ReplicationBlockHeader
 {
-    /// <summary>Bit <c>i</c> is set when slot <c>i</c> of this cluster is watched by at least one session this tick.</summary>
+    /// <summary>Bit <c>i</c> is set when slot <c>i</c> of this cluster is projected this tick: the push set.</summary>
     public ulong WatchedMask;
 
-    /// <summary>Tick at which this block last had a watched slot; drives eviction of blocks idle for ~50 ticks.</summary>
+    /// <summary>The tick this block was last marked: the claim stamp that lists it once per tick in <see cref="WatchedBlockList"/>.</summary>
     public uint LastWatchedTick;
 
     /// <summary>The cluster chunk id this block describes. Checked against the directory key to catch a recycled id.</summary>
@@ -25,32 +25,11 @@ internal struct ReplicationBlockHeader
     /// <summary>Intrusive free-list link, used only while this block is free.</summary>
     public nint NextFree;
 
-    /// <summary>
-    /// Bit <c>i</c> is set when slot <c>i</c> produced a record in the tick named by <see cref="ChangedTick"/> — an enter, or a group whose bytes differed.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>The projection pass already computes this and used to discard it.</b> S1 re-encodes every watched slot and compares against the stored copy —
-    /// there is no dirty bit to read, because <c>ClusterRef.GetSpan</c> and <c>WriteSpatial</c> signal nothing (SUB-10) — and assembles a record only for
-    /// slots whose comparison differed. Publishing the mask costs one store per block and turns that knowledge into something the frame stage can use
-    /// instead of rediscovering per session.
-    /// </para>
-    /// <para>
-    /// <b>Valid only for the tick it names.</b> A reader must test <see cref="ChangedTick"/> against its own tick before trusting a bit: a block not
-    /// projected this tick carries the previous tick's mask, and treating that as current would drop this tick's changes silently. Both fields live in the
-    /// header's existing padding — it is declared <c>Size = 64</c> and used 45 bytes with the two projection-state
-    /// fields below — so nothing about the block's layout moves.
-    /// </para>
-    /// </remarks>
-    public ulong ChangedSlots;
-
     /// <summary>The watched mask as it stood the last time this block was actually projected.</summary>
     /// <remarks>
-    /// <b>This is what makes the dormant-cluster skip safe.</b> A sleeping cluster's bytes cannot have changed, but a session that starts watching one of
-    /// its slots still needs that slot's IDENTITY, and identities are minted by the projection pass. Skipping a dormant block whose watched set had grown
-    /// left the new slot without a netId for as long as the cluster slept, which the frame stage reads as "this session is still owed something" — so
-    /// ViewComplete never latched, every gather fell back to the full walk, and the frame stage lost more than the projection saved. Measured on the SWG
-    /// demo: "0 difference, 36 566 full" and frames up from 3.4 ms to 5.8 ms. Comparing against this mask costs one AND and one branch.
+    /// <b>This is what makes the dormant-cluster skip safe.</b> A sleeping cluster's bytes cannot have changed, but a slot pushed for the first time still
+    /// needs its IDENTITY, and identities are minted by the projection pass. Skipping a dormant block whose marked set had grown would leave the new slot
+    /// without a netId for as long as the cluster slept. Comparing against this mask costs one AND and one branch.
     /// </remarks>
     public ulong ProjectedWatchedMask;
 
@@ -60,27 +39,20 @@ internal struct ReplicationBlockHeader
     /// detected nowhere else — <c>ProjectBlock</c>'s own remark says "there is no destroy hook anywhere, and a slot that stopped being occupied is
     /// detected by this AND" — and no destroy path raises a dirty bit, so a destroy inside a sleeping cluster would never wake it. The identity would
     /// never be released, the block would go on describing a dead entity, and a respawn into that slot would be served to clients as the OLD entity under
-    /// the OLD netId, which the frame stage's reuse detection cannot see because it compares against the block's own stale id. Comparing the occupancy
+    /// the OLD netId. Comparing the occupancy
     /// word costs one load the skip has to do anyway.
     /// </remarks>
     public ulong ProjectedOccupancy;
 
-
     /// <summary>
     /// Bit <c>i</c> is set when an entity ARRIVED in slot <c>i</c> from somewhere else since this block was last projected — a migration carried in, or a
-    /// parked entry drained into it. Read, OR-ed into <see cref="ChangedSlots"/> and cleared by the projection.
+    /// parked entry drained into it. Read and cleared by the projection, which flags the slot's push event as an arrival.
     /// </summary>
     /// <remarks>
     /// <para>
     /// <b>It closes the one way an entity can move without anything saying so.</b> A migration copies the entry verbatim: the identity, the group stamps
-    /// and the quantized state all arrive unchanged, so if the entity's projected bytes did not change on that tick, NO group tick is stamped and the
-    /// destination's change mask does not name the slot. The session that reaches the destination therefore never visits it — and the session that reached
-    /// the SOURCE sees the slot it held change occupant, calls the entity displaced, and emits a LEAVE for an entity that never left its view. The client
-    /// is told to drop it and told to enter it again on some later tick.
-    /// </para>
-    /// <para>
-    /// <b>Naming the arrival costs one bit and no wire bytes.</b> The slot is visited, the session's per-slot identity is refreshed, the walk records the
-    /// identity as read this tick — which is what suppresses the source's leave — and no record is emitted at all when nothing about the entity changed.
+    /// and the quantized state all arrive unchanged, so if the entity's projected bytes did not change on that tick its event would say nothing — and the
+    /// entity's latest event would go on naming the slot it left. Flagged as an arrival, the event is never a no-op.
     /// </para>
     /// <para>
     /// <b>Set with <see cref="System.Threading.Interlocked"/> and read with an exchange</b>, because migrations run in the fence's parallel slices while
@@ -89,15 +61,6 @@ internal struct ReplicationBlockHeader
     /// </para>
     /// </remarks>
     public ulong ArrivedSlots;
-
-    /// <summary>The tick <see cref="ChangedSlots"/> describes. Any other tick means the mask is stale and must not be read.</summary>
-    /// <remarks>
-    /// <b>Written with a release and read with an acquire</b>, because it is the name that makes the mask beside it trustworthy and the two are stored
-    /// separately. Program order alone does not order them on arm64, and either reordering is a silent wrong answer: a reader seeing the new tick against
-    /// the old bits applies a stale change set, and one seeing the old tick against the new bits takes a needless full walk. Both loads compile to plain
-    /// <c>mov</c> on x64.
-    /// </remarks>
-    public uint ChangedTick;
 
     /// <summary>
     /// Whether the pool considers this block rented or free. Owned by <see cref="ReplicationBlockPool"/> alone.
@@ -169,8 +132,8 @@ internal unsafe struct ReplicationColdEntry
     /// <summary>Run start <c>(p_s, t_s)</c>. Encoding owned by the projection pass.</summary>
     public fixed byte RunStart[12];
 
-    /// <summary>Tick at which this entry was last watched.</summary>
-    public uint LastWatchedTick;
+    /// <summary>The tick of the entity's last push event (SUB-19).</summary>
+    public uint LastEventTick;
 }
 
 /// <summary>
@@ -367,8 +330,8 @@ internal readonly struct ReplicationBlockLayout
     /// <summary>Byte offset of the run start pair inside one cold entry.</summary>
     public int RunStartOffsetInColdEntry => PrevPositionBytes;
 
-    /// <summary>Byte offset of the last-watched tick inside one cold entry.</summary>
-    public int LastWatchedTickOffsetInColdEntry => PrevPositionBytes + RunStartBytes;
+    /// <summary>Byte offset of the last-event tick inside one cold entry (SUB-19).</summary>
+    public int LastEventTickOffsetInColdEntry => PrevPositionBytes + RunStartBytes;
 
     /// <summary>Byte offset of the enter cache's static position inside one cold entry.</summary>
     public int EnterPositionOffsetInColdEntry => PrevPositionBytes + RunStartBytes + ColdFixedBytes;
