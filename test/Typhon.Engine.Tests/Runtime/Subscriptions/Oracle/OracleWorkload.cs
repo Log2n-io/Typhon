@@ -138,9 +138,23 @@ internal sealed class OracleWorkload
     /// </remarks>
     public string LastAction { get; private set; }
 
+    /// <summary>
+    /// When positive, every creature also walks this far each step, along a heading it keeps and now and then turns: a steady mover whose position leaves
+    /// v̂ behind by up to the slack (09 § 2), which drift and teleports never do.
+    /// </summary>
+    public float WalkStrideM { get; set; }
+
+    // Each walker's heading, by entity.
+    private readonly Dictionary<long, double> _headings = [];
+
     public void Step()
     {
         MovedLastStep.Clear();
+        if (WalkStrideM > 0)
+        {
+            WalkAll();
+        }
+
         var roll = _random.Next(100);
         LastAction = roll < 12 ? "spawn" : roll < 24 ? "destroy creature" : roll < 30 ? "spawn rock" : roll < 34 ? "destroy rock" : roll < 60 ? "drift"
             : roll < 74 ? "teleport" : roll < 88 ? "vitals" : "mode";
@@ -260,6 +274,48 @@ internal sealed class OracleWorkload
         }
 
         Teleports += Teleport();
+    }
+
+    /// <summary>Walks every creature one stride along its heading, through <c>WriteSpatial</c> so crossings migrate; a walker at the world's edge turns.</summary>
+    private void WalkAll()
+    {
+        using var tx = _engine.CreateQuickTransaction();
+        var accessor = tx.For<ProjCreature>();
+        try
+        {
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                var occupancy = cluster.OccupancyBits;
+                while (occupancy != 0)
+                {
+                    var slot = BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+                    var id = (long)cluster.GetEntityId(slot).RawValue;
+                    if (!_headings.TryGetValue(id, out var heading) || _random.Next(40) == 0)
+                    {
+                        heading = _random.NextDouble() * Math.PI * 2;
+                    }
+
+                    var bounds = cluster.GetReadOnly(ProjCreature.Bounds, slot).Bounds;
+                    var x = Centre(bounds.MinX, bounds.MaxX) + (float)(Math.Cos(heading) * WalkStrideM);
+                    var y = Centre(bounds.MinY, bounds.MaxY) + (float)(Math.Sin(heading) * WalkStrideM);
+                    if (Clamp(x) != x || Clamp(y) != y)
+                    {
+                        heading += Math.PI;
+                    }
+
+                    _headings[id] = heading;
+                    MovedLastStep.Add(id);
+                    cluster.WriteSpatial(ProjCreature.Bounds, slot, BoundsAt(Clamp(x), Clamp(y)));
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        tx.Commit();
     }
 
     /// <summary>

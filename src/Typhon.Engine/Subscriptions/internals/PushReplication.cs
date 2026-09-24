@@ -132,6 +132,11 @@ internal abstract unsafe class PushReplication
     /// <summary>Per plan index: a centimetre plus the coarsest quantization step, the margin a pruning proof on raw cluster bounds needs.</summary>
     private protected readonly double[] _pruneMargin;
 
+    // Per archetype, what v̂'s lag behind the true position costs the cluster proofs (09 § 2, SUB-20): a cluster's box bounds true positions and v̂ lies up
+    // to h_A from them, so the cell query pads by 1 m + h_A and the pruning margin by 1 cm + h_A.
+    private protected readonly double[] _queryPad;
+    private protected readonly double[] _skipMargin;
+
     /// <summary>The visibility radius: the largest a session takes, which sizes its window.</summary>
     public readonly double Radius;
 
@@ -396,6 +401,8 @@ internal abstract unsafe class PushReplication
         _axisBytes = new int[plans.Length];
         _hasZ = new bool[plans.Length];
         _pruneMargin = new double[plans.Length];
+        _queryPad = new double[plans.Length];
+        _skipMargin = new double[plans.Length];
         _positionOffset = new int[plans.Length];
         _pushChunks = new int[plans.Length][];
         _pushBlocks = new nint[plans.Length][];
@@ -424,8 +431,11 @@ internal abstract unsafe class PushReplication
                     + "in the spatial world.");
             }
 
-            // Where the entity's last projected position lives: a mover's previous-position copy, or a static entity's enter cache (it never moves).
-            _positionOffset[a] = position.Moving ? blockLayout.PrevPositionOffsetInColdEntry : blockLayout.EnterPositionOffsetInColdEntry;
+            // Where the position every geometric test reads lives: a mover's v̂ (its previous position when h_A = 0), or a static entity's enter cache.
+            _positionOffset[a] = position.Moving ? blockLayout.VisibilityPositionOffsetInColdEntry : blockLayout.EnterPositionOffsetInColdEntry;
+            var slack = position.Moving ? plans[a].VisibilitySlackM : 0d;
+            _queryPad[a] = 1d + slack;
+            _skipMargin[a] = 0.01 + slack;
 
             var pos = position.Pos;
             _minX[a] = pos.Min[0];
@@ -441,6 +451,8 @@ internal abstract unsafe class PushReplication
                 _stepZ[a] = WireMath.QuantStep(pos.Min[2], pos.Max[2], pos.Bits);
                 _pruneMargin[a] = Math.Max(_pruneMargin[a], 0.01 + _stepZ[a]);
             }
+
+            _pruneMargin[a] += slack;
 
             _axisBytes[a] = pos.Bits / 8;
             _pushChunks[a] = new int[64];

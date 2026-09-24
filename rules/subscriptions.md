@@ -389,6 +389,23 @@
     ArchetypeSetTests.AnArchetypePastPlanIndexSixtyThreeReachesOnlyTheSessionsThatObserveIt, red under a 64-bit set (plan index 70 aliases 6),
     ArchetypeSetTests.AProfileObservingMoreThanSixtyFourArchetypesServesEveryOne, SubscriptionsRegistryTests.The256thArchetype_IsRefused.
 
+### SUB-20: Every geometric test reads v̂, and v̂ moves only by its rule `[fatal][silent]`
+  invariant ∀ observed moving archetype A with slack h_A (09 § 2): each entity e keeps a visibility position v̂ₑ; every geometric test — the push
+    step, the crescent sweep, the cell delivery, the log catch-up, the occupancy and the shadow check — reads v̂ₑ, never the true position
+  invariant v̂ₑ := pₑ (this tick's decoded quantized position) at initialization, on a teleport (the motion epoch changed), and when |pₑ − v̂ₑ| > h_A;
+    otherwise v̂ₑ is unchanged. h_A = 0 is exact: v̂ is the last projected position, and no byte is added to the cold entry
+  invariant h_A ≤ the slack of every Sphere profile observing A — R / 48 until leave bands exist (Q1) — so each profile's bound holds: e is held when its
+    true position is within R − h_A of the anchor, and not held past R + h_A
+  invariant every cluster proof widens by h_A: a cell's cluster query pads by 1 m + h_A and a pruning test by 1 cm + h_A, because a cluster's box
+    bounds true positions and v̂ lies up to h_A from them
+  invariant every move of v̂ makes an event; a mover whose v̂ stays and whose segment and groups did not change makes none
+  scope: ProjectionPass, SubscriptionsRuntime, ReplicationBlockLayout.VisibilityPositionOffsetInColdEntry, PushReplication.AddEvent
+  on_violation: silent. A test that read the true position would disagree with the events the others were fed, and an entity would be entered or left
+    twice or never; a proof that did not widen would skip a cluster holding an entity whose v̂ lies in the cell, which is then never delivered.
+  rationale: the observer already has a slack (the anchor); the entity side had none, so every mover was an event every tick (09 § 2, B10).
+  verified: PushOracleTests.SteadyWalkersAreHeldWithinTheSlackOfTheirDisc at h ∈ {0, R / 48, 8 m} and skip rates 0 and 60 %, with every creature
+    walking 1.5 m a tick; its event count per walker-tick falls with h.
+
 ---
 
 ## Module: Session Lifecycle

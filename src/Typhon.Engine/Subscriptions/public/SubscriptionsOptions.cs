@@ -294,6 +294,12 @@ public sealed class SubscriptionsOptions
     internal bool ForceDeepReplicationForTest { get; init; }
 
     /// <summary>
+    /// Tests and measurements only: the visibility slack <c>h</c>, in metres, of every moving observed archetype, in place of the rule (09 § 2, Q1: the
+    /// smallest <c>R / 48</c> over the Sphere profiles observing it). <see cref="double.NaN"/> applies the rule; 0 is exact.
+    /// </summary>
+    internal double VisibilitySlackMForTest { get; init; } = double.NaN;
+
+    /// <summary>
     /// Whether a profile may declare <see cref="PushDetection.Automatic"/> (ADR-067). Off: replication is explicit — a system that writes a
     /// replicated value calls <see cref="SubscriptionsCommands.Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/> — and a profile asking for automatic
     /// detection is refused when the runtime starts.

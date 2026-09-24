@@ -248,6 +248,12 @@ internal static unsafe class ProjectionPass
         var position = plan.Position;
         var positionBytes = layout.PrevPositionBytes;
 
+        // v̂ (09 § 2, SUB-20): kept apart from the previous position only when the archetype's slack is above zero. It moves to the entity's position at
+        // an initialization, on a teleport, or when the position is more than h_A from it; otherwise the geometry keeps reading where it was.
+        var ownVisibility = layout.VisibilityPositionBytes > 0;
+        var slack = plan.VisibilitySlackM;
+        var slackSquared = slack * slack;
+
         // A pointer as well as a span over the same stack bytes: the position is quantized through the span and read by the motion rule through the pointer,
         // and taking the pointer here rather than per slot is what keeps a `fixed` region off the per-entity path.
         var quantizedBuffer = stackalloc byte[24];
@@ -323,11 +329,12 @@ internal static unsafe class ProjectionPass
             {
                 QuantizePosition(position, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
                 var stored = coldBytes + layout.PrevPositionOffsetInColdEntry;
+                var visibility = coldBytes + layout.VisibilityPositionOffsetInColdEntry;
                 if (push != null)
                 {
                     if (!initialize)
                     {
-                        push.Decode(pushIndex, stored, out pushOldX, out pushOldY, out pushOldZ);
+                        push.Decode(pushIndex, visibility, out pushOldX, out pushOldY, out pushOldZ);
                         pushFlags |= PushEvent.HasOld;
                     }
 
@@ -335,6 +342,7 @@ internal static unsafe class ProjectionPass
                     pushFlags |= PushEvent.HasNew;
                 }
                 var moved = initialize || !new ReadOnlySpan<byte>(stored, positionBytes).SequenceEqual(quantizedPosition[..positionBytes]);
+                var epochBefore = ownVisibility && motion.Enabled ? hotBytes[motion.SegmentOffset + motion.SegmentEpochOffset] : (byte)0;
 
                 // BEFORE the previous position is overwritten, because the rule's teleport and run-departure tests are about this tick's STEP, which only
                 // exists while both positions are still there. The rule owns the whole of the hot entry's segment region and the motion tick in
@@ -347,6 +355,25 @@ internal static unsafe class ProjectionPass
                 {
                     quantizedPosition[..positionBytes].CopyTo(new Span<byte>(stored, positionBytes));
                     hot->Flags |= FlagPositionChanged;
+                }
+
+                if (ownVisibility)
+                {
+                    var dx = pushNewX - pushOldX;
+                    var dy = pushNewY - pushOldY;
+                    var dz = pushNewZ - pushOldZ;
+                    var teleported = motion.Enabled && hotBytes[motion.SegmentOffset + motion.SegmentEpochOffset] != epochBefore;
+                    if (initialize || teleported || (dx * dx) + (dy * dy) + (dz * dz) > slackSquared)
+                    {
+                        quantizedPosition[..positionBytes].CopyTo(new Span<byte>(visibility, positionBytes));
+                    }
+                    else
+                    {
+                        // v̂ stays: the event carries it on both sides, so it is dropped unless a segment or a group made it one.
+                        pushNewX = pushOldX;
+                        pushNewY = pushOldY;
+                        pushNewZ = pushOldZ;
+                    }
                 }
 
                 // A client dead-reckons a mover until told it stopped, so a slot still extrapolating is pushed by the engine next tick —

@@ -134,7 +134,10 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     {
         // Deterministic projection builds the index, and so folds the far flushes, serially in the frame prologue rather than in their stages.
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7300 + skipPercent, [skipPercent, 0, 30, 0],
-            nameof(PushOracleTests), detection: detection, walkRadius: 3000, deterministicProjection: deterministic);
+            nameof(PushOracleTests), detection: detection, walkRadius: 3000, deterministicProjection: deterministic, visibilitySlackM: 0);
+
+        // h = 0: the drifts this workload makes are what the LOD defers most, and v̂ would remove them as events altogether (09 § 2). The LOD over v̂
+        // is step 2.4's, with its declared bands.
         oracle.Push.FarEvery = 4;
 
         for (var i = 0; i < GateTicks; i++)
@@ -162,7 +165,8 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     public void ADeferredFarChangeReachesASessionThatWalksCloser([Range(7400, 7409)] int seed, [Values(0, 30)] int skipPercent)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed,
-            [skipPercent, 0, skipPercent, 0, skipPercent, 0, skipPercent, 0], nameof(PushOracleTests), detection: PushDetection.Explicit, walkRadius: 3000);
+            [skipPercent, 0, skipPercent, 0, skipPercent, 0, skipPercent, 0], nameof(PushOracleTests), detection: PushDetection.Explicit, walkRadius: 3000,
+            visibilitySlackM: 0);
 
         // A long window, so many far changes are still pending when the sessions start to move — below the log depth, or every flush is a reset.
         oracle.Push.FarEvery = 6;
@@ -469,6 +473,61 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         Assert.That(required, Is.GreaterThan(200), "the discs held too little for the comparison to mean anything");
         Assert.That(oracle.ViewpointTeleports, Is.GreaterThan(5), "no session teleported, so the reset path was not exercised");
         Assert.That(oracle.Push.Sweeps, Is.GreaterThan(50), "the anchors barely moved, so the crescent sweep was not exercised");
+    }
+
+    /// <summary>
+    /// Creatures that walk steadily leave v̂ behind by up to the slack h (09 § 2), and every session still holds exactly what its disc names in terms of
+    /// v̂: an entity within R − h of the viewpoint is held, one past R + h is not — through walking sessions, teleports, churn and skipped frames.
+    /// </summary>
+    /// <param name="slackM">h in metres; −1 for the rule, R / 48 = 62.5 m at this radius. An int: the test name becomes a database name.</param>
+    /// <param name="skipPercent">The percentage of ticks on which each session's frames are left undrained.</param>
+    /// <remarks>
+    /// The drift and teleport workload never exercises v̂: a drift stays under a centimetre and a teleport moves v̂ with it. A 1.5 m stride per tick — 15 m/s, under the
+    /// declared 20 m/s teleport — is what makes v̂ lag, cross cells late and cross the disc's edge late — the cases the widened cluster margins exist for. At h = 0 every step is an event; at
+    /// h > 0 a walker makes one per h of travel, which the event count shows.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    [VerifiesRule("SUB-20")]
+    public void SteadyWalkersAreHeldWithinTheSlackOfTheirDisc([Values(0, -1, 8)] int slackM, [Values(0, 60)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 9300 + skipPercent, [skipPercent, 0, 30, skipPercent],
+            nameof(PushOracleTests), walkRadius: 3000, visibilitySlackM: slackM < 0 ? double.NaN : slackM);
+        oracle.Workload.WalkStrideM = 1.5f;
+        var expectedSlack = slackM < 0 ? 3000d / 48d : slackM;
+        Assert.That(oracle.CreatureSlackM, Is.EqualTo(expectedSlack), "the slack the creatures were resolved to");
+
+        var required = 0L;
+        var walkerTicks = 0L;
+        var events0 = oracle.Push.Events;
+        for (var i = 0; i < GateTicks; i++)
+        {
+            walkerTicks += oracle.Workload.Creatures.Count;
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"h = {expectedSlack} m, steady walkers, after {i + 1} ticks at a {skipPercent}% skip rate");
+                oracle.AssertWritesSurvived($"h = {expectedSlack} m, steady walkers, after {i + 1} ticks");
+                required += oracle.RequiredAtLastPoint;
+            }
+        }
+
+        var eventsPerWalkerTick = (oracle.Push.Events - events0) / (double)walkerTicks;
+        Assert.Multiple(() =>
+        {
+            Assert.That(required, Is.GreaterThan(200), "the discs held too little for the comparison to mean anything");
+            Assert.That(oracle.Push.Sweeps, Is.GreaterThan(50), "the anchors barely moved, so the crescent sweep was not exercised");
+            if (expectedSlack == 0)
+            {
+                Assert.That(eventsPerWalkerTick, Is.GreaterThan(0.9), "at h = 0 every stride is an event");
+            }
+            else
+            {
+                // A 1.5 m stride moves v̂ once per ⌈h / 1.5⌉ strides: a sixth of the h = 0 count at 8 m, a fortieth at 62.5 m, plus segments and churn.
+                Assert.That(eventsPerWalkerTick, Is.LessThan(expectedSlack > 10 ? 0.15 : 0.5), $"at h = {expectedSlack} m v̂ moves once per h of travel");
+            }
+        });
     }
 
     /// <summary>

@@ -163,6 +163,9 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <summary>The push path.</summary>
     public PushReplication Push => _harness.Subscriptions.Push;
 
+    /// <summary>The creatures' resolved visibility slack h, in metres.</summary>
+    public double CreatureSlackM => _harness.Subscriptions.Plans[_creatureIndex].VisibilitySlackM;
+
     /// <summary>The frame harness underneath, for what the oracle does not wrap (the frame digest).</summary>
     public FrameHarness Frames => _harness;
 
@@ -216,9 +219,10 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// </param>
     /// <param name="replicationCellM">The replication cell side; zero for <c>ProjectionTestSchema.ReplicationCellFor</c> of the profile's radius.</param>
     /// <param name="forceDeep">Serve the flat world with the deep implementation, which must agree with the flat one on it (10 § 3.5).</param>
+    /// <param name="visibilitySlackM">The creatures' visibility slack h (09 § 2); <see cref="double.NaN"/> for the rule, R / 48.</param>
     public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, PushDetection detection = PushDetection.Explicit,
         double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false,
-        double replicationCellM = 0, bool forceDeep = false)
+        double replicationCellM = 0, bool forceDeep = false, double visibilitySlackM = double.NaN)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
@@ -226,7 +230,8 @@ internal sealed unsafe class OracleHarness : IDisposable
         var radius = walk ? walkRadius : PushRadiusM;
         var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every), name,
             Options(detection == PushDetection.Automatic, deterministicProjection,
-                replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(worldObserver && !walk ? 0 : radius), forceDeep));
+                replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(worldObserver && !walk ? 0 : radius), forceDeep,
+                visibilitySlackM));
         try
         {
             harness.SerialIndex = deterministicProjection;
@@ -539,7 +544,10 @@ internal sealed unsafe class OracleHarness : IDisposable
     {
         var held = new HashSet<uint>(replica.NetIds(plan));
         var slack = _radius / 3.0 / 16.0;
-        var margin = slack + MotionToleranceM + 0.01;
+
+        // v̂ trails a mover's true position by up to h (09 § 2): held within R − h, dropped past R + h, either between.
+        var visibility = plan == _creatureIndex ? _harness.Subscriptions.Plans[plan].VisibilitySlackM : 0d;
+        var margin = slack + visibility + MotionToleranceM + 0.01;
         var inner = _radius - margin;
         var outer = _radius + margin;
         var viewpoint = _viewpoints[session];
@@ -683,9 +691,11 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// induces on purpose — the run would still be correct but it would no longer be measuring what it says it measures. The enter budget is left at the
     /// engine's default: deferring enters across ticks is real behaviour that the quiet window is there to absorb, and raising it would hide it.
     /// </remarks>
-    private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection, double replicationCellM, bool forceDeep) => new()
+    private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection, double replicationCellM, bool forceDeep,
+        double visibilitySlackM) => new()
     {
         ReplicationCellM = replicationCellM,
+        VisibilitySlackMForTest = visibilitySlackM,
         ForceDeepReplicationForTest = forceDeep,
         AllowAutomaticPushDetection = automatic,
 

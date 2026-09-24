@@ -1525,30 +1525,32 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
     /// <summary>
     /// Whether a cluster's box proves no entity in it can matter: for a delivery, the box is wholly outside the new sphere; for a sweep, it is wholly
-    /// inside both spheres or wholly outside both. A centimetre of margin keeps the proof sound against the quantized positions the tests use.
+    /// inside both spheres or wholly outside both. The margin — a centimetre plus the archetype's slack — keeps the proof sound against the quantized v̂
+    /// the tests use: the box bounds true positions, and v̂ lies up to h_A from them (SUB-20).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool SkipCluster(double bx0, double by0, double bz0, double bx1, double by1, double bz1, in Ball a, in Ball n, bool sweeping)
+    private static bool SkipCluster(double bx0, double by0, double bz0, double bx1, double by1, double bz1, in Ball a, in Ball n, bool sweeping,
+        double margin)
     {
         if (double.IsInfinity(bx0) || double.IsInfinity(bx1) || (TEvent.Deep && (double.IsInfinity(bz0) || double.IsInfinity(bz1))))
         {
             return false;
         }
 
-        var outsideNew = BoxMin2(n, bx0, by0, bz0, bx1, by1, bz1) > (n.R + 0.01) * (n.R + 0.01);
+        var outsideNew = BoxMin2(n, bx0, by0, bz0, bx1, by1, bz1) > (n.R + margin) * (n.R + margin);
         if (!sweeping)
         {
             return outsideNew;
         }
 
-        var outsideOld = BoxMin2(a, bx0, by0, bz0, bx1, by1, bz1) > (a.R + 0.01) * (a.R + 0.01);
+        var outsideOld = BoxMin2(a, bx0, by0, bz0, bx1, by1, bz1) > (a.R + margin) * (a.R + margin);
         if (outsideNew && outsideOld)
         {
             return true;
         }
 
-        return BoxMax2(n, bx0, by0, bz0, bx1, by1, bz1) <= (n.R - 0.01) * (n.R - 0.01)
-               && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (a.R - 0.01) * (a.R - 0.01);
+        return BoxMax2(n, bx0, by0, bz0, bx1, by1, bz1) <= (n.R - margin) * (n.R - margin)
+               && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (a.R - margin) * (a.R - margin);
     }
 
     public override bool Gather(SessionId session, bool placed, Vector3D viewpoint, bool forceReset, in ArchetypeSet archetypes, FrameWorkerScratch scratch,
@@ -2534,7 +2536,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             // The box is built from raw positions and the test below from decoded ones: a margin of a quantization step keeps the pruning sound.
             var margin = _pruneMargin[arch];
             double bz0 = 0, bz1 = 0;
-            QueryBox(cx, cy, cz, hasZ, out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
+            QueryBox(cx, cy, cz, hasZ, _queryPad[arch], out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
             using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
@@ -2885,23 +2887,24 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     /// world's bounds decodes into that cell, and a box that stopped at the edge would never find it. A flat grid's, and a 2D archetype's, Z is unbounded.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void QueryBox(int cx, int cy, int cz, bool hasZ, out double x0, out double y0, out double z0, out double x1, out double y1, out double z1)
+    private void QueryBox(int cx, int cy, int cz, bool hasZ, double pad, out double x0, out double y0, out double z0, out double x1, out double y1,
+        out double z1)
     {
         var cellX = _gridMinX + (cx * CellSize);
         var cellY = _gridMinY + (cy * CellSize);
         // A far finite bound, not an infinity: the spatial query takes an unbounded Z ("every Z") but refuses a non-finite X or Y, and widens the box by
         // a step below its low side, which would take -double.MaxValue to -Infinity.
-        x0 = cx == 0 ? -OpenEdgeM : cellX - 1d;
-        x1 = cx == _gridW - 1 ? OpenEdgeM : cellX + CellSize + 1d;
-        y0 = cy == 0 ? -OpenEdgeM : cellY - 1d;
-        y1 = cy == _gridH - 1 ? OpenEdgeM : cellY + CellSize + 1d;
+        x0 = cx == 0 ? -OpenEdgeM : cellX - pad;
+        x1 = cx == _gridW - 1 ? OpenEdgeM : cellX + CellSize + pad;
+        y0 = cy == 0 ? -OpenEdgeM : cellY - pad;
+        y1 = cy == _gridH - 1 ? OpenEdgeM : cellY + CellSize + pad;
         z0 = double.NegativeInfinity;
         z1 = double.PositiveInfinity;
         if (TEvent.Deep && hasZ)
         {
             var cellZ = _gridMinZ + (cz * CellSize);
-            z0 = cz == 0 ? double.NegativeInfinity : cellZ - 1d;
-            z1 = cz == _gridD - 1 ? double.PositiveInfinity : cellZ + CellSize + 1d;
+            z0 = cz == 0 ? double.NegativeInfinity : cellZ - pad;
+            z1 = cz == _gridD - 1 ? double.PositiveInfinity : cellZ + CellSize + pad;
         }
     }
 
@@ -2973,14 +2976,14 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             var layout = state.Layout;
             var hasZ = TEvent.Deep && _hasZ[a];
             double bz0 = 0, bz1 = 0;
-            QueryBox(cx, cy, cz, hasZ, out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
+            QueryBox(cx, cy, cz, hasZ, _queryPad[a], out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
             using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))
             {
                 ClampToWorld(ref bx0, ref by0, ref bz0, ref bx1, ref by1, ref bz1, hasZ);
-                if (!everywhere && SkipCluster(bx0, by0, bz0, bx1, by1, bz1, in n, in n, sweeping))
+                if (!everywhere && SkipCluster(bx0, by0, bz0, bx1, by1, bz1, in n, in n, sweeping, _skipMargin[a]))
                 {
                     continue;
                 }
@@ -3064,14 +3067,14 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             var layout = state.Layout;
             var hasZ = TEvent.Deep && _hasZ[arch];
             double bz0 = 0, bz1 = 0;
-            QueryBox(cx, cy, cz, hasZ, out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
+            QueryBox(cx, cy, cz, hasZ, _queryPad[arch], out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
             using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))
             {
                 ClampToWorld(ref bx0, ref by0, ref bz0, ref bx1, ref by1, ref bz1, hasZ);
-                if (SkipCluster(bx0, by0, bz0, bx1, by1, bz1, in a, in n, sweeping))
+                if (SkipCluster(bx0, by0, bz0, bx1, by1, bz1, in a, in n, sweeping, _skipMargin[arch]))
                 {
                     continue;
                 }
