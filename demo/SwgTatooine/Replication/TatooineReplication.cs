@@ -24,6 +24,12 @@ public static class TatooineReplication
     /// <summary>The god camera's profile: the whole planet, every archetype, through a <c>World</c> observer.</summary>
     public const string GodProfile = "god-world";
 
+    /// <summary>
+    /// The god camera's profile under <c>--god-region</c>: the client's own hull (<c>ClientRegion</c>), a near budget, and an aggregate of the rest — the
+    /// shape AC-3 measures (design/Subscriptions/09 § 17). Declared instead of <see cref="GodProfile"/>, never beside it.
+    /// </summary>
+    public const string GodRegionProfile = "god-region";
+
     /// <summary>The session kind a client names in <c>HELLO</c>.</summary>
     public const string GodKind = "god";
 
@@ -70,6 +76,18 @@ public static class TatooineReplication
     /// <summary>Each player session's outbound byte budget, bytes per second; 0 for none (<c>--session-budget</c>).</summary>
     public static int PlayerBudgetBytesPerSecond { get; set; }
 
+    /// <summary>The players' leave radius, metres (<c>--player-leave</c>); 0 for none, the default. AC-2 and AC-3 run at 192/208 m.</summary>
+    public static double PlayerLeaveM { get; set; }
+
+    /// <summary>The god region's largest edge, metres (<c>--god-region</c>); 0 keeps the <c>World</c> god camera, the default.</summary>
+    public static double GodRegionMaxEdgeM { get; set; }
+
+    /// <summary>The god region's near budget, entities (<c>--god-near</c>); 10 000 by default, AC-3's.</summary>
+    public static int GodNearBudget { get; set; } = 10_000;
+
+    /// <summary>The god region's aggregate tile, metres; its counts refresh once a second.</summary>
+    private const double GodAggregateTileM = 256d;
+
     /// <summary>Declares everything a client can see.</summary>
     /// <param name="subs">The runtime's registry, before <c>Start</c>.</param>
     /// <param name="automatic">Whether the engine detects changes itself instead of relying on the simulation's <c>Replicate</c> calls (experimental).</param>
@@ -106,19 +124,37 @@ public static class TatooineReplication
         // The god camera through a World observer, the players through a disc with no band: the anchor's slack is its hysteresis for observer motion
         // (push-model.md § 4.5).
         var detection = automatic ? PushDetection.Automatic : PushDetection.Explicit;
-        subs.Profile(GodProfile, p => p
-            .Detection(detection)
-            .World()
-            .Of<Creature>()
-            .Of<CityNpc>()
-            .Of<Player>()
-            .Of<CreatureLair>()
-            .Of<WorldObject>());
+        if (GodRegionMaxEdgeM > 0)
+        {
+            subs.Profile(GodRegionProfile, p =>
+            {
+                p.Detection(detection)
+                    .ClientRegion(GodRegionMaxEdgeM)
+                    .Near(GodNearBudget)
+                    .Of<Creature>()
+                    .Of<CityNpc>()
+                    .Of<Player>()
+                    .Of<CreatureLair>()
+                    .Of<WorldObject>();
+                p.Aggregate(GodAggregateTileM, rateHz: 1).Of<Creature>().Of<CityNpc>().Of<Player>();
+            });
+        }
+        else
+        {
+            subs.Profile(GodProfile, p => p
+                .Detection(detection)
+                .World()
+                .Of<Creature>()
+                .Of<CityNpc>()
+                .Of<Player>()
+                .Of<CreatureLair>()
+                .Of<WorldObject>());
+        }
 
         // Centred on the player the session controls, at its post-fence position (09 § 6): no per-tick Place.
         subs.Profile(PlayerProfile, p => p
             .Detection(detection)
-            .Sphere(PlayerRadiusM)
+            .Sphere(PlayerRadiusM, leave: PlayerLeaveM)
             .AroundControlled()
             .Of<Player>()
             .Of<CityNpc>()
@@ -149,7 +185,7 @@ public static class TatooineReplication
             {
                 // By kind, so one run can carry both shapes and a measurement can say which it measured.
                 var player = e.SessionKind == PlayerKind;
-                var request = subs.Session(e.Session).Profile(player ? PlayerProfile : GodProfile);
+                var request = subs.Session(e.Session).Profile(player ? PlayerProfile : GodRegionMaxEdgeM > 0 ? GodRegionProfile : GodProfile);
                 if (player && PlayerBudgetBytesPerSecond > 0)
                 {
                     request.SetBudget(PlayerBudgetBytesPerSecond);

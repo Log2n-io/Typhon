@@ -20,6 +20,8 @@ var seconds = int.Parse(Arg("--seconds") ?? "60");
 var hz = int.Parse(Arg("--hz") ?? "4");
 var kind = Arg("--kind") ?? "god";
 var connectBatch = int.Parse(Arg("--connect-batch") ?? "1");
+// A god camera's region edge, metres: what a ClientRegion god profile (the server's --god-region) observes. The default is the swarm's own.
+var regionM = Arg("--region-m");
 
 var options = new BotSwarmOptions
 {
@@ -28,6 +30,7 @@ var options = new BotSwarmOptions
     TickHz = hz,
     ConnectBatch = connectBatch,
     Kind = kind,
+    RegionRadiusM = regionM == null ? new BotSwarmOptions().RegionRadiusM : double.Parse(regionM, System.Globalization.CultureInfo.InvariantCulture),
 };
 
 Console.WriteLine($"connecting {bots} {kind} bots to {endpoint} …");
@@ -127,6 +130,8 @@ string Blocks()
     var subs = project + frames;
     var tick = swarm.ServerMetric("typhon.tick.p50");
     var tick99 = swarm.ServerMetric("typhon.tick.p99");
+    // The track's own span p99 (P1-17), which the Phase 2 criteria are written against; `subs` above is a sum of two stages' means.
+    var track99 = swarm.ServerMetric("typhon.subscriptions.track.p99");
     Console.WriteLine();
     // Wire cost beside CPU cost: bytes per session per second is the number a capacity plan is actually built on, and a design that trades CPU for
     // payload (or the reverse) cannot be judged from the timing half alone.
@@ -145,7 +150,7 @@ string Blocks()
     var tailSeconds = Math.Max(1.0, (now - from.At).TotalSeconds);
     var bytesLast10 = bots > 0 ? (swarm.BytesReceived - from.Bytes) / tailSeconds / bots : 0;
     Console.WriteLine($"SWEEP kind={kind} sessions={bots} project={project:F3} frames={frames:F3} "
-        + $"subs={subs:F3} tickP50={tick:F3} tickP99={tick99:F3} subsPct={(tick > 0 ? subs / tick * 100 : 0):F1} recPerFrame={swarm.RecordsPerFrame:F0} "
+        + $"subs={subs:F3} trackP99={track99:F3} tickP50={tick:F3} tickP99={tick99:F3} subsPct={(tick > 0 ? subs / tick * 100 : 0):F1} recPerFrame={swarm.RecordsPerFrame:F0} "
         + $"bytesPerSessionPerSec={bytesPerSessionPerSec:F0} bytesLast10={bytesLast10:F0} totalBytes={swarm.BytesReceived}");
     // Every system's mean, heaviest first: the tick is more than replication, and a change that moves cost out of the three stages above shows up here.
     var bySystem = new System.Collections.Generic.List<(string Name, double Ms)>(systems);
