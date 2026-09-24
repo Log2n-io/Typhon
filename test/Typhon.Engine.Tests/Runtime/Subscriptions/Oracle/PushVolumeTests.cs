@@ -79,6 +79,8 @@ class PushVolumeTests : TestBase<PushVolumeTests>
     /// </summary>
     [Test]
     [Explicit("A timing: run it on a quiet machine")]
+    // Manual: a wall-clock ratio needs a quiet machine, which a shared CI runner is not.
+    [Category("Manual")]
     public void AnEmptyDeepWorldCostsTheSameWhateverTheCellSide()
     {
         var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider, Volume16x16x4Km());
@@ -148,6 +150,8 @@ class PushVolumeTests : TestBase<PushVolumeTests>
     /// </summary>
     [Test]
     [Explicit("A measurement: run it on a quiet machine and read the output")]
+    // Manual: a wall-clock ratio needs a quiet machine, which a shared CI runner is not.
+    [Category("Manual")]
     [Property("CacheSize", 256 * 1024 * 1024)]
     public void TheVolumetricSwarmPerStage()
     {

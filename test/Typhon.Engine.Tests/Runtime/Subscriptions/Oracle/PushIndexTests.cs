@@ -338,6 +338,8 @@ class PushIndexTests : TestBase<PushIndexTests>
     /// </summary>
     [Test]
     [Explicit("Performance measurement")]
+    // Manual: a wall-clock ratio needs a quiet machine, which a shared CI runner is not.
+    [Category("Manual")]
     public void AnEmptyWorldCostsTheSameWhateverTheCellSide()
     {
         var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);

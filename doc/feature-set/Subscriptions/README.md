@@ -87,8 +87,9 @@ Clients connect over the built-in TCP transport or through ASP.NET Core (`servic
 - **Records are absolute and skips are unions:** a session that misses frames converges on its next one, with no retransmission.
 - **Correct on x64 and arm64:** every cross-thread hand-off is a named release/acquire pair.
 - **Zero steady-state managed allocation** in the replication path.
-- **Built today:** one `World` or one `Sphere` observer per profile, centred on the viewpoint the application places; 2D positions;
-  one Sphere radius shared by every profile; at most 64 observed archetypes. **Refused at `Start` until they are built:** a leave radius
+- **Built today:** one `World` or one `Sphere` observer per profile, centred on the viewpoint the application places; flat and volumetric
+  worlds (a world one spatial cell deep is served in the plane, a deeper one in 3D — 2D archetypes then live on the plane z = 0); one Sphere
+  radius shared by every profile; at most 64 observed archetypes. The replication cell side is declared (`SubscriptionsOptions.ReplicationCellM`). **Refused at `Start` until they are built:** a leave radius
   (hysteresis), a Sphere following an entity, several observers or near/far tiers in one profile, `ClientRegion`, `Aggregate`, headings,
   shared sources. Events are declared and exported but not delivered yet.
 - **A session never placed holds nothing** — not the area around the origin.
@@ -98,6 +99,7 @@ Clients connect over the built-in TCP transport or through ASP.NET Core (`servic
 - [PushOracleTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushOracleTests.cs) — decoded clients compared with the server under seeded churn, skips of 0–90 %, walking and teleporting sessions, both detection modes, the forgotten-push mutant
 - [FrameAssemblerTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/FrameAssemblerTests.cs) — skipped sessions caught up from the log; identical bytes for sessions in the same state
 - [SphereObserverTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/SphereObserverTests.cs) — a session holds exactly its disc
+- [PushOracle3DTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/Subscriptions/Oracle/PushOracle3DTests.cs) — the oracle in a volumetric world: 3D movers and 2D walkers, climbing and teleporting sessions, a radius that changes without a reset
 - Correctness rules: [`rules/subscriptions.md`](https://github.com/Log2n-io/Typhon/blob/main/rules/subscriptions.md) (SUB-01 … SUB-19)
 
 ## 🔗 Related
