@@ -24,7 +24,7 @@ export { epochAt, evaluateLive, evaluateSlot, headingOf, MAX_MOTION_STRIDE, segm
 export { Clock, type ClockOptions } from './clock/clock.js';
 export { AggregateGrid, type GridSchema } from './aggregates/aggregate-grid.js';
 export { FrameApplier, type FrameApplierOptions } from './apply/frame-applier.js';
-export { AckList, EventRecord, SelfState, SourceList, StatsState } from './apply/frame-state.js';
+export { AckList, EventRecord, retainBytes, SelfState, SourceList, StatsState } from './apply/frame-state.js';
 export { fieldKindOf, gridSchemaFromCatalog, worldSchemaFromCatalog } from './apply/schema-from-catalog.js';
 
 export {
@@ -49,6 +49,7 @@ export {
   decodeF16,
   decodeQuant,
   decodeQuat3,
+  decodeQuat3Halves,
   decodeSnorm,
   decodeTickLo,
   decodeUnorm,
@@ -112,7 +113,26 @@ export {
   type FieldValue,
   type FieldValues,
 } from './protocol/field-codec.js';
-export { BlockMask, TickReader, type TickSink } from './protocol/tick-reader.js';
+export {
+  BlockMask,
+  invalidStateMask,
+  nextNetId,
+  runLength,
+  segmentsOfAStill,
+  TickReader,
+  type EntitiesDecoder,
+  type EntitiesTarget,
+  type GeneratedDecoders,
+  type TickSink,
+} from './protocol/tick-reader.js';
+export {
+  catalogHashOf,
+  CODEGEN_USAGE,
+  generateDecoders,
+  parseCodegenArgs,
+  type CodegenArguments,
+  type GenerateOptions,
+} from './codegen/generate.js';
 export {
   beginBlock,
   endBlock,

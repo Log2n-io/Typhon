@@ -13,7 +13,11 @@
       "import": "./dist/index.js"
     }
   },
+  "bin": {
+    "typhon-codegen": "./bin/typhon-codegen.mjs"
+  },
   "files": [
+    "bin",
     "dist",
     "src"
   ],
@@ -23,12 +27,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p test",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test && tsc --noEmit -p bin && tsc --noEmit -p bench",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:f16-native": "vitest run test/f16-native.test.ts --execArgv=--js-float16array",
+    "bench:decode": "npm run build && node --experimental-strip-types --no-warnings=ExperimentalWarning bench/decode-budget.ts",
     "check": "npm run typecheck && npm run lint && npm run format:check && npm run test"
   },
   "devDependencies": {
