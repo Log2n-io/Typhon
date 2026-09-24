@@ -125,6 +125,12 @@ sealed unsafe class FrameHarness : IDisposable
     /// </summary>
     public bool SerialIndex { get; set; }
 
+    /// <summary>
+    /// Drains the identity quarantine at each tick's start, as the runtime does. Off by default, where no identity is ever reissued; on, a released netId
+    /// comes back a tick later (the harness's quarantine is one tick), so a skipped session can meet its reuse inside the push log (SUB-06).
+    /// </summary>
+    public bool DrainNetIds { get; set; }
+
     /// <summary>Runs one whole tick of the track: blocks, projection, the push index, frames, then the durability gate.</summary>
     /// <param name="tick">The tick number, which must advance.</param>
     /// <param name="workers">Worker-pool width for the frame stage; the projection runs as one chunk.</param>
@@ -136,6 +142,15 @@ sealed unsafe class FrameHarness : IDisposable
         if (RunFence)
         {
             Engine.WriteTickFence(tick);
+        }
+
+        // The shadow oracle's checks queued by the previous tick, where the ingress drain runs them: before this tick's projection moves a block.
+        Subscriptions.Push?.RunQueuedShadowChecks();
+
+        // The tick boundary the runtime drains the identity quarantine at: last tick's releases become reissuable.
+        if (DrainNetIds)
+        {
+            Replication.NetIds.DrainQuarantine();
         }
 
         Sessions.BeginTick();
@@ -504,9 +519,23 @@ sealed unsafe class FrameHarness : IDisposable
         var lists = Math.Max(1, ProjectionWorkers);
         push.MarkPushed(workers: lists, countInProject: !SerialIndex);
 
+        // As the runtime: a tick with no watched block skips the projection's opening, and only flushes the identity releases that fall due.
+        var watched = 0;
         for (var a = 0; a < states.Length; a++)
         {
-            states[a].BeginProjectTick(workers: lists);
+            watched += states[a].WatchedBlocks.Count;
+        }
+
+        for (var a = 0; a < states.Length; a++)
+        {
+            if (watched == 0)
+            {
+                states[a].FlushIdleTick();
+            }
+            else
+            {
+                states[a].BeginProjectTick(workers: lists);
+            }
         }
 
         var projected = 0;

@@ -934,6 +934,27 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         }
     }
 
+    /// <summary>
+    /// A tick with no block to project: last tick's queued releases reach the allocator and its departed entities are forgotten, as <see cref="BeginTick"/>
+    /// would, with the leases themselves left as they are — so a quiet world does not keep released identities live until something is pushed again.
+    /// </summary>
+    public void FlushReleases(NetIdAllocator allocator)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(allocator);
+        for (var i = 0; i < _count; i++)
+        {
+            ref var lease = ref _leases[i];
+            for (var r = 0; r < lease.ReleasedCount; r++)
+            {
+                allocator.Release(lease.Released[r]);
+            }
+
+            lease.ReleasedCount = 0;
+            lease.DepartedCount = 0;
+        }
+    }
+
     /// <summary>Spends one identity from the lease of <paramref name="worker"/>.</summary>
     /// <param name="worker">The chunk index.</param>
     /// <returns>The identity, or <see cref="NetIdAllocator.NoNetId"/> when the lease is empty.</returns>

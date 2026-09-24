@@ -33,6 +33,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     /// <param name="skipPercent">The percentage of ticks on which the session's frames are left undrained.</param>
     [Test]
     [VerifiesRule("SUB-03")]
+    [VerifiesRule("SUB-06")]
     [VerifiesRule("SUB-10")]
     public void AClientsWorldIsTheServersUnderPush(
         [Values(PushDetection.Explicit, PushDetection.Automatic)] PushDetection detection,

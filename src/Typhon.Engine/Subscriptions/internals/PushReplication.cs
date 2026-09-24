@@ -90,7 +90,7 @@ internal struct PushSessionState
 /// the blocks step, the validator, the occupancy, the counters — and the API; <see cref="PushReplication{TEvent}"/> is the geometry, instantiated with
 /// <see cref="PushEvent"/> for a grid one cell deep and <see cref="PushEvent3"/> otherwise, chosen once by <see cref="Create"/>.</para>
 /// </remarks>
-internal abstract unsafe class PushReplication
+internal abstract unsafe partial class PushReplication
 {
     private protected readonly CompiledProjectionPlan[] _plans;
     private protected readonly ArchetypeReplicationState[] _states;
@@ -537,6 +537,13 @@ internal abstract unsafe class PushReplication
 
     private protected readonly PushSessionState[] _sessions;
     private protected uint _tick;
+
+    /// <summary>The most rows a window can have: <see cref="ReplicationGrid.MaxWindow"/> in the flat implementation, 13² in the deep one (10 § 4.3).</summary>
+    private protected const int MaxRows = 169;
+
+    // Shared by both implementations, so declared here rather than once per closed generic type: an empty window, and an empty region hull.
+    private protected static readonly ushort[] ZeroRows = new ushort[MaxRows];
+    private protected static readonly ClientRegionCommand NoHull;
 
     // The last tick the blocks step ran for; zero before the first. A tick the track did not run for (no session, an aborted tick, a failed fence) still
     // ran the fence, which drained that tick's structure words: its pushes are gone, and only re-pushing every live entity recovers them.
@@ -1005,22 +1012,109 @@ internal abstract unsafe class PushReplication
     /// <summary>The aggregate grids (09 § 8): per tile, per archetype, the entities whose v̂ lies in it. Empty when no profile declares an aggregate.</summary>
     public AggregateCounts[] Aggregates { get; private set; } = [];
 
-    // By plan index: whether some aggregate grid counts the archetype, so the merge notes its deltas.
-    private protected bool[] _aggregated = [];
+    // By plan index: whether an aggregate grid or a near budget's counts count the archetype, so the merge notes its deltas.
+    private protected bool[] _counted = [];
 
     /// <summary>Attaches the aggregate grids, before the first tick; every archetype they count must be one this replication serves.</summary>
     public void ConfigureAggregates(AggregateCounts[] grids)
     {
         Aggregates = grids;
-        _aggregated = new bool[_plans.Length];
-        foreach (var grid in grids)
+        RefreshCounted();
+    }
+
+    private void RefreshCounted()
+    {
+        _counted = new bool[_plans.Length];
+        foreach (var grid in Aggregates)
         {
-            for (var a = 0; a < grid.Columns.Length && a < _aggregated.Length; a++)
+            for (var a = 0; a < grid.Columns.Length && a < _counted.Length; a++)
             {
-                _aggregated[a] |= grid.Columns[a] >= 0;
+                _counted[a] |= grid.Columns[a] >= 0;
+            }
+        }
+
+        foreach (var set in _nearSets)
+        {
+            for (var a = 0; a < _counted.Length; a++)
+            {
+                _counted[a] |= a < ArchetypeSet.Capacity && set.Contains(a);
             }
         }
     }
+
+    // ── ClientRegion (09 § 7) ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>A region window's width per axis in cells, <c>⌈maxEdgeM / c⌉ + 5</c>; zero when no profile declares a ClientRegion.</summary>
+    public int RegionWindow { get; private set; }
+
+    /// <summary>
+    /// The near budgets' counts (09 § 7): per distinct archetype set a budgeted ClientRegion observes, per cell, the live entities of those archetypes whose
+    /// v̂ lies there — maintained from the merge's deltas like the occupancy (SUB-24), recounted with it.
+    /// </summary>
+    public ReplicationOccupancy[] NearCounts { get; private set; } = [];
+
+    private protected ArchetypeSet[] _nearSets = [];
+
+    // Per session slot, a ClientRegion session's geometry; allocated at its first region gather, reused by the slot's later sessions.
+    private protected RegionSession[] _regions = [];
+
+    /// <summary>Region cells delivered, and taken back by a near budget — cumulative.</summary>
+    public long RegionCellsDelivered;
+
+    /// <inheritdoc cref="RegionCellsDelivered"/>
+    public long RegionCellsUndelivered;
+
+    /// <summary>Region changes that reset their session: more than half its delivered cells fell outside the new hull — cumulative.</summary>
+    public long RegionResets;
+
+    /// <summary>Enables ClientRegion sessions, before the first tick: their window width and the archetype sets the near budgets count.</summary>
+    public void ConfigureRegions(int window, ArchetypeSet[] nearSets)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(window, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan((long)window * window * (Deep ? window : 1), ReplicationGrid.MaxWindowCells, nameof(window));
+        RegionWindow = window;
+        _nearSets = nearSets;
+        NearCounts = new ReplicationOccupancy[nearSets.Length];
+        for (var i = 0; i < nearSets.Length; i++)
+        {
+            NearCounts[i] = new ReplicationOccupancy();
+        }
+
+        _regions = new RegionSession[_sessions.Length];
+        RefreshCounted();
+    }
+
+    /// <summary>
+    /// Builds a ClientRegion session's records (09 § 7): <c>known(s, e) ⟺ v̂ₑ ∈ H ∧ delivered(s, cell(v̂ₑ))</c> for its committed hull H. The hull is the
+    /// session's anchor: a change sweeps the cells whose classification changed, and resets instead when more than half the delivered cells fall outside the
+    /// new hull. With a near budget, cells are delivered nearest the hull's centroid first while the counted entities stay within it. Returns whether the
+    /// frame must carry a RESET.
+    /// </summary>
+    public abstract bool GatherRegion(SessionId session, bool hasRegion, in ClientRegionCommand region, double maxEdgeM, int nearBudget, int nearCounts,
+        double tickSeconds, bool forceReset, in ArchetypeSet archetypes, FrameWorkerScratch scratch, int enterBudget, ref long enters, ref long leaves,
+        ref long updates, out bool complete);
+
+    /// <summary>Tests only: a ClientRegion session's committed near-budget estimate — the counted entities of its delivered cells.</summary>
+    internal int RegionHeldOf(SessionId session)
+    {
+        var r = (uint)session.Slot < (uint)_regions.Length ? _regions[session.Slot] : null;
+        return r != null && r.Generation == session.Generation && r.Anchored ? r.Held : 0;
+    }
+
+    /// <summary>
+    /// Whether a tile is in a ClientRegion session's aggregate region (09 § 8): it meets the session's pending hull, and some cell of it that the hull meets
+    /// was not delivered — the hull minus what the near tier holds. After the session's gather.
+    /// </summary>
+    public abstract bool RegionAggregates(SessionId session, AggregateCounts counts, uint tile);
+
+    /// <summary>Tests only: whether a ClientRegion session's committed window has the cell a point lies in.</summary>
+    internal abstract bool RegionDelivers(SessionId session, double x, double y, double z);
+
+    /// <summary>Tests only: the replication grid's cells per axis.</summary>
+    internal (int X, int Y, int Z) GridCellsForTest => (_gridW, _gridH, _gridD);
+
+    /// <summary>Tests only: a ClientRegion session's committed delivered cells.</summary>
+    internal abstract int RegionDeliveredCells(SessionId session);
 
     /// <summary>A session's pending anchor, after its gather: where an aggregate's radius is centred.</summary>
     public Vector3D PendingAnchorOf(SessionId session)

@@ -532,16 +532,40 @@ internal sealed class SubscriptionsIngress : IDisposable
             return;
         }
 
-        region.ClampToMaxEdge(MaxEdgeOf(row.Session));
-        if (!region.BuildPlanes())
+        if (!TakeRegion(row, ref region))
         {
             // The ingress hull accepted it and the clamp scales it uniformly, so this is a hostile or corrupted record, refused like one.
             Buffers.Acks.Add(row.Session, seq, AckReasons.RegionInvalid);
-            return;
+        }
+    }
+
+    // Clamped to the session's profile and turned into half-spaces, then the session's region: what the frame stage reads (09 § 7).
+    private bool TakeRegion(SessionIngress row, ref ClientRegionCommand region)
+    {
+        region.ClampToMaxEdge(MaxEdgeOf(row.Session));
+        if (!region.BuildPlanes())
+        {
+            return false;
         }
 
         row.Region = region;
         row.HasRegion = true;
+        return true;
+    }
+
+    /// <summary>
+    /// Tests only: gives a session a region as a drained <c>ClientRegion</c> command would — the hull of the vertices, clamped by its profile, as
+    /// half-spaces — without a client, a ring record or a drain. The row is the tick's (SUB-05): call it between ticks only.
+    /// </summary>
+    internal bool SetRegionForTest(SessionId session, ReadOnlySpan<RegionVertex> vertices, int dims)
+    {
+        var row = RowFor(session);
+        if (row == null || ConvexHull.Build(vertices, dims, 0f, 0, out var region) != ClientRegionOutcome.Accepted)
+        {
+            return false;
+        }
+
+        return TakeRegion(row, ref region);
     }
 
     /// <summary>The longest edge the session's profile accepts for a client region, or zero when it declares none.</summary>

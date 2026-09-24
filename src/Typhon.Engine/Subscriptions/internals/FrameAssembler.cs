@@ -95,6 +95,12 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <inheritdoc cref="AggRows"/>
     internal uint[] AggTiles = new uint[64];
 
+    /// <summary>A ClientRegion session's aggregate region this frame, sorted: the tiles its next AGG measures "newly covered" against.</summary>
+    internal uint[] AggRegion = new uint[64];
+
+    /// <inheritdoc cref="AggRegion"/>
+    internal int AggRegionCount;
+
     /// <summary>Cell deliveries and sweeps this worker's current gather skipped as empty, added to the shared counter once per gather.</summary>
     internal long EmptyCellsSkipped;
 
@@ -492,6 +498,8 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _aggLastTick = new uint[options.MaxSessions];
         _aggGeneration = new ushort[options.MaxSessions];
         _aggAnchor = new Vector3D[options.MaxSessions];
+        _aggRegion = new uint[options.MaxSessions][];
+        _aggRegionCount = new int[options.MaxSessions];
         _eventsLastGeneration = new ushort[options.MaxSessions];
         _followedValid = new bool[options.MaxSessions];
         _encodePlans = BuildEncodePlans(plans, catalog);

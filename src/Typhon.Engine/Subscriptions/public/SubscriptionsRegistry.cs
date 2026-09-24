@@ -1,5 +1,6 @@
 using JetBrains.Annotations;
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Linq.Expressions;
 using Typhon.Protocol;
@@ -348,13 +349,6 @@ public sealed class SubscriptionsRegistry
         {
             foreach (var observer in profile.Observers)
             {
-                if (observer.Kind is not (ObserverKind.World or ObserverKind.Sphere or ObserverKind.Aggregate))
-                {
-                    throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a {observer.Kind} observer, which a later phase builds. World, Sphere and Aggregate ship; the " +
-                        "other shapes are declarable now so the API does not grow verbs later.");
-                }
-
                 if (observer.Kind == ObserverKind.Sphere
                     && (observer.BoundEntity != EntityId.Null ? 1 : 0) + (observer.FollowsControlled ? 1 : 0) + (observer.Placement.HasValue ? 1 : 0) > 1)
                 {
@@ -364,10 +358,26 @@ public sealed class SubscriptionsRegistry
                         $"Profile '{profile.Name}' declares a Sphere centred in more than one way (Bind, AroundControlled, At). Declare one.");
                 }
 
-                if (observer.NearBudget != 0 || observer.FarTileM != 0)
+                if (observer.Kind != ObserverKind.Sphere
+                    && (observer.BoundEntity != EntityId.Null || observer.FollowsControlled || observer.Placement.HasValue))
+                {
+                    // A World has no centre and a ClientRegion's is the client's; serving either without the centre it names would be a silent substitution.
+                    throw new NotSupportedException(
+                        $"Profile '{profile.Name}' centres a {observer.Kind} observer (Bind, AroundControlled or At), which only a Sphere has.");
+                }
+
+                if (observer.NearBudget != 0 && observer.Kind != ObserverKind.ClientRegion)
                 {
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares near/far tiers, which Phase 2 builds together with the observers that need them.");
+                        $"Profile '{profile.Name}' declares a near budget on a {observer.Kind} observer. A near budget caps a ClientRegion's delivered cells " +
+                        "(09 § 7); a Sphere's session takes a byte budget (SetBudget).");
+                }
+
+                if (observer.FarTileM != 0)
+                {
+                    throw new NotSupportedException(
+                        $"Profile '{profile.Name}' declares a far tier with Far(tileM, maxHz). The far tier is an Aggregate beside the entity observer: " +
+                        "p.Aggregate(tileM, rateHz).Of<A>().");
                 }
 
             }
@@ -377,7 +387,7 @@ public sealed class SubscriptionsRegistry
             var aggregates = 0;
             foreach (var observer in profile.Observers)
             {
-                entityObservers += observer.Kind is ObserverKind.World or ObserverKind.Sphere ? 1 : 0;
+                entityObservers += observer.Kind is ObserverKind.World or ObserverKind.Sphere or ObserverKind.ClientRegion ? 1 : 0;
                 aggregates += observer.Kind == ObserverKind.Aggregate ? 1 : 0;
             }
 
@@ -385,13 +395,26 @@ public sealed class SubscriptionsRegistry
             {
                 throw new NotSupportedException(
                     $"Profile '{profile.Name}' declares {entityObservers} entity observers and {aggregates} aggregates. A profile is served through exactly " +
-                    "one World or Sphere observer, with at most one Aggregate beside it.");
+                    "one World, Sphere or ClientRegion observer, with at most one Aggregate beside it.");
+            }
+
+            foreach (var observer in profile.Observers)
+            {
+                if (observer.Kind == ObserverKind.Aggregate && observer.AggregateRadiusM > 0
+                    && !profile.Observers.Any(o => o.Kind == ObserverKind.Sphere))
+                {
+                    // A World's aggregate covers every tile and a ClientRegion's its hull: a radius would be dropped, silently.
+                    throw new NotSupportedException(
+                        $"Profile '{profile.Name}' declares an Aggregate radius beside a World or ClientRegion. Only a Sphere's aggregate has a radius; a " +
+                        "World's covers every tile and a ClientRegion's its hull.");
+                }
             }
 
             if (aggregates > 0 && entityObservers == 0)
             {
                 throw new NotSupportedException(
-                    $"Profile '{profile.Name}' declares an Aggregate alone. An aggregate is a tier beside the profile's World or Sphere observer.");
+                    $"Profile '{profile.Name}' declares an Aggregate alone. An aggregate is a tier beside the profile's World, Sphere or ClientRegion " +
+                    "observer.");
             }
         }
 

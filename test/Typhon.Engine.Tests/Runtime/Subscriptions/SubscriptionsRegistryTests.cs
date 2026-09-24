@@ -524,19 +524,33 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
     }
 
     /// <summary>
-    /// The observer shapes that are still unbuilt are declarable today and refused at <c>Start</c>, naming the shape. (Aggregate is built since 2.6a; one
-    /// declared alone is refused by <c>PushAggregateTests.AnAggregateThatCannotBeServedIsRefused</c>.)
+    /// What a ClientRegion does not have is refused at <c>Start</c> (09 § 5–7): a centre (Bind, At, AroundControlled name a Sphere's), a near budget on
+    /// another shape (a Sphere's budget is its session's bytes), and the far tier of <c>Far</c>, which is an Aggregate's.
     /// </summary>
-    [TestCase(ObserverKind.ClientRegion)]
-    public void AnUnbuiltObserver_IsRefusedAtStart(ObserverKind kind)
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void WhatAShapeDoesNotHaveIsRefusedAtStart([Range(0, 5)] int @case)
     {
         using var runtime = CreateRuntime();
-        runtime.Subscriptions.Profile("p", p => p.ClientRegion(maxEdgeM: 4096).Of<SwgCreature>());
+        runtime.Subscriptions.Profile("p", p =>
+        {
+            _ = @case switch
+            {
+                0 => p.ClientRegion(maxEdgeM: 4096).AroundControlled().Of<SwgCreature>(),
+                1 => p.ClientRegion(maxEdgeM: 4096).At(new Vector3D(1, 2, 0)).Of<SwgCreature>(),
+                2 => p.Sphere(192).Near(100).Of<SwgCreature>(),
+                3 => p.ClientRegion(maxEdgeM: 4096).Far(256, 1).Of<SwgCreature>(),
+                4 => p.ClientRegion(maxEdgeM: 4096).Bind(EntityId.FromRaw(0x10001)).Of<SwgCreature>(),
+                _ => p.ClientRegion(maxEdgeM: 4096).Of<SwgCreature>(),
+            };
+            if (@case == 5)
+            {
+                p.Aggregate(512, 1, radiusM: 1000).Of<SwgCreature>();
+            }
+        });
 
         var ex = Assert.Throws<NotSupportedException>(runtime.Start);
-
-        Assert.That(ex.Message, Does.Contain("later phase"));
-        Assert.That(ex.Message, Does.Contain(kind.ToString()));
+        Assert.That(ex.Message, Does.Contain(@case switch { 0 or 1 or 4 => "only a Sphere has", 2 => "near budget", 3 => "Aggregate", _ => "radius" }));
     }
 
     /// <summary>

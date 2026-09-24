@@ -28,9 +28,8 @@ public enum ObserverKind
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b><see cref="ObserverKind.World"/> and <see cref="ObserverKind.Sphere"/> ship.</b> The other two are declarable today and refused at <c>Start</c> with
-/// the phase that builds them, which is deliberate: the alternative is an API that grows verbs later, so every application written against it has to be revisited when the verb it
-/// always wanted finally exists. Declaring the full shape now costs a clear error message and buys a public surface that does not move.
+/// <b>Every shape ships</b>: <see cref="ObserverKind.World"/>, <see cref="ObserverKind.Sphere"/> and <see cref="ObserverKind.ClientRegion"/> as a profile's one
+/// entity observer, <see cref="ObserverKind.Aggregate"/> as the tier beside it (09 § 5). The far tier of <see cref="Far"/> is the Aggregate's, and refused.
 /// </para>
 /// <para>
 /// <b>An observer reaches an archetype only if that archetype is spatially indexed.</b> Data with no position — a market, a leaderboard, a player's own
@@ -89,10 +88,14 @@ public sealed class ObserverBuilder
     }
 
     /// <summary>
-    /// Caps the entities this observer's near tier sends; beyond it the near radius shrinks and the rest feeds the far tier.
+    /// A ClientRegion's near budget (09 § 7): its cells are delivered nearest the region's centroid first while the entities they hold, counted over the
+    /// observer's archetypes, stay within <paramref name="budget"/>; the cells beyond are not held — a profile's Aggregate covers them. Cells, never single
+    /// entities, are what the budget delivers and takes back, with a deadband: taken back when the count passes 1.1 × budget, more delivered only after it
+    /// has stayed under 0.9 × budget for a second.
     /// </summary>
-    /// <param name="budget">The entity count the near tier is sized for.</param>
+    /// <param name="budget">The entity count the region's delivered cells may hold.</param>
     /// <returns>This builder.</returns>
+    /// <remarks>A Sphere's budget is its session's byte budget (<c>SetBudget</c>); <c>Start</c> refuses a near budget on any other shape.</remarks>
     public ObserverBuilder Near(int budget)
     {
         if (budget <= 0)

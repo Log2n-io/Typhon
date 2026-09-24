@@ -41,6 +41,9 @@ sealed unsafe class ReplicationHarness : IDisposable
     /// <summary>The session table.</summary>
     public SessionTable Sessions => Subscriptions.Sessions;
 
+    /// <summary>The identity allocator every archetype's leases draw on.</summary>
+    public NetIdAllocator NetIds { get; private init; }
+
     /// <summary>
     /// Builds the replication runtime over <paramref name="engine"/> from declarations the caller writes.
     /// </summary>
@@ -77,7 +80,7 @@ sealed unsafe class ReplicationHarness : IDisposable
             var subscriptions = new SubscriptionsRuntime(engine, declarations, new RuntimeOptions { BaseTickRate = 10 }, resources.Runtime, netIds,
                 ["Test"]);
 
-            return new ReplicationHarness(engine, resources, declarations, subscriptions);
+            return new ReplicationHarness(engine, resources, declarations, subscriptions) { NetIds = netIds };
         }
         catch
         {

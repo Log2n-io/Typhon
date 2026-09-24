@@ -24,6 +24,18 @@ internal sealed class SubscriptionProfiles
         /// <summary>Whether the observer is <c>World</c> rather than a <c>Sphere</c>.</summary>
         public bool World { get; init; }
 
+        /// <summary>Whether the observer is a <c>ClientRegion</c> (09 § 7): its sessions are served from the region they send.</summary>
+        public bool Region { get; init; }
+
+        /// <summary>A ClientRegion's widest accepted extent, in metres; zero for any other shape.</summary>
+        public double MaxEdgeM { get; init; }
+
+        /// <summary>A ClientRegion's near budget in entities (09 § 7); zero for none.</summary>
+        public int NearBudget { get; init; }
+
+        // The near budget's counts in PushReplication.NearCounts, plus one: 0 is none.
+        public int NearCountsPlusOne { get; init; }
+
         /// <summary>The radius the sphere's sessions start with, in world units — the band's midpoint R′ with a leave radius; zero for <c>World</c>.</summary>
         public double Radius { get; init; }
 
@@ -108,7 +120,8 @@ internal sealed class SubscriptionProfiles
                     {
                         // The registry refuses this at Start; a registry built directly, unfrozen, reaches here.
                         throw new NotSupportedException(
-                            $"Profile '{declaration.Name}' declares two aggregates; a profile holds at most one Aggregate beside its World or Sphere.");
+                            $"Profile '{declaration.Name}' declares two aggregates; a profile holds at most one Aggregate beside its World, Sphere or " +
+                            "ClientRegion.");
                     }
 
                     aggregate = o;
@@ -119,7 +132,8 @@ internal sealed class SubscriptionProfiles
                     {
                         // The registry refuses this at Start; a registry built directly, unfrozen, reaches here.
                         throw new NotSupportedException(
-                            $"Profile '{declaration.Name}' declares two entity observers; a profile is served through exactly one World or Sphere.");
+                            $"Profile '{declaration.Name}' declares two entity observers; a profile is served through exactly one World, Sphere or " +
+                            "ClientRegion.");
                     }
 
                     observer = o;
@@ -128,12 +142,8 @@ internal sealed class SubscriptionProfiles
 
             if (observer == null)
             {
-                throw new NotSupportedException($"Profile '{declaration.Name}' declares an Aggregate alone; an aggregate is a tier beside a World or Sphere.");
-            }
-            if (observer.Kind is not (ObserverKind.World or ObserverKind.Sphere))
-            {
                 throw new NotSupportedException(
-                    $"Profile '{declaration.Name}' declares a {observer.Kind} observer, which a later phase builds. World and Sphere ship.");
+                    $"Profile '{declaration.Name}' declares an Aggregate alone; an aggregate is a tier beside a World, Sphere or ClientRegion.");
             }
 
             if (observer.Kind == ObserverKind.Sphere && (!double.IsFinite(observer.Radius) || observer.Radius <= 0))
@@ -173,6 +183,9 @@ internal sealed class SubscriptionProfiles
                 Name = declaration.Name,
                 ArchetypeIndices = indices.ToArray(),
                 World = observer.Kind == ObserverKind.World,
+                Region = observer.Kind == ObserverKind.ClientRegion,
+                MaxEdgeM = observer.Kind == ObserverKind.ClientRegion ? observer.MaxEdgeM : 0d,
+                NearBudget = observer.Kind == ObserverKind.ClientRegion ? observer.NearBudget : 0,
                 Radius = observer.Kind == ObserverKind.Sphere ? observer.EffectiveRadius : 0d,
                 MaxRadius = observer.Kind == ObserverKind.Sphere ? Math.Max(observer.EffectiveRadius, observer.MaxRadius) : 0d,
                 Source = observer.Kind != ObserverKind.Sphere ? ViewpointSource.Placed
@@ -187,7 +200,8 @@ internal sealed class SubscriptionProfiles
                 TickDivisor = declaration.TickDivisor,
                 AggregateTileM = aggregate?.TileM ?? 0d,
                 AggregateRateHz = aggregate?.RateHz ?? 0d,
-                AggregateRadiusM = aggregate == null || observer.Kind == ObserverKind.World ? 0d : aggregate.AggregateRadiusM,
+                // A World's aggregate covers every tile and a ClientRegion's its hull (09 § 8): only a Sphere's has a radius.
+                AggregateRadiusM = aggregate == null || observer.Kind != ObserverKind.Sphere ? 0d : aggregate.AggregateRadiusM,
                 AggregateArchetypes = aggregate == null ? [] : AggregateIndices(plans, declaration.Name, aggregate),
             };
         }
@@ -215,6 +229,75 @@ internal sealed class SubscriptionProfiles
 
         list.Sort();
         return list.ToArray();
+    }
+
+    /// <summary>Whether profile <paramref name="profile"/> is served through a ClientRegion (09 § 7).</summary>
+    public bool RegionOf(int profile) => _profiles[profile].Region;
+
+    /// <summary>A ClientRegion profile's widest accepted extent, in metres.</summary>
+    public double MaxEdgeOf(int profile) => _profiles[profile].MaxEdgeM;
+
+    /// <summary>A ClientRegion profile's near budget and its counts' index in <see cref="PushReplication.NearCounts"/>; (0, −1) for none.</summary>
+    public (int Budget, int Counts) NearOf(int profile) => (_profiles[profile].NearBudget, _profiles[profile].NearCountsPlusOne - 1);
+
+    /// <summary>The widest extent any ClientRegion profile accepts, in metres; zero when none declares one. Every region window is sized for it.</summary>
+    public double MaxRegionEdgeM
+    {
+        get
+        {
+            var edge = 0d;
+            foreach (var profile in _profiles)
+            {
+                edge = Math.Max(edge, profile.MaxEdgeM);
+            }
+
+            return edge;
+        }
+    }
+
+    /// <summary>
+    /// The archetype sets the near budgets count (09 § 7): one per distinct set among the budgeted ClientRegion profiles, bound to them. Before the first
+    /// tick.
+    /// </summary>
+    internal List<ArchetypeSet> BindNearCounts()
+    {
+        var sets = new List<ArchetypeSet>();
+        for (var i = 0; i < _profiles.Length; i++)
+        {
+            if (_profiles[i].NearBudget <= 0)
+            {
+                continue;
+            }
+
+            var index = -1;
+            for (var s = 0; s < sets.Count && index < 0; s++)
+            {
+                index = Same(sets[s], _sets[i]) ? s : -1;
+            }
+
+            if (index < 0)
+            {
+                index = sets.Count;
+                sets.Add(_sets[i]);
+            }
+
+            _profiles[i] = _profiles[i] with { NearCountsPlusOne = index + 1 };
+        }
+
+        return sets;
+    }
+
+    private static bool Same(ArchetypeSet a, ArchetypeSet b)
+    {
+        for (var w = 0; w < ArchetypeSet.Words; w++)
+        {
+            if (a[w] != b[w])
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>A profile's aggregate (09 § 8): its grid in <see cref="PushReplication.Aggregates"/>, refresh period and radius; grid −1 for none.</summary>

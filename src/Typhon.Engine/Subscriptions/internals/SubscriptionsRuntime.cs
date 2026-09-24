@@ -185,6 +185,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
                 Push.AttachEncodePlans(encodePlans);
                 ConfigureAggregates(observed);
+                ConfigureRegions();
             }
 
             // The send side (P1-14b). It holds no memory of its own beyond one view and one work item per slot; what it carries is the rule that a frame
@@ -198,6 +199,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _ingressRings = new IngressRingPool("Subscriptions.IngressRings", parent, engine.MemoryAllocator, Options);
             _ingress = new SubscriptionsIngress(_sessions, registry, CommandTypes, new CommandTypeBuffers(CommandTypes, Options.MaxSessions), _ingressRings,
                 Options.MaxSessions, _sendPump);
+            _frames.Ingress = _ingress;
             _ingress.Frames = _frames;
             _ingress.ReplicationStates = _replicationStates;
             // Events (09 § 11): compiled against the catalog, and one commands view per worker slot, so Emit records into the worker's own buffer.
@@ -205,7 +207,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _frames!.Events = Events;
             var workerSlots = (parent as DagScheduler)?.WorkerSlotCount ?? 0;
             Events?.BindWorkerSlots(workerSlots);
-            Commands = new SubscriptionsCommands(_ingress, Events, 0);
+            Commands = new SubscriptionsCommands(_ingress, Events);
             _commandsByWorker = new SubscriptionsCommands[workerSlots];
             for (var w = 0; w < workerSlots; w++)
             {
@@ -310,6 +312,36 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <returns>The view; <see cref="Commands"/> off a worker.</returns>
     public SubscriptionsCommands CommandsFor(int workerId) =>
         (uint)workerId < (uint)_commandsByWorker.Length ? _commandsByWorker[workerId] : Commands;
+
+    /// <summary>
+    /// ClientRegion sessions (09 § 7): one window width, sized for the widest extent any profile accepts, bounded like a Sphere's window, and the archetype
+    /// sets the near budgets count.
+    /// </summary>
+    private void ConfigureRegions()
+    {
+        // ClientRegion (09 § 7): one window width for every region session, sized for the widest extent any profile accepts, and bounded like a Sphere's
+        // window — the cells a gather pays for.
+        var edge = Profiles.MaxRegionEdgeM;
+        if (edge <= 0)
+        {
+            return;
+        }
+
+        // The implementation's depth, not the grid's: the deep one (a flat grid served deep only in tests) keeps W² rows of W cells.
+        var window = (long)Math.Ceiling(edge / Grid.CellM) + 5;
+        var cells = window * window * (Push.Deep ? window : 1);
+        if (window > 64 || cells > ReplicationGrid.MaxWindowCells)
+        {
+            var widest = Push.Deep ? 9 : 48;
+            throw new InvalidOperationException(
+                $"A ClientRegion accepts regions {edge} m wide, and with SubscriptionsOptions.ReplicationCellM = {Grid.CellM} its sessions' window would be " +
+                $"{window} cells per axis (⌈maxEdgeM / c⌉ + 5), {cells} cells, past the bound of {ReplicationGrid.MaxWindowCells}. In a " +
+                $"{(Push.Deep ? "deep" : "flat")} grid maxEdgeM is at most {widest} cells, {widest * Grid.CellM} m: lower it, or raise the cell side to at " +
+                $"least {Math.Ceiling(edge / widest * 1000d) / 1000d} m.");
+        }
+
+        Push.ConfigureRegions((int)window, Profiles.BindNearCounts().ToArray());
+    }
 
     /// <summary>
     /// The aggregate tiers' counts (09 § 8): one per canonical catalog grid, bound to the profiles that read them. A tile must be a whole number of replication

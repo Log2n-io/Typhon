@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Text;
+using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
@@ -71,7 +72,26 @@ internal sealed unsafe class VolumeOracle : IDisposable
     private int _spawned;
     private long _tick;
 
-    private VolumeOracle(FrameHarness harness, int seed, int[] skipPercent, bool volumetric, VolumeMovers movers, double radius, double spanM)
+    // The region mode (09 § 7): each session's region, a frustum it pans, reshapes and jumps — a convex polyhedron of eight corners in a deep grid.
+    private readonly double _regionEdge;
+    private readonly Frustum[] _frustums = [];
+    private bool _budgeted;
+
+    private struct Frustum
+    {
+        public double X;
+        public double Y;
+        public double Z;
+        public double Ux;
+        public double Uy;
+        public double Uz;
+        public double Length;
+        public double Near;
+        public double Far;
+    }
+
+    private VolumeOracle(FrameHarness harness, int seed, int[] skipPercent, bool volumetric, VolumeMovers movers, double radius, double spanM,
+        double regionEdge = 0)
     {
         _harness = harness;
         _skipPercent = skipPercent;
@@ -103,6 +123,118 @@ internal sealed unsafe class VolumeOracle : IDisposable
         {
             _wire[plan] = Array.FindIndex(harness.CatalogPlan.Archetypes, a => a.Name == name);
         }
+
+        _regionEdge = regionEdge;
+        if (regionEdge > 0)
+        {
+            _frustums = new Frustum[_sessions.Length];
+            for (var i = 0; i < _sessions.Length; i++)
+            {
+                _frustums[i] = RandomFrustum();
+                SendRegion(i);
+            }
+        }
+    }
+
+    /// <summary>How many region jumps the walk made: each moves a region clear of its delivered cells, which resets its session.</summary>
+    public int RegionJumps { get; private set; }
+
+    private Frustum RandomFrustum()
+    {
+        var f = new Frustum();
+        Recentre(ref f);
+        Reshape(ref f);
+        return f;
+    }
+
+    // A centre in the populated cube; a third of the time on the plane z = 0, where the 2D walkers live.
+    private void Recentre(ref Frustum f)
+    {
+        var limit = _limit * 0.9;
+        f.X = ((_walker.NextDouble() * 2.0) - 1.0) * limit;
+        f.Y = ((_walker.NextDouble() * 2.0) - 1.0) * limit;
+        f.Z = _walker.Next(3) == 0 ? 0.0 : ((_walker.NextDouble() * 2.0) - 1.0) * limit;
+    }
+
+    // A random axis and a frustum along it — a camera's view, narrow near and wide far — now and then wider than the profile accepts (ingress clamps it).
+    private void Reshape(ref Frustum f)
+    {
+        var theta = _walker.NextDouble() * Math.PI * 2.0;
+        var phi = (_walker.NextDouble() - 0.5) * Math.PI;
+        (f.Ux, f.Uy, f.Uz) = (Math.Cos(theta) * Math.Cos(phi), Math.Sin(theta) * Math.Cos(phi), Math.Sin(phi));
+        var scale = _regionEdge * (_walker.Next(10) == 0 ? 1.6 : 1.0);
+        f.Length = scale * (0.3 + (0.2 * _walker.NextDouble()));
+        f.Near = scale * (0.05 + (0.1 * _walker.NextDouble()));
+        f.Far = scale * (0.15 + (0.1 * _walker.NextDouble()));
+    }
+
+    private static RegionVertex[] Corners(in Frustum f)
+    {
+        // An orthonormal basis (v, w) across the axis u.
+        double ax = Math.Abs(f.Ux) < 0.9 ? 1 : 0, ay = ax == 1 ? 0 : 1, az = 0;
+        var vx = (f.Uy * az) - (f.Uz * ay);
+        var vy = (f.Uz * ax) - (f.Ux * az);
+        var vz = (f.Ux * ay) - (f.Uy * ax);
+        var vl = Math.Sqrt((vx * vx) + (vy * vy) + (vz * vz));
+        (vx, vy, vz) = (vx / vl, vy / vl, vz / vl);
+        var wx = (f.Uy * vz) - (f.Uz * vy);
+        var wy = (f.Uz * vx) - (f.Ux * vz);
+        var wz = (f.Ux * vy) - (f.Uy * vx);
+        var corners = new RegionVertex[8];
+        var k = 0;
+        foreach (var (along, half) in new[] { (-f.Length / 2, f.Near), (f.Length / 2, f.Far) })
+        {
+            foreach (var (sv, sw) in new[] { (-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0) })
+            {
+                corners[k++] = new RegionVertex
+                {
+                    X = f.X + (f.Ux * along) + (((vx * sv) + (wx * sw)) * half),
+                    Y = f.Y + (f.Uy * along) + (((vy * sv) + (wy * sw)) * half),
+                    Z = f.Z + (f.Uz * along) + (((vz * sv) + (wz * sw)) * half),
+                };
+            }
+        }
+
+        return corners;
+    }
+
+    private void SendRegion(int session) =>
+        Assert.That(_harness.Subscriptions.Ingress.SetRegionForTest(_sessions[session], Corners(in _frustums[session]), 3), Is.True,
+            "a frustum is a convex polyhedron");
+
+    /// <summary>Moves every session's region: mostly a pan of a fraction of a cell in 3D, sometimes a new frustum in place, now and then a jump.</summary>
+    private void MoveRegions()
+    {
+        var limit = _limit * 0.9;
+        var step = Push.CellSize * 0.3;
+        for (var i = 0; i < _sessions.Length; i++)
+        {
+            var roll = _walker.Next(100);
+            ref var f = ref _frustums[i];
+            if (roll < 2)
+            {
+                Recentre(ref f);
+                RegionJumps++;
+            }
+            else if (roll < 12)
+            {
+                Reshape(ref f);
+            }
+            else if (roll < 80)
+            {
+                var theta = _walker.NextDouble() * Math.PI * 2.0;
+                var phi = (_walker.NextDouble() - 0.5) * Math.PI;
+                f.X = Math.Clamp(f.X + (Math.Cos(theta) * Math.Cos(phi) * step), -limit, limit);
+                f.Y = Math.Clamp(f.Y + (Math.Sin(theta) * Math.Cos(phi) * step), -limit, limit);
+                f.Z = Math.Clamp(f.Z + (Math.Sin(phi) * step), -limit, limit);
+            }
+            else
+            {
+                continue;
+            }
+
+            SendRegion(i);
+        }
     }
 
     /// <summary>Builds the oracle over a fresh engine and runs its first tick.</summary>
@@ -112,9 +244,12 @@ internal sealed unsafe class VolumeOracle : IDisposable
     /// <param name="cellM">The replication cell side.</param>
     /// <param name="forceDeep">Serve a flat world with the deep implementation.</param>
     /// <param name="spanM">Confine entities and viewers to ±span on the plane axes; zero for the whole world less a margin.</param>
+    /// <param name="regionEdgeM">When positive, the profile is a ClientRegion of this extent (09 § 7), and each session sends a frustum it moves.</param>
+    /// <param name="nearBudget">The ClientRegion's near budget; 0 for none.</param>
+    /// <param name="aggregateCells">When positive, an Aggregate of flyers beside the entity observer, tiles this many cells wide.</param>
     public static VolumeOracle Create(DatabaseEngine engine, bool volumetric, int seed, int[] skipPercent, string name, double radius, double cellM,
         VolumeMovers movers = VolumeMovers.Both, bool forceDeep = false, int flyers = 300, int walkers = 150, int rocks = 60, double spanM = 0,
-        double startRadius = 0)
+        double startRadius = 0, double regionEdgeM = 0, int nearBudget = 0, int aggregateCells = 0)
     {
         var options = new SubscriptionsOptions
         {
@@ -135,6 +270,25 @@ internal sealed unsafe class VolumeOracle : IDisposable
             ProjectionTestSchema.DeclareCreature(subs);
             ProjectionTestSchema.DeclareRock(subs);
             // With a start radius, the profile is Sphere(start, max: radius): sessions begin at the start and SetRadius ranges up to radius (09 § 4).
+            if (regionEdgeM > 0)
+            {
+                subs.Profile(Profile, p =>
+                {
+                    var region = p.Detection(PushDetection.Explicit).ClientRegion(regionEdgeM);
+                    if (nearBudget > 0)
+                    {
+                        region.Near(nearBudget);
+                    }
+
+                    region.Of<ProjFlyer>().Of<ProjCreature>().Of<ProjRock>();
+                    if (aggregateCells > 0)
+                    {
+                        p.Aggregate(aggregateCells * cellM, rateHz: 10).Of<ProjFlyer>();
+                    }
+                });
+                return;
+            }
+
             subs.Profile(Profile, p => p.Detection(PushDetection.Explicit)
                 .Sphere(startRadius > 0 ? startRadius : radius, max: startRadius > 0 ? radius : 0)
                 .Of<ProjFlyer>().Of<ProjCreature>().Of<ProjRock>());
@@ -142,7 +296,11 @@ internal sealed unsafe class VolumeOracle : IDisposable
 
         try
         {
-            var oracle = new VolumeOracle(harness, seed, skipPercent, volumetric, movers, startRadius > 0 ? startRadius : radius, spanM);
+            harness.DrainNetIds = regionEdgeM > 0;
+            var oracle = new VolumeOracle(harness, seed, skipPercent, volumetric, movers, startRadius > 0 ? startRadius : radius, spanM, regionEdgeM)
+            {
+                _budgeted = nearBudget > 0,
+            };
             oracle.Seed(movers == VolumeMovers.Walkers ? 0 : flyers, movers == VolumeMovers.Flyers ? 0 : walkers, rocks);
             oracle._tick = 1;
             engine.WriteTickFence(1);
@@ -157,6 +315,9 @@ internal sealed unsafe class VolumeOracle : IDisposable
     }
 
     public PushReplication Push => _harness.Subscriptions.Push;
+
+    /// <summary>The frame harness underneath.</summary>
+    public FrameHarness Frames => _harness;
 
     public SessionId[] Sessions => _sessions;
 
@@ -601,7 +762,11 @@ internal sealed unsafe class VolumeOracle : IDisposable
             Churn();
         }
 
-        if (walk)
+        if (walk && _regionEdge > 0)
+        {
+            MoveRegions();
+        }
+        else if (walk)
         {
             Walk(teleports);
         }
@@ -705,6 +870,28 @@ internal sealed unsafe class VolumeOracle : IDisposable
         }
 
         var truth = ServerTruth(divergences);
+
+        // No identity leaks (SUB-06): live = leased and unspent + one per described entity, and no orphan refused.
+        var heldIds = 0L;
+        foreach (var byNetId in truth.Values)
+        {
+            heldIds += byNetId.Count;
+        }
+
+        foreach (var state in _harness.Subscriptions.ReplicationStates)
+        {
+            heldIds += state?.NetIdLeases.LeasedCount ?? 0;
+            if (state != null && state.OrphanReleaseFaults != 0)
+            {
+                divergences.Add($"{state.OrphanReleaseFaults} orphaned identities were refused by the allocator");
+            }
+        }
+
+        if (_harness.Replication.NetIds.LiveCount != heldIds)
+        {
+            divergences.Add($"the allocator counts {_harness.Replication.NetIds.LiveCount} identities live and {heldIds} are held: an identity leaked");
+        }
+
         ComparedAtLastPoint = 0;
         RequiredAtLastPoint = 0;
         using (var tx = Engine.CreateQuickTransaction())
@@ -714,7 +901,14 @@ internal sealed unsafe class VolumeOracle : IDisposable
                 var replica = _harness.Replica(_sessions[s]);
                 foreach (var (plan, expected) in truth)
                 {
-                    CompareSphere(tx, replica, s, plan, expected, divergences);
+                    if (_regionEdge > 0)
+                    {
+                        CompareRegion(tx, replica, s, plan, expected, divergences);
+                    }
+                    else
+                    {
+                        CompareSphere(tx, replica, s, plan, expected, divergences);
+                    }
                 }
 
                 if (replica.Store.Anomalies != 0)
@@ -861,6 +1055,82 @@ internal sealed unsafe class VolumeOracle : IDisposable
                 {
                     divergences.Add($"session {session}: plan {plan} netId {netId} has level {level?.ToString() ?? "none"}, the server {ai.Level}");
                 }
+            }
+        }
+    }
+
+    // Every cell within the margin of a point delivered: v̂'s cell may be a neighbour of the true position's.
+    private bool DeliveredAround(int session, (double X, double Y, double Z) p, double margin)
+    {
+        for (var c = 0; c < 8; c++)
+        {
+            var x = p.X + ((c & 1) != 0 ? margin : -margin);
+            var y = p.Y + ((c & 2) != 0 ? margin : -margin);
+            var z = p.Z + ((c & 4) != 0 ? margin : -margin);
+            if (!Push.RegionDelivers(_sessions[session], x, y, z))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>The number of entities of a plan a session's replica holds.</summary>
+    public int HeldCount(int session, string archetype) =>
+        _harness.Replica(_sessions[session]).NetIds(_wire[_harness.PlanIndex(archetype)]).Length;
+
+    /// <summary>
+    /// The region comparison in 3D (09 § 7): an entity inside every face of the session's hull by more than the margin, in a delivered cell, must be held;
+    /// one outside a face by more than it must not be. A 2D archetype lies on the plane z = 0 (10 § 3.4).
+    /// </summary>
+    private void CompareRegion(Transaction tx, SessionReplica replica, int session, int plan, Dictionary<uint, EntityId> expected, List<string> divergences)
+    {
+        var wire = _wire[plan];
+        var held = new HashSet<uint>(replica.NetIds(wire));
+        var hull = _harness.Subscriptions.Ingress.RowOf(_sessions[session]).Region;
+        var tolerance = 0.05 + (2.0 * _positionStep) + 0.005;
+        var margin = _harness.Subscriptions.Plans[plan].VisibilitySlackM + tolerance + 0.01;
+        foreach (var netId in held)
+        {
+            if (!expected.ContainsKey(netId))
+            {
+                divergences.Add($"session {session}: plan {plan} netId {netId} is in the client's world and not in the server's");
+            }
+        }
+
+        foreach (var (netId, entity) in expected)
+        {
+            var p = TruePosition(tx, plan, entity);
+            var outside = double.MinValue;
+            for (var f = 0; f < hull.PlaneCount; f++)
+            {
+                var face = hull.Planes[f];
+                outside = Math.Max(outside, (face.Nx * p.X) + (face.Ny * p.Y) + (face.Nz * p.Z) - face.D);
+            }
+
+            var holds = held.Contains(netId);
+            var required = outside < -margin && (!_budgeted || DeliveredAround(session, p, margin));
+            if (required)
+            {
+                RequiredAtLastPoint++;
+                if (!holds)
+                {
+                    divergences.Add($"session {session}: plan {plan} netId {netId} (entity {entity.RawValue}) at ({p.X:F1}, {p.Y:F1}, {p.Z:F1}) is "
+                        + $"{-outside:F2} m inside the region, in a delivered cell, and the client does not hold it");
+                    continue;
+                }
+            }
+            else if (outside > margin && holds)
+            {
+                divergences.Add($"session {session}: plan {plan} netId {netId} is {outside:F2} m outside the region and the client still holds it");
+                continue;
+            }
+
+            if (holds)
+            {
+                ComparedAtLastPoint++;
+                ComparePosition(replica, session, plan, netId, p, tolerance, divergences);
             }
         }
     }

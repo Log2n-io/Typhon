@@ -125,9 +125,15 @@ public sealed class ProfileBuilder
     /// <summary>
     /// A convex ground footprint the client sends through the built-in <c>ClientRegion</c> command — a camera's view, clipped at the horizon.
     /// </summary>
-    /// <param name="maxEdgeM">The longest edge the server accepts, in metres. A client asking for more is clamped, not refused.</param>
+    /// <param name="maxEdgeM">
+    /// The widest the region's bounding box may be on any axis, in metres. A client asking for more is clamped about its centroid, not refused. It sizes every
+    /// session's window, <c>⌈maxEdgeM / c⌉ + 5</c> cells per axis, which counts against the window bound at <c>Start</c> (09 § 7).
+    /// </param>
     /// <returns>The observer's builder.</returns>
-    /// <remarks><b>Declared now, built in Phase 2.</b></remarks>
+    /// <remarks>
+    /// A session holds the entities whose visibility position lies in the region it last sent and whose cell it has been delivered; until it sends one it
+    /// holds nothing. <see cref="ObserverBuilder.Near"/> caps what it holds, by whole cells nearest the region's centroid.
+    /// </remarks>
     public ObserverBuilder ClientRegion(double maxEdgeM)
     {
         if (!double.IsFinite(maxEdgeM) || maxEdgeM <= 0)

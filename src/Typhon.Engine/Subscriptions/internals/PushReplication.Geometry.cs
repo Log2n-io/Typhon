@@ -20,13 +20,8 @@ namespace Typhon.Engine.Internals;
 /// flat implementation (<see cref="PushSessionState.D"/>, <see cref="PushSessionState.P"/>), in a slab indexed by session slot in the deep one. Moving
 /// a window by a cell is a shift of every row.</para>
 /// </remarks>
-internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEvent : unmanaged, IPushEvent<TEvent>
+internal sealed unsafe partial class PushReplication<TEvent> : PushReplication where TEvent : unmanaged, IPushEvent<TEvent>
 {
-    /// <summary>The most rows a window can have: <see cref="ReplicationGrid.MaxWindow"/> in the flat implementation, 13² in the deep one (10 § 4.3).</summary>
-    private const int MaxRows = 169;
-
-    private static readonly ushort[] ZeroRows = new ushort[MaxRows];
-
     // Rows per window copy, and the deep implementation's slab: per session slot, the committed rows then the pending ones.
     private readonly int _windowRows;
     private readonly ushort[] _slab = [];
@@ -440,6 +435,11 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             return false;
         }
 
+        if (RegionGatheredNow(session) is { } region)
+        {
+            return RegionSeesPoint(region, ref st, x, y, z, viewRadius);
+        }
+
         var pz = TEvent.Deep ? z : 0f;
         if (viewRadius > 0 && !Within(st.PAnchorX, st.PAnchorY, st.PAnchorZ, x, y, pz, (double)viewRadius * viewRadius))
         {
@@ -471,6 +471,12 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
     public override void SessionCellBox(SessionId session, out int minCx, out int maxCx, out int minCy, out int maxCy, out int minCz, out int maxCz)
     {
+        if (RegionGatheredNow(session) is { } region)
+        {
+            RegionCellBox(region, out minCx, out maxCx, out minCy, out maxCy, out minCz, out maxCz);
+            return;
+        }
+
         ref var st = ref _sessions[session.Slot];
         var r = st.PRadius;
         double x0 = st.PAnchorX - r, x1 = st.PAnchorX + r, y0 = st.PAnchorY - r, y1 = st.PAnchorY + r, z0 = st.PAnchorZ - r, z1 = st.PAnchorZ + r;
@@ -495,6 +501,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
     public override void Commit(SessionId session)
     {
+        CommitRegion(session);
         ref var st = ref _sessions[session.Slot];
         st.AnchorX = st.PAnchorX;
         st.AnchorY = st.PAnchorY;
@@ -980,6 +987,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
     private struct AggregateDelta
     {
+        public ulong Key;
         public int Archetype;
         public int Delta;
         public float X;
@@ -1104,8 +1112,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 }
             }
 
-            // The aggregate grids take the same deltas, per archetype and tile (SUB-24).
-            if (Aggregates.Length > 0)
+            // The aggregate grids and the near budgets' counts take the same deltas, per archetype, by tile and by cell (SUB-24).
+            if (Aggregates.Length + NearCounts.Length > 0)
             {
                 for (var c = 0; c < _mergeChunks; c++)
                 {
@@ -1116,6 +1124,14 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                         foreach (var grid in Aggregates)
                         {
                             grid.Add(d.Archetype, d.X, d.Y, d.Z, d.Delta, _tick);
+                        }
+
+                        for (var s = 0; s < _nearSets.Length; s++)
+                        {
+                            if (_nearSets[s].Contains(d.Archetype))
+                            {
+                                NearCounts[s].Add(d.Key, d.Delta);
+                            }
                         }
                     }
                 }
@@ -1371,7 +1387,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         _mergedTick = _tick;
     }
 
-    private void NoteAggregate(int chunk, int archetype, int delta, float x, float y, float z)
+    private void NoteAggregate(int chunk, int archetype, int delta, ulong key, float x, float y, float z)
     {
         var count = _chunkAggCount[chunk];
         if (count == _chunkAggDeltas[chunk].Length)
@@ -1379,7 +1395,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             Array.Resize(ref _chunkAggDeltas[chunk], count * 2);
         }
 
-        _chunkAggDeltas[chunk][count] = new AggregateDelta { Archetype = archetype, Delta = delta, X = x, Y = y, Z = z };
+        _chunkAggDeltas[chunk][count] = new AggregateDelta { Key = key, Archetype = archetype, Delta = delta, X = x, Y = y, Z = z };
         _chunkAggCount[chunk] = count + 1;
     }
 
@@ -1403,7 +1419,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     /// <summary>The aggregate grids recounted from the blocks, when the occupancy is: after a tick whose changes the index missed.</summary>
     internal override void RecountAggregates()
     {
-        if (Aggregates.Length == 0)
+        if (Aggregates.Length + NearCounts.Length == 0)
         {
             return;
         }
@@ -1413,7 +1429,12 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             grid.Zero(_tick);
         }
 
-        RecountAggregatesInto(Aggregates);
+        foreach (var counts in NearCounts)
+        {
+            counts.Clear();
+        }
+
+        RecountAggregatesInto(Aggregates, NearCounts);
     }
 
     /// <summary>Tests: the (tile, archetype) counts that differ from a recount of the blocks (SUB-24's aggregate clause).</summary>
@@ -1425,21 +1446,32 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             fresh[g] = Aggregates[g].EmptyCopy();
         }
 
-        RecountAggregatesInto(fresh);
+        var near = new ReplicationOccupancy[NearCounts.Length];
+        for (var s = 0; s < near.Length; s++)
+        {
+            near[s] = new ReplicationOccupancy();
+        }
+
+        RecountAggregatesInto(fresh, near);
         var differences = 0;
         for (var g = 0; g < fresh.Length; g++)
         {
             differences += Aggregates[g].Differences(fresh[g]);
         }
 
+        for (var s = 0; s < near.Length; s++)
+        {
+            differences += NearCounts[s].Differences(near[s]);
+        }
+
         return differences;
     }
 
-    private void RecountAggregatesInto(AggregateCounts[] into)
+    private void RecountAggregatesInto(AggregateCounts[] into, ReplicationOccupancy[] near)
     {
         foreach (var a in _pushIndices)
         {
-            if (!_aggregated[a])
+            if (!_counted[a])
             {
                 continue;
             }
@@ -1476,6 +1508,14 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                     foreach (var grid in into)
                     {
                         grid.Add(a, px, py, pz, 1, _tick);
+                    }
+
+                    for (var s = 0; s < near.Length; s++)
+                    {
+                        if (_nearSets[s].Contains(a))
+                        {
+                            near[s].Add(CellKey(px, py, pz), 1);
+                        }
                     }
                 }
             }
@@ -1772,7 +1812,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             }
 
             ref var e = ref source[(int)(uint)src];
-            var aggregated = (uint)e.Archetype < (uint)_aggregated.Length && _aggregated[e.Archetype];
+            var aggregated = (uint)e.Archetype < (uint)_counted.Length && _counted[e.Archetype];
             if ((sortKey & 1) != 0)
             {
                 // A secondary: the cell a mover left.
@@ -1780,7 +1820,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 delta -= OccupancyMutantForTest ? 0 : 1;
                 if (aggregated)
                 {
-                    NoteAggregate(chunk, e.Archetype, -1, e.OldX, e.OldY, e.OldZ);
+                    NoteAggregate(chunk, e.Archetype, -1, e.OldKey, e.OldX, e.OldY, e.OldZ);
                 }
             }
             else if ((e.Flags & PushEvent.HasNew) == 0)
@@ -1789,7 +1829,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 delta--;
                 if (aggregated)
                 {
-                    NoteAggregate(chunk, e.Archetype, -1, e.OldX, e.OldY, e.OldZ);
+                    NoteAggregate(chunk, e.Archetype, -1, e.OldKey, e.OldX, e.OldY, e.OldZ);
                 }
             }
             else if ((e.Flags & both) != both || e.OldKey != e.NewKey)
@@ -1798,7 +1838,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 delta++;
                 if (aggregated)
                 {
-                    NoteAggregate(chunk, e.Archetype, 1, e.NewX, e.NewY, e.NewZ);
+                    NoteAggregate(chunk, e.Archetype, 1, e.NewKey, e.NewX, e.NewY, e.NewZ);
                 }
             }
 
@@ -1877,7 +1917,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             Bind(ref st, session);
         }
 
-        var reset = st.NeedsReset || forceReset;
+        // A session whose committed geometry is a ClientRegion's holds what its hull named: only a RESET says what it holds now (09 § 7).
+        var reset = st.NeedsReset || forceReset || (st.Anchored && CommittedAsRegion(session));
         var tick = _tick;
 
         // The radius this frame moves to — the profile's R′, or the session's SetRadius — and the one the committed known-set was built with (09 § 4,
@@ -2284,7 +2325,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         st.PLevel = 0;
 
         var tick = _tick;
-        var reset = st.NeedsReset || forceReset;
+        var reset = st.NeedsReset || forceReset || (st.Anchored && CommittedAsRegion(session));
         var gap = st.Anchored && !reset ? (int)(tick - st.LastTick - 1) : 0;
         var log = Log ??= new LogTable();
         log.Clear();
@@ -2470,6 +2511,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
     // ══ The push log's catch-up ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+    // One per implementation and thread, on purpose: a LogTable holds TEvent, so the two implementations cannot share one.
+    // ReSharper disable once StaticMemberInGenericType
     [ThreadStatic]
     private static LogTable Log;
 
@@ -3568,6 +3611,12 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         var set = _shadow[slotIndex];
         if (set == null || _shadowGen[slotIndex] != session.Generation || !st.Anchored || st.NeedsReset)
         {
+            return;
+        }
+
+        if (CommittedAsRegion(session))
+        {
+            ShadowCheckRegion(_regions[slotIndex], set, in archetypes);
             return;
         }
 

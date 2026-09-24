@@ -28,6 +28,11 @@ internal sealed unsafe partial class FrameAssembler
     /// <summary>The engine, whose EntityMap and clusters a followed entity's position is read from (09 § 6).</summary>
     internal DatabaseEngine Engine;
 
+    /// <summary>The ingress, whose session rows hold the region each ClientRegion session last sent (09 § 7).</summary>
+    internal SubscriptionsIngress Ingress;
+
+    private static readonly ClientRegionCommand NoRegion;
+
     /// <summary>Frames whose followed entity was gone, served at its last position instead (09 § 6, Q6). The application rebinds or unplaces.</summary>
     public long BoundLost;
 
@@ -46,6 +51,7 @@ internal sealed unsafe partial class FrameAssembler
     private int[] _pushProfiles = [];
     private double[] _pushRadius = [];
     private bool[] _pushWorld = [];
+    private bool[] _pushRegion = [];
     private int[] _pushDivisor = [];
     private int _pushSessionCount;
     private int _pushCursor;
@@ -61,6 +67,10 @@ internal sealed unsafe partial class FrameAssembler
     private readonly uint[] _aggLastTick = [];
     private readonly ushort[] _aggGeneration = [];
     private readonly Vector3D[] _aggAnchor = [];
+
+    // A ClientRegion session's aggregate region at its last AGG, sorted (09 § 8): its hull less what its near tier held.
+    private readonly uint[][] _aggRegion = [];
+    private readonly int[] _aggRegionCount = [];
     private readonly ushort[] _eventsLastGeneration = [];
 
     /// <summary>Serial: collects this tick's push sessions and their viewpoints, prepares their rows, and indexes the push events.</summary>
@@ -113,10 +123,12 @@ internal sealed unsafe partial class FrameAssembler
                 Array.Resize(ref _pushRadius, grown);
                 Array.Resize(ref _pushFollow, grown);
                 Array.Resize(ref _pushWorld, grown);
+                Array.Resize(ref _pushRegion, grown);
                 Array.Resize(ref _pushDivisor, grown);
             }
 
             _pushWorld[n] = world;
+            _pushRegion[n] = Profiles.RegionOf(profile);
             _pushDivisor[n] = divisor;
             _pushFollow[n] = EntityId.Null;
             switch (Profiles.SourceOf(profile))
@@ -284,9 +296,10 @@ internal sealed unsafe partial class FrameAssembler
                 var published = -1;
                 AssemblePush(i, scratch, ref follow, ref lost, ref counters, ref enters, ref leaves, ref updates, ref published);
 
-                // The budget loop, fed with every frame the session was given or had nothing for (09 § 10). World sessions have no LOD. The budget is
-                // read here, in the session's chunk, not in the serial prologue: a row per session there was a cache miss per session in series.
-                if (published >= 0 && !_pushWorld[i])
+                // The budget loop, fed with every frame the session was given or had nothing for (09 § 10). World and ClientRegion sessions have no
+                // LOD. The budget is read here, in the session's chunk, not in the serial prologue: a row per session there was a cache miss per session
+                // in series.
+                if (published >= 0 && !_pushWorld[i] && !_pushRegion[i])
                 {
                     var session = _pushSessions[i];
                     Push.Pace(session, published, _sessions.BudgetOf(session), Volatile.Read(ref _tickSeconds));
@@ -510,18 +523,116 @@ internal sealed unsafe partial class FrameAssembler
             var r = scratch.AggRows[i];
             for (var c = 0; c < a; c++)
             {
-                w.WriteVaru((uint)Math.Max(0, counts.Counts[(r * a) + c]));
+                // Row −1: a tile that left a region's aggregate, sent as zero (SelectRegionAggregateRows).
+                w.WriteVaru(r < 0 ? 0u : (uint)Math.Max(0, counts.Counts[(r * a) + c]));
             }
         }
 
         TickWriter.EndBlock(ref w, mark);
     }
 
-    private void CommitAggregate(SessionId session, Vector3D anchor)
+    private void CommitAggregate(SessionId session, Vector3D anchor, FrameWorkerScratch region)
     {
-        _aggLastTick[session.Slot] = (uint)_tick;
-        _aggAnchor[session.Slot] = anchor;
-        _aggGeneration[session.Slot] = session.Generation;
+        var slot = session.Slot;
+        _aggLastTick[slot] = (uint)_tick;
+        _aggAnchor[slot] = anchor;
+        _aggGeneration[slot] = session.Generation;
+        if (region != null)
+        {
+            var count = region.AggRegionCount;
+            if (_aggRegion[slot] == null || _aggRegion[slot].Length < count)
+            {
+                _aggRegion[slot] = new uint[Math.Max(64, Math.Max(count, (_aggRegion[slot]?.Length ?? 0) * 2))];
+            }
+
+            Array.Copy(region.AggRegion, _aggRegion[slot], count);
+            _aggRegionCount[slot] = count;
+        }
+    }
+
+    /// <summary>
+    /// A ClientRegion session's <c>AGG</c> rows (09 § 8): the tiles of its aggregate region — its hull less the cells its near tier delivered — that changed
+    /// since its last AGG or that the region did not cover then; every non-empty one on a reset. The region's tiles are kept, sorted, for the next AGG.
+    /// </summary>
+    private int SelectRegionAggregateRows(SessionId session, AggregateCounts counts, FrameWorkerScratch scratch, bool reset, uint last)
+    {
+        var slot = session.Slot;
+        var previous = reset || _aggRegion[slot] == null ? [] : new ReadOnlySpan<uint>(_aggRegion[slot], 0, _aggRegionCount[slot]);
+        var n = 0;
+        var inRegion = 0;
+        var a = counts.ArchetypeCount;
+        for (var r = 0; r < counts.Rows; r++)
+        {
+            var tile = counts.Tiles[r];
+            if (!Push.RegionAggregates(session, counts, tile))
+            {
+                continue;
+            }
+
+            if (inRegion == scratch.AggRegion.Length)
+            {
+                Array.Resize(ref scratch.AggRegion, inRegion * 2);
+            }
+
+            scratch.AggRegion[inRegion++] = tile;
+            bool send;
+            if (reset)
+            {
+                send = false;
+                for (var c = 0; c < a && !send; c++)
+                {
+                    send = counts.Counts[(r * a) + c] > 0;
+                }
+            }
+            else
+            {
+                send = counts.Stamps[r] > last || previous.BinarySearch(tile) < 0;
+            }
+
+            if (!send)
+            {
+                continue;
+            }
+
+            if (n == scratch.AggRows.Length)
+            {
+                Array.Resize(ref scratch.AggRows, n * 2);
+                Array.Resize(ref scratch.AggTiles, n * 2);
+            }
+
+            scratch.AggRows[n] = r;
+            scratch.AggTiles[n++] = tile;
+        }
+
+        Array.Sort(scratch.AggRegion, 0, inRegion);
+        scratch.AggRegionCount = inRegion;
+
+        // A tile the region no longer covers gets a zero row: the client knows its hull but not which cells the near tier delivered, so a tile that left
+        // because its last cell was delivered would otherwise keep its count beside the entities now held (09 § 8, a region's aggregate).
+        var current = new ReadOnlySpan<uint>(scratch.AggRegion, 0, inRegion);
+        foreach (var tile in previous)
+        {
+            if (current.BinarySearch(tile) >= 0)
+            {
+                continue;
+            }
+
+            if (n == scratch.AggRows.Length)
+            {
+                Array.Resize(ref scratch.AggRows, n * 2);
+                Array.Resize(ref scratch.AggTiles, n * 2);
+            }
+
+            scratch.AggRows[n] = -1;
+            scratch.AggTiles[n++] = tile;
+        }
+
+        if (n > 1)
+        {
+            Array.Sort(scratch.AggTiles, scratch.AggRows, 0, n);
+        }
+
+        return n;
     }
 
     /// <summary>A frame's enter budget (09 § 10): halved per LOD level, divided by the overload multiplier, never below one.</summary>
@@ -577,13 +688,28 @@ internal sealed unsafe partial class FrameAssembler
             ResolveFollowed(index, session, ref follow, ref lost);
         }
 
-        var reset = _pushWorld[index]
-            ? Push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, EnterBudget(0), ref enters, ref leaves,
-                ref updates, out var complete)
-            : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], Profiles.BandsOf(_pushProfiles[index]), state.PendingReset,
-                in Profiles.SetOf(_pushProfiles[index]), scratch,
-                _encodePlans,
-                EnterBudget(Push.TargetLevelOf(session)), ref enters, ref leaves, ref updates, out complete);
+        bool reset, complete;
+        if (_pushRegion[index])
+        {
+            // The region the client last sent, read from its ingress row: the ingress drain wrote it earlier in this tick, and nothing writes it again
+            // before the next one (SUB-05).
+            var row = Ingress?.RowOf(session);
+            var hasRegion = row is { HasRegion: true };
+            var profile = _pushProfiles[index];
+            var (nearBudget, nearCounts) = Profiles.NearOf(profile);
+            reset = Push.GatherRegion(session, hasRegion, in hasRegion ? ref row.Region : ref NoRegion, Profiles.MaxEdgeOf(profile), nearBudget, nearCounts,
+                Volatile.Read(ref _tickSeconds), state.PendingReset, in Profiles.SetOf(profile), scratch, EnterBudget(0), ref enters, ref leaves,
+                ref updates, out complete);
+        }
+        else
+        {
+            reset = _pushWorld[index]
+                ? Push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, EnterBudget(0), ref enters, ref leaves,
+                    ref updates, out complete)
+                : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], Profiles.BandsOf(_pushProfiles[index]),
+                    state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, _encodePlans, EnterBudget(Push.TargetLevelOf(session)), ref enters,
+                    ref leaves, ref updates, out complete);
+        }
 
         if (timing)
         {
@@ -647,8 +773,10 @@ internal sealed unsafe partial class FrameAssembler
             {
                 aggReset = !sent || reset;
                 aggAnchor = aggRadius > 0 ? Push.PendingAnchorOf(session) : default;
-                aggRows = SelectAggregateRows(aggCounts, scratch, aggReset, sent ? _aggLastTick[session.Slot] : 0u, aggRadius, aggAnchor,
-                    _aggAnchor[session.Slot]);
+                aggRows = _pushRegion[index]
+                    ? SelectRegionAggregateRows(session, aggCounts, scratch, aggReset, sent ? _aggLastTick[session.Slot] : 0u)
+                    : SelectAggregateRows(aggCounts, scratch, aggReset, sent ? _aggLastTick[session.Slot] : 0u, aggRadius, aggAnchor,
+                        _aggAnchor[session.Slot]);
             }
         }
 
@@ -666,7 +794,7 @@ internal sealed unsafe partial class FrameAssembler
             Push.Commit(session);
             if (aggDue)
             {
-                CommitAggregate(session, aggAnchor);
+                CommitAggregate(session, aggAnchor, _pushRegion[index] ? scratch : null);
             }
 
             published = 0;
@@ -746,7 +874,7 @@ internal sealed unsafe partial class FrameAssembler
         Push.Commit(session);
         if (aggDue)
         {
-            CommitAggregate(session, aggAnchor);
+            CommitAggregate(session, aggAnchor, _pushRegion[index] ? scratch : null);
         }
 
         if (Push.Shadow)

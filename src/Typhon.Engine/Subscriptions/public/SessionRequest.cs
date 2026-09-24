@@ -132,7 +132,8 @@ public readonly ref struct SessionRequest
     /// <remarks>
     /// A Sphere session over its budget is degraded by LOD level (09 § 10): every distance band's period doubles per level, a profile with no band gets one
     /// beyond half its radius, and the enter budget halves. Records are deferred and never dropped, so a small number slows a view down rather than
-    /// corrupting it. The level rises after a second over the budget and falls after three under 70 % of it.
+    /// corrupting it. The level rises after a second over the budget and falls after three under 70 % of it. A World or ClientRegion session has no LOD
+    /// level, so the budget does not act on it: a ClientRegion's is its profile's near budget (<c>Near</c>, 09 § 7), counted in entities.
     /// </remarks>
     public SessionRequest SetBudget(int bytesPerSecond)
     {

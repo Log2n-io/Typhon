@@ -269,6 +269,12 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         var blocks = WatchedBlocks(states);
         if (blocks == 0)
         {
+            // Nothing to project, but last tick's identity releases still fall due (SUB-06): a quiet world must not keep them live.
+            for (var i = 0; i < states.Length; i++)
+            {
+                states[i].FlushIdleTick();
+            }
+
             return 0;
         }
 
