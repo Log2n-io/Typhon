@@ -550,22 +550,29 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
     }
 
     /// <summary>
-    /// A <c>Sphere</c> that asks to follow an entity is refused, rather than silently centred somewhere the declaration did not name.
+    /// A Sphere centred two ways — bound to an entity and placed at a fixed point — is refused at <c>Start</c> (09 § 6): serving either would be a silent
+    /// substitution of the other.
     /// </summary>
-    /// <remarks>
-    /// The sphere is centred on the session's viewpoint, which an application places each tick. Following an entity means the ENGINE resolving that entity's
-    /// position on the replication track, which is separate work — and a refusal is the only honest answer while it is missing, because the alternative is a
-    /// declaration whose stated centre is quietly ignored.
-    /// </remarks>
     [Test]
     [VerifiesRule("SUB-16")]
-    public void ASphereThatFollowsAnEntityIsRefusedUntilTheEngineSideFollowExists()
+    public void ASphereCentredTwoWaysIsRefused([Values(0, 1, 2)] int order)
     {
         using var runtime = CreateRuntime();
-        runtime.Subscriptions.Profile("p", p => p.Sphere(192, leave: 208).AroundControlled().Of<SwgCreature>());
+        var entity = EntityId.FromRaw(0x10001);
+        runtime.Subscriptions.Profile("p", p =>
+        {
+            var sphere = p.Sphere(192);
+            _ = order switch
+            {
+                0 => sphere.Bind(entity).At(new Vector3D(1, 2, 0)),
+                1 => sphere.AroundControlled().Bind(entity),
+                _ => sphere.Bind(entity).AroundControlled(),
+            };
+            sphere.Of<SwgCreature>();
+        });
 
         var ex = Assert.Throws<NotSupportedException>(runtime.Start);
-        Assert.That(ex.Message, Does.Contain("viewpoint"));
+        Assert.That(ex.Message, Does.Contain("more than one way"), "whichever order the verbs were called in");
     }
 
     /// <summary>A profile with two observers is refused, even of one shape and one radius: it would be a tier, and Phase 2 builds tiers.</summary>

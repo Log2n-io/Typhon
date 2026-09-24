@@ -137,9 +137,6 @@ internal abstract unsafe class PushReplication
     /// <summary>The replication cell side, declared (<see cref="SubscriptionsOptions.ReplicationCellM"/>).</summary>
     public readonly double CellSize;
 
-    /// <summary>How far a viewpoint may drift from its anchor before the anchor moves.</summary>
-    public readonly double AnchorSlack;
-
     /// <summary>The delivered window's half width, in cells.</summary>
     public readonly int Half;
 
@@ -429,7 +426,6 @@ internal abstract unsafe class PushReplication
             _positionOffset[a] = position.Moving ? blockLayout.VisibilityPositionOffsetInColdEntry : blockLayout.EnterPositionOffsetInColdEntry;
             var slack = position.Moving ? plans[a].VisibilitySlackM : 0d;
             _queryPad[a] = 1d + slack;
-            _skipMargin[a] = 0.01 + slack;
 
             var pos = position.Pos;
             _minX[a] = pos.Min[0];
@@ -448,6 +444,9 @@ internal abstract unsafe class PushReplication
 
             _pruneMargin[a] += slack;
 
+            // The cell delivery and sweep prune against v̂, which is quantized: the same centimetre, quantum and slack as the far sweep.
+            _skipMargin[a] = _pruneMargin[a];
+
             _axisBytes[a] = pos.Bits / 8;
             _pushChunks[a] = new int[64];
             _pushBlocks[a] = new nint[64];
@@ -459,7 +458,6 @@ internal abstract unsafe class PushReplication
         ArgumentNullException.ThrowIfNull(grid);
         Radius = grid.Radius;
         CellSize = grid.CellM;
-        AnchorSlack = grid.AnchorSlack;
         Half = grid.Half;
         Window = grid.Window;
         _gridMinX = grid.OriginX;

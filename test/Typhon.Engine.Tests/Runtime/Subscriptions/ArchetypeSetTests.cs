@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using System.Numerics;
 using System.Runtime.InteropServices;
+using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime;
@@ -571,6 +572,24 @@ class ArchetypeSetTests : TestBase<ArchetypeSetTests>
 
     private static int Held<T>(FrameHarness harness, SessionId session) =>
         harness.Replica(session).NetIds(harness.CatalogPlan.ArchetypeByName(typeof(T).Name).Idx).Length;
+
+    /// <summary>Every bit of the 256 is its own: a set holding 0, 63, 64, 127 and 255 holds nothing else, on either side of each word boundary.</summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void EveryPlanIndexHasItsOwnBit()
+    {
+        var set = new ArchetypeSet();
+        int[] held = [0, 63, 64, 127, 255];
+        foreach (var a in held)
+        {
+            set.Add(a);
+        }
+
+        for (var a = 0; a < ArchetypeSet.Capacity; a++)
+        {
+            Assert.That(set.Contains(a), Is.EqualTo(System.Array.IndexOf(held, a) >= 0), $"plan index {a}");
+        }
+    }
 
     /// <summary>
     /// The creature sits at plan index 70; a second profile observes the archetype at plan index 6. Before step 2.0 the creature's events and cells reached

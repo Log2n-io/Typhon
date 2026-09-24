@@ -353,14 +353,13 @@ public sealed class SubscriptionsRegistry
                         "shapes are declarable now so the API does not grow verbs later.");
                 }
 
-                if (observer.Kind == ObserverKind.Sphere && (observer.BoundEntity != EntityId.Null || observer.FollowsControlled))
+                if (observer.Kind == ObserverKind.Sphere
+                    && (observer.BoundEntity != EntityId.Null ? 1 : 0) + (observer.FollowsControlled ? 1 : 0) + (observer.Placement.HasValue ? 1 : 0) > 1)
                 {
-                    // The sphere is centred on the session's viewpoint, which the application places on the tick. Following an entity means the ENGINE
-                    // resolving that entity's position on the replication track, which is a different piece of work; refusing it is better than silently
-                    // centring the sphere somewhere the declaration did not ask for.
+                    // Bind, AroundControlled and At each name where the sphere is centred; two of them name two places, and serving either would be a
+                    // silent substitution.
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a Sphere that follows an entity. Centre it with the session's viewpoint instead — an "
-                        + "application system calls Place(session, position) each tick — until the engine-side follow is built.");
+                        $"Profile '{profile.Name}' declares a Sphere centred in more than one way (Bind, AroundControlled, At). Declare one.");
                 }
 
                 if (observer.NearBudget != 0 || observer.FarTileM != 0)

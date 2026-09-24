@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Typhon.Protocol;
 
@@ -25,8 +26,12 @@ internal struct ArchetypeSet
     /// <summary>Whether plan index <paramref name="archetype"/> is in the set.</summary>
     /// <param name="archetype">A plan index below <see cref="Capacity"/>.</param>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public readonly bool Contains(int archetype) =>
-        ((Unsafe.Add(ref Unsafe.As<ArchetypeSet, ulong>(ref Unsafe.AsRef(in this)), (archetype >> 6) & (Words - 1)) >> (archetype & 63)) & 1UL) != 0;
+    public readonly bool Contains(int archetype)
+    {
+        // The word index is masked so the read never leaves the set; an index past it would alias, which the registry's 255 cap and Start's refusal exclude.
+        Debug.Assert((uint)archetype < Capacity, "a plan index past the set's capacity aliases");
+        return ((Unsafe.Add(ref Unsafe.As<ArchetypeSet, ulong>(ref Unsafe.AsRef(in this)), (archetype >> 6) & (Words - 1)) >> (archetype & 63)) & 1UL) != 0;
+    }
 
     /// <summary>Adds plan index <paramref name="archetype"/>.</summary>
     /// <param name="archetype">A plan index below <see cref="Capacity"/>.</param>

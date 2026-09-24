@@ -61,7 +61,6 @@ public sealed class ObserverBuilder
     public ObserverBuilder Bind(EntityId entity)
     {
         _observer.BoundEntity = entity;
-        _observer.FollowsControlled = false;
         return this;
     }
 
@@ -77,7 +76,6 @@ public sealed class ObserverBuilder
     public ObserverBuilder At(Vector3D position)
     {
         _observer.Placement = position;
-        _observer.FollowsControlled = false;
         return this;
     }
 

@@ -455,6 +455,10 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _plans = plans;
         _sessions = sessions;
         _states = new SessionFrameState[options.MaxSessions];
+        _followed = new Vector3D[options.MaxSessions];
+        _followedGeneration = new uint[options.MaxSessions];
+        _followedEntity = new EntityId[options.MaxSessions];
+        _followedValid = new bool[options.MaxSessions];
         _encodePlans = BuildEncodePlans(plans, catalog);
         _lagBoundTicks = SkipPolicy.LagBoundTicks(options, tickPeriodUs);
         _silenceBoundTicks = SkipPolicy.SilenceBoundTicks(options, tickPeriodUs);

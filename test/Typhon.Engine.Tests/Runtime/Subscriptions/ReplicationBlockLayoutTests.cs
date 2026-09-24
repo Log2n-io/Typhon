@@ -181,4 +181,39 @@ class ReplicationBlockLayoutTests
             Assert.That(with.BlockSize, Is.EqualTo(without.BlockSize + (21 * 8)));
         });
     }
+
+    /// <summary>
+    /// v̂'s bytes (09 § 2): the previous position's width, after the last-event tick and before the enter cache, with no region overlapping another; the
+    /// SWG-shaped 2D mover stays on a 32 B cold stride and a 3D one goes to 64 B; widening twice is widening once, and a static archetype has no v̂.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-20")]
+    public void TheVisibilityPositionHasItsOwnBytesOnlyWhenWidened()
+    {
+        var twoD = ReplicationBlockLayout.ForArchetype(slotCount: 21, segmentBytes: 13, packedStateBytes: 4, prevPositionBytes: 6, runStartBytes: 12,
+            ownerEntrySize: 0, enterPositionBytes: 0, enterBodyBytes: 3);
+        var threeD = ReplicationBlockLayout.ForArchetype(slotCount: 21, segmentBytes: 18, packedStateBytes: 20, prevPositionBytes: 9, runStartBytes: 16,
+            ownerEntrySize: 0);
+        var still = ReplicationBlockLayout.ForArchetype(slotCount: 21, segmentBytes: 0, packedStateBytes: 4, prevPositionBytes: 0, runStartBytes: 0,
+            ownerEntrySize: 0, enterPositionBytes: 6, enterBodyBytes: 2);
+        var wide2 = twoD.WithVisibilityPosition();
+        var wide3 = threeD.WithVisibilityPosition();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(twoD.VisibilityPositionBytes, Is.Zero);
+            Assert.That(twoD.VisibilityPositionOffsetInColdEntry, Is.EqualTo(twoD.PrevPositionOffsetInColdEntry), "at h = 0 v̂ is the previous position");
+
+            Assert.That(wide2.VisibilityPositionBytes, Is.EqualTo(6));
+            Assert.That(wide2.VisibilityPositionOffsetInColdEntry, Is.EqualTo(wide2.LastEventTickOffsetInColdEntry + ReplicationBlockLayout.ColdFixedBytes));
+            Assert.That(wide2.EnterPositionOffsetInColdEntry, Is.EqualTo(wide2.VisibilityPositionOffsetInColdEntry + 6), "the enter cache follows v̂");
+            Assert.That(wide2.EnterBodyOffsetInColdEntry + wide2.EnterBodyBytes, Is.LessThanOrEqualTo(wide2.ColdStride), "every region fits the stride");
+            Assert.That(wide2.ColdStride, Is.EqualTo(32), "6 + 12 + 4 + 6 + 3 = 31 B: the 2D mover keeps a 32 B cold stride");
+            Assert.That(wide2.HotStride, Is.EqualTo(twoD.HotStride), "v̂ lives in the cold entry only");
+
+            Assert.That(wide3.ColdStride, Is.EqualTo(64), "9 + 16 + 4 + 9 = 38 B: a 3D mover's cold entry takes 64 B");
+            Assert.That(wide3.WithVisibilityPosition().ColdStride, Is.EqualTo(wide3.ColdStride), "widening twice is widening once");
+            Assert.That(still.WithVisibilityPosition().VisibilityPositionBytes, Is.Zero, "a static archetype keeps no previous position, so no v̂");
+        });
+    }
 }

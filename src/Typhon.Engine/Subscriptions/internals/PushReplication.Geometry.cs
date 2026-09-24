@@ -1549,8 +1549,12 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             return true;
         }
 
-        return BoxMax2(n, bx0, by0, bz0, bx1, by1, bz1) <= (n.R - margin) * (n.R - margin)
-               && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (a.R - margin) * (a.R - margin);
+        // A margin as wide as the radius proves nothing inside: (R − margin)² would be positive again and "prove" a box at the anchor.
+        var innerN = n.R - margin;
+        var innerA = a.R - margin;
+        return innerN > 0 && innerA > 0
+               && BoxMax2(n, bx0, by0, bz0, bx1, by1, bz1) <= innerN * innerN
+               && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= innerA * innerA;
     }
 
     public override bool Gather(SessionId session, bool placed, Vector3D viewpoint, double radius, bool forceReset, in ArchetypeSet archetypes,
@@ -1570,6 +1574,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
         // The radius this frame moves to — the profile's R′, or the session's SetRadius — and the one the committed known-set was built with (09 § 4,
         // 10 § 5): a change is a shell sweep, not a reset. The window is sized for the largest any session can take.
+        Debug.Assert(radius <= Radius, "SetRadius and the profiles bound a session's radius by the window's; the prologue handed a wider one");
         var rNew = radius > 0 && radius <= Radius ? radius : Radius;
         var rOld = st.Radius > 0 ? st.Radius : rNew;
 
@@ -2551,7 +2556,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 // A box wholly beyond R/2 of the new anchor, or wholly within R/2 of the old one, holds nobody who crossed inward.
                 if (!double.IsInfinity(bx0) && !double.IsInfinity(bx1) && (!hasZ || (!double.IsInfinity(bz0) && !double.IsInfinity(bz1)))
                     && (BoxMin2(n, bx0, by0, bz0, bx1, by1, bz1) > (nearN + margin) * (nearN + margin)
-                        || BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (nearA - margin) * (nearA - margin)))
+                        || (nearA > margin && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (nearA - margin) * (nearA - margin))))
                 {
                     continue;
                 }

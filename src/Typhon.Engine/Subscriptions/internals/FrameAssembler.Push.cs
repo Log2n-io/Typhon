@@ -25,6 +25,21 @@ internal sealed unsafe partial class FrameAssembler
     /// <summary>The declared profiles, which name each session's observer.</summary>
     internal SubscriptionProfiles Profiles;
 
+    /// <summary>The engine, whose EntityMap and clusters a followed entity's position is read from (09 § 6).</summary>
+    internal DatabaseEngine Engine;
+
+    /// <summary>Frames whose followed entity was gone, served at its last position instead (09 § 6, Q6). The application rebinds or unplaces.</summary>
+    public long BoundLost;
+
+    // The entity each push session follows this tick (Bind or AroundControlled), or Null; resolved in the parallel chunk, not the serial prologue.
+    private EntityId[] _pushFollow = [];
+
+    // Per slot: the last position a followed entity was read at, and for which session generation — what a session keeps when its entity is gone.
+    private readonly Vector3D[] _followed = [];
+    private readonly uint[] _followedGeneration = [];
+    private readonly EntityId[] _followedEntity = [];
+    private readonly bool[] _followedValid = [];
+
     private SessionId[] _pushSessions = [];
     private Vector3D[] _pushViewpoints = [];
     private bool[] _pushPlaced = [];
@@ -61,14 +76,35 @@ internal sealed unsafe partial class FrameAssembler
                 Array.Resize(ref _pushPlaced, grown);
                 Array.Resize(ref _pushProfiles, grown);
                 Array.Resize(ref _pushRadius, grown);
+                Array.Resize(ref _pushFollow, grown);
                 Array.Resize(ref _pushWorld, grown);
                 Array.Resize(ref _pushDivisor, grown);
             }
 
             _pushWorld[n] = world;
             _pushDivisor[n] = divisor;
-            _pushPlaced[n] = _sessions.TryGetViewpoint(session, out var viewpoint);
-            _pushViewpoints[n] = viewpoint;
+            _pushFollow[n] = EntityId.Null;
+            switch (Profiles.SourceOf(profile))
+            {
+                case ViewpointSource.Fixed:
+                    _pushPlaced[n] = true;
+                    _pushViewpoints[n] = Profiles.PlacementOf(profile);
+                    break;
+                case ViewpointSource.Bound:
+                    _pushPlaced[n] = false;
+                    _pushFollow[n] = Profiles.BoundEntityOf(profile);
+                    break;
+                case ViewpointSource.Controlled:
+                    // A session that controls nothing yet is nowhere, as an unplaced one is.
+                    _pushPlaced[n] = false;
+                    _pushFollow[n] = _sessions.ControlledOf(session);
+                    break;
+                default:
+                    _pushPlaced[n] = _sessions.TryGetViewpoint(session, out var viewpoint);
+                    _pushViewpoints[n] = viewpoint;
+                    break;
+            }
+
             _pushProfiles[n] = profile;
 
             // The radius this frame is gathered at: the session's run-time one when SetRadius gave it one, its profile's R′ otherwise (09 § 3–4).
@@ -77,7 +113,7 @@ internal sealed unsafe partial class FrameAssembler
             _pushSessions[n++] = session;
             PrepareSession(session);
             // Only a World session served this tick can fill: a rate class skips the others (the check the frame stage repeats below).
-            if (world && (divisor <= 1 || ((_tick + (uint)session.Slot) % (uint)divisor) == 0))
+            if (world && (divisor <= 1 || ((_tick + session.Slot) % (uint)divisor) == 0))
             {
                 var sessionState = StateOf(session);
                 Push.NoteWorldSession(session, sessionState != null && sessionState.PendingReset);
@@ -177,16 +213,31 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        long enters = 0, leaves = 0, updates = 0;
-        while (true)
-        {
-            var i = Interlocked.Increment(ref _pushCursor) - 1;
-            if (i >= _pushSessionCount)
-            {
-                break;
-            }
+        long enters = 0, leaves = 0, updates = 0, lost = 0;
 
-            AssemblePush(i, scratch, ref counters, ref enters, ref leaves, ref updates);
+        // One reader for this worker's whole share: its accessors stay cached across the followed sessions it serves.
+        var follow = new BoundViewpoint(Engine);
+        try
+        {
+            while (true)
+            {
+                var i = Interlocked.Increment(ref _pushCursor) - 1;
+                if (i >= _pushSessionCount)
+                {
+                    break;
+                }
+
+                AssemblePush(i, scratch, ref follow, ref lost, ref counters, ref enters, ref leaves, ref updates);
+            }
+        }
+        finally
+        {
+            follow.Dispose();
+        }
+
+        if (lost > 0)
+        {
+            Interlocked.Add(ref BoundLost, lost);
         }
 
         Interlocked.Add(ref Push.Enters, enters);
@@ -194,7 +245,55 @@ internal sealed unsafe partial class FrameAssembler
         Interlocked.Add(ref Push.Updates, updates);
     }
 
-    private void AssemblePush(int index, FrameWorkerScratch scratch, ref FrameCounters counters, ref long enters, ref long leaves, ref long updates)
+    /// <summary>
+    /// A followed session's viewpoint: its entity's position after this tick's fence (09 § 6), read here, in the session's parallel chunk. An entity that
+    /// is gone leaves the session at the last position it was read at, and counts <see cref="BoundLost"/>; with none yet, the session is nowhere.
+    /// </summary>
+    private void ResolveFollowed(int index, SessionId session, ref BoundViewpoint follow, ref long lost)
+    {
+        var slot = session.Slot;
+        if ((uint)slot >= (uint)_followed.Length)
+        {
+            return;
+        }
+
+        var entity = _pushFollow[index];
+        if (follow.TryRead(entity, out var centre))
+        {
+            _followed[slot] = centre;
+            _followedGeneration[slot] = session.Generation;
+            _followedEntity[slot] = entity;
+            _followedValid[slot] = true;
+            _pushViewpoints[index] = centre;
+            _pushPlaced[index] = true;
+            return;
+        }
+
+        // Only the same entity's last position: a session switched to an entity that cannot be read yet is nowhere, not where the previous one was.
+        if (_followedValid[slot] && _followedGeneration[slot] == session.Generation && _followedEntity[slot] == entity)
+        {
+            lost++;
+            _pushViewpoints[index] = _followed[slot];
+            _pushPlaced[index] = true;
+        }
+    }
+
+    /// <summary>Tests only: the last position a session's followed entity was read at, and whether there is one.</summary>
+    internal bool TryGetFollowed(SessionId session, out Vector3D position)
+    {
+        position = default;
+        var slot = session.Slot;
+        if ((uint)slot >= (uint)_followed.Length || !_followedValid[slot] || _followedGeneration[slot] != session.Generation)
+        {
+            return false;
+        }
+
+        position = _followed[slot];
+        return true;
+    }
+
+    private void AssemblePush(int index, FrameWorkerScratch scratch, ref BoundViewpoint follow, ref long lost, ref FrameCounters counters, ref long enters,
+        ref long leaves, ref long updates)
     {
         var session = _pushSessions[index];
         var state = StateOf(session);
@@ -206,7 +305,7 @@ internal sealed unsafe partial class FrameAssembler
         // A rate class: not this session's tick. Not a skip — nothing was refused — and the log carries the union on its next one. Staggered by slot so a
         // profile's sessions do not all land on the same tick.
         var divisor = _pushDivisor[index];
-        if (divisor > 1 && ((_tick + (uint)session.Slot) % (uint)divisor) != 0)
+        if (divisor > 1 && ((_tick + session.Slot) % (uint)divisor) != 0)
         {
             return;
         }
@@ -238,6 +337,11 @@ internal sealed unsafe partial class FrameAssembler
         var mark = timing ? Stopwatch.GetTimestamp() : 0L;
 
         scratch.BeginSession(_plans.Length);
+        if (!_pushFollow[index].IsNull)
+        {
+            ResolveFollowed(index, session, ref follow, ref lost);
+        }
+
         var reset = _pushWorld[index]
             ? Push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves,
                 ref updates, out var complete)

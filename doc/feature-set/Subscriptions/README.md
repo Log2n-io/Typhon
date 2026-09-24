@@ -89,7 +89,7 @@ Clients connect over the built-in TCP transport or through ASP.NET Core (`servic
 - **Zero steady-state managed allocation** in the replication path.
 - **Built today:** one `World` or one `Sphere` observer per profile, centred on the viewpoint the application places; flat and volumetric
   worlds (a world one spatial cell deep is served in the plane, a deeper one in 3D — 2D archetypes then live on the plane z = 0); Sphere
-  profiles of any radius, with a leave band (`Sphere(192, leave: 208)`) and a run-time range (`Sphere(192, max: 1500)` + `SetRadius`); up to 255 replicated archetypes, any number of them observed by one profile. The replication cell side is declared (`SubscriptionsOptions.ReplicationCellM`). **Refused at `Start` until they are built:** a Sphere following an entity, several observers or near/far tiers in one profile, `ClientRegion`, `Aggregate`, headings,
+  profiles of any radius, with a leave band (`Sphere(192, leave: 208)`) and a run-time range (`Sphere(192, max: 1500)` + `SetRadius`); up to 255 replicated archetypes, any number of them observed by one profile. The replication cell side is declared (`SubscriptionsOptions.ReplicationCellM`). A Sphere is centred on the viewpoint `Place` gives, a fixed point (`At`), one entity (`Bind`) or the session's controlled entity (`AroundControlled`), read after the tick's fence. **Refused at `Start` until they are built:** several observers or near/far tiers in one profile, `ClientRegion`, `Aggregate`, headings,
   shared sources. Events are declared and exported but not delivered yet.
 - **A session never placed holds nothing** — not the area around the origin.
 

@@ -112,9 +112,11 @@ public static class TatooineReplication
             .Of<CreatureLair>()
             .Of<WorldObject>());
 
+        // Centred on the player the session controls, at its post-fence position (09 § 6): no per-tick Place.
         subs.Profile(PlayerProfile, p => p
             .Detection(detection)
             .Sphere(PlayerRadiusM)
+            .AroundControlled()
             .Of<Player>()
             .Of<CityNpc>()
             .Of<Creature>());
@@ -474,48 +476,37 @@ public static class TatooineReplication
             }
         }
 
-        // ONE walk: this tick's position for every player a session holds, and a player for every session that does not hold one yet.
-        BoundPositions.Clear();
+        // A player for every session that does not hold one yet, handed over once with Control: the engine centres the session's sphere on it from then
+        // on (AroundControlled), so there is no per-tick walk of every player and no Place.
         var cursor = 0;
-        foreach (var cluster in accessor.GetClusterEnumerator())
+        if (Unbound.Count > 0)
         {
-            var occupancy = cluster.OccupancyBits;
-            var placements = cluster.GetReadOnlySpan(Player.Bounds);
-            var ids = cluster.EntityIds;
-            while (occupancy != 0)
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                var slot = BitOperations.TrailingZeroCount(occupancy);
-                occupancy &= occupancy - 1;
-                var id = ids[slot];
-                var held = BoundIds.Contains(id);
-                if (!held && cursor >= Unbound.Count)
+                var occupancy = cluster.OccupancyBits;
+                var ids = cluster.EntityIds;
+                while (occupancy != 0 && cursor < Unbound.Count)
                 {
-                    continue;
-                }
+                    var slot = BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+                    var id = ids[slot];
+                    if (BoundIds.Contains(id))
+                    {
+                        continue;
+                    }
 
-                var b = placements[slot].Bounds;
-                var at = new Vector3D((b.MinX + b.MaxX) * 0.5, (b.MinY + b.MaxY) * 0.5, 0d);
-                if (!held)
-                {
                     var session = Unbound[cursor++];
                     BoundPlayer[session.Value] = id;
                     BoundIds.Add(id);
+                    subs.Session(session).Control(cluster.GetEntityId(slot));
                 }
 
-                BoundPositions[id] = at;
+                if (cursor >= Unbound.Count)
+                {
+                    break;
+                }
             }
         }
-
-        foreach (var session in subs.OpenSessions)
-        {
-            if (string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal)
-                && BoundPlayer.TryGetValue(session.Value, out var id)
-                && BoundPositions.TryGetValue(id, out var at))
-            {
-                subs.Place(session, at);
-            }
-        }
-
 
         // A closed session gives its player back, or the maps grow for the life of the process and every player eventually reads as held — at which
         // point a new session is bound to nothing and sees nothing.
@@ -560,9 +551,6 @@ public static class TatooineReplication
 
     /// <summary>The players held by some session, so the walk can tell a free one from a taken one without searching.</summary>
     private static readonly HashSet<long> BoundIds = [];
-
-    /// <summary>Scratch, reused every tick: this tick's position for each held player.</summary>
-    private static readonly Dictionary<long, Vector3D> BoundPositions = [];
 
     /// <summary>Scratch: the player sessions open this tick that hold no player yet.</summary>
     private static readonly List<SessionId> Unbound = [];

@@ -127,15 +127,14 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // A second detector instance is not a second copy of that arithmetic: the ladder stays in one place, which is what the exposed property is for.
             LargestTickMultiplier = new OverloadDetector(options.Overload, options.BaseTickRate).MaxTickMultiplier;
 
-            Plans = ProjectionCompiler.Compile(registry, engine, NominalTickPeriodSeconds, LargestTickMultiplier);
+            Plans = ProjectionCompiler.Compile(registry, engine, NominalTickPeriodSeconds, LargestTickMultiplier, Options.ReplicationCellM,
+                Options.VisibilitySlackMForTest);
 
             Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames,
                 engine.SpatialGrid?.Config);
 
             _sessions = new SessionTable("Subscriptions.Sessions", parent, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
 
-            // Before the blocks are carved: an archetype with a slack above zero keeps v̂ in its cold entry, which widens the layout.
-            ResolveVisibilitySlack(registry, Plans, Options.VisibilitySlackMForTest);
             _replicationStates = AttachReplicationStates(engine, parent, netIds);
 
             // Built after the session table, whose rows name each session's profile. It resolves every profile to plan indices here, so the tick path never
@@ -147,6 +146,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _frames = new FrameAssembler("Subscriptions.Frames", parent, engine.MemoryAllocator, Options, Plans, Catalog.Canonical, _sessions,
                 NominalTickPeriodUs);
             _frames.Profiles = Profiles;
+            _frames.Engine = engine;
 
             // The push path (ADR-067): every archetype some profile observes is served by it.
             var observed = Profiles.ObservedArchetypes;
@@ -552,57 +552,6 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         }
 
         return null;
-    }
-
-    /// <summary>
-    /// Resolves each moving archetype's visibility slack <c>h_A</c> (09 § 2) and widens its layout for v̂ when it is above zero.
-    /// </summary>
-    /// <remarks>
-    /// <c>h_A</c> is the smallest slack over the Sphere profiles observing the archetype, so every profile's bound holds: without a band a profile's slack
-    /// mirrors the anchor slack its sessions already accept, <c>R / 48</c> (Q1). A <c>World</c> profile holds every entity whatever its position and asks for none; an
-    /// archetype no Sphere observes stays exact. A profile with a leave band asks for its half-band, <c>(L − R) / 2</c> (§ 3).
-    /// </remarks>
-    private static void ResolveVisibilitySlack(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, double overrideM)
-    {
-        for (var a = 0; a < plans.Length; a++)
-        {
-            var plan = plans[a];
-            if (plan.Position == null || !plan.Position.Moving)
-            {
-                continue;
-            }
-
-            var slack = double.PositiveInfinity;
-            foreach (var profile in registry.Profiles)
-            {
-                foreach (var observer in profile.Observers)
-                {
-                    if (observer.Kind != ObserverKind.Sphere)
-                    {
-                        continue;
-                    }
-
-                    foreach (var type in observer.Archetypes)
-                    {
-                        if (type == plan.ArchetypeType)
-                        {
-                            slack = Math.Min(slack, observer.VisibilitySlack);
-                        }
-                    }
-                }
-            }
-
-            if (double.IsFinite(overrideM))
-            {
-                slack = overrideM;
-            }
-
-            plan.VisibilitySlackM = double.IsFinite(slack) && slack > 0 ? slack : 0d;
-            if (plan.VisibilitySlackM > 0)
-            {
-                plan.BlockLayout = plan.BlockLayout.WithVisibilityPosition();
-            }
-        }
     }
 
     /// <summary>

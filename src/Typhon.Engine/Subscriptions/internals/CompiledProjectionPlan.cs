@@ -350,16 +350,16 @@ internal sealed class CompiledProjectionPlan
     public CompiledPosition Position { get; init; }
 
     /// <summary>
-    /// The block layout: the hot, cold and owner entry offsets a block of this archetype is carved into. Widened at <c>Start</c>, before any block
-    /// exists, when the archetype's visibility slack is above zero (<see cref="VisibilitySlackM"/>).
+    /// The block layout: the hot, cold and owner entry offsets a block of this archetype is carved into — with v̂'s bytes in the cold entry when the
+    /// archetype's visibility slack is above zero (<see cref="VisibilitySlackM"/>).
     /// </summary>
-    public ReplicationBlockLayout BlockLayout { get; internal set; }
+    public ReplicationBlockLayout BlockLayout { get; init; }
 
     /// <summary>
     /// The archetype's visibility slack <c>h_A</c> in metres (09 § 2): v̂ moves to the entity's position only when that position is more than this far
-    /// from it. Zero is exact — v̂ is the last projected position, every tick. Resolved at <c>Start</c> from the profiles that observe the archetype.
+    /// from it. Zero is exact — v̂ is the last projected position, every tick. Resolved by the compiler from the profiles that observe the archetype.
     /// </summary>
-    public double VisibilitySlackM { get; internal set; }
+    public double VisibilitySlackM { get; init; }
 
     /// <summary>Bytes one owner entry reserves — the owner sections' bodies — or <c>0</c> when the archetype declares none.</summary>
     public int OwnerEntrySize { get; init; }

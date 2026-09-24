@@ -667,9 +667,10 @@ internal sealed unsafe class SessionTable : IDisposable
             return false;
         }
 
+        _affinity.Enter(nameof(SessionTable), nameof(SetRadius));
         try
         {
-            if (!TryGetRow(session, out _))
+            if (!TryGetOpenRow(session, out _))
             {
                 return false;
             }
@@ -679,6 +680,7 @@ internal sealed unsafe class SessionTable : IDisposable
         }
         finally
         {
+            _affinity.Exit();
             Exit();
         }
     }
@@ -1136,6 +1138,16 @@ internal sealed unsafe class SessionTable : IDisposable
             Exit();
         }
     }
+
+    /// <summary>The entity a session controls, or <see cref="EntityId.Null"/>. Tick side, like the viewpoint.</summary>
+    /// <param name="session">The identity.</param>
+    /// <returns>The entity.</returns>
+    /// <remarks>
+    /// No gate: it is read once per followed session in the frame prologue, and the gate's counter is shared with the transport threads' sends, so taking it
+    /// here bounced its line on every session. The row's identity is checked with the acquire load <see cref="TryGetRow"/> makes, and <c>Controlled</c> is
+    /// written only on the tick.
+    /// </remarks>
+    public EntityId ControlledOf(SessionId session) => TryGetRow(session, out var row) ? row->Controlled : EntityId.Null;
 
     /// <summary>Sets a session's outbound byte budget. Tick side, from the request log.</summary>
     /// <param name="session">The identity.</param>

@@ -250,7 +250,7 @@ internal static unsafe class ProjectionPass
 
         // v̂ (09 § 2, SUB-20): kept apart from the previous position only when the archetype's slack is above zero. It moves to the entity's position at
         // an initialization, on a teleport, or when the position is more than h_A from it; otherwise the geometry keeps reading where it was.
-        var ownVisibility = layout.VisibilityPositionBytes > 0;
+        var ownVisibility = push != null && layout.VisibilityPositionBytes > 0;
         var slack = plan.VisibilitySlackM;
         var slackSquared = slack * slack;
 

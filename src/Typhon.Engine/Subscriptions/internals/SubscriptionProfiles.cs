@@ -30,6 +30,15 @@ internal sealed class SubscriptionProfiles
         /// <summary>The largest radius a session of this profile can be given (<c>SetRadius</c>); <see cref="Radius"/> when it is fixed.</summary>
         public double MaxRadius { get; init; }
 
+        /// <summary>Where the sphere is centred (09 § 6): the session's placed viewpoint, a fixed position, a bound entity, or the controlled one.</summary>
+        public ViewpointSource Source { get; init; }
+
+        /// <summary>The entity a <see cref="ViewpointSource.Bound"/> sphere follows.</summary>
+        public EntityId BoundEntity { get; init; }
+
+        /// <summary>The position a <see cref="ViewpointSource.Fixed"/> sphere is centred on.</summary>
+        public Vector3D Placement { get; init; }
+
         /// <summary>Whether the engine compares every live entity instead of waiting for <c>Replicate</c>.</summary>
         public bool Automatic { get; init; }
 
@@ -126,6 +135,13 @@ internal sealed class SubscriptionProfiles
                 World = observer.Kind == ObserverKind.World,
                 Radius = observer.Kind == ObserverKind.Sphere ? observer.EffectiveRadius : 0d,
                 MaxRadius = observer.Kind == ObserverKind.Sphere ? Math.Max(observer.EffectiveRadius, observer.MaxRadius) : 0d,
+                Source = observer.Kind != ObserverKind.Sphere ? ViewpointSource.Placed
+                    : observer.FollowsControlled ? ViewpointSource.Controlled
+                    : observer.BoundEntity != EntityId.Null ? ViewpointSource.Bound
+                    : observer.Placement.HasValue ? ViewpointSource.Fixed
+                    : ViewpointSource.Placed,
+                BoundEntity = observer.BoundEntity,
+                Placement = observer.Placement ?? default,
                 Automatic = declaration.PushDetection == PushDetection.Automatic,
                 TickDivisor = declaration.TickDivisor,
             };
@@ -191,6 +207,15 @@ internal sealed class SubscriptionProfiles
 
     /// <summary>The largest radius a session of profile <paramref name="profile"/> can be given; its R′ when the radius is fixed.</summary>
     public double MaxRadiusOf(int profile) => _profiles[profile].MaxRadius;
+
+    /// <summary>Where profile <paramref name="profile"/>'s sphere is centred.</summary>
+    public ViewpointSource SourceOf(int profile) => _profiles[profile].Source;
+
+    /// <summary>The entity profile <paramref name="profile"/>'s sphere follows, when its source is <see cref="ViewpointSource.Bound"/>.</summary>
+    public EntityId BoundEntityOf(int profile) => _profiles[profile].BoundEntity;
+
+    /// <summary>The fixed centre of profile <paramref name="profile"/>'s sphere, when its source is <see cref="ViewpointSource.Fixed"/>.</summary>
+    public Vector3D PlacementOf(int profile) => _profiles[profile].Placement;
 
     /// <summary>The name of profile <paramref name="profile"/>, for messages.</summary>
     public string NameOf(int profile) => _profiles[profile].Name;

@@ -64,8 +64,10 @@ internal static class ProjectionCompiler
     /// not the raw <c>BaseTickRate / MinTickRateHz</c> ratio, which the ladder caps.
     /// </param>
     /// <returns>One plan per declared archetype, in declaration order.</returns>
+    /// <param name="replicationCellM">The replication cell side; the visibility slack is capped at half of it. Zero or less: no cap.</param>
+    /// <param name="visibilitySlackOverrideM">Tests only: every Sphere-observed moving archetype's slack; <see cref="double.NaN"/> applies the rule.</param>
     public static CompiledProjectionPlan[] Compile(SubscriptionsRegistry registry, DatabaseEngine engine, double nominalTickPeriodSeconds,
-        int largestTickMultiplier)
+        int largestTickMultiplier, double replicationCellM = 0, double visibilitySlackOverrideM = double.NaN)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(engine);
@@ -84,7 +86,8 @@ internal static class ProjectionCompiler
         var plans = new CompiledProjectionPlan[registry.Archetypes.Count];
         for (var i = 0; i < plans.Length; i++)
         {
-            plans[i] = CompileArchetype(registry.Archetypes[i], engine, nominalTickPeriodSeconds, largestTickMultiplier);
+            var slack = VisibilitySlackOf(registry, registry.Archetypes[i].ArchetypeType, replicationCellM, visibilitySlackOverrideM);
+            plans[i] = CompileArchetype(registry.Archetypes[i], engine, nominalTickPeriodSeconds, largestTickMultiplier, slack);
         }
 
         return plans;
@@ -141,8 +144,53 @@ internal static class ProjectionCompiler
             $"{WireMath.SymmetricLimit(32)}. Lower the threshold, or widen the position quantum by shrinking the world.");
     }
 
+    /// <summary>
+    /// An archetype's visibility slack <c>h_A</c> (09 § 2–3): the smallest slack over the Sphere profiles observing it — a profile's half band, or its
+    /// <c>R / 48</c> without one — capped at half a cell, as the anchor slack is, so a cell query's padding stays under a cell. An archetype no Sphere
+    /// observes stays exact: nothing tests it against a radius.
+    /// </summary>
+    private static double VisibilitySlackOf(SubscriptionsRegistry registry, Type archetype, double cellM, double overrideM)
+    {
+        var slack = double.PositiveInfinity;
+        foreach (var profile in registry.Profiles)
+        {
+            foreach (var observer in profile.Observers)
+            {
+                if (observer.Kind != ObserverKind.Sphere)
+                {
+                    continue;
+                }
+
+                foreach (var type in observer.Archetypes)
+                {
+                    if (type == archetype)
+                    {
+                        slack = Math.Min(slack, observer.VisibilitySlack);
+                    }
+                }
+            }
+        }
+
+        if (!double.IsFinite(slack))
+        {
+            return 0d;
+        }
+
+        if (double.IsFinite(overrideM))
+        {
+            slack = overrideM;
+        }
+
+        if (cellM > 0 && double.IsFinite(cellM))
+        {
+            slack = Math.Min(slack, cellM / 2d);
+        }
+
+        return slack > 0 ? slack : 0d;
+    }
+
     private static CompiledProjectionPlan CompileArchetype(ArchetypeProjection projection, DatabaseEngine engine, double nominalTickPeriodSeconds,
-        int largestTickMultiplier)
+        int largestTickMultiplier, double visibilitySlackM)
     {
         var meta = ResolveArchetype(projection);
         var layout = meta.ClusterLayout;
@@ -221,6 +269,13 @@ internal static class ProjectionCompiler
         var blockLayout = ReplicationBlockLayout.ForArchetype(layout.ClusterSize, moving ? position.SegmentBytes : 0, stateBodyBytes, quantizedPositionBytes,
             runStartBytes, ownerEntrySize, enterPositionBytes, onEnter.MaxBodyBytes);
 
+        // v̂ (09 § 2) gets bytes of its own only for a mover with a slack; at zero it is the previous position.
+        var slack = moving ? visibilitySlackM : 0d;
+        if (slack > 0)
+        {
+            blockLayout = blockLayout.WithVisibilityPosition();
+        }
+
         return new CompiledProjectionPlan
         {
             Name = projection.Name,
@@ -237,6 +292,7 @@ internal static class ProjectionCompiler
             OwnerGroups = ownerGroups,
             Position = position,
             BlockLayout = blockLayout,
+            VisibilitySlackM = slack,
             OwnerEntrySize = ownerEntrySize,
             MaxStateBodyBytes = stateBodyBytes,
             TickSlotCount = motionTickSlots + groupNames.Length,

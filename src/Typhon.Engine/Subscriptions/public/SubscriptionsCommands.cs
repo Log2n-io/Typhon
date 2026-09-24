@@ -328,7 +328,7 @@ public sealed class SubscriptionsCommands
     /// profile's own.
     /// </param>
     /// <returns><see langword="false"/> when the session is closing or gone.</returns>
-    /// <exception cref="InvalidOperationException">The session's profile is not a Sphere.</exception>
+    /// <exception cref="InvalidOperationException">No profile is applied to the session yet, or its profile is not a Sphere.</exception>
     /// <exception cref="ArgumentOutOfRangeException">The radius is outside the profile's declared range.</exception>
     /// <remarks>
     /// <para>
@@ -337,16 +337,33 @@ public sealed class SubscriptionsCommands
     /// </para>
     /// <para>
     /// <b>It applies now, like <see cref="Place"/>,</b> and holds until the session's profile changes, which returns it to the new profile's own radius.
-    /// Call it after the profile it is checked against has been applied.
+    /// It is checked against the profile applied NOW: a profile requested through <see cref="Session"/> is applied by the next tick's prologue, so a
+    /// radius for that profile is set from the next tick on.
+    /// </para>
+    /// <para>
+    /// <b>The radius is the one sessions test</b> — the band's midpoint <c>(R + L) / 2</c> when the profile declares a leave radius — the same space as
+    /// <c>max:</c>.
     /// </para>
     /// </remarks>
     public bool SetRadius(SessionId session, double radius)
     {
-        var profiles = _ingress.Frames?.Profiles;
-        var profile = _ingress.Sessions.ProfileIndex(session);
-        if (profiles == null || profile < 0 || profiles.RadiusOf(profile) <= 0)
+        var sessions = _ingress.Sessions;
+        if (!sessions.IsOpen(session))
         {
-            throw new InvalidOperationException("SetRadius applies to a session whose profile is a Sphere, and this session's profile is not.");
+            return false;
+        }
+
+        var profiles = _ingress.Frames?.Profiles;
+        var profile = sessions.ProfileIndex(session);
+        if (profiles == null || profile < 0)
+        {
+            throw new InvalidOperationException(
+                "SetRadius needs the session's profile applied first; a profile requested this tick is applied by the next tick's prologue.");
+        }
+
+        if (profiles.RadiusOf(profile) <= 0)
+        {
+            throw new InvalidOperationException($"SetRadius applies to a Sphere profile; the session's profile '{profiles.NameOf(profile)}' is not one.");
         }
 
         var own = profiles.RadiusOf(profile);

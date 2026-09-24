@@ -368,8 +368,10 @@
     The grid covers the spatial world's bounds, and a spatial world one cell deep gives a grid one cell deep
   never resolve a declared region shape as though it were another: a profile whose observers have different shapes is a near/far tier, and
     the tiers differ in budget, rate and record kind, so their union is a wrong answer rather than an approximation
-  never centre a region somewhere the declaration did not name — an observer that asked to follow an entity and got the session's viewpoint
-    instead is a silent substitution; refuse it while the follow is unbuilt
+  never centre a region somewhere the declaration did not name: a Sphere is centred on the viewpoint Place gives (the default), a fixed point (At), one
+    entity (Bind) or the session's controlled entity (AroundControlled) — an entity's position read after the tick's fence, in the same tick. A followed
+    entity that is gone keeps its sessions at the last position read (counted, BoundLost); a session following nothing yet is nowhere. Two centres
+    declared on one Sphere are refused at Start
   scope: PushReplication.Gather, PushReplication.GatherWorld, PushReplication.Commit, SubscriptionProfiles.TryGetProfile, SubscriptionProfiles.RadiusOf,
     SubscriptionsCommands.SetRadius, SubscriptionProfiles.SetOf, ArchetypeSet.Contains, SessionTable.ProfileIndex, SessionTable.SetViewpoint,
     SessionTable.TryGetViewpoint, SubscriptionsCommands.Place, SubscriptionsRegistry, ReplicationGrid.Resolve
@@ -382,7 +384,7 @@
     the disc rather than a number recorded from a run; SphereObserverTests.TwoSessionsPlacedApartHoldDisjointSets, which discriminates "bounded by the
     radius" from "bounded at all"; SphereObserverTests.AnUnplacedSessionHoldsNothing over a populated origin; SphereObserverTests.AWorldObserverOverTheSameEntitiesHoldsAllOfThem;
     PushOracleTests.WalkingSessionsHoldExactlyWhatTheirDiscNames, where sessions walk and teleport under seeded churn;
-    SubscriptionsRegistryTests.ASphereThatFollowsAnEntityIsRefusedUntilTheEngineSideFollowExists,
+    SubscriptionsRegistryTests.ASphereCentredTwoWaysIsRefused, SphereObserverTests.AControlledSphereFollowsItsEntityInTheSameTick, SphereObserverTests.ASessionWhoseEntityIsDestroyedKeepsItsLastViewpoint, SphereObserverTests.BindAndAtCentreTheSphereWhereTheyName,
     PushOracleTests.TwoProfilesAndABandEachHoldTheirOwnDisc, ReplicationGridTests.AProfileWhoseRunTimeMaximumPassesTheWindowIsRefusedAtStart,
     SubscriptionsRegistryTests.AProfileWithTwoObserversIsRefused; ReplicationGridTests.AnUndeclaredCellSideIsRefused,
     ReplicationGridTests.ARuntimeThatObservesAnArchetypeWithoutACellSideRefusesToStart, ReplicationGridTests.AGridWiderThanTheCellKeyIsRefused,
@@ -398,10 +400,10 @@
     step, the crescent sweep, the cell delivery, the log catch-up, the occupancy and the shadow check — reads v̂ₑ, never the true position
   invariant v̂ₑ := pₑ (this tick's decoded quantized position) at initialization, on a teleport (the motion epoch changed), and when |pₑ − v̂ₑ| > h_A;
     otherwise v̂ₑ is unchanged. h_A = 0 is exact: v̂ is the last projected position, and no byte is added to the cold entry
-  invariant h_A ≤ the slack of every Sphere profile observing A — R / 48 until leave bands exist (Q1) — so each profile's bound holds: e is held when its
-    true position is within R − h_A of the anchor, and not held past R + h_A
-  invariant every cluster proof widens by h_A: a cell's cluster query pads by 1 m + h_A and a pruning test by 1 cm + h_A, because a cluster's box
-    bounds true positions and v̂ lies up to h_A from them
+  invariant h_A ≤ the slack of every Sphere profile observing A — its half band (L − R) / 2, or R / 48 without one (Q1) — and ≤ half a cell, so each
+    profile's bound holds: e is held when its true position is within R′ − h_A of the anchor, and not held past R′ + h_A
+  invariant every cluster proof widens by h_A: a cell's cluster query pads by 1 m + h_A and a pruning test by 1 cm + the position quantum + h_A,
+    because a cluster's box bounds true positions and v̂, quantized, lies up to h_A from them; a margin as wide as a radius proves nothing inside it
   invariant every move of v̂ makes an event; a mover whose v̂ stays and whose segment and groups did not change makes none
   scope: ProjectionPass, SubscriptionsRuntime, ReplicationBlockLayout.VisibilityPositionOffsetInColdEntry, PushReplication.AddEvent
   on_violation: silent. A test that read the true position would disagree with the events the others were fed, and an entity would be entered or left

@@ -276,6 +276,223 @@ class SphereObserverTests : TestBase<SphereObserverTests>
         }
     }
 
+    // ── 09 § 6: where the sphere is centred ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private static EntityId SpawnPlayerAt(DatabaseEngine dbe, float x, float y)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var vitals = new ProjVitals { Health = 1, MaxHealth = 1 };
+        var id = tx.Spawn<ProjPlayer>(ProjPlayer.Bounds.Set(PointAt(x, y)), ProjPlayer.Vitals.Set(in vitals));
+        tx.Commit();
+        return id;
+    }
+
+    private static void MovePlayer(DatabaseEngine dbe, EntityId player, float x, float y)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var accessor = tx.For<ProjPlayer>();
+        foreach (var cluster in accessor.GetClusterEnumerator())
+        {
+            var occupancy = cluster.OccupancyBits;
+            while (occupancy != 0)
+            {
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+                if (cluster.GetEntityId(slot) == player)
+                {
+                    cluster.WriteSpatial(ProjPlayer.Bounds, slot, PointAt(x, y));
+                }
+            }
+        }
+
+        accessor.Dispose();
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// <c>AroundControlled</c> (09 § 6): the session's sphere is centred on the entity it controls, at that entity's position after the tick's fence — the
+    /// same tick, with no <c>Place</c> — and holds the disc around it. The entity's archetype is not one the profile observes.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void AControlledSphereFollowsItsEntityInTheSameTick()
+    {
+        var dbe = SetupEngine();
+        Populate(dbe);
+        var player = SpawnPlayerAt(dbe, 50f, 50f);
+        using var harness = FrameHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("near", p => p.Sphere(Radius).AroundControlled().Of<ProjCreature>());
+            },
+            nameof(AControlledSphereFollowsItsEntityInTheSameTick), replicationCellM: ProjectionTestSchema.ReplicationCellFor(Radius));
+        harness.RunFence = true;
+        var session = harness.OpenSessions(1, "near")[0];
+        Assert.That(harness.Sessions.SetControlled(session, player), Is.True);
+
+        Fill(harness, session);
+        Assert.That(Held(harness, session), Is.EqualTo(PointsWithin(50d, 50d, Radius)), "the disc around the controlled entity, with no Place");
+
+        // Moved on tick 7; tick 7's frame is already centred where the fence put it.
+        MovePlayer(dbe, player, 51.5f, 50f);
+        harness.RunTick(FillTicks + 1);
+        harness.Deliver(session);
+        Assert.That(harness.Assembler.TryGetFollowed(session, out var followed), Is.True);
+        Assert.That(followed.X, Is.EqualTo(51.5).Within(1e-3), "the viewpoint is the entity's post-fence position of the same tick");
+
+        // Far enough to be a teleport: the next frames refill around the new position.
+        MovePlayer(dbe, player, 300f, 300f);
+        for (var tick = FillTicks + 2; tick <= (2 * FillTicks) + 2; tick++)
+        {
+            harness.RunTick(tick);
+            harness.Deliver(session);
+        }
+
+        Assert.That(Held(harness, session), Is.EqualTo(PointsWithin(300d, 300d, Radius)), "the disc around where the entity went");
+        Assert.That(harness.Assembler.BoundLost, Is.Zero);
+    }
+
+    /// <summary>
+    /// A followed entity that is destroyed leaves its sessions at the last position it was read at, counting <c>BoundLost</c> (09 § 6, Q6) — not
+    /// unplaced, which would blank the client's world on every respawn.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void ASessionWhoseEntityIsDestroyedKeepsItsLastViewpoint()
+    {
+        var dbe = SetupEngine();
+        Populate(dbe);
+        var player = SpawnPlayerAt(dbe, 200f, 200f);
+        using var harness = FrameHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("near", p => p.Sphere(Radius).AroundControlled().Of<ProjCreature>());
+            },
+            nameof(ASessionWhoseEntityIsDestroyedKeepsItsLastViewpoint), replicationCellM: ProjectionTestSchema.ReplicationCellFor(Radius));
+        harness.RunFence = true;
+        var session = harness.OpenSessions(1, "near")[0];
+        harness.Sessions.SetControlled(session, player);
+        Fill(harness, session);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(player);
+            tx.Commit();
+        }
+
+        for (var tick = FillTicks + 1; tick <= FillTicks + 3; tick++)
+        {
+            harness.RunTick(tick);
+            harness.Deliver(session);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(harness, session), Is.EqualTo(PointsWithin(200d, 200d, Radius)), "still the disc around the last position");
+            Assert.That(harness.Assembler.BoundLost, Is.GreaterThanOrEqualTo(3), "each frame served at the last position counts");
+        });
+    }
+
+    /// <summary>
+    /// A destroyed entity's EntityMap record lives on, tombstoned, while an older reader keeps the cleanup from running — and its freed slot may hold
+    /// another entity. The follow reads it as gone: the session stays at the last position and counts <c>BoundLost</c>, whatever the slot now holds.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void ADestroyedEntityIsGoneEvenWhileItsTombstoneIsKept()
+    {
+        var dbe = SetupEngine();
+        Populate(dbe);
+        var player = SpawnPlayerAt(dbe, 200f, 200f);
+        using var harness = FrameHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("near", p => p.Sphere(Radius).AroundControlled().Of<ProjCreature>());
+            },
+            nameof(ADestroyedEntityIsGoneEvenWhileItsTombstoneIsKept), replicationCellM: ProjectionTestSchema.ReplicationCellFor(Radius));
+        harness.RunFence = true;
+        var session = harness.OpenSessions(1, "near")[0];
+        harness.Sessions.SetControlled(session, player);
+        Fill(harness, session);
+
+        // An older reader holds MinTSN, so the destroy's EntityMap removal is deferred; a new player then takes the freed slot, somewhere else.
+        using var reader = dbe.CreateQuickTransaction();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(player);
+            tx.Commit();
+        }
+
+        SpawnPlayerAt(dbe, 330f, 330f);
+        for (var tick = FillTicks + 1; tick <= FillTicks + 3; tick++)
+        {
+            harness.RunTick(tick);
+            harness.Deliver(session);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(harness, session), Is.EqualTo(PointsWithin(200d, 200d, Radius)), "still the disc around the last position");
+            Assert.That(harness.Assembler.BoundLost, Is.GreaterThanOrEqualTo(3), "the tombstone reads as gone");
+        });
+    }
+
+    /// <summary>
+    /// <c>SetRadius</c> (09 § 4) on a session that is gone returns <see langword="false"/>; before any profile is applied it says so, rather than calling
+    /// the profile not a Sphere.
+    /// </summary>
+    [Test]
+    public void SetRadiusRefusesPlainlyWhenThereIsNothingToSet()
+    {
+        var dbe = SetupEngine();
+        using var harness = FrameHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("near", p => p.Sphere(Radius, max: 2 * Radius).Of<ProjCreature>());
+            },
+            nameof(SetRadiusRefusesPlainlyWhenThereIsNothingToSet), replicationCellM: ProjectionTestSchema.ReplicationCellFor(2 * Radius));
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, "near")[0];
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.SetRadius(session, 1.5 * Radius), Is.True, "within [R, max]");
+            Assert.Throws<ArgumentOutOfRangeException>(() => commands.SetRadius(session, 3 * Radius));
+            Assert.That(harness.Sessions.SetProfile(session, null), Is.True);
+            Assert.That(Assert.Throws<InvalidOperationException>(() => commands.SetRadius(session, Radius))!.Message, Does.Contain("applied first"));
+            Assert.That(harness.Sessions.Close(session, SessionCloseReason.Kicked, 4100), Is.True);
+            Assert.That(commands.SetRadius(session, Radius), Is.False, "a closing session");
+        });
+    }
+
+    /// <summary><c>Bind(entity)</c> centres every session of the profile on that entity; <c>At(position)</c> on a fixed point — neither needs <c>Place</c>.</summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void BindAndAtCentreTheSphereWhereTheyName()
+    {
+        var dbe = SetupEngine();
+        Populate(dbe);
+        var beacon = SpawnPlayerAt(dbe, 120f, 80f);
+        using var harness = FrameHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("beacon", p => p.Sphere(Radius).Bind(beacon).Of<ProjCreature>());
+                subs.Profile("fixed", p => p.Sphere(Radius).At(new Vector3D(330d, 330d, 0d)).Of<ProjCreature>());
+            },
+            nameof(BindAndAtCentreTheSphereWhereTheyName), replicationCellM: ProjectionTestSchema.ReplicationCellFor(Radius));
+        harness.RunFence = true;
+        var bound = harness.OpenSessions(2, "beacon");
+        var fixedSession = harness.OpenSessions(1, "fixed")[0];
+        Fill(harness, bound[0], bound[1], fixedSession);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(harness, bound[0]), Is.EqualTo(PointsWithin(120d, 80d, Radius)), "bound: the disc around the entity");
+            Assert.That(Held(harness, bound[1]), Is.EqualTo(PointsWithin(120d, 80d, Radius)), "every session of the profile follows it");
+            Assert.That(Held(harness, fixedSession), Is.EqualTo(PointsWithin(330d, 330d, Radius)), "fixed: the disc around the declared point");
+        });
+    }
+
     /// <summary>A session nobody placed holds nothing, rather than everything near the origin.</summary>
     /// <remarks>
     /// A default position is a legal world position, so an implementation that could not tell "never placed" from "placed at zero" would give every
