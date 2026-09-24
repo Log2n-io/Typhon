@@ -396,6 +396,74 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
     private protected override bool LogHolds(uint first, uint last) => LogCovers(first, last);
 
+    public override void CellOf(double x, double y, double z, out int cx, out int cy, out int cz)
+    {
+        cx = CellX(x);
+        cy = CellY(y);
+        cz = CellZ(z);
+    }
+
+    public override bool SeesPoint(SessionId session, float x, float y, float z, float viewRadius)
+    {
+        ref var st = ref _sessions[session.Slot];
+        if (!st.Bound || st.Generation != session.Generation)
+        {
+            return false;
+        }
+
+        var pz = TEvent.Deep ? z : 0f;
+        if (viewRadius > 0 && !Within(st.PAnchorX, st.PAnchorY, st.PAnchorZ, x, y, pz, (double)viewRadius * viewRadius))
+        {
+            return false;
+        }
+
+        var key = CellKey(x, y, pz);
+        if (st.Anchored && st.Radius > 0 && Within(st.AnchorX, st.AnchorY, st.AnchorZ, x, y, pz, st.Radius * st.Radius)
+            && Held(Committed(ref st, session.Slot), st.OriginX, st.OriginY, st.OriginZ, key))
+        {
+            return true;
+        }
+
+        return st.PRadius > 0 && Within(st.PAnchorX, st.PAnchorY, st.PAnchorZ, x, y, pz, st.PRadius * st.PRadius)
+               && Held(Pending(ref st, session.Slot), st.POriginX, st.POriginY, st.POriginZ, key);
+    }
+
+    public override bool WorldSeesPoint(SessionId session, float x, float y, float z)
+    {
+        ref var st = ref _sessions[session.Slot];
+        if (!st.Bound || st.Generation != session.Generation)
+        {
+            return false;
+        }
+
+        var key = CellKey(x, y, TEvent.Deep ? z : 0f);
+        return key < st.Cursor || key < st.PCursor;
+    }
+
+    public override void SessionCellBox(SessionId session, out int minCx, out int maxCx, out int minCy, out int maxCy, out int minCz, out int maxCz)
+    {
+        ref var st = ref _sessions[session.Slot];
+        var r = st.PRadius;
+        double x0 = st.PAnchorX - r, x1 = st.PAnchorX + r, y0 = st.PAnchorY - r, y1 = st.PAnchorY + r, z0 = st.PAnchorZ - r, z1 = st.PAnchorZ + r;
+        if (st.Anchored && st.Radius > 0)
+        {
+            var c = st.Radius;
+            x0 = Math.Min(x0, st.AnchorX - c);
+            x1 = Math.Max(x1, st.AnchorX + c);
+            y0 = Math.Min(y0, st.AnchorY - c);
+            y1 = Math.Max(y1, st.AnchorY + c);
+            z0 = Math.Min(z0, st.AnchorZ - c);
+            z1 = Math.Max(z1, st.AnchorZ + c);
+        }
+
+        minCx = CellX(x0);
+        maxCx = CellX(x1);
+        minCy = CellY(y0);
+        maxCy = CellY(y1);
+        minCz = CellZ(z0);
+        maxCz = CellZ(z1);
+    }
+
     public override void Commit(SessionId session)
     {
         ref var st = ref _sessions[session.Slot];

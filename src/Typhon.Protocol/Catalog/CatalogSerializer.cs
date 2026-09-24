@@ -75,15 +75,7 @@ public static class CatalogSerializer
             };
         }
 
-        var events = Sorted(catalog.Events, static (a, b) => string.CompareOrdinal(a.Name, b.Name));
-        for (var i = 0; i < events.Length; i++)
-        {
-            var e = events[i];
-            events[i] = new CatalogEvent
-            {
-                Idx = ProtocolConstants.FirstAppEventIdx + i, Name = e.Name, Scope = e.Scope, Fields = SortedMessageFields(e.Fields),
-            };
-        }
+        var events = CanonicalEvents(catalog.Events);
 
         var commands = CanonicalCommands(catalog.Commands);
         var metrics = CanonicalMetrics(catalog.Metrics);
@@ -211,6 +203,33 @@ public static class CatalogSerializer
     /// <param name="kind">The codec kind.</param>
     /// <returns><see langword="true"/> for <c>bits</c> and <c>bool</c>.</returns>
     public static bool IsPacked(CodecKind kind) => kind is CodecKind.Bits or CodecKind.Bool;
+
+    // Built-ins at their reserved indices, then the application's by name from FirstAppEventIdx (W27), as the commands are.
+    private static CatalogEvent[] CanonicalEvents(CatalogEvent[] declared)
+    {
+        var apps = new List<CatalogEvent>();
+        var result = new List<CatalogEvent>();
+        foreach (var e in declared ?? [])
+        {
+            (BuiltInEvents.ReservedIdx(e.Name) >= 0 ? result : apps).Add(e);
+        }
+
+        apps.Sort(static (a, b) => string.CompareOrdinal(a.Name, b.Name));
+        for (var i = 0; i < result.Count; i++)
+        {
+            result[i] = Copy(result[i], BuiltInEvents.ReservedIdx(result[i].Name));
+        }
+
+        for (var i = 0; i < apps.Count; i++)
+        {
+            result.Add(Copy(apps[i], ProtocolConstants.FirstAppEventIdx + i));
+        }
+
+        result.Sort(static (a, b) => a.Idx.CompareTo(b.Idx));
+        return result.ToArray();
+
+        static CatalogEvent Copy(CatalogEvent e, int idx) => new() { Idx = idx, Name = e.Name, Scope = e.Scope, Fields = SortedMessageFields(e.Fields) };
+    }
 
     private static CatalogCommand[] CanonicalCommands(CatalogCommand[] declared)
     {

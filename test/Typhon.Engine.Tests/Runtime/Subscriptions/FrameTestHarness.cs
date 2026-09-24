@@ -222,6 +222,22 @@ sealed unsafe class FrameHarness : IDisposable
         return delivered;
     }
 
+    /// <summary>Claims and releases every frame ready for a session without decoding it: the send side's cost, with no client work.</summary>
+    /// <param name="session">The session.</param>
+    /// <returns>How many frames were drained.</returns>
+    public int Drain(SessionId session)
+    {
+        var send = Assembler.SendStateOf(session.Slot);
+        var drained = 0;
+        while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        {
+            send->CompleteSend(frame.Sequence);
+            drained++;
+        }
+
+        return drained;
+    }
+
     /// <summary>
     /// Whether <see cref="Deliver"/> folds every frame it applies into <see cref="Digest"/>: the session and everything the decoded frame hands a client —
     /// records with their positions, velocities, segment times and epochs, field values, events — but no metric value, so the digest is a function of
@@ -592,15 +608,23 @@ sealed class SessionReplica
     public SessionReplica(CatalogPlan plan)
     {
         Store = new WorldStore(plan);
-        _applier = new FrameApplier(Store);
+        Events = new EventRecorder();
+        _applier = new FrameApplier(Store, Events);
     }
+
+    /// <summary>Every event the frames carried, in the order they were applied.</summary>
+    public EventRecorder Events { get; }
 
     /// <summary>The replica.</summary>
     public WorldStore Store { get; }
 
     /// <summary>Applies one <c>TICK</c> message.</summary>
     /// <param name="frame">The message.</param>
-    public void Apply(ReadOnlySpan<byte> frame) => _applier.Apply(frame);
+    public void Apply(ReadOnlySpan<byte> frame)
+    {
+        Events.BeginFrame();
+        _applier.Apply(frame);
+    }
 
     /// <summary>The netIds the replica holds for an archetype, ascending.</summary>
     /// <param name="archetype">The archetype's wire index.</param>
@@ -828,5 +852,66 @@ sealed class FrameLog : ITickSink
         public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes) { }
 
         public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components) { }
+    }
+}
+
+/// <summary>Records a replica's decoded events: each one's type and numeric fields, in order; <c>EventsLost</c> is summed, not listed.</summary>
+sealed class EventRecorder : IEventHandler
+{
+    private Dictionary<string, double> _current;
+
+    /// <summary>The events, in order: name and field values (a vector field's first component).</summary>
+    public List<(string Name, Dictionary<string, double> Fields)> Received { get; } = [];
+
+    /// <summary>The sum of every <c>EventsLost</c> count received.</summary>
+    public long Lost { get; private set; }
+
+    /// <summary><c>EventsLost</c> records that were not their frame's first event: 03 § 7 puts it first.</summary>
+    public int LostOutOfPlace { get; private set; }
+
+    private bool _lost;
+    private int _inFrame;
+
+    /// <summary>A frame begins.</summary>
+    public void BeginFrame() => _inFrame = 0;
+
+    /// <inheritdoc />
+    public void Event(MessagePlan type)
+    {
+        _lost = type.Idx == BuiltInEvents.EventsLostIdx;
+        LostOutOfPlace += _lost && _inFrame > 0 ? 1 : 0;
+        _inFrame++;
+        _current = new Dictionary<string, double>(StringComparer.Ordinal);
+        if (!_lost)
+        {
+            Received.Add((type.Name, _current));
+        }
+    }
+
+    /// <inheritdoc />
+    public void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
+    {
+        if (_lost)
+        {
+            Lost += (long)components[0];
+            return;
+        }
+
+        _current[field.Name] = components[0];
+    }
+
+    /// <inheritdoc />
+    public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
+    {
+    }
+
+    /// <inheritdoc />
+    public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes)
+    {
+    }
+
+    /// <inheritdoc />
+    public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
+    {
     }
 }

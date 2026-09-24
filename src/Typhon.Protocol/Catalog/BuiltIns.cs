@@ -3,6 +3,49 @@ using System;
 namespace Typhon.Protocol;
 
 /// <summary>
+/// The events the engine declares itself, at reserved indices 0–15 (W27): today one, <see cref="EventsLost"/>.
+/// </summary>
+public static class BuiltInEvents
+{
+    /// <summary>
+    /// The name of the event that tells a session how many events it was never sent: the ones routed to it while it was skipped for longer than the event
+    /// log keeps (09 § 11, D7). First in its frame's <c>EVENTS</c> block when present.
+    /// </summary>
+    public const string EventsLost = "EventsLost";
+
+    /// <summary>The reserved index of <see cref="EventsLost"/>.</summary>
+    public const int EventsLostIdx = 0;
+
+    /// <summary>The <c>EventsLost</c> field carrying the count.</summary>
+    public const string EventsLostCountField = "count";
+
+    /// <summary>The scope token of an event addressed to one session: <c>EventsLost</c>, and an application's <c>RouteToSession</c> events.</summary>
+    public const string SessionScope = "session";
+
+    /// <summary>The reserved index of a built-in event, or −1 when <paramref name="name"/> is an application event.</summary>
+    /// <param name="name">The event name.</param>
+    /// <returns>The reserved index, or −1.</returns>
+    public static int ReservedIdx(string name) => name == EventsLost ? EventsLostIdx : -1;
+
+    /// <summary>Whether <paramref name="e"/> is shaped exactly as <see cref="CreateEventsLost"/> builds it: one <c>varu</c> field named <c>count</c>.</summary>
+    /// <param name="e">An event named <see cref="EventsLost"/>.</param>
+    /// <returns><see langword="true"/> when the shape matches.</returns>
+    public static bool HasEventsLostShape(CatalogEvent e) =>
+        e.Fields is [{ Name: EventsLostCountField, Codec.Kind: CodecKind.Varu, Group: null, OnEnter: false, Enum: null }]
+        && e.Scope == SessionScope;
+
+    /// <summary>Builds the <c>EventsLost</c> event: one <c>varu</c> count.</summary>
+    /// <returns>The event definition.</returns>
+    public static CatalogEvent CreateEventsLost() => new()
+    {
+        Idx = EventsLostIdx,
+        Name = EventsLost,
+        Scope = SessionScope,
+        Fields = [new CatalogField { Name = EventsLostCountField, Codec = new CatalogCodec { Kind = CodecKind.Varu } }],
+    };
+}
+
+/// <summary>
 /// The commands the engine itself understands (W27, W28). They sit in the catalog beside the application's, at reserved indices that never move.
 /// </summary>
 public static class BuiltInCommands

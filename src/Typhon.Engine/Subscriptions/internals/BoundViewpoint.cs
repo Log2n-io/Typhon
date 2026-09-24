@@ -18,7 +18,7 @@ namespace Typhon.Engine.Internals;
 /// cluster slot and no revision chain is walked.
 /// </para>
 /// </remarks>
-internal unsafe ref struct BoundViewpoint : IDisposable
+internal unsafe ref struct BoundViewpoint : IDisposable, IEventEntities
 {
     private readonly DatabaseEngine _engine;
     private ArchetypeEngineState _state;
@@ -96,6 +96,48 @@ internal unsafe ref struct BoundViewpoint : IDisposable
         SpatialGrid.ReadSpatialCenter3D(field, spatial.FieldInfo.FieldType, out var x, out var y, out var z);
         centre = new Vector3D(x, y, z);
         return true;
+    }
+
+    /// <summary>Where a live entity is: its archetype's cluster state, cluster chunk and slot (09 § 11: an event's entity reference).</summary>
+    public bool TryLocate(EntityId entity, out ArchetypeClusterState clusters, out int chunk, out int slot)
+    {
+        clusters = null;
+        chunk = 0;
+        slot = 0;
+        var states = _engine?._stateByRouting;
+        var routing = entity.ArchetypeId;
+        if (entity.IsNull || states == null || routing >= states.Length)
+        {
+            return false;
+        }
+
+        if (routing != _routing && !Open(states[routing], routing))
+        {
+            return false;
+        }
+
+        var record = stackalloc byte[ClusterEntityRecordAccessor.MaxRecordSize];
+        if (!_state.EntityMap.TryGet(entity.EntityKey, record, ref _map) || !ClusterEntityRecordAccessor.GetHeader(record).IsAlive)
+        {
+            return false;
+        }
+
+        clusters = _state.ClusterState;
+        chunk = ClusterEntityRecordAccessor.GetClusterChunkId(record);
+        slot = ClusterEntityRecordAccessor.GetSlotIndex(record);
+        return true;
+    }
+
+    /// <summary>The push replication an event's entity field is resolved against; set by the frame prologue.</summary>
+    public PushReplication Push;
+
+    /// <inheritdoc />
+    public bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z)
+    {
+        netId = 0;
+        x = y = z = 0f;
+        return Push != null && TryLocate(entity, out var clusters, out var chunk, out var slot) && Push.TryEntityAt(clusters, chunk, slot, entity, out netId,
+            out x, out y, out z);
     }
 
     /// <summary>Releases the accessors.</summary>

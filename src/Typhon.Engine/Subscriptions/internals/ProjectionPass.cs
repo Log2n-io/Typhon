@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -159,7 +160,7 @@ internal static unsafe class ProjectionPass
             {
                 if (push != null)
                 {
-                    EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId);
+                    EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId, leases, hot->Entity);
                 }
 
                 leases.Release(worker, hot->NetId);
@@ -194,7 +195,7 @@ internal static unsafe class ProjectionPass
                 {
                     if (push != null)
                     {
-                        EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId);
+                        EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId, leases, hot->Entity);
                     }
 
                     leases.Release(worker, hot->NetId);
@@ -653,13 +654,17 @@ internal static unsafe class ProjectionPass
         }
     }
 
-    /// <summary>A slot whose identity ends here — destroyed, or displaced by a reuse — leaves every session that holds it.</summary>
+    /// <summary>
+    /// A slot whose identity ends here — destroyed, or displaced by a reuse — leaves every session that holds it; its identity and last position are kept
+    /// for the tick's events, which may still name it (09 § 11: "X killed Y").
+    /// </summary>
     private static void EmitPushLeave(PushReplication push, int archetype, int worker, ReplicationBlockHeader* block, byte* blockBytes,
-        in ReplicationBlockLayout layout, int slot, uint netId)
+        in ReplicationBlockLayout layout, int slot, uint netId, NetIdLeaseSet leases, EntityId entity)
     {
         push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + push.PositionOffset(archetype), out var x, out var y,
             out var z);
         push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, z, 0f, 0f, 0f);
+        leases.Depart(worker, entity, netId, x, y, z);
     }
 
     // ── Entry helpers ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -763,6 +768,47 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         public int ReleasedCapacity;
         public int Demand;
         public int Starved;
+        public DepartedEntity* Departed;
+        public int DepartedCount;
+        public int DepartedCapacity;
+    }
+
+    /// <summary>An identity released this tick with the entity it named and its last position: an event of the tick may still name it (09 § 11).</summary>
+    public struct DepartedEntity
+    {
+        public EntityId Entity;
+        public uint NetId;
+        public float X;
+        public float Y;
+        public float Z;
+    }
+
+    /// <summary>Records, from <paramref name="worker"/>'s chunk, the entity whose identity it released and where it was last.</summary>
+    public void Depart(int worker, EntityId entity, uint netId, float x, float y, float z)
+    {
+        ref var lease = ref _leases[worker];
+        if (lease.DepartedCount == lease.DepartedCapacity)
+        {
+            var capacity = lease.DepartedCapacity == 0 ? 16 : lease.DepartedCapacity * 2;
+            lease.Departed = (DepartedEntity*)NativeMemory.Realloc(lease.Departed, (nuint)capacity * (nuint)sizeof(DepartedEntity));
+            lease.DepartedCapacity = capacity;
+        }
+
+        lease.Departed[lease.DepartedCount++] = new DepartedEntity { Entity = entity, NetId = netId, X = x, Y = y, Z = z };
+    }
+
+    /// <summary>This tick's departed entities, every worker's: read serially, in the frame prologue, before the next tick's <see cref="BeginTick"/>.</summary>
+    public void CollectDeparted(Dictionary<long, DepartedEntity> into)
+    {
+        for (var i = 0; i < _count; i++)
+        {
+            ref var lease = ref _leases[i];
+            for (var k = 0; k < lease.DepartedCount; k++)
+            {
+                var d = lease.Departed[k];
+                into[(long)d.Entity.RawValue] = d;
+            }
+        }
     }
 
     private Lease* _leases;
@@ -865,6 +911,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
             }
 
             lease.ReleasedCount = 0;
+            lease.DepartedCount = 0;
 
             var wanted = i < workers ? Math.Clamp(Math.Max(2 * (lease.Demand + lease.Starved), cold), MinLease, MaxLease) : 0;
             while (lease.Count > wanted)
@@ -971,6 +1018,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         {
             NativeMemory.Free(_leases[i].Ids);
             NativeMemory.Free(_leases[i].Released);
+            NativeMemory.Free(_leases[i].Departed);
         }
 
         NativeMemory.Free(_leases);

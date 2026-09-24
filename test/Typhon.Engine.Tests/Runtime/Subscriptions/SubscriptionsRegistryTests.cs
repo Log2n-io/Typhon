@@ -236,8 +236,7 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
         subs.Profile("god-world", p => p.World()
             .Of<SwgCreature>().Of<SwgCityNpc>().Of<SwgPlayer>().Of<SwgCreatureLair>());
 
-        var attacks = new EventQueue<SwgAttack>("Attacks", 64);
-        subs.Event(attacks, e => e
+        subs.Event<SwgAttack>(e => e
             .RouteToKnown(a => a.Target, a => a.Attacker)
             .Entity(a => a.Attacker)
             .Entity(a => a.Target)
@@ -377,7 +376,6 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
             Assert.That(profile.Observers[0].Kind, Is.EqualTo(ObserverKind.World));
             Assert.That(profile.Observers[0].Archetypes, Has.Count.EqualTo(4));
 
-            Assert.That(attack.QueueName, Is.EqualTo("Attacks"));
             Assert.That(attack.Routing, Is.EqualTo(EventRouting.ToKnown));
             Assert.That(attack.RoutingEntityFields, Is.EqualTo(new[] { "Target", "Attacker" }));
             Assert.That(attack.Fields, Has.Count.EqualTo(3));

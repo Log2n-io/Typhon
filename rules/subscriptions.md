@@ -657,6 +657,34 @@
     goes red when the inner crescent serves only entities that become near. The inner crescent's window reaching back past a catch-up's gap, and a
     flush window's floor wrap-safe in the first ticks, each turn their scripted test red when removed.
 
+### SUB-21: An event reaches exactly the sessions its route names, once, in emission order `[fatal][silent]`
+  invariant an event emitted in tick T (SubscriptionsCommands.Emit) is encoded once, after T's projection, into T's event log slot; the bytes are the
+    catalog plan's field encoding (FieldCodec), identical for every session, and an EntityId field is the entity's netId, 0 when it has none
+  invariant a session's frame carries the events routed to it in every tick after its last committed frame (the current tick alone before its first),
+    each once, in emission order (worker slot, then call order); Broadcast routes to every session, ToOwner to the session whose Control is the named
+    entity when the frame is built, ToSession to the session EmitTo names; Near and ToKnown to every session that sees the event's point, or a named
+    entity's v̂, against its committed or pending geometry (inside the sphere with the point's cell delivered — SUB-16's test; a World session: the cell
+    delivered), and Near with a radius only within it of the session's viewpoint
+  invariant an entity destroyed in the event's tick still resolves, from the projection's release, to the netId and v̂ it had
+  invariant an event of a tick the log no longer holds is counted, not sent: the frame opens its EVENTS block with the built-in EventsLost (index 0)
+    carrying that count over the last EventHub.SummaryDepth ticks — a lower bound beyond. Broadcast and ToSession are counted exactly; ToOwner against
+    the session's Control, and Near and ToKnown against its geometry, when the frame is built (a session that moved or changed Control during the gap is
+    counted as it is now). Events take at most half a frame: past it, they are counted rather than sent
+  invariant an event reaches sessions bound to a profile; emissions of a tick no frame stage encoded (no session, no push replication, an aborted tick)
+    are discarded at the next tick's start, not delivered later
+  invariant a value its codec cannot carry drops that one event, counted in EventHub.Rejected; the tick path does not throw
+  never keep per-session event state: the log and its summary are per tick
+  scope: EventHub, EventHub.Emit, EventHub.EmitTo, EventHub.EncodeTick, EventHub.Collect, EventHub.Write, SubscriptionsCommands.Emit,
+    SubscriptionsCommands.EmitTo, BuiltInEvents, PushReplication.SeesPoint, PushReplication.WorldSeesPoint, NetIdLeaseSet.Depart, FrameAssembler.AssemblePush
+  on_violation: a client acts on an event that was not its own, twice, out of order, or never learns that it missed one — silently.
+  rationale: events are best effort but never ambiguous: the log makes a skipped session's union exact while the log lasts, and the loss count says
+    how much it missed after.
+  verified: EventDeliveryTests.EveryEventReachesExactlyItsSessionsAtEverySkipRate (random broadcast and owner events, skip 0–90 %: once each, in order,
+    received + lost = routed; Near and ToKnown included), EventDeliveryTests.AnEventReachesItsSessionsWithItsValues,
+    EventDeliveryTests.EveryCodecShapeRoundTripsAndABadValueDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
+    EventDeliveryTests.WorldSessionsLateSessionsAndWorkerOrder. Falsifiability: a frame that carries only its own tick's events turns the
+    30–90 % cases red; a loss count of 0 turns the 60 and 90 % cases red; dropping the dedupe turns the oracle and the dedupe case red.
+
 ### SUB-22: A session's LOD level defers updates and never loses one `[fatal][silent]`
   invariant a session's LOD level ℓ ∈ 0..3 commits with its frame (SUB-03); the frame is gathered with the committed level's bands before (what every
     held-back change was scheduled by) and the target level's after. At ℓ every declared band's period is min(N · 2^ℓ, 8) at the same boundary, and a

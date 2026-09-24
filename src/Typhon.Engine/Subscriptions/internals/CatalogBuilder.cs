@@ -218,8 +218,15 @@ internal static class CatalogBuilder
 
     private static CatalogEvent[] BuildEvents(SubscriptionsRegistry registry, Dictionary<string, string[]> enums)
     {
-        var events = new CatalogEvent[registry.Events.Count];
-        for (var i = 0; i < events.Length; i++)
+        // A catalog that declares events carries the built-in EventsLost too (09 § 11, D7): a skipped session is told what it was not sent.
+        var declared = registry.Events.Count;
+        var events = new CatalogEvent[declared == 0 ? 0 : declared + 1];
+        if (declared > 0)
+        {
+            events[declared] = BuiltInEvents.CreateEventsLost();
+        }
+
+        for (var i = 0; i < declared; i++)
         {
             var declaration = registry.Events[i];
             events[i] = new CatalogEvent
@@ -240,9 +247,10 @@ internal static class CatalogBuilder
         EventRouting.ToKnown => "known",
         EventRouting.ToOwner => "owner",
         EventRouting.Broadcast => "broadcast",
+        EventRouting.ToSession => BuiltInEvents.SessionScope,
         _ => throw new InvalidOperationException(
             $"Event '{declaration.Name}' declares no routing, so it would reach no session and the catalog would name a scope that means nothing. " +
-            "Declare RouteNear, RouteToKnown, RouteToOwner or Broadcast."),
+            "Declare RouteNear, RouteToKnown, RouteToOwner, RouteToSession or Broadcast."),
     };
 
     private static CatalogCommand[] BuildCommands(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, Dictionary<string, string[]> enums,

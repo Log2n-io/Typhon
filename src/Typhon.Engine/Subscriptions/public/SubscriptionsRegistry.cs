@@ -174,16 +174,18 @@ public sealed class SubscriptionsRegistry
     }
 
     /// <summary>
-    /// Declares that an event queue's events reach clients, and how.
+    /// Declares an event type clients receive, and how it is routed. Systems send one with <see cref="SubscriptionsCommands.Emit{T}"/>.
     /// </summary>
-    /// <typeparam name="T">The event type.</typeparam>
-    /// <param name="queue">The queue systems produce into. Replication becomes its single consumer.</param>
+    /// <typeparam name="T">The event type: an unmanaged, blittable struct.</typeparam>
     /// <param name="configure">Declares routing and fields.</param>
     /// <returns>This registry.</returns>
-    public SubscriptionsRegistry Event<T>(EventQueue<T> queue, Action<EventBuilder<T>> configure) where T : unmanaged
+    /// <remarks>
+    /// <b>Emitted, not drained (09 § 11, Q3).</b> An event a client sees is emitted explicitly, as state is pushed (ADR-067): an application that also
+    /// applies its events keeps its own <see cref="EventQueue{T}"/> for the simulation and emits what clients should see.
+    /// </remarks>
+    public SubscriptionsRegistry Event<T>(Action<EventBuilder<T>> configure) where T : unmanaged
     {
         ThrowIfFrozen();
-        ArgumentNullException.ThrowIfNull(queue);
         ArgumentNullException.ThrowIfNull(configure);
 
         SubscriptionsNames.RefuseReservedName(typeof(T).Name, "An event");
@@ -195,7 +197,7 @@ public sealed class SubscriptionsRegistry
             }
         }
 
-        var declaration = new EventDeclaration(queue.Name, typeof(T), _events.Count);
+        var declaration = new EventDeclaration(typeof(T), _events.Count, System.Runtime.CompilerServices.Unsafe.SizeOf<T>());
         configure(new EventBuilder<T>(declaration));
 
         // Here, and not at Start: a field defaults to its raw type, and the types that have no default — a 64-bit integer, a double — can only be answered by
@@ -631,7 +633,7 @@ internal static class SubscriptionsNames
                 $"{what} named '{name}' uses the reserved '{ProtocolConstants.BuiltInMetricPrefix}' prefix, which belongs to the engine's own declarations.");
         }
 
-        if (BuiltInCommands.ReservedIdx(name) >= 0)
+        if (BuiltInCommands.ReservedIdx(name) >= 0 || BuiltInEvents.ReservedIdx(name) >= 0)
         {
             throw new InvalidOperationException($"{what} named '{name}' collides with a built-in the engine declares itself.");
         }

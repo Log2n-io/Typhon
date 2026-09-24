@@ -515,10 +515,9 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
     [Test]
     public void AnEventDeclaringNothing_CarriesEveryFieldUnderItsRawType()
     {
-        var queue = new EventQueue<DefaultedHit>("Hits", 64);
-        using var harness = new Harness(subs => subs.Event(queue, e => e.RouteToOwner(h => h.Victim)));
+        using var harness = new Harness(subs => subs.Event<DefaultedHit>(e => e.RouteToOwner(h => h.Victim)));
 
-        var declared = harness.Export.Canonical.Events[0];
+        var declared = Array.Find(harness.Export.Canonical.Events, e => e.Name == nameof(DefaultedHit));
         Assert.Multiple(() =>
         {
             Assert.That(FieldNames(declared.Fields), Is.EqualTo(new[] { "Critical", "Mode", "Damage", "Victim" }),
@@ -535,10 +534,9 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
     [Test]
     public void AnEventCanIgnoreAFieldItStillRoutesOn()
     {
-        var queue = new EventQueue<DefaultedHit>("Hits", 64);
-        using var harness = new Harness(subs => subs.Event(queue, e => e.RouteToOwner(h => h.Victim).Ignore(h => h.Mode)));
+        using var harness = new Harness(subs => subs.Event<DefaultedHit>(e => e.RouteToOwner(h => h.Victim).Ignore(h => h.Mode)));
 
-        var declared = harness.Export.Canonical.Events[0];
+        var declared = Array.Find(harness.Export.Canonical.Events, e => e.Name == nameof(DefaultedHit));
         Assert.Multiple(() =>
         {
             Assert.That(FieldNames(declared.Fields), Is.EqualTo(new[] { "Critical", "Damage", "Victim" }));
@@ -575,7 +573,7 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
         {
             subs.Command<AllDefaults>(c => c.Rate(10, 20).Field(m => m.Count, Codec.U8));
             subs.Command<HasScratch>(c => c.Ignore(s => s.Scratch));
-            subs.Event(new EventQueue<DefaultedHit>("Hits", 64), e => e.RouteToOwner(h => h.Victim));
+            subs.Event<DefaultedHit>(e => e.RouteToOwner(h => h.Victim));
         }
     }
 

@@ -140,6 +140,22 @@ internal sealed unsafe partial class FrameAssembler
         // After the index, whose finish brought the occupancy to this tick: the occupied cells in order, for the World fills still under way.
         Push.PrepareWorldOrder();
 
+        // Events (09 § 11): this tick's emissions, encoded once — after projection, so their entities' netIds exist — into the event log.
+        if (Events != null)
+        {
+            // The prologue holds no epoch of its own, and resolving an entity reads the EntityMap and the cluster layout through chunk accessors.
+            using var epoch = EpochGuard.Enter(Engine.EpochManager);
+            var netIds = new BoundViewpoint(Engine) { Push = Push };
+            try
+            {
+                Events.EncodeTick((uint)_tick, ref netIds, Push);
+            }
+            finally
+            {
+                netIds.Dispose();
+            }
+        }
+
         // Distance LOD: the far flushes into the tick's log slot — folded by their stage, or here when the index was built here.
         if (n > 0)
         {
@@ -402,10 +418,28 @@ internal sealed unsafe partial class FrameAssembler
             mark = now;
         }
 
+        // Events since the session's last frame (09 § 11): the log's, and a loss count for the ticks it no longer holds.
+        var events = Events;
+        var eventCount = 0;
+        var eventBytes = 0;
+        var eventsLost = 0L;
+        if (events != null)
+        {
+            var geometry = new SessionEventGeometry(Push, session, _pushWorld[index]);
+            events.Collect(scratch.EventPicks, Push.LastTickOf(session), (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, out eventCount,
+                out eventBytes, out eventsLost);
+
+            // Events take at most half a frame: past it they are counted, not sent, so a burst cannot make every frame oversize and starve the session.
+            if (eventBytes > _maxFrameBytes / 2)
+            {
+                EventHub.Shed(scratch.EventPicks, ref eventCount, ref eventBytes, ref eventsLost);
+            }
+        }
+
         var stats = Stats;
         var emitStats = stats != null && stats.IsEmissionTick && (send->Caps & Capabilities.Stats) != 0;
         var newlyComplete = complete && !state.ViewComplete;
-        if (records == 0 && !reset && !emitStats && !newlyComplete)
+        if (records == 0 && eventCount == 0 && !reset && !emitStats && !newlyComplete)
         {
             // Nothing to say. The anchor may still have moved and a cell with nothing in it may have been delivered; neither changes what the client holds,
             // so the pending state is committed even though no frame is.
@@ -417,7 +451,7 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0);
+        var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0) + (eventCount > 0 ? eventBytes + 16 : 0);
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags);
@@ -431,6 +465,11 @@ internal sealed unsafe partial class FrameAssembler
 
             EntitiesEncoder.WriteEntities(ref writer, _encodePlans[a], scratch.List(a, FrameListKind.Enter), scratch.List(a, FrameListKind.Segment),
                 scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave));
+        }
+
+        if (eventCount > 0)
+        {
+            events.Write(ref writer, scratch.EventPicks, eventCount, eventsLost);
         }
 
         if (emitStats)
@@ -470,6 +509,10 @@ internal sealed unsafe partial class FrameAssembler
         buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
         send->PublishFrame(sequence, block, length, _tick);
         published = length;
+        if (eventCount > 0)
+        {
+            events.NoteDelivered(eventCount, eventsLost);
+        }
 
         // COMMIT — the anchor and the delivered cells move with the frame that describes them.
         Push.Commit(session);
@@ -511,4 +554,26 @@ internal sealed unsafe partial class FrameAssembler
             counters.LeavesEmitted += scratch.Count(a, FrameListKind.Leave);
         }
     }
+}
+
+/// <summary>A session's geometry for the events' geometric routes (09 § 11): the push step's own known-set test, committed or pending.</summary>
+internal readonly ref struct SessionEventGeometry : IEventGeometry
+{
+    private readonly PushReplication _push;
+    private readonly SessionId _session;
+
+    public SessionEventGeometry(PushReplication push, SessionId session, bool world)
+    {
+        _push = push;
+        _session = session;
+        World = world;
+    }
+
+    public bool World { get; }
+
+    public void CellBox(out int minCx, out int maxCx, out int minCy, out int maxCy, out int minCz, out int maxCz) =>
+        _push.SessionCellBox(_session, out minCx, out maxCx, out minCy, out maxCy, out minCz, out maxCz);
+
+    public bool Sees(float x, float y, float z, float viewRadius) =>
+        World ? _push.WorldSeesPoint(_session, x, y, z) : _push.SeesPoint(_session, x, y, z, viewRadius);
 }

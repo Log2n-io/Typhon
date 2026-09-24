@@ -86,6 +86,9 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <summary>Distance LOD: far updates withheld by this worker's current gather, added to the shared counter once per gather.</summary>
     internal long Deferred;
 
+    /// <summary>Events (09 § 11): the (tick, event) pairs the current session's frame carries.</summary>
+    internal readonly EventPicks EventPicks = new();
+
     /// <summary>Cell deliveries and sweeps this worker's current gather skipped as empty, added to the shared counter once per gather.</summary>
     internal long EmptyCellsSkipped;
 
@@ -384,6 +387,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     private readonly SessionFrameState[] _states;
     private readonly int _maxFrameBytes;
     private readonly int _lagBoundTicks;
+
+    /// <summary>The declared events' hub (09 § 11), or <see langword="null"/>; set by the runtime before the first tick.</summary>
+    internal EventHub Events;
 
     // The tick period in seconds, the budget loop's clock: the nominal one until the runtime publishes the live one, which the overload multiplier stretches.
     private double _tickSeconds;

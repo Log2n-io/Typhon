@@ -199,7 +199,17 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 Options.MaxSessions, _sendPump);
             _ingress.Frames = _frames;
             _ingress.ReplicationStates = _replicationStates;
-            Commands = new SubscriptionsCommands(_ingress);
+            // Events (09 § 11): compiled against the catalog, and one commands view per worker slot, so Emit records into the worker's own buffer.
+            Events = EventHub.Build(registry, CatalogPlan);
+            _frames!.Events = Events;
+            var workerSlots = (parent as DagScheduler)?.WorkerSlotCount ?? 0;
+            Events?.BindWorkerSlots(workerSlots);
+            Commands = new SubscriptionsCommands(_ingress, Events, 0);
+            _commandsByWorker = new SubscriptionsCommands[workerSlots];
+            for (var w = 0; w < workerSlots; w++)
+            {
+                _commandsByWorker[w] = new SubscriptionsCommands(_ingress, Events, w + 1);
+            }
 
             // STATS (P1-16). Last of the tick-path objects, because it reads across all of them — the session table's open count, the send pump's bytes, the
             // ingress rows' drop counters and the engine's per-archetype entity counts — and attached to the frame assembler rather than constructed by it,
@@ -287,10 +297,21 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// What an application system reads and answers commands through. <see langword="null"/> on an inactive runtime.
     /// </summary>
     /// <remarks>
-    /// The <c>ctx.Subscriptions</c> sugar of <c>design/Subscriptions/01-model.md § 7</c> is one property on <c>TickContext</c> that a later slice adds; this
-    /// is the object it will return, and a system can hold it directly in the meantime because it is created at <c>Start</c> and never replaced.
+    /// The view off a worker — lifecycle hooks and tests — whose events go to slot 0. A system reads <c>ctx.Subscriptions</c>, which is its own worker's
+    /// view (<see cref="CommandsFor"/>): holding this one instead would put its events on slot 0 with every other holder's.
     /// </remarks>
     public SubscriptionsCommands Commands { get; }
+
+    private readonly SubscriptionsCommands[] _commandsByWorker = [];
+
+    /// <summary>The commands view a system on worker <paramref name="workerId"/> is handed: its events go to that worker's buffer.</summary>
+    /// <param name="workerId">The worker, or <see cref="TickContext.NonWorkerId"/>.</param>
+    /// <returns>The view; <see cref="Commands"/> off a worker.</returns>
+    public SubscriptionsCommands CommandsFor(int workerId) =>
+        (uint)workerId < (uint)_commandsByWorker.Length ? _commandsByWorker[workerId] : Commands;
+
+    /// <summary>The declared events' hub, or <see langword="null"/> when no event is declared.</summary>
+    public EventHub Events { get; }
 
     /// <summary>The per-archetype replication state, parallel to <see cref="Plans"/>. Empty on an inactive runtime.</summary>
     public ArchetypeReplicationState[] ReplicationStates => _replicationStates;
@@ -523,6 +544,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         Volatile.Write(ref _tickPeriodUs, NominalTickPeriodUs * (uint)Math.Max(1, tickMultiplier));
         _frames?.SetTickState(NominalTickPeriodUs * (uint)Math.Max(1, tickMultiplier), tickMultiplier);
         Volatile.Write(ref _currentTick, (uint)tickNumber);
+
+        // Before any system of this tick emits: what a tick no frame stage encoded left behind is discarded, not delivered later.
+        Events?.OnTickStart((uint)tickNumber);
     }
 
     /// <summary>The replication state of a replicated archetype, or <see langword="null"/> when it is not replicated.</summary>

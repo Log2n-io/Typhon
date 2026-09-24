@@ -38,8 +38,8 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
 
     private const string GoldenDescription =
         "The engine's own catalog, emitted by CatalogBuilder from a compiled projection plan rather than hand-built: three archetypes (one moving with a "
-        + "packed enum and a fraction, one with an owner section, one static), the eleven built-in metrics, an application metric, an event, two commands and "
-        + "the built-in ClientRegion at index 0.";
+        + "packed enum and a fraction, one with an owner section, one static), the eleven built-in metrics, an application metric, an event and the "
+        + "built-in EventsLost at index 0, two commands and the built-in ClientRegion at index 0.";
 
     /// <summary>The nominal tick period the vector declares: 10 Hz, as the demo's catalog does.</summary>
     private const int TickPeriodUs = 100_000;
@@ -80,8 +80,7 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
         subs.Profile("god-world", p => p.World().Of<ProjCreature>().Of<ProjPlayer>().Of<ProjRock>());
         subs.Profile("region", p => p.ClientRegion(maxEdgeM: 512));
 
-        var attacks = new EventQueue<SwgAttack>("Attacks", 64);
-        subs.Event(attacks, e => e
+        subs.Event<SwgAttack>(e => e
             .RouteToKnown(a => a.Target, a => a.Attacker)
             .Entity(a => a.Attacker)
             .Entity(a => a.Target)
@@ -214,9 +213,10 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
             Assert.That(catalog.Commands[1].Name, Is.EqualTo(nameof(SwgMoveTo)));
             Assert.That(catalog.Commands[2].Idx, Is.EqualTo(ProtocolConstants.FirstAppCommandIdx + 1));
 
-            Assert.That(catalog.Events, Has.Length.EqualTo(1));
-            Assert.That(catalog.Events[0].Idx, Is.EqualTo(ProtocolConstants.FirstAppEventIdx));
-            Assert.That(catalog.Events[0].Scope, Is.EqualTo("known"));
+            Assert.That(catalog.Events, Has.Length.EqualTo(2), "the application's event, and the built-in EventsLost a catalog with events carries");
+            Assert.That((catalog.Events[0].Idx, catalog.Events[0].Name), Is.EqualTo((BuiltInEvents.EventsLostIdx, BuiltInEvents.EventsLost)));
+            Assert.That(catalog.Events[1].Idx, Is.EqualTo(ProtocolConstants.FirstAppEventIdx));
+            Assert.That(catalog.Events[1].Scope, Is.EqualTo("known"));
 
             Assert.That(catalog.Metrics, Has.Length.EqualTo(BuiltInMetrics.Count + 1));
             for (var idx = 0; idx < BuiltInMetrics.Count; idx++)
@@ -535,8 +535,7 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
 
         var ex = Assert.Throws<InvalidOperationException>(() => Build(dbe, subs =>
         {
-            var attacks = new EventQueue<SwgAttack>("Attacks", 64);
-            subs.Event(attacks, e => e.Field(a => a.Damage, Codec.U16));
+            subs.Event<SwgAttack>(e => e.Field(a => a.Damage, Codec.U16));
         }));
 
         Assert.That(ex.Message, Does.Contain(nameof(SwgAttack)));

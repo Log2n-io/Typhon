@@ -956,6 +956,74 @@ internal abstract unsafe class PushReplication
         return sb.ToString();
     }
 
+    /// <summary>
+    /// The netId and v̂ of the entity in <paramref name="clusters"/>' chunk <paramref name="chunk"/>, slot <paramref name="slot"/> — false when its archetype
+    /// is not replicated, its cluster has no block, or the slot holds no identity for it (09 § 11: an event's entity reference).
+    /// </summary>
+    public bool TryEntityAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out uint netId, out float x, out float y, out float z)
+    {
+        netId = 0;
+        x = y = z = 0f;
+        for (var a = 0; a < _states.Length; a++)
+        {
+            var state = _states[a];
+            if (state == null || !ReferenceEquals(state.ClusterState, clusters))
+            {
+                continue;
+            }
+
+            var block = BlockOf(a, chunk);
+            if (block == null || (uint)slot >= 64)
+            {
+                return false;
+            }
+
+            var layout = state.Layout;
+            var hot = (ReplicationHotEntry*)((byte*)block + layout.HotOffset + (slot * layout.HotStride));
+            if (hot->Entity != entity || hot->NetId == NetIdAllocator.NoNetId)
+            {
+                return false;
+            }
+
+            netId = hot->NetId;
+            Decode(a, (byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + PositionOffset(a), out x, out y, out z);
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>This tick's departed entities, every replicated archetype's (09 § 11, Q7). Serial, in the frame prologue.</summary>
+    public void CollectDeparted(System.Collections.Generic.Dictionary<long, NetIdLeaseSet.DepartedEntity> into)
+    {
+        foreach (var state in _states)
+        {
+            state?.NetIdLeases.CollectDeparted(into);
+        }
+    }
+
+    /// <summary>The cell a point lies in, clamped to the grid.</summary>
+    public abstract void CellOf(double x, double y, double z, out int cx, out int cy, out int cz);
+
+    /// <summary>
+    /// Whether a Sphere session sees a point: inside its committed sphere with the point's cell delivered, or its pending one — the known-set test (SUB-16)
+    /// an event's geometric route asks (09 § 11) — and, with <paramref name="viewRadius"/>, within that of its viewpoint. After its gather.
+    /// </summary>
+    public abstract bool SeesPoint(SessionId session, float x, float y, float z, float viewRadius);
+
+    /// <summary>Whether a World session has delivered the cell a point lies in, committed or pending.</summary>
+    public abstract bool WorldSeesPoint(SessionId session, float x, float y, float z);
+
+    /// <summary>The cells a Sphere session's committed and pending spheres span: where its events' points can be.</summary>
+    public abstract void SessionCellBox(SessionId session, out int minCx, out int maxCx, out int minCy, out int maxCy, out int minCz, out int maxCz);
+
+    /// <summary>The tick of a session's last committed frame; 0 before its first.</summary>
+    public uint LastTickOf(SessionId session)
+    {
+        ref var st = ref _sessions[session.Slot];
+        return st.Bound && st.Generation == session.Generation && st.Anchored ? st.LastTick : 0;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private protected ReplicationBlockHeader* BlockOf(int archetype, int chunkId)
     {

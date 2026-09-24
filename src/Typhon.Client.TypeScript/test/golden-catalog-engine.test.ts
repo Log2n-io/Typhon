@@ -60,6 +60,8 @@ describe('catalog-engine', () => {
     expect(plan.command(16).name).toBe('SwgMoveTo');
     expect(plan.command(17).name).toBe('SwgSetTarget');
     expect(plan.event(16).name).toBe('SwgAttack');
+    expect(plan.event(0).name).toBe('EventsLost');
+    expect(plan.event(0).body.fields.map((f) => f.name)).toEqual(['count']);
 
     // The eleven built-in metrics at 0-10, then the application's from 32. The two vector built-ins carry one value
     // per label; every other metric is a scalar.

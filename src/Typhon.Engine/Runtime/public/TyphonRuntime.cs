@@ -1725,7 +1725,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ChunkCount = totalChunks,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
-            Subscriptions = _subscriptionsRuntime?.Commands
+            Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId)
         };
         ctx.DebugValidateWorkerId(Scheduler.WorkerSlotCount, sys.Name);
 
@@ -1856,7 +1856,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ClusterIds = clusterIdArray,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
-            Subscriptions = _subscriptionsRuntime?.Commands,
+            Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks
@@ -2000,7 +2000,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 ClusterIds = clusterIdArray,
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
-                Subscriptions = _subscriptionsRuntime?.Commands,
+                Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
                 WorkerId = workerId,
                 ChunkIndex = chunkIndex,
                 ChunkCount = totalChunks
@@ -2779,7 +2779,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ConsumedQueues = _systemConsumedQueues[sysIdx],
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
-            Subscriptions = _subscriptionsRuntime?.Commands,
+            Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             // Single-invocation system: one chunk, index 0. Left at the default 0 before #860, which made the documented slicing formula
             // (start = ChunkIndex * len / ChunkCount) divide by zero for any non-chunked system that used it.

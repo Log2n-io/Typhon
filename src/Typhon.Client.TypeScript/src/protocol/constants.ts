@@ -123,6 +123,13 @@ export const CloseCode = {
   LastApplicationCode: 4999,
 } as const;
 
+/** The events the engine declares itself, at reserved indices 0–15 (W27). */
+export const BuiltInEvent = {
+  EventsLost: 'EventsLost',
+  EventsLostIdx: 0,
+  eventsLostCountField: 'count',
+} as const;
+
 /** The built-in commands (W27, W28), at reserved indices that never move. */
 export const BuiltInCommand = {
   ClientRegion: 'ClientRegion',

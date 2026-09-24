@@ -252,11 +252,61 @@ public readonly struct CommandBatch<T> where T : unmanaged
 public sealed class SubscriptionsCommands
 {
     private readonly SubscriptionsIngress _ingress;
+    private readonly EventHub _events;
+    private readonly int _slot;
 
-    internal SubscriptionsCommands(SubscriptionsIngress ingress)
+    internal SubscriptionsCommands(SubscriptionsIngress ingress, EventHub events = null, int slot = 0)
     {
         ArgumentNullException.ThrowIfNull(ingress);
         _ingress = ingress;
+        _events = events;
+        _slot = slot;
+    }
+
+    /// <summary>
+    /// Sends an event to the clients its declaration routes it to (09 § 11). Encoded once, after this tick's projection, and the same bytes reach every
+    /// session it matches; a session that misses frames receives it with its next one while the event log holds the tick, and is told how many it lost after.
+    /// </summary>
+    /// <typeparam name="T">A type declared with <see cref="SubscriptionsRegistry.Event{T}"/>.</typeparam>
+    /// <param name="evt">The event; copied.</param>
+    /// <exception cref="InvalidOperationException"><typeparamref name="T"/> is not a declared event.</exception>
+    /// <remarks>
+    /// <para>
+    /// Each worker records into its own buffer; call it on the thread the <c>ctx</c> was handed to. A view kept past its tick or shared with other threads
+    /// stays correct — each buffer is gated — but its events land in another worker's order. A tick's events travel in worker order, then call order, which
+    /// is not the order the systems ran in across workers.
+    /// </para>
+    /// <para>
+    /// An <see cref="EntityId"/> field travels as the entity's netId — 0, "unknown", for an entity the client could not know. An event reaches sessions bound
+    /// to a profile: a session with none is served no frame, and is not counted as having lost it.
+    /// </para>
+    /// </remarks>
+    public void Emit<T>(in T evt) where T : unmanaged
+    {
+        if (_events == null)
+        {
+            throw new InvalidOperationException($"'{typeof(T).Name}' is not a declared event: declare it with Subscriptions.Event<{typeof(T).Name}>(…).");
+        }
+
+        _events.Emit(_slot, in evt);
+    }
+
+    /// <summary>
+    /// Sends an event to one session: an event type declared with <see cref="EventBuilder{T}.RouteToSession"/> (09 § 11). To a session that is closed or
+    /// unknown, it reaches nobody.
+    /// </summary>
+    /// <typeparam name="T">A type declared with <see cref="SubscriptionsRegistry.Event{T}"/> and routed to a session.</typeparam>
+    /// <param name="session">The session.</param>
+    /// <param name="evt">The event; copied.</param>
+    /// <exception cref="InvalidOperationException"><typeparamref name="T"/> is not a declared event routed to a session.</exception>
+    public void EmitTo<T>(SessionId session, in T evt) where T : unmanaged
+    {
+        if (_events == null)
+        {
+            throw new InvalidOperationException($"'{typeof(T).Name}' is not a declared event: declare it with Subscriptions.Event<{typeof(T).Name}>(…).");
+        }
+
+        _events.EmitTo(_slot, session, in evt);
     }
 
     /// <summary>

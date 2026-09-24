@@ -426,7 +426,7 @@ internal sealed class CommandRegistry
     }
 
     /// <summary>The element kind of a struct field, unwrapping an enum and a single-component vector struct alike.</summary>
-    private static (CommandFieldElement Element, int Size) ElementOf(Type fieldType, string command, string wireField)
+    internal static (CommandFieldElement Element, int Size) ElementOf(Type fieldType, string command, string wireField)
     {
         var type = fieldType.IsEnum ? Enum.GetUnderlyingType(fieldType) : fieldType;
 
