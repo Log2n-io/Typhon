@@ -704,4 +704,112 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
             Assert.That(recorder.Received, Has.Count.EqualTo(1), "the discarded notice never arrives");
         });
     }
+
+    private static void MoveCreature(DatabaseEngine dbe, EntityId creature, float x)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var accessor = tx.For<ProjCreature>();
+        try
+        {
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                var occupancy = cluster.OccupancyBits;
+                while (occupancy != 0)
+                {
+                    var slot = System.Numerics.BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+                    if (cluster.GetEntityId(slot).RawValue == creature.RawValue)
+                    {
+                        cluster.WriteSpatial(ProjCreature.Bounds, slot, PointAt(x, 0f));
+                    }
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// RouteToKnown is was ∨ is (09 § 11): an entity that leaves a session's view in the event's own tick — "X killed Y" as Y walks out — still reaches the
+    /// session that knew it where it was.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-21")]
+    public void AKnownEventReachesASessionTheEntityLeftThisTick()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var creature = Spawn(dbe, 1, 0f)[0];
+        MoveCreature(dbe, creature, 42f);
+        using var harness = Harness(dbe, nameof(AKnownEventReachesASessionTheEntityLeftThisTick));
+        harness.RunFence = true;
+        var session = harness.OpenSessions(1, "near")[0];
+        Assert.That(harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d)), Is.True);
+        var tick = 0;
+        for (; tick < FillTicks;)
+        {
+            harness.RunTick(++tick);
+            harness.Deliver(session);
+        }
+
+        var plan = harness.CatalogPlan.ArchetypeByName(nameof(ProjCreature)).Idx;
+        Assert.That(harness.Replica(session).NetIds(plan), Has.Length.EqualTo(1), "the session holds the creature at 42 m");
+
+        // In one tick: the creature steps to 60 m, out of the 45 m sphere and into another cell, and the event naming it is emitted.
+        MoveCreature(dbe, creature, 60f);
+        harness.Subscriptions.Commands.Emit(new ProjDuel { A = creature, B = EntityId.Null, Seq = 7 });
+        harness.RunTick(++tick);
+        harness.Deliver(session);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Replica(session).NetIds(plan), Is.Empty, "the creature left the view");
+            Assert.That(harness.Replica(session).Events.Received.Exists(e => e.Name == nameof(ProjDuel)), Is.True, "and the event about it arrived first");
+        });
+    }
+
+    /// <summary>A session bound to no profile has no view, but broadcasts and its own EmitTo reach it, in frames of events alone; nothing else does.</summary>
+    [Test]
+    [VerifiesRule("SUB-21")]
+    public void ASessionWithNoProfileHearsBroadcastsAndItsOwnEvents()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var creatures = Spawn(dbe, 1, 0f);
+        using var harness = Harness(dbe, nameof(ASessionWithNoProfileHearsBroadcastsAndItsOwnEvents));
+        harness.RunFence = true;
+        var near = harness.OpenSessions(1, "near")[0];
+        var lobby = harness.OpenSessions(1, "near")[0];
+        Assert.That(harness.Sessions.SetViewpoint(near, new Vector3D(0d, 0d, 0d)), Is.True);
+        Assert.That(harness.Sessions.SetProfile(lobby, null), Is.True);
+        Assert.That(harness.Sessions.SetControlled(lobby, creatures[0]), Is.True);
+        var tick = 0;
+        for (; tick < FillTicks;)
+        {
+            harness.RunTick(++tick);
+            harness.Deliver(near);
+            harness.Deliver(lobby);
+        }
+
+        var commands = harness.Subscriptions.Commands;
+        commands.Emit(new ProjNotice { Seq = 1, Kind = 1 });
+        commands.EmitTo(lobby, new ProjWhisper { Seq = 2 });
+        commands.Emit(new ProjBoom { X = 0f, Y = 0f, Seq = 3 });
+        commands.Emit(new ProjDuel { A = creatures[0], B = EntityId.Null, Seq = 4 });
+        harness.RunTick(++tick);
+        harness.Deliver(near);
+        harness.Deliver(lobby);
+
+        // Missed frames catch up from the log, as any session's do.
+        commands.Emit(new ProjNotice { Seq = 5, Kind = 1 });
+        harness.RunTick(++tick);
+        commands.Emit(new ProjNotice { Seq = 6, Kind = 1 });
+        harness.RunTick(++tick);
+        harness.Deliver(lobby);
+
+        var seqs = harness.Replica(lobby).Events.Received.ConvertAll(e => (int)e.Fields["Seq"]);
+        Assert.That(seqs, Is.EqualTo(new[] { 1, 2, 5, 6 }), "the broadcast and the whisper — no near, known or owner event: it has no view, and controls in none");
+    }
 }

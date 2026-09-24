@@ -1002,8 +1002,41 @@ internal abstract unsafe class PushReplication
         }
     }
 
+    /// <summary>The aggregate grids (09 § 8): per tile, per archetype, the entities whose v̂ lies in it. Empty when no profile declares an aggregate.</summary>
+    public AggregateCounts[] Aggregates { get; private set; } = [];
+
+    // By plan index: whether some aggregate grid counts the archetype, so the merge notes its deltas.
+    private protected bool[] _aggregated = [];
+
+    /// <summary>Attaches the aggregate grids, before the first tick; every archetype they count must be one this replication serves.</summary>
+    public void ConfigureAggregates(AggregateCounts[] grids)
+    {
+        Aggregates = grids;
+        _aggregated = new bool[_plans.Length];
+        foreach (var grid in grids)
+        {
+            for (var a = 0; a < grid.Columns.Length && a < _aggregated.Length; a++)
+            {
+                _aggregated[a] |= grid.Columns[a] >= 0;
+            }
+        }
+    }
+
+    /// <summary>A session's pending anchor, after its gather: where an aggregate's radius is centred.</summary>
+    public Vector3D PendingAnchorOf(SessionId session)
+    {
+        ref var st = ref _sessions[session.Slot];
+        return st.Bound && st.Generation == session.Generation ? new Vector3D(st.PAnchorX, st.PAnchorY, st.PAnchorZ) : default;
+    }
+
     /// <summary>The cell a point lies in, clamped to the grid.</summary>
     public abstract void CellOf(double x, double y, double z, out int cx, out int cy, out int cz);
+
+    /// <summary>
+    /// The v̂ an entity had before this tick, when this tick's projection moved it: its event, filed under the cell of its new v̂ (<paramref name="x"/>,
+    /// <paramref name="y"/>, <paramref name="z"/>), carries the old one. <c>RouteToKnown</c> files both (09 § 11: was ∨ is). Serial, after the index.
+    /// </summary>
+    public abstract bool TryOldVisibility(uint netId, float x, float y, float z, out float oldX, out float oldY, out float oldZ);
 
     /// <summary>
     /// Whether a Sphere session sees a point: inside its committed sphere with the point's cell delivered, or its pending one — the known-set test (SUB-16)
@@ -1352,6 +1385,12 @@ internal abstract unsafe class PushReplication
     /// exactly what a cell delivery would enumerate.
     /// </summary>
     internal abstract void Recount(ReplicationOccupancy into);
+
+    /// <summary>Recounts the aggregate grids from the blocks.</summary>
+    internal abstract void RecountAggregates();
+
+    /// <summary>Tests: the aggregate counts that differ from a fresh recount of the blocks.</summary>
+    internal abstract int AggregateDifferencesForTest();
 
     /// <summary>Tests only: the current index's shape recomputed from its own events, after checking it; (-1, -1) when any check fails.</summary>
     internal abstract (int Cells, int Entries) IndexShapeForTest();

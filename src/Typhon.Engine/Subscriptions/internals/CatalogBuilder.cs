@@ -99,9 +99,8 @@ internal static class CatalogBuilder
             Events = BuildEvents(registry, enums),
             Commands = BuildCommands(registry, plans, enums, spatial),
 
-            // Empty, and not for want of a grid: a grid describes the aggregate tiers and the region clamp of Phase 2. Emitting the engine's spatial grid now
-            // would put a tuning knob nobody decodes into the digest, and re-send the catalog to every client the first time it was retuned.
-            Grids = [],
+            // The aggregate tiers' grids (09 § 8): one per distinct tile edge and archetype set, over the spatial world. None without an aggregate.
+            Grids = BuildGrids(registry, plans, spatial),
             Metrics = BuildMetrics(registry, archetypes, systemNames),
         };
 
@@ -212,6 +211,60 @@ internal static class CatalogBuilder
         }
 
         return result;
+    }
+
+    // ── Aggregate grids ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private static CatalogGrid[] BuildGrids(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, SpatialGridConfig? spatial)
+    {
+        var grids = new List<CatalogGrid>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var profile in registry.Profiles)
+        {
+            foreach (var observer in profile.Observers)
+            {
+                if (observer.Kind != ObserverKind.Aggregate)
+                {
+                    continue;
+                }
+
+                var archetypes = new List<int>();
+                foreach (var type in observer.Archetypes)
+                {
+                    var index = Array.FindIndex(plans, p => p.ArchetypeType == type);
+                    if (index >= 0 && !archetypes.Contains(index))
+                    {
+                        archetypes.Add(index);
+                    }
+                }
+
+                archetypes.Sort();
+                if (!seen.Add(observer.TileM.ToString("R", System.Globalization.CultureInfo.InvariantCulture) + "|" + string.Join(',', archetypes)))
+                {
+                    continue;
+                }
+
+                if (spatial is not { } world)
+                {
+                    throw new InvalidOperationException($"Profile '{profile.Name}' declares an Aggregate, whose tiles are laid over the spatial world, and none is configured.");
+                }
+
+                var deep = !ReplicationGrid.IsFlat(world, registry.Options.ReplicationCellM);
+                var tile = observer.TileM;
+                int Dim(double min, double max) => Math.Max(1, (int)Math.Ceiling((max - min) / tile));
+                grids.Add(new CatalogGrid
+                {
+                    Origin = deep ? [world.WorldMin.X, world.WorldMin.Y, world.WorldMin.Z] : [world.WorldMin.X, world.WorldMin.Y],
+                    Cell = tile,
+                    Dims = deep
+                        ? [Dim(world.WorldMin.X, world.WorldMax.X), Dim(world.WorldMin.Y, world.WorldMax.Y), Dim(world.WorldMin.Z, world.WorldMax.Z)]
+                        : [Dim(world.WorldMin.X, world.WorldMax.X), Dim(world.WorldMin.Y, world.WorldMax.Y)],
+                    Archetypes = archetypes.ToArray(),
+                });
+            }
+        }
+
+        return grids.ToArray();
     }
 
     // ── Events and commands ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

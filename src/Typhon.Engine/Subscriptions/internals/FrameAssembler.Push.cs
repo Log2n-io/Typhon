@@ -50,11 +50,26 @@ internal sealed unsafe partial class FrameAssembler
     private int _pushSessionCount;
     private int _pushCursor;
 
+    // Sessions bound to no profile, served events alone (09 § 11): Broadcast and EmitTo reach them. Their last committed events tick, by slot.
+    private SessionId[] _eventSessions = [];
+    private int _eventSessionCount;
+    private int _eventCursor;
+    private readonly uint[] _eventsLastTick = [];
+
+    // Aggregates (09 § 8), by slot, committed with the frame: the tick of the session's last AGG, the anchor it was centred on, and the generation they
+    // belong to (0: none sent yet, so the next is a RESET).
+    private readonly uint[] _aggLastTick = [];
+    private readonly ushort[] _aggGeneration = [];
+    private readonly Vector3D[] _aggAnchor = [];
+    private readonly ushort[] _eventsLastGeneration = [];
+
     /// <summary>Serial: collects this tick's push sessions and their viewpoints, prepares their rows, and indexes the push events.</summary>
     private void BeginPushTick()
     {
         _pushSessionCount = 0;
         _pushCursor = 0;
+        _eventSessionCount = 0;
+        _eventCursor = 0;
         if (Push == null || Profiles == null)
         {
             return;
@@ -71,6 +86,18 @@ internal sealed unsafe partial class FrameAssembler
         {
             if (!Profiles.TryGetProfile(session, out var profile, out var world, out var divisor))
             {
+                // No profile, no view: but a broadcast or an EmitTo still reaches it (09 § 11), in a frame of events alone.
+                if (Events != null)
+                {
+                    if (_eventSessionCount == _eventSessions.Length)
+                    {
+                        Array.Resize(ref _eventSessions, Math.Max(16, _eventSessionCount * 2));
+                    }
+
+                    _eventSessions[_eventSessionCount++] = session;
+                    PrepareSession(session);
+                }
+
                 continue;
             }
 
@@ -235,7 +262,7 @@ internal sealed unsafe partial class FrameAssembler
     /// <summary>Parallel: this chunk's share of the push sessions, taken from a shared cursor.</summary>
     private void ExecutePushSessions(FrameWorkerScratch scratch, ref FrameCounters counters)
     {
-        if (_pushSessionCount == 0)
+        if (_pushSessionCount + _eventSessionCount == 0)
         {
             return;
         }
@@ -274,6 +301,17 @@ internal sealed unsafe partial class FrameAssembler
         if (lost > 0)
         {
             Interlocked.Add(ref BoundLost, lost);
+        }
+
+        while (true)
+        {
+            var i = Interlocked.Increment(ref _eventCursor) - 1;
+            if (i >= _eventSessionCount)
+            {
+                break;
+            }
+
+            AssembleEventsOnly(_eventSessions[i], scratch, ref counters);
         }
 
         Interlocked.Add(ref Push.Enters, enters);
@@ -330,6 +368,162 @@ internal sealed unsafe partial class FrameAssembler
 
     // published: the bytes the session's frame published, or zero when it had nothing to say; left as it was when no frame was made — not its tick, or a
     // frame refused (degraded, lagging, no slot, oversize, no pool): the budget loop reads the link's rate, and a refusal is congestion, not quiet.
+    /// <summary>
+    /// A session bound to no profile: a frame of the events routed to it — broadcasts and its own <c>EmitTo</c> — since its last one, and nothing else
+    /// (09 § 11). No frame when none is owed; a frame not sent leaves the events owed, caught up from the log.
+    /// </summary>
+    private void AssembleEventsOnly(SessionId session, FrameWorkerScratch scratch, ref FrameCounters counters)
+    {
+        var state = StateOf(session);
+        var slot = session.Slot;
+        if (state == null || state.Generation != session.Generation || (uint)slot >= (uint)_eventsLastTick.Length)
+        {
+            return;
+        }
+
+        var events = Events;
+        var last = _eventsLastGeneration[slot] == session.Generation ? _eventsLastTick[slot] : 0u;
+        var nowhere = default(NoEventGeometry);
+        events.Collect(scratch.EventPicks, last, (uint)_tick, EntityId.Null, session, ref nowhere, out var count, out var bytes, out var lost);
+        if (bytes > _maxFrameBytes / 2)
+        {
+            EventHub.Shed(scratch.EventPicks, ref count, ref bytes, ref lost);
+        }
+
+        var reset = state.PendingReset;
+        if (count == 0 && !reset)
+        {
+            _eventsLastTick[slot] = (uint)_tick;
+            _eventsLastGeneration[slot] = session.Generation;
+            return;
+        }
+
+        var send = SendStateOf(slot);
+        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick) || SkipPolicy.AcknowledgementLag(send->ProducedTick, send->AckedTick) > _lagBoundTicks
+            || !send->TryBeginFrame(out var sequence, out var recycled))
+        {
+            NoteSkip(state);
+            return;
+        }
+
+        var buffer = scratch.Bytes(64 + bytes);
+        var writer = new WireWriter(buffer);
+        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, reset ? TickFlags.Reset : TickFlags.None);
+        if (count > 0)
+        {
+            events.Write(ref writer, scratch.EventPicks, count, lost);
+        }
+
+        var length = writer.Position;
+        var block = recycled;
+        if (length > _maxFrameBytes || !Pool.TryRentOrKeep(length, ref block, out var previous))
+        {
+            ReturnIfValid(block);
+            send->AbandonFrame(sequence);
+            NoteSkip(state);
+            return;
+        }
+
+        ReturnIfValid(previous);
+        buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
+        send->PublishFrame(sequence, block, length, _tick);
+        events.NoteDelivered(count, lost);
+        _eventsLastTick[slot] = (uint)_tick;
+        _eventsLastGeneration[slot] = session.Generation;
+        state.PendingReset = false;
+        state.BytesPublished += length;
+        state.FramesProduced++;
+        state.FramesSinceDegrade++;
+        scratch.AddReady(session);
+        counters.FramesProduced++;
+        counters.BytesEncoded += length;
+    }
+
+    /// <summary>
+    /// The rows an <c>AGG</c> block carries, sorted by tile into the worker's scratch: in the region (every tile, or those meeting the radius around the
+    /// anchor), and changed since the last AGG, or newly in the region, or — on a reset — not empty.
+    /// </summary>
+    private static int SelectAggregateRows(AggregateCounts counts, FrameWorkerScratch scratch, bool reset, uint last, double radius, Vector3D anchor,
+        Vector3D lastAnchor)
+    {
+        var n = 0;
+        var a = counts.ArchetypeCount;
+        for (var r = 0; r < counts.Rows; r++)
+        {
+            var tile = counts.Tiles[r];
+            if (radius > 0 && !counts.Meets(tile, anchor.X, anchor.Y, anchor.Z, radius))
+            {
+                continue;
+            }
+
+            bool send;
+            if (reset)
+            {
+                send = false;
+                for (var c = 0; c < a && !send; c++)
+                {
+                    send = counts.Counts[(r * a) + c] > 0;
+                }
+            }
+            else
+            {
+                send = counts.Stamps[r] > last || (radius > 0 && !counts.Meets(tile, lastAnchor.X, lastAnchor.Y, lastAnchor.Z, radius));
+            }
+
+            if (!send)
+            {
+                continue;
+            }
+
+            if (n == scratch.AggRows.Length)
+            {
+                Array.Resize(ref scratch.AggRows, n * 2);
+                Array.Resize(ref scratch.AggTiles, n * 2);
+            }
+
+            scratch.AggRows[n] = r;
+            scratch.AggTiles[n++] = tile;
+        }
+
+        if (n > 1)
+        {
+            Array.Sort(scratch.AggTiles, scratch.AggRows, 0, n);
+        }
+
+        return n;
+    }
+
+    /// <summary>An <c>AGG</c> block (03 § 9): the grid, RESET, and each row's tile as a gap from the previous and its counts, one per grid archetype.</summary>
+    private static void WriteAggregate(ref WireWriter w, AggregateCounts counts, FrameWorkerScratch scratch, int rows, bool reset)
+    {
+        var mark = TickWriter.BeginBlock(ref w, BlockTypes.Agg);
+        w.WriteVaru((uint)counts.GridIdx);
+        w.WriteU8(reset ? (byte)1 : (byte)0);
+        w.WriteVaru((uint)rows);
+        var prev = -1L;
+        var a = counts.ArchetypeCount;
+        for (var i = 0; i < rows; i++)
+        {
+            var tile = scratch.AggTiles[i];
+            w.WriteVaru((uint)(tile - prev - 1));
+            prev = tile;
+            var r = scratch.AggRows[i];
+            for (var c = 0; c < a; c++)
+            {
+                w.WriteVaru((uint)Math.Max(0, counts.Counts[(r * a) + c]));
+            }
+        }
+
+        TickWriter.EndBlock(ref w, mark);
+    }
+
+    private void CommitAggregate(SessionId session, Vector3D anchor)
+    {
+        _aggLastTick[session.Slot] = (uint)_tick;
+        _aggAnchor[session.Slot] = anchor;
+        _aggGeneration[session.Slot] = session.Generation;
+    }
+
     /// <summary>A frame's enter budget (09 § 10): halved per LOD level, divided by the overload multiplier, never below one.</summary>
     private int EnterBudget(int level) => Math.Max(1, (_options.EnterBudgetPerFrame >> level) / Math.Max(1, Volatile.Read(ref _tickMultiplier)));
 
@@ -436,10 +630,33 @@ internal sealed unsafe partial class FrameAssembler
             }
         }
 
+        // The aggregate tier (09 § 8): on the session's aggregate tick — at most its rate, staggered by slot — the tiles of its region that changed since its
+        // last AGG, and the tiles its region newly covers; every non-empty tile, with RESET, on the first or after a reset.
+        var (aggGrid, aggPeriod, aggRadius) = Profiles.AggregateOf(_pushProfiles[index]);
+        var aggDue = false;
+        var aggReset = false;
+        var aggRows = 0;
+        var aggAnchor = default(Vector3D);
+        AggregateCounts aggCounts = null;
+        if (aggGrid >= 0 && (uint)session.Slot < (uint)_aggLastTick.Length)
+        {
+            aggCounts = Push.Aggregates[aggGrid];
+            var sent = _aggGeneration[session.Slot] == session.Generation;
+            aggDue = !sent || reset || ((_tick + session.Slot) % aggPeriod) == 0;
+            if (aggDue)
+            {
+                aggReset = !sent || reset;
+                aggAnchor = aggRadius > 0 ? Push.PendingAnchorOf(session) : default;
+                aggRows = SelectAggregateRows(aggCounts, scratch, aggReset, sent ? _aggLastTick[session.Slot] : 0u, aggRadius, aggAnchor,
+                    _aggAnchor[session.Slot]);
+            }
+        }
+
+        var aggWrite = aggDue && (aggRows > 0 || aggReset);
         var stats = Stats;
         var emitStats = stats != null && stats.IsEmissionTick && (send->Caps & Capabilities.Stats) != 0;
         var newlyComplete = complete && !state.ViewComplete;
-        if (records == 0 && eventCount == 0 && !reset && !emitStats && !newlyComplete)
+        if (records == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete)
         {
             // Nothing to say. The anchor may still have moved and a cell with nothing in it may have been delivered; neither changes what the client holds,
             // so the pending state is committed even though no frame is.
@@ -447,11 +664,17 @@ internal sealed unsafe partial class FrameAssembler
             ReturnIfValid(recycled);
             NoteSkip(state, counted: false);
             Push.Commit(session);
+            if (aggDue)
+            {
+                CommitAggregate(session, aggAnchor);
+            }
+
             published = 0;
             return;
         }
 
-        var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0) + (eventCount > 0 ? eventBytes + 16 : 0);
+        var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0) + (eventCount > 0 ? eventBytes + 16 : 0)
+            + (aggWrite ? 24 + (aggRows * 5 * (1 + aggCounts.ArchetypeCount)) : 0);
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags);
@@ -470,6 +693,11 @@ internal sealed unsafe partial class FrameAssembler
         if (eventCount > 0)
         {
             events.Write(ref writer, scratch.EventPicks, eventCount, eventsLost);
+        }
+
+        if (aggWrite)
+        {
+            WriteAggregate(ref writer, aggCounts, scratch, aggRows, aggReset);
         }
 
         if (emitStats)
@@ -516,6 +744,11 @@ internal sealed unsafe partial class FrameAssembler
 
         // COMMIT — the anchor and the delivered cells move with the frame that describes them.
         Push.Commit(session);
+        if (aggDue)
+        {
+            CommitAggregate(session, aggAnchor);
+        }
+
         if (Push.Shadow)
         {
             Push.ShadowApply(session, scratch, _plans.Length, reset);
@@ -576,4 +809,18 @@ internal readonly ref struct SessionEventGeometry : IEventGeometry
 
     public bool Sees(float x, float y, float z, float viewRadius) =>
         World ? _push.WorldSeesPoint(_session, x, y, z) : _push.SeesPoint(_session, x, y, z, viewRadius);
+}
+
+/// <summary>No geometry: a session with no profile sees no point, so the geometric routes never match it (09 § 11).</summary>
+internal readonly ref struct NoEventGeometry : IEventGeometry
+{
+    public bool World => false;
+
+    public void CellBox(out int minCx, out int maxCx, out int minCy, out int maxCy, out int minCz, out int maxCz)
+    {
+        (minCx, minCy, minCz) = (0, 0, 0);
+        (maxCx, maxCy, maxCz) = (-1, -1, -1);
+    }
+
+    public bool Sees(float x, float y, float z, float viewRadius) => false;
 }

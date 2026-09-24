@@ -184,6 +184,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 }
 
                 Push.AttachEncodePlans(encodePlans);
+                ConfigureAggregates(observed);
             }
 
             // The send side (P1-14b). It holds no memory of its own beyond one view and one work item per slot; what it carries is the rule that a frame
@@ -309,6 +310,87 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <returns>The view; <see cref="Commands"/> off a worker.</returns>
     public SubscriptionsCommands CommandsFor(int workerId) =>
         (uint)workerId < (uint)_commandsByWorker.Length ? _commandsByWorker[workerId] : Commands;
+
+    /// <summary>
+    /// The aggregate tiers' counts (09 § 8): one per canonical catalog grid, bound to the profiles that read them. A tile must be a whole number of replication
+    /// cells over the same origin — the counts follow cell changes, so a tile edge inside a cell would let a move cross it unseen — and every archetype a grid
+    /// counts must be one push replication serves.
+    /// </summary>
+    private void ConfigureAggregates(bool[] observed)
+    {
+        var canonical = Catalog.Canonical.Grids ?? [];
+        if (canonical.Length == 0)
+        {
+            return;
+        }
+
+        var planOfCanonical = new int[Catalog.Canonical.Archetypes.Length];
+        for (var c = 0; c < planOfCanonical.Length; c++)
+        {
+            planOfCanonical[c] = Array.FindIndex(Plans, p => p.Name == Catalog.Canonical.Archetypes[c].Name);
+        }
+
+        var grids = new AggregateCounts[canonical.Length];
+        for (var g = 0; g < canonical.Length; g++)
+        {
+            var grid = canonical[g];
+            var cells = grid.Cell / Grid.CellM;
+            if (Math.Abs(cells - Math.Round(cells)) > 1e-9 || Math.Round(cells) < 1)
+            {
+                throw new NotSupportedException(
+                    $"An Aggregate's tile of {grid.Cell} m is not a whole number of the {Grid.CellM} m replication cells: tile counts follow cell changes, so a tile " +
+                    "edge inside a cell would let a move cross it unseen. Declare a multiple of the cell.");
+            }
+
+            var columns = new int[Plans.Length];
+            Array.Fill(columns, -1);
+            for (var j = 0; j < grid.Archetypes.Length; j++)
+            {
+                var plan = planOfCanonical[grid.Archetypes[j]];
+                if (plan < 0 || !observed[plan])
+                {
+                    throw new NotSupportedException(
+                        $"An Aggregate counts '{Catalog.Canonical.Archetypes[grid.Archetypes[j]].Name}', which no profile replicates: its counts come from the " +
+                        "push step's events. Observe the archetype in some profile.");
+                }
+
+                columns[plan] = j;
+            }
+
+            grids[g] = new AggregateCounts(grid.Idx, grid.Origin[0], grid.Origin[1], grid.Origin.Length > 2 ? grid.Origin[2] : 0d, grid.Cell, grid.Dims[0],
+                grid.Dims[1], grid.Dims.Length > 2 ? grid.Dims[2] : 1, columns, grid.Archetypes.Length);
+        }
+
+        Push.ConfigureAggregates(grids);
+        Profiles.BindAggregates((tileM, archetypes) =>
+        {
+            for (var g = 0; g < grids.Length; g++)
+            {
+                if (grids[g].TileM != tileM)
+                {
+                    continue;
+                }
+
+                var same = true;
+                var n = 0;
+                for (var a = 0; a < grids[g].Columns.Length; a++)
+                {
+                    if (grids[g].Columns[a] >= 0)
+                    {
+                        n++;
+                        same &= Array.IndexOf(archetypes, a) >= 0;
+                    }
+                }
+
+                if (same && n == archetypes.Length)
+                {
+                    return g;
+                }
+            }
+
+            return -1;
+        }, NominalTickPeriodSeconds);
+    }
 
     /// <summary>The declared events' hub, or <see langword="null"/> when no event is declared.</summary>
     public EventHub Events { get; }

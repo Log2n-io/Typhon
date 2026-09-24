@@ -195,6 +195,9 @@ public sealed class ObserverDeclaration
     /// <summary>An aggregate observer's refresh rate, in hertz.</summary>
     public double RateHz { get; internal set; }
 
+    /// <summary>An aggregate observer's radius around the session's anchor; 0 for every tile.</summary>
+    public double AggregateRadiusM { get; internal set; }
+
     /// <summary>The near tier's entity budget; 0 when none was declared.</summary>
     public int NearBudget { get; internal set; }
 

@@ -523,23 +523,15 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
         }
     }
 
-    /// <summary>The observer shapes that are still unbuilt are declarable today and refused at <c>Start</c>, naming the shape.</summary>
+    /// <summary>
+    /// The observer shapes that are still unbuilt are declarable today and refused at <c>Start</c>, naming the shape. (Aggregate is built since 2.6a; one
+    /// declared alone is refused by <c>PushAggregateTests.AnAggregateThatCannotBeServedIsRefused</c>.)
+    /// </summary>
     [TestCase(ObserverKind.ClientRegion)]
-    [TestCase(ObserverKind.Aggregate)]
     public void AnUnbuiltObserver_IsRefusedAtStart(ObserverKind kind)
     {
         using var runtime = CreateRuntime();
-        runtime.Subscriptions.Profile("p", p =>
-        {
-            if (kind == ObserverKind.ClientRegion)
-            {
-                p.ClientRegion(maxEdgeM: 4096).Of<SwgCreature>();
-            }
-            else
-            {
-                p.Aggregate(tileM: 256, rateHz: 1).Of<SwgCreature>();
-            }
-        });
+        runtime.Subscriptions.Profile("p", p => p.ClientRegion(maxEdgeM: 4096).Of<SwgCreature>());
 
         var ex = Assert.Throws<NotSupportedException>(runtime.Start);
 

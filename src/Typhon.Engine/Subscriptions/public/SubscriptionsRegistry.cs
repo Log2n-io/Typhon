@@ -348,11 +348,11 @@ public sealed class SubscriptionsRegistry
         {
             foreach (var observer in profile.Observers)
             {
-                if (observer.Kind is not (ObserverKind.World or ObserverKind.Sphere))
+                if (observer.Kind is not (ObserverKind.World or ObserverKind.Sphere or ObserverKind.Aggregate))
                 {
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a {observer.Kind} observer, which a later phase builds. World and Sphere ship; the other " +
-                        "shapes are declarable now so the API does not grow verbs later.");
+                        $"Profile '{profile.Name}' declares a {observer.Kind} observer, which a later phase builds. World, Sphere and Aggregate ship; the " +
+                        "other shapes are declarable now so the API does not grow verbs later.");
                 }
 
                 if (observer.Kind == ObserverKind.Sphere
@@ -372,11 +372,26 @@ public sealed class SubscriptionsRegistry
 
             }
 
-            if (profile.Observers.Count > 1)
+            // Tiers (09 § 5): one entity observer, and at most one Aggregate beside it.
+            var entityObservers = 0;
+            var aggregates = 0;
+            foreach (var observer in profile.Observers)
+            {
+                entityObservers += observer.Kind is ObserverKind.World or ObserverKind.Sphere ? 1 : 0;
+                aggregates += observer.Kind == ObserverKind.Aggregate ? 1 : 0;
+            }
+
+            if (entityObservers > 1 || aggregates > 1)
             {
                 throw new NotSupportedException(
-                    $"Profile '{profile.Name}' declares {profile.Observers.Count} observers. A profile is served through exactly one World or Sphere observer "
-                    + "until Phase 2 builds the tiers that give several a meaning.");
+                    $"Profile '{profile.Name}' declares {entityObservers} entity observers and {aggregates} aggregates. A profile is served through exactly " +
+                    "one World or Sphere observer, with at most one Aggregate beside it.");
+            }
+
+            if (aggregates > 0 && entityObservers == 0)
+            {
+                throw new NotSupportedException(
+                    $"Profile '{profile.Name}' declares an Aggregate alone. An aggregate is a tier beside the profile's World or Sphere observer.");
             }
         }
 

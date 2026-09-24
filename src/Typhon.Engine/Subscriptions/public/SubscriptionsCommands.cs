@@ -277,8 +277,8 @@ public sealed class SubscriptionsCommands
     /// is not the order the systems ran in across workers.
     /// </para>
     /// <para>
-    /// An <see cref="EntityId"/> field travels as the entity's netId — 0, "unknown", for an entity the client could not know. An event reaches sessions bound
-    /// to a profile: a session with none is served no frame, and is not counted as having lost it.
+    /// An <see cref="EntityId"/> field travels as the entity's netId — 0, "unknown", for an entity the client could not know. A session bound to no profile
+    /// hears broadcasts and its own <see cref="EmitTo{T}"/>, in frames of events alone; the routes that need a view never reach it.
     /// </para>
     /// </remarks>
     public void Emit<T>(in T evt) where T : unmanaged

@@ -630,10 +630,18 @@ internal sealed class EventHub
                 foreach (var offset in info.EntityOffsets)
                 {
                     var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[offset..]));
-                    if (!entity.IsNull && Resolve(ref entities, entity, out _, out var x, out var y, out var z))
+                    if (!entity.IsNull && Resolve(ref entities, entity, out var netId, out var x, out var y, out var z))
                     {
                         push.CellOf(x, y, z, out var cx, out var cy, out var cz);
                         slot.AddGeo(CellKey(cx, cy, cz), e, x, y, z, 0f);
+
+                        // was ∨ is: an entity this tick moved to another cell is filed where it was too, so a session that knew it there hears of it
+                        // — "X killed Y" as Y leaves the view. The match is deduplicated.
+                        if (netId != 0 && push.TryOldVisibility(netId, x, y, z, out var ox, out var oy, out var oz))
+                        {
+                            push.CellOf(ox, oy, oz, out cx, out cy, out cz);
+                            slot.AddGeo(CellKey(cx, cy, cz), e, ox, oy, oz, 0f);
+                        }
                     }
                 }
 

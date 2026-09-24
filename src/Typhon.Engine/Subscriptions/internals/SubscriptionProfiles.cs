@@ -42,6 +42,19 @@ internal sealed class SubscriptionProfiles
         /// <summary>The sphere's distance bands (09 § 9); none for <c>World</c>.</summary>
         public LodBands Bands { get; init; }
 
+        public double AggregateTileM { get; init; }
+
+        public double AggregateRateHz { get; init; }
+
+        public double AggregateRadiusM { get; init; }
+
+        public int[] AggregateArchetypes { get; init; }
+
+        // The grid's index in PushReplication.Aggregates, plus one: 0 is none, which the default says.
+        public int AggregateGridPlusOne { get; init; }
+
+        public int AggregatePeriodTicks { get; init; }
+
         /// <summary>Whether the engine compares every live entity instead of waiting for <c>Replicate</c>.</summary>
         public bool Automatic { get; init; }
 
@@ -85,14 +98,38 @@ internal sealed class SubscriptionProfiles
                 continue;
             }
 
-            if (declaration.Observers.Count > 1)
+            ObserverDeclaration observer = null;
+            ObserverDeclaration aggregate = null;
+            foreach (var o in declaration.Observers)
             {
-                // The registry refuses this at Start; a registry built directly, unfrozen, reaches here.
-                throw new NotSupportedException(
-                    $"Profile '{declaration.Name}' declares {declaration.Observers.Count} observers; a profile is served through exactly one World or Sphere.");
+                if (o.Kind == ObserverKind.Aggregate)
+                {
+                    if (aggregate != null)
+                    {
+                        // The registry refuses this at Start; a registry built directly, unfrozen, reaches here.
+                        throw new NotSupportedException(
+                            $"Profile '{declaration.Name}' declares two aggregates; a profile holds at most one Aggregate beside its World or Sphere.");
+                    }
+
+                    aggregate = o;
+                }
+                else
+                {
+                    if (observer != null)
+                    {
+                        // The registry refuses this at Start; a registry built directly, unfrozen, reaches here.
+                        throw new NotSupportedException(
+                            $"Profile '{declaration.Name}' declares two entity observers; a profile is served through exactly one World or Sphere.");
+                    }
+
+                    observer = o;
+                }
             }
 
-            var observer = declaration.Observers[0];
+            if (observer == null)
+            {
+                throw new NotSupportedException($"Profile '{declaration.Name}' declares an Aggregate alone; an aggregate is a tier beside a World or Sphere.");
+            }
             if (observer.Kind is not (ObserverKind.World or ObserverKind.Sphere))
             {
                 throw new NotSupportedException(
@@ -148,10 +185,71 @@ internal sealed class SubscriptionProfiles
                 Bands = observer.Kind == ObserverKind.Sphere ? new LodBands(observer.Bands) : default,
                 Automatic = declaration.PushDetection == PushDetection.Automatic,
                 TickDivisor = declaration.TickDivisor,
+                AggregateTileM = aggregate?.TileM ?? 0d,
+                AggregateRateHz = aggregate?.RateHz ?? 0d,
+                AggregateRadiusM = aggregate == null || observer.Kind == ObserverKind.World ? 0d : aggregate.AggregateRadiusM,
+                AggregateArchetypes = aggregate == null ? [] : AggregateIndices(plans, declaration.Name, aggregate),
             };
         }
 
         sessions.BindProfiles(name => _byName.TryGetValue(name, out var index) ? index : -1);
+    }
+
+    private static int[] AggregateIndices(CompiledProjectionPlan[] plans, string profile, ObserverDeclaration aggregate)
+    {
+        var list = new List<int>();
+        foreach (var archetype in aggregate.Archetypes)
+        {
+            var index = IndexOfArchetype(plans, archetype);
+            if (index < 0)
+            {
+                throw new InvalidOperationException(
+                    $"Profile '{profile}' aggregates '{archetype.Name}', which declares no projection: an aggregate counts what replication serves.");
+            }
+
+            if (!list.Contains(index))
+            {
+                list.Add(index);
+            }
+        }
+
+        list.Sort();
+        return list.ToArray();
+    }
+
+    /// <summary>A profile's aggregate (09 § 8): its grid in <see cref="PushReplication.Aggregates"/>, refresh period and radius; grid −1 for none.</summary>
+    public (int Grid, int PeriodTicks, double RadiusM) AggregateOf(int profile) =>
+        (uint)profile < (uint)_profiles.Length
+            ? (_profiles[profile].AggregateGridPlusOne - 1, _profiles[profile].AggregatePeriodTicks, _profiles[profile].AggregateRadiusM)
+            : (-1, 0, 0d);
+
+    /// <summary>Binds each profile's aggregate to its grid and refresh period, once the grids exist (runtime Start).</summary>
+    internal void BindAggregates(Func<double, int[], int> gridOf, double tickPeriodSeconds)
+    {
+        for (var i = 0; i < _profiles.Length; i++)
+        {
+            var p = _profiles[i];
+            if (p.AggregateTileM > 0)
+            {
+                _profiles[i] = p with
+                {
+                    AggregateGridPlusOne = gridOf(p.AggregateTileM, p.AggregateArchetypes) + 1,
+                    AggregatePeriodTicks = Math.Max(1, (int)Math.Round(1d / (p.AggregateRateHz * tickPeriodSeconds))),
+                };
+            }
+        }
+    }
+
+    /// <summary>Every profile's aggregate: its tile edge and the plan indices it counts.</summary>
+    internal IEnumerable<(double TileM, int[] Archetypes)> AggregateDeclarations()
+    {
+        foreach (var p in _profiles)
+        {
+            if (p.AggregateTileM > 0)
+            {
+                yield return (p.AggregateTileM, p.AggregateArchetypes);
+            }
+        }
     }
 
     /// <summary>The profile a session is bound to, or <see langword="false"/> when it has none or its observer reaches nothing.</summary>

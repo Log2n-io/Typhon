@@ -353,8 +353,9 @@
     position, and every event that moves an anchor, moves an entity or delivers a cell emits exactly the enters and leaves that keep it true
   invariant [s has never been placed] → s holds NOTHING. A default position is a legal world position, so "never placed" and "placed at the origin"
     must be distinguishable, and the unplaced session is the one that sees nothing
-  invariant a profile is served through exactly ONE observer, World or Sphere; a second observer, near/far tiers and the other shapes are refused at
-    Start until Phase 2 builds them. Profiles may declare different radii, a leave radius and a run-time maximum (09 § 3–4): one window serves them all,
+  invariant a profile is served through exactly ONE entity observer, World or Sphere, with at most one Aggregate beside it (09 § 5) — which sends
+    AGG, never entity records, so the entity known-set stays that one observer's; a second entity observer, an aggregate alone, near/far tiers and the
+    other shapes are refused at Start. Profiles may declare different radii, a leave radius and a run-time maximum (09 § 3–4): one window serves them all,
     sized for the largest radius any session can take, and that radius counts against the window bound at Start
   invariant a radius change (SetRadius, or a profile change between Sphere radii) is geometry like an anchor move: the next frame sweeps the shell
     between the two radii and does not reset
@@ -663,14 +664,15 @@
   invariant a session's frame carries the events routed to it in every tick after its last committed frame (the current tick alone before its first),
     each once, in emission order (worker slot, then call order); Broadcast routes to every session, ToOwner to the session whose Control is the named
     entity when the frame is built, ToSession to the session EmitTo names; Near and ToKnown to every session that sees the event's point, or a named
-    entity's v̂, against its committed or pending geometry (inside the sphere with the point's cell delivered — SUB-16's test; a World session: the cell
+    entity's v̂ — its v̂ before this tick too, when this tick moved it to another cell (was ∨ is) — against its committed or pending geometry (inside the sphere with the point's cell delivered — SUB-16's test; a World session: the cell
     delivered), and Near with a radius only within it of the session's viewpoint
   invariant an entity destroyed in the event's tick still resolves, from the projection's release, to the netId and v̂ it had
   invariant an event of a tick the log no longer holds is counted, not sent: the frame opens its EVENTS block with the built-in EventsLost (index 0)
     carrying that count over the last EventHub.SummaryDepth ticks — a lower bound beyond. Broadcast and ToSession are counted exactly; ToOwner against
     the session's Control, and Near and ToKnown against its geometry, when the frame is built (a session that moved or changed Control during the gap is
     counted as it is now). Events take at most half a frame: past it, they are counted rather than sent
-  invariant an event reaches sessions bound to a profile; emissions of a tick no frame stage encoded (no session, no push replication, an aborted tick)
+  invariant a session bound to no profile has no view: Broadcast and ToSession reach it in frames of events alone, caught up from the log like any
+    session's; the other routes never do. Emissions of a tick no frame stage encoded (no session, no push replication, an aborted tick)
     are discarded at the next tick's start, not delivered later
   invariant a value its codec cannot carry drops that one event, counted in EventHub.Rejected; the tick path does not throw
   never keep per-session event state: the log and its summary are per tick
@@ -682,7 +684,8 @@
   verified: EventDeliveryTests.EveryEventReachesExactlyItsSessionsAtEverySkipRate (random broadcast and owner events, skip 0–90 %: once each, in order,
     received + lost = routed; Near and ToKnown included), EventDeliveryTests.AnEventReachesItsSessionsWithItsValues,
     EventDeliveryTests.EveryCodecShapeRoundTripsAndABadValueDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
-    EventDeliveryTests.WorldSessionsLateSessionsAndWorkerOrder. Falsifiability: a frame that carries only its own tick's events turns the
+    EventDeliveryTests.WorldSessionsLateSessionsAndWorkerOrder, EventDeliveryTests.AKnownEventReachesASessionTheEntityLeftThisTick,
+    EventDeliveryTests.ASessionWithNoProfileHearsBroadcastsAndItsOwnEvents. Falsifiability: filing only the current v̂ turns the leaving-entity case red; a frame that carries only its own tick's events turns the
     30–90 % cases red; a loss count of 0 turns the 60 and 90 % cases red; dropping the dedupe turns the oracle and the dedupe case red.
 
 ### SUB-22: A session's LOD level defers updates and never loses one `[fatal][silent]`
@@ -728,16 +731,23 @@
   invariant every tick the track runs is indexed, sessions bound to a profile or not: the tick's cell changes are the occupancy's only input
   invariant a tick whose changes the occupancy missed — one the track did not run for, or one it ran but never finished indexing — is followed by a
     recount at the next index's finish, after that tick's projection: only then do the blocks describe the fence's carried and parked entries
+  invariant the aggregate grids (09 § 8) take the same deltas per archetype and tile: after every index, ∀ grid, tile, counted archetype a: count = the
+    live, identified entries of a whose last pushed position lies in the tile; a recount of the occupancy recounts them. A tile is a whole number of
+    replication cells over the same origin — a move within a cell never crosses a tile edge — and a grid counts only archetypes push replication serves
+  invariant a session's AGG block carries, on its aggregate tick (at most the declared rate, staggered by slot), the tiles of its region (every tile,
+    or those meeting the declared radius around its anchor) that changed since its last AGG or that the region newly covers; the first, or one after a
+    reset, sets RESET and carries every non-empty tile. Counts are absolute, so a skipped session's next AGG is the union
   never skip a cell delivery or a sweep on a cell whose count is not zero
   scope: ReplicationOccupancy, PushReplication.MergeChunk, PushReplication.FinishIndex, PushReplication.Recount, PushReplication.PrepareBlocks,
-    PushReplication.DeliverCell, PushReplication.SweepCell, FrameAssembler.BeginPushTick
+    PushReplication.DeliverCell, PushReplication.SweepCell, FrameAssembler.BeginPushTick, AggregateCounts, PushReplication.RecountAggregates
   on_violation: an under-count skips a cell that holds entities — a session never receives them until they move, silently. An over-count only costs
     a query.
   rationale: the empty-cell skip is what makes a sparse or 3D fill cheap; it is sound only because every change of cell makes an event (SUB-19).
   verified: PushIndexTests.TheOccupancyEqualsARecountUnderChurn, PushIndexTests.ASkippedTickIsFollowedByARecount,
     PushIndexTests.AnUnindexedTickIsFollowedByARecount, PushIndexTests.ATickWithNoBoundSessionIsStillIndexed,
-    ReplicationOccupancyTests (the map against a dictionary). Falsifiability: PushIndexTests.AnOccupancyThatKeepsMoversInTheCellTheyLeftIsCaught
-    runs the mutant that drops a secondary's decrement.
+    ReplicationOccupancyTests (the map against a dictionary), PushAggregateTests.TheCountsEqualARecountUnderChurn (World and Sphere, skip 0 and 60 %),
+    PushAggregateTests.TheClientsCountsAreTheServers. Falsifiability: PushIndexTests.AnOccupancyThatKeepsMoversInTheCellTheyLeftIsCaught runs the
+    mutant that drops a secondary's decrement; dropping it from the aggregate deltas turns TheCountsEqualARecountUnderChurn red.
 
 ### SUB-25: The push index holds this tick's events in cell order and touches only occupied cells `[perf][silent]`
   invariant ∀ tick T, the index (= T's log slot) holds every event of T once under its primary cell and once more under the cell a mover left, cells

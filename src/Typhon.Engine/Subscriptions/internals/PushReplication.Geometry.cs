@@ -403,6 +403,35 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         cz = CellZ(z);
     }
 
+    public override bool TryOldVisibility(uint netId, float x, float y, float z, out float oldX, out float oldY, out float oldZ)
+    {
+        oldX = oldY = oldZ = 0f;
+        var slot = _log[_tick % LogDepth];
+        if (!slot.Valid || slot.Tick != _tick || slot.CellCount == 0)
+        {
+            return false;
+        }
+
+        var key = CellKey(x, y, TEvent.Deep ? z : 0f);
+        var k = LowerBound(slot.Cells, 0, slot.CellCount, key);
+        if (k >= slot.CellCount || slot.Cells[k] != key)
+        {
+            return false;
+        }
+
+        for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
+        {
+            ref var e = ref slot.Events[i];
+            if (e.NetId == netId && (e.Flags & PushEvent.HasOld) != 0 && e.OldKey != e.NewKey)
+            {
+                (oldX, oldY, oldZ) = (e.OldX, e.OldY, e.OldZ);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public override bool SeesPoint(SessionId session, float x, float y, float z, float viewRadius)
     {
         ref var st = ref _sessions[session.Slot];
@@ -945,6 +974,19 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     private int[][] _chunkDeltas = [];
     private int[] _chunkDeltaCount = [];
 
+    // Per merge chunk, the aggregate deltas of the tick (09 § 8): the archetype, +1 or −1, and the point — applied serially at the index's finish.
+    private AggregateDelta[][] _chunkAggDeltas = [];
+    private int[] _chunkAggCount = [];
+
+    private struct AggregateDelta
+    {
+        public int Archetype;
+        public int Delta;
+        public float X;
+        public float Y;
+        public float Z;
+    }
+
     public override void CountWorker(int worker)
     {
         if (!_countInProject || (uint)worker >= (uint)_events.Length)
@@ -1044,6 +1086,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             // After the projection every block's occupancy word and cold position describe this tick, arrivals and drained entries included.
             var recountFrom = Stopwatch.GetTimestamp();
             Recount(_occupancy);
+            RecountAggregates();
             _recountAtFinish = false;
             OccupancyRecounts++;
             RecountTicks += Stopwatch.GetTimestamp() - recountFrom;
@@ -1058,6 +1101,23 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 for (var i = 0; i < _chunkDeltaCount[c]; i++)
                 {
                     _occupancy.Add(keys[i], deltas[i]);
+                }
+            }
+
+            // The aggregate grids take the same deltas, per archetype and tile (SUB-24).
+            if (Aggregates.Length > 0)
+            {
+                for (var c = 0; c < _mergeChunks; c++)
+                {
+                    var list = _chunkAggDeltas[c];
+                    for (var i = 0; i < _chunkAggCount[c]; i++)
+                    {
+                        ref var d = ref list[i];
+                        foreach (var grid in Aggregates)
+                        {
+                            grid.Add(d.Archetype, d.X, d.Y, d.Z, d.Delta, _tick);
+                        }
+                    }
                 }
             }
         }
@@ -1281,6 +1341,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             Array.Resize(ref _chunkDeltaKeys, k);
             Array.Resize(ref _chunkDeltas, k);
             Array.Resize(ref _chunkDeltaCount, k);
+            Array.Resize(ref _chunkAggDeltas, k);
+            Array.Resize(ref _chunkAggCount, k);
         }
 
         if (_mergeKeyA.Length < k)
@@ -1298,13 +1360,27 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             _chunkPrimaryEnds[c] ??= new int[64];
             _chunkDeltaKeys[c] ??= new ulong[64];
             _chunkDeltas[c] ??= new int[64];
+            _chunkAggDeltas[c] ??= new AggregateDelta[16];
             _chunkCellCount[c] = 0;
             _chunkDeltaCount[c] = 0;
+            _chunkAggCount[c] = 0;
         }
 
         _mergeChunks = k;
         MaxMergeChunks = Math.Max(MaxMergeChunks, k);
         _mergedTick = _tick;
+    }
+
+    private void NoteAggregate(int chunk, int archetype, int delta, float x, float y, float z)
+    {
+        var count = _chunkAggCount[chunk];
+        if (count == _chunkAggDeltas[chunk].Length)
+        {
+            Array.Resize(ref _chunkAggDeltas[chunk], count * 2);
+        }
+
+        _chunkAggDeltas[chunk][count] = new AggregateDelta { Archetype = archetype, Delta = delta, X = x, Y = y, Z = z };
+        _chunkAggCount[chunk] = count + 1;
     }
 
     private void NoteDelta(int chunk, ulong key, int delta, ref int count)
@@ -1322,6 +1398,88 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
         _chunkDeltaKeys[chunk][count] = key;
         _chunkDeltas[chunk][count++] = delta;
+    }
+
+    /// <summary>The aggregate grids recounted from the blocks, when the occupancy is: after a tick whose changes the index missed.</summary>
+    internal override void RecountAggregates()
+    {
+        if (Aggregates.Length == 0)
+        {
+            return;
+        }
+
+        foreach (var grid in Aggregates)
+        {
+            grid.Zero(_tick);
+        }
+
+        RecountAggregatesInto(Aggregates);
+    }
+
+    /// <summary>Tests: the (tile, archetype) counts that differ from a recount of the blocks (SUB-24's aggregate clause).</summary>
+    internal override int AggregateDifferencesForTest()
+    {
+        var fresh = new AggregateCounts[Aggregates.Length];
+        for (var g = 0; g < fresh.Length; g++)
+        {
+            fresh[g] = Aggregates[g].EmptyCopy();
+        }
+
+        RecountAggregatesInto(fresh);
+        var differences = 0;
+        for (var g = 0; g < fresh.Length; g++)
+        {
+            differences += Aggregates[g].Differences(fresh[g]);
+        }
+
+        return differences;
+    }
+
+    private void RecountAggregatesInto(AggregateCounts[] into)
+    {
+        foreach (var a in _pushIndices)
+        {
+            if (!_aggregated[a])
+            {
+                continue;
+            }
+
+            var state = _states[a];
+            var cs = state.ClusterState;
+            if (cs == null)
+            {
+                continue;
+            }
+
+            var ids = cs.ReadActiveClusterList(out var active);
+            var layout = state.Layout;
+            for (var i = 0; ids != null && i < active; i++)
+            {
+                if (!state.Directory.TryGetBlock(ids[i], out var block))
+                {
+                    continue;
+                }
+
+                var bytes = (byte*)block;
+                var occ = block->ProjectedOccupancy;
+                while (occ != 0)
+                {
+                    var slot = BitOperations.TrailingZeroCount(occ);
+                    occ &= occ - 1;
+                    var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (slot * layout.HotStride));
+                    if (hot->NetId == NetIdAllocator.NoNetId)
+                    {
+                        continue;
+                    }
+
+                    DecodeAt(a, bytes + layout.ColdOffset + (slot * layout.ColdStride) + _positionOffset[a], out var px, out var py, out var pz);
+                    foreach (var grid in into)
+                    {
+                        grid.Add(a, px, py, pz, 1, _tick);
+                    }
+                }
+            }
+        }
     }
 
     internal override void Recount(ReplicationOccupancy into)
@@ -1614,21 +1772,34 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             }
 
             ref var e = ref source[(int)(uint)src];
+            var aggregated = (uint)e.Archetype < (uint)_aggregated.Length && _aggregated[e.Archetype];
             if ((sortKey & 1) != 0)
             {
                 // A secondary: the cell a mover left.
                 primaryEnd = primaryEnd < 0 ? output : primaryEnd;
                 delta -= OccupancyMutantForTest ? 0 : 1;
+                if (aggregated)
+                {
+                    NoteAggregate(chunk, e.Archetype, -1, e.OldX, e.OldY, e.OldZ);
+                }
             }
             else if ((e.Flags & PushEvent.HasNew) == 0)
             {
                 // Leave-only: the entity is gone from the cell it was last described in.
                 delta--;
+                if (aggregated)
+                {
+                    NoteAggregate(chunk, e.Archetype, -1, e.OldX, e.OldY, e.OldZ);
+                }
             }
             else if ((e.Flags & both) != both || e.OldKey != e.NewKey)
             {
                 // New here: a first description, or a mover that changed cell.
                 delta++;
+                if (aggregated)
+                {
+                    NoteAggregate(chunk, e.Archetype, 1, e.NewX, e.NewY, e.NewZ);
+                }
             }
 
             slotEvents[output++] = e;

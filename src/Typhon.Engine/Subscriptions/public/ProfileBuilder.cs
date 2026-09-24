@@ -141,12 +141,24 @@ public sealed class ProfileBuilder
     /// <summary>
     /// Per-cell counts per archetype, for a view too wide to send entities for: a strategic map, a far tier, a heat map.
     /// </summary>
-    /// <param name="tileM">The tile's edge, in metres.</param>
+    /// <param name="tileM">The tile's edge, in metres: a whole number of replication cells.</param>
     /// <param name="rateHz">How often the counts are refreshed, in hertz.</param>
+    /// <param name="radiusM">
+    /// The tiles a session is sent: those within this distance of its sphere's anchor; 0 for every tile. A <c>World</c> profile's aggregate covers every tile.
+    /// </param>
     /// <returns>The observer's builder.</returns>
-    /// <remarks><b>Declared now, built in Phase 2.</b></remarks>
-    public ObserverBuilder Aggregate(double tileM, double rateHz)
+    /// <remarks>
+    /// A tier (09 § 5, § 8): declared beside the profile's one entity observer (<c>World</c> or <c>Sphere</c>), it sends the tiles' counts in <c>AGG</c>
+    /// blocks — never entity records — refreshed at most <paramref name="rateHz"/> times a second, each time the tiles that changed. Every archetype it
+    /// counts must be one some profile replicates.
+    /// </remarks>
+    public ObserverBuilder Aggregate(double tileM, double rateHz, double radiusM = 0)
     {
+        if (!double.IsFinite(radiusM) || radiusM < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(radiusM), radiusM, "An aggregate's radius is zero (every tile) or a positive, finite distance.");
+        }
+
         if (!double.IsFinite(tileM) || tileM <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(tileM), tileM, "An aggregate observer needs a positive, finite tile edge.");
@@ -157,7 +169,7 @@ public sealed class ProfileBuilder
             throw new ArgumentOutOfRangeException(nameof(rateHz), rateHz, "An aggregate observer needs a positive, finite rate.");
         }
 
-        return _profile.Add(new ObserverDeclaration(ObserverKind.Aggregate) { TileM = tileM, RateHz = rateHz });
+        return _profile.Add(new ObserverDeclaration(ObserverKind.Aggregate) { TileM = tileM, RateHz = rateHz, AggregateRadiusM = radiusM });
     }
 }
 

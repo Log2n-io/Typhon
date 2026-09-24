@@ -89,6 +89,12 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <summary>Events (09 § 11): the (tick, event) pairs the current session's frame carries.</summary>
     internal readonly EventPicks EventPicks = new();
 
+    /// <summary>Aggregates (09 § 8): the rows the current session's <c>AGG</c> block carries, and their tiles, sorted.</summary>
+    internal int[] AggRows = new int[64];
+
+    /// <inheritdoc cref="AggRows"/>
+    internal uint[] AggTiles = new uint[64];
+
     /// <summary>Cell deliveries and sweeps this worker's current gather skipped as empty, added to the shared counter once per gather.</summary>
     internal long EmptyCellsSkipped;
 
@@ -482,6 +488,11 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _followed = new Vector3D[options.MaxSessions];
         _followedGeneration = new uint[options.MaxSessions];
         _followedEntity = new EntityId[options.MaxSessions];
+        _eventsLastTick = new uint[options.MaxSessions];
+        _aggLastTick = new uint[options.MaxSessions];
+        _aggGeneration = new ushort[options.MaxSessions];
+        _aggAnchor = new Vector3D[options.MaxSessions];
+        _eventsLastGeneration = new ushort[options.MaxSessions];
         _followedValid = new bool[options.MaxSessions];
         _encodePlans = BuildEncodePlans(plans, catalog);
         _lagBoundTicks = SkipPolicy.LagBoundTicks(options, tickPeriodUs);
@@ -673,7 +684,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             _prepareTicks += Stopwatch.GetTimestamp() - prepFrom;
         }
 
-        if (_pushSessionCount == 0)
+        if (_pushSessionCount + _eventSessionCount == 0)
         {
             return 0;
         }
@@ -691,7 +702,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             _prologueTicks += Stopwatch.GetTimestamp() - prologueFrom;
         }
 
-        var chunks = Math.Min(workers, _pushSessionCount);
+        var chunks = Math.Min(workers, _pushSessionCount + _eventSessionCount);
         _lastChunkCount = chunks;
         if (_chunkBusy.Length < chunks)
         {
