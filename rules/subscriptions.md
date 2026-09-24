@@ -124,7 +124,7 @@
     being the bytes that are sent
   never compare a group body against a stored copy that was not zero-padded to the section's widest form — the padding is what makes a
     fixed-width comparison of variable-length canonical encodings exact
-  scope: ProjectionPass.ProjectBlock, ProjectionColumnWalk.Quantize, ProjectionColumnWalk.Walk, ProjectionColumnWalk.WalkRatio,
+  scope: ProjectionPass.ProjectBlock, ProjectionPass.ApplyHeadingDeadband, ProjectionColumnWalk.Quantize, ProjectionColumnWalk.Walk, ProjectionColumnWalk.WalkRatio,
     ReplicationHotEntry.GroupTicks, ReplicationHotEntry.PackedState, ReplicationColdEntry.PrevQuantizedPosition,
     SubscriptionsCommands.Replicate, PushReplication.PrepareBlocks, PushReplication.MarkPushed, ArchetypeClusterState.NoteStructureSlots,
     ClusterRef.GetSpan, ClusterRef.WriteSpatial
@@ -141,13 +141,19 @@
   note the POSITION is compared the same way and by the same rule, through the quantized copy in the cold entry, and stamps the motion group's
     tick. What it does not do is fit or emit a motion SEGMENT, which is a separate decision about when a client's extrapolation has drifted far
     enough (design/Subscriptions/02-execution.md § 4).
+  note a HEADING's compare is a deadband in code space (09 § 15): before its group is encoded, a code within the declared tolerance of the one the
+    client holds — kept per heading in the cold entry, and distance taken modulo the angle's full turn — is replaced by the held one, so the body does
+    not change and nothing is sent; past it, the new code is held. The compare is still the encode: the code compared is the code sent. The client's
+    heading trails the entity's by at most the tolerance
   note `PushDetection.Automatic` pushes every live entity of an archetype each tick and lets the comparison find the changes. It is experimental and
     refused unless `SubscriptionsOptions.AllowAutomaticPushDetection` is set (ADR-067 decision 3).
   verified: ProjectionPassTests.AWriteThroughGetSpanIsDetected and ProjectionPassTests.AWriteThroughWriteSpatialIsDetected — the two write
     paths that set no signal, each on a marked slot, each requiring the comparison to have found the change and stamped the group tick. Falsifiability is
     proved by ProjectionPassTests.AChangeNoPassEverLooksAtIsNotDetected, which performs both writes and does NOT run the pass, requiring the entry to be
     untouched — so the verifiers discriminate the comparison from the write. The push set's half: PushOracleTests.AForgottenPushLeavesTheClientStaleAndTheOracleSeesIt
-    (a write with no push is not sent, and the oracle sees it) and PushOracleTests.AClientsWorldIsTheServersUnderPush in both detection modes.
+    (a write with no push is not sent, and the oracle sees it) and PushOracleTests.AClientsWorldIsTheServersUnderPush in both detection modes. The
+    heading note: HeadingTests.AHeadingIsSentOnlyWhenItTurnsPastItsTolerance (1° under 2° sends nothing, 3° sends one record, 0.9° across ±π nothing —
+    red without the deadband).
 
 ---
 

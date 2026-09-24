@@ -154,9 +154,9 @@ public sealed class ArchetypeProjectionBuilder
     /// <param name="group">The change group. <see langword="null"/> takes <see cref="ArchetypeProjection.DefaultGroup"/>.</param>
     /// <returns>This builder.</returns>
     /// <remarks>
-    /// <b>Declared now, built in Phase 2</b> — a runtime that starts with one of these refuses to start and says so. The verb exists here so an application
-    /// that needs it writes it once: the shape it will have when it works is the shape it has today. A moving entity needs none of this; its heading follows
-    /// from its velocity, which the client already has.
+    /// A new value is sent only when it has turned more than <paramref name="toleranceDeg"/> from the one the client holds, so a small jitter costs nothing
+    /// and the client's heading trails the entity's by at most the tolerance. Push the write with <c>Replicate</c>, like any other state. A moving entity needs
+    /// none of this; its heading follows from its velocity, which the client already has.
     /// </remarks>
     public ArchetypeProjectionBuilder Heading<TComponent, TField>(Comp<TComponent> component, Expression<Func<TComponent, TField>> selector, int bits,
         double toleranceDeg, string name = null, string group = null)
@@ -210,7 +210,7 @@ public sealed class ProjectedField
     /// <summary>Whether the field is owner-visible — carried by <c>SELF</c>, never by a public record.</summary>
     public bool Owner { get; internal set; }
 
-    /// <summary>Whether the field was declared as a heading, which Phase 1 refuses at <c>Start</c>.</summary>
+    /// <summary>Whether the field was declared as a heading: sent only when it turns past its tolerance.</summary>
     public bool IsHeading { get; internal set; }
 
     /// <summary>A heading's send threshold in degrees; 0 for every other transform.</summary>

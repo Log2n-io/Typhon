@@ -201,7 +201,7 @@ internal readonly struct ReplicationBlockLayout
     }
 
     private ReplicationBlockLayout(int slotCount, int segmentBytes, int packedStateBytes, int prevPositionBytes, int runStartBytes, int ownerEntrySize,
-        int enterPositionBytes, int enterBodyBytes, int visibilityPositionBytes = 0)
+        int enterPositionBytes, int enterBodyBytes, int visibilityPositionBytes = 0, int headingBytes = 0)
     {
         // A zero or negative slot count yields a block with no entries, which the pool would happily carve and hand out forever; a negative owner entry size
         // shrinks the block below its own regions. Both are construction-time mistakes, so they fail here rather than as arithmetic nonsense later.
@@ -222,6 +222,7 @@ internal readonly struct ReplicationBlockLayout
         ArgumentOutOfRangeException.ThrowIfNegative(enterPositionBytes);
         ArgumentOutOfRangeException.ThrowIfNegative(enterBodyBytes);
         ArgumentOutOfRangeException.ThrowIfNegative(visibilityPositionBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(headingBytes);
 
         SlotCount = slotCount;
         OwnerEntrySize = ownerEntrySize;
@@ -232,12 +233,13 @@ internal readonly struct ReplicationBlockLayout
         EnterPositionBytes = enterPositionBytes;
         EnterBodyBytes = enterBodyBytes;
         VisibilityPositionBytes = visibilityPositionBytes;
+        HeadingBytes = headingBytes;
 
         // The strides are the whole point of sizing here rather than in a struct declaration: an entry that straddles two cache lines costs the per-hit passes
         // a second line on every read, so the stride is rounded UP to whole lines rather than packed. An archetype whose regions fit one line keeps AC-5's
         // 64 B; one that does not pays 128 B knowingly, and the layout is where that becomes visible.
         HotStride = RoundUpTo(HotFixedBytes + segmentBytes + packedStateBytes, HotEntrySize);
-        ColdStride = RoundUpTo(ColdFixedBytes + prevPositionBytes + runStartBytes + visibilityPositionBytes + enterPositionBytes + enterBodyBytes,
+        ColdStride = RoundUpTo(ColdFixedBytes + prevPositionBytes + runStartBytes + visibilityPositionBytes + enterPositionBytes + enterBodyBytes + headingBytes,
             ColdEntrySize);
 
         // Computed once. These are fixed for the archetype's lifetime and are read on paths that become per-cluster and then per-hit, so recomputing a
@@ -268,9 +270,11 @@ internal readonly struct ReplicationBlockLayout
     /// <b>It sizes; it refuses nothing.</b> A 3D archetype with four <c>varu</c> state fields needs 18 B of segment and 20 B of state, which is 70 B of hot
     /// entry — a legal declaration that the fixed 64 B shape would have silently overrun. The answer is a 128 B stride, not a refusal.
     /// </remarks>
+    /// <param name="headingBytes">Bytes of the codes the client holds for the archetype's headings (09 § 15): four per heading field, or <c>0</c>.</param>
     public static ReplicationBlockLayout ForArchetype(int slotCount, int segmentBytes, int packedStateBytes, int prevPositionBytes, int runStartBytes,
-        int ownerEntrySize, int enterPositionBytes = 0, int enterBodyBytes = 0) =>
-        new(slotCount, segmentBytes, packedStateBytes, prevPositionBytes, runStartBytes, ownerEntrySize, enterPositionBytes, enterBodyBytes);
+        int ownerEntrySize, int enterPositionBytes = 0, int enterBodyBytes = 0, int headingBytes = 0) =>
+        new(slotCount, segmentBytes, packedStateBytes, prevPositionBytes, runStartBytes, ownerEntrySize, enterPositionBytes, enterBodyBytes,
+            headingBytes: headingBytes);
 
     /// <summary>
     /// This layout with a visibility position v̂ of its own in every cold entry (09 § 2): as many bytes as the previous quantized position, for an
@@ -281,7 +285,7 @@ internal readonly struct ReplicationBlockLayout
         PrevPositionBytes == 0 || VisibilityPositionBytes > 0
             ? this
             : new ReplicationBlockLayout(SlotCount, SegmentBytes, PackedStateBytes, PrevPositionBytes, RunStartBytes, OwnerEntrySize, EnterPositionBytes,
-                EnterBodyBytes, PrevPositionBytes);
+                EnterBodyBytes, PrevPositionBytes, HeadingBytes);
 
     /// <summary>The archetype's cluster slot count, <c>N</c>.</summary>
     public int SlotCount { get; }
@@ -363,6 +367,15 @@ internal readonly struct ReplicationBlockLayout
 
     /// <summary>Byte offset of the enter cache's <c>onEnter</c> body inside one cold entry.</summary>
     public int EnterBodyOffsetInColdEntry => EnterPositionOffsetInColdEntry + EnterPositionBytes;
+
+    /// <summary>
+    /// Where the codes the client holds for the archetype's headings start (09 § 15): a heading is sent only when it turns past its tolerance, so what the
+    /// client holds can trail the value, and the deadband is measured from it. Four bytes per heading field, in the order of the fields.
+    /// </summary>
+    public int HeadingOffsetInColdEntry => EnterBodyOffsetInColdEntry + EnterBodyBytes;
+
+    /// <summary>Bytes of the heading codes in every cold entry; <c>0</c> when the archetype declares no heading.</summary>
+    public int HeadingBytes { get; }
 
     /// <summary>Byte offset of <c>hot[0]</c> from the start of the block.</summary>
     public int HotOffset { get; }

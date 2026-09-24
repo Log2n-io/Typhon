@@ -7,6 +7,11 @@ using Typhon.Protocol;
 
 namespace Typhon.Engine;
 
+/// <summary>Fills a labelled metric's values, one per label in the declared order (09 § 15, D5).</summary>
+/// <param name="values">As many values as the metric has labels, zeroed; a value left unwritten is sent as zero.</param>
+[PublicAPI]
+public delegate void MetricValuesSource(Span<double> values);
+
 /// <summary>
 /// What a metric measures.
 /// </summary>
@@ -261,6 +266,60 @@ public sealed class SubscriptionsRegistry
     {
         ThrowIfFrozen();
         ArgumentNullException.ThrowIfNull(source);
+        CheckMetric(name, unit, codec);
+        _metrics.Add(new MetricDeclaration(name, unit, codec, kind, labels, source, _metrics.Count));
+        return this;
+    }
+
+    /// <summary>
+    /// Declares a labelled application metric (09 § 15, D5): one value per label, all read by one call per emission — not one per label, not one per
+    /// session.
+    /// </summary>
+    /// <param name="name">The metric's name. The <c>typhon.</c> prefix is reserved for the engine's own.</param>
+    /// <param name="unit">Its unit.</param>
+    /// <param name="codec">How each value travels.</param>
+    /// <param name="labels">The labels, at least one, distinct: the order the values are written in.</param>
+    /// <param name="source">Fills the values, one per label in <paramref name="labels"/>' order; a value it leaves unwritten is zero.</param>
+    /// <param name="kind">Gauge or counter.</param>
+    /// <returns>This registry.</returns>
+    public SubscriptionsRegistry Metric(string name, string unit, Codec codec, string[] labels, MetricValuesSource source,
+        MetricKind kind = MetricKind.Gauge)
+    {
+        ThrowIfFrozen();
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(labels);
+        CheckMetric(name, unit, codec);
+        if (labels.Length == 0 || labels.Distinct(StringComparer.Ordinal).Count() != labels.Length || labels.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException($"Metric '{name}' needs at least one label, each named and distinct: a value is addressed by its label.",
+                nameof(labels));
+        }
+
+        _metrics.Add(new MetricDeclaration(name, unit, codec, kind, labels, null, _metrics.Count) { ValuesSource = source });
+        return this;
+    }
+
+    /// <summary>
+    /// Declares a per-session application metric (09 § 15, D5): a value for each session that asked for statistics, read once per such session per
+    /// emission — a second, on the tick every block is sent.
+    /// </summary>
+    /// <param name="name">The metric's name. The <c>typhon.</c> prefix is reserved for the engine's own.</param>
+    /// <param name="unit">Its unit.</param>
+    /// <param name="codec">How the value travels.</param>
+    /// <param name="source">Reads the session's value. It runs on a frame worker, concurrently for different sessions: it must not write shared state.</param>
+    /// <param name="kind">Gauge or counter.</param>
+    /// <returns>This registry.</returns>
+    public SubscriptionsRegistry SessionMetric(string name, string unit, Codec codec, Func<SessionId, double> source, MetricKind kind = MetricKind.Gauge)
+    {
+        ThrowIfFrozen();
+        ArgumentNullException.ThrowIfNull(source);
+        CheckMetric(name, unit, codec);
+        _metrics.Add(new MetricDeclaration(name, unit, codec, kind, null, null, _metrics.Count) { SessionSource = source });
+        return this;
+    }
+
+    private void CheckMetric(string name, string unit, Codec codec)
+    {
         if (string.IsNullOrWhiteSpace(name))
         {
             throw new ArgumentException("A metric needs a name.", nameof(name));
@@ -290,9 +349,6 @@ public sealed class SubscriptionsRegistry
                 throw new InvalidOperationException($"Metric '{name}' is already declared.");
             }
         }
-
-        _metrics.Add(new MetricDeclaration(name, unit, codec, kind, labels, source, _metrics.Count));
-        return this;
     }
 
     /// <summary>
@@ -340,11 +396,6 @@ public sealed class SubscriptionsRegistry
 
     private void RefuseUnbuiltShapes()
     {
-        foreach (var archetype in _archetypes)
-        {
-            RefuseHeadings(archetype);
-        }
-
         foreach (var profile in _profiles)
         {
             foreach (var observer in profile.Observers)
@@ -423,19 +474,6 @@ public sealed class SubscriptionsRegistry
             throw new NotSupportedException(
                 $"Source '{_sources[0].Name}' is declared, and shared sources are Phase 4 work. Until then, data a client needs and a position cannot reach " +
                 "travels as owner fields on the entity that owns it.");
-        }
-    }
-
-    private static void RefuseHeadings(ArchetypeProjection archetype)
-    {
-        foreach (var field in archetype.Fields)
-        {
-            if (field.IsHeading)
-            {
-                throw new NotSupportedException(
-                    $"Archetype '{archetype.Name}' declares the heading '{field.Name}', which Phase 2 builds. A moving entity needs none: its heading " +
-                    "follows from the velocity the client already has.");
-            }
         }
     }
 
@@ -544,6 +582,15 @@ public sealed class MetricDeclaration
 
     /// <summary>The order this metric was declared in. Not the wire index, which starts above the engine's reserved range.</summary>
     public int Index { get; }
+
+    /// <summary>A labelled metric's reader, which fills one value per label; <see langword="null"/> for the other shapes.</summary>
+    public MetricValuesSource ValuesSource { get; internal init; }
+
+    /// <summary>A per-session metric's reader; <see langword="null"/> for a server-scope one.</summary>
+    public Func<SessionId, double> SessionSource { get; internal init; }
+
+    /// <summary>Whether the metric has a value per session rather than one for the server.</summary>
+    public bool PerSession => SessionSource != null;
 
     /// <summary>Reads the current value.</summary>
     internal Func<double> Source { get; }

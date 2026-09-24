@@ -479,6 +479,7 @@ internal static class CatalogBuilder
                 Codec = declaration.Codec.Catalog,
                 Kind = declaration.Kind == MetricKind.Counter ? CatalogMetric.CounterKind : null,
                 Labels = declaration.Labels.Count == 0 ? null : Copy(declaration.Labels),
+                Scope = declaration.PerSession ? CatalogMetric.SessionScope : null,
             });
         }
 

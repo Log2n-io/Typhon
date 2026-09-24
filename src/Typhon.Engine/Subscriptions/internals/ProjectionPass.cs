@@ -407,6 +407,12 @@ internal static unsafe class ProjectionPass
                 pushFlags |= PushEvent.HasOld | PushEvent.HasNew;
             }
 
+            // ── Headings: the deadband, before the groups compare (09 § 15) ────────────────────────────────────────────────────────────────────────────────
+            if (layout.HeadingBytes > 0)
+            {
+                ApplyHeadingDeadband(fields, codes, slot, coldBytes + layout.HeadingOffsetInColdEntry, initialize);
+            }
+
             // ── Groups: encode, compare, stamp ──────────────────────────────────────────────────────────────────────────────────────────────────────────
             var changed = EncodeAndCompare(plan.Groups, fields, 0, codes, slot, pack, groupScratch, hotBytes + layout.PackedStateOffsetInHotEntry,
                 groupLength, groupOffset, hot, tick, initialize);
@@ -486,6 +492,39 @@ internal static unsafe class ProjectionPass
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static byte* StoreFor(ArchetypeClusterInfo clusterLayout, byte* transientBase, byte* clusterBase, byte componentSlot) =>
         transientBase != null && (clusterLayout.TransientSlotMask & (1 << componentSlot)) != 0 ? transientBase : clusterBase;
+
+    /// <summary>
+    /// A heading's deadband in code space (09 § 15, SUB-10): a new code within the tolerance of the one the client holds is replaced by the held one, so the
+    /// group body the comparison sees is unchanged and nothing is sent; past it, the new code becomes the held one. The distance is taken modulo the angle's
+    /// full turn, so the wrap at ±π is no special case — and the compare is still the encode: what is compared is what would be sent.
+    /// </summary>
+    private static void ApplyHeadingDeadband(CompiledField[] fields, uint* codes, int slot, byte* held, bool initialize)
+    {
+        for (var i = 0; i < fields.Length; i++)
+        {
+            ref readonly var field = ref fields[i];
+            if (field.HeadingPlusOne == 0)
+            {
+                continue;
+            }
+
+            var code = codes + (i * MaxSlots) + slot;
+            var kept = (uint*)(held + (4 * (field.HeadingPlusOne - 1)));
+            if (!initialize)
+            {
+                var mask = field.CodecBits >= 32 ? uint.MaxValue : (1u << field.CodecBits) - 1;
+                var diff = (*code - *kept) & mask;
+                var distance = Math.Min(diff, (mask - diff) + 1);
+                if (distance <= field.HeadingToleranceCodes)
+                {
+                    *code = *kept;
+                    continue;
+                }
+            }
+
+            *kept = *code;
+        }
+    }
 
     // ── Sections ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 

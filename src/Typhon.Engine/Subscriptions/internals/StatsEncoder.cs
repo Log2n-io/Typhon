@@ -69,6 +69,9 @@ internal sealed class StatsEncoder
 
         /// <summary>The application's reader, for <see cref="ServerSource.Application"/>.</summary>
         public Func<double> Application { get; init; }
+
+        /// <summary>A labelled application metric's reader, which fills its values.</summary>
+        public MetricValuesSource ApplicationValues { get; init; }
     }
 
     /// <summary>A half saturates at its largest finite value; a metric never carries a NaN or an infinity, because a HUD would render one (W25).</summary>
@@ -84,6 +87,12 @@ internal sealed class StatsEncoder
     private readonly DatabaseEngine _engine;
 
     private readonly ServerBinding[] _serverBindings;
+
+    // By position in the session segment: an application metric's reader, null for the engine's own three.
+    private readonly Func<SessionId, double>[] _sessionApplication;
+
+    /// <summary>Application metric sources that threw — counted, and their values sent as zero: a metric must not take down the frame stage.</summary>
+    public long ApplicationFaults;
     private readonly double[] _serverValues;
     private readonly byte[] _serverBytes;
 
@@ -151,12 +160,19 @@ internal sealed class StatsEncoder
                 ValueOffset = values,
                 ValueCount = metric.ValueCount,
                 Application = ApplicationSource(registry, metric.Name),
+                ApplicationValues = Declaration(registry, metric.Name)?.ValuesSource,
             };
 
             values += metric.ValueCount;
         }
 
         _serverValues = new double[values];
+        _sessionApplication = new Func<SessionId, double>[plan.SessionMetrics.Length];
+        for (var i = 0; i < _sessionApplication.Length; i++)
+        {
+            _sessionApplication[i] = Declaration(registry, plan.SessionMetrics[i].Name)?.SessionSource;
+        }
+
         _serverBytes = new byte[MaxSegmentBytes(plan.ServerMetrics)];
 
         // The block's worst case, which the frame's upper bound has to make room for: the type byte, the length prefix's full reservation, and both segments.
@@ -277,12 +293,24 @@ internal sealed class StatsEncoder
                     _serverValues[at] = outBytesPerSec;
                     break;
                 case ServerSource.Application:
-                    // One call per emission, never one per session — and one call for a labelled metric too, because the public verb declares a single
-                    // Func<double> whatever its label count. The remaining values stay at zero rather than repeating a number that means one of them.
-                    _serverValues[at] = binding.Application == null ? 0 : binding.Application();
-                    for (var v = 1; v < binding.ValueCount; v++)
+                    // One call per emission, never one per session. A labelled metric's reader fills one value per label; a scalar one gives its value.
+                    var target = _serverValues.AsSpan(at, binding.ValueCount);
+                    target.Clear();
+                    try
                     {
-                        _serverValues[at + v] = 0;
+                        if (binding.ApplicationValues != null)
+                        {
+                            binding.ApplicationValues(target);
+                        }
+                        else if (binding.Application != null)
+                        {
+                            target[0] = binding.Application();
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        target.Clear();
+                        Interlocked.Increment(ref ApplicationFaults);
                     }
 
                     break;
@@ -328,11 +356,28 @@ internal sealed class StatsEncoder
         values[2] = Counter(_ingress?.RowOf(session) is { } row ? Volatile.Read(ref row.DroppedCommands) : 0);
 
         var at = 0;
-        foreach (var metric in _plan.SessionMetrics)
+        for (var m = 0; m < _plan.SessionMetrics.Length; m++)
         {
+            var metric = _plan.SessionMetrics[m];
+            var application = _sessionApplication[m];
             for (var v = 0; v < metric.ValueCount; v++)
             {
-                WriteValue(ref w, metric, at < SessionValueCount ? values[at] : 0);
+                var value = at < SessionValueCount ? values[at] : 0;
+                if (application != null)
+                {
+                    // Read here, once per subscribing session per emission, on the session's worker (09 § 15, D5).
+                    try
+                    {
+                        value = application(session);
+                    }
+                    catch (Exception)
+                    {
+                        value = 0;
+                        Interlocked.Increment(ref ApplicationFaults);
+                    }
+                }
+
+                WriteValue(ref w, metric, value);
                 at++;
             }
         }
@@ -544,6 +589,19 @@ internal sealed class StatsEncoder
         // when the profiler is off, so there is no always-on number to read. It emits zero until one exists, rather than a number nobody measured.
         _ => name.StartsWith(ProtocolConstants.BuiltInMetricPrefix, StringComparison.Ordinal) ? ServerSource.Unsourced : ServerSource.Application,
     };
+
+    private static MetricDeclaration Declaration(SubscriptionsRegistry registry, string name)
+    {
+        foreach (var declaration in registry.Metrics)
+        {
+            if (string.Equals(declaration.Name, name, StringComparison.Ordinal))
+            {
+                return declaration;
+            }
+        }
+
+        return null;
+    }
 
     private static Func<double> ApplicationSource(SubscriptionsRegistry registry, string name)
     {

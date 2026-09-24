@@ -266,8 +266,14 @@ internal static class ProjectionCompiler
         // after it was projected would have neither, and the frame stage would have to re-encode from the columns per session. Written once when an entry
         // is initialized; see ReplicationBlockLayout.EnterBytes for why it is in the cold entry and why it usually costs nothing.
         var enterPositionBytes = position != null && !moving ? position.Dims * (position.Pos.Bits / 8) : 0;
+        var headings = 0;
+        foreach (var field in fields)
+        {
+            headings = Math.Max(headings, field.HeadingPlusOne);
+        }
+
         var blockLayout = ReplicationBlockLayout.ForArchetype(layout.ClusterSize, moving ? position.SegmentBytes : 0, stateBodyBytes, quantizedPositionBytes,
-            runStartBytes, ownerEntrySize, enterPositionBytes, onEnter.MaxBodyBytes);
+            runStartBytes, ownerEntrySize, enterPositionBytes, onEnter.MaxBodyBytes, headingBytes: 4 * headings);
 
         // v̂ (09 § 2) gets bytes of its own only for a mover with a slack; at zero it is the previous position.
         var slack = moving ? visibilitySlackM : 0d;
@@ -340,6 +346,16 @@ internal static class ProjectionCompiler
             compiled[i] = CompileField(projection, field, meta, layout, engine, fieldSection, i, ref packBits);
         }
 
+        // Each heading gets its index among the archetype's headings, in wire order: where its held code lives in the cold entry (09 § 15).
+        var heading = 0;
+        for (var i = 0; i < compiled.Length; i++)
+        {
+            if (compiled[i].HeadingPlusOne > 0)
+            {
+                compiled[i] = compiled[i] with { HeadingPlusOne = ++heading };
+            }
+        }
+
         return compiled;
     }
 
@@ -364,8 +380,29 @@ internal static class ProjectionCompiler
         packBits += bitCount;
 
         var (codeMin, codeMax) = IntegerRange(codec);
+        var headingTolerance = 0u;
+        if (field.IsHeading)
+        {
+            if (!double.IsFinite(field.HeadingToleranceDeg) || field.HeadingToleranceDeg <= 0 || field.HeadingToleranceDeg >= 180)
+            {
+                throw new InvalidOperationException(
+                    $"Archetype '{projection.Name}' declares the heading '{field.Name}' with a tolerance of {field.HeadingToleranceDeg}°. A heading is sent when it " +
+                    "turns past its tolerance, which must be above 0° and below 180°.");
+            }
+
+            if (codec.Kind != CodecKind.Angle || field.Owner || field.OnEnter)
+            {
+                throw new InvalidOperationException($"Heading '{field.Name}' of archetype '{projection.Name}' must be a public, grouped angle field.");
+            }
+
+            // The deadband in code space: a turn of the tolerance is this many codes of the angle's 2^bits per full turn.
+            headingTolerance = (uint)Math.Floor(field.HeadingToleranceDeg / 360d * Math.Pow(2, codec.Bits));
+        }
+
         return new CompiledField
         {
+            HeadingPlusOne = field.IsHeading ? 1 : 0,
+            HeadingToleranceCodes = headingTolerance,
             Name = field.Name,
             ComponentSlot = slot,
             ComponentOffsetInCluster = layout.ComponentOffset(slot),

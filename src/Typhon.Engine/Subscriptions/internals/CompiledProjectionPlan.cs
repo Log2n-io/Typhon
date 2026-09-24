@@ -138,6 +138,12 @@ internal readonly struct CompiledField
     /// <summary>Whether the field lives in its section's leading bit pack: a <c>bits</c> or a <c>bool</c> (W12).</summary>
     public bool Packed { get; init; }
 
+    /// <summary>A heading's index among the archetype's headings, plus one: its held code is at that index in the cold entry (09 § 15); 0 for none.</summary>
+    public int HeadingPlusOne { get; init; }
+
+    /// <summary>A heading's tolerance in codes of its angle: a turn of at most this many codes from the held one sends nothing.</summary>
+    public uint HeadingToleranceCodes { get; init; }
+
     /// <summary>For a packed field, its first bit within its section's pack.</summary>
     public int BitOffset { get; init; }
 
