@@ -215,9 +215,10 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// Build the push index serially, in the frame prologue — the collapsed shape's path — instead of sorted by the projection and merged by its stage.
     /// </param>
     /// <param name="replicationCellM">The replication cell side; zero for <c>ProjectionTestSchema.ReplicationCellFor</c> of the profile's radius.</param>
+    /// <param name="forceDeep">Serve the flat world with the deep implementation, which must agree with the flat one on it (10 § 3.5).</param>
     public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, PushDetection detection = PushDetection.Explicit,
         double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false,
-        double replicationCellM = 0)
+        double replicationCellM = 0, bool forceDeep = false)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
@@ -225,7 +226,7 @@ internal sealed unsafe class OracleHarness : IDisposable
         var radius = walk ? walkRadius : PushRadiusM;
         var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every), name,
             Options(detection == PushDetection.Automatic, deterministicProjection,
-                replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(worldObserver && !walk ? 0 : radius)));
+                replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(worldObserver && !walk ? 0 : radius), forceDeep));
         try
         {
             harness.SerialIndex = deterministicProjection;
@@ -682,9 +683,10 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// induces on purpose — the run would still be correct but it would no longer be measuring what it says it measures. The enter budget is left at the
     /// engine's default: deferring enters across ticks is real behaviour that the quiet window is there to absorb, and raising it would hide it.
     /// </remarks>
-    private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection, double replicationCellM) => new()
+    private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection, double replicationCellM, bool forceDeep) => new()
     {
         ReplicationCellM = replicationCellM,
+        ForceDeepReplicationForTest = forceDeep,
         AllowAutomaticPushDetection = automatic,
 
         // The push path's legality check: a record the client could not apply — an enter of a held entity, an update or a leave of an unheld one — is a

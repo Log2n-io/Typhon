@@ -14,8 +14,7 @@ namespace Typhon.Engine;
 /// </para>
 /// <para>
 /// <b>Three axes always</b> (L2). A spatial grid one cell deep gives a replication grid one cell deep whatever the side, so a flat world keeps its metric
-/// when <c>c</c> is smaller than a spatial cell. The replication itself is still 2D until the deep implementation lands (10 § 12, 1.5.2); the third axis
-/// is resolved and reported so the model and the API do not change when it does.
+/// when <c>c</c> is smaller than a spatial cell. The depth selects the implementation (10 § 3.5): the flat one for one cell, the deep one otherwise.
 /// </para>
 /// <para>
 /// <b>Cells per axis are <c>⌈extent / c⌉</c></b>, the half-open bounds exactly; a position on the upper bound is clamped into the last cell.
@@ -26,7 +25,7 @@ internal sealed class ReplicationGrid
     /// <summary>Cells per axis a cell key can address: 21 bits, the spatial VDB key's width.</summary>
     public const int MaxAxisCells = 1 << 21;
 
-    /// <summary>The widest window the session state stores inline (<c>D0..D3</c>, 256 bits).</summary>
+    /// <summary>The widest window a row of the session state holds (one <see cref="ushort"/> per row).</summary>
     public const int MaxWindow = 16;
 
     /// <summary>The most cells one window may cover (<c>W_x · W_y · W_z</c>, 10 § 4.3): what a session's gather pays per tick.</summary>
@@ -92,15 +91,21 @@ internal sealed class ReplicationGrid
         var radius = Math.Max(0, maxRadius);
         var half = (int)Math.Ceiling(radius / cellM) + 2;
         var window = (2 * half) + 1;
-        var windowCells = (long)window * window;
+        // The bound is on the cells a session's gather pays for (10 § 4.3): W² in a flat grid, W³ in a deep one — 15 and 13 cells per axis at most.
+        var deep = dimZ > 1;
+        var windowCells = (long)window * window * (deep ? window : 1);
         if (window > MaxWindow || windowCells > MaxWindowCells)
         {
+            var widestWindow = deep ? 13 : 15;
+            var reach = (widestWindow - 5) / 2;
+
             // The side named is rounded UP to the precision it is printed at, so the value the message suggests is one this check accepts.
-            var smallest = Math.Ceiling(radius / ((MaxWindow - 5) / 2) * 1000d) / 1000d;
+            var smallest = Math.Ceiling(radius / reach * 1000d) / 1000d;
             throw new InvalidOperationException(
                 $"SubscriptionsOptions.ReplicationCellM = {Format(cellM)} is too small for the largest Sphere radius, {Format(radius)}: a session's window "
-                + $"would be {window} cells wide (2⌈R / c⌉ + 5), and the widest it may be is {MaxWindow}, so ⌈R / c⌉ must be at most "
-                + $"{(MaxWindow - 5) / 2}. Raise the cell side to at least {Format(smallest)}.");
+                + $"would be {window} cells wide (2⌈R / c⌉ + 5), and the widest it may be is {widestWindow} in a {(deep ? "deep" : "flat")} grid "
+                + $"({(deep ? "W³" : "W²")} ≤ {MaxWindowCells} cells), so ⌈R / c⌉ must be at most {reach}. Raise the cell side to at least "
+                + $"{Format(smallest)}.");
         }
 
         return new ReplicationGrid
@@ -124,7 +129,7 @@ internal sealed class ReplicationGrid
     /// <summary>The <c>Start</c> log line's grid description.</summary>
     public override string ToString()
         => $"cell {Format(CellM)}, {DimX} x {DimY} x {DimZ} cells from ({Format(OriginX)}, {Format(OriginY)}, {Format(OriginZ)}), "
-           + $"window {Window} x {Window} (R {Format(Radius)}), {(Flat ? "flat" : "deep")}";
+           + $"window {Window} x {Window}{(Flat ? "" : $" x {Window}")} (R {Format(Radius)}), {(Flat ? "flat" : "deep")}";
 
     private static string Format(double v) => v.ToString("0.###", CultureInfo.InvariantCulture);
 }

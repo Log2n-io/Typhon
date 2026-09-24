@@ -249,7 +249,9 @@ sealed unsafe class FrameHarness : IDisposable
 
     private readonly System.Collections.Generic.Dictionary<uint, (int Frames, int CompleteAt)> _fillFrames = [];
 
-    /// <summary>While <see cref="DigestFrames"/> is set: the frames a session was delivered up to and including its first <c>VIEW_COMPLETE</c>; 0 before.</summary>
+    /// <summary>
+    /// While <see cref="DigestFrames"/> is set: the frames a session was delivered up to and including its first <c>VIEW_COMPLETE</c>; 0 before.
+    /// </summary>
     public int FramesToComplete(SessionId session) => _fillFrames.GetValueOrDefault(session.Value).CompleteAt;
 
     /// <summary>

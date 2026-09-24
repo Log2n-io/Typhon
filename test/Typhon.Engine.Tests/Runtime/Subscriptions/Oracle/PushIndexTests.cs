@@ -274,13 +274,61 @@ class PushIndexTests : TestBase<PushIndexTests>
         });
     }
 
-    /// <summary>A flat world's event is 48 bytes (10 § 3.5): it is copied into the index and read by every session reaching its cell.</summary>
+    /// <summary>
+    /// A flat world's event is 48 bytes and a deep one's 64 (10 § 3.5): each is copied into the index and read by every session reaching its cell. The
+    /// widest keys round-trip through both.
+    /// </summary>
     [Test]
-    public void AFlatPushEventIsFortyEightBytes()
+    public void TheFlatEventIsFortyEightBytesAndTheDeepOneSixtyFour()
     {
+        const int Max = (1 << 21) - 1;
         Assert.That(System.Runtime.CompilerServices.Unsafe.SizeOf<PushEvent>(), Is.EqualTo(48));
-        var e = new PushEvent { NewKey = PushReplication.Key((1 << 21) - 1, (1 << 21) - 2) };
-        Assert.That((e.NewCx, e.NewCy), Is.EqualTo(((1 << 21) - 1, (1 << 21) - 2)), "the widest key round-trips through its six bytes");
+        Assert.That(System.Runtime.CompilerServices.Unsafe.SizeOf<PushEvent3>(), Is.EqualTo(64));
+        var flat = new PushEvent { NewKey = PushEvent.Key(Max, Max - 1, 0) };
+        Assert.That((PushEvent.KeyX(flat.NewKey), PushEvent.KeyY(flat.NewKey)), Is.EqualTo((Max, Max - 1)), "the flat key in its six bytes");
+        var deep = new PushEvent3 { NewKey = PushEvent3.Key(Max, Max - 1, Max - 2) };
+        Assert.That((PushEvent3.KeyX(deep.NewKey), PushEvent3.KeyY(deep.NewKey), PushEvent3.KeyZ(deep.NewKey)), Is.EqualTo((Max, Max - 1, Max - 2)));
+    }
+
+    /// <summary>
+    /// The deep key (10 § 3.3): tiles of 4³ cells major, so every cell of a tile sorts between the tile's first key and the next tile's, tiles sort
+    /// z-major, and the key and its compressed sort form round-trip every coordinate.
+    /// </summary>
+    [Test]
+    public void TheDeepKeyIsTileMajorAndRoundTrips()
+    {
+        var random = new System.Random(3303);
+        for (var i = 0; i < 20_000; i++)
+        {
+            var (cx, cy, cz) = (random.Next(1 << 21), random.Next(1 << 21), random.Next(1 << 21));
+            var key = PushEvent3.Key(cx, cy, cz);
+            Assert.That((PushEvent3.KeyX(key), PushEvent3.KeyY(key), PushEvent3.KeyZ(key)), Is.EqualTo((cx, cy, cz)));
+            var unit = PushEvent3.Unit(key);
+            Assert.That(unit, Is.EqualTo(PushEvent3.UnitOf(cx >> 2, cy >> 2, cz >> 2)));
+            Assert.That(key, Is.GreaterThanOrEqualTo(PushEvent3.UnitFirstKey(unit)).And.LessThan(PushEvent3.UnitFirstKey(unit + 1)));
+        }
+
+        // Within a grid of 100 × 60 × 40 cells: the compressed form keeps the order and inverts exactly.
+        const int BitsX = 5, BitsY = 4;
+        var keys = new System.Collections.Generic.List<ulong>();
+        for (var i = 0; i < 5_000; i++)
+        {
+            keys.Add(PushEvent3.Key(random.Next(100), random.Next(60), random.Next(40)));
+        }
+
+        keys.Sort();
+        for (var i = 0; i < keys.Count; i++)
+        {
+            var compressed = PushEvent3.Compress(keys[i], BitsX, BitsY);
+            Assert.That(PushEvent3.Expand(compressed, BitsX, BitsY), Is.EqualTo(keys[i]));
+            if (i > 0)
+            {
+                Assert.That(compressed, Is.GreaterThanOrEqualTo(PushEvent3.Compress(keys[i - 1], BitsX, BitsY)), "compression keeps the key order");
+            }
+        }
+
+        Assert.That(PushEvent3.Key(3, 3, 3), Is.LessThan(PushEvent3.Key(4, 0, 0)), "a tile's cells precede the next tile's");
+        Assert.That(PushEvent3.Key(0, 0, 4), Is.GreaterThan(PushEvent3.Key(1000, 1000, 3)), "tiles are z-major");
     }
 
     /// <summary>

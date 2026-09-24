@@ -315,7 +315,7 @@ internal static unsafe class ProjectionPass
             }
 
             // Where the entity was when last projected, and where it is now — the decoded wire positions.
-            float pushOldX = 0f, pushOldY = 0f, pushNewX = 0f, pushNewY = 0f;
+            float pushOldX = 0f, pushOldY = 0f, pushOldZ = 0f, pushNewX = 0f, pushNewY = 0f, pushNewZ = 0f;
             var pushFlags = (byte)0;
 
             // ── Position: quantized, compared, stored; then the motion rule decides whether it becomes a SEGMENT (P1-10) ──────────────────────────────────
@@ -327,11 +327,11 @@ internal static unsafe class ProjectionPass
                 {
                     if (!initialize)
                     {
-                        push.Decode(pushIndex, stored, out pushOldX, out pushOldY);
+                        push.Decode(pushIndex, stored, out pushOldX, out pushOldY, out pushOldZ);
                         pushFlags |= PushEvent.HasOld;
                     }
 
-                    push.Decode(pushIndex, quantizedBuffer, out pushNewX, out pushNewY);
+                    push.Decode(pushIndex, quantizedBuffer, out pushNewX, out pushNewY, out pushNewZ);
                     pushFlags |= PushEvent.HasNew;
                 }
                 var moved = initialize || !new ReadOnlySpan<byte>(stored, positionBytes).SequenceEqual(quantizedPosition[..positionBytes]);
@@ -365,16 +365,17 @@ internal static unsafe class ProjectionPass
                 quantizedPosition[..staticBytes].CopyTo(new Span<byte>(coldBytes + layout.EnterPositionOffsetInColdEntry, staticBytes));
                 if (push != null)
                 {
-                    push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY);
+                    push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY, out pushNewZ);
                     pushFlags |= PushEvent.HasNew;
                 }
             }
             else if (push != null && position != null && layout.EnterPositionBytes > 0)
             {
                 // A static entity pushed again is where it always was.
-                push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY);
+                push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY, out pushNewZ);
                 pushOldX = pushNewX;
                 pushOldY = pushNewY;
+                pushOldZ = pushNewZ;
                 pushFlags |= PushEvent.HasOld | PushEvent.HasNew;
             }
 
@@ -398,7 +399,7 @@ internal static unsafe class ProjectionPass
                     pushFlags |= PushEvent.Arrived;
                 }
 
-                push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushNewX, pushNewY);
+                push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushOldZ, pushNewX, pushNewY, pushNewZ);
             }
 
             // ── The enter cache ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -629,8 +630,9 @@ internal static unsafe class ProjectionPass
     private static void EmitPushLeave(PushReplication push, int archetype, int worker, ReplicationBlockHeader* block, byte* blockBytes,
         in ReplicationBlockLayout layout, int slot, uint netId)
     {
-        push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + push.PositionOffset(archetype), out var x, out var y);
-        push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, 0f, 0f);
+        push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + push.PositionOffset(archetype), out var x, out var y,
+            out var z);
+        push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, z, 0f, 0f, 0f);
     }
 
     // ── Entry helpers ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

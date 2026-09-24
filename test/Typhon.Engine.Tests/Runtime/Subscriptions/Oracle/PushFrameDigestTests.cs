@@ -18,6 +18,11 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 /// runs, with this digest — except <see cref="WorldObserversPacedOverAFineGrid"/>, re-pinned by 1.5.3, whose pacing counts occupied cells only.
 /// </para>
 /// <para>
+/// <b>Both implementations</b> (10 § 3.5, L6): every run is also served by the deep implementation on the same flat world, and must give the flat one's
+/// digest — the deep geometry with z = 0 everywhere is the flat geometry, bit for bit (10 § 3.4). The one exception is a <c>World</c> fill the enter
+/// budget splits, whose frames follow key order, tile-major in the deep implementation.
+/// </para>
+/// <para>
 /// <b>When a constant may change.</b> Only with a step that changes frames on purpose and says so (10 § 12: 1.5.3, <c>World</c> pacing on occupied
 /// cells). Re-recording one to make a refactor pass defeats the gate.
 /// </para>
@@ -42,19 +47,19 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
     }
 
     [Test]
-    public void SpheresUnderChurnAndSkips()
+    public void SpheresUnderChurnAndSkips([Values] bool deep)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1501, [0, 30, 60], nameof(PushFrameDigestTests),
-            deterministicProjection: true);
+            deterministicProjection: true, forceDeep: deep);
 
         Assert.That(Run(oracle), Is.EqualTo(9167096882797981372UL));
     }
 
     [Test]
-    public void WorldObserversUnderChurnAndSkips()
+    public void WorldObserversUnderChurnAndSkips([Values] bool deep)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1502, [0, 60], nameof(PushFrameDigestTests),
-            worldObserver: true, deterministicProjection: true);
+            worldObserver: true, deterministicProjection: true, forceDeep: deep);
 
         Assert.That(Run(oracle), Is.EqualTo(17210926344840522847UL));
     }
@@ -65,10 +70,10 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
     /// constant was re-pinned (the 1.5.1 engine gave 5680082172371474769).
     /// </summary>
     [Test]
-    public void WorldObserversPacedOverAFineGrid()
+    public void WorldObserversPacedOverAFineGrid([Values] bool deep)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1505, [0, 30, 60], nameof(PushFrameDigestTests),
-            worldObserver: true, bigWorld: true, deterministicProjection: true, replicationCellM: 128);
+            worldObserver: true, bigWorld: true, deterministicProjection: true, replicationCellM: 128, forceDeep: deep);
 
         var digest = Run(oracle);
         Assert.Multiple(() =>
@@ -78,25 +83,26 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
                 Assert.That(oracle.Frames.FramesToComplete(oracle.Sessions[s]), Is.EqualTo(1), $"session {s}: frames to VIEW_COMPLETE (five before 1.5.3)");
             }
 
-            Assert.That(digest, Is.EqualTo(1442836563172249734UL));
+            // The deep implementation walks its keys in tile order, so where the enter budget splits a fill its frames differ from the flat row order's.
+            Assert.That(digest, Is.EqualTo(deep ? 4702946978978135846UL : 1442836563172249734UL));
         });
     }
 
     [Test]
-    public void WalkingSpheresWithTheDistanceLod([Values(false, true)] bool deterministic)
+    public void WalkingSpheresWithTheDistanceLod([Values(false, true)] bool deterministic, [Values] bool deep)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1503, [0, 30, 0, 60], nameof(PushFrameDigestTests),
-            walkRadius: 3000, deterministicProjection: deterministic);
+            walkRadius: 3000, deterministicProjection: deterministic, forceDeep: deep);
         oracle.Push.FarEvery = 4;
 
         Assert.That(Run(oracle), Is.EqualTo(13328118253220528914UL));
     }
 
     [Test]
-    public void AProfileServedEveryFourthTick([Values(false, true)] bool world)
+    public void AProfileServedEveryFourthTick([Values(false, true)] bool world, [Values] bool deep)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1504, [0, 30], nameof(PushFrameDigestTests),
-            worldObserver: world, every: 4, deterministicProjection: true);
+            worldObserver: world, every: 4, deterministicProjection: true, forceDeep: deep);
 
         Assert.That(Run(oracle), Is.EqualTo(6800132841681185214UL));
     }

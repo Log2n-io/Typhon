@@ -288,6 +288,12 @@ public sealed class SubscriptionsOptions
     internal bool PushShadow { get; init; }
 
     /// <summary>
+    /// Tests only: serve a flat world with the deep implementation (10 § 3.5, L6), which must agree with the flat one on it — what the degeneracy tests
+    /// run.
+    /// </summary>
+    internal bool ForceDeepReplicationForTest { get; init; }
+
+    /// <summary>
     /// Whether a profile may declare <see cref="PushDetection.Automatic"/> (ADR-067). Off: replication is explicit — a system that writes a
     /// replicated value calls <see cref="SubscriptionsCommands.Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/> — and a profile asking for automatic
     /// detection is refused when the runtime starts.

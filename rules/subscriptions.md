@@ -344,7 +344,9 @@
 
 ### SUB-16: A session holds exactly what its geometry names, and a session with no region holds nothing `[fatal][silent]`
   invariant ∀ session s with a Sphere observer of radius r, ∀ tick T after s's fill: s holds entity e iff e's last pushed position lies within r of s's
-    committed anchor AND e's cell is in s's delivered window — no entity outside that is held, and none inside it is left out
+    committed anchor AND e's cell is in s's delivered window — no entity outside that is held, and none inside it is left out. The distance is 3D;
+    its z terms are 0 in a grid one cell deep and for a 2D-position archetype, which lies on the plane z = 0 (the spatial grid's convention), so
+    a flat world's known-set is the 2D one bit for bit whichever implementation serves it
   invariant ∀ session s with a World observer: s holds every live entity of its archetypes whose cell the delivery cursor has passed
   invariant nothing is stored per (session, entity): what s holds is recomputed from the anchor, the delivered cells and each entity's last pushed
     position, and every event that moves an anchor, moves an entity or delivers a cell emits exactly the enters and leaves that keep it true
@@ -353,10 +355,12 @@
   invariant a profile is served through exactly ONE observer, World or Sphere; a leave radius (hysteresis), a second observer, near/far tiers and the
     other shapes are refused at Start until Phase 2 builds them
   invariant every Sphere declares the SAME radius, at most 64 archetypes are observed (a session's archetype set is a 64-bit mask), and every
-    observed archetype has a 2D position — each refused at Start rather than served approximately
+    observed archetype has a 2D or 3D position — each refused at Start rather than served approximately; a 2D-position archetype is refused in a deep
+    grid whose Z range excludes 0, where its plane would lie outside every cell
   invariant the replication grid's cell side is DECLARED (SubscriptionsOptions.ReplicationCellM), never derived: a runtime that observes an archetype
-    without one is refused at Start, World-only included; so is a grid past 2²¹ cells on an axis and a window past 16 cells (⌈R / c⌉ > 5), each
-    message naming the setting. The grid covers the spatial world's bounds, and a spatial world one cell deep gives a grid one cell deep
+    without one is refused at Start, World-only included; so is a grid past 2²¹ cells on an axis and a window past its bound — the cells a gather
+    pays for, W² ≤ 2 809 and W ≤ 15 in a flat grid (⌈R / c⌉ ≤ 5), W³ ≤ 2 809 in a deep one (W ≤ 13, ⌈R / c⌉ ≤ 4) — each message naming the setting.
+    The grid covers the spatial world's bounds, and a spatial world one cell deep gives a grid one cell deep
   never resolve a declared region shape as though it were another: a profile whose observers have different shapes is a near/far tier, and
     the tiers differ in budget, rate and record kind, so their union is a wrong answer rather than an approximation
   never centre a region somewhere the declaration did not name — an observer that asked to follow an entity and got the session's viewpoint
@@ -376,7 +380,11 @@
     SubscriptionsRegistryTests.ASphereLeaveRadiusIsRefusedUntilHysteresisIsBuilt, SubscriptionsRegistryTests.TwoSphereRadiiAreRefused,
     SubscriptionsRegistryTests.AProfileWithTwoObserversIsRefused; ReplicationGridTests.AnUndeclaredCellSideIsRefused,
     ReplicationGridTests.ARuntimeThatObservesAnArchetypeWithoutACellSideRefusesToStart, ReplicationGridTests.AGridWiderThanTheCellKeyIsRefused,
-    ReplicationGridTests.AWindowPastSixteenCellsIsRefusedAndTheMessageNamesTheSmallestSide. The 64-archetype and 2D-position refusals have no test.
+    ReplicationGridTests.AWindowPastSixteenCellsIsRefusedAndTheMessageNamesTheSmallestSide, ReplicationGridTests.ADeepWindowPastThirteenCellsIsRefused,
+    ReplicationGridTests.ATwoDimensionalArchetypeIsRefusedInADeepGridWhoseZRangeExcludesZero; PushOracle3DTests.AClientsWorldIsItsSphereInADeepGrid,
+    the same oracle in 3D with 2D walkers on z = 0 beside 3D flyers; PushOracle3DTests.AThirdAxisChangesNothingInAFlatGrid and
+    AThirdAxisChangesNothingInAFlatGridServedDeep, the degeneracy clause; PushFrameDigestTests, every flat run served by both implementations. The
+    64-archetype refusal has no test.
 
 ---
 

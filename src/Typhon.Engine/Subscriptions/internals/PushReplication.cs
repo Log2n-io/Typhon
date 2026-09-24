@@ -8,73 +8,11 @@ using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
-/// <summary>
-/// One projected slot of a push archetype this tick, with where it was and where it is. The unit the frame stage fans out.
-/// </summary>
-/// <remarks>
-/// Positions are the DECODED quantized positions — exactly what the wire carries — so every path that tests a distance (the push step, the sweep, a cell
-/// delivery) tests the same number and the geometric known-set is exact rather than approximately consistent.
-/// </remarks>
-internal struct PushEvent
+/// <summary>One copy of a session's delivered window in the flat implementation: one row of up to 16 cells per <see cref="ushort"/>, inline.</summary>
+[InlineArray(ReplicationGrid.MaxWindow)]
+internal struct WindowRows
 {
-    public const byte HasOld = 1;
-    public const byte HasNew = 2;
-    public const byte Segment = 4;
-
-    /// <summary>Set by the projection on an arrival by migration: never dropped as a no-op, so the entity's latest event names the slot it is in now.</summary>
-    public const byte Arrived = 8;
-
-    /// <summary>
-    /// Distance LOD: this is the entity's far flush — its phase tick — and <see cref="FlushGroups"/> (with <see cref="FlushSegment"/>) is the union of what
-    /// changed since its previous one. A session that holds the entity far sends that union; any other treats the event as it would without the flag.
-    /// </summary>
-    public const byte FarFlush = 16;
-
-    /// <summary>Distance LOD: the far flush carries the motion segment.</summary>
-    public const byte FlushSegment = 32;
-
-    // Laid out to 48 bytes, a key's 42 bits in eight and six bytes: the struct is copied into the index and read by every session that reaches its cell.
-    public nint Block;
-
-    // The cells of the old and new positions as packed keys (PushReplication.Key), computed once by the projecting worker so no session re-derives them.
-    public ulong OldKey;
-    public float OldX;
-    public float OldY;
-    public float NewX;
-    public float NewY;
-    public uint NetId;
-    private uint _newKeyLow;
-    private ushort _newKeyHigh;
-    public ushort Archetype;
-    public byte Slot;
-    public byte Flags;
-
-    /// <summary>The change groups this tick stamped — what an update to a session that already holds the entity carries.</summary>
-    public byte Groups;
-
-    /// <summary>Distance LOD: with <see cref="FarFlush"/>, the groups changed since the entity's previous far flush.</summary>
-    public byte FlushGroups;
-
-    public ulong NewKey
-    {
-        readonly get => _newKeyLow | ((ulong)_newKeyHigh << 32);
-        set
-        {
-            _newKeyLow = (uint)value;
-            _newKeyHigh = (ushort)(value >> 32);
-        }
-    }
-
-    public readonly int OldCx => PushReplication.KeyX(OldKey);
-
-    public readonly int OldCy => PushReplication.KeyY(OldKey);
-
-    public readonly int NewCx => PushReplication.KeyX(NewKey);
-
-    public readonly int NewCy => PushReplication.KeyY(NewKey);
-
-    /// <summary>The primary cell: the new position's, or the old one's for a leave-only event.</summary>
-    public readonly ulong PrimaryKey => (Flags & HasNew) != 0 ? NewKey : OldKey;
+    private ushort _row;
 }
 
 /// <summary>What the push path remembers about one session: its visibility anchor and which cells around it it has been given.</summary>
@@ -86,9 +24,22 @@ internal struct PushSessionState
     public bool NeedsReset;
     public double AnchorX;
     public double AnchorY;
+    public double AnchorZ;
     public int OriginX;
     public int OriginY;
-    public ulong D0, D1, D2, D3;
+    public int OriginZ;
+
+    /// <summary>The radius the committed known-set was built with; zero until the first frame, which takes the grid's.</summary>
+    public double Radius;
+
+    /// <summary>
+    /// Test seam (10 § 5): the radius the next frame moves to; zero for the grid's. Phase 2's <c>SetRadius</c> will set it. The window is sized for the grid's
+    /// radius, the largest a session may take.
+    /// </summary>
+    public double RequestedRadius;
+
+    /// <summary>The flat implementation's delivered window, one row per <see cref="ushort"/>; the deep implementation's lives in a slab.</summary>
+    public WindowRows D;
 
     /// <summary>The tick of the last committed frame: the push log replays every event after it.</summary>
     public uint LastTick;
@@ -103,9 +54,12 @@ internal struct PushSessionState
     // Computed by the gather, applied only when the frame is published (SUB-03's discipline: a frame that was not sent changes nothing).
     public double PAnchorX;
     public double PAnchorY;
+    public double PAnchorZ;
     public int POriginX;
     public int POriginY;
-    public ulong P0, P1, P2, P3;
+    public int POriginZ;
+    public double PRadius;
+    public WindowRows P;
 }
 
 /// <summary>
@@ -118,17 +72,20 @@ internal struct PushSessionState
 /// and leaves that keep the equality true, so nothing per (session, entity) is stored or probed.</para>
 /// <para><b>Per tick:</b> the blocks step marks the pushed slots (the fence's structure words: spawns, destroys, <c>WriteSpatial</c>, and
 /// <see cref="SubscriptionsCommands.Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/>) plus the slots still extrapolating; projection encodes them and
-/// emits a <see cref="PushEvent"/> each; the frame prologue buckets the events by cell; each push session's frame is gathered from the cells around it.</para>
+/// emits an event each; the push index sorts the events by cell; each push session's frame is gathered from the cells around it.</para>
+/// <para><b>One model, two implementations</b> (<c>claude/design/Subscriptions/10-phase15-3d-groundwork.md</c> § 3.5, L6). This class is what is shared —
+/// the blocks step, the validator, the occupancy, the counters — and the API; <see cref="PushReplication{TEvent}"/> is the geometry, instantiated with
+/// <see cref="PushEvent"/> for a grid one cell deep and <see cref="PushEvent3"/> otherwise, chosen once by <see cref="Create"/>.</para>
 /// </remarks>
-internal sealed unsafe class PushReplication
+internal abstract unsafe class PushReplication
 {
-    private readonly CompiledProjectionPlan[] _plans;
-    private readonly ArchetypeReplicationState[] _states;
-    private readonly int[] _pushIndices;
+    private protected readonly CompiledProjectionPlan[] _plans;
+    private protected readonly ArchetypeReplicationState[] _states;
+    private protected readonly int[] _pushIndices;
     private readonly bool[] _bootstrapped;
 
     // Per plan index: the cold-entry offset of the entity's last projected position.
-    private readonly int[] _positionOffset;
+    private protected readonly int[] _positionOffset;
 
     /// <summary>The cold-entry offset of a push archetype's last projected position.</summary>
     public int PositionOffset(int archetype) => _positionOffset[archetype];
@@ -159,14 +116,23 @@ internal sealed unsafe class PushReplication
         (uint)archetype < (uint)_forgottenGroups.Length && _forgottenGroups[archetype] != null && (uint)group < (uint)_forgottenGroups[archetype].Length
             ? Interlocked.Read(ref _forgottenGroups[archetype][group]) : 0;
 
-    // Position decode per archetype (2D: axes 0 and 1).
+    // Position decode per archetype: axes 0 and 1, and axis 2 where the grid is deep and the codec has it — in a flat grid, or for a 2D codec, the
+    // geometric z is 0 (10 § 3.4).
     private readonly double[] _minX;
     private readonly double[] _minY;
+    private readonly double[] _minZ;
     private readonly double[] _stepX;
     private readonly double[] _stepY;
+    private readonly double[] _stepZ;
     private readonly int[] _axisBytes;
 
-    /// <summary>The visibility radius.</summary>
+    /// <summary>Per plan index: the archetype's positions have a third axis in this grid — a 3D codec in a deep grid.</summary>
+    private protected readonly bool[] _hasZ;
+
+    /// <summary>Per plan index: a centimetre plus the coarsest quantization step, the margin a pruning proof on raw cluster bounds needs.</summary>
+    private protected readonly double[] _pruneMargin;
+
+    /// <summary>The visibility radius: the largest a session takes, which sizes its window.</summary>
     public readonly double Radius;
 
     /// <summary>The replication cell side, declared (<see cref="SubscriptionsOptions.ReplicationCellM"/>).</summary>
@@ -178,13 +144,18 @@ internal sealed unsafe class PushReplication
     /// <summary>The delivered window's half width, in cells.</summary>
     public readonly int Half;
 
-    /// <summary>The delivered window's width, in cells (<c>2 · Half + 1</c>, at most 16).</summary>
+    /// <summary>The delivered window's width per axis, in cells (<c>2 · Half + 1</c>, at most 16).</summary>
     public readonly int Window;
 
-    private readonly double _gridMinX;
-    private readonly double _gridMinY;
-    private readonly int _gridW;
-    private readonly int _gridH;
+    /// <summary>Whether this is the deep implementation (three axes).</summary>
+    public abstract bool Deep { get; }
+
+    private protected readonly double _gridMinX;
+    private protected readonly double _gridMinY;
+    private protected readonly double _gridMinZ;
+    private protected readonly int _gridW;
+    private protected readonly int _gridH;
+    private protected readonly int _gridD;
 
     // Per archetype, this tick's push set as (chunk, mask) pairs.
     private readonly int[][] _pushChunks;
@@ -193,14 +164,6 @@ internal sealed unsafe class PushReplication
 
     // Per archetype, by chunk id: slots to push again next tick — still extrapolating, or denied an identity.
     private readonly long[][] _repush;
-
-    // Per worker, this tick's events.
-    private PushEvent[][] _events = [];
-    private int[] _eventCount = [];
-
-    // The index: events bucketed by cell, primaries first, then the secondaries (leave-only views of a mover filed under the cell it left). It is the current
-    // tick's slot of the push log.
-    private PushEvent[] _indexed = [];
 
     /// <summary>
     /// PROTOTYPE — distance LOD (<c>TYPHON_PUSH_FAR_EVERY=N</c>, 0 = off): an update to an entity beyond half the radius, that was beyond it before too, is
@@ -229,155 +192,9 @@ internal sealed unsafe class PushReplication
     /// <summary>Distance LOD: time spent in <see cref="EndFarFold"/> — serial, in the frame prologue — cumulative, in Stopwatch ticks.</summary>
     public long FarEndTicks;
 
-    // Distance LOD's per-tick fold (BeginFarFold): per chunk of cells, the flush entries it appended, in cell order, as a compact CSR.
-    private uint _farFoldTick = uint.MaxValue;
-    private uint _farEndTick = uint.MaxValue;
-    private int _farChunkCount;
-    private PushEvent[][] _farOut = [];
-    private int[] _farOutCount = [];
-    private ulong[][] _farOutCells = [];
-    private int[][] _farOutStarts = [];
-    private int[] _farOutCellCount = [];
-    private long[] _farOutFlagged = [];
-    private ulong[] _farBounds = [];
-
     /// <summary>How many ticks of indexes the push log keeps: a session that missed fewer frames than this catches up from them, an older one resets.</summary>
     /// <remarks>Covers <see cref="SkipPolicy.MaxDegradeLevel"/> (one frame in four) with room for a few back-pressure skips on top.</remarks>
     public const int LogDepth = 8;
-
-    private readonly TickLog[] _log = CreateLog();
-
-    /// <summary>
-    /// One tick of the push log, which is also that tick's index: the events in cell order, the occupied cells as an ascending CSR of packed keys, and a
-    /// row table from each occupied row to its first cell.
-    /// </summary>
-    private sealed class TickLog
-    {
-        public uint Tick;
-        public bool Valid;
-        public PushEvent[] Events = [];
-        public ulong[] Cells = [];
-        public int[] Starts = [];
-        public int[] PrimaryEnds = [];
-        public int CellCount;
-
-        // Open addressing, row + 1 as the key (0 is empty), sized to twice the occupied rows: a probe per row a session reads, and an empty row costs one.
-        private ulong[] _rowKeys = new ulong[16];
-        private int[] _rowFirst = new int[16];
-        private int _rowMask = 15;
-
-        // Distance LOD: this tick's far flushes for entities whose latest event is an earlier tick, by cell (compact, ascending). An entity whose latest
-        // event IS this tick carries its flush on that event instead.
-        public PushEvent[] Flush = [];
-        public ulong[] FlushCells = [];
-        public int[] FlushStarts = [];
-        public int FlushCellCount;
-
-        /// <summary>Rebuilds the row table from <see cref="Cells"/>: O(occupied cells), clearing only the table it uses.</summary>
-        public void BuildRows()
-        {
-            var rows = 0;
-            var previous = ulong.MaxValue;
-            for (var k = 0; k < CellCount; k++)
-            {
-                var row = Cells[k] >> KeyAxisBits;
-                if (row != previous)
-                {
-                    rows++;
-                    previous = row;
-                }
-            }
-
-            var size = 16;
-            while (size < rows * 2)
-            {
-                size <<= 1;
-            }
-
-            if (_rowKeys.Length < size)
-            {
-                _rowKeys = new ulong[size];
-                _rowFirst = new int[size];
-            }
-
-            Array.Clear(_rowKeys, 0, size);
-            _rowMask = size - 1;
-            previous = ulong.MaxValue;
-            for (var k = 0; k < CellCount; k++)
-            {
-                var row = Cells[k] >> KeyAxisBits;
-                if (row == previous)
-                {
-                    continue;
-                }
-
-                previous = row;
-                var h = Hash(row) & _rowMask;
-                while (_rowKeys[h] != 0)
-                {
-                    h = (h + 1) & _rowMask;
-                }
-
-                _rowKeys[h] = row + 1;
-                _rowFirst[h] = k;
-            }
-        }
-
-        /// <summary>The index in <see cref="Cells"/> of the row's first occupied cell, or -1 when the row has none.</summary>
-        public int RowStart(ulong row)
-        {
-            var h = Hash(row) & _rowMask;
-            while (true)
-            {
-                var k = _rowKeys[h];
-                if (k == row + 1)
-                {
-                    return _rowFirst[h];
-                }
-
-                if (k == 0)
-                {
-                    return -1;
-                }
-
-                h = (h + 1) & _rowMask;
-            }
-        }
-
-        private static int Hash(ulong row) => (int)((row * 0x9E3779B97F4A7C15UL) >> 40);
-    }
-
-    /// <summary>The first occupied cell of row <paramref name="cy"/> at or after column <paramref name="minCx"/>, or past the end when there is none.</summary>
-    private static int FirstCellInRow(TickLog slot, int cy, int minCx)
-    {
-        var k = slot.RowStart((ulong)(uint)cy);
-        if (k < 0)
-        {
-            return slot.CellCount;
-        }
-
-        // A row holds few cells: a short scan finds the first in the box, and only a long row falls back to the binary search.
-        var target = Key(minCx, cy);
-        var cells = slot.Cells;
-        var scanEnd = Math.Min(slot.CellCount, k + 8);
-        while (k < scanEnd && cells[k] < target)
-        {
-            k++;
-        }
-
-        return k < scanEnd || k == slot.CellCount ? k : LowerBound(cells, k, slot.CellCount, target);
-    }
-
-    private static TickLog[] CreateLog()
-    {
-        var log = new TickLog[LogDepth];
-        for (var i = 0; i < log.Length; i++)
-        {
-            log[i] = new TickLog();
-        }
-
-        return log;
-    }
 
     // Counters for the log's catch-up.
     public long LogCatchUps;
@@ -385,8 +202,8 @@ internal sealed unsafe class PushReplication
     public long LogTooOld;
     public long LogAmbiguous;
 
-    private PushSessionState[] _sessions;
-    private uint _tick;
+    private protected readonly PushSessionState[] _sessions;
+    private protected uint _tick;
 
     // The last tick the blocks step ran for; zero before the first. A tick the track did not run for (no session, an aborted tick, a failed fence) still
     // ran the fence, which drained that tick's structure words: its pushes are gone, and only re-pushing every live entity recovers them.
@@ -394,11 +211,10 @@ internal sealed unsafe class PushReplication
 
     /// <summary>Blocks steps that followed a tick the track did not run for, and so re-pushed every live entity — cumulative.</summary>
     public long GapRepushes;
-    private ArchetypeEncodePlan[] _encodePlans = [];
+    private protected ArchetypeEncodePlan[] _encodePlans = [];
 
     /// <summary>The frame stage's encode plans, whose group tick slots decide what an update carries.</summary>
     public void AttachEncodePlans(ArchetypeEncodePlan[] plans) => _encodePlans = plans;
-
 
     // Per archetype, this tick's push set's blocks, parallel to _pushChunks — looked up once in PrepareBlocks.
     private readonly nint[][] _pushBlocks;
@@ -428,8 +244,8 @@ internal sealed unsafe class PushReplication
     // of a held id, no state, segment or leave of an unheld one), and every few ticks it must equal the geometric known-set recomputed from the blocks.
     // Either failing is a divergence a client would carry for good. Off by default: it is a HashSet per session.
     public readonly bool Shadow;
-    private readonly HashSet<uint>[] _shadow = [];
-    private readonly ushort[] _shadowGen = [];
+    private protected readonly HashSet<uint>[] _shadow = [];
+    private protected readonly ushort[] _shadowGen = [];
     public long ShadowIllegal;
     public long ShadowMissing;
     public long ShadowExtra;
@@ -442,44 +258,99 @@ internal sealed unsafe class PushReplication
 
     // Entries lost at the fence without a projection to see them go: a block released with live entries, a slot overwritten by a migration or by a parked
     // drain. Each one is an identity some client may hold, so each becomes a leave event.
-    private readonly object _orphanLock = new();
-    private PushEvent[] _orphans = new PushEvent[64];
-    private int _orphanCount;
+    private protected readonly object _orphanLock = new();
+    private protected int _orphanCount;
     public long OrphanRelease;
     public long OrphanMigrate;
     public long OrphanDrain;
 
-    /// <summary>Records an entry that is about to vanish at the fence, so every session holding it is told to drop it. Rare; locked.</summary>
-    public void Orphan(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId, int cause)
-    {
-        Decode(archetype, cold + _positionOffset[archetype], out var x, out var y);
-        lock (_orphanLock)
-        {
-            if (_orphanCount == _orphans.Length)
-            {
-                Array.Resize(ref _orphans, _orphanCount * 2);
-            }
+    private protected readonly ReplicationOccupancy _occupancy = new();
 
-            ref var e = ref _orphans[_orphanCount++];
-            e = default;
-            e.Block = (nint)block;
-            e.NetId = netId;
-            e.Archetype = (ushort)archetype;
-            e.Flags = PushEvent.HasOld;
-            e.OldX = x;
-            e.OldY = y;
-            e.OldKey = Key(CellX(x), CellY(y));
-            switch (cause)
-            {
-                case 0: OrphanRelease++; break;
-                case 1: OrphanMigrate++; break;
-                default: OrphanDrain++; break;
-            }
-        }
+    /// <summary>The replication grid's occupancy, maintained from the index (10 § 2.4).</summary>
+    internal ReplicationOccupancy Occupancy => _occupancy;
+
+    /// <summary>Cell deliveries and sweeps skipped because the cell held nothing — a cluster query each — cumulative.</summary>
+    public long EmptyCellsSkipped;
+
+    /// <summary>
+    /// Cell delivery and sweep (10 § 8, L7): time in each, cumulative in Stopwatch ticks, and the entries each decoded against what it emitted — the
+    /// measurement that decides whether batched delivery is worth designing. Collected only while <see cref="FrameAssembler.PhaseTimingEnabled"/> is set.
+    /// </summary>
+    public long DeliverTicks;
+    public long DeliverDecoded;
+    public long DeliverEntered;
+    public long SweepTicks;
+    public long SweepDecoded;
+
+    /// <summary>Full recounts of the occupancy: after a tick the track did not run for or did not index, whose events it never saw — cumulative.</summary>
+    public long OccupancyRecounts;
+
+    /// <summary>Time spent in those recounts — serial, in the index's finish — cumulative, in Stopwatch ticks.</summary>
+    public long RecountTicks;
+
+    // Set by the blocks step when the occupancy missed a tick's changes; the finish then recounts instead of applying this tick's deltas.
+    private protected bool _recountAtFinish;
+
+    /// <summary>Index entries (primaries and secondaries) this tick, and occupied cells in the index — for the empty-world and cost tests.</summary>
+    public int IndexEntries { get; private protected set; }
+
+    /// <summary>The most key ranges one tick's merge was split into — whether the merge ever ran as concurrent chunks.</summary>
+    public int MaxMergeChunks { get; private protected set; }
+
+    /// <summary>Tests only (SUB-24's mutant): a mover's secondary no longer takes its entity out of the cell it left.</summary>
+    internal bool OccupancyMutantForTest;
+
+    /// <summary>Tests only (SUB-25's mutant): a mover's secondary is filed under the cell it entered instead of the one it left.</summary>
+    internal bool IndexMutantForTest;
+
+    /// <summary>Cells the index holds this tick: only those an event touched.</summary>
+    public int IndexCells { get; private protected set; }
+
+    /// <summary>
+    /// PROTOTYPE — the index is merged in parallel (<c>TYPHON_PUSH_PARALLEL_INDEX=0</c> merges it serially in the frame prologue, for the A/B).
+    /// </summary>
+    public bool ParallelIndex = Environment.GetEnvironmentVariable("TYPHON_PUSH_PARALLEL_INDEX") != "0";
+
+    private protected bool _countInProject;
+    private protected uint _indexedTick = uint.MaxValue;
+
+    /// <summary>Whether this tick's index is built, so the frame prologue does not build it again.</summary>
+    public bool Indexed => _indexedTick == _tick;
+
+    /// <summary>World frames that ended before the session's fill was complete — cumulative; what the fill's pacing costs in frames.</summary>
+    public long WorldFillFrames;
+
+    /// <summary>
+    /// World gathers that needed the occupied cells' order on a tick it was not taken: each one delivered nothing that frame. Zero when sound.
+    /// </summary>
+    public long WorldOrderMissing;
+
+    // Set by NoteWorldSession when some World session may fill this tick: only then is the occupancy's order kept up to date.
+    private bool _worldOrderNeeded;
+    private protected ulong[] _worldOrder = [];
+    private protected int _worldOrderCount;
+    private protected uint _worldOrderTick = uint.MaxValue;
+
+    /// <summary>
+    /// <b>Test seam, and a deliberate one.</b> Commits a skipped session as though its frame had been published — the one move SUB-03 forbids — so the
+    /// rule's verifier can be shown to reject it. Nothing in production sets it.
+    /// </summary>
+    internal bool CommitOnSkipForTest;
+
+    /// <summary>
+    /// The implementation the grid's depth selects (L6): the flat one for a grid one cell deep, the deep one otherwise — or always the deep one with
+    /// <c>forceDeep</c>, which only tests set, since on a flat grid both must agree.
+    /// </summary>
+    public static PushReplication Create(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic,
+        ReplicationGrid grid, int maxSessions, bool shadow = false, bool forceDeep = false)
+    {
+        return grid == null || (grid.Flat && !forceDeep)
+            ? new PushReplication<PushEvent>(plans, states, isPush, automatic, grid, maxSessions, shadow)
+            : new PushReplication<PushEvent3>(plans, states, isPush, automatic, grid, maxSessions, shadow);
     }
 
-    public PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic, ReplicationGrid grid,
-        int maxSessions, bool shadow = false)
+    private protected PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic,
+        ReplicationGrid grid, int maxSessions, bool shadow, bool deep)
     {
         Shadow = shadow || Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
         _plans = plans;
@@ -510,11 +381,16 @@ internal sealed unsafe class PushReplication
             _validating[a] = [];
             _forgottenGroups[a] = new long[8];
         }
+
         _minX = new double[plans.Length];
         _minY = new double[plans.Length];
+        _minZ = new double[plans.Length];
         _stepX = new double[plans.Length];
         _stepY = new double[plans.Length];
+        _stepZ = new double[plans.Length];
         _axisBytes = new int[plans.Length];
+        _hasZ = new bool[plans.Length];
+        _pruneMargin = new double[plans.Length];
         _positionOffset = new int[plans.Length];
         _pushChunks = new int[plans.Length][];
         _pushBlocks = new nint[plans.Length][];
@@ -526,11 +402,21 @@ internal sealed unsafe class PushReplication
         {
             var position = plans[a].Position;
             var blockLayout = plans[a].BlockLayout;
-            if (position == null || position.Dims != 2 || (position.Moving ? blockLayout.PrevPositionBytes == 0 : blockLayout.EnterPositionBytes == 0))
+            if (position == null || position.Dims < 2 || position.Dims > 3
+                || (position.Moving ? blockLayout.PrevPositionBytes == 0 : blockLayout.EnterPositionBytes == 0))
             {
                 throw new NotSupportedException(
-                    $"Archetype '{plans[a].Name}' is observed by a profile and has no 2D position. Replication serves entities by where they are, and the "
-                    + "push index supports 2D positions only.");
+                    $"Archetype '{plans[a].Name}' is observed by a profile and has no 2D or 3D position. Replication serves entities by where they are.");
+            }
+
+            // A 2D position lies on the plane z = 0, the spatial grid's own convention (10 § 3.4). In a deep grid whose Z range excludes 0 it would lie
+            // outside every cell, and every cell-based proof would be unsound.
+            if (grid != null && !grid.Flat && position.Dims == 2 && (grid.OriginZ > 0 || grid.OriginZ + (grid.DimZ * grid.CellM) <= 0))
+            {
+                throw new NotSupportedException(
+                    $"Archetype '{plans[a].Name}' has a 2D position, which replication places on the plane z = 0, and the spatial world's Z range "
+                    + $"[{grid.OriginZ}, {grid.OriginZ + (grid.DimZ * grid.CellM)}) does not contain it. Give the archetype a 3D position, or include z = 0 "
+                    + "in the spatial world.");
             }
 
             // Where the entity's last projected position lives: a mover's previous-position copy, or a static entity's enter cache (it never moves).
@@ -541,6 +427,16 @@ internal sealed unsafe class PushReplication
             _minY[a] = pos.Min[1];
             _stepX[a] = WireMath.QuantStep(pos.Min[0], pos.Max[0], pos.Bits);
             _stepY[a] = WireMath.QuantStep(pos.Min[1], pos.Max[1], pos.Bits);
+            // In a flat grid every geometric z is 0 (10 § 3.4), whichever implementation serves it.
+            _hasZ[a] = deep && position.Dims == 3 && grid != null && !grid.Flat;
+            _pruneMargin[a] = 0.01 + Math.Max(_stepX[a], _stepY[a]);
+            if (_hasZ[a])
+            {
+                _minZ[a] = pos.Min[2];
+                _stepZ[a] = WireMath.QuantStep(pos.Min[2], pos.Max[2], pos.Bits);
+                _pruneMargin[a] = Math.Max(_pruneMargin[a], 0.01 + _stepZ[a]);
+            }
+
             _axisBytes[a] = pos.Bits / 8;
             _pushChunks[a] = new int[64];
             _pushBlocks[a] = new nint[64];
@@ -557,11 +453,10 @@ internal sealed unsafe class PushReplication
         Window = grid.Window;
         _gridMinX = grid.OriginX;
         _gridMinY = grid.OriginY;
+        _gridMinZ = grid.OriginZ;
         _gridW = grid.DimX;
         _gridH = grid.DimY;
-
-        _bitsX = BitsFor(_gridW);
-        _sortBits = _bitsX + BitsFor(_gridH) + 1;
+        _gridD = grid.DimZ;
 
         _sessions = new PushSessionState[Math.Max(1, maxSessions)];
         if (Shadow)
@@ -570,6 +465,23 @@ internal sealed unsafe class PushReplication
             _shadowGen = new ushort[_sessions.Length];
         }
     }
+
+    // ── The flat cell key, for callers outside the geometry (tests, the occupancy's tests) ──
+
+    /// <summary>Bits per axis of a cell key: the spatial VDB key's width (<see cref="ReplicationGrid.MaxAxisCells"/>).</summary>
+    internal const int KeyAxisBits = 21;
+
+    /// <summary>A flat grid's packed cell key, <c>(cy &lt;&lt; 21) | cx</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Key(int cx, int cy) => PushEvent.Key(cx, cy, 0);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int KeyX(ulong key) => PushEvent.KeyX(key);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int KeyY(ulong key) => PushEvent.KeyY(key);
+
+    // ══ Shadow oracle ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     /// <summary>Shadow oracle: applies one published frame's records to the session's shadow of its client, counting every illegal record.</summary>
     public void ShadowApply(SessionId session, FrameWorkerScratch scratch, int archetypes, bool reset)
@@ -635,11 +547,14 @@ internal sealed unsafe class PushReplication
         _shadowQueue.Clear();
     }
 
+    /// <summary>Shadow oracle, serial: compares a session's shadow with the geometric known-set recomputed from every block.</summary>
+    public abstract void ShadowCheck(SessionId session, ulong archetypeMask);
+
     public long GoneInUnoccupiedSlot;
     public long GoneOccupiedButNotProjected;
     public long GoneNowhere;
 
-    private void ClassifyGone(uint netId, ulong archetypeMask)
+    private protected void ClassifyGone(uint netId, ulong archetypeMask)
     {
         foreach (var a in _pushIndices)
         {
@@ -683,102 +598,6 @@ internal sealed unsafe class PushReplication
         GoneNowhere++;
     }
 
-    /// <summary>Shadow oracle, serial: compares a session's shadow with the geometric known-set recomputed from every block.</summary>
-    public void ShadowCheck(SessionId session, ulong archetypeMask)
-    {
-        var slot = session.Slot;
-        ref var st = ref _sessions[slot];
-        var set = _shadow[slot];
-        if (set == null || _shadowGen[slot] != session.Generation || !st.Anchored || st.NeedsReset)
-        {
-            return;
-        }
-
-        var r2 = Radius * Radius;
-        var expected = 0;
-        var missing = 0L;
-        var where = new Dictionary<uint, (float X, float Y, bool Delivered)>();
-        foreach (var a in _pushIndices)
-        {
-            if ((archetypeMask & (1UL << a)) == 0)
-            {
-                continue;
-            }
-
-            var state = _states[a];
-            var cs = state.ClusterState;
-            if (cs == null)
-            {
-                continue;
-            }
-
-            var ids = cs.ReadActiveClusterList(out var active);
-            var layout = state.Layout;
-            for (var i = 0; ids != null && i < active; i++)
-            {
-                if (!state.Directory.TryGetBlock(ids[i], out var block))
-                {
-                    continue;
-                }
-
-                var bytes = (byte*)block;
-                var occ = block->ProjectedOccupancy;
-                while (occ != 0)
-                {
-                    var s = BitOperations.TrailingZeroCount(occ);
-                    occ &= occ - 1;
-                    var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (s * layout.HotStride));
-                    if (hot->NetId == NetIdAllocator.NoNetId)
-                    {
-                        continue;
-                    }
-
-                    Decode(a, bytes + layout.ColdOffset + (s * layout.ColdStride) + _positionOffset[a], out var px, out var py);
-                    var delivered = Bit(st.D0, st.D1, st.D2, st.D3, WindowIndex(st.OriginX, st.OriginY, CellX(px), CellY(py)));
-                    where[hot->NetId] = (px, py, delivered);
-                    var known = Within(st.AnchorX, st.AnchorY, px, py, r2) && delivered;
-                    if (!known)
-                    {
-                        continue;
-                    }
-
-                    expected++;
-                    if (!set.Contains(hot->NetId))
-                    {
-                        missing++;
-                    }
-                }
-            }
-        }
-
-        ShadowMissing += missing;
-        ShadowExtra += set.Count - (expected - missing);
-        if (set.Count - (expected - missing) > 0)
-        {
-            foreach (var id in set)
-            {
-                if (!where.TryGetValue(id, out var w))
-                {
-                    ExtraGone++;
-                    ClassifyGone(id, archetypeMask);
-                }
-                else if (!Within(st.AnchorX, st.AnchorY, w.X, w.Y, r2))
-                {
-                    ExtraOutside++;
-                    var dx = w.X - st.AnchorX;
-                    var dy = w.Y - st.AnchorY;
-                    ExtraOutsideDistSum += Math.Sqrt((dx * dx) + (dy * dy)) - Radius;
-                }
-                else if (!w.Delivered)
-                {
-                    ExtraUndelivered++;
-                }
-            }
-        }
-        ShadowChecks++;
-        ShadowChecked += expected;
-    }
-
     /// <summary>Diagnostics: per push archetype, entries migrated, parked, parked-and-dropped, abandoned.</summary>
     public string MigrationSummary()
     {
@@ -794,12 +613,11 @@ internal sealed unsafe class PushReplication
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ReplicationBlockHeader* BlockOf(int archetype, int chunkId)
+    private protected ReplicationBlockHeader* BlockOf(int archetype, int chunkId)
     {
         var table = _states[archetype].BlockByChunk;
         return (uint)chunkId < (uint)table.Length ? (ReplicationBlockHeader*)table[chunkId] : null;
     }
-
 
     // ══ Blocks step (serial) ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -951,7 +769,7 @@ internal sealed unsafe class PushReplication
     }
 
     /// <summary>Called by a projecting worker for an event: counts it as a forgotten push when only the validator asked for the slot.</summary>
-    private void NoteIfForgotten(int archetype, ReplicationBlockHeader* block, int slot, byte flags, int groups)
+    private protected void NoteIfForgotten(int archetype, ReplicationBlockHeader* block, int slot, byte flags, int groups)
     {
         var validating = _validating[archetype];
         if (validating.Count == 0 || !validating.TryGetValue(block->ChunkId, out var mask) || (mask & (1UL << slot)) == 0)
@@ -1025,26 +843,39 @@ internal sealed unsafe class PushReplication
             }
         }
 
-        if (_events.Length < workers)
-        {
-            Array.Resize(ref _events, workers);
-            Array.Resize(ref _eventCount, workers);
-        }
-
-        for (var w = 0; w < _events.Length; w++)
-        {
-            _events[w] ??= new PushEvent[1024];
-            _eventCount[w] = 0;
-        }
-
-        EnsureRuns(_events.Length + 1);
+        ResetWorkers(workers);
     }
+
+    /// <summary>Sizes and empties the per-worker event lists for this tick's projection.</summary>
+    private protected abstract void ResetWorkers(int workers);
 
     // ══ Projection (parallel, one worker per block) ══════════════════════════════════════════════════════════════════════════════════════════════════
 
-    /// <summary>Decodes a 2D quantized position as the wire would.</summary>
+    /// <summary>
+    /// Decodes a quantized position as the wire would: axes 0 and 1, and axis 2 where the archetype has one in this grid — a flat grid's, or a 2D codec's,
+    /// geometric z is 0 (10 § 3.4).
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void Decode(int archetype, byte* quantized, out float x, out float y)
+    public void Decode(int archetype, byte* quantized, out float x, out float y, out float z)
+    {
+        DecodePlane(archetype, quantized, out x, out y);
+        z = 0f;
+        if (_hasZ[archetype])
+        {
+            var bytes = _axisBytes[archetype];
+            uint qz = 0;
+            for (var i = 0; i < bytes; i++)
+            {
+                qz |= (uint)quantized[(2 * bytes) + i] << (8 * i);
+            }
+
+            z = (float)WireMath.DecodeQuantWithStep(qz, _minZ[archetype], _stepZ[archetype]);
+        }
+    }
+
+    /// <summary>Axes 0 and 1 only: the flat implementation's whole decode, whose geometric z is 0 whatever the codec.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected void DecodePlane(int archetype, byte* quantized, out float x, out float y)
     {
         var bytes = _axisBytes[archetype];
         uint qx = 0, qy = 0;
@@ -1059,74 +890,11 @@ internal sealed unsafe class PushReplication
     }
 
     /// <summary>Records one projected slot. Called by the worker that owns the block, while its hot entry is still in cache.</summary>
-    public void AddEvent(int worker, int archetype, ReplicationBlockHeader* block, int slot, ReplicationHotEntry* hot, uint netId, byte flags, float ox,
-        float oy, float nx, float ny)
-    {
-        var groups = 0;
-        if (hot != null && (uint)archetype < (uint)_encodePlans.Length)
-        {
-            var plan = _encodePlans[archetype];
-            var tick = _tick;
-            if (plan.Moving && hot->GroupTicks[plan.MotionTickSlot] >= tick)
-            {
-                flags |= PushEvent.Segment;
-            }
+    public abstract void AddEvent(int worker, int archetype, ReplicationBlockHeader* block, int slot, ReplicationHotEntry* hot, uint netId, byte flags,
+        float ox, float oy, float oz, float nx, float ny, float nz);
 
-            for (var g = 0; g < plan.GroupCount; g++)
-            {
-                if (hot->GroupTicks[plan.GroupTickSlot[g]] >= tick)
-                {
-                    groups |= 1 << g;
-                }
-            }
-        }
-
-        // Pushed, re-encoded, and nothing moved or changed: no session can learn anything from it. Dropped here, in parallel, rather than filtered by
-        // every session that reaches its cell.
-        const byte both = PushEvent.HasOld | PushEvent.HasNew;
-        var arrived = (flags & PushEvent.Arrived) != 0;
-        flags &= unchecked((byte)~PushEvent.Arrived);
-        if (!arrived && (flags & (both | PushEvent.Segment)) == both && groups == 0 && ox == nx && oy == ny)
-        {
-            // No event, so the entity's stamp stays the tick of its last one: the sweep and the cell delivery must still own it.
-            return;
-        }
-
-        if (ValidateClustersPerTick > 0 && hot != null)
-        {
-            NoteIfForgotten(archetype, block, slot, flags, groups);
-        }
-
-        if (hot != null)
-        {
-            // The push step owns this entity from this tick on; the sweep, the cell delivery and the log's catch-up skip it by this stamp.
-            var layout = _states[archetype].Layout;
-            *(uint*)((byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + layout.LastEventTickOffsetInColdEntry) = _tick;
-        }
-
-        var list = _events[worker];
-        var n = _eventCount[worker];
-        if (n == list.Length)
-        {
-            Array.Resize(ref _events[worker], n * 2);
-            list = _events[worker];
-        }
-
-        ref var e = ref list[n];
-        e.Block = (nint)block;
-        e.Slot = (byte)slot;
-        e.NetId = netId;
-        e.Archetype = (ushort)archetype;
-        e.Flags = flags;
-        e.OldX = ox;
-        e.OldY = oy;
-        e.NewX = nx;
-        e.NewY = ny;
-        e.Groups = (byte)groups;
-        e.OldKey = Key(CellX(ox), CellY(oy));
-        e.NewKey = Key(CellX(nx), CellY(ny));
-        _eventCount[worker] = n + 1;
-    }
+    /// <summary>Records an entry that is about to vanish at the fence, so every session holding it is told to drop it. Rare; locked.</summary>
+    public abstract void Orphan(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId, int cause);
 
     /// <summary>Marks slots of a cluster to be pushed again next tick. Called by the worker that owns the block — one writer per chunk.</summary>
     public void Repush(int archetype, int chunkId, ulong slots)
@@ -1139,654 +907,42 @@ internal sealed unsafe class PushReplication
     }
 
     // ══ The push index (design/Subscriptions/10 § 2.3) ═══════════════════════════════════════════════════════════════════════════════════════════════
-    //
-    // Each projection chunk sorts its own events by cell as it finishes (SortRun), the PushIndex stage merges the sorted runs by key range (MergeChunk),
-    // and a serial finish concatenates the chunks' cell lists and builds the row table (FinishIndex). Every step costs O(events + occupied cells): no
-    // array the size of the grid is touched, cleared or walked. The result is the tick's slot of the push log, so the log and the index are one thing.
-
-    /// <summary>Bits per axis of a cell key: the spatial VDB key's width (<see cref="ReplicationGrid.MaxAxisCells"/>).</summary>
-    internal const int KeyAxisBits = 21;
-
-    private const ulong KeyAxisMask = (1UL << KeyAxisBits) - 1;
-
-    /// <summary>A cell's packed key, <c>(cy &lt;&lt; 21) | cx</c>: ascending keys are row-major order, and a row is <c>key &gt;&gt; 21</c>.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static ulong Key(int cx, int cy) => ((ulong)(uint)cy << KeyAxisBits) | (uint)cx;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static int KeyX(ulong key) => (int)(key & KeyAxisMask);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal static int KeyY(ulong key) => (int)((key >> KeyAxisBits) & KeyAxisMask);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int CellX(double x) => Math.Clamp((int)Math.Floor((x - _gridMinX) / CellSize), 0, _gridW - 1);
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int CellY(double y) => Math.Clamp((int)Math.Floor((y - _gridMinY) / CellSize), 0, _gridH - 1);
-
-    // The sort key of an index entry: the cell compressed to the grid's used bits (row-major, so the order is the packed key's), shifted left once, with
-    // the low bit set for a secondary — every cell's primaries sort before its secondaries by construction. Fewer bits, fewer radix passes.
-    private readonly int _bitsX;
-    private readonly int _sortBits;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ulong SortKey(ulong key, uint secondary) => ((((ulong)(uint)KeyY(key) << _bitsX) | (uint)KeyX(key)) << 1) | secondary;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private ulong KeyOfSortKey(ulong sortKey)
-    {
-        var cell = sortKey >> 1;
-        return Key((int)(cell & ((1UL << _bitsX) - 1)), (int)(cell >> _bitsX));
-    }
-
-    // Per run (a worker's events, then the fence's orphans last): the entries' sort keys and event indices, sorted, and the buffers the sort ping-pongs.
-    private ulong[][] _runKey = [];
-    private int[][] _runIdx = [];
-    private ulong[][] _runKeyTmp = [];
-    private int[][] _runIdxTmp = [];
-    private int[] _runLen = [];
-    private uint[] _runSortedTick = [];
-
-    // The fence's orphans as the last run, copied out of the orphan list when the merge is prepared.
-    private PushEvent[] _orphanEvents = new PushEvent[64];
-    private int _orphanRunCount;
-
-    // The merge: key-range splitters in sort-key space, and per chunk its cells in order.
-    private int _mergeChunks;
-    private uint _mergedTick = uint.MaxValue;
-    private ulong[] _split = [];
-    private ulong[][] _chunkCells = [];
-    private int[][] _chunkStarts = [];
-    private int[][] _chunkPrimaryEnds = [];
-    private int[] _chunkCellCount = [];
-    private ulong[] _samples = [];
-
-    // Per chunk, the cells whose occupancy changed this tick and by how much, applied by the serial finish.
-    private ulong[][] _chunkDeltaKeys = [];
-    private int[][] _chunkDeltas = [];
-    private int[] _chunkDeltaCount = [];
-
-    private readonly ReplicationOccupancy _occupancy = new();
-
-    /// <summary>The replication grid's occupancy, maintained from the index (10 § 2.4).</summary>
-    internal ReplicationOccupancy Occupancy => _occupancy;
-
-    /// <summary>Cell deliveries and sweeps skipped because the cell held nothing — a cluster query each — cumulative.</summary>
-    public long EmptyCellsSkipped;
-
-    /// <summary>
-    /// Cell delivery and sweep (10 § 8, L7): time in each, cumulative in Stopwatch ticks, and the entries each decoded against what it emitted — the
-    /// measurement that decides whether batched delivery is worth designing. Collected only while <see cref="FrameAssembler.PhaseTimingEnabled"/> is set.
-    /// </summary>
-    public long DeliverTicks;
-    public long DeliverDecoded;
-    public long DeliverEntered;
-    public long SweepTicks;
-    public long SweepDecoded;
-
-    /// <summary>Full recounts of the occupancy: after a tick the track did not run for or did not index, whose events it never saw — cumulative.</summary>
-    public long OccupancyRecounts;
-
-    /// <summary>Time spent in those recounts — serial, in the index's finish — cumulative, in Stopwatch ticks.</summary>
-    public long RecountTicks;
-
-    // Set by the blocks step when the occupancy missed a tick's changes; the finish then recounts instead of applying this tick's deltas.
-    private bool _recountAtFinish;
-
-    /// <summary>Index entries (primaries and secondaries) this tick, and occupied cells in the index — for the empty-world and cost tests.</summary>
-    public int IndexEntries { get; private set; }
-
-    /// <summary>The most key ranges one tick's merge was split into — whether the merge ever ran as concurrent chunks.</summary>
-    public int MaxMergeChunks { get; private set; }
-
-    /// <summary>Tests only (SUB-24's mutant): a mover's secondary no longer takes its entity out of the cell it left.</summary>
-    internal bool OccupancyMutantForTest;
-
-    /// <summary>Tests only (SUB-25's mutant): a mover's secondary is filed under the cell it entered instead of the one it left.</summary>
-    internal bool IndexMutantForTest;
-
-    /// <summary>Cells the index holds this tick: only those an event touched.</summary>
-    public int IndexCells { get; private set; }
-
-    private static int BitsFor(int count) => count <= 1 ? 1 : 32 - BitOperations.LeadingZeroCount((uint)(count - 1));
-
-    /// <summary>
-    /// PROTOTYPE — the index is merged in parallel (<c>TYPHON_PUSH_PARALLEL_INDEX=0</c> merges it serially in the frame prologue, for the A/B).
-    /// </summary>
-    public bool ParallelIndex = Environment.GetEnvironmentVariable("TYPHON_PUSH_PARALLEL_INDEX") != "0";
-
-    private bool _countInProject;
-    private uint _indexedTick = uint.MaxValue;
-
-    /// <summary>Whether this tick's index is built, so the frame prologue does not build it again.</summary>
-    public bool Indexed => _indexedTick == _tick;
 
     /// <summary>
     /// Called by a projection chunk once its blocks are done: sorts its worker's events by cell while they are still in this core's cache. The run is the
     /// worker's own, so no chunk writes anything another reads.
     /// </summary>
-    public void CountWorker(int worker)
-    {
-        if (!_countInProject || (uint)worker >= (uint)_events.Length)
-        {
-            return;
-        }
-
-        SortRun(worker, _events[worker], _eventCount[worker]);
-    }
+    public abstract void CountWorker(int worker);
 
     /// <summary>
     /// The parallel index's serial half, after every projection chunk has sorted its run: the fence's orphans as one more run, and the key-range
     /// splitters. Returns how many merge chunks follow, or 0 when the projection did not sort this tick and the frame prologue builds the index instead.
     /// </summary>
-    public int BeginParallelIndex()
-    {
-        if (!_countInProject || _events.Length == 0)
-        {
-            return 0;
-        }
-
-        var from = Stopwatch.GetTimestamp();
-        PrepareMerge(_events.Length);
-        IndexTicks += Stopwatch.GetTimestamp() - from;
-        return _mergeChunks;
-    }
+    public abstract int BeginParallelIndex();
 
     /// <summary>One merge chunk: every run's entries in its key range, merged into the tick's log slot.</summary>
-    public void PlaceWorker(int chunk)
-    {
-        if ((uint)chunk >= (uint)_mergeChunks || _mergedTick != _tick)
-        {
-            return;
-        }
-
-        var from = Stopwatch.GetTimestamp();
-        MergeChunk(chunk);
-        var spent = Stopwatch.GetTimestamp() - from;
-        Interlocked.Add(ref IndexTicks, spent);
-        Interlocked.Add(ref MergeTicks, spent);
-    }
+    public abstract void PlaceWorker(int chunk);
 
     /// <summary>
     /// Builds this tick's index serially: what the frame prologue runs when no stage merged it (the collapsed shape, a deterministic projection, the
     /// parallel index switched off), and the finish when one did.
     /// </summary>
-    public void BuildIndex()
-    {
-        if (_mergedTick != _tick)
-        {
-            var from = Stopwatch.GetTimestamp();
-            PrepareMerge(1);
-            for (var c = 0; c < _mergeChunks; c++)
-            {
-                MergeChunk(c);
-            }
-
-            IndexTicks += Stopwatch.GetTimestamp() - from;
-        }
-
-        FinishIndex();
-    }
+    public abstract void BuildIndex();
 
     /// <summary>
-    /// The index's serial tail: the chunks' cell lists concatenated into the log slot — chunk order is key order — and the slot's row table. Idempotent per
-    /// tick; a no-op until the merge ran.
+    /// The index's serial tail: the chunks' cell lists concatenated into the log slot — chunk order is key order — and the slot's probe-unit table.
+    /// Idempotent per tick; a no-op until the merge ran.
     /// </summary>
-    public void FinishIndex()
-    {
-        if (_mergedTick != _tick || _indexedTick == _tick)
-        {
-            return;
-        }
-
-        var from = Stopwatch.GetTimestamp();
-        var slot = _log[_tick % LogDepth];
-        var cells = 0;
-        for (var c = 0; c < _mergeChunks; c++)
-        {
-            cells += _chunkCellCount[c];
-        }
-
-        if (slot.Cells.Length < cells)
-        {
-            var grown = Math.Max(Math.Max(64, cells), slot.Cells.Length * 2);
-            slot.Cells = new ulong[grown];
-            slot.PrimaryEnds = new int[grown];
-        }
-
-        if (slot.Starts.Length < cells + 1)
-        {
-            slot.Starts = new int[Math.Max(cells + 1, slot.Starts.Length * 2)];
-        }
-
-        var at = 0;
-        for (var c = 0; c < _mergeChunks; c++)
-        {
-            var n = _chunkCellCount[c];
-            Array.Copy(_chunkCells[c], 0, slot.Cells, at, n);
-            Array.Copy(_chunkStarts[c], 0, slot.Starts, at, n);
-            Array.Copy(_chunkPrimaryEnds[c], 0, slot.PrimaryEnds, at, n);
-            at += n;
-        }
-
-        slot.Starts[cells] = IndexEntries;
-        slot.CellCount = cells;
-        slot.BuildRows();
-        if (_recountAtFinish)
-        {
-            // After the projection every block's occupancy word and cold position describe this tick, arrivals and drained entries included.
-            var recountFrom = Stopwatch.GetTimestamp();
-            Recount(_occupancy);
-            _recountAtFinish = false;
-            OccupancyRecounts++;
-            RecountTicks += Stopwatch.GetTimestamp() - recountFrom;
-        }
-        else
-        {
-            // Serial, and O(cells whose count changed): 10 § 2.4 applies them per merge chunk, which a concurrent map would need; not worth it at this size.
-            for (var c = 0; c < _mergeChunks; c++)
-            {
-                var keys = _chunkDeltaKeys[c];
-                var deltas = _chunkDeltas[c];
-                for (var i = 0; i < _chunkDeltaCount[c]; i++)
-                {
-                    _occupancy.Add(keys[i], deltas[i]);
-                }
-            }
-        }
-
-        slot.Tick = _tick;
-        slot.Valid = true;
-        slot.FlushCellCount = 0;
-        _indexed = slot.Events;
-        IndexCells = cells;
-        _indexedTick = _tick;
-        IndexTicks += Stopwatch.GetTimestamp() - from;
-        FinishTicks += Stopwatch.GetTimestamp() - from;
-    }
-
-    /// <summary>Fills a run from a list of events: one entry under each event's primary cell, and one more under the cell a mover left.</summary>
-    private void FillRun(int run, PushEvent[] events, int count)
-    {
-        const byte both = PushEvent.HasNew | PushEvent.HasOld;
-        if (_runKey[run] == null || _runKey[run].Length < 2 * count)
-        {
-            // A power of two, so a load that creeps up reallocates a logarithmic number of times rather than on every new maximum (SUB-07).
-            var size = (int)Math.Max(2048u, BitOperations.RoundUpToPowerOf2((uint)(2 * count)));
-            _runKey[run] = new ulong[size];
-            _runIdx[run] = new int[size];
-            _runKeyTmp[run] = new ulong[size];
-            _runIdxTmp[run] = new int[size];
-        }
-
-        var keys = _runKey[run];
-        var idx = _runIdx[run];
-        var n = 0;
-        for (var i = 0; i < count; i++)
-        {
-            ref readonly var e = ref events[i];
-            keys[n] = SortKey(e.PrimaryKey, 0);
-            idx[n++] = i;
-            if ((e.Flags & both) == both && e.OldKey != e.NewKey)
-            {
-                keys[n] = SortKey(IndexMutantForTest ? e.NewKey : e.OldKey, 1);
-                idx[n++] = i;
-            }
-        }
-
-        _runLen[run] = n;
-    }
-
-    /// <summary>Fills and sorts one run, stably, so equal keys keep the order their events were recorded in.</summary>
-    private void SortRun(int run, PushEvent[] events, int count)
-    {
-        var from = Stopwatch.GetTimestamp();
-        FillRun(run, events, count);
-        var n = _runLen[run];
-        if (n > 0 && RadixSort(_runKey[run], _runIdx[run], _runKeyTmp[run], _runIdxTmp[run], n, _sortBits))
-        {
-            (_runKey[run], _runKeyTmp[run]) = (_runKeyTmp[run], _runKey[run]);
-            (_runIdx[run], _runIdxTmp[run]) = (_runIdxTmp[run], _runIdx[run]);
-        }
-
-        _runSortedTick[run] = _tick;
-        Interlocked.Add(ref SortTicks, Stopwatch.GetTimestamp() - from);
-    }
-
-    /// <summary>
-    /// A stable LSD radix sort of <paramref name="n"/> entries on the low <paramref name="bits"/> of their keys, in as few passes of at most 11 bits as the
-    /// width allows. Returns whether the result is in the temporary buffers. Short runs use an insertion sort, which is also stable.
-    /// </summary>
-    private static bool RadixSort(ulong[] keys, int[] idx, ulong[] keysTmp, int[] idxTmp, int n, int bits)
-    {
-        if (n <= 48)
-        {
-            for (var i = 1; i < n; i++)
-            {
-                var key = keys[i];
-                var id = idx[i];
-                var j = i - 1;
-                while (j >= 0 && keys[j] > key)
-                {
-                    keys[j + 1] = keys[j];
-                    idx[j + 1] = idx[j];
-                    j--;
-                }
-
-                keys[j + 1] = key;
-                idx[j + 1] = id;
-            }
-
-            return false;
-        }
-
-        var passes = (bits + 10) / 11;
-        var digit = (bits + passes - 1) / passes;
-        var buckets = 1 << digit;
-        var mask = (ulong)(buckets - 1);
-        Span<int> histogram = stackalloc int[buckets];
-        var srcK = keys;
-        var srcI = idx;
-        var dstK = keysTmp;
-        var dstI = idxTmp;
-        for (var p = 0; p < passes; p++)
-        {
-            var shift = p * digit;
-            histogram.Clear();
-            for (var i = 0; i < n; i++)
-            {
-                histogram[(int)((srcK[i] >> shift) & mask)]++;
-            }
-
-            var running = 0;
-            for (var b = 0; b < buckets; b++)
-            {
-                var c = histogram[b];
-                histogram[b] = running;
-                running += c;
-            }
-
-            for (var i = 0; i < n; i++)
-            {
-                var key = srcK[i];
-                var at = histogram[(int)((key >> shift) & mask)]++;
-                dstK[at] = key;
-                dstI[at] = srcI[i];
-            }
-
-            (srcK, dstK) = (dstK, srcK);
-            (srcI, dstI) = (dstI, srcI);
-        }
-
-        return (passes & 1) != 0;
-    }
-
-    /// <summary>
-    /// The merge's serial half: the orphans' run, every run not yet sorted (the serial path), and <paramref name="chunks"/> key-range splitters sampled
-    /// from the runs, on cell boundaries so a cell's primaries and secondaries land in one chunk.
-    /// </summary>
-    private void PrepareMerge(int chunks)
-    {
-        var workers = _events.Length;
-        var runs = workers + 1;
-        EnsureRuns(runs);
-
-        // The fence's orphans are the last run: leaves like any other, filed under the cell the entity was last described in.
-        if (_orphanEvents.Length < _orphanCount)
-        {
-            _orphanEvents = new PushEvent[Math.Max(_orphanCount, _orphanEvents.Length * 2)];
-        }
-
-        Array.Copy(_orphans, _orphanEvents, _orphanCount);
-        _orphanRunCount = _orphanCount;
-        SortRun(workers, _orphanEvents, _orphanCount);
-        _orphanCount = 0;
-
-        var total = 0;
-        for (var r = 0; r < workers; r++)
-        {
-            if (_runSortedTick[r] != _tick)
-            {
-                SortRun(r, _events[r], _eventCount[r]);
-            }
-
-            total += _runLen[r];
-        }
-
-        total += _runLen[workers];
-        IndexEntries = total;
-        var events = _orphanRunCount;
-        for (var r = 0; r < workers; r++)
-        {
-            events += _eventCount[r];
-        }
-
-        Events += events;
-        var slot = _log[_tick % LogDepth];
-        if (slot.Events.Length < total)
-        {
-            slot.Events = new PushEvent[Math.Max(total, slot.Events.Length * 2)];
-        }
-
-        // A few hundred entries per chunk at least: below that a chunk costs more to dispatch than to merge.
-        var k = Math.Clamp(Math.Min(chunks, total / 512), 1, Math.Max(1, chunks));
-        if (_split.Length < k + 1)
-        {
-            _split = new ulong[k + 1];
-        }
-
-        _split[0] = 0;
-        _split[k] = ulong.MaxValue;
-        if (k > 1)
-        {
-            // About eight samples per chunk, taken from each run in proportion to its length, sorted: their quantiles split the entries into ranges of
-            // about equal size, and the serial cost follows the chunk count rather than the worker count.
-            var target = 8 * k;
-            if (_samples.Length < target + runs)
-            {
-                _samples = new ulong[target + runs];
-            }
-
-            var s = 0;
-            for (var r = 0; r < runs; r++)
-            {
-                var len = _runLen[r];
-                var m = len == 0 ? 0 : Math.Max(1, (int)((long)len * target / total));
-                for (var j = 0; j < m; j++)
-                {
-                    _samples[s++] = _runKey[r][(int)((long)len * j / m)] & ~1UL;
-                }
-            }
-
-            Array.Sort(_samples, 0, s);
-            for (var i = 1; i < k; i++)
-            {
-                _split[i] = Math.Max(_split[i - 1], _samples[(int)((long)s * i / k)]);
-            }
-        }
-
-        if (_chunkCells.Length < k)
-        {
-            Array.Resize(ref _chunkCells, k);
-            Array.Resize(ref _chunkStarts, k);
-            Array.Resize(ref _chunkPrimaryEnds, k);
-            Array.Resize(ref _chunkCellCount, k);
-            Array.Resize(ref _chunkDeltaKeys, k);
-            Array.Resize(ref _chunkDeltas, k);
-            Array.Resize(ref _chunkDeltaCount, k);
-        }
-
-        if (_mergeKeyA.Length < k)
-        {
-            Array.Resize(ref _mergeKeyA, k);
-            Array.Resize(ref _mergeSrcA, k);
-            Array.Resize(ref _mergeKeyB, k);
-            Array.Resize(ref _mergeSrcB, k);
-        }
-
-        for (var c = 0; c < k; c++)
-        {
-            _chunkCells[c] ??= new ulong[64];
-            _chunkStarts[c] ??= new int[64];
-            _chunkPrimaryEnds[c] ??= new int[64];
-            _chunkDeltaKeys[c] ??= new ulong[64];
-            _chunkDeltas[c] ??= new int[64];
-            _chunkCellCount[c] = 0;
-            _chunkDeltaCount[c] = 0;
-        }
-
-        _mergeChunks = k;
-        MaxMergeChunks = Math.Max(MaxMergeChunks, k);
-        _mergedTick = _tick;
-    }
-
-    private void NoteDelta(int chunk, ulong key, int delta, ref int count)
-    {
-        if (delta == 0)
-        {
-            return;
-        }
-
-        if (count == _chunkDeltaKeys[chunk].Length)
-        {
-            Array.Resize(ref _chunkDeltaKeys[chunk], count * 2);
-            Array.Resize(ref _chunkDeltas[chunk], count * 2);
-        }
-
-        _chunkDeltaKeys[chunk][count] = key;
-        _chunkDeltas[chunk][count++] = delta;
-    }
+    public abstract void FinishIndex();
 
     /// <summary>
     /// Recounts the occupancy from every block: the live, identified entries of every observed archetype, by the cell of their last pushed position —
     /// exactly what a cell delivery would enumerate.
     /// </summary>
-    internal void Recount(ReplicationOccupancy into)
-    {
-        into.Clear();
-        foreach (var a in _pushIndices)
-        {
-            var state = _states[a];
-            var cs = state.ClusterState;
-            if (cs == null)
-            {
-                continue;
-            }
+    internal abstract void Recount(ReplicationOccupancy into);
 
-            var ids = cs.ReadActiveClusterList(out var active);
-            var layout = state.Layout;
-            for (var i = 0; ids != null && i < active; i++)
-            {
-                if (!state.Directory.TryGetBlock(ids[i], out var block))
-                {
-                    continue;
-                }
-
-                var bytes = (byte*)block;
-                var occ = block->ProjectedOccupancy;
-                while (occ != 0)
-                {
-                    var slot = BitOperations.TrailingZeroCount(occ);
-                    occ &= occ - 1;
-                    var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (slot * layout.HotStride));
-                    if (hot->NetId == NetIdAllocator.NoNetId)
-                    {
-                        continue;
-                    }
-
-                    Decode(a, bytes + layout.ColdOffset + (slot * layout.ColdStride) + _positionOffset[a], out var px, out var py);
-                    into.Add(Key(CellX(px), CellY(py)), 1);
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Tests only: the current index's shape recomputed from its own events — the distinct cells they name and the entries they need — after checking that
-    /// the cells ascend, every entry is filed under its cell (primaries first, then the cells movers left) and the row table finds every row's first cell.
-    /// (-1, -1) when any of that fails.
-    /// </summary>
-    internal (int Cells, int Entries) IndexShapeForTest()
-    {
-        const byte both = PushEvent.HasNew | PushEvent.HasOld;
-        var slot = _log[_tick % LogDepth];
-        if (!Indexed || slot.Tick != _tick)
-        {
-            return (-1, -1);
-        }
-
-        // The index as a multiset of (identity, cell, secondary), against the same multiset built from the runs' raw events: an event dropped, copied twice
-        // or misfiled fails here even when the index is consistent with itself.
-        var expected = new Dictionary<(uint, ulong, bool), int>();
-        for (var w = 0; w <= _events.Length; w++)
-        {
-            var list = w < _events.Length ? _events[w] : _orphanEvents;
-            var count = w < _events.Length ? _eventCount[w] : _orphanRunCount;
-            for (var i = 0; i < count; i++)
-            {
-                ref readonly var e = ref list[i];
-                Bump(expected, (e.NetId, e.PrimaryKey, false), 1);
-                if ((e.Flags & both) == both && e.OldKey != e.NewKey)
-                {
-                    Bump(expected, (e.NetId, e.OldKey, true), 1);
-                }
-            }
-        }
-
-        var keys = new HashSet<ulong>();
-        var entries = 0;
-        for (var k = 0; k < slot.CellCount; k++)
-        {
-            var cell = slot.Cells[k];
-            if ((k > 0 && cell <= slot.Cells[k - 1]) || ((k == 0 || KeyY(slot.Cells[k - 1]) != KeyY(cell)) && slot.RowStart((ulong)KeyY(cell)) != k))
-            {
-                return (-1, -1);
-            }
-
-            for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
-            {
-                ref readonly var e = ref slot.Events[i];
-                if (e.PrimaryKey != cell)
-                {
-                    return (-1, -1);
-                }
-
-                keys.Add(cell);
-                entries++;
-                Bump(expected, (e.NetId, cell, false), -1);
-                if ((e.Flags & both) == both && e.OldKey != e.NewKey)
-                {
-                    keys.Add(e.OldKey);
-                    entries++;
-                }
-            }
-
-            for (var i = slot.PrimaryEnds[k]; i < slot.Starts[k + 1]; i++)
-            {
-                ref readonly var e = ref slot.Events[i];
-                if ((e.Flags & both) != both || e.OldKey == e.NewKey || e.OldKey != cell)
-                {
-                    return (-1, -1);
-                }
-
-                Bump(expected, (e.NetId, cell, true), -1);
-            }
-        }
-
-        foreach (var count in expected.Values)
-        {
-            if (count != 0)
-            {
-                return (-1, -1);
-            }
-        }
-
-        return (keys.Count, entries);
-
-        static void Bump(Dictionary<(uint, ulong, bool), int> map, (uint, ulong, bool) key, int by) =>
-            map[key] = map.GetValueOrDefault(key) + by;
-    }
+    /// <summary>Tests only: the current index's shape recomputed from its own events, after checking it; (-1, -1) when any check fails.</summary>
+    internal abstract (int Cells, int Entries) IndexShapeForTest();
 
     /// <summary>Tests only: the cells where the maintained occupancy disagrees with a recount from the blocks. Zero when SUB-24 holds.</summary>
     internal int VerifyOccupancy()
@@ -1796,215 +952,15 @@ internal sealed unsafe class PushReplication
         return _occupancy.Differences(recount);
     }
 
-    private void EnsureRuns(int runs)
+    /// <summary>Tests only (10 § 5): the radius a session's next frames move to — a spherical shell sweep, not a reset. At most the grid's radius.</summary>
+    internal void SetRadiusForTest(SessionId session, double radius)
     {
-        if (_runKey.Length >= runs)
+        if (radius <= 0 || radius > Radius)
         {
-            return;
+            throw new ArgumentOutOfRangeException(nameof(radius), radius, $"a session's radius is in (0, {Radius}], the radius its window is sized for");
         }
 
-        Array.Resize(ref _runKey, runs);
-        Array.Resize(ref _runIdx, runs);
-        Array.Resize(ref _runKeyTmp, runs);
-        Array.Resize(ref _runIdxTmp, runs);
-        Array.Resize(ref _runLen, runs);
-        Array.Resize(ref _runSortedTick, runs);
-        for (var r = 0; r < runs; r++)
-        {
-            _runSortedTick[r] = uint.MaxValue;
-        }
-    }
-
-    // Per chunk, the merge's ping-pong buffers: an entry's sort key and its source, (run << 32) | event index.
-    private ulong[][] _mergeKeyA = [];
-    private long[][] _mergeSrcA = [];
-    private ulong[][] _mergeKeyB = [];
-    private long[][] _mergeSrcB = [];
-
-    /// <summary>
-    /// One key range: each run's slice found by binary search — the chunk's output offset is the count of entries below its range, so no chunk waits for
-    /// another — then the slices merged pairwise, adjacent runs first, so the order is (key, run, index) and a function of the runs alone. Every event is
-    /// copied into the log slot in that order while the range's cells and their occupancy deltas are listed.
-    /// </summary>
-    private void MergeChunk(int chunk)
-    {
-        var workers = _events.Length;
-        var runs = workers + 1;
-        var lo = _split[chunk];
-        var hi = _split[chunk + 1];
-        Span<int> from = stackalloc int[runs];
-        Span<int> to = stackalloc int[runs];
-        var output = 0;
-        var total = 0;
-        for (var r = 0; r < runs; r++)
-        {
-            var len = _runLen[r];
-            from[r] = chunk == 0 ? 0 : LowerBound(_runKey[r], 0, len, lo);
-            to[r] = chunk == _mergeChunks - 1 ? len : LowerBound(_runKey[r], 0, len, hi);
-            output += from[r];
-            total += to[r] - from[r];
-        }
-
-        EnsureMergeBuffers(chunk, total);
-        var keys = _mergeKeyA[chunk];
-        var srcs = _mergeSrcA[chunk];
-
-        // The slices, concatenated in run order; each is already sorted.
-        Span<int> bounds = stackalloc int[runs + 1];
-        var at = 0;
-        var segments = 0;
-        for (var r = 0; r < runs; r++)
-        {
-            if (from[r] == to[r])
-            {
-                continue;
-            }
-
-            bounds[segments++] = at;
-            Array.Copy(_runKey[r], from[r], keys, at, to[r] - from[r]);
-            var runIdx = _runIdx[r];
-            for (var i = from[r]; i < to[r]; i++)
-            {
-                srcs[at++] = ((long)r << 32) | (uint)runIdx[i];
-            }
-        }
-
-        bounds[segments] = at;
-
-        // Adjacent segments merged pairwise until one is left: a linear pass per halving. A tie takes the left, lower-run side first.
-        var keysOut = _mergeKeyB[chunk];
-        var srcsOut = _mergeSrcB[chunk];
-        while (segments > 1)
-        {
-            var merged = 0;
-            for (var sgm = 0; sgm < segments; sgm += 2)
-            {
-                var a0 = bounds[sgm];
-                if (sgm + 1 == segments)
-                {
-                    var tail = bounds[sgm + 1] - a0;
-                    Array.Copy(keys, a0, keysOut, a0, tail);
-                    Array.Copy(srcs, a0, srcsOut, a0, tail);
-                    bounds[merged++] = a0;
-                    continue;
-                }
-
-                var a1 = bounds[sgm + 1];
-                var b1 = bounds[sgm + 2];
-                int i = a0, j = a1, o = a0;
-                while (i < a1 && j < b1)
-                {
-                    if (keys[j] < keys[i])
-                    {
-                        keysOut[o] = keys[j];
-                        srcsOut[o++] = srcs[j++];
-                    }
-                    else
-                    {
-                        keysOut[o] = keys[i];
-                        srcsOut[o++] = srcs[i++];
-                    }
-                }
-
-                Array.Copy(keys, i, keysOut, o, a1 - i);
-                Array.Copy(srcs, i, srcsOut, o, a1 - i);
-                o += a1 - i;
-                Array.Copy(keys, j, keysOut, o, b1 - j);
-                Array.Copy(srcs, j, srcsOut, o, b1 - j);
-                bounds[merged++] = a0;
-            }
-
-            bounds[merged] = at;
-            segments = merged;
-            (keys, keysOut) = (keysOut, keys);
-            (srcs, srcsOut) = (srcsOut, srcs);
-        }
-
-        var slotEvents = _log[_tick % LogDepth].Events;
-        var cells = _chunkCells[chunk];
-        var starts = _chunkStarts[chunk];
-        var primaryEnds = _chunkPrimaryEnds[chunk];
-        var cellCount = 0;
-        var current = ulong.MaxValue;
-        var primaryEnd = -1;
-        var delta = 0;
-        var deltaCount = 0;
-        const byte both = PushEvent.HasNew | PushEvent.HasOld;
-        for (var n = 0; n < at; n++)
-        {
-            var sortKey = keys[n];
-            var src = srcs[n];
-            var run = (int)(src >> 32);
-            var source = run < workers ? _events[run] : _orphanEvents;
-            var cell = sortKey >> 1;
-            if (cell != current)
-            {
-                if (current != ulong.MaxValue)
-                {
-                    primaryEnds[cellCount - 1] = primaryEnd < 0 ? output : primaryEnd;
-                    NoteDelta(chunk, cells[cellCount - 1], delta, ref deltaCount);
-                }
-
-                delta = 0;
-                if (cellCount == cells.Length)
-                {
-                    Array.Resize(ref _chunkCells[chunk], cellCount * 2);
-                    Array.Resize(ref _chunkStarts[chunk], cellCount * 2);
-                    Array.Resize(ref _chunkPrimaryEnds[chunk], cellCount * 2);
-                    cells = _chunkCells[chunk];
-                    starts = _chunkStarts[chunk];
-                    primaryEnds = _chunkPrimaryEnds[chunk];
-                }
-
-                cells[cellCount] = KeyOfSortKey(sortKey);
-                starts[cellCount] = output;
-                cellCount++;
-                current = cell;
-                primaryEnd = -1;
-            }
-
-            ref readonly var e = ref source[(int)(uint)src];
-            if ((sortKey & 1) != 0)
-            {
-                // A secondary: the cell a mover left.
-                primaryEnd = primaryEnd < 0 ? output : primaryEnd;
-                delta -= OccupancyMutantForTest ? 0 : 1;
-            }
-            else if ((e.Flags & PushEvent.HasNew) == 0)
-            {
-                // Leave-only: the entity is gone from the cell it was last described in.
-                delta--;
-            }
-            else if ((e.Flags & both) != both || e.OldKey != e.NewKey)
-            {
-                // New here: a first description, or a mover that changed cell.
-                delta++;
-            }
-
-            slotEvents[output++] = e;
-        }
-
-        if (current != ulong.MaxValue)
-        {
-            primaryEnds[cellCount - 1] = primaryEnd < 0 ? output : primaryEnd;
-            NoteDelta(chunk, cells[cellCount - 1], delta, ref deltaCount);
-        }
-
-        _chunkCellCount[chunk] = cellCount;
-        _chunkDeltaCount[chunk] = deltaCount;
-    }
-
-    // Called by the chunk that owns the slot; the outer arrays are sized by PrepareMerge, serially, before any chunk runs.
-    private void EnsureMergeBuffers(int chunk, int total)
-    {
-        if (_mergeKeyA[chunk] == null || _mergeKeyA[chunk].Length < total)
-        {
-            var size = Math.Max(1024, total + (total >> 1));
-            _mergeKeyA[chunk] = new ulong[size];
-            _mergeSrcA[chunk] = new long[size];
-            _mergeKeyB[chunk] = new ulong[size];
-            _mergeSrcB[chunk] = new long[size];
-        }
+        _sessions[session.Slot].RequestedRadius = radius;
     }
 
     // ══ Per-session gather (parallel over sessions) ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -2028,492 +984,23 @@ internal sealed unsafe class PushReplication
         }
     }
 
-    /// <summary>
-    /// <b>Test seam, and a deliberate one.</b> Commits a skipped session as though its frame had been published — the one move SUB-03 forbids — so the
-    /// rule's verifier can be shown to reject it. Nothing in production sets it.
-    /// </summary>
-    internal bool CommitOnSkipForTest;
-
     /// <summary>The frame was published: the anchor and the delivered cells it described become the session's.</summary>
-    public void Commit(SessionId session)
-    {
-        ref var st = ref _sessions[session.Slot];
-        st.AnchorX = st.PAnchorX;
-        st.AnchorY = st.PAnchorY;
-        st.OriginX = st.POriginX;
-        st.OriginY = st.POriginY;
-        st.D0 = st.P0;
-        st.D1 = st.P1;
-        st.D2 = st.P2;
-        st.D3 = st.P3;
-        st.Cursor = st.PCursor;
-        st.Anchored = true;
-        st.NeedsReset = false;
-        st.LastTick = _tick;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool Bit(ulong d0, ulong d1, ulong d2, ulong d3, int i) =>
-        i >= 0 && ((i >> 6) switch { 0 => d0, 1 => d1, 2 => d2, _ => d3 } >> (i & 63) & 1UL) != 0;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void SetBit(ref ulong d0, ref ulong d1, ref ulong d2, ref ulong d3, int i)
-    {
-        switch (i >> 6)
-        {
-            case 0: d0 |= 1UL << (i & 63); break;
-            case 1: d1 |= 1UL << (i & 63); break;
-            case 2: d2 |= 1UL << (i & 63); break;
-            default: d3 |= 1UL << (i & 63); break;
-        }
-    }
-
-    /// <summary>The window index of absolute cell (<paramref name="cx"/>, <paramref name="cy"/>) for a window at the given origin, or -1 outside it.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private int WindowIndex(int originX, int originY, int cx, int cy)
-    {
-        var lx = cx - originX;
-        var ly = cy - originY;
-        return (uint)lx < (uint)Window && (uint)ly < (uint)Window ? (ly * Window) + lx : -1;
-    }
-
-    private static double RectMin2(double sx, double sy, double x0, double y0, double c)
-    {
-        var dx = Math.Max(Math.Max(x0 - sx, 0d), sx - (x0 + c));
-        var dy = Math.Max(Math.Max(y0 - sy, 0d), sy - (y0 + c));
-        return (dx * dx) + (dy * dy);
-    }
-
-    private static double RectMax2(double sx, double sy, double x0, double y0, double c)
-    {
-        var dx = Math.Max(sx - x0, x0 + c - sx);
-        var dy = Math.Max(sy - y0, y0 + c - sy);
-        return (dx * dx) + (dy * dy);
-    }
-
-    /// <summary>
-    /// Whether a cluster's box proves no entity in it can matter: for a delivery, the box is wholly outside the new disc; for a sweep, it is wholly
-    /// inside both discs or wholly outside both. A centimetre of margin keeps the proof sound against the quantized positions the tests use.
-    /// </summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool SkipCluster(double bx0, double by0, double bx1, double by1, double ax, double ay, double nx, double ny, bool sweeping)
-    {
-        if (double.IsInfinity(bx0) || double.IsInfinity(bx1))
-        {
-            return false;
-        }
-
-        var outer = (Radius + 0.01) * (Radius + 0.01);
-        var inner = (Radius - 0.01) * (Radius - 0.01);
-        var outsideNew = BoxMin2(nx, ny, bx0, by0, bx1, by1) > outer;
-        if (!sweeping)
-        {
-            return outsideNew;
-        }
-
-        var outsideOld = BoxMin2(ax, ay, bx0, by0, bx1, by1) > outer;
-        if (outsideNew && outsideOld)
-        {
-            return true;
-        }
-
-        return BoxMax2(nx, ny, bx0, by0, bx1, by1) <= inner && BoxMax2(ax, ay, bx0, by0, bx1, by1) <= inner;
-    }
-
-    private static double BoxMin2(double sx, double sy, double x0, double y0, double x1, double y1)
-    {
-        var dx = Math.Max(Math.Max(x0 - sx, 0d), sx - x1);
-        var dy = Math.Max(Math.Max(y0 - sy, 0d), sy - y1);
-        return (dx * dx) + (dy * dy);
-    }
-
-    private static double BoxMax2(double sx, double sy, double x0, double y0, double x1, double y1)
-    {
-        var dx = Math.Max(sx - x0, x1 - sx);
-        var dy = Math.Max(sy - y0, y1 - sy);
-        return (dx * dx) + (dy * dy);
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static bool Within(double ax, double ay, float x, float y, double r2)
-    {
-        var dx = x - ax;
-        var dy = y - ay;
-        return (dx * dx) + (dy * dy) <= r2;
-    }
+    public abstract void Commit(SessionId session);
 
     /// <summary>
     /// Builds one push session's records into <paramref name="scratch"/>. Returns whether the frame must carry a RESET (first frame after a lost one, a
     /// teleport, or a profile switch).
     /// </summary>
-    public bool Gather(SessionId session, bool placed, Vector3D viewpoint, bool forceReset, ulong archetypeMask, FrameWorkerScratch scratch,
-        ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves, ref long updates, out bool complete)
-    {
-        complete = true;
-        var from = Stopwatch.GetTimestamp();
-        ref var st = ref _sessions[session.Slot];
-        if (!st.Bound || st.Generation != session.Generation)
-        {
-            st = default;
-            st.Bound = true;
-            st.Generation = session.Generation;
-        }
+    public abstract bool Gather(SessionId session, bool placed, Vector3D viewpoint, bool forceReset, ulong archetypeMask, FrameWorkerScratch scratch,
+        ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves, ref long updates, out bool complete);
 
-        var reset = st.NeedsReset || forceReset;
-        var r2 = Radius * Radius;
-        var tick = _tick;
-
-        // Missed frames: replayed from the push log while every missed tick is still in it, reset otherwise (SUB-03: skip = union).
-        var gap = st.Anchored && !reset && placed ? (int)(tick - st.LastTick - 1) : 0;
-
-        // Distance LOD: an update to an entity far from the session before and after is sent only on the entity's far flush (BeginFarFold).
-        var lod = FarEvery > 1 && placed;
-        var farR2 = Radius * Radius * 0.25;
-        var log = Log ??= new LogTable();
-        log.Clear();
-        if (gap > 0)
-        {
-            if (gap >= LogDepth || !LogCovers(st.LastTick + 1, tick))
-            {
-                Interlocked.Increment(ref LogTooOld);
-                reset = true;
-                gap = 0;
-            }
-            else if (!CollectLog(ref st, viewpoint, archetypeMask, log, r2))
-            {
-                Interlocked.Increment(ref LogAmbiguous);
-                reset = true;
-                gap = 0;
-                log.Clear();
-            }
-            else
-            {
-                Interlocked.Increment(ref LogCatchUps);
-                Interlocked.Add(ref LogCatchUpTicks, gap);
-            }
-        }
-
-        double ax, ay;
-        int oOriginX, oOriginY;
-        ulong o0, o1, o2, o3;
-        if (!placed)
-        {
-            // Nowhere: nothing is described and nothing changes. The pending state is the current one.
-            st.PAnchorX = st.AnchorX;
-            st.PAnchorY = st.AnchorY;
-            st.POriginX = st.OriginX;
-            st.POriginY = st.OriginY;
-            st.P0 = st.D0;
-            st.P1 = st.D1;
-            st.P2 = st.D2;
-            st.P3 = st.D3;
-            return reset && st.Anchored;
-        }
-
-        if (reset || !st.Anchored)
-        {
-            ax = viewpoint.X;
-            ay = viewpoint.Y;
-            o0 = o1 = o2 = o3 = 0;
-            oOriginX = CellX(ax) - Half;
-            oOriginY = CellY(ay) - Half;
-            reset = st.Anchored || reset;
-        }
-        else
-        {
-            ax = st.AnchorX;
-            ay = st.AnchorY;
-            oOriginX = st.OriginX;
-            oOriginY = st.OriginY;
-            o0 = st.D0;
-            o1 = st.D1;
-            o2 = st.D2;
-            o3 = st.D3;
-        }
-
-        // ── The anchor ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        var nx = ax;
-        var ny = ay;
-        var dvx = viewpoint.X - ax;
-        var dvy = viewpoint.Y - ay;
-        var drift2 = (dvx * dvx) + (dvy * dvy);
-        if (drift2 > AnchorSlack * AnchorSlack)
-        {
-            if (drift2 > CellSize * CellSize)
-            {
-                // A teleport: everything the client holds is wrong. Start over.
-                ax = nx = viewpoint.X;
-                ay = ny = viewpoint.Y;
-                o0 = o1 = o2 = o3 = 0;
-                oOriginX = CellX(ax) - Half;
-                oOriginY = CellY(ay) - Half;
-                reset = true;
-            }
-            else
-            {
-                nx = viewpoint.X;
-                ny = viewpoint.Y;
-            }
-        }
-
-        var moved = nx != ax || ny != ay;
-        var nOriginX = CellX(nx) - Half;
-        var nOriginY = CellY(ny) - Half;
-
-        // The new window starts as the old one's cells that it still covers.
-        ulong d0 = 0, d1 = 0, d2 = 0, d3 = 0;
-        for (var ly = 0; ly < Window; ly++)
-        {
-            for (var lx = 0; lx < Window; lx++)
-            {
-                var oi = WindowIndex(oOriginX, oOriginY, nOriginX + lx, nOriginY + ly);
-                if (Bit(o0, o1, o2, o3, oi))
-                {
-                    SetBit(ref d0, ref d1, ref d2, ref d3, (ly * Window) + lx);
-                }
-            }
-        }
-
-        // ── 1. Deliver cells nearest first, under the enter budget ─────────────────────────────────────────────────────────────────────────────────
-        ulong n0 = 0, n1 = 0, n2 = 0, n3 = 0;
-        var entered = 0;
-        var anchorCx = CellX(nx);
-        var anchorCy = CellY(ny);
-        for (var ring = 0; ring <= Half && entered < enterBudget; ring++)
-        {
-            for (var dy = -ring; dy <= ring && entered < enterBudget; dy++)
-            {
-                for (var dx = -ring; dx <= ring && entered < enterBudget; dx++)
-                {
-                    if (Math.Abs(dx) != ring && Math.Abs(dy) != ring)
-                    {
-                        continue;
-                    }
-
-                    var cx = anchorCx + dx;
-                    var cy = anchorCy + dy;
-                    if ((uint)cx >= (uint)_gridW || (uint)cy >= (uint)_gridH)
-                    {
-                        continue;
-                    }
-
-                    var wi = WindowIndex(nOriginX, nOriginY, cx, cy);
-                    if (wi < 0 || Bit(d0, d1, d2, d3, wi))
-                    {
-                        continue;
-                    }
-
-                    var x0 = _gridMinX + (cx * CellSize);
-                    var y0 = _gridMinY + (cy * CellSize);
-                    if (RectMin2(nx, ny, x0, y0, CellSize) > r2)
-                    {
-                        continue;
-                    }
-
-                    SetBit(ref d0, ref d1, ref d2, ref d3, wi);
-                    SetBit(ref n0, ref n1, ref n2, ref n3, wi);
-                    entered += DeliverCell(cx, cy, nx, ny, r2, archetypeMask, scratch, tick, gap);
-                    Interlocked.Increment(ref CellsDelivered);
-                }
-            }
-        }
-
-        // The budget did not bind, so every cell the disc reaches is delivered: the client holds its whole view.
-        complete = entered < enterBudget;
-        enters += entered;
-
-        // ── 2. The push events around both anchors ─────────────────────────────────────────────────────────────────────────────────────────────────
-        if (gap > 0)
-        {
-            EmitLog(log, ax, ay, oOriginX, oOriginY, o0, o1, o2, o3, nx, ny, nOriginX, nOriginY, d0, d1, d2, d3, r2, scratch, ref enters, ref leaves,
-                ref updates, lod, farR2);
-        }
-
-        var minCx = CellX(Math.Min(ax, nx) - Radius);
-        var maxCx = CellX(Math.Max(ax, nx) + Radius);
-        var minCy = CellY(Math.Min(ay, ny) - Radius);
-        var maxCy = CellY(Math.Max(ay, ny) + Radius);
-        var index = _log[tick % LogDepth];
-        for (var cy = minCy; gap == 0 && cy <= maxCy; cy++)
-        {
-            // Only the occupied cells of the row: one probe of the row table, then the row's cells in the box.
-            var last = Key(maxCx, cy);
-            for (var k = FirstCellInRow(index, cy, minCx); k < index.CellCount && index.Cells[k] <= last; k++)
-            {
-                var cx = KeyX(index.Cells[k]);
-                var b = index.Starts[k];
-                var end = index.Starts[k + 1];
-                var pe = index.PrimaryEnds[k];
-
-                // A cell wholly inside both discs and delivered in both windows: every event that neither entered nor left it is an update, with no test.
-                var x0 = _gridMinX + (cx * CellSize);
-                var y0 = _gridMinY + (cy * CellSize);
-                var interior = RectMax2(ax, ay, x0, y0, CellSize) <= r2 && RectMax2(nx, ny, x0, y0, CellSize) <= r2
-                    && Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, cx, cy)) && Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, cx, cy));
-                for (var i = b; i < end; i++)
-                {
-                    ref readonly var e = ref _indexed[i];
-                    if ((archetypeMask & (1UL << e.Archetype)) == 0)
-                    {
-                        continue;
-                    }
-
-                    if (interior && i < pe && (e.Flags & (PushEvent.HasOld | PushEvent.HasNew)) == (PushEvent.HasOld | PushEvent.HasNew)
-                        && e.OldCx == cx && e.OldCy == cy)
-                    {
-                        EmitUpdateLod(in e, e.OldX, e.OldY, e.Groups, (e.Flags & PushEvent.Segment) != 0, e.FlushGroups, e.Flags, ax, ay, nx, ny, lod,
-                            farR2, scratch, ref updates);
-                        continue;
-                    }
-
-                    if (i >= pe)
-                    {
-                        // A secondary: handled at its primary cell when that cell is in range.
-                        var primary = e.PrimaryKey;
-                        var pcx = KeyX(primary);
-                        var pcy = KeyY(primary);
-                        if (pcx >= minCx && pcx <= maxCx && pcy >= minCy && pcy <= maxCy)
-                        {
-                            continue;
-                        }
-                    }
-
-                    var was = (e.Flags & PushEvent.HasOld) != 0 && Within(ax, ay, e.OldX, e.OldY, r2)
-                        && Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, e.OldCx, e.OldCy));
-                    var isIn = (e.Flags & PushEvent.HasNew) != 0 && Within(nx, ny, e.NewX, e.NewY, r2)
-                        && Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, e.NewCx, e.NewCy));
-                    if (isIn)
-                    {
-                        if (!was)
-                        {
-                            scratch.Add(e.Archetype, FrameListKind.Enter,
-                                new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
-                            enters++;
-                        }
-                        else
-                        {
-                            EmitUpdateLod(in e, e.OldX, e.OldY, e.Groups, (e.Flags & PushEvent.Segment) != 0, e.FlushGroups, e.Flags, ax, ay, nx, ny,
-                                lod, farR2, scratch, ref updates);
-                        }
-                    }
-                    else if (was)
-                    {
-                        scratch.Add(e.Archetype, FrameListKind.Leave, new FrameRecord { NetId = e.NetId, Archetype = e.Archetype });
-                        leaves++;
-                    }
-                }
-            }
-        }
-
-        // ── 3. The crescent the anchor's move uncovered or left ────────────────────────────────────────────────────────────────────────────────────
-        if (moved)
-        {
-            Interlocked.Increment(ref Sweeps);
-            for (var ly = 0; ly < Window; ly++)
-            {
-                for (var lx = 0; lx < Window; lx++)
-                {
-                    var wi = (ly * Window) + lx;
-                    if (!Bit(d0, d1, d2, d3, wi) || Bit(n0, n1, n2, n3, wi))
-                    {
-                        continue;
-                    }
-
-                    var cx = nOriginX + lx;
-                    var cy = nOriginY + ly;
-                    if ((uint)cx >= (uint)_gridW || (uint)cy >= (uint)_gridH)
-                    {
-                        continue;
-                    }
-
-                    var x0 = _gridMinX + (cx * CellSize);
-                    var y0 = _gridMinY + (cy * CellSize);
-                    var inBoth = RectMax2(ax, ay, x0, y0, CellSize) <= r2 && RectMax2(nx, ny, x0, y0, CellSize) <= r2;
-                    var outBoth = RectMin2(ax, ay, x0, y0, CellSize) > r2 && RectMin2(nx, ny, x0, y0, CellSize) > r2;
-                    if (inBoth || outBoth)
-                    {
-                        continue;
-                    }
-
-                    SweepCell(cx, cy, ax, ay, nx, ny, r2, archetypeMask, scratch, tick, gap, ref enters, ref leaves);
-                }
-            }
-
-            // Distance LOD: the inner crescent. A held entity the anchor's move brought inside R/2 may have far changes it was never sent — they wait for
-            // its far flush, which a near session ignores — so it gets its whole state now. One with an event since the last frame is the event's.
-            for (var ly = 0; lod && ly < Window; ly++)
-            {
-                for (var lx = 0; lx < Window; lx++)
-                {
-                    var wi = (ly * Window) + lx;
-                    if (!Bit(d0, d1, d2, d3, wi) || Bit(n0, n1, n2, n3, wi))
-                    {
-                        continue;
-                    }
-
-                    var cx = nOriginX + lx;
-                    var cy = nOriginY + ly;
-                    if ((uint)cx >= (uint)_gridW || (uint)cy >= (uint)_gridH)
-                    {
-                        continue;
-                    }
-
-                    var x0 = _gridMinX + (cx * CellSize);
-                    var y0 = _gridMinY + (cy * CellSize);
-                    if (RectMin2(nx, ny, x0, y0, CellSize) > farR2 || RectMax2(ax, ay, x0, y0, CellSize) <= farR2)
-                    {
-                        continue;
-                    }
-
-                    FarSweepCell(cx, cy, ax, ay, oOriginX, oOriginY, o0, o1, o2, o3, nx, ny, r2, farR2, archetypeMask, scratch, tick, gap, ref updates);
-                }
-            }
-        }
-
-        // ── 4. Distance LOD: this tick's far flushes of entities whose latest event is older, sent to the sessions that hold them far ─────────────
-        // After missed frames the log's replay folded them, with the events.
-        if (lod && gap == 0)
-        {
-            FlushEntries(ax, ay, oOriginX, oOriginY, o0, o1, o2, o3, nx, ny, nOriginX, nOriginY, d0, d1, d2, d3, r2, farR2, archetypeMask, scratch,
-                ref updates);
-        }
-
-        if (scratch.Deferred != 0)
-        {
-            Interlocked.Add(ref UpdatesDeferred, scratch.Deferred);
-            scratch.Deferred = 0;
-        }
-
-        FoldEmptyCells(scratch);
-
-        st.PAnchorX = nx;
-        st.PAnchorY = ny;
-        st.POriginX = nOriginX;
-        st.POriginY = nOriginY;
-        st.P0 = d0;
-        st.P1 = d1;
-        st.P2 = d2;
-        st.P3 = d3;
-        Interlocked.Add(ref GatherTicks, Stopwatch.GetTimestamp() - from);
-        return reset;
-    }
-
-    // ══ World sessions ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-    /// <summary>How many occupied cells a World session's delivery may visit in one frame: bounds a frame's cost (10 § 2.4, 1.5.3).</summary>
-    private const int WorldCellsPerFrame = 4096;
-
-    /// <summary>World frames that ended before the session's fill was complete — cumulative; what the fill's pacing costs in frames.</summary>
-    public long WorldFillFrames;
-
-    /// <summary>World gathers that needed the occupied cells' order on a tick it was not taken: each one delivered nothing that frame. Zero when sound.</summary>
-    public long WorldOrderMissing;
-
-    // Set by NoteWorldSession when some World session may fill this tick: only then is the occupancy's order kept up to date.
-    private bool _worldOrderNeeded;
-    private ulong[] _worldOrder = [];
-    private int _worldOrderCount;
-    private uint _worldOrderTick = uint.MaxValue;
+    /// <summary>
+    /// A World session: it holds every entity of its archetypes whose cell it has been delivered, and occupied cells are delivered in key order behind one
+    /// cursor — so its whole known-set is <c>key(cell(v)) &lt; cursor</c>. Each frame delivers occupied cells onward under the enter budget, then carries
+    /// the tick's events.
+    /// </summary>
+    public abstract bool GatherWorld(SessionId session, bool forceReset, ulong archetypeMask, FrameWorkerScratch scratch, int enterBudget, ref long enters,
+        ref long leaves, ref long updates, out bool complete);
 
     /// <summary>
     /// Serial, in the frame prologue: notes a World session this tick, so its fill can walk the occupied cells in order. A session may fill when its fill is
@@ -2527,8 +1014,8 @@ internal sealed unsafe class PushReplication
     }
 
     /// <summary>
-    /// Serial, in the frame prologue, after the index: the occupied cells in key order for this tick's World fills — taken only when some fill is
-    /// incomplete, so a runtime whose World sessions all hold the world pays nothing for it.
+    /// Serial, in the frame prologue, after the index: the occupied cells in key order for this tick's World fills — taken only when some fill may run,
+    /// so a runtime whose World sessions all hold the world pays nothing for it.
     /// </summary>
     public void PrepareWorldOrder()
     {
@@ -2550,909 +1037,26 @@ internal sealed unsafe class PushReplication
         _worldOrderCount = ordered.Length;
     }
 
-    /// <summary>
-    /// A World session: it holds every entity of its archetypes whose cell it has been delivered, and occupied cells are delivered in key order behind one
-    /// cursor — so its whole known-set is <c>key(cell(v)) &lt; cursor</c>. Each frame delivers occupied cells onward under the enter budget, then carries
-    /// the tick's events.
-    /// </summary>
-    public bool GatherWorld(SessionId session, bool forceReset, ulong archetypeMask, FrameWorkerScratch scratch, int enterBudget, ref long enters,
-        ref long leaves, ref long updates, out bool complete)
-    {
-        var from = Stopwatch.GetTimestamp();
-        ref var st = ref _sessions[session.Slot];
-        if (!st.Bound || st.Generation != session.Generation)
-        {
-            st = default;
-            st.Bound = true;
-            st.Generation = session.Generation;
-        }
-
-        var tick = _tick;
-        var reset = st.NeedsReset || forceReset;
-        var gap = st.Anchored && !reset ? (int)(tick - st.LastTick - 1) : 0;
-        var log = Log ??= new LogTable();
-        log.Clear();
-        if (gap > 0)
-        {
-            if (gap >= LogDepth || !LogCovers(st.LastTick + 1, tick))
-            {
-                Interlocked.Increment(ref LogTooOld);
-                reset = true;
-                gap = 0;
-            }
-            else if (!CollectLogWorld(st.LastTick + 1, st.Cursor, archetypeMask, log))
-            {
-                Interlocked.Increment(ref LogAmbiguous);
-                reset = true;
-                gap = 0;
-                log.Clear();
-            }
-            else
-            {
-                Interlocked.Increment(ref LogCatchUps);
-                Interlocked.Add(ref LogCatchUpTicks, gap);
-            }
-        }
-
-        var flagged = reset && st.Anchored;
-        var oldCursor = reset || !st.Anchored ? 0UL : st.Cursor;
-
-        // ── 1. Deliver occupied cells onward, under the enter budget ──
-        // An empty cell holds nobody to enter, so only occupied ones are visited; past the last of them the whole world is delivered.
-        var cursor = oldCursor;
-        var entered = 0;
-        if (cursor != ulong.MaxValue && _worldOrderTick != tick)
-        {
-            // NoteWorldSession did not foresee this fill. Nothing is delivered and the cursor stays where it is — never "complete" over an order nobody
-            // took — and the next prologue sees the fill and takes it.
-            Interlocked.Increment(ref WorldOrderMissing);
-        }
-        else if (cursor != ulong.MaxValue)
-        {
-            var k = LowerBound(_worldOrder, 0, _worldOrderCount, cursor);
-            var visited = 0;
-            for (; k < _worldOrderCount && entered < enterBudget && visited < WorldCellsPerFrame; k++, visited++)
-            {
-                var key = _worldOrder[k];
-                entered += DeliverCell(KeyX(key), KeyY(key), 0d, 0d, double.PositiveInfinity, archetypeMask, scratch, tick, gap, everywhere: true);
-                cursor = key + 1;
-            }
-
-            if (k == _worldOrderCount)
-            {
-                cursor = ulong.MaxValue;
-            }
-        }
-
-        complete = cursor == ulong.MaxValue;
-        if (!complete)
-        {
-            Interlocked.Increment(ref WorldFillFrames);
-        }
-
-        enters += entered;
-
-        // ── 2. The events: this tick's, or every missed tick's folded ──
-        if (gap > 0)
-        {
-            for (var i = 0; i < log.Count; i++)
-            {
-                ref var entry = ref log.Entries[i];
-                ref readonly var e = ref entry.Last;
-                var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && Key(entry.OldCx, entry.OldCy) < oldCursor;
-                var isIn = (e.Flags & PushEvent.HasNew) != 0 && e.NewKey < cursor;
-                EmitWorld(in e, was, isIn, entry.Groups, entry.Segment, scratch, ref enters, ref leaves, ref updates);
-            }
-        }
-        else
-        {
-            var slot = _log[tick % LogDepth];
-            for (var k = 0; slot.Valid && slot.Tick == tick && k < slot.CellCount; k++)
-            {
-                for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
-                {
-                    ref readonly var e = ref slot.Events[i];
-                    if ((archetypeMask & (1UL << e.Archetype)) == 0)
-                    {
-                        continue;
-                    }
-
-                    var was = (e.Flags & PushEvent.HasOld) != 0 && e.OldKey < oldCursor;
-                    var isIn = (e.Flags & PushEvent.HasNew) != 0 && e.NewKey < cursor;
-                    EmitWorld(in e, was, isIn, e.Groups, (e.Flags & PushEvent.Segment) != 0, scratch, ref enters, ref leaves, ref updates);
-                }
-            }
-        }
-
-        st.PCursor = cursor;
-        FoldEmptyCells(scratch);
-        Interlocked.Add(ref GatherTicks, Stopwatch.GetTimestamp() - from);
-        return flagged;
-    }
-
-    // Once per gather, not once per cell: a World frame can skip thousands of cells, and every gather worker shares the counter's line.
-    private void FoldEmptyCells(FrameWorkerScratch scratch)
-    {
-        if (scratch.EmptyCellsSkipped != 0)
-        {
-            Interlocked.Add(ref EmptyCellsSkipped, scratch.EmptyCellsSkipped);
-            scratch.EmptyCellsSkipped = 0;
-        }
-    }
-
-    private static void EmitWorld(in PushEvent e, bool was, bool isIn, int groups, bool segment, FrameWorkerScratch scratch, ref long enters,
-        ref long leaves, ref long updates)
-    {
-        if (isIn && !was)
-        {
-            scratch.Add(e.Archetype, FrameListKind.Enter, new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
-            enters++;
-        }
-        else if (isIn)
-        {
-            var merged = e;
-            merged.Groups = (byte)groups;
-            merged.Flags = segment ? (byte)(e.Flags | PushEvent.Segment) : (byte)(e.Flags & ~PushEvent.Segment);
-            EmitUpdate(in merged, scratch, ref updates);
-        }
-        else if (was)
-        {
-            scratch.Add(e.Archetype, FrameListKind.Leave, new FrameRecord { NetId = e.NetId, Archetype = e.Archetype });
-            leaves++;
-        }
-    }
-
-    /// <summary>The World form of <see cref="CollectLog"/>: every cell, primaries only (each event once per tick).</summary>
-    private bool CollectLogWorld(uint first, ulong cursor, ulong archetypeMask, LogTable table)
-    {
-        for (var t = first; t != _tick + 1; t++)
-        {
-            var slot = _log[t % LogDepth];
-            for (var k = 0; k < slot.CellCount; k++)
-            {
-                for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
-                {
-                    ref readonly var e = ref slot.Events[i];
-                    if ((archetypeMask & (1UL << e.Archetype)) == 0)
-                    {
-                        continue;
-                    }
-
-                    ref var entry = ref table.Find(e.NetId, out var found);
-                    if (!found)
-                    {
-                        entry = default;
-                        entry.FirstFlags = e.Flags;
-                        entry.OldX = e.OldX;
-                        entry.OldY = e.OldY;
-                        entry.OldCx = e.OldCx;
-                        entry.OldCy = e.OldCy;
-                    }
-                    else if ((entry.Last.Flags & PushEvent.HasNew) == 0)
-                    {
-                        entry.Replaced = true;
-                    }
-
-                    entry.Last = e;
-                    entry.LastTick = t;
-                    entry.Groups |= e.Groups;
-                    entry.Segment |= (e.Flags & PushEvent.Segment) != 0;
-                }
-            }
-        }
-
-        for (var i = 0; i < table.Count; i++)
-        {
-            ref var entry = ref table.Entries[i];
-            if (entry.Replaced && (entry.FirstFlags & PushEvent.HasOld) != 0 && Key(entry.OldCx, entry.OldCy) < cursor
-                && (entry.Last.Flags & PushEvent.HasNew) != 0)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    // ══ The push log's catch-up ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-
-    [ThreadStatic]
-    private static LogTable Log;
-
-    /// <summary>
-    /// Per worker: the missed ticks' events, folded per identity — the first event's old position, the last one's new, and the union of what changed.
-    /// </summary>
-    private sealed class LogTable
-    {
-        public uint[] Keys = new uint[256];
-        public int[] Index = new int[256];
-        public LogEntry[] Entries = new LogEntry[128];
-        public int Count;
-
-        public void Clear()
-        {
-            if (Count > 0)
-            {
-                Array.Clear(Keys);
-                Count = 0;
-            }
-        }
-
-        public ref LogEntry Find(uint netId, out bool found)
-        {
-            if (Count * 2 >= Keys.Length)
-            {
-                Grow();
-            }
-
-            var mask = Keys.Length - 1;
-            var h = (int)((netId * 0x9E3779B1u) >> 8) & mask;
-            while (true)
-            {
-                var k = Keys[h];
-                if (k == 0)
-                {
-                    Keys[h] = netId + 1;
-                    Index[h] = Count;
-                    if (Count == Entries.Length)
-                    {
-                        Array.Resize(ref Entries, Count * 2);
-                    }
-
-                    found = false;
-                    return ref Entries[Count++];
-                }
-
-                if (k == netId + 1)
-                {
-                    found = true;
-                    return ref Entries[Index[h]];
-                }
-
-                h = (h + 1) & mask;
-            }
-        }
-
-        private void Grow()
-        {
-            var keys = new uint[Keys.Length * 2];
-            var index = new int[keys.Length];
-            var mask = keys.Length - 1;
-            for (var i = 0; i < Keys.Length; i++)
-            {
-                if (Keys[i] == 0)
-                {
-                    continue;
-                }
-
-                var h = (int)(((Keys[i] - 1) * 0x9E3779B1u) >> 8) & mask;
-                while (keys[h] != 0)
-                {
-                    h = (h + 1) & mask;
-                }
-
-                keys[h] = Keys[i];
-                index[h] = Index[i];
-            }
-
-            Keys = keys;
-            Index = index;
-        }
-    }
-
-    private struct LogEntry
-    {
-        public PushEvent Last;
-        public float OldX;
-        public float OldY;
-        public int OldCx;
-        public int OldCy;
-        public uint LastTick;
-        public byte FirstFlags;
-        public byte Groups;
-        public bool Segment;
-        public bool Replaced;
-
-        // Distance LOD: the far flushes folded in (flagged events and flush entries), and whether any real event was.
-        public byte FlushGroups;
-        public bool FlushSegment;
-        public bool Flushed;
-        public bool Real;
-    }
-
-    /// <summary>Whether the log holds every tick from <paramref name="first"/> to <paramref name="last"/>.</summary>
-    private bool LogCovers(uint first, uint last)
-    {
-        for (var t = first; t != last + 1; t++)
-        {
-            var slot = _log[t % LogDepth];
-            if (!slot.Valid || slot.Tick != t)
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    /// <summary>
-    /// Folds every event the session missed, in tick order, over the cells either disc can reach. Returns <see langword="false"/> when an identity it held
-    /// was reused inside the window and would be both left and entered in one frame (SUB-06), which only a RESET can say.
-    /// </summary>
-    private bool CollectLog(ref PushSessionState st, Vector3D viewpoint, ulong archetypeMask, LogTable table, double r2)
-    {
-        var ax = st.AnchorX;
-        var ay = st.AnchorY;
-        var minCx = CellX(Math.Min(ax, viewpoint.X) - Radius);
-        var maxCx = CellX(Math.Max(ax, viewpoint.X) + Radius);
-        var minCy = CellY(Math.Min(ay, viewpoint.Y) - Radius);
-        var maxCy = CellY(Math.Max(ay, viewpoint.Y) + Radius);
-        for (var t = st.LastTick + 1; t != _tick + 1; t++)
-        {
-            var slot = _log[t % LogDepth];
-            for (var cy = minCy; cy <= maxCy; cy++)
-            {
-                var hi = Key(maxCx, cy);
-                for (var k = FirstCellInRow(slot, cy, minCx); k < slot.CellCount && slot.Cells[k] <= hi; k++)
-                {
-                    for (var i = slot.Starts[k]; i < slot.Starts[k + 1]; i++)
-                    {
-                        ref readonly var e = ref slot.Events[i];
-                        if ((archetypeMask & (1UL << e.Archetype)) == 0)
-                        {
-                            continue;
-                        }
-
-                        ref var entry = ref table.Find(e.NetId, out var found);
-                        if (!found)
-                        {
-                            entry = default;
-                            entry.FirstFlags = e.Flags;
-                            entry.OldX = e.OldX;
-                            entry.OldY = e.OldY;
-                            entry.OldCx = e.OldCx;
-                            entry.OldCy = e.OldCy;
-                        }
-                        else if (entry.LastTick == t)
-                        {
-                            // The same event, met again — as a secondary, or as the primary after its secondary. A secondary is a copy taken before the
-                            // fold flagged the primary, so a far flush is only ever on the primary: take it from whichever copy carries it.
-                            if ((e.Flags & PushEvent.FarFlush) != 0)
-                            {
-                                entry.FlushGroups |= e.FlushGroups;
-                                entry.FlushSegment |= (e.Flags & PushEvent.FlushSegment) != 0;
-                                entry.Flushed = true;
-                            }
-
-                            continue;
-                        }
-                        else if ((entry.Last.Flags & PushEvent.HasNew) == 0)
-                        {
-                            // An event after the identity was released: it names somebody else now.
-                            entry.Replaced = true;
-                        }
-
-                        entry.Last = e;
-                        entry.LastTick = t;
-                        entry.Groups |= e.Groups;
-                        entry.Segment |= (e.Flags & PushEvent.Segment) != 0;
-                        entry.Real = true;
-                        if ((e.Flags & PushEvent.FarFlush) != 0)
-                        {
-                            entry.FlushGroups |= e.FlushGroups;
-                            entry.FlushSegment |= (e.Flags & PushEvent.FlushSegment) != 0;
-                            entry.Flushed = true;
-                        }
-                    }
-                }
-            }
-
-            // The tick's far flushes of entities whose latest event is older: their position is that event's, and nothing else changed since.
-            for (var cy = minCy; FarEvery > 1 && cy <= maxCy; cy++)
-            {
-                var lo = Key(minCx, cy);
-                var hi = Key(maxCx, cy);
-                var k = LowerBound(slot.FlushCells, 0, slot.FlushCellCount, lo);
-                for (; k < slot.FlushCellCount && slot.FlushCells[k] <= hi; k++)
-                {
-                    for (var i = slot.FlushStarts[k]; i < slot.FlushStarts[k + 1]; i++)
-                    {
-                        ref readonly var f = ref slot.Flush[i];
-                        if ((archetypeMask & (1UL << f.Archetype)) == 0)
-                        {
-                            continue;
-                        }
-
-                        ref var entry = ref table.Find(f.NetId, out var found);
-                        if (!found)
-                        {
-                            entry = default;
-                            entry.FirstFlags = f.Flags;
-                            entry.OldX = f.OldX;
-                            entry.OldY = f.OldY;
-                            entry.OldCx = f.OldCx;
-                            entry.OldCy = f.OldCy;
-                        }
-                        else if ((entry.Last.Flags & PushEvent.HasNew) == 0)
-                        {
-                            entry.Replaced = true;
-                        }
-
-                        entry.Last = f;
-                        entry.LastTick = t;
-                        entry.FlushGroups |= f.FlushGroups;
-                        entry.FlushSegment |= (f.Flags & PushEvent.FlushSegment) != 0;
-                        entry.Flushed = true;
-                    }
-                }
-            }
-        }
-
-        // An identity the session held that now names another entity it would enter: leave and enter in one frame, which only a RESET can carry. The
-        // enter half is tested against the viewpoint, a superset of what the gather will deliver, so the refusal is conservative.
-        for (var i = 0; i < table.Count; i++)
-        {
-            ref var entry = ref table.Entries[i];
-            if (entry.Replaced && WasKnown(ref st, in entry, r2) && (entry.Last.Flags & PushEvent.HasNew) != 0
-                && Within(viewpoint.X, viewpoint.Y, entry.Last.NewX, entry.Last.NewY, (Radius + CellSize) * (Radius + CellSize)))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private bool WasKnown(ref PushSessionState st, in LogEntry entry, double r2) =>
-        (entry.FirstFlags & PushEvent.HasOld) != 0 && Within(st.AnchorX, st.AnchorY, entry.OldX, entry.OldY, r2)
-        && Bit(st.D0, st.D1, st.D2, st.D3, WindowIndex(st.OriginX, st.OriginY, entry.OldCx, entry.OldCy));
-
-    /// <summary>The folded events against the committed disc and window (was) and the new ones (is).</summary>
-    private void EmitLog(LogTable table, double ax, double ay, int oOriginX, int oOriginY, ulong o0, ulong o1, ulong o2, ulong o3, double nx, double ny,
-        int nOriginX, int nOriginY, ulong d0, ulong d1, ulong d2, ulong d3, double r2, FrameWorkerScratch scratch, ref long enters, ref long leaves,
-        ref long updates, bool lod, double farR2)
-    {
-        for (var i = 0; i < table.Count; i++)
-        {
-            ref var entry = ref table.Entries[i];
-            ref readonly var e = ref entry.Last;
-            var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && Within(ax, ay, entry.OldX, entry.OldY, r2)
-                && Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, entry.OldCx, entry.OldCy));
-            var isIn = (e.Flags & PushEvent.HasNew) != 0 && Within(nx, ny, e.NewX, e.NewY, r2)
-                && Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, e.NewCx, e.NewCy));
-
-            // Only far flushes and no event: the entity neither moved nor changed since, and a flush entry stamps nothing — so an enter or a leave is the cell
-            // delivery's or the sweep's, and a crossing inward is the inner crescent's. It speaks only to a session holding it far before and after.
-            if (!entry.Real)
-            {
-                if (lod && was && isIn && !Within(nx, ny, e.NewX, e.NewY, farR2) && !Within(ax, ay, entry.OldX, entry.OldY, farR2))
-                {
-                    EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, entry.FlushGroups, entry.FlushSegment, scratch, ref updates);
-                }
-
-                continue;
-            }
-
-            if (isIn && !was)
-            {
-                scratch.Add(e.Archetype, FrameListKind.Enter, new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
-                enters++;
-            }
-            else if (isIn)
-            {
-                var flushFlags = entry.Flushed ? (byte)(PushEvent.FarFlush | (entry.FlushSegment ? PushEvent.FlushSegment : 0)) : (byte)0;
-                EmitUpdateLod(in e, entry.OldX, entry.OldY, entry.Groups, entry.Segment, entry.FlushGroups, flushFlags, ax, ay, nx, ny, lod, farR2,
-                    scratch, ref updates);
-            }
-            else if (was)
-            {
-                scratch.Add(e.Archetype, FrameListKind.Leave, new FrameRecord { NetId = e.NetId, Archetype = e.Archetype });
-                leaves++;
-            }
-        }
-    }
-
-    /// <summary>
-    /// An update to an entity the session holds before and after: sent, withheld (far then and far now, not its far flush), the far flush's union, or
-    /// widened to the whole state (it crossed inward, so changes withheld while it was far may be missing). Of <c>flags</c> only
-    /// <see cref="PushEvent.FarFlush"/> and <see cref="PushEvent.FlushSegment"/> are read.
-    /// </summary>
-    private void EmitUpdateLod(in PushEvent e, float oldX, float oldY, int groups, bool segment, int flushGroups, byte flags, double ax, double ay, double nx,
-        double ny, bool lod, double farR2, FrameWorkerScratch scratch, ref long updates)
-    {
-        if (lod)
-        {
-            var farNow = !Within(nx, ny, e.NewX, e.NewY, farR2);
-            var farBefore = !Within(ax, ay, oldX, oldY, farR2);
-            if (farNow && farBefore)
-            {
-                if ((flags & PushEvent.FarFlush) == 0)
-                {
-                    scratch.Deferred++;
-                    return;
-                }
-
-                groups = flushGroups;
-                segment = (flags & PushEvent.FlushSegment) != 0;
-            }
-            else if (farBefore)
-            {
-                var plan = _encodePlans[e.Archetype];
-                groups = (1 << plan.GroupCount) - 1;
-                segment = plan.Moving;
-            }
-        }
-
-        EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, groups, segment, scratch, ref updates);
-    }
-
-    /// <summary>Distance LOD: this tick's flush entries in the disc, to a session that held the entity before this frame and holds it far now.</summary>
-    private void FlushEntries(double ax, double ay, int oOriginX, int oOriginY, ulong o0, ulong o1, ulong o2, ulong o3, double nx, double ny, int nOriginX,
-        int nOriginY, ulong d0, ulong d1, ulong d2, ulong d3, double r2, double farR2, ulong archetypeMask, FrameWorkerScratch scratch, ref long updates)
-    {
-        var slot = _log[_tick % LogDepth];
-        if (slot.FlushCellCount == 0 || slot.Tick != _tick)
-        {
-            return;
-        }
-
-        var minCx = CellX(nx - Radius);
-        var maxCx = CellX(nx + Radius);
-        var minCy = CellY(ny - Radius);
-        var maxCy = CellY(ny + Radius);
-        for (var cy = minCy; cy <= maxCy; cy++)
-        {
-            var k = LowerBound(slot.FlushCells, 0, slot.FlushCellCount, Key(minCx, cy));
-            for (; k < slot.FlushCellCount && slot.FlushCells[k] <= Key(maxCx, cy); k++)
-            {
-                var cell = slot.FlushCells[k];
-                var x0 = _gridMinX + (KeyX(cell) * CellSize);
-                var y0 = _gridMinY + (KeyY(cell) * CellSize);
-                if (RectMax2(nx, ny, x0, y0, CellSize) <= farR2 || RectMin2(nx, ny, x0, y0, CellSize) > r2)
-                {
-                    continue;
-                }
-
-                for (var i = slot.FlushStarts[k]; i < slot.FlushStarts[k + 1]; i++)
-                {
-                    ref readonly var f = ref slot.Flush[i];
-                    if ((archetypeMask & (1UL << f.Archetype)) == 0 || Within(nx, ny, f.NewX, f.NewY, farR2) || !Within(nx, ny, f.NewX, f.NewY, r2)
-                        || !Bit(d0, d1, d2, d3, WindowIndex(nOriginX, nOriginY, f.NewCx, f.NewCy)) || !Within(ax, ay, f.NewX, f.NewY, r2)
-                        || !Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, f.NewCx, f.NewCy)))
-                    {
-                        continue;
-                    }
-
-                    EmitRecord(f.NetId, f.Block, f.Slot, f.Archetype, f.FlushGroups, (f.Flags & PushEvent.FlushSegment) != 0, scratch, ref updates);
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Distance LOD: a cell of the inner crescent — the held entities the anchor's move brought from beyond R/2 to within it, with no event since the
-    /// session's last frame, get what changed in the last N ticks: older changes went out in the far flush before, and newer ones wait for one a near
-    /// session ignores.
-    /// </summary>
-    private void FarSweepCell(int cx, int cy, double ax, double ay, int oOriginX, int oOriginY, ulong o0, ulong o1, ulong o2, ulong o3, double nx, double ny,
-        double r2, double farR2, ulong archetypeMask, FrameWorkerScratch scratch, uint tick, int gap, ref long updates)
-    {
-        if (!Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, cx, cy)) || _occupancy.Get(Key(cx, cy)) == 0)
-        {
-            return;
-        }
-
-        var x0 = _gridMinX + (cx * CellSize);
-        var y0 = _gridMinY + (cy * CellSize);
-        var near = Math.Sqrt(farR2);
-        foreach (var a in _pushIndices)
-        {
-            if ((archetypeMask & (1UL << a)) == 0)
-            {
-                continue;
-            }
-
-            var state = _states[a];
-            var cs = state.ClusterState;
-            if (cs == null)
-            {
-                continue;
-            }
-
-            var plan = _encodePlans[a];
-            var layout = state.Layout;
-            var lo = tick > (uint)FarEvery ? tick - (uint)FarEvery : 0u;
-
-            // The box is built from raw positions and the test below from decoded ones: a margin of a quantization step keeps the pruning sound.
-            var margin = 0.01 + Math.Max(_stepX[a], _stepY[a]);
-            using var e = cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, double.NegativeInfinity, x0 + CellSize + 1d, y0 + CellSize + 1d, double.PositiveInfinity);
-            while (e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out var bx1, out var by1))
-            {
-                // A box wholly beyond R/2 of the new anchor, or wholly within R/2 of the old one, holds nobody who crossed inward.
-                if (!double.IsInfinity(bx0) && !double.IsInfinity(bx1)
-                    && (BoxMin2(nx, ny, bx0, by0, bx1, by1) > (near + margin) * (near + margin)
-                        || BoxMax2(ax, ay, bx0, by0, bx1, by1) <= (near - margin) * (near - margin)))
-                {
-                    continue;
-                }
-
-                var block = BlockOf(a, chunkId);
-                if (block == null)
-                {
-                    continue;
-                }
-
-                var bytes = (byte*)block;
-                var occ = block->ProjectedOccupancy;
-                while (occ != 0)
-                {
-                    var slot = BitOperations.TrailingZeroCount(occ);
-                    occ &= occ - 1;
-                    var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (slot * layout.HotStride));
-                    if (hot->NetId == NetIdAllocator.NoNetId)
-                    {
-                        continue;
-                    }
-
-                    var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
-                    if (tick - *(uint*)(cold + layout.LastEventTickOffsetInColdEntry) <= (uint)gap)
-                    {
-                        continue;
-                    }
-
-                    Decode(a, cold + _positionOffset[a], out var px, out var py);
-                    if (CellX(px) != cx || CellY(py) != cy || !Within(nx, ny, px, py, farR2) || Within(ax, ay, px, py, farR2)
-                        || !Within(ax, ay, px, py, r2))
-                    {
-                        continue;
-                    }
-
-                    var groups = 0;
-                    for (var g = 0; g < plan.GroupCount; g++)
-                    {
-                        if (hot->GroupTicks[plan.GroupTickSlot[g]] > lo)
-                        {
-                            groups |= 1 << g;
-                        }
-                    }
-
-                    FarCrescentStates++;
-                    EmitRecord(hot->NetId, (nint)block, (byte)slot, (ushort)a, groups, plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > lo, scratch,
-                        ref updates);
-                }
-            }
-        }
-    }
-
     // ══ Distance LOD: the far flushes (parallel stage after the index) ═══════════════════════════════════════════════════════════════════════════════
 
     /// <summary>Whether this tick's far flushes have been folded.</summary>
-    public bool FarFolded => _farFoldTick == _tick;
+    public abstract bool FarFolded { get; }
 
     /// <summary>
     /// The far-flush fold's serial half: how many chunks of cells the stage runs, or 0 when the LOD is off, the index is not built yet (the frame
     /// prologue then folds serially) or the fold already ran this tick.
     /// </summary>
-    /// <remarks>
-    /// An entity's far flush is its phase tick, <c>(netId + tick) % N == 0</c>, and carries the groups it changed in the last N ticks — read from the
-    /// group stamps of its hot entry, which every change sets and which the previous phase flush, N ticks ago, covered up to. The candidates are the
-    /// primaries of the last N log slots; the one that is the entity's latest event (its cold stamp names that tick) speaks for it. A change always makes
-    /// an event, so an entity with anything to flush is always among them.
-    /// </remarks>
-    public int BeginFarFold(int workers)
-    {
-        if (FarEvery <= 1 || !Indexed || _farFoldTick == _tick)
-        {
-            return 0;
-        }
+    public abstract int BeginFarFold(int workers);
 
-        var k = Math.Max(1, Math.Min(workers, _log[_tick % LogDepth].CellCount));
-        if (_farBounds.Length < k + 1)
-        {
-            _farBounds = new ulong[k + 1];
-        }
-
-        // Cell ranges of about equal event counts, from this tick's compact index: a population is clustered, so equal cell counts are not equal work.
-        var slot0 = _log[_tick % LogDepth];
-        var totalEvents = slot0.CellCount == 0 ? 0 : slot0.Starts[slot0.CellCount];
-        _farBounds[0] = 0;
-        var at = 0;
-        for (var i = 1; i < k; i++)
-        {
-            var target = (int)((long)totalEvents * i / k);
-            while (at < slot0.CellCount && slot0.Starts[at] < target)
-            {
-                at++;
-            }
-
-            _farBounds[i] = at < slot0.CellCount ? Math.Max(_farBounds[i - 1], slot0.Cells[at]) : ulong.MaxValue;
-        }
-
-        _farBounds[k] = ulong.MaxValue;
-        if (_farOut.Length < k)
-        {
-            Array.Resize(ref _farOut, k);
-            Array.Resize(ref _farOutCount, k);
-            Array.Resize(ref _farOutCells, k);
-            Array.Resize(ref _farOutStarts, k);
-            Array.Resize(ref _farOutCellCount, k);
-            Array.Resize(ref _farOutFlagged, k);
-        }
-
-        for (var i = 0; i < k; i++)
-        {
-            _farOut[i] ??= new PushEvent[256];
-            _farOutCells[i] ??= new ulong[64];
-            _farOutStarts[i] ??= new int[65];
-            _farOutCount[i] = 0;
-            _farOutCellCount[i] = 0;
-            _farOutFlagged[i] = 0;
-        }
-
-        _farChunkCount = k;
-        _farFoldTick = _tick;
-        return k;
-    }
-
-    /// <summary>
-    /// One chunk of the fold: a contiguous range of cells, walked in order across the window's slots, so its output is already grouped by cell. A chunk
-    /// owns its cells' events, which is what lets it flag this tick's in place.
-    /// </summary>
-    public void FoldFarChunk(int chunk)
-    {
-        if ((uint)chunk >= (uint)_farChunkCount)
-        {
-            return;
-        }
-
-        var c0 = _farBounds[chunk];
-        var c1 = _farBounds[chunk + 1];
-        var n = FarEvery;
-        var t = _tick;
-
-        // The window's floor, wrap-safe for the run's first ticks; and the phase, wrap-safe for a tick counter or net id past 2^32 when N is no power of two.
-        var lo = t > (uint)n ? t - (uint)n : 0u;
-        var tickPhase = t % (uint)n;
-        Span<int> cursor = stackalloc int[LogDepth];
-        for (var age = 0; age < n; age++)
-        {
-            var slot = _log[(t - (uint)age) % LogDepth];
-            cursor[age] = slot.Valid && slot.Tick == t - (uint)age ? LowerBound(slot.Cells, 0, slot.CellCount, c0) : int.MaxValue;
-        }
-
-        var output = _farOut[chunk];
-        var count = 0;
-        var cellsOut = _farOutCells[chunk];
-        var startsOut = _farOutStarts[chunk];
-        var cellCount = 0;
-        var flagged = 0L;
-        while (true)
-        {
-            // The next cell any slot has events in.
-            var cell = ulong.MaxValue;
-            for (var age = 0; age < n; age++)
-            {
-                var slot = _log[(t - (uint)age) % LogDepth];
-                if (cursor[age] < slot.CellCount && slot.Cells[cursor[age]] < cell)
-                {
-                    cell = slot.Cells[cursor[age]];
-                }
-            }
-
-            if (cell >= c1)
-            {
-                break;
-            }
-
-            var before = count;
-            for (var age = 0; age < n; age++)
-            {
-                var slot = _log[(t - (uint)age) % LogDepth];
-                if (cursor[age] >= slot.CellCount || slot.Cells[cursor[age]] != cell)
-                {
-                    continue;
-                }
-
-                var k = cursor[age]++;
-                var events = slot.Events;
-                for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
-                {
-                    ref var e = ref events[i];
-                    if ((e.Flags & PushEvent.HasNew) == 0 || ((e.NetId % (uint)n) + tickPhase) % (uint)n != 0)
-                    {
-                        continue;
-                    }
-
-                    var block = (ReplicationBlockHeader*)e.Block;
-                    if (block == null || block->ChunkId < 0)
-                    {
-                        continue;
-                    }
-
-                    var layout = _states[e.Archetype].Layout;
-                    var bytes = (byte*)block;
-                    var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (e.Slot * layout.HotStride));
-                    // This tick's event is the entity's latest by definition; an older one only if nothing came after it (its stamp) and its slot still
-                    // holds it (identity reuse).
-                    if (age != 0 && (hot->NetId != e.NetId
-                        || *(uint*)(bytes + layout.ColdOffset + (e.Slot * layout.ColdStride) + layout.LastEventTickOffsetInColdEntry) != slot.Tick))
-                    {
-                        continue;
-                    }
-
-                    var plan = _encodePlans[e.Archetype];
-                    var groups = 0;
-                    for (var g = 0; g < plan.GroupCount; g++)
-                    {
-                        if (hot->GroupTicks[plan.GroupTickSlot[g]] > lo)
-                        {
-                            groups |= 1 << g;
-                        }
-                    }
-
-                    var segment = plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > lo;
-                    if (groups == 0 && !segment)
-                    {
-                        continue;
-                    }
-
-                    if (age == 0)
-                    {
-                        e.FlushGroups = (byte)groups;
-                        e.Flags |= (byte)(PushEvent.FarFlush | (segment ? PushEvent.FlushSegment : 0));
-                        flagged++;
-                        continue;
-                    }
-
-                    if (count == output.Length)
-                    {
-                        Array.Resize(ref _farOut[chunk], count * 2);
-                        output = _farOut[chunk];
-                    }
-
-                    ref var f = ref output[count++];
-                    f = e;
-                    f.OldX = e.NewX;
-                    f.OldY = e.NewY;
-                    f.OldKey = e.NewKey;
-                    f.Groups = 0;
-                    f.FlushGroups = (byte)groups;
-                    f.Flags = (byte)(PushEvent.HasOld | PushEvent.HasNew | PushEvent.FarFlush | (segment ? PushEvent.FlushSegment : 0));
-                }
-            }
-
-            if (count != before)
-            {
-                if (cellCount + 1 >= startsOut.Length)
-                {
-                    Array.Resize(ref _farOutCells[chunk], (cellCount + 1) * 2);
-                    Array.Resize(ref _farOutStarts[chunk], ((cellCount + 1) * 2) + 1);
-                    cellsOut = _farOutCells[chunk];
-                    startsOut = _farOutStarts[chunk];
-                }
-
-                cellsOut[cellCount] = cell;
-                startsOut[cellCount] = before;
-                cellCount++;
-            }
-        }
-
-        _farOutCount[chunk] = count;
-        _farOutCellCount[chunk] = cellCount;
-        _farOutFlagged[chunk] = flagged;
-    }
+    /// <summary>One chunk of the fold: a contiguous range of cells, walked in order across the window's slots.</summary>
+    public abstract void FoldFarChunk(int chunk);
 
     /// <summary>
     /// The fold's serial tail, in the frame prologue: the chunks' flush entries concatenated, in chunk order — which is cell order — into the tick's log
-    /// slot. Folds serially first when no stage did (the LOD on a tick whose index the prologue built).
+    /// slot. Folds serially first when no stage did.
     /// </summary>
     public void EndFarFold()
     {
-        if (_farEndTick == _tick)
-        {
-            return;
-        }
-
         var from = Stopwatch.GetTimestamp();
         try
         {
@@ -3464,71 +1068,9 @@ internal sealed unsafe class PushReplication
         }
     }
 
-    private void EndFarFoldCore()
-    {
+    private protected abstract void EndFarFoldCore();
 
-        if (!FarFolded)
-        {
-            var chunks = BeginFarFold(1);
-            for (var c = 0; c < chunks; c++)
-            {
-                FoldFarChunk(c);
-            }
-        }
-
-        _farEndTick = _tick;
-        var slot = _log[_tick % LogDepth];
-        slot.FlushCellCount = 0;
-        if (!FarFolded || slot.Tick != _tick)
-        {
-            return;
-        }
-
-        var total = 0;
-        var totalCells = 0;
-        for (var c = 0; c < _farChunkCount; c++)
-        {
-            total += _farOutCount[c];
-            totalCells += _farOutCellCount[c];
-            FarFlushes += _farOutFlagged[c];
-        }
-
-        FarFlushes += total;
-        if (slot.Flush.Length < total)
-        {
-            slot.Flush = new PushEvent[Math.Max(total, slot.Flush.Length * 2)];
-        }
-
-        if (slot.FlushCells.Length < totalCells)
-        {
-            slot.FlushCells = new ulong[Math.Max(totalCells, slot.FlushCells.Length * 2)];
-        }
-
-        if (slot.FlushStarts.Length < totalCells + 1)
-        {
-            slot.FlushStarts = new int[Math.Max(totalCells + 1, slot.FlushStarts.Length * 2)];
-        }
-
-        var at = 0;
-        var cellAt = 0;
-        for (var c = 0; c < _farChunkCount; c++)
-        {
-            Array.Copy(_farOut[c], 0, slot.Flush, at, _farOutCount[c]);
-            for (var k = 0; k < _farOutCellCount[c]; k++)
-            {
-                slot.FlushCells[cellAt] = _farOutCells[c][k];
-                slot.FlushStarts[cellAt] = at + _farOutStarts[c][k];
-                cellAt++;
-            }
-
-            at += _farOutCount[c];
-        }
-
-        slot.FlushStarts[cellAt] = at;
-        slot.FlushCellCount = cellAt;
-    }
-
-    private static int LowerBound(ulong[] values, int from, int count, ulong key)
+    private protected static int LowerBound(ulong[] values, int from, int count, ulong key)
     {
         var lo = from;
         var hi = count;
@@ -3546,225 +1088,5 @@ internal sealed unsafe class PushReplication
         }
 
         return lo;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void EmitRecord(uint netId, nint block, byte slot, ushort archetype, int groups, bool segment, FrameWorkerScratch scratch, ref long updates)
-    {
-        if (segment)
-        {
-            scratch.Add(archetype, FrameListKind.Segment, new FrameRecord { NetId = netId, Block = block, Slot = slot, Archetype = archetype });
-            updates++;
-        }
-
-        if (groups != 0)
-        {
-            scratch.Add(archetype, FrameListKind.State,
-                new FrameRecord { NetId = netId, Block = block, Slot = slot, GroupMask = (byte)groups, Archetype = archetype });
-            updates++;
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static void EmitUpdate(in PushEvent e, FrameWorkerScratch scratch, ref long updates)
-    {
-        if ((e.Flags & PushEvent.Segment) != 0)
-        {
-            scratch.Add(e.Archetype, FrameListKind.Segment, new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, Archetype = e.Archetype });
-            updates++;
-        }
-
-        if (e.Groups != 0)
-        {
-            scratch.Add(e.Archetype, FrameListKind.State,
-                new FrameRecord { NetId = e.NetId, Block = e.Block, Slot = e.Slot, GroupMask = e.Groups, Archetype = e.Archetype });
-            updates++;
-        }
-    }
-
-    /// <summary>Enters every entity of the cell inside the disc that was not pushed this tick (a pushed one is the push step's).</summary>
-    private int DeliverCell(int cx, int cy, double nx, double ny, double r2, ulong archetypeMask, FrameWorkerScratch scratch, uint tick, int gap,
-        bool everywhere = false)
-    {
-        // Nobody's last pushed position is in the cell: its cluster query could find nothing to enter.
-        if (_occupancy.Get(Key(cx, cy)) == 0)
-        {
-            scratch.EmptyCellsSkipped++;
-            return 0;
-        }
-
-        var from = FrameAssembler.PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
-        var decoded = 0;
-        var entered = 0;
-        var ax = nx;
-        var ay = ny;
-        const bool sweeping = false;
-        var x0 = _gridMinX + (cx * CellSize);
-        var y0 = _gridMinY + (cy * CellSize);
-        foreach (var a in _pushIndices)
-        {
-            if ((archetypeMask & (1UL << a)) == 0)
-            {
-                continue;
-            }
-
-            var state = _states[a];
-            var cs = state.ClusterState;
-            if (cs == null)
-            {
-                continue;
-            }
-
-            var layout = state.Layout;
-            using var e = cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, double.NegativeInfinity, x0 + CellSize + 1d, y0 + CellSize + 1d, double.PositiveInfinity);
-            while (e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out var bx1, out var by1))
-            {
-                if (!everywhere && SkipCluster(bx0, by0, bx1, by1, ax, ay, nx, ny, sweeping))
-                {
-                    continue;
-                }
-
-                var block = BlockOf(a, chunkId);
-                if (block == null)
-                {
-                    continue;
-                }
-
-                var bytes = (byte*)block;
-                var occ = block->ProjectedOccupancy;
-                while (occ != 0)
-                {
-                    var slot = BitOperations.TrailingZeroCount(occ);
-                    occ &= occ - 1;
-                    var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (slot * layout.HotStride));
-                    if (hot->NetId == NetIdAllocator.NoNetId)
-                    {
-                        continue;
-                    }
-
-                    var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
-                    // Owned by the push step (or, after missed frames, by the log's replay): it had an event since the session's last frame.
-                    if (tick - *(uint*)(cold + layout.LastEventTickOffsetInColdEntry) <= (uint)gap)
-                    {
-                        continue;
-                    }
-
-                    decoded++;
-                    Decode(a, cold + _positionOffset[a], out var px, out var py);
-                    if (CellX(px) != cx || CellY(py) != cy || (!everywhere && !Within(nx, ny, px, py, r2)))
-                    {
-                        continue;
-                    }
-
-                    scratch.Add(a, FrameListKind.Enter, new FrameRecord { NetId = hot->NetId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)a });
-                    entered++;
-                }
-            }
-        }
-
-        if (from != 0L)
-        {
-            Interlocked.Add(ref DeliverTicks, Stopwatch.GetTimestamp() - from);
-            Interlocked.Add(ref DeliverDecoded, decoded);
-            Interlocked.Add(ref DeliverEntered, entered);
-        }
-
-        return entered;
-    }
-
-    /// <summary>Emits the enters and leaves the anchor's move caused among one delivered cell's entities that were not pushed this tick.</summary>
-    private void SweepCell(int cx, int cy, double ax, double ay, double nx, double ny, double r2, ulong archetypeMask, FrameWorkerScratch scratch, uint tick,
-        int gap, ref long enters, ref long leaves)
-    {
-        if (_occupancy.Get(Key(cx, cy)) == 0)
-        {
-            scratch.EmptyCellsSkipped++;
-            return;
-        }
-
-        var from = FrameAssembler.PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
-        var decoded = 0;
-        var x0 = _gridMinX + (cx * CellSize);
-        var y0 = _gridMinY + (cy * CellSize);
-        var visited = 0;
-        const bool sweeping = true;
-        foreach (var a in _pushIndices)
-        {
-            if ((archetypeMask & (1UL << a)) == 0)
-            {
-                continue;
-            }
-
-            var state = _states[a];
-            var cs = state.ClusterState;
-            if (cs == null)
-            {
-                continue;
-            }
-
-            var layout = state.Layout;
-            using var e = cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, double.NegativeInfinity, x0 + CellSize + 1d, y0 + CellSize + 1d, double.PositiveInfinity);
-            while (e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out var bx1, out var by1))
-            {
-                if (SkipCluster(bx0, by0, bx1, by1, ax, ay, nx, ny, sweeping))
-                {
-                    continue;
-                }
-
-                var block = BlockOf(a, chunkId);
-                if (block == null)
-                {
-                    continue;
-                }
-
-                var bytes = (byte*)block;
-                var occ = block->ProjectedOccupancy;
-                while (occ != 0)
-                {
-                    var slot = BitOperations.TrailingZeroCount(occ);
-                    occ &= occ - 1;
-                    var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (slot * layout.HotStride));
-                    if (hot->NetId == NetIdAllocator.NoNetId)
-                    {
-                        continue;
-                    }
-
-                    var cold = bytes + layout.ColdOffset + (slot * layout.ColdStride);
-                    // Owned by the push step (or, after missed frames, by the log's replay): it had an event since the session's last frame.
-                    if (tick - *(uint*)(cold + layout.LastEventTickOffsetInColdEntry) <= (uint)gap)
-                    {
-                        continue;
-                    }
-
-                    decoded++;
-                    Decode(a, cold + _positionOffset[a], out var px, out var py);
-                    if (CellX(px) != cx || CellY(py) != cy)
-                    {
-                        continue;
-                    }
-
-                    visited++;
-                    var was = Within(ax, ay, px, py, r2);
-                    var isIn = Within(nx, ny, px, py, r2);
-                    if (isIn && !was)
-                    {
-                        scratch.Add(a, FrameListKind.Enter, new FrameRecord { NetId = hot->NetId, Block = (nint)block, Slot = (byte)slot, Archetype = (ushort)a });
-                        enters++;
-                    }
-                    else if (was && !isIn)
-                    {
-                        scratch.Add(a, FrameListKind.Leave, new FrameRecord { NetId = hot->NetId, Archetype = (ushort)a });
-                        leaves++;
-                    }
-                }
-            }
-        }
-
-        Interlocked.Add(ref SweepSlots, visited);
-        if (from != 0L)
-        {
-            Interlocked.Add(ref SweepDecoded, decoded);
-            Interlocked.Add(ref SweepTicks, Stopwatch.GetTimestamp() - from);
-        }
     }
 }

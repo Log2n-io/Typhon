@@ -165,15 +165,8 @@ static class ProjectionTestSchema
     /// archetype's motion, and the 3D case would read as an accident.
     /// </param>
     /// <returns>The engine, with its components registered and its grid configured.</returns>
-    public static DatabaseEngine SetupEngine(IServiceProvider services, bool volumetric = false)
-    {
-        var dbe = services.GetRequiredService<DatabaseEngine>();
-        dbe.RegisterComponentFromAccessor<ProjBounds>();
-        dbe.RegisterComponentFromAccessor<ProjBounds3>();
-        dbe.RegisterComponentFromAccessor<ProjAi>();
-        dbe.RegisterComponentFromAccessor<ProjVitals>();
-        dbe.RegisterComponentFromAccessor<ProjWallet>();
-        dbe.ConfigureSpatialGrid(volumetric
+    public static DatabaseEngine SetupEngine(IServiceProvider services, bool volumetric = false) =>
+        SetupEngine(services, volumetric
             ? new SpatialGridConfig(
                 worldMin: new Vector3D(-VolumeExtentM, -VolumeExtentM, -VolumeExtentM),
                 worldMax: new Vector3D(VolumeExtentM, VolumeExtentM, VolumeExtentM),
@@ -182,6 +175,17 @@ static class ProjectionTestSchema
                 worldMin: new Vector2(-WorldExtentM, -WorldExtentM),
                 worldMax: new Vector2(WorldExtentM, WorldExtentM),
                 cellSize: 256f));
+
+    /// <summary>The same engine over a spatial world of the caller's choosing.</summary>
+    public static DatabaseEngine SetupEngine(IServiceProvider services, SpatialGridConfig spatial)
+    {
+        var dbe = services.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<ProjBounds>();
+        dbe.RegisterComponentFromAccessor<ProjBounds3>();
+        dbe.RegisterComponentFromAccessor<ProjAi>();
+        dbe.RegisterComponentFromAccessor<ProjVitals>();
+        dbe.RegisterComponentFromAccessor<ProjWallet>();
+        dbe.ConfigureSpatialGrid(spatial);
         dbe.InitializeArchetypes();
         return dbe;
     }

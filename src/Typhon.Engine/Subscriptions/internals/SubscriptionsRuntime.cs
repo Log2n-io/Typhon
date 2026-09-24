@@ -159,7 +159,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 // Null only when no spatial grid is configured, and then an observed archetype has no position, which the push path refuses by name first.
                 var spatial = engine.SpatialGrid;
                 Grid = spatial == null ? null : ReplicationGrid.Resolve(Options.ReplicationCellM, spatial.Config, Profiles.MaxRadius);
-                Push = new PushReplication(Plans, _replicationStates, observed, automatic, Grid, Options.MaxSessions, Options.PushShadow);
+                Push = PushReplication.Create(Plans, _replicationStates, observed, automatic, Grid, Options.MaxSessions, Options.PushShadow,
+                    Options.ForceDeepReplicationForTest);
                 for (var a = 0; a < observed.Length; a++)
                 {
                     if (observed[a])

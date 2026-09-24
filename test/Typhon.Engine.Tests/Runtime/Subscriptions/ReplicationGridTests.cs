@@ -80,6 +80,39 @@ class ReplicationGridTests : TestBase<ReplicationGridTests>
     }
 
     [Test]
+    [VerifiesRule("SUB-16")]
+    public void ADeepWindowPastThirteenCellsIsRefused()
+    {
+        // ⌈192 / 45⌉ = 5: a window of 15 cells, 15³ = 3 375 cells past the 2 809 a session may pay for. The flat grid takes the same side.
+        var spatial = new SpatialGridConfig(new Vector3D(-1024, -1024, -1024), new Vector3D(1024, 1024, 1024), 128);
+        var ex = Assert.Throws<InvalidOperationException>(() => ReplicationGrid.Resolve(45, spatial, 192));
+
+        Assert.That(ex!.Message, Does.Contain("ReplicationCellM").And.Contain("15 cells").And.Contain("13 in a deep grid").And.Contain("48"));
+        Assert.That(ReplicationGrid.Resolve(48, spatial, 192).Window, Is.EqualTo(13), "the side the message names is accepted");
+        Assert.That(ReplicationGrid.Resolve(45, Flat16Km(), 192).Window, Is.EqualTo(15), "a flat grid takes the same side");
+    }
+
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void ATwoDimensionalArchetypeIsRefusedInADeepGridWhoseZRangeExcludesZero()
+    {
+        // A 2D position lies on the plane z = 0 (10 § 3.4); this world's Z runs from 100 m up, so the plane is outside every cell.
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider,
+            new SpatialGridConfig(new Vector3D(-1024, -1024, 100), new Vector3D(1024, 1024, 1124), 256));
+
+        var ex = Assert.Throws<NotSupportedException>(() =>
+        {
+            using var harness = ReplicationHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("p", p => p.Sphere(192).Of<ProjCreature>());
+            }, "ZRange", new SubscriptionsOptions { MaxSessions = 16, ReplicationCellM = 64 });
+        });
+
+        Assert.That(ex!.Message, Does.Contain(nameof(ProjCreature)).And.Contain("z = 0"));
+    }
+
+    [Test]
     public void AWorldOnlyGridHasTheSmallestWindowAndNoSlack()
     {
         var grid = ReplicationGrid.Resolve(64, Flat16Km(), 0);
