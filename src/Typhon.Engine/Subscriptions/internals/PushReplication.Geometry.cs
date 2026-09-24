@@ -130,7 +130,10 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool InGrid(int cx, int cy, int cz) => (uint)cx < (uint)_gridW && (uint)cy < (uint)_gridH && (!TEvent.Deep || (uint)cz < (uint)_gridD);
 
-    /// <summary>A sphere of interest: an anchor and a radius, with the squares every test reads.</summary>
+    /// <summary>
+    /// A sphere of interest: an anchor and a radius, with the squares every test reads — and the session's distance bands (09 § 9) as squared
+    /// boundaries at this radius. Band 0 is inside the first boundary, sent every tick; band i is beyond boundary i, sent every <c>Ni</c> ticks.
+    /// </summary>
     private readonly struct Ball
     {
         public readonly double X;
@@ -139,18 +142,67 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         public readonly double R;
         public readonly double R2;
 
-        /// <summary>The distance LOD's inner radius squared: <c>(R / 2)²</c>.</summary>
-        public readonly double Far2;
+        public readonly int BandCount;
+        public readonly double B1, B2, B3;
+        public readonly int N1, N2, N3;
 
-        public Ball(double x, double y, double z, double r)
+        public Ball(double x, double y, double z, double r) : this(x, y, z, r, default)
+        {
+        }
+
+        public Ball(double x, double y, double z, double r, in LodBands bands)
         {
             X = x;
             Y = y;
             Z = z;
             R = r;
             R2 = r * r;
-            Far2 = r * r * 0.25;
+            BandCount = bands.Count;
+            B1 = bands.F1 * bands.F1 * R2;
+            B2 = bands.F2 * bands.F2 * R2;
+            B3 = bands.F3 * bands.F3 * R2;
+            N1 = bands.N1;
+            N2 = bands.N2;
+            N3 = bands.N3;
         }
+
+        /// <summary>The innermost boundary squared: inside it every entity is near. <see cref="R2"/> without bands.</summary>
+        public double Inner2 => BandCount > 0 ? B1 : R2;
+
+        /// <summary>The outermost boundary squared: beyond it every entity is in the last band. <see cref="R2"/> without bands.</summary>
+        public double Outer2 => BandCount switch
+        {
+            0 => R2,
+            1 => B1,
+            2 => B2,
+            _ => B3,
+        };
+
+        /// <summary>The band of a point: 0 near, 1 … <see cref="BandCount"/> beyond each boundary.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int BandOf(double px, double py, double pz)
+        {
+            if (BandCount == 0)
+            {
+                return 0;
+            }
+
+            var dx = px - X;
+            var dy = py - Y;
+            var dz = pz - Z;
+            var d2 = (dx * dx) + (dy * dy) + (dz * dz);
+            return d2 <= B1 ? 0 : BandCount == 1 || d2 <= B2 ? 1 : BandCount == 2 || d2 <= B3 ? 2 : 3;
+        }
+
+        /// <summary>A band's period, in ticks; 1 for the near band.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int EveryOf(int band) => band switch
+        {
+            0 => 1,
+            1 => N1,
+            2 => N2,
+            _ => N3,
+        };
     }
 
     /// <summary>The squared distance from a sphere's centre to the nearest point of a cell (a flat grid's cells have no depth, 10 § 3.4).</summary>
@@ -1557,8 +1609,9 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= innerA * innerA;
     }
 
-    public override bool Gather(SessionId session, bool placed, Vector3D viewpoint, double radius, bool forceReset, in ArchetypeSet archetypes,
-        FrameWorkerScratch scratch, ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves, ref long updates, out bool complete)
+    public override bool Gather(SessionId session, bool placed, Vector3D viewpoint, double radius, in LodBands bands, bool forceReset,
+        in ArchetypeSet archetypes, FrameWorkerScratch scratch, ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves,
+        ref long updates, out bool complete)
     {
         complete = true;
         var from = Stopwatch.GetTimestamp();
@@ -1585,7 +1638,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         var gap = st.Anchored && !reset && placed ? (int)(tick - st.LastTick - 1) : 0;
 
         // Distance LOD: an update to an entity far from the session before and after is sent only on the entity's far flush (BeginFarFold).
-        var lod = FarEvery > 1 && placed;
+        var lod = bands.Count > 0 && FarPhase > 1 && placed;
         var log = Log ??= new LogTable();
         log.Clear();
         if (gap > 0)
@@ -1692,8 +1745,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         var nOriginX = CellX(nx) - Half;
         var nOriginY = CellY(ny) - Half;
         var nOriginZ = CellZ(nz) - Half;
-        var aBall = new Ball(ax, ay, az, rOld);
-        var nBall = new Ball(nx, ny, nz, rNew);
+        var aBall = new Ball(ax, ay, az, rOld, in bands);
+        var nBall = new Ball(nx, ny, nz, rNew, in bands);
 
         // The new window starts as the old one's cells that it still covers.
         Span<ushort> d = stackalloc ushort[TEvent.Deep ? MaxRows : ReplicationGrid.MaxWindow];
@@ -1879,8 +1932,9 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 }
             }
 
-            // Distance LOD: the inner crescent. A held entity the anchor's move brought inside R/2 may have far changes it was never sent — they wait for
-            // its far flush, which a near session ignores — so it gets its whole state now. One with an event since the last frame is the event's.
+            // Distance LOD: the inner crescent. A held entity the anchor's move brought inward across a band's boundary may have changes it was never
+            // sent — they wait for a flush of its old band, which its new band does not share — so it gets them now. One with an event since the last
+            // frame is the event's. A cell wholly in the last band now, or wholly near before, holds no such entity.
             for (var lz = 0; lod && lz < planes; lz++)
             {
                 for (var ly = 0; ly < Window; ly++)
@@ -1899,7 +1953,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                             continue;
                         }
 
-                        if (CellMin2(nBall, cx, cy, cz) > nBall.Far2 || CellMax2(aBall, cx, cy, cz) <= aBall.Far2)
+                        if (CellMin2(nBall, cx, cy, cz) > nBall.Outer2 || CellMax2(aBall, cx, cy, cz) <= aBall.Inner2)
                         {
                             continue;
                         }
@@ -2332,7 +2386,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             }
 
             // The tick's far flushes of entities whose latest event is older: their position is that event's, and nothing else changed since.
-            if (FarEvery > 1)
+            if (FarPhase > 1)
             {
                 var flushes = new BoxWalk(slot.FlushCells, slot.FlushCellCount, null, minCx, maxCx, minCy, maxCy, minCz, maxCz);
                 while (flushes.Next(out var k))
@@ -2405,11 +2459,12 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             var isIn = (e.Flags & PushEvent.HasNew) != 0 && Within(n, e.NewX, e.NewY, e.NewZ) && Held(d, nOriginX, nOriginY, nOriginZ, e.NewKey);
 
             // Only far flushes and no event: the entity neither moved nor changed since, and a flush entry stamps nothing — so an enter or a leave is the cell
-            // delivery's or the sweep's, and a crossing inward is the inner crescent's. It speaks only to a session holding it far before and after.
+            // delivery's or the sweep's, and a crossing inward — between any two bands — is the inner crescent's. It speaks only to a session holding it in a
+            // band before and after, not nearer now.
             if (!entry.Real)
             {
-                if (lod && was && isIn && !Within(n.X, n.Y, n.Z, e.NewX, e.NewY, e.NewZ, n.Far2)
-                    && !Within(a.X, a.Y, a.Z, entry.OldX, entry.OldY, entry.OldZ, a.Far2))
+                var bandBefore = a.BandOf(entry.OldX, entry.OldY, entry.OldZ);
+                if (lod && was && isIn && bandBefore > 0 && n.BandOf(e.NewX, e.NewY, e.NewZ) >= bandBefore)
                 {
                     EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, entry.FlushGroups, entry.FlushSegment, scratch, ref updates);
                 }
@@ -2426,7 +2481,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             {
                 var flushFlags = entry.Flushed ? (byte)(PushEvent.FarFlush | (entry.FlushSegment ? PushEvent.FlushSegment : 0)) : (byte)0;
                 EmitUpdateLod(ref e, entry.OldX, entry.OldY, entry.OldZ, entry.Groups, entry.Segment, entry.FlushGroups, flushFlags, in a, in n, lod,
-                    scratch, ref updates);
+                    scratch, ref updates, live: false);
             }
             else if (was)
             {
@@ -2437,20 +2492,29 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     }
 
     /// <summary>
-    /// An update to an entity the session holds before and after: sent, withheld (far then and far now, not its far flush), the far flush's union, or
-    /// widened to the whole state (it crossed inward, so changes withheld while it was far may be missing). Of <c>flags</c> only
-    /// <see cref="PushEvent.FarFlush"/> and <see cref="PushEvent.FlushSegment"/> are read.
+    /// An update to an entity the session holds before and after (09 § 9): sent; withheld (in a band before, not inward since, and not its flush tick for
+    /// that band); its flush for the band — the groups stamped in the band's last N ticks; or widened to the whole state (it came inward across a boundary,
+    /// so changes withheld in its old band may be missing). Of <c>flags</c> only <see cref="PushEvent.FarFlush"/> and <see cref="PushEvent.FlushSegment"/>
+    /// are read. <paramref name="live"/> is this tick's event; a catch-up's union has no single flush tick, so it sends every flushed group.
     /// </summary>
     private void EmitUpdateLod(ref TEvent e, float oldX, float oldY, float oldZ, int groups, bool segment, int flushGroups, byte flags, in Ball a, in Ball n,
-        bool lod, FrameWorkerScratch scratch, ref long updates)
+        bool lod, FrameWorkerScratch scratch, ref long updates, bool live = true)
     {
         if (lod)
         {
-            var farNow = !Within(n.X, n.Y, n.Z, e.NewX, e.NewY, e.NewZ, n.Far2);
-            var farBefore = !Within(a.X, a.Y, a.Z, oldX, oldY, oldZ, a.Far2);
-            if (farNow && farBefore)
+            var bandNow = n.BandOf(e.NewX, e.NewY, e.NewZ);
+            var bandBefore = a.BandOf(oldX, oldY, oldZ);
+            if (bandNow < bandBefore)
             {
-                if ((flags & PushEvent.FarFlush) == 0)
+                var plan = _encodePlans[e.Archetype];
+                groups = (1 << plan.GroupCount) - 1;
+                segment = plan.Moving;
+            }
+            else if (bandBefore > 0)
+            {
+                // Outward or in place: the old band's period, the more frequent of the two, is the schedule every change so far was held to.
+                var every = a.EveryOf(bandBefore);
+                if ((flags & PushEvent.FarFlush) == 0 || (live && ((e.NetId % (uint)every) + (_tick % (uint)every)) % (uint)every != 0))
                 {
                     scratch.Deferred++;
                     return;
@@ -2458,19 +2522,43 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
                 groups = flushGroups;
                 segment = (flags & PushEvent.FlushSegment) != 0;
-            }
-            else if (farBefore)
-            {
-                var plan = _encodePlans[e.Archetype];
-                groups = (1 << plan.GroupCount) - 1;
-                segment = plan.Moving;
+                if (live)
+                {
+                    FlushSince(ref e, _tick - (uint)every, ref groups, ref segment);
+                }
             }
         }
 
         EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, groups, segment, scratch, ref updates);
     }
 
-    /// <summary>Distance LOD: this tick's flush entries in the sphere, to a session that held the entity before this frame and holds it far now.</summary>
+    /// <summary>
+    /// A flush's groups narrowed to a band's period: the fold computed them over the widest band's window, and a band of period N sends only what was
+    /// stamped in its last N ticks — the rest went out in its previous flushes.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void FlushSince(ref TEvent e, uint since, ref int groups, ref bool segment)
+    {
+        if (e.Block == 0 || FarWindow <= 1)
+        {
+            return;
+        }
+
+        var plan = _encodePlans[e.Archetype];
+        var layout = _states[e.Archetype].Layout;
+        var hot = (ReplicationHotEntry*)((byte*)e.Block + layout.HotOffset + (e.Slot * layout.HotStride));
+        for (var g = 0; g < plan.GroupCount; g++)
+        {
+            if ((groups & (1 << g)) != 0 && hot->GroupTicks[plan.GroupTickSlot[g]] <= since)
+            {
+                groups &= ~(1 << g);
+            }
+        }
+
+        segment &= plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > since;
+    }
+
+    /// <summary>Distance LOD: this tick's flush entries in the sphere, to a session that held the entity before this frame and holds it in a band now.</summary>
     private void FlushEntries(in Ball a, int oOriginX, int oOriginY, int oOriginZ, ReadOnlySpan<ushort> o, in Ball n, int nOriginX, int nOriginY,
         int nOriginZ, ReadOnlySpan<ushort> d, in ArchetypeSet archetypes, FrameWorkerScratch scratch, ref long updates)
     {
@@ -2488,7 +2576,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             var cx = TEvent.KeyX(cell);
             var cy = TEvent.KeyY(cell);
             var cz = TEvent.KeyZ(cell);
-            if (CellMax2(n, cx, cy, cz) <= n.Far2 || CellMin2(n, cx, cy, cz) > n.R2)
+            if (CellMax2(n, cx, cy, cz) <= n.Inner2 || CellMin2(n, cx, cy, cz) > n.R2)
             {
                 continue;
             }
@@ -2496,22 +2584,42 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             for (var i = slot.FlushStarts[k]; i < slot.FlushStarts[k + 1]; i++)
             {
                 ref var f = ref slot.Flush[i];
-                if (!archetypes.Contains(f.Archetype) || Within(n.X, n.Y, n.Z, f.NewX, f.NewY, f.NewZ, n.Far2) || !Within(n, f.NewX, f.NewY, f.NewZ)
-                    || !Held(d, nOriginX, nOriginY, nOriginZ, f.NewKey) || !Within(a, f.NewX, f.NewY, f.NewZ)
-                    || !Held(o, oOriginX, oOriginY, oOriginZ, f.NewKey))
+                if (!archetypes.Contains(f.Archetype) || !Within(n, f.NewX, f.NewY, f.NewZ) || !Held(d, nOriginX, nOriginY, nOriginZ, f.NewKey)
+                    || !Within(a, f.NewX, f.NewY, f.NewZ) || !Held(o, oOriginX, oOriginY, oOriginZ, f.NewKey))
                 {
                     continue;
                 }
 
-                EmitRecord(f.NetId, f.Block, f.Slot, f.Archetype, f.FlushGroups, (f.Flags & PushEvent.FlushSegment) != 0, scratch, ref updates);
+                // The entity did not move; the anchor may have. Inward is the inner crescent's; otherwise the old band's period schedules the flush — the
+                // first band's for an entity that was near, which got everything until now.
+                var bandNow = n.BandOf(f.NewX, f.NewY, f.NewZ);
+                var bandBefore = a.BandOf(f.NewX, f.NewY, f.NewZ);
+                if (bandNow == 0 || bandNow < bandBefore)
+                {
+                    continue;
+                }
+
+                var every = a.EveryOf(Math.Max(bandBefore, 1));
+                if (((f.NetId % (uint)every) + (_tick % (uint)every)) % (uint)every != 0)
+                {
+                    continue;
+                }
+
+                var groups = (int)f.FlushGroups;
+                var segment = (f.Flags & PushEvent.FlushSegment) != 0;
+                FlushSince(ref f, _tick - (uint)every, ref groups, ref segment);
+                if (groups != 0 || segment)
+                {
+                    EmitRecord(f.NetId, f.Block, f.Slot, f.Archetype, groups, segment, scratch, ref updates);
+                }
             }
         }
     }
 
     /// <summary>
-    /// Distance LOD: a cell of the inner crescent — the held entities the anchor's move brought from beyond R/2 to within it, with no event since the
-    /// session's last frame, get what changed in the last N ticks: older changes went out in the far flush before, and newer ones wait for one a near
-    /// session ignores.
+    /// Distance LOD: a cell of the inner crescent — the held entities the anchor's move brought inward across a band's boundary, with no event since the
+    /// session's last frame, get what changed in their old band's last N ticks: older changes went out in that band's flushes, and newer ones wait for one
+    /// the new band does not share.
     /// </summary>
     private void FarSweepCell(int cx, int cy, int cz, in Ball a, int oOriginX, int oOriginY, int oOriginZ, ReadOnlySpan<ushort> o, in Ball n,
         in ArchetypeSet archetypes, FrameWorkerScratch scratch, uint tick, int gap, ref long updates)
@@ -2521,8 +2629,9 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             return;
         }
 
-        var nearN = Math.Sqrt(n.Far2);
-        var nearA = Math.Sqrt(a.Far2);
+        // A box wholly in the last band now, or wholly near before, holds nobody who came inward.
+        var nearN = Math.Sqrt(n.Outer2);
+        var nearA = Math.Sqrt(a.Inner2);
         foreach (var arch in _pushIndices)
         {
             if (!archetypes.Contains(arch))
@@ -2539,7 +2648,6 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
             var plan = _encodePlans[arch];
             var layout = state.Layout;
-            var lo = tick > (uint)FarEvery ? tick - (uint)FarEvery : 0u;
             var hasZ = TEvent.Deep && _hasZ[arch];
 
             // The box is built from raw positions and the test below from decoded ones: a margin of a quantization step keeps the pruning sound.
@@ -2553,7 +2661,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             {
                 ClampToWorld(ref bx0, ref by0, ref bz0, ref bx1, ref by1, ref bz1, hasZ);
 
-                // A box wholly beyond R/2 of the new anchor, or wholly within R/2 of the old one, holds nobody who crossed inward.
+                // A box wholly past the outermost boundary of the new anchor, or wholly within the innermost of the old one, holds nobody who came inward.
                 if (!double.IsInfinity(bx0) && !double.IsInfinity(bx1) && (!hasZ || (!double.IsInfinity(bz0) && !double.IsInfinity(bz1)))
                     && (BoxMin2(n, bx0, by0, bz0, bx1, by1, bz1) > (nearN + margin) * (nearN + margin)
                         || (nearA > margin && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (nearA - margin) * (nearA - margin))))
@@ -2586,11 +2694,19 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                     }
 
                     DecodeAt(arch, cold + _positionOffset[arch], out var px, out var py, out var pz);
-                    if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz) || !Within(n.X, n.Y, n.Z, px, py, pz, n.Far2)
-                        || Within(a.X, a.Y, a.Z, px, py, pz, a.Far2) || !Within(a, px, py, pz))
+                    if (CellX(px) != cx || CellY(py) != cy || (TEvent.Deep && CellZ(pz) != cz) || !Within(a, px, py, pz))
                     {
                         continue;
                     }
+
+                    var bandBefore = a.BandOf(px, py, pz);
+                    if (n.BandOf(px, py, pz) >= bandBefore)
+                    {
+                        continue;
+                    }
+
+                    var every = (uint)a.EveryOf(bandBefore);
+                    var lo = tick > every ? tick - every : 0u;
 
                     var groups = 0;
                     for (var g = 0; g < plan.GroupCount; g++)
@@ -2621,7 +2737,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     /// </remarks>
     public override int BeginFarFold(int workers)
     {
-        if (FarEvery <= 1 || !Indexed || _farFoldTick == _tick)
+        if (FarPhase <= 1 || !Indexed || _farFoldTick == _tick)
         {
             return 0;
         }
@@ -2684,12 +2800,15 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
         var c0 = _farBounds[chunk];
         var c1 = _farBounds[chunk + 1];
-        var n = FarEvery;
+
+        // The smallest period flags candidates — every band's flush ticks are among its own — and the largest is the history a flush must cover.
+        var p = FarPhase;
+        var n = FarWindow;
         var t = _tick;
 
-        // The window's floor, wrap-safe for the run's first ticks; and the phase, wrap-safe for a tick counter or net id past 2^32 when N is no power of two.
+        // The window's floor, wrap-safe for the run's first ticks; and the phase, wrap-safe for a tick counter or net id past 2^32.
         var lo = t > (uint)n ? t - (uint)n : 0u;
-        var tickPhase = t % (uint)n;
+        var tickPhase = t % (uint)p;
         Span<int> cursor = stackalloc int[LogDepth];
         for (var age = 0; age < n; age++)
         {
@@ -2735,7 +2854,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
                 {
                     ref var e = ref events[i];
-                    if ((e.Flags & PushEvent.HasNew) == 0 || ((e.NetId % (uint)n) + tickPhase) % (uint)n != 0)
+                    if ((e.Flags & PushEvent.HasNew) == 0 || ((e.NetId % (uint)p) + tickPhase) % (uint)p != 0)
                     {
                         continue;
                     }

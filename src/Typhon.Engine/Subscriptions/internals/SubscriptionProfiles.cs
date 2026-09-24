@@ -39,6 +39,9 @@ internal sealed class SubscriptionProfiles
         /// <summary>The position a <see cref="ViewpointSource.Fixed"/> sphere is centred on.</summary>
         public Vector3D Placement { get; init; }
 
+        /// <summary>The sphere's distance bands (09 § 9); none for <c>World</c>.</summary>
+        public LodBands Bands { get; init; }
+
         /// <summary>Whether the engine compares every live entity instead of waiting for <c>Replicate</c>.</summary>
         public bool Automatic { get; init; }
 
@@ -142,6 +145,7 @@ internal sealed class SubscriptionProfiles
                     : ViewpointSource.Placed,
                 BoundEntity = observer.BoundEntity,
                 Placement = observer.Placement ?? default,
+                Bands = observer.Kind == ObserverKind.Sphere ? new LodBands(observer.Bands) : default,
                 Automatic = declaration.PushDetection == PushDetection.Automatic,
                 TickDivisor = declaration.TickDivisor,
             };
@@ -216,6 +220,34 @@ internal sealed class SubscriptionProfiles
 
     /// <summary>The fixed centre of profile <paramref name="profile"/>'s sphere, when its source is <see cref="ViewpointSource.Fixed"/>.</summary>
     public Vector3D PlacementOf(int profile) => _profiles[profile].Placement;
+
+    /// <summary>Profile <paramref name="profile"/>'s distance bands.</summary>
+    public LodBands BandsOf(int profile) => _profiles[profile].Bands;
+
+    /// <summary>
+    /// The fold's phase and window over every profile's bands (09 § 9): the smallest and the largest period declared, 0 and 0 when no profile has bands.
+    /// Nested powers of two make the smallest period's flush ticks a superset of every band's, and the largest period the history a flush must cover.
+    /// </summary>
+    public (int Phase, int Window) FarFold
+    {
+        get
+        {
+            var phase = 0;
+            var window = 0;
+            foreach (var profile in _profiles)
+            {
+                if (profile.Bands.Count == 0)
+                {
+                    continue;
+                }
+
+                phase = phase == 0 ? profile.Bands.MinEvery : Math.Min(phase, profile.Bands.MinEvery);
+                window = Math.Max(window, profile.Bands.MaxEvery);
+            }
+
+            return (phase, window);
+        }
+    }
 
     /// <summary>The name of profile <paramref name="profile"/>, for messages.</summary>
     public string NameOf(int profile) => _profiles[profile].Name;

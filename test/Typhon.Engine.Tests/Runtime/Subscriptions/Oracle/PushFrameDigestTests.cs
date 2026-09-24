@@ -92,10 +92,10 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
     public void WalkingSpheresWithTheDistanceLod([Values(false, true)] bool deterministic, [Values] bool deep)
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1503, [0, 30, 0, 60], nameof(PushFrameDigestTests),
-            walkRadius: 3000, deterministicProjection: deterministic, forceDeep: deep);
-        oracle.Push.FarEvery = 4;
+            walkRadius: 3000, deterministicProjection: deterministic, forceDeep: deep, farEvery: 4);
 
-        Assert.That(Run(oracle), Is.EqualTo(13328118253220528914UL));
+        // Re-pinned in 2.4a: the band is declared, so it applies from tick 1; the prototype's FarEvery was set after the harness's first tick.
+        Assert.That(Run(oracle), Is.EqualTo(18235304897354314830UL));
     }
 
     [Test]

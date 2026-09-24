@@ -630,10 +630,15 @@
   invariant ∀ push archetype, ∀ live slot s: cold LastEventTick(s) = the tick of the latest PushEvent recorded for the entity in s
   invariant ∀ change to an entity's projected state or motion in tick T: a PushEvent for it is recorded in T, and it names the block and slot the
     entity is in at the end of T — an arrival by migration included, even when no byte changed
-  invariant the far flush of an entity at its phase tick p ((netId mod N + p mod N) mod N = 0) carries every group whose stamp is in (p − N, p]
+  invariant distance bands (09 § 9) are declared per Sphere profile — at most three, periods N ∈ {2, 4, 8} growing outward — and folded once: at the
+    smallest declared period's phase ticks, over the largest's window. For a session holding an entity in band b before and not nearer after, the entity's
+    update is sent only at its flush tick for b, p with ((netId mod N_b + p mod N_b) mod N_b = 0), and carries every group whose stamp is in (p − N_b, p]
+  invariant an entity a session's anchor or radius brings inward across any band's boundary, with no event since the session's last frame, gets every
+    group stamped in its old band's last N ticks (the inner crescent); a catch-up's flush-only replay never speaks for such an entity
   never write a push slot's LastEventTick anywhere but PushReplication.AddEvent — not for a slot the change gate skipped, not on a dormant path
   never drop an arrival's event as a byte-identical no-op
-  scope: PushReplication.AddEvent, PushReplication.FoldFarChunk, PushReplication.FarSweepCell, PushReplication.CollectLog, ProjectionPass.ProjectBlock,
+  scope: PushReplication.AddEvent, PushReplication.FoldFarChunk, PushReplication.FarSweepCell, PushReplication.CollectLog, PushReplication.ConfigureFar,
+    BandBuilder.Every, ProjectionPass.ProjectBlock,
     ReplicationBlockLayout.LastEventTickOffsetInColdEntry, PushEvent.Arrived, PushEvent.FarFlush
   on_violation: the distance LOD's far-flush fold picks an entity's latest event by that stamp, and the sweep, the cell delivery and the log's catch-up
     read it as "the push step owns this entity from that tick on". A stamp moved without an event makes the fold skip the entity, so a change a far
@@ -643,9 +648,10 @@
     entity itself — its group stamps say what, the log's events say where, and this stamp ties the two to one event.
   note the field was the watched-set pipeline's "watched last tick"; that pipeline is gone, and the field now means only this.
   verified: PushOracleTests.ADeferredFarChangeReachesASessionThatWalksCloser, PushOracleTests.DeferredFarUpdatesStillConverge,
-    PushOracleTests.FarFlushesConvergeThroughCatchUpWithSmallCells, PushOracleTests.AFarFlushMetFirstAsASecondaryReachesACaughtUpSession — oracle runs
-    with the shadow legality check on. Falsifiability: removing the
-    far-flush fold's in-place flag, its flush entries or the inner-crescent sweep each turns ADeferredFarChangeReachesASessionThatWalksCloser red.
+    PushOracleTests.FarFlushesConvergeThroughCatchUpWithSmallCells, PushOracleTests.AFarFlushMetFirstAsASecondaryReachesACaughtUpSession,
+    PushOracleTests.ThreeBandsConvergeAtEverySkipRate — oracle runs with the shadow legality check on. Falsifiability: removing the far-flush fold's
+    in-place flag, its flush entries or the inner-crescent sweep each turns ADeferredFarChangeReachesASessionThatWalksCloser red; its nested-bands case
+    goes red when the inner crescent serves only entities that become near.
 
 ### SUB-24: The occupancy counts exactly the entities whose last pushed position lies in each cell `[fatal][silent]`
   invariant after every index, ∀ cell: occupancy(cell) = the live, identified entries of observed archetypes whose last pushed position lies in cell,

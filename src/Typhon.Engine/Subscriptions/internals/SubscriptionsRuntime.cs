@@ -175,6 +175,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 }
 
                 _frames.Push = Push;
+                var (farPhase, farWindow) = Profiles.FarFold;
+                Push.ConfigureFar(farPhase, farWindow);
                 var encodePlans = new ArchetypeEncodePlan[Plans.Length];
                 for (var a = 0; a < Plans.Length; a++)
                 {

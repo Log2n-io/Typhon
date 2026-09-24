@@ -575,6 +575,28 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
         Assert.That(ex.Message, Does.Contain("more than one way"), "whichever order the verbs were called in");
     }
 
+    /// <summary>
+    /// A band's declaration is refused where it is written (09 § 9): a period other than 2, 4 or 8; a boundary outside (0, 1); a band not slower and
+    /// farther than the one inside it; a fourth band; bands on a World observer.
+    /// </summary>
+    [Test]
+    public void ABadBandIsRefusedWhereItIsDeclared()
+    {
+        using var runtime = CreateRuntime();
+        Assert.Multiple(() =>
+        {
+            runtime.Subscriptions.Profile("a", p => Assert.Throws<ArgumentOutOfRangeException>(() => p.Sphere(100).Bands(b => b.Every(3, beyond: 0.5))));
+            runtime.Subscriptions.Profile("b", p => Assert.Throws<ArgumentOutOfRangeException>(() => p.Sphere(100).Bands(b => b.Every(2, beyond: 1.0))));
+            runtime.Subscriptions.Profile("c", p => Assert.Throws<ArgumentOutOfRangeException>(
+                () => p.Sphere(100).Bands(b => b.Every(4, beyond: 0.5).Every(2, beyond: 0.7))));
+            runtime.Subscriptions.Profile("d", p => Assert.Throws<ArgumentOutOfRangeException>(
+                () => p.Sphere(100).Bands(b => b.Every(2, beyond: 0.5).Every(4, beyond: 0.4))));
+            runtime.Subscriptions.Profile("e", p => Assert.Throws<InvalidOperationException>(
+                () => p.Sphere(100).Bands(b => b.Every(2, beyond: 0.2).Every(4, beyond: 0.4).Every(8, beyond: 0.6).Every(8, beyond: 0.8))));
+            runtime.Subscriptions.Profile("f", p => Assert.Throws<InvalidOperationException>(() => p.World().Bands(b => b.Every(2, beyond: 0.5))));
+        });
+    }
+
     /// <summary>A profile with two observers is refused, even of one shape and one radius: it would be a tier, and Phase 2 builds tiers.</summary>
     [Test]
     [VerifiesRule("SUB-16")]

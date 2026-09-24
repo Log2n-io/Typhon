@@ -134,11 +134,9 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     {
         // Deterministic projection builds the index, and so folds the far flushes, serially in the frame prologue rather than in their stages.
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7300 + skipPercent, [skipPercent, 0, 30, 0],
-            nameof(PushOracleTests), detection: detection, walkRadius: 3000, deterministicProjection: deterministic, visibilitySlackM: 0);
+            nameof(PushOracleTests), detection: detection, walkRadius: 3000, deterministicProjection: deterministic, visibilitySlackM: 0, farEvery: 4);
 
-        // h = 0: the drifts this workload makes are what the LOD defers most, and v̂ would remove them as events altogether (09 § 2). The LOD over v̂
-        // is step 2.4's, with its declared bands.
-        oracle.Push.FarEvery = 4;
+        // h = 0: the drifts this workload makes are what the LOD defers most, and v̂ would remove them as events altogether (09 § 2).
 
         for (var i = 0; i < GateTicks; i++)
         {
@@ -155,6 +153,41 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     }
 
     /// <summary>
+    /// Three declared bands (09 § 9) — every 2 ticks beyond 0.4 R, 4 beyond 0.6 R, 8 beyond 0.8 R: walking sessions still hold exactly their disc with
+    /// the right values once the world is quiet, the updates of every band are deferred and flushed, and entities the anchors' moves bring inward across
+    /// any boundary get their state — with skipped frames, and with v̂ on (the rule's default slack).
+    /// </summary>
+    /// <param name="skipPercent">The percentage of ticks on which each session's frames are left undrained.</param>
+    /// <param name="deterministic">Whether the index and the far flushes are built serially, in the frame prologue.</param>
+    [Test]
+    [VerifiesRule("SUB-19")]
+    public void ThreeBandsConvergeAtEverySkipRate([Values(0, 30, 60)] int skipPercent, [Values(false, true)] bool deterministic)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7600 + skipPercent, [skipPercent, 0, 30, skipPercent],
+            nameof(PushOracleTests), walkRadius: 3000, deterministicProjection: deterministic,
+            bands: b => b.Every(2, beyond: 0.4).Every(4, beyond: 0.6).Every(8, beyond: 0.8));
+        oracle.Workload.WalkStrideM = 1.5f;
+        Assert.That((oracle.Push.FarPhase, oracle.Push.FarWindow), Is.EqualTo((2, 8)), "the fold runs at the innermost period over the outermost's window");
+
+        for (var i = 0; i < GateTicks; i++)
+        {
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"three bands, after {i + 1} ticks at a {skipPercent}% skip rate");
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(oracle.Push.UpdatesDeferred, Is.GreaterThan(20), "the bands deferred nothing, so they were not exercised");
+            Assert.That(oracle.Push.FarFlushes, Is.GreaterThan(20), "the deferred updates were never flushed");
+            Assert.That(oracle.Push.FarCrescentStates, Is.GreaterThan(0), "no entity came inward across a boundary with the anchor's move");
+        });
+    }
+
+    /// <summary>
     /// A far change whose update was deferred still reaches a session that then walks closer to the entity, with no further event from it: the only thing
     /// that brings the entity inside half the radius is the viewer's own move.
     /// </summary>
@@ -162,14 +195,15 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     /// <param name="skipPercent">The percentage of ticks on which half the sessions' frames are left undrained: the flushes then arrive by catch-up.</param>
     [Test]
     [VerifiesRule("SUB-19")]
-    public void ADeferredFarChangeReachesASessionThatWalksCloser([Range(7400, 7409)] int seed, [Values(0, 30)] int skipPercent)
+    public void ADeferredFarChangeReachesASessionThatWalksCloser([Range(7400, 7409)] int seed, [Values(0, 30)] int skipPercent, [Values] bool nested)
     {
+        // Nested: every 2 ticks beyond 0.3 R, every 8 beyond 0.6 R — a viewer's step brings entities from the outer band into the inner one, not near,
+        // and what the outer band withheld (up to 8 ticks of changes) is not in the inner band's flushes (2 ticks).
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed,
             [skipPercent, 0, skipPercent, 0, skipPercent, 0, skipPercent, 0], nameof(PushOracleTests), detection: PushDetection.Explicit, walkRadius: 3000,
-            visibilitySlackM: 0);
+            visibilitySlackM: 0, farEvery: 4, bands: nested ? b => b.Every(2, beyond: 0.3).Every(8, beyond: 0.6) : null);
 
         // A long window, so many far changes are still pending when the sessions start to move — below the log depth, or every flush is a reset.
-        oracle.Push.FarEvery = 6;
 
         for (var i = 0; i < 80; i++)
         {
@@ -208,8 +242,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     {
         // A small radius, so cells are small and the workload's moves cross them often; most frames skipped, so most flushes arrive by catch-up.
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed, [60, 60, 60, 60, 60, 60], nameof(PushOracleTests),
-            detection: PushDetection.Explicit, walkRadius: 400);
-        oracle.Push.FarEvery = 4;
+            detection: PushDetection.Explicit, walkRadius: 400, farEvery: 4);
 
         for (var i = 0; i < 150; i++)
         {
@@ -242,7 +275,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         using var harness = FrameHarness.Create(engine, subs =>
         {
             ProjectionTestSchema.DeclareCreature(subs);
-            subs.Profile(Profile, p => p.Sphere(Radius).Of<ProjCreature>());
+            subs.Profile(Profile, p => p.Sphere(Radius).Bands(b => b.Every(Every, beyond: 0.5)).Of<ProjCreature>());
         }, nameof(PushOracleTests), new SubscriptionsOptions
         {
             PushShadow = true,
@@ -253,7 +286,6 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         });
 
         var push = harness.Subscriptions.Push;
-        push.FarEvery = Every;
 
         // A cell edge past R/2 east of the viewer, with the grid starting at the world's west edge: the entity sits half a metre west of it, far.
         Assert.That(push.CellSize, Is.EqualTo(Radius / 3));

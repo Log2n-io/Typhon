@@ -241,15 +241,18 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <param name="visibilitySlackM">The creatures' visibility slack h (09 § 2); <see cref="double.NaN"/> for the rule, R / 48.</param>
     /// <param name="leaveRadius">The walking disc's leave radius (09 § 3); 0 for none.</param>
     /// <param name="secondRadius">When positive, a second Sphere profile of this radius, which every odd session is bound to (09 § 4).</param>
+    /// <param name="farEvery">When positive, the first profile's distance band (09 § 9): beyond half the radius, updates every this many ticks.</param>
+    /// <param name="bands">The first profile's distance bands, when several are wanted; overrides <paramref name="farEvery"/>.</param>
     public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, PushDetection detection = PushDetection.Explicit,
         double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false,
-        double replicationCellM = 0, bool forceDeep = false, double visibilitySlackM = double.NaN, double leaveRadius = 0, double secondRadius = 0)
+        double replicationCellM = 0, bool forceDeep = false, double visibilitySlackM = double.NaN, double leaveRadius = 0, double secondRadius = 0,
+        int farEvery = 0, Action<BandBuilder> bands = null)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
         var walk = walkRadius > 0;
         var radius = walk ? walkRadius : PushRadiusM;
-        var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every, leaveRadius, secondRadius), name,
+        var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every, leaveRadius, secondRadius, farEvery, bands), name,
             Options(detection == PushDetection.Automatic, deterministicProjection,
                 replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(worldObserver && !walk ? 0 : radius), forceDeep,
                 visibilitySlackM));
@@ -732,7 +735,7 @@ internal sealed unsafe class OracleHarness : IDisposable
 
     /// <summary>The projections and the profile the oracle runs against: a disc, or the whole world.</summary>
     private static void Declare(SubscriptionsRegistry subs, PushDetection detection, double radius, bool world, int every, double leaveRadius = 0,
-        double secondRadius = 0)
+        double secondRadius = 0, int farEvery = 0, Action<BandBuilder> bands = null)
     {
         ProjectionTestSchema.DeclareCreature(subs);
         ProjectionTestSchema.DeclareRock(subs);
@@ -742,7 +745,20 @@ internal sealed unsafe class OracleHarness : IDisposable
         }
         else
         {
-            subs.Profile(Profile, p => p.Detection(detection).Every(every).Sphere(radius, leave: leaveRadius).Of<ProjCreature>().Of<ProjRock>());
+            subs.Profile(Profile, p =>
+            {
+                var sphere = p.Detection(detection).Every(every).Sphere(radius, leave: leaveRadius);
+                if (bands != null)
+                {
+                    sphere.Bands(bands);
+                }
+                else if (farEvery > 0)
+                {
+                    sphere.Bands(b => b.Every(farEvery, beyond: 0.5));
+                }
+
+                sphere.Of<ProjCreature>().Of<ProjRock>();
+            });
             if (secondRadius > 0)
             {
                 subs.Profile(SecondProfile, p => p.Detection(detection).Every(every).Sphere(secondRadius).Of<ProjCreature>().Of<ProjRock>());

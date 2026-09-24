@@ -104,6 +104,31 @@ public sealed class ObserverBuilder
     }
 
     /// <summary>
+    /// Declares a Sphere's distance bands (09 § 9): beyond a fraction of the radius, an entity's updates are sent every N ticks.
+    /// </summary>
+    /// <param name="bands">The bands, innermost first — <c>b =&gt; b.Every(2, beyond: 0.5).Every(4, beyond: 0.75)</c>.</param>
+    /// <returns>This builder.</returns>
+    /// <exception cref="InvalidOperationException">The observer is not a Sphere, or its bands were already declared.</exception>
+    public ObserverBuilder Bands(Action<BandBuilder> bands)
+    {
+        ArgumentNullException.ThrowIfNull(bands);
+        if (_observer.Kind != ObserverKind.Sphere)
+        {
+            throw new InvalidOperationException($"Distance bands are fractions of a Sphere's radius; a {_observer.Kind} observer has none.");
+        }
+
+        if (_observer.Bands.Count > 0)
+        {
+            throw new InvalidOperationException("A Sphere's bands are declared once.");
+        }
+
+        var builder = new BandBuilder();
+        bands(builder);
+        _observer.Bands = builder.Bands;
+        return this;
+    }
+
+    /// <summary>
     /// Adds a far tier: per-cell counts per archetype beyond the near tier, at a bounded rate.
     /// </summary>
     /// <param name="tileM">The aggregation tile's edge, in metres.</param>
@@ -141,6 +166,9 @@ public sealed class ObserverDeclaration
 
     /// <summary>A sphere's leave radius, in metres; 0 when the declaration left the hysteresis band to the engine.</summary>
     public double LeaveRadius { get; internal set; }
+
+    /// <summary>A sphere's distance bands, innermost first (09 § 9); empty when every update is sent every tick.</summary>
+    public IReadOnlyList<DistanceBand> Bands { get; internal set; } = [];
 
     /// <summary>A sphere's largest run-time radius, in metres (<c>SetRadius</c>); 0 when a session's radius is fixed.</summary>
     public double MaxRadius { get; internal set; }

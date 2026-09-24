@@ -171,7 +171,7 @@ internal sealed unsafe partial class FrameAssembler
         Console.Error.WriteLine(
             $"  PUSH CELLS: delivery {p.DeliverTicks * f:F0} ms, {p.DeliverDecoded} decoded for {p.DeliverEntered} entered; "
             + $"sweep {p.SweepTicks * f:F0} ms, {p.SweepDecoded} decoded for {p.SweepSlots} in the cell; empty skipped {p.EmptyCellsSkipped}");
-        Console.Error.WriteLine($"  PUSH LOD: far every {p.FarEvery}; updates withheld {p.UpdatesDeferred}, far flushes {p.FarFlushes}, crescent states {p.FarCrescentStates}, fold tail {p.FarEndTicks * f:F0} ms");
+        Console.Error.WriteLine($"  PUSH LOD: far fold phase {p.FarPhase} window {p.FarWindow}; updates withheld {p.UpdatesDeferred}, far flushes {p.FarFlushes}, crescent states {p.FarCrescentStates}, fold tail {p.FarEndTicks * f:F0} ms");
         Console.Error.WriteLine(
             $"  PUSH LOG: catch-ups {p.LogCatchUps} over {p.LogCatchUpTicks} missed ticks; resets: too old {p.LogTooOld}, ambiguous {p.LogAmbiguous}; "
             + $"gap re-pushes {p.GapRepushes}, "
@@ -345,8 +345,8 @@ internal sealed unsafe partial class FrameAssembler
         var reset = _pushWorld[index]
             ? Push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves,
                 ref updates, out var complete)
-            : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], state.PendingReset, in Profiles.SetOf(_pushProfiles[index]),
-                scratch,
+            : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], Profiles.BandsOf(_pushProfiles[index]), state.PendingReset,
+                in Profiles.SetOf(_pushProfiles[index]), scratch,
                 _encodePlans,
                 Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves, ref updates, out complete);
 

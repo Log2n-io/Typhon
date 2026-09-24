@@ -167,20 +167,27 @@ internal abstract unsafe class PushReplication
     private readonly long[][] _repush;
 
     /// <summary>
-    /// PROTOTYPE — distance LOD (<c>TYPHON_PUSH_FAR_EVERY=N</c>, 0 = off): an update to an entity beyond half the radius, that was beyond it before too, is
-    /// deferred and sent every N ticks as the union since the last time, folded from the push log. Enters and leaves are never deferred, and an entity
-    /// crossing inward gets its whole state.
+    /// Distance LOD (09 § 9): the fold's phase — the smallest period any profile's bands declare, whose flush ticks are every band's — and its window, the
+    /// largest period, the history a flush covers. Both 0 when no profile has bands: nothing is folded. Set once, at <c>Start</c>, from the profiles.
     /// </summary>
-    public int FarEvery
+    public int FarPhase { get; private set; }
+
+    /// <inheritdoc cref="FarPhase"/>
+    public int FarWindow { get; private set; }
+
+    /// <summary>Sets the fold's phase and window from the profiles' bands (<see cref="SubscriptionProfiles.FarFold"/>). Before the first tick.</summary>
+    /// <param name="phase">The smallest declared period, or 0.</param>
+    /// <param name="window">The largest declared period, at most <see cref="LogDepth"/>, or 0.</param>
+    public void ConfigureFar(int phase, int window)
     {
-        get => _farEvery;
+        if (phase > 1 && (window < phase || window > LogDepth))
+        {
+            throw new ArgumentOutOfRangeException(nameof(window), window, $"a fold window is between its phase and the log's depth, {LogDepth}");
+        }
 
-        // At most the log's depth: an entity's far flush is found among the events of the last N ticks, and the log holds LogDepth of them. Set before
-        // the first tick — the phase of every entity is taken against it.
-        set => _farEvery = Math.Clamp(value, 0, LogDepth);
+        FarPhase = phase > 1 ? phase : 0;
+        FarWindow = phase > 1 ? window : 0;
     }
-
-    private int _farEvery = Math.Clamp(int.TryParse(Environment.GetEnvironmentVariable("TYPHON_PUSH_FAR_EVERY"), out var farEvery) ? farEvery : 0, 0, 8);
 
     public long UpdatesDeferred;
 
@@ -992,8 +999,9 @@ internal abstract unsafe class PushReplication
     /// Builds one push session's records into <paramref name="scratch"/>. Returns whether the frame must carry a RESET (first frame after a lost one, a
     /// teleport, or a profile switch).
     /// </summary>
-    public abstract bool Gather(SessionId session, bool placed, Vector3D viewpoint, double radius, bool forceReset, in ArchetypeSet archetypes,
-        FrameWorkerScratch scratch, ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves, ref long updates, out bool complete);
+    public abstract bool Gather(SessionId session, bool placed, Vector3D viewpoint, double radius, in LodBands bands, bool forceReset,
+        in ArchetypeSet archetypes, FrameWorkerScratch scratch, ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves,
+        ref long updates, out bool complete);
 
     /// <summary>
     /// A World session: it holds every entity of its archetypes whose cell it has been delivered, and occupied cells are delivered in key order behind one
