@@ -20,8 +20,7 @@ namespace Typhon.Engine;
 /// on a field, captured or passed to another thread, which is the compiler enforcing the per-worker discipline instead of documentation asking for it.
 /// </para>
 /// <para>
-/// <b>What Phase 1 applies.</b> <see cref="Profile"/>, <see cref="Control"/> and <see cref="Kick"/> take effect. <see cref="SetBudget"/> is recorded and not
-/// yet applied: the per-session budget is Phase 2's step 2.4.
+/// <b>What applies.</b> <see cref="Profile"/>, <see cref="Control"/>, <see cref="SetBudget"/> and <see cref="Kick"/> take effect.
 /// <see cref="Observe"/>, <see cref="Unobserve"/> and <see cref="SetSources"/> throw here, at the call site, naming the phase that builds them — the shape is
 /// complete now so that an application written against it never has to be revisited when the verb it wanted starts working.
 /// </para>
@@ -131,8 +130,9 @@ public readonly ref struct SessionRequest
     /// <param name="bytesPerSecond">The budget. Zero removes it; the frame ceiling and the enter budget still apply.</param>
     /// <returns>This request, so several may be chained.</returns>
     /// <remarks>
-    /// <b>Recorded, not yet applied</b> — nothing reads it until Phase 2's per-session budget (step 2.4). Once applied, records are deferred and never
-    /// dropped, so a small number slows a view down rather than corrupting it.
+    /// A Sphere session over its budget is degraded by LOD level (09 § 10): every distance band's period doubles per level, a profile with no band gets one
+    /// beyond half its radius, and the enter budget halves. Records are deferred and never dropped, so a small number slows a view down rather than
+    /// corrupting it. The level rises after a second over the budget and falls after three under 70 % of it.
     /// </remarks>
     public SessionRequest SetBudget(int bytesPerSecond)
     {

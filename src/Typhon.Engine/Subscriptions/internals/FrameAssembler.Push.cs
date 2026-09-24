@@ -138,6 +138,9 @@ internal sealed unsafe partial class FrameAssembler
             Push.EndFarFold();
         }
 
+        // The LOD census, recounted before this tick's commits move it — only while a level is in use (09 § 10).
+        Push.RecountLevels(_pushSessions, n);
+
         // Shadow oracle: every 50 ticks, up to eight sessions compared with the geometry. Serial, and before the frames: the anchors it reads are the
         // committed ones, which is what the shadows describe.
         if (Push.Shadow && _tick % 50 == 49)
@@ -171,7 +174,7 @@ internal sealed unsafe partial class FrameAssembler
         Console.Error.WriteLine(
             $"  PUSH CELLS: delivery {p.DeliverTicks * f:F0} ms, {p.DeliverDecoded} decoded for {p.DeliverEntered} entered; "
             + $"sweep {p.SweepTicks * f:F0} ms, {p.SweepDecoded} decoded for {p.SweepSlots} in the cell; empty skipped {p.EmptyCellsSkipped}");
-        Console.Error.WriteLine($"  PUSH LOD: far fold phase {p.FarPhase} window {p.FarWindow}; updates withheld {p.UpdatesDeferred}, far flushes {p.FarFlushes}, crescent states {p.FarCrescentStates}, fold tail {p.FarEndTicks * f:F0} ms");
+        Console.Error.WriteLine($"  PUSH LOD: far fold phase {p.FarPhase} window {p.FarWindow}; updates withheld {p.UpdatesDeferred}, far flushes {p.FarFlushes}, crescent states {p.FarCrescentStates}, fold tail {p.FarEndTicks * f:F0} ms; levels raised {p.LevelRaises}, lowered {p.LevelLowers}");
         Console.Error.WriteLine(
             $"  PUSH LOG: catch-ups {p.LogCatchUps} over {p.LogCatchUpTicks} missed ticks; resets: too old {p.LogTooOld}, ambiguous {p.LogAmbiguous}; "
             + $"gap re-pushes {p.GapRepushes}, "
@@ -227,7 +230,16 @@ internal sealed unsafe partial class FrameAssembler
                     break;
                 }
 
-                AssemblePush(i, scratch, ref follow, ref lost, ref counters, ref enters, ref leaves, ref updates);
+                var published = -1;
+                AssemblePush(i, scratch, ref follow, ref lost, ref counters, ref enters, ref leaves, ref updates, ref published);
+
+                // The budget loop, fed with every frame the session was given or had nothing for (09 § 10). World sessions have no LOD. The budget is
+                // read here, in the session's chunk, not in the serial prologue: a row per session there was a cache miss per session in series.
+                if (published >= 0 && !_pushWorld[i])
+                {
+                    var session = _pushSessions[i];
+                    Push.Pace(session, published, _sessions.BudgetOf(session), Volatile.Read(ref _tickSeconds));
+                }
             }
         }
         finally
@@ -292,8 +304,10 @@ internal sealed unsafe partial class FrameAssembler
         return true;
     }
 
+    // published: the bytes the session's frame published, or zero when it had nothing to say; left as it was when no frame was made — not its tick, or a
+    // frame refused (degraded, lagging, no slot, oversize, no pool): the budget loop reads the link's rate, and a refusal is congestion, not quiet.
     private void AssemblePush(int index, FrameWorkerScratch scratch, ref BoundViewpoint follow, ref long lost, ref FrameCounters counters, ref long enters,
-        ref long leaves, ref long updates)
+        ref long leaves, ref long updates, ref int published)
     {
         var session = _pushSessions[index];
         var state = StateOf(session);
@@ -348,7 +362,7 @@ internal sealed unsafe partial class FrameAssembler
             : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], Profiles.BandsOf(_pushProfiles[index]), state.PendingReset,
                 in Profiles.SetOf(_pushProfiles[index]), scratch,
                 _encodePlans,
-                Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves, ref updates, out complete);
+                Math.Max(1, _options.EnterBudgetPerFrame >> Push.TargetLevelOf(session)), ref enters, ref leaves, ref updates, out complete);
 
         if (timing)
         {
@@ -388,6 +402,7 @@ internal sealed unsafe partial class FrameAssembler
             ReturnIfValid(recycled);
             NoteSkip(state, counted: false);
             Push.Commit(session);
+            published = 0;
             return;
         }
 
@@ -443,6 +458,7 @@ internal sealed unsafe partial class FrameAssembler
         ReturnIfValid(previous);
         buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
         send->PublishFrame(sequence, block, length, _tick);
+        published = length;
 
         // COMMIT — the anchor and the delivered cells move with the frame that describes them.
         Push.Commit(session);

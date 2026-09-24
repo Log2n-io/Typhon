@@ -37,7 +37,7 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 internal sealed unsafe class OracleHarness : IDisposable
 {
     /// <summary>How many ticks of stillness precede a comparison: enough for a skipped session's slots to drain and its union frame to be produced.</summary>
-    public const int QuietTicks = 8;
+    public const int QuietTicks = PushReplication.LogDepth + 2;
 
     /// <summary>The profile every oracle session is bound to.</summary>
     public const string Profile = "oracle-world";

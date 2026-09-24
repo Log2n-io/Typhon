@@ -145,6 +145,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         public readonly int BandCount;
         public readonly double B1, B2, B3;
         public readonly int N1, N2, N3;
+        public readonly int W1, W2, W3;
 
         public Ball(double x, double y, double z, double r) : this(x, y, z, r, default)
         {
@@ -164,6 +165,9 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             N1 = bands.N1;
             N2 = bands.N2;
             N3 = bands.N3;
+            W1 = bands.W1;
+            W2 = bands.W2;
+            W3 = bands.W3;
         }
 
         /// <summary>The innermost boundary squared: inside it every entity is near. <see cref="R2"/> without bands.</summary>
@@ -202,6 +206,16 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             1 => N1,
             2 => N2,
             _ => N3,
+        };
+
+        /// <summary>A band's window — the history its flush carries — in ticks: its period, or longer for a while after the session's level fell.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int WindowOf(int band) => band switch
+        {
+            0 => 1,
+            1 => W1,
+            2 => W2,
+            _ => W3,
         };
     }
 
@@ -371,6 +385,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     private void Bind(ref PushSessionState st, SessionId session)
     {
         st = default;
+        // The slot's previous session left the census with the recount (RecountLevels), which sees only bound sessions: nothing to take out here.
         st.Bound = true;
         st.Generation = session.Generation;
         if (TEvent.Deep)
@@ -391,6 +406,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         st.OriginY = st.POriginY;
         st.OriginZ = st.POriginZ;
         st.Radius = st.PRadius;
+        CommitLevel(ref st);
         if (TEvent.Deep)
         {
             Pending(ref st, session.Slot).CopyTo(Committed(ref st, session.Slot));
@@ -1637,8 +1653,17 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         // Missed frames: replayed from the push log while every missed tick is still in it, reset otherwise (SUB-03: skip = union).
         var gap = st.Anchored && !reset && placed ? (int)(tick - st.LastTick - 1) : 0;
 
-        // Distance LOD: an update to an entity far from the session before and after is sent only on the entity's far flush (BeginFarFold).
-        var lod = bands.Count > 0 && FarPhase > 1 && placed;
+        // Distance LOD at the session's level (09 § 9–10): the committed level's bands are what every change held back so far was scheduled by — with a
+        // wider window for a while after it fell — and the frame moves to the budget loop's target, committed with it. An update to an entity far from the
+        // session before and after is sent only on the entity's far flush (BeginFarFold).
+        var aBands = bands.AtLevel(st.Level, Widened(in st, tick) ? st.WideLevel : 0);
+        var nBands = bands.AtLevel(st.TargetLevel, 0);
+        st.PLevel = st.TargetLevel;
+        var lod = (aBands.Count > 0 || nBands.Count > 0) && placed;
+
+        // A level moves periods, not boundaries — except a bandless profile's implicit band, which appears at level 1 and goes at 0: only then can an
+        // entity be inward without the anchor moving.
+        var rebanded = lod && aBands.Count != nBands.Count;
         var log = Log ??= new LogTable();
         log.Clear();
         if (gap > 0)
@@ -1673,6 +1698,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             st.POriginY = st.OriginY;
             st.POriginZ = st.OriginZ;
             st.PRadius = st.Radius;
+            st.PLevel = st.Level;
             Committed(ref st, slotIndex).CopyTo(Pending(ref st, slotIndex));
             return reset && st.Anchored;
         }
@@ -1745,8 +1771,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         var nOriginX = CellX(nx) - Half;
         var nOriginY = CellY(ny) - Half;
         var nOriginZ = CellZ(nz) - Half;
-        var aBall = new Ball(ax, ay, az, rOld, in bands);
-        var nBall = new Ball(nx, ny, nz, rNew, in bands);
+        var aBall = new Ball(ax, ay, az, rOld, in aBands);
+        var nBall = new Ball(nx, ny, nz, rNew, in nBands);
 
         // The new window starts as the old one's cells that it still covers.
         Span<ushort> d = stackalloc ushort[TEvent.Deep ? MaxRows : ReplicationGrid.MaxWindow];
@@ -1897,8 +1923,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             }
         }
 
-        // ── 3. The crescent (a shell in 3D) the anchor's move or the radius change uncovered or left ────────────────────────────────────────────────
-        if (moved || resized)
+        // ── 3. The crescent (a shell in 3D) the anchor's move or the radius change uncovered or left — or, for the inner one, a band that went ────────
+        if (moved || resized || rebanded)
         {
             Interlocked.Increment(ref Sweeps);
             var planes = TEvent.Deep ? Window : 1;
@@ -2005,6 +2031,10 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         {
             Bind(ref st, session);
         }
+
+        // No LOD for a World session: a session switched from a Sphere at a level goes back to 0 with this frame, and leaves the census.
+        st.TargetLevel = 0;
+        st.PLevel = 0;
 
         var tick = _tick;
         var reset = st.NeedsReset || forceReset;
@@ -2512,7 +2542,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             }
             else if (bandBefore > 0)
             {
-                // Outward or in place: the old band's period, the more frequent of the two, is the schedule every change so far was held to.
+                // Outward or in place: the old band's period, the more frequent of the two, is the schedule every change so far was held to; its window is
+                // the history the flush carries.
                 var every = a.EveryOf(bandBefore);
                 if ((flags & PushEvent.FarFlush) == 0 || (live && ((e.NetId % (uint)every) + (_tick % (uint)every)) % (uint)every != 0))
                 {
@@ -2524,13 +2555,23 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 segment = (flags & PushEvent.FlushSegment) != 0;
                 if (live)
                 {
-                    FlushSince(ref e, _tick - (uint)every, ref groups, ref segment);
+                    FlushSince(ref e, WindowFloor(_tick, a.WindowOf(bandBefore)), ref groups, ref segment);
+
+                    // Nothing stamped in the window — an arrival that changed no byte, flagged by an older change: there is no record to send.
+                    if (groups == 0 && !segment)
+                    {
+                        return;
+                    }
                 }
             }
         }
 
         EmitRecord(e.NetId, e.Block, e.Slot, e.Archetype, groups, segment, scratch, ref updates);
     }
+
+    /// <summary>The tick a window of <paramref name="ticks"/> ending at <paramref name="tick"/> starts after, wrap-safe: 0 in the run's first ticks.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static uint WindowFloor(uint tick, int ticks) => tick > (uint)ticks ? tick - (uint)ticks : 0u;
 
     /// <summary>
     /// A flush's groups narrowed to a band's period: the fold computed them over the widest band's window, and a band of period N sends only what was
@@ -2592,14 +2633,16 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
                 // The entity did not move; the anchor may have. Inward is the inner crescent's; otherwise the old band's period schedules the flush — the
                 // first band's for an entity that was near, which got everything until now.
+                // A session with no band before — its level just rose from none — was sent every change: nothing is held back.
                 var bandNow = n.BandOf(f.NewX, f.NewY, f.NewZ);
                 var bandBefore = a.BandOf(f.NewX, f.NewY, f.NewZ);
-                if (bandNow == 0 || bandNow < bandBefore)
+                if (bandNow == 0 || bandNow < bandBefore || a.BandCount == 0)
                 {
                     continue;
                 }
 
-                var every = a.EveryOf(Math.Max(bandBefore, 1));
+                var band = Math.Max(bandBefore, 1);
+                var every = a.EveryOf(band);
                 if (((f.NetId % (uint)every) + (_tick % (uint)every)) % (uint)every != 0)
                 {
                     continue;
@@ -2607,7 +2650,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
                 var groups = (int)f.FlushGroups;
                 var segment = (f.Flags & PushEvent.FlushSegment) != 0;
-                FlushSince(ref f, _tick - (uint)every, ref groups, ref segment);
+                FlushSince(ref f, WindowFloor(_tick, a.WindowOf(band)), ref groups, ref segment);
                 if (groups != 0 || segment)
                 {
                     EmitRecord(f.NetId, f.Block, f.Slot, f.Archetype, groups, segment, scratch, ref updates);
@@ -2705,8 +2748,9 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                         continue;
                     }
 
-                    var every = (uint)a.EveryOf(bandBefore);
-                    var lo = tick > every ? tick - every : 0u;
+                    // From the last frame the session received, not from this tick: after missed frames the catch-up leaves an inward entity's flushes of
+                    // the gap to this sweep, so what the old band held back reaches back to its window before the gap.
+                    var lo = WindowFloor(tick, a.WindowOf(bandBefore) + gap);
 
                     var groups = 0;
                     for (var g = 0; g < plan.GroupCount; g++)
@@ -2737,6 +2781,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     /// </remarks>
     public override int BeginFarFold(int workers)
     {
+        ResolveFar();
         if (FarPhase <= 1 || !Indexed || _farFoldTick == _tick)
         {
             return 0;
@@ -2945,6 +2990,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         {
             return;
         }
+
+        ResolveFar();
 
         if (!FarFolded)
         {

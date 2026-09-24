@@ -203,7 +203,6 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
             [skipPercent, 0, skipPercent, 0, skipPercent, 0, skipPercent, 0], nameof(PushOracleTests), detection: PushDetection.Explicit, walkRadius: 3000,
             visibilitySlackM: 0, farEvery: 4, bands: nested ? b => b.Every(2, beyond: 0.3).Every(8, beyond: 0.6) : null);
 
-        // A long window, so many far changes are still pending when the sessions start to move — below the log depth, or every flush is a reset.
 
         for (var i = 0; i < 80; i++)
         {
@@ -224,6 +223,128 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         oracle.Quiesce();
         oracle.AssertConverged("far changes deferred, then the sessions walked closer with no further write");
         Assert.That(oracle.Push.UpdatesDeferred, Is.GreaterThan(20), "no far update was ever deferred, so the case was not exercised");
+    }
+
+    /// <summary>
+    /// A change withheld on the last frame a session received, its flush missed in a skipped frame, and the viewer's move bringing the entity inward on the
+    /// catch-up: the catch-up leaves the gap's flush of an inward entity to the inner crescent, so the crescent must reach back past the gap.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-19")]
+    [VerifiesRule("SUB-03")]
+    public void AChangeWithheldBeforeASkippedFlushReachesASessionThatCameCloser()
+    {
+        const double Radius = 3000;
+        const int Every = 2;
+        const string Profile = "far";
+        var engine = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        using var harness = FrameHarness.Create(engine, subs =>
+        {
+            ProjectionTestSchema.DeclareCreature(subs);
+            subs.Profile(Profile, p => p.Sphere(Radius).Bands(b => b.Every(Every, beyond: 0.5)).Of<ProjCreature>());
+        }, nameof(PushOracleTests), new SubscriptionsOptions
+        {
+            PushShadow = true,
+            MaxSessions = 4,
+            StatePoolBudgetBytes = 64L * 1024 * 1024,
+            FramePoolBudgetBytes = 64L * 1024 * 1024,
+            ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(Radius),
+        });
+
+        var push = harness.Subscriptions.Push;
+
+        // Far at 0.6 R; a near entity whose changes fill the session's two frame slots, so the frame after them is refused.
+        const float FarX = (float)(Radius * 0.6);
+        EntityId entity;
+        EntityId near;
+        using (var tx = engine.CreateQuickTransaction())
+        {
+            var ai = new ProjAi { Template = 1, Mode = ProjAiMode.Wander, Level = 10 };
+            var vitals = new ProjVitals { Health = 10, MaxHealth = 20 };
+            var bounds = BoundsAt(FarX);
+            entity = tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(in bounds), ProjCreature.Ai.Set(in ai), ProjCreature.Vitals.Set(in vitals));
+            bounds = BoundsAt(100f);
+            near = tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(in bounds), ProjCreature.Ai.Set(in ai), ProjCreature.Vitals.Set(in vitals));
+            tx.Commit();
+        }
+
+        var session = harness.OpenSessions(1, Profile)[0];
+        Assert.That(harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d)), Is.True);
+        var replica = harness.Replica(session);
+        var creature = harness.CatalogPlan.ArchetypeByName(nameof(ProjCreature)).Idx;
+
+        long tick = 0;
+        void Run(bool deliver)
+        {
+            tick++;
+            engine.WriteTickFence(tick);
+            harness.RunTick(tick);
+            if (deliver)
+            {
+                harness.Deliver(session);
+            }
+        }
+
+        for (var i = 0; i < 4; i++)
+        {
+            Run(deliver: true);
+        }
+
+        var netId = NetIdAt(replica, creature, FarX);
+
+        // T0, the change's tick, is not the entity's flush tick; T0 + 1 is, and its frame is refused.
+        var t0 = tick + 2;
+        if (((netId % Every) + ((ulong)t0 % Every)) % Every == 0)
+        {
+            t0++;
+        }
+
+        while (tick < t0 - 2)
+        {
+            Run(deliver: true);
+        }
+
+        WriteLevel(harness, near, 11, null);
+        Run(deliver: false);
+        WriteLevel(harness, near, 12, null);
+        WriteLevel(harness, entity, 4242, null);
+        var deferred = push.UpdatesDeferred;
+        Run(deliver: false);
+        Assert.That(push.UpdatesDeferred, Is.GreaterThan(deferred), "the change was not withheld on its tick, so the case did not run");
+        var catchUps = push.LogCatchUps;
+        Run(deliver: false);
+
+        // Drained; the viewer steps 0.3 R east, which brings the entity inside R/2 — the next frame is the catch-up over the refused one.
+        harness.Deliver(session);
+        Assert.That(harness.Sessions.SetViewpoint(session, new Vector3D(Radius * 0.3, 0d, 0d)), Is.True);
+        for (var i = 0; i < 4; i++)
+        {
+            Run(deliver: true);
+        }
+
+        Assert.That(push.LogCatchUps, Is.GreaterThan(catchUps), "the session was not caught up through the log, so the case did not run");
+        Assert.That(push.ShadowIllegal, Is.Zero, "a record the client could not apply was published");
+        Assert.That(replica.Value(creature, netId, "level"), Is.EqualTo(4242d), "the withheld change was lost between the skipped flush and the crescent");
+    }
+
+    /// <summary>
+    /// Changes in the run's first ticks, under an 8-tick band: an entity whose flush falls before tick 8 carries them — the window's floor is tick 0, not a
+    /// wrapped tick past every stamp — and every client converges.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-19")]
+    public void AChangeInTheFirstTicksReachesAFarSession()
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7430, [0, 0], nameof(PushOracleTests),
+            walkRadius: 3000, bands: b => b.Every(8, beyond: 0.05));
+        for (var i = 0; i < 5; i++)
+        {
+            oracle.Step();
+        }
+
+        oracle.Quiesce();
+        oracle.AssertConverged("changes of the first ticks, under an 8-tick band");
+        Assert.That(oracle.Push.UpdatesDeferred, Is.GreaterThan(0), "nothing was deferred: the case did not run");
     }
 
     /// <summary>

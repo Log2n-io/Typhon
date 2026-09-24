@@ -577,9 +577,10 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
 
     /// <summary>
     /// A band's declaration is refused where it is written (09 § 9): a period other than 2, 4 or 8; a boundary outside (0, 1); a band not slower and
-    /// farther than the one inside it; a fourth band; bands on a World observer.
+    /// farther than the one inside it; a fourth band; a NaN boundary; bands on a World observer; bands declared twice, even the first time empty.
     /// </summary>
     [Test]
+    [VerifiesRule("SUB-19")]
     public void ABadBandIsRefusedWhereItIsDeclared()
     {
         using var runtime = CreateRuntime();
@@ -589,8 +590,11 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
             runtime.Subscriptions.Profile("b", p => Assert.Throws<ArgumentOutOfRangeException>(() => p.Sphere(100).Bands(b => b.Every(2, beyond: 1.0))));
             runtime.Subscriptions.Profile("c", p => Assert.Throws<ArgumentOutOfRangeException>(
                 () => p.Sphere(100).Bands(b => b.Every(4, beyond: 0.5).Every(2, beyond: 0.7))));
-            runtime.Subscriptions.Profile("d", p => Assert.Throws<ArgumentOutOfRangeException>(
-                () => p.Sphere(100).Bands(b => b.Every(2, beyond: 0.5).Every(4, beyond: 0.4))));
+            var inward = Assert.Throws<ArgumentOutOfRangeException>(() => runtime.Subscriptions.Profile("d",
+                p => p.Sphere(100).Bands(b => b.Every(2, beyond: 0.5).Every(4, beyond: 0.4))));
+            Assert.That(inward.ParamName, Is.EqualTo("beyond"), "the boundary is what is out of order");
+            runtime.Subscriptions.Profile("g", p => Assert.Throws<ArgumentOutOfRangeException>(() => p.Sphere(100).Bands(b => b.Every(2, beyond: double.NaN))));
+            runtime.Subscriptions.Profile("h", p => Assert.Throws<InvalidOperationException>(() => p.Sphere(100).Bands(_ => { }).Bands(b => b.Every(2, 0.5))));
             runtime.Subscriptions.Profile("e", p => Assert.Throws<InvalidOperationException>(
                 () => p.Sphere(100).Bands(b => b.Every(2, beyond: 0.2).Every(4, beyond: 0.4).Every(8, beyond: 0.6).Every(8, beyond: 0.8))));
             runtime.Subscriptions.Profile("f", p => Assert.Throws<InvalidOperationException>(() => p.World().Bands(b => b.Every(2, beyond: 0.5))));

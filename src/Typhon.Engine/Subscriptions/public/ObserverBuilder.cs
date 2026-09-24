@@ -41,6 +41,7 @@ public enum ObserverKind
 public sealed class ObserverBuilder
 {
     private readonly ObserverDeclaration _observer;
+    private bool _bandsDeclared;
 
     internal ObserverBuilder(ObserverDeclaration observer) => _observer = observer;
 
@@ -111,17 +112,19 @@ public sealed class ObserverBuilder
     /// <exception cref="InvalidOperationException">The observer is not a Sphere, or its bands were already declared.</exception>
     public ObserverBuilder Bands(Action<BandBuilder> bands)
     {
+        // Declared once, even empty: a second call is a second opinion about the same radius, and silently keeping either would hide one.
         ArgumentNullException.ThrowIfNull(bands);
         if (_observer.Kind != ObserverKind.Sphere)
         {
             throw new InvalidOperationException($"Distance bands are fractions of a Sphere's radius; a {_observer.Kind} observer has none.");
         }
 
-        if (_observer.Bands.Count > 0)
+        if (_bandsDeclared)
         {
             throw new InvalidOperationException("A Sphere's bands are declared once.");
         }
 
+        _bandsDeclared = true;
         var builder = new BandBuilder();
         bands(builder);
         _observer.Bands = builder.Bands;

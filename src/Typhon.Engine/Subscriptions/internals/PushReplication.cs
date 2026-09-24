@@ -54,6 +54,22 @@ internal struct PushSessionState
     public int POriginZ;
     public double PRadius;
     public WindowRows P;
+
+    // The LOD level (09 § 10), committed with the frame like the anchor: Level is what every change held back so far was scheduled by, TargetLevel is
+    // where the budget loop wants the session, PLevel what this frame's gather moved it to.
+    public byte Level;
+    public byte PLevel;
+    public byte TargetLevel;
+
+    /// <summary>After the level fell: the level whose periods a flush's history still spans, until <see cref="WideUntil"/> (<see cref="LodBands.AtLevel"/>).</summary>
+    public byte WideLevel;
+    public uint WideUntil;
+
+    // The budget loop: the bytes/s EWMA, ticks spent over the budget and under its lower mark, and the last tick it was fed.
+    public float Rate;
+    public ushort Over;
+    public ushort Under;
+    public uint PacedTick;
 }
 
 /// <summary>
@@ -167,13 +183,43 @@ internal abstract unsafe class PushReplication
     private readonly long[][] _repush;
 
     /// <summary>
-    /// Distance LOD (09 § 9): the fold's phase — the smallest period any profile's bands declare, whose flush ticks are every band's — and its window, the
-    /// largest period, the history a flush covers. Both 0 when no profile has bands: nothing is folded. Set once, at <c>Start</c>, from the profiles.
+    /// Distance LOD (09 § 9–10): the fold's phase — the smallest period any session is gathered with, whose flush ticks are every band's — and its window,
+    /// the history a flush covers. Both 0 when nothing is folded. The profiles' bands set a floor at <c>Start</c>; the sessions' LOD levels lower the phase
+    /// and widen the window to the log's depth while any is above zero (<see cref="ResolveFar"/>), once per tick, before the fold.
     /// </summary>
     public int FarPhase { get; private set; }
 
     /// <inheritdoc cref="FarPhase"/>
     public int FarWindow { get; private set; }
+
+    // The profiles' fold, from Start; the committed LOD levels' census, [level] = sessions; the last tick a level fell; the tick ResolveFar last ran.
+    private int _declaredPhase;
+    private int _declaredWindow;
+    private readonly int[] _levelSessions = new int[MaxLevel + 1];
+    private uint _lastLowered;
+    private bool _lowered;
+    private uint _farResolvedTick = uint.MaxValue;
+
+    /// <summary>The highest LOD level (09 § 10): every period doubled three times, up to the log's depth.</summary>
+    public const int MaxLevel = 3;
+
+    /// <summary>The budget loop's EWMA time constant, in seconds.</summary>
+    public const double RateTauSeconds = 0.5;
+
+    /// <summary>How long a session's rate stays over its budget before its level rises, in seconds.</summary>
+    public const double RaiseAfterSeconds = 1d;
+
+    /// <summary>How long a session's rate stays under <see cref="LowerBelow"/> of its budget before its level falls, in seconds.</summary>
+    public const double LowerAfterSeconds = 3d;
+
+    /// <summary>The deadband's lower mark, as a fraction of the budget.</summary>
+    public const double LowerBelow = 0.7;
+
+    /// <summary>LOD levels raised and lowered by the budget loop — cumulative.</summary>
+    public long LevelRaises;
+
+    /// <inheritdoc cref="LevelRaises"/>
+    public long LevelLowers;
 
     /// <summary>Sets the fold's phase and window from the profiles' bands (<see cref="SubscriptionProfiles.FarFold"/>). Before the first tick.</summary>
     /// <param name="phase">The smallest declared period, or 0.</param>
@@ -185,8 +231,202 @@ internal abstract unsafe class PushReplication
             throw new ArgumentOutOfRangeException(nameof(window), window, $"a fold window is between its phase and the log's depth, {LogDepth}");
         }
 
-        FarPhase = phase > 1 ? phase : 0;
-        FarWindow = phase > 1 ? window : 0;
+        _declaredPhase = phase > 1 ? phase : 0;
+        _declaredWindow = phase > 1 ? window : 0;
+        FarPhase = _declaredPhase;
+        FarWindow = _declaredWindow;
+    }
+
+    /// <summary>
+    /// This tick's fold (09 § 10): the declared one, or — while a session's committed level is above zero, or one fell in the last <see cref="LogDepth"/>
+    /// ticks — the phase of the lowest such level's shortest period and the log's whole depth. Serial, before the fold; the census it reads is every
+    /// commit up to the previous tick's, which is the level each session's gather this tick holds its changes to.
+    /// </summary>
+    private protected void ResolveFar()
+    {
+        if (_farResolvedTick == _tick)
+        {
+            return;
+        }
+
+        _farResolvedTick = _tick;
+        var phase = _declaredPhase;
+        var window = _declaredWindow;
+        for (var level = 1; level <= MaxLevel; level++)
+        {
+            if (Volatile.Read(ref _levelSessions[level]) > 0)
+            {
+                // A level's shortest period is 2^level with no declared band, and longer with one: 2^level divides every period in use.
+                phase = phase > 1 ? Math.Min(phase, 1 << level) : 1 << level;
+                window = LogDepth;
+                break;
+            }
+        }
+
+        if (phase > 1 && Volatile.Read(ref _lowered) && _tick - Volatile.Read(ref _lastLowered) <= LogDepth)
+        {
+            window = LogDepth;
+        }
+
+        FarPhase = phase;
+        FarWindow = window;
+    }
+
+    /// <summary>Whether any session's committed LOD level is above zero, by the census.</summary>
+    public bool LevelsInUse => _levelSessions[1] + _levelSessions[2] + _levelSessions[3] != 0;
+
+    /// <summary>How often the census is recounted, in ticks: a power of two.</summary>
+    public const int RecountEvery = 64;
+
+    /// <summary>
+    /// Recounts the census from the bound sessions every <see cref="RecountEvery"/> ticks while it says levels are in use. The commits keep it by increments;
+    /// what they miss is a session that closed, or whose slot was rebound, at a level — which only ever leaves the census too high, so the fold's phase too
+    /// low and its window too wide: a superset, costlier, never wrong. The recount bounds that to <see cref="RecountEvery"/> ticks without reading every
+    /// session's state serially every tick. Serial, in the frame prologue, before any commit of the tick.
+    /// </summary>
+    /// <param name="sessions">The tick's push sessions.</param>
+    /// <param name="count">How many.</param>
+    public void RecountLevels(SessionId[] sessions, int count)
+    {
+        if (!LevelsInUse || (_tick & (RecountEvery - 1)) != 0)
+        {
+            return;
+        }
+
+        Span<int> census = stackalloc int[MaxLevel + 1];
+        for (var i = 0; i < count; i++)
+        {
+            var session = sessions[i];
+            ref var st = ref _sessions[session.Slot];
+            if (st.Bound && st.Generation == session.Generation)
+            {
+                census[st.Level]++;
+            }
+        }
+
+        for (var level = 0; level <= MaxLevel; level++)
+        {
+            _levelSessions[level] = census[level];
+        }
+    }
+
+    /// <summary>A session's committed LOD level moves with its frame: the census follows, and a fall widens the windows for <see cref="LogDepth"/> ticks.</summary>
+    private protected void CommitLevel(ref PushSessionState st)
+    {
+        if (st.PLevel == st.Level)
+        {
+            return;
+        }
+
+        Interlocked.Decrement(ref _levelSessions[st.Level]);
+        Interlocked.Increment(ref _levelSessions[st.PLevel]);
+        if (st.PLevel < st.Level)
+        {
+            // Every entity's next flush at the lower level falls within LogDepth ticks of its last one at the higher: until then, it spans the higher's.
+            st.WideLevel = (byte)Math.Max(st.Level, Widened(in st, _tick) ? st.WideLevel : 0);
+            st.WideUntil = _tick + LogDepth;
+            Volatile.Write(ref _lastLowered, _tick);
+            Volatile.Write(ref _lowered, true);
+        }
+
+        st.Level = st.PLevel;
+    }
+
+    /// <summary>Whether a session's windows are still widened by a fall, wrap-safe: <c>WideUntil</c> is at most <see cref="LogDepth"/> ticks ahead.</summary>
+    private protected static bool Widened(in PushSessionState st, uint tick) => st.WideLevel > 0 && (int)(st.WideUntil - tick) >= 0;
+
+    /// <summary>The LOD level a session's next frame is gathered at: its enter budget is <c>EnterBudgetPerFrame >> level</c> (09 § 10).</summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The level, 0 for an unbound session.</returns>
+    public int TargetLevelOf(SessionId session)
+    {
+        ref var st = ref _sessions[session.Slot];
+        return st.Bound && st.Generation == session.Generation ? st.TargetLevel : 0;
+    }
+
+    /// <summary>Tests only: a session's committed LOD level.</summary>
+    internal int LevelOf(SessionId session)
+    {
+        ref var st = ref _sessions[session.Slot];
+        return st.Bound && st.Generation == session.Generation ? st.Level : 0;
+    }
+
+    /// <summary>Tests only: a session's bytes/s EWMA.</summary>
+    internal double RateOf(SessionId session)
+    {
+        ref var st = ref _sessions[session.Slot];
+        return st.Bound && st.Generation == session.Generation ? st.Rate : 0d;
+    }
+
+    /// <summary>Tests only: the budget loop leaves every level where <see cref="SetTargetLevel"/> put it.</summary>
+    internal bool LevelsPinned;
+
+    /// <summary>Tests only: sets the level a session's next frames move to, as the budget loop would.</summary>
+    internal void SetTargetLevel(SessionId session, int level)
+    {
+        ArgumentOutOfRangeException.ThrowIfGreaterThan((uint)level, (uint)MaxLevel, nameof(level));
+        ref var st = ref _sessions[session.Slot];
+        if (st.Bound && st.Generation == session.Generation)
+        {
+            st.TargetLevel = (byte)level;
+        }
+    }
+
+    /// <summary>
+    /// The budget loop (09 § 10), fed once per tick a session is served, with the bytes its frame published — zero for none. The level rises after the
+    /// rate's EWMA has been over the budget for <see cref="RaiseAfterSeconds"/>, and falls after it has been under <see cref="LowerBelow"/> of it for
+    /// <see cref="LowerAfterSeconds"/>; each move restarts both clocks. A session with no budget goes back to level 0. The frames move to the level, and it
+    /// commits with them. O(1); only the session's own worker writes its state.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="bytes">What this tick's frame published.</param>
+    /// <param name="budget">The session's budget in bytes per second; 0 for none.</param>
+    /// <param name="tickSeconds">The nominal tick period.</param>
+    public void Pace(SessionId session, int bytes, int budget, double tickSeconds)
+    {
+        ref var st = ref _sessions[session.Slot];
+        if (!st.Bound || st.Generation != session.Generation || LevelsPinned)
+        {
+            return;
+        }
+
+        if (budget <= 0)
+        {
+            // No budget: level 0, and nothing written once there — the loop costs a session with no budget one load.
+            if (st.TargetLevel != 0 || st.PacedTick != 0)
+            {
+                st.TargetLevel = 0;
+                st.Rate = 0;
+                st.Over = 0;
+                st.Under = 0;
+                st.PacedTick = 0;
+            }
+
+            return;
+        }
+
+        var ticks = st.PacedTick == 0 ? 1u : Math.Clamp(_tick - st.PacedTick, 1u, 64u);
+        st.PacedTick = _tick;
+        var seconds = ticks * tickSeconds;
+        var alpha = 1d - Math.Exp(-seconds / RateTauSeconds);
+        st.Rate += (float)(alpha * ((bytes / seconds) - st.Rate));
+
+        st.Over = st.Rate > budget ? (ushort)Math.Min(st.Over + ticks, ushort.MaxValue) : (ushort)0;
+        st.Under = st.Rate < budget * LowerBelow ? (ushort)Math.Min(st.Under + ticks, ushort.MaxValue) : (ushort)0;
+        if (st.Over * tickSeconds >= RaiseAfterSeconds && st.TargetLevel < MaxLevel)
+        {
+            st.TargetLevel++;
+            st.Over = 0;
+            st.Under = 0;
+            Interlocked.Increment(ref LevelRaises);
+        }
+        else if (st.Under * tickSeconds >= LowerAfterSeconds && st.TargetLevel > 0)
+        {
+            st.TargetLevel--;
+            st.Over = 0;
+            st.Under = 0;
+            Interlocked.Increment(ref LevelLowers);
+        }
     }
 
     public long UpdatesDeferred;

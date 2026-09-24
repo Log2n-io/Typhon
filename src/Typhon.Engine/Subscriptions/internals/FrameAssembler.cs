@@ -384,6 +384,13 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     private readonly SessionFrameState[] _states;
     private readonly int _maxFrameBytes;
     private readonly int _lagBoundTicks;
+
+    // The tick period in seconds, the budget loop's clock: the nominal one until the runtime publishes the live one, which the overload multiplier stretches.
+    private double _tickSeconds;
+
+    /// <summary>The live tick period, from the runtime's tick state: a stretched tick sends the same bytes over a longer time.</summary>
+    /// <param name="periodUs">The period, in microseconds.</param>
+    internal void SetTickPeriod(uint periodUs) => Volatile.Write(ref _tickSeconds, periodUs / 1_000_000d);
     private readonly int _silenceBoundTicks;
     private readonly int _closeBoundTicks;
     private readonly int _degradeBoundTicks;
@@ -461,6 +468,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _followedValid = new bool[options.MaxSessions];
         _encodePlans = BuildEncodePlans(plans, catalog);
         _lagBoundTicks = SkipPolicy.LagBoundTicks(options, tickPeriodUs);
+        _tickSeconds = tickPeriodUs / 1_000_000d;
         _silenceBoundTicks = SkipPolicy.SilenceBoundTicks(options, tickPeriodUs);
 
 

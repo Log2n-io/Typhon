@@ -61,7 +61,7 @@ public sealed class BandBuilder
             var inner = _bands[^1];
             if (n <= inner.Every || beyond <= inner.Beyond)
             {
-                throw new ArgumentOutOfRangeException(nameof(n), n,
+                throw new ArgumentOutOfRangeException(n <= inner.Every ? nameof(n) : nameof(beyond), n <= inner.Every ? n : beyond,
                     $"Bands go outward and slower: this one ({n} beyond {beyond}) must have a larger period and boundary than the one inside it "
                     + $"({inner.Every} beyond {inner.Beyond}).");
             }

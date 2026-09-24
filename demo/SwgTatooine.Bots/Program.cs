@@ -66,6 +66,9 @@ var started = DateTime.UtcNow;
 // Bytes counted from the same instant as the window, not from the first connect: dividing everything received since the first session opened by the
 // time since the last one did overstated the rate by the connect phase's share.
 var bytesAtStart = swarm.BytesReceived;
+
+// Every 5 s sample, for the rate over the run's last 10 s: a per-session budget is judged on its steady state, not on the fill that opens a run.
+var samples = new System.Collections.Generic.List<(DateTime At, long Bytes)> { (started, bytesAtStart) };
 while (!stopping.IsCancellationRequested)
 {
     try
@@ -76,6 +79,8 @@ while (!stopping.IsCancellationRequested)
     {
         break;
     }
+
+    samples.Add((DateTime.UtcNow, swarm.BytesReceived));
 
     // The server's own numbers, as the server reported them to its clients (AC-1's track p99 is the headline).
     Console.WriteLine($"  t+{(DateTime.UtcNow - started).TotalSeconds,6:F0}s  connected {swarm.Connected,5}  "
@@ -127,9 +132,21 @@ string Blocks()
     // payload (or the reverse) cannot be judged from the timing half alone.
     var elapsed = Math.Max(1.0, (DateTime.UtcNow - started).TotalSeconds);
     var bytesPerSessionPerSec = bots > 0 ? (swarm.BytesReceived - bytesAtStart) / elapsed / bots : 0;
+    var now = DateTime.UtcNow;
+    var from = samples[0];
+    foreach (var sample in samples)
+    {
+        if ((now - sample.At).TotalSeconds >= 10)
+        {
+            from = sample;
+        }
+    }
+
+    var tailSeconds = Math.Max(1.0, (now - from.At).TotalSeconds);
+    var bytesLast10 = bots > 0 ? (swarm.BytesReceived - from.Bytes) / tailSeconds / bots : 0;
     Console.WriteLine($"SWEEP kind={kind} sessions={bots} project={project:F3} frames={frames:F3} "
         + $"subs={subs:F3} tickP50={tick:F3} tickP99={tick99:F3} subsPct={(tick > 0 ? subs / tick * 100 : 0):F1} recPerFrame={swarm.RecordsPerFrame:F0} "
-        + $"bytesPerSessionPerSec={bytesPerSessionPerSec:F0} totalBytes={swarm.BytesReceived}");
+        + $"bytesPerSessionPerSec={bytesPerSessionPerSec:F0} bytesLast10={bytesLast10:F0} totalBytes={swarm.BytesReceived}");
     // Every system's mean, heaviest first: the tick is more than replication, and a change that moves cost out of the three stages above shows up here.
     var bySystem = new System.Collections.Generic.List<(string Name, double Ms)>(systems);
     bySystem.Sort((x, y) => y.Ms.CompareTo(x.Ms));

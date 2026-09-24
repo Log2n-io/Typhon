@@ -66,6 +66,7 @@ public sealed partial class TatooineSim
 
         // Before Start, because the catalog a client negotiates against is compiled there and the declarations are its source.
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
+        TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
         _runtime.OnTickAborted += (_, outcome)
             => Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}'");

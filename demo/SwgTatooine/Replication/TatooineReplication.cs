@@ -67,6 +67,9 @@ public static class TatooineReplication
     /// <param name="slots">The slots.</param>
     public static void Replicate<T>(in ClusterRef<T> cluster, ulong slots) where T : class => _pushCommands?.Replicate(in cluster, slots);
 
+    /// <summary>Each player session's outbound byte budget, bytes per second; 0 for none (<c>--session-budget</c>).</summary>
+    public static int PlayerBudgetBytesPerSecond { get; set; }
+
     /// <summary>Declares everything a client can see.</summary>
     /// <param name="subs">The runtime's registry, before <c>Start</c>.</param>
     /// <param name="automatic">Whether the engine detects changes itself instead of relying on the simulation's <c>Replicate</c> calls (experimental).</param>
@@ -145,7 +148,12 @@ public static class TatooineReplication
             if (e.Kind == SessionEventKind.Opened)
             {
                 // By kind, so one run can carry both shapes and a measurement can say which it measured.
-                subs.Session(e.Session).Profile(e.SessionKind == PlayerKind ? PlayerProfile : GodProfile);
+                var player = e.SessionKind == PlayerKind;
+                var request = subs.Session(e.Session).Profile(player ? PlayerProfile : GodProfile);
+                if (player && PlayerBudgetBytesPerSecond > 0)
+                {
+                    request.SetBudget(PlayerBudgetBytesPerSecond);
+                }
             }
         }
     }

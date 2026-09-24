@@ -239,6 +239,9 @@ public sealed class SimConfig
     /// </summary>
     public bool SubscriptionsPushAutomatic;
 
+    /// <summary>Each player session's outbound byte budget, bytes per second (<c>--session-budget</c>); 0 for none. Drives the per-session LOD level.</summary>
+    public int SessionBudgetBytesPerSecond;
+
     /// <summary>Idle iterations a scheduler worker spins inside a tick before yielding (<c>--idle-spin N</c>).</summary>
     public int WorkerIdleSpin = 100;
 

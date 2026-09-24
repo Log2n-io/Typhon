@@ -1149,6 +1149,11 @@ internal sealed unsafe class SessionTable : IDisposable
     /// </remarks>
     public EntityId ControlledOf(SessionId session) => TryGetRow(session, out var row) ? row->Controlled : EntityId.Null;
 
+    /// <summary>A session's outbound byte budget, 0 for none. Tick side, without the gate, as <see cref="ControlledOf"/>: written only on the tick.</summary>
+    /// <param name="session">The identity.</param>
+    /// <returns>The budget in bytes per second.</returns>
+    public int BudgetOf(SessionId session) => TryGetRow(session, out var row) ? row->BytesPerSecond : 0;
+
     /// <summary>Sets a session's outbound byte budget. Tick side, from the request log.</summary>
     /// <param name="session">The identity.</param>
     /// <param name="bytesPerSecond">The budget; zero removes it.</param>
