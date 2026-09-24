@@ -455,7 +455,8 @@ sealed class BotSwarmSmokeTests : TestBase<BotSwarmSmokeTests>
         {
             dag.CallbackSystem("MoveCreatures", ctx => MoveCreatures(ctx));
         }
-    }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = tickRateHz, Subscriptions = subscriptions ?? new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
+    }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = tickRateHz, Subscriptions = subscriptions
+            ?? new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
     });
 
     /// <summary>

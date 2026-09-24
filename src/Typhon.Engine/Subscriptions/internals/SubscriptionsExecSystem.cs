@@ -247,15 +247,15 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 
         var t2 = timed ? Stopwatch.GetTimestamp() : 0L;
 
-        // The marks come BEFORE the leases, which are sized from the marked blocks. The index is counted by the projection's chunks unless reproducible bytes
-        // are asked for: its order inside a cell follows the race. The collapsed shape counts too but never places — its frame prologue sees no index for the
-        // tick and builds it serially, recounting from zero.
+        // The marks come BEFORE the leases, which are sized from the marked blocks. Each projection chunk sorts its own events for the index; the merge's
+        // order is a function of the runs, so a deterministic projection gives a deterministic index in this shape too. The collapsed shape sorts but never
+        // merges in a stage — its frame prologue merges the sorted runs serially.
         for (var i = 0; i < states.Length; i++)
         {
             states[i].BeginWatchedBlocks(tick);
         }
 
-        push.MarkPushed(Math.Max(1, ctx.WorkerCount), countInProject: !subs.Options.DeterministicProjection);
+        push.MarkPushed(Math.Max(1, ctx.WorkerCount), countInProject: true);
 
         if (timed)
         {
@@ -442,8 +442,8 @@ internal sealed class SubscriptionsEventsExecSystem : SubscriptionsExecSystemBas
 }
 
 /// <summary>
-/// Places the tick's push events into the cell index, one chunk per worker list, after the projection counted them. Serial prefix in its
-/// prologue; nothing to do (zero chunks) on a tick the frame prologue indexes serially.
+/// Merges the tick's push events into the cell index, one chunk per key range, after each projection chunk sorted its own. Serial prefix (the
+/// splitters) in its prologue; nothing to do (zero chunks) on a tick the frame prologue indexes serially.
 /// </summary>
 internal sealed class SubscriptionsPushIndexExecSystem : SubscriptionsExecSystemBase
 {
@@ -478,8 +478,19 @@ internal sealed class SubscriptionsPushFarExecSystem : SubscriptionsExecSystemBa
     /// <inheritdoc />
     protected override SubscriptionsStage Stage => SubscriptionsStage.Project;
 
-    // No session open, nobody to flush to: a session that opens later starts with a reset and its whole view, never with an old flush.
-    protected override int PrepareChunks(SubscriptionsContext ctx) => ctx.SessionCount > 0 ? ctx.Subscriptions?.Push?.BeginFarFold(ctx.WorkerCount) ?? 0 : 0;
+    // The index's serial tail first — the chunks' cell lists into the log slot — so the fold and the frames read a finished index. No session open,
+    // nobody to flush to: a session that opens later starts with a reset and its whole view, never with an old flush.
+    protected override int PrepareChunks(SubscriptionsContext ctx)
+    {
+        var push = ctx.Subscriptions?.Push;
+        if (push == null)
+        {
+            return 0;
+        }
+
+        push.FinishIndex();
+        return ctx.SessionCount > 0 ? push.BeginFarFold(ctx.WorkerCount) : 0;
+    }
 
     protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => ctx.Subscriptions?.Push?.FoldFarChunk(chunkIndex);
 }

@@ -33,21 +33,18 @@ internal struct PushEvent
     /// <summary>Distance LOD: the far flush carries the motion segment.</summary>
     public const byte FlushSegment = 32;
 
+    // Laid out to 48 bytes, a key's 42 bits in eight and six bytes: the struct is copied into the index and read by every session that reaches its cell.
     public nint Block;
+
+    // The cells of the old and new positions as packed keys (PushReplication.Key), computed once by the projecting worker so no session re-derives them.
+    public ulong OldKey;
     public float OldX;
     public float OldY;
     public float NewX;
     public float NewY;
     public uint NetId;
-
-    /// <summary>The primary cell: the new position's, or the old one's for a leave-only event.</summary>
-    public int Cell;
-
-    // Cell coordinates, computed once by the projecting worker so no session re-derives them.
-    public short OldCx;
-    public short OldCy;
-    public short NewCx;
-    public short NewCy;
+    private uint _newKeyLow;
+    private ushort _newKeyHigh;
     public ushort Archetype;
     public byte Slot;
     public byte Flags;
@@ -57,6 +54,27 @@ internal struct PushEvent
 
     /// <summary>Distance LOD: with <see cref="FarFlush"/>, the groups changed since the entity's previous far flush.</summary>
     public byte FlushGroups;
+
+    public ulong NewKey
+    {
+        readonly get => _newKeyLow | ((ulong)_newKeyHigh << 32);
+        set
+        {
+            _newKeyLow = (uint)value;
+            _newKeyHigh = (ushort)(value >> 32);
+        }
+    }
+
+    public readonly int OldCx => PushReplication.KeyX(OldKey);
+
+    public readonly int OldCy => PushReplication.KeyY(OldKey);
+
+    public readonly int NewCx => PushReplication.KeyX(NewKey);
+
+    public readonly int NewCy => PushReplication.KeyY(NewKey);
+
+    /// <summary>The primary cell: the new position's, or the old one's for a leave-only event.</summary>
+    public readonly ulong PrimaryKey => (Flags & HasNew) != 0 ? NewKey : OldKey;
 }
 
 /// <summary>What the push path remembers about one session: its visibility anchor and which cells around it it has been given.</summary>
@@ -214,11 +232,11 @@ internal sealed unsafe class PushReplication
     private int _farChunkCount;
     private PushEvent[][] _farOut = [];
     private int[] _farOutCount = [];
-    private int[][] _farOutCells = [];
+    private ulong[][] _farOutCells = [];
     private int[][] _farOutStarts = [];
     private int[] _farOutCellCount = [];
     private long[] _farOutFlagged = [];
-    private int[] _farBounds = [];
+    private ulong[] _farBounds = [];
 
     /// <summary>How many ticks of indexes the push log keeps: a session that missed fewer frames than this catches up from them, an older one resets.</summary>
     /// <remarks>Covers <see cref="SkipPolicy.MaxDegradeLevel"/> (one frame in four) with room for a few back-pressure skips on top.</remarks>
@@ -226,23 +244,125 @@ internal sealed unsafe class PushReplication
 
     private readonly TickLog[] _log = CreateLog();
 
-    /// <summary>One tick of the push log: that tick's events in cell order, and the non-empty cells as a compact, ascending CSR.</summary>
+    /// <summary>
+    /// One tick of the push log, which is also that tick's index: the events in cell order, the occupied cells as an ascending CSR of packed keys, and a
+    /// row table from each occupied row to its first cell.
+    /// </summary>
     private sealed class TickLog
     {
         public uint Tick;
         public bool Valid;
         public PushEvent[] Events = [];
-        public int[] Cells = [];
+        public ulong[] Cells = [];
         public int[] Starts = [];
         public int[] PrimaryEnds = [];
         public int CellCount;
 
+        // Open addressing, row + 1 as the key (0 is empty), sized to twice the occupied rows: a probe per row a session reads, and an empty row costs one.
+        private ulong[] _rowKeys = new ulong[16];
+        private int[] _rowFirst = new int[16];
+        private int _rowMask = 15;
+
         // Distance LOD: this tick's far flushes for entities whose latest event is an earlier tick, by cell (compact, ascending). An entity whose latest
         // event IS this tick carries its flush on that event instead.
         public PushEvent[] Flush = [];
-        public int[] FlushCells = [];
+        public ulong[] FlushCells = [];
         public int[] FlushStarts = [];
         public int FlushCellCount;
+
+        /// <summary>Rebuilds the row table from <see cref="Cells"/>: O(occupied cells), clearing only the table it uses.</summary>
+        public void BuildRows()
+        {
+            var rows = 0;
+            var previous = ulong.MaxValue;
+            for (var k = 0; k < CellCount; k++)
+            {
+                var row = Cells[k] >> KeyAxisBits;
+                if (row != previous)
+                {
+                    rows++;
+                    previous = row;
+                }
+            }
+
+            var size = 16;
+            while (size < rows * 2)
+            {
+                size <<= 1;
+            }
+
+            if (_rowKeys.Length < size)
+            {
+                _rowKeys = new ulong[size];
+                _rowFirst = new int[size];
+            }
+
+            Array.Clear(_rowKeys, 0, size);
+            _rowMask = size - 1;
+            previous = ulong.MaxValue;
+            for (var k = 0; k < CellCount; k++)
+            {
+                var row = Cells[k] >> KeyAxisBits;
+                if (row == previous)
+                {
+                    continue;
+                }
+
+                previous = row;
+                var h = Hash(row) & _rowMask;
+                while (_rowKeys[h] != 0)
+                {
+                    h = (h + 1) & _rowMask;
+                }
+
+                _rowKeys[h] = row + 1;
+                _rowFirst[h] = k;
+            }
+        }
+
+        /// <summary>The index in <see cref="Cells"/> of the row's first occupied cell, or -1 when the row has none.</summary>
+        public int RowStart(ulong row)
+        {
+            var h = Hash(row) & _rowMask;
+            while (true)
+            {
+                var k = _rowKeys[h];
+                if (k == row + 1)
+                {
+                    return _rowFirst[h];
+                }
+
+                if (k == 0)
+                {
+                    return -1;
+                }
+
+                h = (h + 1) & _rowMask;
+            }
+        }
+
+        private static int Hash(ulong row) => (int)((row * 0x9E3779B97F4A7C15UL) >> 40);
+    }
+
+    /// <summary>The first occupied cell of row <paramref name="cy"/> at or after column <paramref name="minCx"/>, or past the end when there is none.</summary>
+    private static int FirstCellInRow(TickLog slot, int cy, int minCx)
+    {
+        var k = slot.RowStart((ulong)(uint)cy);
+        if (k < 0)
+        {
+            return slot.CellCount;
+        }
+
+        // A row holds few cells: a short scan finds the first in the box, and only a long row falls back to the binary search.
+        var target = Key(minCx, cy);
+        var cells = slot.Cells;
+        var scanEnd = Math.Min(slot.CellCount, k + 8);
+        while (k < scanEnd && cells[k] < target)
+        {
+            k++;
+        }
+
+        return k < scanEnd || k == slot.CellCount ? k : LowerBound(cells, k, slot.CellCount, target);
     }
 
     private static TickLog[] CreateLog()
@@ -261,10 +381,6 @@ internal sealed unsafe class PushReplication
     public long LogCatchUpTicks;
     public long LogTooOld;
     public long LogAmbiguous;
-    private readonly int[] _cellStart;
-    private readonly int[] _cellPrimaryEnd;
-    private readonly int[] _cellFill;
-    private readonly int[] _cellSecondaryFill;
 
     private PushSessionState[] _sessions;
     private uint _tick;
@@ -295,6 +411,11 @@ internal sealed unsafe class PushReplication
     public long SweepSlots;
     public long Resets;
     public long IndexTicks;
+
+    /// <summary>The index's split, cumulative, in Stopwatch ticks: the runs' fill and sort (projection chunks), the merge (index chunks), the finish.</summary>
+    public long SortTicks;
+    public long MergeTicks;
+    public long FinishTicks;
     public long PrepareTicks;
     public long GatherTicks;
 
@@ -344,9 +465,7 @@ internal sealed unsafe class PushReplication
             e.Flags = PushEvent.HasOld;
             e.OldX = x;
             e.OldY = y;
-            e.OldCx = (short)CellX(x);
-            e.OldCy = (short)CellY(y);
-            e.Cell = (e.OldCy * _gridW) + e.OldCx;
+            e.OldKey = Key(CellX(x), CellY(y));
             switch (cause)
             {
                 case 0: OrphanRelease++; break;
@@ -426,6 +545,8 @@ internal sealed unsafe class PushReplication
             _repush[a] = [];
         }
 
+        // Null only without a spatial grid, where every observed archetype was refused above for having no position.
+        ArgumentNullException.ThrowIfNull(grid);
         Radius = grid.Radius;
         CellSize = grid.CellM;
         AnchorSlack = grid.AnchorSlack;
@@ -436,17 +557,9 @@ internal sealed unsafe class PushReplication
         _gridW = grid.DimX;
         _gridH = grid.DimY;
 
-        // The dense index's own limit, gone with it (10 § 12, 1.5.1): it clears and walks four int arrays of this many cells every tick.
-        if ((long)_gridW * _gridH > 16_000_000)
-        {
-            throw new NotSupportedException(
-                $"Replication grid of {_gridW} x {_gridH} cells is too large for the dense push index: raise SubscriptionsOptions.ReplicationCellM.");
-        }
+        _bitsX = BitsFor(_gridW);
+        _sortBits = _bitsX + BitsFor(_gridH) + 1;
 
-        _cellStart = new int[(_gridW * _gridH) + 1];
-        _cellPrimaryEnd = new int[_gridW * _gridH];
-        _cellFill = new int[_gridW * _gridH];
-        _cellSecondaryFill = new int[_gridW * _gridH];
         _sessions = new PushSessionState[Math.Max(1, maxSessions)];
         if (Shadow)
         {
@@ -696,7 +809,15 @@ internal sealed unsafe class PushReplication
         var from = Stopwatch.GetTimestamp();
         _tick = tick;
         var resumed = _preparedTick != 0 && tick != _preparedTick + 1;
+
+        // A tick the track ran whose index was never finished (a stage fault between the projection and the frames) lost its cell changes as surely as a
+        // tick it skipped. _indexedTick still names the last finished tick here: MarkPushed resets it later in this step.
+        var unindexed = _preparedTick != 0 && !resumed && _indexedTick != _preparedTick;
         _preparedTick = tick;
+
+        // Either way the occupancy missed changes. It is recounted when this tick's index is finished, not now: the fence has yet to place this tick's
+        // carried and parked entries, and only the projection makes the blocks' occupancy words describe them (SUB-24).
+        _recountAtFinish |= resumed || unindexed;
         if (resumed)
         {
             GapRepushes++;
@@ -874,15 +995,9 @@ internal sealed unsafe class PushReplication
     /// <summary>After the watched lists were reset: marks the push set and lists each block once, so the projection pass visits exactly it.</summary>
     public void MarkPushed(int workers, bool countInProject = false)
     {
-        // The parallel index (BeginParallelIndex): the projection's chunks count their events into the shared per-cell counts as they finish, so those
-        // start from zero here, before any chunk runs.
+        // The parallel index (BeginParallelIndex): the projection's chunks sort their own events as they finish.
         _countInProject = countInProject && ParallelIndex;
         _indexedTick = uint.MaxValue;
-        if (_countInProject)
-        {
-            Array.Clear(_cellStart);
-            Array.Clear(_cellPrimaryEnd);
-        }
 
         foreach (var a in _pushIndices)
         {
@@ -918,6 +1033,8 @@ internal sealed unsafe class PushReplication
             _events[w] ??= new PushEvent[1024];
             _eventCount[w] = 0;
         }
+
+        EnsureRuns(_events.Length + 1);
     }
 
     // ══ Projection (parallel, one worker per block) ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1003,11 +1120,8 @@ internal sealed unsafe class PushReplication
         e.NewX = nx;
         e.NewY = ny;
         e.Groups = (byte)groups;
-        e.OldCx = (short)CellX(ox);
-        e.OldCy = (short)CellY(oy);
-        e.NewCx = (short)CellX(nx);
-        e.NewCy = (short)CellY(ny);
-        e.Cell = (flags & PushEvent.HasNew) != 0 ? (e.NewCy * _gridW) + e.NewCx : (e.OldCy * _gridW) + e.OldCx;
+        e.OldKey = Key(CellX(ox), CellY(oy));
+        e.NewKey = Key(CellX(nx), CellY(ny));
         _eventCount[worker] = n + 1;
     }
 
@@ -1021,7 +1135,26 @@ internal sealed unsafe class PushReplication
         }
     }
 
-    // ══ Frame prologue (serial) ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // ══ The push index (design/Subscriptions/10 § 2.3) ═══════════════════════════════════════════════════════════════════════════════════════════════
+    //
+    // Each projection chunk sorts its own events by cell as it finishes (SortRun), the PushIndex stage merges the sorted runs by key range (MergeChunk),
+    // and a serial finish concatenates the chunks' cell lists and builds the row table (FinishIndex). Every step costs O(events + occupied cells): no
+    // array the size of the grid is touched, cleared or walked. The result is the tick's slot of the push log, so the log and the index are one thing.
+
+    /// <summary>Bits per axis of a cell key: the spatial VDB key's width (<see cref="ReplicationGrid.MaxAxisCells"/>).</summary>
+    internal const int KeyAxisBits = 21;
+
+    private const ulong KeyAxisMask = (1UL << KeyAxisBits) - 1;
+
+    /// <summary>A cell's packed key, <c>(cy &lt;&lt; 21) | cx</c>: ascending keys are row-major order, and a row is <c>key &gt;&gt; 21</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong Key(int cx, int cy) => ((ulong)(uint)cy << KeyAxisBits) | (uint)cx;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int KeyX(ulong key) => (int)(key & KeyAxisMask);
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int KeyY(ulong key) => (int)((key >> KeyAxisBits) & KeyAxisMask);
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int CellX(double x) => Math.Clamp((int)Math.Floor((x - _gridMinX) / CellSize), 0, _gridW - 1);
@@ -1029,129 +1162,94 @@ internal sealed unsafe class PushReplication
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int CellY(double y) => Math.Clamp((int)Math.Floor((y - _gridMinY) / CellSize), 0, _gridH - 1);
 
-    /// <summary>Buckets this tick's events by cell, primaries then secondaries within each cell: a counting sort over the events.</summary>
-    public void BuildIndex()
+    // The sort key of an index entry: the cell compressed to the grid's used bits (row-major, so the order is the packed key's), shifted left once, with
+    // the low bit set for a secondary — every cell's primaries sort before its secondaries by construction. Fewer bits, fewer radix passes.
+    private readonly int _bitsX;
+    private readonly int _sortBits;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ulong SortKey(ulong key, uint secondary) => ((((ulong)(uint)KeyY(key) << _bitsX) | (uint)KeyX(key)) << 1) | secondary;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ulong KeyOfSortKey(ulong sortKey)
     {
-        var from = Stopwatch.GetTimestamp();
-
-        // The fence's orphans ride worker 0's list: they are leaves like any other, filed under the cell the entity was last described in.
-        if (_orphanCount > 0 && _events.Length > 0)
-        {
-            for (var i = 0; i < _orphanCount; i++)
-            {
-                var n = _eventCount[0];
-                if (n == _events[0].Length)
-                {
-                    Array.Resize(ref _events[0], n * 2);
-                }
-
-                _events[0][n] = _orphans[i];
-                _eventCount[0] = n + 1;
-            }
-
-            _orphanCount = 0;
-        }
-
-        var cells = _gridW * _gridH;
-        var workers = _events.Length;
-        const byte both = PushEvent.HasNew | PushEvent.HasOld;
-
-        // Count: the primary counts in _cellStart, the secondary ones in _cellPrimaryEnd, both turned into offsets below. Proportional to the events and
-        // the grid, never to the worker count.
-        Array.Clear(_cellStart);
-        Array.Clear(_cellPrimaryEnd);
-        for (var w = 0; w < workers; w++)
-        {
-            var list = _events[w];
-            var n = _eventCount[w];
-            for (var i = 0; i < n; i++)
-            {
-                ref readonly var e = ref list[i];
-                _cellStart[e.Cell]++;
-                if ((e.Flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
-                {
-                    _cellPrimaryEnd[(e.OldCy * _gridW) + e.OldCx]++;
-                }
-            }
-        }
-
-        var running = 0;
-        for (var c = 0; c < cells; c++)
-        {
-            var primaries = _cellStart[c];
-            var secondaries = _cellPrimaryEnd[c];
-            _cellStart[c] = running;
-            _cellFill[c] = running;
-            running += primaries;
-            _cellPrimaryEnd[c] = running;
-            _cellSecondaryFill[c] = running;
-            running += secondaries;
-        }
-
-        _cellStart[cells] = running;
-        Events += running;
-        var slot = _log[_tick % LogDepth];
-        if (slot.Events.Length < running)
-        {
-            slot.Events = new PushEvent[Math.Max(running, slot.Events.Length * 2)];
-        }
-
-        _indexed = slot.Events;
-        for (var w = 0; w < workers; w++)
-        {
-            var list = _events[w];
-            var n = _eventCount[w];
-            for (var i = 0; i < n; i++)
-            {
-                ref readonly var e = ref list[i];
-                _indexed[_cellFill[e.Cell]++] = e;
-                if ((e.Flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
-                {
-                    // A secondary keeps the PRIMARY cell in Cell, so a session can tell whether it already met this event there.
-                    _indexed[_cellSecondaryFill[(e.OldCy * _gridW) + e.OldCx]++] = e;
-                }
-            }
-        }
-
-        // The log's compact form of this tick: the non-empty cells, ascending, with their ranges. The dense arrays above are rebuilt every tick.
-        var nonEmpty = 0;
-        for (var c = 0; c < cells; c++)
-        {
-            if (_cellStart[c + 1] != _cellStart[c])
-            {
-                if (nonEmpty == slot.Cells.Length)
-                {
-                    var grown = Math.Max(64, nonEmpty * 2);
-                    Array.Resize(ref slot.Cells, grown);
-                    Array.Resize(ref slot.Starts, grown + 1);
-                    Array.Resize(ref slot.PrimaryEnds, grown);
-                }
-
-                slot.Cells[nonEmpty] = c;
-                slot.Starts[nonEmpty] = _cellStart[c];
-                slot.PrimaryEnds[nonEmpty] = _cellPrimaryEnd[c];
-                nonEmpty++;
-            }
-        }
-
-        if (slot.Starts.Length < nonEmpty + 1)
-        {
-            Array.Resize(ref slot.Starts, nonEmpty + 1);
-        }
-
-        slot.Starts[nonEmpty] = running;
-        slot.CellCount = nonEmpty;
-        slot.Tick = _tick;
-        slot.Valid = true;
-        slot.FlushCellCount = 0;
-        _indexedTick = _tick;
-
-        IndexTicks += Stopwatch.GetTimestamp() - from;
+        var cell = sortKey >> 1;
+        return Key((int)(cell & ((1UL << _bitsX) - 1)), (int)(cell >> _bitsX));
     }
 
+    // Per run (a worker's events, then the fence's orphans last): the entries' sort keys and event indices, sorted, and the buffers the sort ping-pongs.
+    private ulong[][] _runKey = [];
+    private int[][] _runIdx = [];
+    private ulong[][] _runKeyTmp = [];
+    private int[][] _runIdxTmp = [];
+    private int[] _runLen = [];
+    private uint[] _runSortedTick = [];
+
+    // The fence's orphans as the last run, copied out of the orphan list when the merge is prepared.
+    private PushEvent[] _orphanEvents = new PushEvent[64];
+    private int _orphanRunCount;
+
+    // The merge: key-range splitters in sort-key space, and per chunk its cells in order.
+    private int _mergeChunks;
+    private uint _mergedTick = uint.MaxValue;
+    private ulong[] _split = [];
+    private ulong[][] _chunkCells = [];
+    private int[][] _chunkStarts = [];
+    private int[][] _chunkPrimaryEnds = [];
+    private int[] _chunkCellCount = [];
+    private ulong[] _samples = [];
+
+    // Per chunk, the cells whose occupancy changed this tick and by how much, applied by the serial finish.
+    private ulong[][] _chunkDeltaKeys = [];
+    private int[][] _chunkDeltas = [];
+    private int[] _chunkDeltaCount = [];
+
+    private readonly ReplicationOccupancy _occupancy = new();
+
+    /// <summary>The replication grid's occupancy, maintained from the index (10 § 2.4).</summary>
+    internal ReplicationOccupancy Occupancy => _occupancy;
+
+    /// <summary>Cell deliveries and sweeps skipped because the cell held nothing — a cluster query each — cumulative.</summary>
+    public long EmptyCellsSkipped;
+
     /// <summary>
-    /// PROTOTYPE — the index is built in parallel (<c>TYPHON_PUSH_PARALLEL_INDEX=0</c> keeps <see cref="BuildIndex"/>, serial in the frame prologue, for the
-    /// A/B): counted by the projection's chunks, offset here, placed by one chunk per worker list.
+    /// Cell delivery and sweep (10 § 8, L7): time in each, cumulative in Stopwatch ticks, and the entries each decoded against what it emitted — the
+    /// measurement that decides whether batched delivery is worth designing. Collected only while <see cref="FrameAssembler.PhaseTimingEnabled"/> is set.
+    /// </summary>
+    public long DeliverTicks;
+    public long DeliverDecoded;
+    public long DeliverEntered;
+    public long SweepTicks;
+    public long SweepDecoded;
+
+    /// <summary>Full recounts of the occupancy: after a tick the track did not run for or did not index, whose events it never saw — cumulative.</summary>
+    public long OccupancyRecounts;
+
+    /// <summary>Time spent in those recounts — serial, in the index's finish — cumulative, in Stopwatch ticks.</summary>
+    public long RecountTicks;
+
+    // Set by the blocks step when the occupancy missed a tick's changes; the finish then recounts instead of applying this tick's deltas.
+    private bool _recountAtFinish;
+
+    /// <summary>Index entries (primaries and secondaries) this tick, and occupied cells in the index — for the empty-world and cost tests.</summary>
+    public int IndexEntries { get; private set; }
+
+    /// <summary>The most key ranges one tick's merge was split into — whether the merge ever ran as concurrent chunks.</summary>
+    public int MaxMergeChunks { get; private set; }
+
+    /// <summary>Tests only (SUB-24's mutant): a mover's secondary no longer takes its entity out of the cell it left.</summary>
+    internal bool OccupancyMutantForTest;
+
+    /// <summary>Tests only (SUB-25's mutant): a mover's secondary is filed under the cell it entered instead of the one it left.</summary>
+    internal bool IndexMutantForTest;
+
+    /// <summary>Cells the index holds this tick: only those an event touched.</summary>
+    public int IndexCells { get; private set; }
+
+    private static int BitsFor(int count) => count <= 1 ? 1 : 32 - BitOperations.LeadingZeroCount((uint)(count - 1));
+
+    /// <summary>
+    /// PROTOTYPE — the index is merged in parallel (<c>TYPHON_PUSH_PARALLEL_INDEX=0</c> merges it serially in the frame prologue, for the A/B).
     /// </summary>
     public bool ParallelIndex = Environment.GetEnvironmentVariable("TYPHON_PUSH_PARALLEL_INDEX") != "0";
 
@@ -1162,8 +1260,8 @@ internal sealed unsafe class PushReplication
     public bool Indexed => _indexedTick == _tick;
 
     /// <summary>
-    /// Called by a projection chunk once its blocks are done: counts its worker's events into the shared per-cell counts — primaries under their cell,
-    /// secondaries under the cell a mover left. Atomic, because every chunk counts into the same cells; the events are still in this core's cache.
+    /// Called by a projection chunk once its blocks are done: sorts its worker's events by cell while they are still in this core's cache. The run is the
+    /// worker's own, so no chunk writes anything another reads.
     /// </summary>
     public void CountWorker(int worker)
     {
@@ -1172,23 +1270,12 @@ internal sealed unsafe class PushReplication
             return;
         }
 
-        const byte both = PushEvent.HasNew | PushEvent.HasOld;
-        var list = _events[worker];
-        var n = _eventCount[worker];
-        for (var i = 0; i < n; i++)
-        {
-            ref readonly var e = ref list[i];
-            Interlocked.Increment(ref _cellStart[e.Cell]);
-            if ((e.Flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
-            {
-                Interlocked.Increment(ref _cellPrimaryEnd[(e.OldCy * _gridW) + e.OldCx]);
-            }
-        }
+        SortRun(worker, _events[worker], _eventCount[worker]);
     }
 
     /// <summary>
-    /// The parallel index's serial half, after every projection chunk has counted: the fence's orphans, the offsets and the log's compact cell list. Returns
-    /// how many placement chunks follow — one per worker list — or 0 when the projection did not count this tick and the frame prologue builds it instead.
+    /// The parallel index's serial half, after every projection chunk has sorted its run: the fence's orphans as one more run, and the key-range
+    /// splitters. Returns how many merge chunks follow, or 0 when the projection did not sort this tick and the frame prologue builds the index instead.
     /// </summary>
     public int BeginParallelIndex()
     {
@@ -1198,110 +1285,723 @@ internal sealed unsafe class PushReplication
         }
 
         var from = Stopwatch.GetTimestamp();
-        const byte both = PushEvent.HasNew | PushEvent.HasOld;
-
-        // The fence's orphans ride worker 0's list, counted here: nothing else is running.
-        for (var i = 0; i < _orphanCount; i++)
-        {
-            var n = _eventCount[0];
-            if (n == _events[0].Length)
-            {
-                Array.Resize(ref _events[0], n * 2);
-            }
-
-            ref readonly var e = ref _orphans[i];
-            _events[0][n] = e;
-            _eventCount[0] = n + 1;
-            _cellStart[e.Cell]++;
-            if ((e.Flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
-            {
-                _cellPrimaryEnd[(e.OldCy * _gridW) + e.OldCx]++;
-            }
-        }
-
-        _orphanCount = 0;
-        var cells = _gridW * _gridH;
-        var running = 0;
-        var slot = _log[_tick % LogDepth];
-        var nonEmpty = 0;
-        for (var c = 0; c < cells; c++)
-        {
-            var primaries = _cellStart[c];
-            var secondaries = _cellPrimaryEnd[c];
-            _cellStart[c] = running;
-            _cellFill[c] = running;
-            running += primaries;
-            _cellPrimaryEnd[c] = running;
-            _cellSecondaryFill[c] = running;
-            running += secondaries;
-            if (primaries + secondaries != 0)
-            {
-                if (nonEmpty == slot.Cells.Length)
-                {
-                    var grown = Math.Max(64, nonEmpty * 2);
-                    Array.Resize(ref slot.Cells, grown);
-                    Array.Resize(ref slot.Starts, grown + 1);
-                    Array.Resize(ref slot.PrimaryEnds, grown);
-                }
-
-                slot.Cells[nonEmpty] = c;
-                slot.Starts[nonEmpty] = _cellStart[c];
-                slot.PrimaryEnds[nonEmpty] = _cellPrimaryEnd[c];
-                nonEmpty++;
-            }
-        }
-
-        _cellStart[cells] = running;
-        Events += running;
-        if (slot.Events.Length < running)
-        {
-            slot.Events = new PushEvent[Math.Max(running, slot.Events.Length * 2)];
-        }
-
-        if (slot.Starts.Length < nonEmpty + 1)
-        {
-            Array.Resize(ref slot.Starts, nonEmpty + 1);
-        }
-
-        slot.Starts[nonEmpty] = running;
-        slot.CellCount = nonEmpty;
-        slot.Tick = _tick;
-        slot.Valid = true;
-        slot.FlushCellCount = 0;
-        _indexed = slot.Events;
-        _indexedTick = _tick;
+        PrepareMerge(_events.Length);
         IndexTicks += Stopwatch.GetTimestamp() - from;
-        return _events.Length;
+        return _mergeChunks;
     }
 
-    /// <summary>
-    /// The parallel index's placement, for one worker's list: each event into its cell's next free position, claimed atomically since other lists place
-    /// into the same cells. The order inside a cell follows the race, which nothing reads: a cell's events are folded or tested one by one.
-    /// </summary>
-    public void PlaceWorker(int worker)
+    /// <summary>One merge chunk: every run's entries in its key range, merged into the tick's log slot.</summary>
+    public void PlaceWorker(int chunk)
     {
-        if ((uint)worker >= (uint)_events.Length)
+        if ((uint)chunk >= (uint)_mergeChunks || _mergedTick != _tick)
         {
             return;
         }
 
         var from = Stopwatch.GetTimestamp();
-        const byte both = PushEvent.HasNew | PushEvent.HasOld;
-        var list = _events[worker];
-        var n = _eventCount[worker];
-        var indexed = _indexed;
-        for (var i = 0; i < n; i++)
+        MergeChunk(chunk);
+        var spent = Stopwatch.GetTimestamp() - from;
+        Interlocked.Add(ref IndexTicks, spent);
+        Interlocked.Add(ref MergeTicks, spent);
+    }
+
+    /// <summary>
+    /// Builds this tick's index serially: what the frame prologue runs when no stage merged it (the collapsed shape, a deterministic projection, the
+    /// parallel index switched off), and the finish when one did.
+    /// </summary>
+    public void BuildIndex()
+    {
+        if (_mergedTick != _tick)
         {
-            ref readonly var e = ref list[i];
-            indexed[Interlocked.Increment(ref _cellFill[e.Cell]) - 1] = e;
-            if ((e.Flags & both) == both && (e.OldCx != e.NewCx || e.OldCy != e.NewCy))
+            var from = Stopwatch.GetTimestamp();
+            PrepareMerge(1);
+            for (var c = 0; c < _mergeChunks; c++)
             {
-                // A secondary keeps the PRIMARY cell in Cell, so a session can tell whether it already met this event there.
-                indexed[Interlocked.Increment(ref _cellSecondaryFill[(e.OldCy * _gridW) + e.OldCx]) - 1] = e;
+                MergeChunk(c);
+            }
+
+            IndexTicks += Stopwatch.GetTimestamp() - from;
+        }
+
+        FinishIndex();
+    }
+
+    /// <summary>
+    /// The index's serial tail: the chunks' cell lists concatenated into the log slot — chunk order is key order — and the slot's row table. Idempotent per
+    /// tick; a no-op until the merge ran.
+    /// </summary>
+    public void FinishIndex()
+    {
+        if (_mergedTick != _tick || _indexedTick == _tick)
+        {
+            return;
+        }
+
+        var from = Stopwatch.GetTimestamp();
+        var slot = _log[_tick % LogDepth];
+        var cells = 0;
+        for (var c = 0; c < _mergeChunks; c++)
+        {
+            cells += _chunkCellCount[c];
+        }
+
+        if (slot.Cells.Length < cells)
+        {
+            var grown = Math.Max(Math.Max(64, cells), slot.Cells.Length * 2);
+            slot.Cells = new ulong[grown];
+            slot.PrimaryEnds = new int[grown];
+        }
+
+        if (slot.Starts.Length < cells + 1)
+        {
+            slot.Starts = new int[Math.Max(cells + 1, slot.Starts.Length * 2)];
+        }
+
+        var at = 0;
+        for (var c = 0; c < _mergeChunks; c++)
+        {
+            var n = _chunkCellCount[c];
+            Array.Copy(_chunkCells[c], 0, slot.Cells, at, n);
+            Array.Copy(_chunkStarts[c], 0, slot.Starts, at, n);
+            Array.Copy(_chunkPrimaryEnds[c], 0, slot.PrimaryEnds, at, n);
+            at += n;
+        }
+
+        slot.Starts[cells] = IndexEntries;
+        slot.CellCount = cells;
+        slot.BuildRows();
+        if (_recountAtFinish)
+        {
+            // After the projection every block's occupancy word and cold position describe this tick, arrivals and drained entries included.
+            var recountFrom = Stopwatch.GetTimestamp();
+            Recount(_occupancy);
+            _recountAtFinish = false;
+            OccupancyRecounts++;
+            RecountTicks += Stopwatch.GetTimestamp() - recountFrom;
+        }
+        else
+        {
+            // Serial, and O(cells whose count changed): 10 § 2.4 applies them per merge chunk, which a concurrent map would need; not worth it at this size.
+            for (var c = 0; c < _mergeChunks; c++)
+            {
+                var keys = _chunkDeltaKeys[c];
+                var deltas = _chunkDeltas[c];
+                for (var i = 0; i < _chunkDeltaCount[c]; i++)
+                {
+                    _occupancy.Add(keys[i], deltas[i]);
+                }
             }
         }
 
-        Interlocked.Add(ref IndexTicks, Stopwatch.GetTimestamp() - from);
+        slot.Tick = _tick;
+        slot.Valid = true;
+        slot.FlushCellCount = 0;
+        _indexed = slot.Events;
+        IndexCells = cells;
+        _indexedTick = _tick;
+        IndexTicks += Stopwatch.GetTimestamp() - from;
+        FinishTicks += Stopwatch.GetTimestamp() - from;
+    }
+
+    /// <summary>Fills a run from a list of events: one entry under each event's primary cell, and one more under the cell a mover left.</summary>
+    private void FillRun(int run, PushEvent[] events, int count)
+    {
+        const byte both = PushEvent.HasNew | PushEvent.HasOld;
+        if (_runKey[run] == null || _runKey[run].Length < 2 * count)
+        {
+            // A power of two, so a load that creeps up reallocates a logarithmic number of times rather than on every new maximum (SUB-07).
+            var size = (int)Math.Max(2048u, BitOperations.RoundUpToPowerOf2((uint)(2 * count)));
+            _runKey[run] = new ulong[size];
+            _runIdx[run] = new int[size];
+            _runKeyTmp[run] = new ulong[size];
+            _runIdxTmp[run] = new int[size];
+        }
+
+        var keys = _runKey[run];
+        var idx = _runIdx[run];
+        var n = 0;
+        for (var i = 0; i < count; i++)
+        {
+            ref readonly var e = ref events[i];
+            keys[n] = SortKey(e.PrimaryKey, 0);
+            idx[n++] = i;
+            if ((e.Flags & both) == both && e.OldKey != e.NewKey)
+            {
+                keys[n] = SortKey(IndexMutantForTest ? e.NewKey : e.OldKey, 1);
+                idx[n++] = i;
+            }
+        }
+
+        _runLen[run] = n;
+    }
+
+    /// <summary>Fills and sorts one run, stably, so equal keys keep the order their events were recorded in.</summary>
+    private void SortRun(int run, PushEvent[] events, int count)
+    {
+        var from = Stopwatch.GetTimestamp();
+        FillRun(run, events, count);
+        var n = _runLen[run];
+        if (n > 0 && RadixSort(_runKey[run], _runIdx[run], _runKeyTmp[run], _runIdxTmp[run], n, _sortBits))
+        {
+            (_runKey[run], _runKeyTmp[run]) = (_runKeyTmp[run], _runKey[run]);
+            (_runIdx[run], _runIdxTmp[run]) = (_runIdxTmp[run], _runIdx[run]);
+        }
+
+        _runSortedTick[run] = _tick;
+        Interlocked.Add(ref SortTicks, Stopwatch.GetTimestamp() - from);
+    }
+
+    /// <summary>
+    /// A stable LSD radix sort of <paramref name="n"/> entries on the low <paramref name="bits"/> of their keys, in as few passes of at most 11 bits as the
+    /// width allows. Returns whether the result is in the temporary buffers. Short runs use an insertion sort, which is also stable.
+    /// </summary>
+    private static bool RadixSort(ulong[] keys, int[] idx, ulong[] keysTmp, int[] idxTmp, int n, int bits)
+    {
+        if (n <= 48)
+        {
+            for (var i = 1; i < n; i++)
+            {
+                var key = keys[i];
+                var id = idx[i];
+                var j = i - 1;
+                while (j >= 0 && keys[j] > key)
+                {
+                    keys[j + 1] = keys[j];
+                    idx[j + 1] = idx[j];
+                    j--;
+                }
+
+                keys[j + 1] = key;
+                idx[j + 1] = id;
+            }
+
+            return false;
+        }
+
+        var passes = (bits + 10) / 11;
+        var digit = (bits + passes - 1) / passes;
+        var buckets = 1 << digit;
+        var mask = (ulong)(buckets - 1);
+        Span<int> histogram = stackalloc int[buckets];
+        var srcK = keys;
+        var srcI = idx;
+        var dstK = keysTmp;
+        var dstI = idxTmp;
+        for (var p = 0; p < passes; p++)
+        {
+            var shift = p * digit;
+            histogram.Clear();
+            for (var i = 0; i < n; i++)
+            {
+                histogram[(int)((srcK[i] >> shift) & mask)]++;
+            }
+
+            var running = 0;
+            for (var b = 0; b < buckets; b++)
+            {
+                var c = histogram[b];
+                histogram[b] = running;
+                running += c;
+            }
+
+            for (var i = 0; i < n; i++)
+            {
+                var key = srcK[i];
+                var at = histogram[(int)((key >> shift) & mask)]++;
+                dstK[at] = key;
+                dstI[at] = srcI[i];
+            }
+
+            (srcK, dstK) = (dstK, srcK);
+            (srcI, dstI) = (dstI, srcI);
+        }
+
+        return (passes & 1) != 0;
+    }
+
+    /// <summary>
+    /// The merge's serial half: the orphans' run, every run not yet sorted (the serial path), and <paramref name="chunks"/> key-range splitters sampled
+    /// from the runs, on cell boundaries so a cell's primaries and secondaries land in one chunk.
+    /// </summary>
+    private void PrepareMerge(int chunks)
+    {
+        var workers = _events.Length;
+        var runs = workers + 1;
+        EnsureRuns(runs);
+
+        // The fence's orphans are the last run: leaves like any other, filed under the cell the entity was last described in.
+        if (_orphanEvents.Length < _orphanCount)
+        {
+            _orphanEvents = new PushEvent[Math.Max(_orphanCount, _orphanEvents.Length * 2)];
+        }
+
+        Array.Copy(_orphans, _orphanEvents, _orphanCount);
+        _orphanRunCount = _orphanCount;
+        SortRun(workers, _orphanEvents, _orphanCount);
+        _orphanCount = 0;
+
+        var total = 0;
+        for (var r = 0; r < workers; r++)
+        {
+            if (_runSortedTick[r] != _tick)
+            {
+                SortRun(r, _events[r], _eventCount[r]);
+            }
+
+            total += _runLen[r];
+        }
+
+        total += _runLen[workers];
+        IndexEntries = total;
+        var events = _orphanRunCount;
+        for (var r = 0; r < workers; r++)
+        {
+            events += _eventCount[r];
+        }
+
+        Events += events;
+        var slot = _log[_tick % LogDepth];
+        if (slot.Events.Length < total)
+        {
+            slot.Events = new PushEvent[Math.Max(total, slot.Events.Length * 2)];
+        }
+
+        // A few hundred entries per chunk at least: below that a chunk costs more to dispatch than to merge.
+        var k = Math.Clamp(Math.Min(chunks, total / 512), 1, Math.Max(1, chunks));
+        if (_split.Length < k + 1)
+        {
+            _split = new ulong[k + 1];
+        }
+
+        _split[0] = 0;
+        _split[k] = ulong.MaxValue;
+        if (k > 1)
+        {
+            // About eight samples per chunk, taken from each run in proportion to its length, sorted: their quantiles split the entries into ranges of
+            // about equal size, and the serial cost follows the chunk count rather than the worker count.
+            var target = 8 * k;
+            if (_samples.Length < target + runs)
+            {
+                _samples = new ulong[target + runs];
+            }
+
+            var s = 0;
+            for (var r = 0; r < runs; r++)
+            {
+                var len = _runLen[r];
+                var m = len == 0 ? 0 : Math.Max(1, (int)((long)len * target / total));
+                for (var j = 0; j < m; j++)
+                {
+                    _samples[s++] = _runKey[r][(int)((long)len * j / m)] & ~1UL;
+                }
+            }
+
+            Array.Sort(_samples, 0, s);
+            for (var i = 1; i < k; i++)
+            {
+                _split[i] = Math.Max(_split[i - 1], _samples[(int)((long)s * i / k)]);
+            }
+        }
+
+        if (_chunkCells.Length < k)
+        {
+            Array.Resize(ref _chunkCells, k);
+            Array.Resize(ref _chunkStarts, k);
+            Array.Resize(ref _chunkPrimaryEnds, k);
+            Array.Resize(ref _chunkCellCount, k);
+            Array.Resize(ref _chunkDeltaKeys, k);
+            Array.Resize(ref _chunkDeltas, k);
+            Array.Resize(ref _chunkDeltaCount, k);
+        }
+
+        if (_mergeKeyA.Length < k)
+        {
+            Array.Resize(ref _mergeKeyA, k);
+            Array.Resize(ref _mergeSrcA, k);
+            Array.Resize(ref _mergeKeyB, k);
+            Array.Resize(ref _mergeSrcB, k);
+        }
+
+        for (var c = 0; c < k; c++)
+        {
+            _chunkCells[c] ??= new ulong[64];
+            _chunkStarts[c] ??= new int[64];
+            _chunkPrimaryEnds[c] ??= new int[64];
+            _chunkDeltaKeys[c] ??= new ulong[64];
+            _chunkDeltas[c] ??= new int[64];
+            _chunkCellCount[c] = 0;
+            _chunkDeltaCount[c] = 0;
+        }
+
+        _mergeChunks = k;
+        MaxMergeChunks = Math.Max(MaxMergeChunks, k);
+        _mergedTick = _tick;
+    }
+
+    private void NoteDelta(int chunk, ulong key, int delta, ref int count)
+    {
+        if (delta == 0)
+        {
+            return;
+        }
+
+        if (count == _chunkDeltaKeys[chunk].Length)
+        {
+            Array.Resize(ref _chunkDeltaKeys[chunk], count * 2);
+            Array.Resize(ref _chunkDeltas[chunk], count * 2);
+        }
+
+        _chunkDeltaKeys[chunk][count] = key;
+        _chunkDeltas[chunk][count++] = delta;
+    }
+
+    /// <summary>
+    /// Recounts the occupancy from every block: the live, identified entries of every observed archetype, by the cell of their last pushed position —
+    /// exactly what a cell delivery would enumerate.
+    /// </summary>
+    internal void Recount(ReplicationOccupancy into)
+    {
+        into.Clear();
+        foreach (var a in _pushIndices)
+        {
+            var state = _states[a];
+            var cs = state.ClusterState;
+            if (cs == null)
+            {
+                continue;
+            }
+
+            var ids = cs.ReadActiveClusterList(out var active);
+            var layout = state.Layout;
+            for (var i = 0; ids != null && i < active; i++)
+            {
+                if (!state.Directory.TryGetBlock(ids[i], out var block))
+                {
+                    continue;
+                }
+
+                var bytes = (byte*)block;
+                var occ = block->ProjectedOccupancy;
+                while (occ != 0)
+                {
+                    var slot = BitOperations.TrailingZeroCount(occ);
+                    occ &= occ - 1;
+                    var hot = (ReplicationHotEntry*)(bytes + layout.HotOffset + (slot * layout.HotStride));
+                    if (hot->NetId == NetIdAllocator.NoNetId)
+                    {
+                        continue;
+                    }
+
+                    Decode(a, bytes + layout.ColdOffset + (slot * layout.ColdStride) + _positionOffset[a], out var px, out var py);
+                    into.Add(Key(CellX(px), CellY(py)), 1);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Tests only: the current index's shape recomputed from its own events — the distinct cells they name and the entries they need — after checking that
+    /// the cells ascend, every entry is filed under its cell (primaries first, then the cells movers left) and the row table finds every row's first cell.
+    /// (-1, -1) when any of that fails.
+    /// </summary>
+    internal (int Cells, int Entries) IndexShapeForTest()
+    {
+        const byte both = PushEvent.HasNew | PushEvent.HasOld;
+        var slot = _log[_tick % LogDepth];
+        if (!Indexed || slot.Tick != _tick)
+        {
+            return (-1, -1);
+        }
+
+        // The index as a multiset of (identity, cell, secondary), against the same multiset built from the runs' raw events: an event dropped, copied twice
+        // or misfiled fails here even when the index is consistent with itself.
+        var expected = new Dictionary<(uint, ulong, bool), int>();
+        for (var w = 0; w <= _events.Length; w++)
+        {
+            var list = w < _events.Length ? _events[w] : _orphanEvents;
+            var count = w < _events.Length ? _eventCount[w] : _orphanRunCount;
+            for (var i = 0; i < count; i++)
+            {
+                ref readonly var e = ref list[i];
+                Bump(expected, (e.NetId, e.PrimaryKey, false), 1);
+                if ((e.Flags & both) == both && e.OldKey != e.NewKey)
+                {
+                    Bump(expected, (e.NetId, e.OldKey, true), 1);
+                }
+            }
+        }
+
+        var keys = new HashSet<ulong>();
+        var entries = 0;
+        for (var k = 0; k < slot.CellCount; k++)
+        {
+            var cell = slot.Cells[k];
+            if ((k > 0 && cell <= slot.Cells[k - 1]) || ((k == 0 || KeyY(slot.Cells[k - 1]) != KeyY(cell)) && slot.RowStart((ulong)KeyY(cell)) != k))
+            {
+                return (-1, -1);
+            }
+
+            for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
+            {
+                ref readonly var e = ref slot.Events[i];
+                if (e.PrimaryKey != cell)
+                {
+                    return (-1, -1);
+                }
+
+                keys.Add(cell);
+                entries++;
+                Bump(expected, (e.NetId, cell, false), -1);
+                if ((e.Flags & both) == both && e.OldKey != e.NewKey)
+                {
+                    keys.Add(e.OldKey);
+                    entries++;
+                }
+            }
+
+            for (var i = slot.PrimaryEnds[k]; i < slot.Starts[k + 1]; i++)
+            {
+                ref readonly var e = ref slot.Events[i];
+                if ((e.Flags & both) != both || e.OldKey == e.NewKey || e.OldKey != cell)
+                {
+                    return (-1, -1);
+                }
+
+                Bump(expected, (e.NetId, cell, true), -1);
+            }
+        }
+
+        foreach (var count in expected.Values)
+        {
+            if (count != 0)
+            {
+                return (-1, -1);
+            }
+        }
+
+        return (keys.Count, entries);
+
+        static void Bump(Dictionary<(uint, ulong, bool), int> map, (uint, ulong, bool) key, int by) =>
+            map[key] = map.GetValueOrDefault(key) + by;
+    }
+
+    /// <summary>Tests only: the cells where the maintained occupancy disagrees with a recount from the blocks. Zero when SUB-24 holds.</summary>
+    internal int VerifyOccupancy()
+    {
+        var recount = new ReplicationOccupancy();
+        Recount(recount);
+        return _occupancy.Differences(recount);
+    }
+
+    private void EnsureRuns(int runs)
+    {
+        if (_runKey.Length >= runs)
+        {
+            return;
+        }
+
+        Array.Resize(ref _runKey, runs);
+        Array.Resize(ref _runIdx, runs);
+        Array.Resize(ref _runKeyTmp, runs);
+        Array.Resize(ref _runIdxTmp, runs);
+        Array.Resize(ref _runLen, runs);
+        Array.Resize(ref _runSortedTick, runs);
+        for (var r = 0; r < runs; r++)
+        {
+            _runSortedTick[r] = uint.MaxValue;
+        }
+    }
+
+    // Per chunk, the merge's ping-pong buffers: an entry's sort key and its source, (run << 32) | event index.
+    private ulong[][] _mergeKeyA = [];
+    private long[][] _mergeSrcA = [];
+    private ulong[][] _mergeKeyB = [];
+    private long[][] _mergeSrcB = [];
+
+    /// <summary>
+    /// One key range: each run's slice found by binary search — the chunk's output offset is the count of entries below its range, so no chunk waits for
+    /// another — then the slices merged pairwise, adjacent runs first, so the order is (key, run, index) and a function of the runs alone. Every event is
+    /// copied into the log slot in that order while the range's cells and their occupancy deltas are listed.
+    /// </summary>
+    private void MergeChunk(int chunk)
+    {
+        var workers = _events.Length;
+        var runs = workers + 1;
+        var lo = _split[chunk];
+        var hi = _split[chunk + 1];
+        Span<int> from = stackalloc int[runs];
+        Span<int> to = stackalloc int[runs];
+        var output = 0;
+        var total = 0;
+        for (var r = 0; r < runs; r++)
+        {
+            var len = _runLen[r];
+            from[r] = chunk == 0 ? 0 : LowerBound(_runKey[r], 0, len, lo);
+            to[r] = chunk == _mergeChunks - 1 ? len : LowerBound(_runKey[r], 0, len, hi);
+            output += from[r];
+            total += to[r] - from[r];
+        }
+
+        EnsureMergeBuffers(chunk, total);
+        var keys = _mergeKeyA[chunk];
+        var srcs = _mergeSrcA[chunk];
+
+        // The slices, concatenated in run order; each is already sorted.
+        Span<int> bounds = stackalloc int[runs + 1];
+        var at = 0;
+        var segments = 0;
+        for (var r = 0; r < runs; r++)
+        {
+            if (from[r] == to[r])
+            {
+                continue;
+            }
+
+            bounds[segments++] = at;
+            Array.Copy(_runKey[r], from[r], keys, at, to[r] - from[r]);
+            var runIdx = _runIdx[r];
+            for (var i = from[r]; i < to[r]; i++)
+            {
+                srcs[at++] = ((long)r << 32) | (uint)runIdx[i];
+            }
+        }
+
+        bounds[segments] = at;
+
+        // Adjacent segments merged pairwise until one is left: a linear pass per halving. A tie takes the left, lower-run side first.
+        var keysOut = _mergeKeyB[chunk];
+        var srcsOut = _mergeSrcB[chunk];
+        while (segments > 1)
+        {
+            var merged = 0;
+            for (var sgm = 0; sgm < segments; sgm += 2)
+            {
+                var a0 = bounds[sgm];
+                if (sgm + 1 == segments)
+                {
+                    var tail = bounds[sgm + 1] - a0;
+                    Array.Copy(keys, a0, keysOut, a0, tail);
+                    Array.Copy(srcs, a0, srcsOut, a0, tail);
+                    bounds[merged++] = a0;
+                    continue;
+                }
+
+                var a1 = bounds[sgm + 1];
+                var b1 = bounds[sgm + 2];
+                int i = a0, j = a1, o = a0;
+                while (i < a1 && j < b1)
+                {
+                    if (keys[j] < keys[i])
+                    {
+                        keysOut[o] = keys[j];
+                        srcsOut[o++] = srcs[j++];
+                    }
+                    else
+                    {
+                        keysOut[o] = keys[i];
+                        srcsOut[o++] = srcs[i++];
+                    }
+                }
+
+                Array.Copy(keys, i, keysOut, o, a1 - i);
+                Array.Copy(srcs, i, srcsOut, o, a1 - i);
+                o += a1 - i;
+                Array.Copy(keys, j, keysOut, o, b1 - j);
+                Array.Copy(srcs, j, srcsOut, o, b1 - j);
+                bounds[merged++] = a0;
+            }
+
+            bounds[merged] = at;
+            segments = merged;
+            (keys, keysOut) = (keysOut, keys);
+            (srcs, srcsOut) = (srcsOut, srcs);
+        }
+
+        var slotEvents = _log[_tick % LogDepth].Events;
+        var cells = _chunkCells[chunk];
+        var starts = _chunkStarts[chunk];
+        var primaryEnds = _chunkPrimaryEnds[chunk];
+        var cellCount = 0;
+        var current = ulong.MaxValue;
+        var primaryEnd = -1;
+        var delta = 0;
+        var deltaCount = 0;
+        const byte both = PushEvent.HasNew | PushEvent.HasOld;
+        for (var n = 0; n < at; n++)
+        {
+            var sortKey = keys[n];
+            var src = srcs[n];
+            var run = (int)(src >> 32);
+            var source = run < workers ? _events[run] : _orphanEvents;
+            var cell = sortKey >> 1;
+            if (cell != current)
+            {
+                if (current != ulong.MaxValue)
+                {
+                    primaryEnds[cellCount - 1] = primaryEnd < 0 ? output : primaryEnd;
+                    NoteDelta(chunk, cells[cellCount - 1], delta, ref deltaCount);
+                }
+
+                delta = 0;
+                if (cellCount == cells.Length)
+                {
+                    Array.Resize(ref _chunkCells[chunk], cellCount * 2);
+                    Array.Resize(ref _chunkStarts[chunk], cellCount * 2);
+                    Array.Resize(ref _chunkPrimaryEnds[chunk], cellCount * 2);
+                    cells = _chunkCells[chunk];
+                    starts = _chunkStarts[chunk];
+                    primaryEnds = _chunkPrimaryEnds[chunk];
+                }
+
+                cells[cellCount] = KeyOfSortKey(sortKey);
+                starts[cellCount] = output;
+                cellCount++;
+                current = cell;
+                primaryEnd = -1;
+            }
+
+            ref readonly var e = ref source[(int)(uint)src];
+            if ((sortKey & 1) != 0)
+            {
+                // A secondary: the cell a mover left.
+                primaryEnd = primaryEnd < 0 ? output : primaryEnd;
+                delta -= OccupancyMutantForTest ? 0 : 1;
+            }
+            else if ((e.Flags & PushEvent.HasNew) == 0)
+            {
+                // Leave-only: the entity is gone from the cell it was last described in.
+                delta--;
+            }
+            else if ((e.Flags & both) != both || e.OldKey != e.NewKey)
+            {
+                // New here: a first description, or a mover that changed cell.
+                delta++;
+            }
+
+            slotEvents[output++] = e;
+        }
+
+        if (current != ulong.MaxValue)
+        {
+            primaryEnds[cellCount - 1] = primaryEnd < 0 ? output : primaryEnd;
+            NoteDelta(chunk, cells[cellCount - 1], delta, ref deltaCount);
+        }
+
+        _chunkCellCount[chunk] = cellCount;
+        _chunkDeltaCount[chunk] = deltaCount;
+    }
+
+    // Called by the chunk that owns the slot; the outer arrays are sized by PrepareMerge, serially, before any chunk runs.
+    private void EnsureMergeBuffers(int chunk, int total)
+    {
+        if (_mergeKeyA[chunk] == null || _mergeKeyA[chunk].Length < total)
+        {
+            var size = Math.Max(1024, total + (total >> 1));
+            _mergeKeyA[chunk] = new ulong[size];
+            _mergeSrcA[chunk] = new long[size];
+            _mergeKeyB[chunk] = new ulong[size];
+            _mergeSrcB[chunk] = new long[size];
+        }
     }
 
     // ══ Per-session gather (parallel over sessions) ══════════════════════════════════════════════════════════════════════════════════════════════════
@@ -1630,19 +2330,17 @@ internal sealed unsafe class PushReplication
         var maxCx = CellX(Math.Max(ax, nx) + Radius);
         var minCy = CellY(Math.Min(ay, ny) - Radius);
         var maxCy = CellY(Math.Max(ay, ny) + Radius);
+        var index = _log[tick % LogDepth];
         for (var cy = minCy; gap == 0 && cy <= maxCy; cy++)
         {
-            for (var cx = minCx; cx <= maxCx; cx++)
+            // Only the occupied cells of the row: one probe of the row table, then the row's cells in the box.
+            var last = Key(maxCx, cy);
+            for (var k = FirstCellInRow(index, cy, minCx); k < index.CellCount && index.Cells[k] <= last; k++)
             {
-                var cell = (cy * _gridW) + cx;
-                var b = _cellStart[cell];
-                var end = _cellStart[cell + 1];
-                if (b == end)
-                {
-                    continue;
-                }
-
-                var pe = _cellPrimaryEnd[cell];
+                var cx = KeyX(index.Cells[k]);
+                var b = index.Starts[k];
+                var end = index.Starts[k + 1];
+                var pe = index.PrimaryEnds[k];
 
                 // A cell wholly inside both discs and delivered in both windows: every event that neither entered nor left it is an update, with no test.
                 var x0 = _gridMinX + (cx * CellSize);
@@ -1668,8 +2366,9 @@ internal sealed unsafe class PushReplication
                     if (i >= pe)
                     {
                         // A secondary: handled at its primary cell when that cell is in range.
-                        var pcx = e.Cell % _gridW;
-                        var pcy = e.Cell / _gridW;
+                        var primary = e.PrimaryKey;
+                        var pcx = KeyX(primary);
+                        var pcy = KeyY(primary);
                         if (pcx >= minCx && pcx <= maxCx && pcy >= minCy && pcy <= maxCy)
                         {
                             continue;
@@ -1782,6 +2481,8 @@ internal sealed unsafe class PushReplication
             scratch.Deferred = 0;
         }
 
+        FoldEmptyCells(scratch);
+
         st.PAnchorX = nx;
         st.PAnchorY = ny;
         st.POriginX = nOriginX;
@@ -1893,8 +2594,19 @@ internal sealed unsafe class PushReplication
         }
 
         st.PCursor = cursor;
+        FoldEmptyCells(scratch);
         Interlocked.Add(ref GatherTicks, Stopwatch.GetTimestamp() - from);
         return flagged;
+    }
+
+    // Once per gather, not once per cell: a World frame can skip thousands of cells, and every gather worker shares the counter's line.
+    private void FoldEmptyCells(FrameWorkerScratch scratch)
+    {
+        if (scratch.EmptyCellsSkipped != 0)
+        {
+            Interlocked.Add(ref EmptyCellsSkipped, scratch.EmptyCellsSkipped);
+            scratch.EmptyCellsSkipped = 0;
+        }
     }
 
     private static void EmitWorld(in PushEvent e, bool was, bool isIn, int groups, bool segment, FrameWorkerScratch scratch, ref long enters,
@@ -2062,8 +2774,8 @@ internal sealed unsafe class PushReplication
         public PushEvent Last;
         public float OldX;
         public float OldY;
-        public short OldCx;
-        public short OldCy;
+        public int OldCx;
+        public int OldCy;
         public uint LastTick;
         public byte FirstFlags;
         public byte Groups;
@@ -2109,10 +2821,8 @@ internal sealed unsafe class PushReplication
             var slot = _log[t % LogDepth];
             for (var cy = minCy; cy <= maxCy; cy++)
             {
-                var lo = (cy * _gridW) + minCx;
-                var hi = (cy * _gridW) + maxCx;
-                var k = LowerBound(slot.Cells, slot.CellCount, lo);
-                for (; k < slot.CellCount && slot.Cells[k] <= hi; k++)
+                var hi = Key(maxCx, cy);
+                for (var k = FirstCellInRow(slot, cy, minCx); k < slot.CellCount && slot.Cells[k] <= hi; k++)
                 {
                     for (var i = slot.Starts[k]; i < slot.Starts[k + 1]; i++)
                     {
@@ -2169,9 +2879,9 @@ internal sealed unsafe class PushReplication
             // The tick's far flushes of entities whose latest event is older: their position is that event's, and nothing else changed since.
             for (var cy = minCy; FarEvery > 1 && cy <= maxCy; cy++)
             {
-                var lo = (cy * _gridW) + minCx;
-                var hi = (cy * _gridW) + maxCx;
-                var k = LowerBound(slot.FlushCells, slot.FlushCellCount, lo);
+                var lo = Key(minCx, cy);
+                var hi = Key(maxCx, cy);
+                var k = LowerBound(slot.FlushCells, 0, slot.FlushCellCount, lo);
                 for (; k < slot.FlushCellCount && slot.FlushCells[k] <= hi; k++)
                 {
                     for (var i = slot.FlushStarts[k]; i < slot.FlushStarts[k + 1]; i++)
@@ -2321,12 +3031,12 @@ internal sealed unsafe class PushReplication
         var maxCy = CellY(ny + Radius);
         for (var cy = minCy; cy <= maxCy; cy++)
         {
-            var k = LowerBound(slot.FlushCells, slot.FlushCellCount, (cy * _gridW) + minCx);
-            for (; k < slot.FlushCellCount && slot.FlushCells[k] <= (cy * _gridW) + maxCx; k++)
+            var k = LowerBound(slot.FlushCells, 0, slot.FlushCellCount, Key(minCx, cy));
+            for (; k < slot.FlushCellCount && slot.FlushCells[k] <= Key(maxCx, cy); k++)
             {
                 var cell = slot.FlushCells[k];
-                var x0 = _gridMinX + ((cell % _gridW) * CellSize);
-                var y0 = _gridMinY + ((cell / _gridW) * CellSize);
+                var x0 = _gridMinX + (KeyX(cell) * CellSize);
+                var y0 = _gridMinY + (KeyY(cell) * CellSize);
                 if (RectMax2(nx, ny, x0, y0, CellSize) <= farR2 || RectMin2(nx, ny, x0, y0, CellSize) > r2)
                 {
                     continue;
@@ -2356,7 +3066,7 @@ internal sealed unsafe class PushReplication
     private void FarSweepCell(int cx, int cy, double ax, double ay, int oOriginX, int oOriginY, ulong o0, ulong o1, ulong o2, ulong o3, double nx, double ny,
         double r2, double farR2, ulong archetypeMask, FrameWorkerScratch scratch, uint tick, int gap, ref long updates)
     {
-        if (!Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, cx, cy)))
+        if (!Bit(o0, o1, o2, o3, WindowIndex(oOriginX, oOriginY, cx, cy)) || _occupancy.Get(Key(cx, cy)) == 0)
         {
             return;
         }
@@ -2465,16 +3175,15 @@ internal sealed unsafe class PushReplication
             return 0;
         }
 
-        var k = Math.Max(1, Math.Min(workers, _gridH));
+        var k = Math.Max(1, Math.Min(workers, _log[_tick % LogDepth].CellCount));
         if (_farBounds.Length < k + 1)
         {
-            _farBounds = new int[k + 1];
+            _farBounds = new ulong[k + 1];
         }
 
         // Cell ranges of about equal event counts, from this tick's compact index: a population is clustered, so equal cell counts are not equal work.
         var slot0 = _log[_tick % LogDepth];
         var totalEvents = slot0.CellCount == 0 ? 0 : slot0.Starts[slot0.CellCount];
-        var cells = _gridW * _gridH;
         _farBounds[0] = 0;
         var at = 0;
         for (var i = 1; i < k; i++)
@@ -2485,10 +3194,10 @@ internal sealed unsafe class PushReplication
                 at++;
             }
 
-            _farBounds[i] = at < slot0.CellCount ? Math.Max(_farBounds[i - 1], slot0.Cells[at]) : cells;
+            _farBounds[i] = at < slot0.CellCount ? Math.Max(_farBounds[i - 1], slot0.Cells[at]) : ulong.MaxValue;
         }
 
-        _farBounds[k] = cells;
+        _farBounds[k] = ulong.MaxValue;
         if (_farOut.Length < k)
         {
             Array.Resize(ref _farOut, k);
@@ -2502,7 +3211,7 @@ internal sealed unsafe class PushReplication
         for (var i = 0; i < k; i++)
         {
             _farOut[i] ??= new PushEvent[256];
-            _farOutCells[i] ??= new int[64];
+            _farOutCells[i] ??= new ulong[64];
             _farOutStarts[i] ??= new int[65];
             _farOutCount[i] = 0;
             _farOutCellCount[i] = 0;
@@ -2537,7 +3246,7 @@ internal sealed unsafe class PushReplication
         for (var age = 0; age < n; age++)
         {
             var slot = _log[(t - (uint)age) % LogDepth];
-            cursor[age] = slot.Valid && slot.Tick == t - (uint)age ? LowerBound(slot.Cells, slot.CellCount, c0) : int.MaxValue;
+            cursor[age] = slot.Valid && slot.Tick == t - (uint)age ? LowerBound(slot.Cells, 0, slot.CellCount, c0) : int.MaxValue;
         }
 
         var output = _farOut[chunk];
@@ -2549,7 +3258,7 @@ internal sealed unsafe class PushReplication
         while (true)
         {
             // The next cell any slot has events in.
-            var cell = int.MaxValue;
+            var cell = ulong.MaxValue;
             for (var age = 0; age < n; age++)
             {
                 var slot = _log[(t - (uint)age) % LogDepth];
@@ -2634,9 +3343,7 @@ internal sealed unsafe class PushReplication
                     f = e;
                     f.OldX = e.NewX;
                     f.OldY = e.NewY;
-                    f.OldCx = e.NewCx;
-                    f.OldCy = e.NewCy;
-                    f.Cell = (e.NewCy * _gridW) + e.NewCx;
+                    f.OldKey = e.NewKey;
                     f.Groups = 0;
                     f.FlushGroups = (byte)groups;
                     f.Flags = (byte)(PushEvent.HasOld | PushEvent.HasNew | PushEvent.FarFlush | (segment ? PushEvent.FlushSegment : 0));
@@ -2723,7 +3430,7 @@ internal sealed unsafe class PushReplication
 
         if (slot.FlushCells.Length < totalCells)
         {
-            slot.FlushCells = new int[Math.Max(totalCells, slot.FlushCells.Length * 2)];
+            slot.FlushCells = new ulong[Math.Max(totalCells, slot.FlushCells.Length * 2)];
         }
 
         if (slot.FlushStarts.Length < totalCells + 1)
@@ -2750,9 +3457,9 @@ internal sealed unsafe class PushReplication
         slot.FlushCellCount = cellAt;
     }
 
-    private static int LowerBound(int[] values, int count, int key)
+    private static int LowerBound(ulong[] values, int from, int count, ulong key)
     {
-        var lo = 0;
+        var lo = from;
         var hi = count;
         while (lo < hi)
         {
@@ -2808,6 +3515,15 @@ internal sealed unsafe class PushReplication
     private int DeliverCell(int cx, int cy, double nx, double ny, double r2, ulong archetypeMask, FrameWorkerScratch scratch, uint tick, int gap,
         bool everywhere = false)
     {
+        // Nobody's last pushed position is in the cell: its cluster query could find nothing to enter.
+        if (_occupancy.Get(Key(cx, cy)) == 0)
+        {
+            scratch.EmptyCellsSkipped++;
+            return 0;
+        }
+
+        var from = FrameAssembler.PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
+        var decoded = 0;
         var entered = 0;
         var ax = nx;
         var ay = ny;
@@ -2862,6 +3578,7 @@ internal sealed unsafe class PushReplication
                         continue;
                     }
 
+                    decoded++;
                     Decode(a, cold + _positionOffset[a], out var px, out var py);
                     if (CellX(px) != cx || CellY(py) != cy || (!everywhere && !Within(nx, ny, px, py, r2)))
                     {
@@ -2874,6 +3591,13 @@ internal sealed unsafe class PushReplication
             }
         }
 
+        if (from != 0L)
+        {
+            Interlocked.Add(ref DeliverTicks, Stopwatch.GetTimestamp() - from);
+            Interlocked.Add(ref DeliverDecoded, decoded);
+            Interlocked.Add(ref DeliverEntered, entered);
+        }
+
         return entered;
     }
 
@@ -2881,6 +3605,14 @@ internal sealed unsafe class PushReplication
     private void SweepCell(int cx, int cy, double ax, double ay, double nx, double ny, double r2, ulong archetypeMask, FrameWorkerScratch scratch, uint tick,
         int gap, ref long enters, ref long leaves)
     {
+        if (_occupancy.Get(Key(cx, cy)) == 0)
+        {
+            scratch.EmptyCellsSkipped++;
+            return;
+        }
+
+        var from = FrameAssembler.PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
+        var decoded = 0;
         var x0 = _gridMinX + (cx * CellSize);
         var y0 = _gridMinY + (cy * CellSize);
         var visited = 0;
@@ -2933,6 +3665,7 @@ internal sealed unsafe class PushReplication
                         continue;
                     }
 
+                    decoded++;
                     Decode(a, cold + _positionOffset[a], out var px, out var py);
                     if (CellX(px) != cx || CellY(py) != cy)
                     {
@@ -2957,5 +3690,10 @@ internal sealed unsafe class PushReplication
         }
 
         Interlocked.Add(ref SweepSlots, visited);
+        if (from != 0L)
+        {
+            Interlocked.Add(ref SweepDecoded, decoded);
+            Interlocked.Add(ref SweepTicks, Stopwatch.GetTimestamp() - from);
+        }
     }
 }

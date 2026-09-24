@@ -56,6 +56,11 @@ sealed unsafe class ReplicationHarness : IDisposable
     public static ReplicationHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null,
         double replicationCellM = 0)
     {
+        if (options != null && replicationCellM > 0)
+        {
+            throw new ArgumentException("options declares its own ReplicationCellM; passing replicationCellM too would be ignored", nameof(replicationCellM));
+        }
+
         var resources = new ResourceRegistry(new ResourceRegistryOptions { Name = name });
         try
         {

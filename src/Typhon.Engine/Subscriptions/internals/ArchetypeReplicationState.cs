@@ -512,6 +512,17 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             }
             else
             {
+                // Dropped: every session holding the entity is told it left, and the occupancy stops counting it where it was last described. It is
+                // initialised afresh, under a new identity, when a block next covers it.
+                if (Push != null)
+                {
+                    var droppedId = ((ReplicationHotEntry*)bytes)->NetId;
+                    if (droppedId != NetIdAllocator.NoNetId)
+                    {
+                        Push.Orphan(PushArchetypeIndex, null, bytes + Layout.HotStride, Layout, droppedId, 2);
+                    }
+                }
+
                 Interlocked.Increment(ref _parkedDropped);
             }
         }

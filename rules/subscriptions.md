@@ -612,3 +612,35 @@
     PushOracleTests.FarFlushesConvergeThroughCatchUpWithSmallCells, PushOracleTests.AFarFlushMetFirstAsASecondaryReachesACaughtUpSession — oracle runs
     with the shadow legality check on. Falsifiability: removing the
     far-flush fold's in-place flag, its flush entries or the inner-crescent sweep each turns ADeferredFarChangeReachesASessionThatWalksCloser red.
+
+### SUB-24: The occupancy counts exactly the entities whose last pushed position lies in each cell `[fatal][silent]`
+  invariant after every index, ∀ cell: occupancy(cell) = the live, identified entries of observed archetypes whose last pushed position lies in cell,
+    and a cell with none has no entry
+  invariant every tick the track runs is indexed, sessions bound to a profile or not: the tick's cell changes are the occupancy's only input
+  invariant a tick whose changes the occupancy missed — one the track did not run for, or one it ran but never finished indexing — is followed by a
+    recount at the next index's finish, after that tick's projection: only then do the blocks describe the fence's carried and parked entries
+  never skip a cell delivery or a sweep on a cell whose count is not zero
+  scope: ReplicationOccupancy, PushReplication.MergeChunk, PushReplication.FinishIndex, PushReplication.Recount, PushReplication.PrepareBlocks,
+    PushReplication.DeliverCell, PushReplication.SweepCell, FrameAssembler.BeginPushTick
+  on_violation: an under-count skips a cell that holds entities — a session never receives them until they move, silently. An over-count only costs
+    a query.
+  rationale: the empty-cell skip is what makes a sparse or 3D fill cheap; it is sound only because every change of cell makes an event (SUB-19).
+  verified: PushIndexTests.TheOccupancyEqualsARecountUnderChurn, PushIndexTests.ASkippedTickIsFollowedByARecount,
+    PushIndexTests.AnUnindexedTickIsFollowedByARecount, PushIndexTests.ATickWithNoBoundSessionIsStillIndexed,
+    ReplicationOccupancyTests (the map against a dictionary). Falsifiability: PushIndexTests.AnOccupancyThatKeepsMoversInTheCellTheyLeftIsCaught
+    runs the mutant that drops a secondary's decrement.
+
+### SUB-25: The push index holds this tick's events in cell order and touches only occupied cells `[perf][silent]`
+  invariant ∀ tick T, the index (= T's log slot) holds every event of T once under its primary cell and once more under the cell a mover left, cells
+    ascending by packed key, a cell's primaries before its secondaries; its row table names every occupied row's first cell
+  invariant building and reading the index costs O(events + occupied cells + rows read): no per-tick structure is sized by, cleared over or walked
+    across the replication grid's cell count, so an empty world indexes nothing whatever its cell side (10 § 2.3, SUB-13's precedent)
+  never let a read path insert into the index or the row table
+  scope: PushReplication.SortRun, PushReplication.MergeChunk, PushReplication.FinishIndex, PushReplication.Gather, PushReplication.CollectLog
+  on_violation: silent and slow. A dense index pays for every cell of the world every tick with nothing to index — the reason a 3D or a fine grid was
+    unaffordable — and a misfiled event is an entity a session never hears about.
+  rationale: 3D cubes the cell count; only a structure that follows events keeps replication's cost independent of the grid.
+  verified: PushIndexTests.TheIndexHoldsExactlyTheCellsTheEventsName and PushIndexTests.ConcurrentMergeChunksBuildTheSameIndexShape — the index as a
+    multiset of (identity, cell, secondary) against the runs' raw events; PushIndexTests.AnEmptyWorldIndexesNothingWhateverTheGrid.
+    Falsifiability: PushIndexTests.AnIndexThatMisfilesSecondariesIsCaught. The cost clause is timed by the explicit
+    PushIndexTests.AnEmptyWorldCostsTheSameWhateverTheCellSide, not in the gate; the never clause has no test.

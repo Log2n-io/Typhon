@@ -332,7 +332,9 @@ class StatsBlockTests : TestBase<StatsBlockTests>
                 });
             }, new RuntimeOptions
             {
-                WorkerCount = workerCount, BaseTickRate = tickRateHz, Subscriptions = new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
+                WorkerCount = workerCount,
+                BaseTickRate = tickRateHz,
+                Subscriptions = new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
             });
 
             _runtime.Subscriptions.Sessions.Kinds("god");

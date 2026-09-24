@@ -54,7 +54,9 @@ internal sealed class ReplicationGrid
     /// <summary>How far a viewpoint may drift from its anchor before the anchor moves: <c>min(R / 48, c / 2)</c> (10 § 4.1).</summary>
     public double AnchorSlack { get; private init; }
 
-    /// <summary>The window's half width in cells, <c>⌈R / c⌉ + 2</c>: two cells of margin, so a cell leaves only when all of it is past R from both anchors.</summary>
+    /// <summary>
+    /// The window's half width in cells, <c>⌈R / c⌉ + 2</c>: two cells of margin, so a cell leaves only when all of it is past R from both anchors.
+    /// </summary>
     public int Half { get; private init; }
 
     /// <summary>The window's width in cells, <c>2 · Half + 1</c>.</summary>
@@ -89,16 +91,26 @@ internal sealed class ReplicationGrid
                 + $"world; a cell key addresses at most {MaxAxisCells} cells per axis. Raise the cell side.");
         }
 
+        // A World session's cursor is a dense cell index in an int until 1.5.3 walks the occupied cells instead (10 § 2.4).
+        if (dimX * dimY > int.MaxValue)
+        {
+            throw new InvalidOperationException(
+                $"SubscriptionsOptions.ReplicationCellM = {Format(cellM)} gives a replication grid of {dimX} x {dimY} cells, more than a World session's "
+                + "cursor can address. Raise the cell side.");
+        }
+
         var radius = Math.Max(0, maxRadius);
         var half = (int)Math.Ceiling(radius / cellM) + 2;
         var window = (2 * half) + 1;
         var windowCells = (long)window * window;
         if (window > MaxWindow || windowCells > MaxWindowCells)
         {
+            // The side named is rounded UP to the precision it is printed at, so the value the message suggests is one this check accepts.
+            var smallest = Math.Ceiling(radius / ((MaxWindow - 5) / 2) * 1000d) / 1000d;
             throw new InvalidOperationException(
                 $"SubscriptionsOptions.ReplicationCellM = {Format(cellM)} is too small for the largest Sphere radius, {Format(radius)}: a session's window "
                 + $"would be {window} cells wide (2⌈R / c⌉ + 5), and the widest it may be is {MaxWindow}, so ⌈R / c⌉ must be at most "
-                + $"{(MaxWindow - 5) / 2}. Raise the cell side to at least {Format(radius / ((MaxWindow - 5) / 2))}.");
+                + $"{(MaxWindow - 5) / 2}. Raise the cell side to at least {Format(smallest)}.");
         }
 
         return new ReplicationGrid

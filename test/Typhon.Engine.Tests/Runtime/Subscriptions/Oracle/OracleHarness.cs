@@ -163,6 +163,9 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <summary>The push path.</summary>
     public PushReplication Push => _harness.Subscriptions.Push;
 
+    /// <summary>The frame harness underneath, for what the oracle does not wrap (the frame digest).</summary>
+    public FrameHarness Frames => _harness;
+
     /// <summary>The frame assembler, for the one test that has to break a rule on the production object to prove the oracle can see it.</summary>
     public FrameAssembler Assembler => _harness.Assembler;
 
@@ -208,18 +211,24 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <param name="worldObserver">Serve the profile through a <c>World</c> observer instead of a covering disc.</param>
     /// <param name="every">The profile's tick divisor.</param>
     /// <param name="bigWorld">Seed the walking oracle's population even when the sessions do not walk.</param>
-    /// <param name="deterministicProjection">Build the push index serially, in the frame prologue, as reproducible runs do.</param>
+    /// <param name="deterministicProjection">
+    /// Build the push index serially, in the frame prologue — the collapsed shape's path — instead of sorted by the projection and merged by its stage.
+    /// </param>
+    /// <param name="replicationCellM">The replication cell side; zero for <c>ProjectionTestSchema.ReplicationCellFor</c> of the profile's radius.</param>
     public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, PushDetection detection = PushDetection.Explicit,
-        double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false)
+        double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false,
+        double replicationCellM = 0)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
         var walk = walkRadius > 0;
         var radius = walk ? walkRadius : PushRadiusM;
         var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every), name,
-            Options(detection == PushDetection.Automatic, deterministicProjection, worldObserver && !walk ? 0 : radius));
+            Options(detection == PushDetection.Automatic, deterministicProjection,
+                replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(worldObserver && !walk ? 0 : radius)));
         try
         {
+            harness.SerialIndex = deterministicProjection;
             var oracle = new OracleHarness(harness, skipPercent, seed, detection, radius, walk);
 
             // A walking disc covers a few percent of the world, so the world is denser for it to hold anything worth comparing.
@@ -276,6 +285,15 @@ internal sealed unsafe class OracleHarness : IDisposable
         _tick++;
         Engine.WriteTickFence(_tick);
         _harness.SkipTick(_tick);
+    }
+
+    /// <summary>Churn and a tick whose track stopped after the index merge: its index is never finished and nothing is delivered.</summary>
+    public void StepWithoutIndex()
+    {
+        Workload.Step();
+        _tick++;
+        Engine.WriteTickFence(_tick);
+        _harness.RunTickWithoutIndex(_tick);
     }
 
     /// <summary>
@@ -664,9 +682,9 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// induces on purpose — the run would still be correct but it would no longer be measuring what it says it measures. The enter budget is left at the
     /// engine's default: deferring enters across ticks is real behaviour that the quiet window is there to absorb, and raising it would hide it.
     /// </remarks>
-    private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection, double radius) => new()
+    private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection, double replicationCellM) => new()
     {
-        ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(radius),
+        ReplicationCellM = replicationCellM,
         AllowAutomaticPushDetection = automatic,
 
         // The push path's legality check: a record the client could not apply — an enter of a held entity, an update or a leave of an unheld one — is a

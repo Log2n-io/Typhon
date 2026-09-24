@@ -79,7 +79,10 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         _pushSessionCount = n;
-        if (n > 0 && !Push.Indexed)
+
+        // Every tick the track runs is indexed, sessions bound or not: the index is the tick's log slot, and its cell changes are the occupancy's only
+        // input (SUB-24). A tick left unindexed would leave the occupancy short of its spawns and crossings.
+        if (!Push.Indexed)
         {
             Push.BuildIndex();
         }
@@ -118,9 +121,16 @@ internal sealed unsafe partial class FrameAssembler
         Console.Error.WriteLine(
             $"  PUSH: {_pushSessionCount} sessions; slots pushed {p.SlotsPushed}, events {p.Events}; enters {p.Enters}, leaves {p.Leaves}, updates {p.Updates}; "
             + $"cells delivered {p.CellsDelivered}, sweeps {p.Sweeps} ({p.SweepSlots} slots); resets {p.Resets}; "
-            + $"serial prepare {p.PrepareTicks * f:F0} ms, index {p.IndexTicks * f:F0} ms, gather busy {p.GatherTicks * f:F0} ms (cumulative)");
+            + $"serial prepare {p.PrepareTicks * f:F0} ms, index {p.IndexTicks * f:F0} ms "
+            + $"(sort {p.SortTicks * f:F0}, merge {p.MergeTicks * f:F0}, finish {p.FinishTicks * f:F0}), gather busy {p.GatherTicks * f:F0} ms (cumulative)");
+        Console.Error.WriteLine(
+            $"  PUSH CELLS: delivery {p.DeliverTicks * f:F0} ms, {p.DeliverDecoded} decoded for {p.DeliverEntered} entered; "
+            + $"sweep {p.SweepTicks * f:F0} ms, {p.SweepDecoded} decoded for {p.SweepSlots} in the cell; empty skipped {p.EmptyCellsSkipped}");
         Console.Error.WriteLine($"  PUSH LOD: far every {p.FarEvery}; updates withheld {p.UpdatesDeferred}, far flushes {p.FarFlushes}, crescent states {p.FarCrescentStates}, fold tail {p.FarEndTicks * f:F0} ms");
-        Console.Error.WriteLine($"  PUSH LOG: catch-ups {p.LogCatchUps} over {p.LogCatchUpTicks} missed ticks; resets: too old {p.LogTooOld}, ambiguous {p.LogAmbiguous}");
+        Console.Error.WriteLine(
+            $"  PUSH LOG: catch-ups {p.LogCatchUps} over {p.LogCatchUpTicks} missed ticks; resets: too old {p.LogTooOld}, ambiguous {p.LogAmbiguous}; "
+            + $"gap re-pushes {p.GapRepushes}, "
+            + $"occupancy recounts {p.OccupancyRecounts} ({p.RecountTicks * f:F0} ms)");
         if (p.ValidateClustersPerTick > 0)
         {
             var groups = new System.Text.StringBuilder();

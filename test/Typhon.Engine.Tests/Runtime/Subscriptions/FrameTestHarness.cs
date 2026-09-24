@@ -113,6 +113,18 @@ sealed unsafe class FrameHarness : IDisposable
     /// </summary>
     public bool RunFence { get; set; }
 
+    /// <summary>
+    /// How many worker lists the projection spreads its blocks over, round-robin; the push index's merge chunks then run concurrently, as the stage
+    /// runs them. One by default: a single list and a single merge chunk.
+    /// </summary>
+    public int ProjectionWorkers { get; set; } = 1;
+
+    /// <summary>
+    /// Whether the index is built serially in the frame prologue instead of sorted by the projection and merged by the index stage: the path the
+    /// collapsed shape and <c>TYPHON_PUSH_PARALLEL_INDEX=0</c> take.
+    /// </summary>
+    public bool SerialIndex { get; set; }
+
     /// <summary>Runs one whole tick of the track: blocks, projection, the push index, frames, then the durability gate.</summary>
     /// <param name="tick">The tick number, which must advance.</param>
     /// <param name="workers">Worker-pool width for the frame stage; the projection runs as one chunk.</param>
@@ -144,6 +156,24 @@ sealed unsafe class FrameHarness : IDisposable
         {
             Engine.WriteTickFence(tick);
         }
+    }
+
+    /// <summary>
+    /// A tick whose track ran up to the index merge and stopped: the projection and the merge ran, the index was never finished and no frame was built —
+    /// what a stage fault between the projection and the frames leaves behind.
+    /// </summary>
+    /// <param name="tick">The tick number, which must advance.</param>
+    public void RunTickWithoutIndex(long tick)
+    {
+        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        Tick = tick;
+        if (RunFence)
+        {
+            Engine.WriteTickFence(tick);
+        }
+
+        Sessions.BeginTick();
+        RunProject(tick, finish: false);
     }
 
     /// <summary>Runs a tick's blocks and projection steps but not the frame stage — what an allocation measurement brackets.</summary>
@@ -179,12 +209,182 @@ sealed unsafe class FrameHarness : IDisposable
         while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
             var bytes = new ReadOnlySpan<byte>(frame.Bytes, frame.Length);
+            if (DigestFrames)
+            {
+                FoldDigest(session, bytes);
+            }
+
             replica.Apply(bytes);
             send->CompleteSend(frame.Sequence);
             delivered++;
         }
 
         return delivered;
+    }
+
+    /// <summary>
+    /// Whether <see cref="Deliver"/> folds every frame it applies into <see cref="Digest"/>: the session and everything the decoded frame hands a client —
+    /// records with their positions, velocities, segment times and epochs, field values, events — but no metric value, so the digest is a function of
+    /// what was replicated only.
+    /// </summary>
+    public bool DigestFrames { get; set; }
+
+    /// <summary>FNV-1a 64 over every frame <see cref="Deliver"/> applied while <see cref="DigestFrames"/> was set.</summary>
+    public ulong Digest { get; private set; } = 14695981039346656037UL;
+
+    private void FoldDigest(SessionId session, ReadOnlySpan<byte> frame)
+    {
+        var sink = new DigestSink(Digest);
+        sink.Fold($"s{session.Value}");
+        TickReader.Read(frame, CatalogPlan, ref sink);
+        Digest = sink.Hash;
+    }
+
+    /// <summary>
+    /// Folds everything a decoded frame hands a client — records with their positions, velocities, segment times and epochs, field values, events —
+    /// except metric values, which are measurements rather than replication.
+    /// </summary>
+    private struct DigestSink : ITickSink
+    {
+        public ulong Hash;
+
+        public DigestSink(ulong seed) => Hash = seed;
+
+        public void Fold(string s)
+        {
+            foreach (var ch in s)
+            {
+                Mix(ch);
+            }
+
+            Mix('|');
+        }
+
+        private void Mix(ulong v) => Hash = (Hash ^ v) * 1099511628211UL;
+
+        private void Mix(scoped ReadOnlySpan<double> values)
+        {
+            foreach (var v in values)
+            {
+                Mix((ulong)BitConverter.DoubleToInt64Bits(v));
+            }
+        }
+
+        private void Mix(scoped ReadOnlySpan<byte> bytes)
+        {
+            foreach (var b in bytes)
+            {
+                Mix(b);
+            }
+        }
+
+        public void BeginTick(uint tick, TickFlags flags, uint periodUs)
+        {
+            Mix(1);
+            Mix(tick);
+            Mix((ulong)flags);
+        }
+
+        public void BeginEntities(ArchetypePlan archetype) => Fold("e" + archetype.Name);
+
+        public void Enter(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch)
+        {
+            Mix(2);
+            Mix(netId);
+            Mix(position);
+            Mix(velocity);
+            Mix(t0);
+            Mix(epoch);
+        }
+
+        public void Segment(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch)
+        {
+            Mix(3);
+            Mix(netId);
+            Mix(position);
+            Mix(velocity);
+            Mix(t0);
+            Mix(epoch);
+        }
+
+        public void State(uint netId, byte groupMask)
+        {
+            Mix(4);
+            Mix(netId);
+            Mix(groupMask);
+        }
+
+        public void Leave(uint netId)
+        {
+            Mix(5);
+            Mix(netId);
+        }
+
+        public void Event(MessagePlan type) => Fold("v" + type.Name);
+
+        public void Self(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask)
+        {
+            Mix(6);
+            Mix(netId);
+            Mix(lastSeq);
+            Mix(ownerMask);
+        }
+
+        public void Ack(ushort seq, byte reason)
+        {
+            Mix(7);
+            Mix(seq);
+            Mix(reason);
+        }
+
+        public void Source(ushort requestId, byte status, ushort code)
+        {
+            Mix(8);
+            Mix(requestId);
+            Mix(status);
+            Mix(code);
+        }
+
+        public void BeginAggregate(CatalogGrid grid, bool reset)
+        {
+            Mix(9);
+            Mix((ulong)grid.Idx);
+        }
+
+        public void AggregateCell(uint cell, scoped ReadOnlySpan<uint> counts)
+        {
+            Mix(cell);
+            foreach (var c in counts)
+            {
+                Mix(c);
+            }
+        }
+
+        public void Metric(MetricPlan metric, int valueIndex, double value) => Fold("m" + metric.Name);
+
+        public void Debug(byte subType, scoped ReadOnlySpan<byte> payload) => Mix(subType);
+
+        public void Ext(uint appTypeId, scoped ReadOnlySpan<byte> payload)
+        {
+            Mix(appTypeId);
+            Mix(payload);
+        }
+
+        public void UnknownBlock(byte blockType) => Mix(blockType);
+
+        public void EndTick() => Mix(10);
+
+        public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => Mix(components);
+
+        public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) => Mix(utf8);
+
+        public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes) => Mix(bytes);
+
+        public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
+        {
+            Mix((ulong)count);
+            Mix(components);
+        }
     }
 
     /// <summary>Claims and copies out every frame ready for a session without applying it — what the golden vector is built from.</summary>
@@ -239,7 +439,7 @@ sealed unsafe class FrameHarness : IDisposable
     public void Dispose() => _replication.Dispose();
 
     /// <summary>The blocks step and S1, single-threaded: the push set and its blocks, the parked drain, the marks, then each block's projection.</summary>
-    private void RunProject(long tick)
+    private void RunProject(long tick, bool finish = true)
     {
         var push = Subscriptions.Push;
         if (push == null)
@@ -264,13 +464,16 @@ sealed unsafe class FrameHarness : IDisposable
             states[a].BeginWatchedBlocks(stamp);
         }
 
-        // The projection counts its events for the parallel index, which the push index stage then places (SubscriptionsPushIndexExecSystem).
-        push.MarkPushed(workers: 1, countInProject: !Subscriptions.Options.DeterministicProjection);
+        // The projection sorts its events for the parallel index, which the push index stage then merges (SubscriptionsPushIndexExecSystem).
+        var lists = Math.Max(1, ProjectionWorkers);
+        push.MarkPushed(workers: lists, countInProject: !SerialIndex);
 
         for (var a = 0; a < states.Length; a++)
         {
-            states[a].BeginProjectTick(workers: 1);
+            states[a].BeginProjectTick(workers: lists);
         }
+
+        var projected = 0;
 
         using (EpochGuard.Enter(Engine.EpochManager))
         {
@@ -301,7 +504,7 @@ sealed unsafe class FrameHarness : IDisposable
 
                         var clusterBase = persistent != null ? persistentAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
                         var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
-                        ProjectionPass.ProjectBlock(plans[a], a, state, 0, block, clusterBase, transientBase, stamp);
+                        ProjectionPass.ProjectBlock(plans[a], a, state, projected++ % lists, block, clusterBase, transientBase, stamp);
                     }
                 }
                 finally
@@ -312,15 +515,33 @@ sealed unsafe class FrameHarness : IDisposable
             }
         }
 
-        // The push index stage: counted by the projection above, offset, then placed one worker list at a time.
-        push.CountWorker(0);
-        var lists = push.BeginParallelIndex();
+        // The push index stage: sorted by the projection above, split into key ranges, then merged one range at a time.
         for (var w = 0; w < lists; w++)
         {
-            push.PlaceWorker(w);
+            push.CountWorker(w);
         }
 
-        // The far-flush stage (SubscriptionsPushFarExecSystem), in two chunks so a chunk boundary is crossed — and, as there, only with a session open.
+        var ranges = push.BeginParallelIndex();
+        if (ranges > 1)
+        {
+            System.Threading.Tasks.Parallel.For(0, ranges, push.PlaceWorker);
+        }
+        else
+        {
+            for (var r = 0; r < ranges; r++)
+            {
+                push.PlaceWorker(r);
+            }
+        }
+
+        // The far-flush stage (SubscriptionsPushFarExecSystem): the index's serial tail, then the fold in two chunks so a chunk boundary is crossed — and,
+        // as there, only with a session open.
+        if (!finish)
+        {
+            return;
+        }
+
+        push.FinishIndex();
         var chunks = Sessions.OpenCount > 0 ? push.BeginFarFold(2) : 0;
         for (var c = 0; c < chunks; c++)
         {

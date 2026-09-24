@@ -258,7 +258,90 @@ public static class TatooineReplication
         }
 
         Console.Error.WriteLine(line.ToString());
+        ReportTail(ring, systems, first);
     }
+
+    /// <summary>
+    /// Where the window's slow ticks go: for the ticks at or above the window's 95th percentile, each system's mean span beyond its own median over the
+    /// window. A tail that a mean hides shows up here by name.
+    /// </summary>
+    private static void ReportTail(TickTelemetryRing ring, SystemDefinition[] systems, long first)
+    {
+        var durations = new List<float>();
+        var rows = new List<float[]>();
+        for (var t = first; t <= ring.NewestTick; t++)
+        {
+            ref readonly var tick = ref ring.GetTick(t);
+            if (tick.ActualDurationMs <= 0f)
+            {
+                continue;
+            }
+
+            var metrics = ring.GetSystemMetrics(t);
+            var row = new float[systems.Length];
+            for (var i = 0; i < metrics.Length && i < systems.Length; i++)
+            {
+                row[i] = metrics[i].WasSkipped ? 0f : metrics[i].DurationUs;
+            }
+
+            durations.Add(tick.ActualDurationMs);
+            rows.Add(row);
+        }
+
+        if (durations.Count < 20)
+        {
+            return;
+        }
+
+        var sorted = durations.ToArray();
+        Array.Sort(sorted);
+        var p95 = sorted[(int)(sorted.Length * 0.95)];
+        var median = new float[systems.Length];
+        var column = new float[rows.Count];
+        for (var i = 0; i < systems.Length; i++)
+        {
+            for (var r = 0; r < rows.Count; r++)
+            {
+                column[r] = rows[r][i];
+            }
+
+            Array.Sort(column);
+            median[i] = column[column.Length / 2];
+        }
+
+        var excess = new double[systems.Length];
+        var slow = 0;
+        for (var r = 0; r < rows.Count; r++)
+        {
+            if (durations[r] < p95)
+            {
+                continue;
+            }
+
+            slow++;
+            for (var i = 0; i < systems.Length; i++)
+            {
+                excess[i] += rows[r][i] - median[i];
+            }
+        }
+
+        var order = new int[systems.Length];
+        for (var i = 0; i < order.Length; i++)
+        {
+            order[i] = i;
+        }
+
+        Array.Sort(order, (x, y) => excess[y].CompareTo(excess[x]));
+        var line = new System.Text.StringBuilder(
+            $"  tail: {slow} ticks >= p95 {p95:F2} ms (median {sorted[sorted.Length / 2]:F2}); mean excess over each system's median, us:");
+        for (var k = 0; k < Math.Min(8, order.Length); k++)
+        {
+            line.Append($" {systems[order[k]].Name}={excess[order[k]] / slow:F0}");
+        }
+
+        Console.Error.WriteLine(line.ToString());
+    }
+
     private static long SendWindowFrom, SendFramesFrom, SendBytesFrom, SendAllocFrom, SendItemsFrom;
     private static double SendCpuFrom;
     private static int SendGen0From;

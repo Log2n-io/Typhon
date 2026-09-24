@@ -86,6 +86,9 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <summary>Distance LOD: far updates withheld by this worker's current gather, added to the shared counter once per gather.</summary>
     internal long Deferred;
 
+    /// <summary>Cell deliveries and sweeps this worker's current gather skipped as empty, added to the shared counter once per gather.</summary>
+    internal long EmptyCellsSkipped;
+
     private struct RecordList
     {
         public FrameRecord* Items;
