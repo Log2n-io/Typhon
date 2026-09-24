@@ -153,19 +153,30 @@ sealed class PushLodLevelTests : TestBase<PushLodLevelTests>
         Assert.That(push.TargetLevelOf(session), Is.EqualTo(1), "a rise restarts the clock: the next is a second later, not sooner");
         Feed(10, twice);
         Assert.That(push.TargetLevelOf(session), Is.EqualTo(2));
+        Assert.That(push.ShrinkOf(session), Is.Zero, "no radius off below the last level");
         Feed(50, twice);
         Assert.That(push.TargetLevelOf(session), Is.EqualTo(3), "a level a second while still over");
+        Assert.That(push.ShrinkOf(session), Is.Zero);
+
+        // At the last level and still over: a step off the radius a second, the last resort (217, 267).
         Feed(100, twice);
         Assert.That(push.TargetLevelOf(session), Is.EqualTo(PushReplication.MaxLevel), "no level past the last");
+        Assert.That(push.ShrinkOf(session), Is.EqualTo(2), "a step a second at the last level");
 
-        // Silent: under 7 000 B/s after 27 ticks, and three seconds (150 ticks) later a level falls.
+        // Silent: under 7 000 B/s after 27 ticks, and three seconds (150 ticks) later the radius gets a step back — before any level falls.
         Feed(170, 0);
-        Assert.That(push.TargetLevelOf(session), Is.EqualTo(3), "three seconds under the lower mark have not passed");
+        Assert.That((push.TargetLevelOf(session), push.ShrinkOf(session)), Is.EqualTo((3, 2)), "three seconds under the lower mark have not passed");
         Feed(15, 0);
-        Assert.That(push.TargetLevelOf(session), Is.EqualTo(2));
+        Assert.That((push.TargetLevelOf(session), push.ShrinkOf(session)), Is.EqualTo((3, 1)), "the radius comes back first");
+        // At 65 % of the budget the rate is under the lower mark, but the disc a step larger (x (16/15)^2, +14 %) would not be: the radius stays short
+        // rather than oscillate.
+        Feed(400, budget * 65 / 100 / 50);
+        Assert.That((push.TargetLevelOf(session), push.ShrinkOf(session)), Is.EqualTo((3, 1)), "a step back would put the rate over the lower mark");
+        Feed(300, 0);
+        Assert.That((push.TargetLevelOf(session), push.ShrinkOf(session)), Is.EqualTo((2, 0)), "then the radius, then the level");
 
         push.Pace(session, 0, 0, tick);
-        Assert.That(push.TargetLevelOf(session), Is.Zero, "no budget");
+        Assert.That((push.TargetLevelOf(session), push.ShrinkOf(session)), Is.EqualTo((0, 0)), "no budget");
 
         // Ticks the session was not served (a rate class, a refused frame) count as time: one feed after three ticks weighs three ticks.
         push.Pace(session, 0, budget, tick);
@@ -207,7 +218,7 @@ sealed class PushLodLevelTests : TestBase<PushLodLevelTests>
             oracle.Step();
         }
 
-        Assert.That((oracle.Push.FarPhase, oracle.Push.FarWindow), Is.EqualTo((4, PushReplication.LogDepth)), "one session at level 2");
+        Assert.That((oracle.Push.FarPhase, oracle.Push.FarWindow), Is.EqualTo((4, 4)), "one session at level 2, no band declared: every 4 ticks, 4 of history");
 
         Assert.That(oracle.Frames.Sessions.Close(leaving, SessionCloseReason.Kicked, 4100), Is.True);
         for (var i = 0; i < PushReplication.RecountEvery + 2; i++)
@@ -216,5 +227,119 @@ sealed class PushLodLevelTests : TestBase<PushLodLevelTests>
         }
 
         Assert.That((oracle.Push.FarPhase, oracle.Push.FarWindow), Is.EqualTo((0, 0)), "the census still counts a closed session");
+    }
+
+    /// <summary>
+    /// The last resort (09 § 10): at the last level a session's radius loses sixteenths of itself, never below half of it, and gets them back — a radius change swept
+    /// like SetRadius's, committed with the frame. Shrinks set at random on walking sessions, at two skip rates: every client holds what its committed
+    /// radius says.
+    /// </summary>
+    /// <param name="skipPercent">The percentage of ticks on which some sessions' frames are left undrained.</param>
+    [Test]
+    [VerifiesRule("SUB-22")]
+    public void ARadiusTheBudgetShrinksConverges([Values(0, 30)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7960 + skipPercent, [skipPercent, 0, 30, skipPercent],
+            nameof(PushLodLevelTests), walkRadius: 3000);
+        oracle.Workload.WalkStrideM = 1.5f;
+        oracle.Push.LevelsPinned = true;
+        var rng = new Random(skipPercent);
+        var shrunk = 0;
+        for (var i = 0; i < 120; i++)
+        {
+            if (i % 7 == 0)
+            {
+                foreach (var session in oracle.Sessions)
+                {
+                    oracle.Push.SetTargetLevel(session, PushReplication.MaxLevel);
+                    oracle.Push.SetShrink(session, rng.Next(0, PushReplication.MaxShrink + 1));
+                }
+            }
+
+            oracle.Step();
+            foreach (var session in oracle.Sessions)
+            {
+                var radius = oracle.Push.RadiusOf(session);
+                shrunk += radius > 0 && radius < 3000 ? 1 : 0;
+                Assert.That(radius, Is.Zero.Or.GreaterThanOrEqualTo(1500), "never below half the radius");
+            }
+
+            if ((i + 1) % 60 == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"radii shrunk and restored, after {i + 1} ticks at {skipPercent}% skipped");
+            }
+        }
+
+        Assert.That(shrunk, Is.GreaterThan(50), "radii were rarely shrunk: the case did not run");
+    }
+
+    /// <summary>
+    /// Overload (09 § 10): while the tick multiplier is above 1 every Sphere session is a level up and served every other tick; the multiplier back at 1,
+    /// they return to level 0 and every tick — and the clients converge through both.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-22")]
+    public void AnOverloadedTickRaisesEveryLevelAndHalvesTheRate()
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7970, [0, 0], nameof(PushLodLevelTests),
+            walkRadius: 3000);
+        oracle.Workload.WalkStrideM = 1.5f;
+        const uint period = 16_667;
+        for (var i = 0; i < 5; i++)
+        {
+            oracle.Step();
+        }
+
+        var before = oracle.Push.LogCatchUps;
+        for (var i = 0; i < 20; i++)
+        {
+            oracle.Step();
+        }
+
+        var normal = oracle.Push.LogCatchUps - before;
+
+        oracle.Assembler.SetTickState(2 * period, 2);
+        for (var i = 0; i < 5; i++)
+        {
+            oracle.Step();
+        }
+
+        before = oracle.Push.LogCatchUps;
+        for (var i = 0; i < 20; i++)
+        {
+            oracle.Step();
+        }
+
+        // Served every other tick, every frame is a catch-up over the tick it was not served.
+        var overloaded = oracle.Push.LogCatchUps - before;
+        Assert.Multiple(() =>
+        {
+            foreach (var session in oracle.Sessions)
+            {
+                Assert.That(oracle.Push.LevelOf(session), Is.EqualTo(1), $"session {session.Value}: the overload step");
+            }
+
+            Assert.That(oracle.Push.FarPhase, Is.EqualTo(2), "the implicit band's fold");
+            Assert.That(normal, Is.Zero, "served every tick, nothing is caught up");
+            Assert.That(overloaded, Is.EqualTo(10 * oracle.Sessions.Length), "every session served every other tick, each frame over one missed");
+        });
+
+        oracle.Quiesce();
+        oracle.AssertConverged("under overload");
+
+        oracle.Assembler.SetTickState(period, 1);
+        for (var i = 0; i < 5; i++)
+        {
+            oracle.Step();
+        }
+
+        foreach (var session in oracle.Sessions)
+        {
+            Assert.That(oracle.Push.LevelOf(session), Is.Zero, $"session {session.Value}: back to level 0");
+        }
+
+        oracle.Quiesce();
+        oracle.AssertConverged("after the overload");
     }
 }

@@ -521,7 +521,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
         Volatile.Write(ref _tickOriginTimestamp, tickOriginTimestamp);
         Volatile.Write(ref _tickPeriodUs, NominalTickPeriodUs * (uint)Math.Max(1, tickMultiplier));
-        _frames?.SetTickPeriod(NominalTickPeriodUs * (uint)Math.Max(1, tickMultiplier));
+        _frames?.SetTickState(NominalTickPeriodUs * (uint)Math.Max(1, tickMultiplier), tickMultiplier);
         Volatile.Write(ref _currentTick, (uint)tickNumber);
     }
 

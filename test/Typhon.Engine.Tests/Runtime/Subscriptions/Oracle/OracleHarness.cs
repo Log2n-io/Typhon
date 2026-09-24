@@ -567,7 +567,10 @@ internal sealed unsafe class OracleHarness : IDisposable
         List<string> divergences)
     {
         var held = new HashSet<uint>(replica.NetIds(plan));
-        var radius = _sessionRadius[session];
+
+        // The radius the session's known-set was committed at: its own, less any last-resort shrink of the budget loop (09 § 10).
+        var committed = Push.RadiusOf(_sessions[session]);
+        var radius = committed > 0 ? Math.Min(committed, _sessionRadius[session]) : _sessionRadius[session];
         var slack = _anchorSlack[session];
 
         // v̂ trails a mover's true position by up to h (09 § 2): held within R − h, dropped past R + h, either between.

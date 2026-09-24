@@ -65,7 +65,10 @@ internal struct PushSessionState
     public byte WideLevel;
     public uint WideUntil;
 
-    // The budget loop: the bytes/s EWMA, ticks spent over the budget and under its lower mark, and the last tick it was fed.
+    // The budget loop: the level it asked for and the steps (a ShrinkSteps-th of the radius each) it took off the radius at the last level (09 § 10; TargetLevel adds the overload step),
+    // the bytes/s EWMA, ticks spent over the budget and under its lower mark, and the last tick it was fed.
+    public byte BudgetLevel;
+    public byte Shrink;
     public float Rate;
     public ushort Over;
     public ushort Under;
@@ -238,8 +241,8 @@ internal abstract unsafe class PushReplication
     }
 
     /// <summary>
-    /// This tick's fold (09 § 10): the declared one, or — while a session's committed level is above zero, or one fell in the last <see cref="LogDepth"/>
-    /// ticks — the phase of the lowest such level's shortest period and the log's whole depth. Serial, before the fold; the census it reads is every
+    /// This tick's fold (09 § 10): the declared one, or — while a session's committed level is above zero — the phase of the lowest level's shortest period
+    /// over the highest level's longest period; for <see cref="LogDepth"/> ticks after a level fell, the log's whole depth, which the widened windows need. Serial, before the fold; the census it reads is every
     /// commit up to the previous tick's, which is the level each session's gather this tick holds its changes to.
     /// </summary>
     private protected void ResolveFar()
@@ -252,15 +255,22 @@ internal abstract unsafe class PushReplication
         _farResolvedTick = _tick;
         var phase = _declaredPhase;
         var window = _declaredWindow;
+        int lowest = 0, highest = 0;
         for (var level = 1; level <= MaxLevel; level++)
         {
             if (Volatile.Read(ref _levelSessions[level]) > 0)
             {
-                // A level's shortest period is 2^level with no declared band, and longer with one: 2^level divides every period in use.
-                phase = phase > 1 ? Math.Min(phase, 1 << level) : 1 << level;
-                window = LogDepth;
-                break;
+                lowest = lowest == 0 ? level : lowest;
+                highest = level;
             }
+        }
+
+        if (lowest > 0)
+        {
+            // A level's shortest period is 2^level with no declared band, and longer with one: 2^lowest divides every period in use. Its longest is the
+            // declared longest (or the implicit band's 1) doubled per level, up to the log's depth: the history no flush needs more of.
+            phase = phase > 1 ? Math.Min(phase, 1 << lowest) : 1 << lowest;
+            window = Math.Min(LogDepth, Math.Max(_declaredWindow, 1) << highest);
         }
 
         if (phase > 1 && Volatile.Read(ref _lowered) && _tick - Volatile.Read(ref _lastLowered) <= LogDepth)
@@ -358,6 +368,48 @@ internal abstract unsafe class PushReplication
         return st.Bound && st.Generation == session.Generation ? st.Rate : 0d;
     }
 
+    /// <summary>
+    /// The overload step (09 § 10): 1 while the runtime's tick multiplier is above 1, 0 otherwise — every Sphere session's level rises by it. Set by the frame
+    /// prologue each tick, from the multiplier the tick started with; it falls back when the overload detector's own hold releases the multiplier.
+    /// </summary>
+    public int OverloadStep { get; set; }
+
+    /// <summary>The last resort's step, as a fraction of the session's own radius: 1/16, so a step moves the rate by about 13 % (a disc's area).</summary>
+    public const int ShrinkSteps = 16;
+
+    /// <summary>The most steps the last resort takes: half the radius.</summary>
+    public const int MaxShrink = ShrinkSteps / 2;
+
+    /// <summary>Last-resort radius steps taken off and given back by the budget loop — cumulative.</summary>
+    public long RadiusShrinks;
+
+    /// <inheritdoc cref="RadiusShrinks"/>
+    public long RadiusGrows;
+
+    /// <summary>Tests only: the steps a session's radius is short of its own, as the budget loop left them.</summary>
+    internal int ShrinkOf(SessionId session)
+    {
+        ref var st = ref _sessions[session.Slot];
+        return st.Bound && st.Generation == session.Generation ? st.Shrink : 0;
+    }
+
+    /// <summary>Tests only: a session's committed radius — its own, less any last-resort shrink.</summary>
+    internal double RadiusOf(SessionId session)
+    {
+        ref var st = ref _sessions[session.Slot];
+        return st.Bound && st.Generation == session.Generation ? st.Radius : 0d;
+    }
+
+    /// <summary>Tests only: sets the steps taken off a session's radius, as the budget loop would at its last level.</summary>
+    internal void SetShrink(SessionId session, int steps)
+    {
+        ref var st = ref _sessions[session.Slot];
+        if (st.Bound && st.Generation == session.Generation)
+        {
+            st.Shrink = (byte)Math.Clamp(steps, 0, MaxShrink);
+        }
+    }
+
     /// <summary>Tests only: the budget loop leaves every level where <see cref="SetTargetLevel"/> put it.</summary>
     internal bool LevelsPinned;
 
@@ -375,13 +427,15 @@ internal abstract unsafe class PushReplication
     /// <summary>
     /// The budget loop (09 § 10), fed once per tick a session is served, with the bytes its frame published — zero for none. The level rises after the
     /// rate's EWMA has been over the budget for <see cref="RaiseAfterSeconds"/>, and falls after it has been under <see cref="LowerBelow"/> of it for
-    /// <see cref="LowerAfterSeconds"/>; each move restarts both clocks. A session with no budget goes back to level 0. The frames move to the level, and it
-    /// commits with them. O(1); only the session's own worker writes its state.
+    /// <see cref="LowerAfterSeconds"/>; each move restarts both clocks. At the last level and still over, the radius loses a step instead — the last
+    /// resort, never below <see cref="MaxLevel"/> — and under the lower mark it gets a step back before any level falls. A session with no budget goes back
+    /// to level 0 and its own radius. The level the frames move to adds <see cref="OverloadStep"/>; it and the radius commit with them. O(1); only the
+    /// session's own worker writes its state.
     /// </summary>
     /// <param name="session">The session.</param>
     /// <param name="bytes">What this tick's frame published.</param>
     /// <param name="budget">The session's budget in bytes per second; 0 for none.</param>
-    /// <param name="tickSeconds">The nominal tick period.</param>
+    /// <param name="tickSeconds">The live tick period.</param>
     public void Pace(SessionId session, int bytes, int budget, double tickSeconds)
     {
         ref var st = ref _sessions[session.Slot];
@@ -392,10 +446,12 @@ internal abstract unsafe class PushReplication
 
         if (budget <= 0)
         {
-            // No budget: level 0, and nothing written once there — the loop costs a session with no budget one load.
-            if (st.TargetLevel != 0 || st.PacedTick != 0)
+            // No budget: level 0 (plus the overload step) at its own radius, and nothing written once there — a session with no budget pays one load.
+            if (st.TargetLevel != OverloadStep || st.PacedTick != 0 || st.BudgetLevel != 0 || st.Shrink != 0)
             {
-                st.TargetLevel = 0;
+                st.BudgetLevel = 0;
+                st.Shrink = 0;
+                st.TargetLevel = (byte)OverloadStep;
                 st.Rate = 0;
                 st.Over = 0;
                 st.Under = 0;
@@ -413,20 +469,49 @@ internal abstract unsafe class PushReplication
 
         st.Over = st.Rate > budget ? (ushort)Math.Min(st.Over + ticks, ushort.MaxValue) : (ushort)0;
         st.Under = st.Rate < budget * LowerBelow ? (ushort)Math.Min(st.Under + ticks, ushort.MaxValue) : (ushort)0;
-        if (st.Over * tickSeconds >= RaiseAfterSeconds && st.TargetLevel < MaxLevel)
+        if (st.Over * tickSeconds >= RaiseAfterSeconds && (st.BudgetLevel < MaxLevel || st.Shrink < MaxShrink))
         {
-            st.TargetLevel++;
+            if (st.BudgetLevel < MaxLevel)
+            {
+                st.BudgetLevel++;
+                Interlocked.Increment(ref LevelRaises);
+            }
+            else
+            {
+                // The last resort: a step off the radius, down to half of it.
+                st.Shrink++;
+                Interlocked.Increment(ref RadiusShrinks);
+            }
+
             st.Over = 0;
             st.Under = 0;
-            Interlocked.Increment(ref LevelRaises);
         }
-        else if (st.Under * tickSeconds >= LowerAfterSeconds && st.TargetLevel > 0)
+        else if (st.Under * tickSeconds >= LowerAfterSeconds && (st.Shrink > 0 || st.BudgetLevel > 0))
         {
-            st.TargetLevel--;
-            st.Over = 0;
-            st.Under = 0;
-            Interlocked.Increment(ref LevelLowers);
+            // The radius first: eviction is what the loop gives back soonest — but only when the rate, scaled to the grown disc's area (a ball's volume
+            // in 3D), stays under the lower mark: a radius that grew straight back over the budget would shrink again a second later and pay a sweep
+            // and a refill every cycle. The two radii's ratio depends on the step count alone, (S − s + 1) / (S − s).
+            if (st.Shrink > 0)
+            {
+                var grown = Math.Pow((ShrinkSteps - st.Shrink + 1d) / (ShrinkSteps - st.Shrink), _gridD > 1 ? 3 : 2);
+                if (st.Rate * grown < budget * LowerBelow)
+                {
+                    st.Shrink--;
+                    Interlocked.Increment(ref RadiusGrows);
+                    st.Over = 0;
+                    st.Under = 0;
+                }
+            }
+            else
+            {
+                st.BudgetLevel--;
+                Interlocked.Increment(ref LevelLowers);
+                st.Over = 0;
+                st.Under = 0;
+            }
         }
+
+        st.TargetLevel = (byte)Math.Min(MaxLevel, st.BudgetLevel + OverloadStep);
     }
 
     public long UpdatesDeferred;

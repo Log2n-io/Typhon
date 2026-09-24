@@ -660,18 +660,24 @@
 ### SUB-22: A session's LOD level defers updates and never loses one `[fatal][silent]`
   invariant a session's LOD level ℓ ∈ 0..3 commits with its frame (SUB-03); the frame is gathered with the committed level's bands before (what every
     held-back change was scheduled by) and the target level's after. At ℓ every declared band's period is min(N · 2^ℓ, 8) at the same boundary, and a
-    profile with none has one beyond R′/2, every 2^ℓ ticks; the enter budget is max(1, EnterBudgetPerFrame >> target level). A World session has
-    no level: its frames return it to 0
+    profile with none has one beyond R′/2, every 2^ℓ ticks; the enter budget is max(1, (EnterBudgetPerFrame >> target level) / tick multiplier). A
+    World session has no level: its frames return it to 0
+  invariant overload: while the tick multiplier is above 1, every Sphere session's target level is its budget level + 1 (at most 3) and every profile
+    is served at min(2 · divisor, 4); both follow the multiplier the tick started with and fall back with it
+  invariant the radius shrinks only at ℓ = 3 and still over the budget, a sixteenth of the session's own radius per second, never below half of it;
+    under the lower mark it grows back a step per 3 s before any level falls, when the rate scaled to the grown disc (ball) stays under the mark. A shrink is a radius
+    change (a shell sweep of leaves) and commits with the frame
   invariant after a level falls from ℓ to ℓ′ < ℓ, for LogDepth ticks a band's flush carries every group stamped in its period at ℓ, not ℓ′: the first
     flush on the shorter schedule reaches back to the last one on the longer
   invariant the fold's phase divides every period in use and its window covers every flush's history: while any committed level is above zero, the
-    phase is at most 2^(lowest such level) and the window is LogDepth; while no level is, but one fell in the last LogDepth ticks and a band is still
+    phase is at most 2^(lowest such level) and the window is min(LogDepth, max(declared longest period, 1) · 2^(highest such level)); while no level is, but one fell in the last LogDepth ticks and a band is still
     in use (phase > 1), the window is LogDepth. The census may count too many sessions — a closed one, until the recount every RecountEvery ticks — but
     never too few
   invariant the budget loop raises the level after the bytes/s EWMA has been over the session's budget for 1 s, lowers it after 3 s under 0.7 of it,
     and returns a session with no budget to level 0. It reads the link: a frame published counts its bytes and a frame with nothing to say counts 0,
     over the live tick period; a frame refused (degraded, lagging, no slot, oversize, no pool) is not fed — congestion is not quiet
-  never drop a record for a budget: a deferred change reaches the session at the entity's next flush for its committed level, or by the inner crescent
+  never drop a record for a budget: a deferred change reaches the session at the entity's next flush for its committed level, or by the inner crescent;
+    the only eviction is the bounded last-resort radius
   scope: PushReplication.Pace, PushReplication.ResolveFar, PushReplication.CommitLevel, PushReplication.RecountLevels, LodBands.AtLevel,
     FrameAssembler.ExecutePushSessions
   on_violation: a flush that does not reach back far enough after a fall, or a fold phase that misses a session's flush ticks, leaves a client with a
@@ -681,7 +687,9 @@
   verified: PushLodLevelTests.LevelChangesConvergeAtEverySkipRate (levels moved at random, both ways, several steps at once, banded and bandless,
     skip 0–60 %) and LevelChangesConvergeOnTheDeepImplementation, PushLodLevelTests.ABudgetRaisesTheLevelAndRemovingItLowersIt (end to end through
     SetBudget, and the fold it implies), PushLodLevelTests.TheBudgetLoopRisesAfterASecondOverAndFallsAfterThreeUnder (the loop's timing, cadence and
-    an elapsed-ticks step), PushLodLevelTests.AClosedSessionAtALevelReleasesTheFold (the census). Falsifiability: dropping the fall's widening turns
+    an elapsed-ticks step), PushLodLevelTests.AClosedSessionAtALevelReleasesTheFold (the census and the fold's window),
+    PushLodLevelTests.ARadiusTheBudgetShrinksConverges (the last resort, never below R′/2), PushLodLevelTests.AnOverloadedTickRaisesEveryLevelAndHalvesTheRate
+    (the overload step and rate). Falsifiability: a fold window sized from the lowest level turns the bandless level cases red; dropping the fall's widening turns
     LevelChangesConvergeAtEverySkipRate(0, banded) red; a fold phase blind to the levels turns the bandless cases and ABudget… red; no inner crescent
     on a band that went turns LevelChangesConvergeAtEverySkipRate(0, bandless) and ABudget… red. The refused-frame clause and the World reset have no
     test.

@@ -60,6 +60,12 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
+        // Overload (09 § 10): while the tick is stretched, every profile is served half as often (up to every fourth tick) and every Sphere session's LOD
+        // level rises a step (the budget loop adds it); the enter budget shrinks by the multiplier. Stateless: it follows the multiplier the tick started
+        // with, and the detector's hold is what brings it back.
+        var multiplier = Math.Max(1, Volatile.Read(ref _tickMultiplier));
+        var overload = multiplier > 1 ? 1 : 0;
+        Push.OverloadStep = overload;
         var n = 0;
         foreach (var session in _sessions)
         {
@@ -67,6 +73,8 @@ internal sealed unsafe partial class FrameAssembler
             {
                 continue;
             }
+
+            divisor = Math.Min(divisor << overload, 4);
 
             if (n == _pushSessions.Length)
             {
@@ -174,7 +182,7 @@ internal sealed unsafe partial class FrameAssembler
         Console.Error.WriteLine(
             $"  PUSH CELLS: delivery {p.DeliverTicks * f:F0} ms, {p.DeliverDecoded} decoded for {p.DeliverEntered} entered; "
             + $"sweep {p.SweepTicks * f:F0} ms, {p.SweepDecoded} decoded for {p.SweepSlots} in the cell; empty skipped {p.EmptyCellsSkipped}");
-        Console.Error.WriteLine($"  PUSH LOD: far fold phase {p.FarPhase} window {p.FarWindow}; updates withheld {p.UpdatesDeferred}, far flushes {p.FarFlushes}, crescent states {p.FarCrescentStates}, fold tail {p.FarEndTicks * f:F0} ms; levels raised {p.LevelRaises}, lowered {p.LevelLowers}");
+        Console.Error.WriteLine($"  PUSH LOD: far fold phase {p.FarPhase} window {p.FarWindow}; updates withheld {p.UpdatesDeferred}, far flushes {p.FarFlushes}, crescent states {p.FarCrescentStates}, fold tail {p.FarEndTicks * f:F0} ms; levels raised {p.LevelRaises}, lowered {p.LevelLowers}; radius cells off {p.RadiusShrinks}, back {p.RadiusGrows}; overload step {p.OverloadStep}");
         Console.Error.WriteLine(
             $"  PUSH LOG: catch-ups {p.LogCatchUps} over {p.LogCatchUpTicks} missed ticks; resets: too old {p.LogTooOld}, ambiguous {p.LogAmbiguous}; "
             + $"gap re-pushes {p.GapRepushes}, "
@@ -306,6 +314,9 @@ internal sealed unsafe partial class FrameAssembler
 
     // published: the bytes the session's frame published, or zero when it had nothing to say; left as it was when no frame was made — not its tick, or a
     // frame refused (degraded, lagging, no slot, oversize, no pool): the budget loop reads the link's rate, and a refusal is congestion, not quiet.
+    /// <summary>A frame's enter budget (09 § 10): halved per LOD level, divided by the overload multiplier, never below one.</summary>
+    private int EnterBudget(int level) => Math.Max(1, (_options.EnterBudgetPerFrame >> level) / Math.Max(1, Volatile.Read(ref _tickMultiplier)));
+
     private void AssemblePush(int index, FrameWorkerScratch scratch, ref BoundViewpoint follow, ref long lost, ref FrameCounters counters, ref long enters,
         ref long leaves, ref long updates, ref int published)
     {
@@ -357,12 +368,12 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         var reset = _pushWorld[index]
-            ? Push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves,
+            ? Push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, EnterBudget(0), ref enters, ref leaves,
                 ref updates, out var complete)
             : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], Profiles.BandsOf(_pushProfiles[index]), state.PendingReset,
                 in Profiles.SetOf(_pushProfiles[index]), scratch,
                 _encodePlans,
-                Math.Max(1, _options.EnterBudgetPerFrame >> Push.TargetLevelOf(session)), ref enters, ref leaves, ref updates, out complete);
+                EnterBudget(Push.TargetLevelOf(session)), ref enters, ref leaves, ref updates, out complete);
 
         if (timing)
         {

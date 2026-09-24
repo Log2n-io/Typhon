@@ -388,9 +388,20 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     // The tick period in seconds, the budget loop's clock: the nominal one until the runtime publishes the live one, which the overload multiplier stretches.
     private double _tickSeconds;
 
-    /// <summary>The live tick period, from the runtime's tick state: a stretched tick sends the same bytes over a longer time.</summary>
+    // The overload tick multiplier the tick started with (09 § 10): 1 unless the overload detector stretched the tick.
+    private int _tickMultiplier = 1;
+
+    /// <summary>
+    /// The live tick state, from the runtime at each tick's start: the period — a stretched tick sends the same bytes over a longer time — and the overload
+    /// multiplier that stretched it.
+    /// </summary>
     /// <param name="periodUs">The period, in microseconds.</param>
-    internal void SetTickPeriod(uint periodUs) => Volatile.Write(ref _tickSeconds, periodUs / 1_000_000d);
+    /// <param name="multiplier">The overload tick multiplier, 1 when not overloaded.</param>
+    internal void SetTickState(uint periodUs, int multiplier)
+    {
+        Volatile.Write(ref _tickSeconds, periodUs / 1_000_000d);
+        Volatile.Write(ref _tickMultiplier, Math.Max(1, multiplier));
+    }
     private readonly int _silenceBoundTicks;
     private readonly int _closeBoundTicks;
     private readonly int _degradeBoundTicks;

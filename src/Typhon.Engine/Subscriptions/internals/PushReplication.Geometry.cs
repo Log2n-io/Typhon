@@ -1645,6 +1645,14 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         // 10 § 5): a change is a shell sweep, not a reset. The window is sized for the largest any session can take.
         Debug.Assert(radius <= Radius, "SetRadius and the profiles bound a session's radius by the window's; the prologue handed a wider one");
         var rNew = radius > 0 && radius <= Radius ? radius : Radius;
+
+        // The budget's last resort (09 § 10): sixteenths of the radius off it, down to half. A shrink is a radius change like SetRadius's — a shell
+        // sweep of leaves — and commits with the frame.
+        if (st.Shrink > 0)
+        {
+            rNew *= 1d - (Math.Min((int)st.Shrink, MaxShrink) / (double)ShrinkSteps);
+        }
+
         var rOld = st.Radius > 0 ? st.Radius : rNew;
 
         // The anchor slack is the session's own: R′ / 48, capped at half a cell so a slack move never skips one (09 § 4).
