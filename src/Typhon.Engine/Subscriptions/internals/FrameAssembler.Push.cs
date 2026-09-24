@@ -76,7 +76,8 @@ internal sealed unsafe partial class FrameAssembler
             _pushMasks[n] = mask;
             _pushSessions[n++] = session;
             PrepareSession(session);
-            if (world)
+            // Only a World session served this tick can fill: a rate class skips the others (the check the frame stage repeats below).
+            if (world && (divisor <= 1 || ((_tick + (uint)session.Slot) % (uint)divisor) == 0))
             {
                 var sessionState = StateOf(session);
                 Push.NoteWorldSession(session, sessionState != null && sessionState.PendingReset);

@@ -1,4 +1,5 @@
 using NUnit.Framework;
+using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 
@@ -46,6 +47,59 @@ class PushOracle3DTests : TestBase<PushOracle3DTests>
             Assert.That(oracle.ViewpointTeleports, Is.GreaterThan(2), "no session teleported");
             Assert.That(oracle.Push.ShadowIllegal, Is.Zero);
             Assert.That(oracle.Push.VerifyOccupancy(), Is.Zero, "the occupancy disagrees with a recount");
+        });
+    }
+
+    /// <summary>
+    /// An entity beyond the world's Z bound (spatial accepts it with a warning) decodes onto the top edge — its codec clamps it — and so lies in the top
+    /// cell. The top cell's cluster query is open upward and the pruning clamps the cluster's box into the world, so a session within reach of the
+    /// decoded position holds it: here 26 m below it, and 174 m below it, where the raw box (276 m away) would have pruned it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void AnEntityBeyondTheWorldsZBoundIsHeldAtTheEdge()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider, volumetric: true);
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            subs.Archetype<ProjFlyer>(a => a
+                .Motion(ProjFlyer.Bounds, m => m.Tolerance(0.05).Teleport(ProjectionTestSchema.MaxSpeedMps))
+                .Field(ProjFlyer.Ai, x => x.Level, Codec.U16, name: "level"));
+            subs.Profile("fly", p => p.Sphere(192).Of<ProjFlyer>());
+        }, nameof(AnEntityBeyondTheWorldsZBoundIsHeldAtTheEdge), replicationCellM: 64);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var above = new ProjBounds3
+            {
+                Bounds = new AABB3F { MinX = -0.5f, MinY = -0.5f, MinZ = 1099.5f, MaxX = 0.5f, MaxY = 0.5f, MaxZ = 1100.5f }, Speed = 1f,
+            };
+            var ai = new ProjAi { Level = 3 };
+            tx.Spawn<ProjFlyer>(ProjFlyer.Bounds.Set(in above), ProjFlyer.Ai.Set(in ai));
+            tx.Commit();
+        }
+
+        // Placed only once the entity has gone quiet, so the cell delivery finds it rather than its first tick's event.
+        var sessions = harness.OpenSessions(2, "fly");
+        for (var tick = 1; tick <= 6; tick++)
+        {
+            if (tick == 4)
+            {
+                harness.Sessions.SetViewpoint(sessions[0], new Vector3D(0, 0, 998));
+                harness.Sessions.SetViewpoint(sessions[1], new Vector3D(0, 0, 850));
+            }
+
+            dbe.WriteTickFence(tick);
+            harness.RunTick(tick);
+            harness.Deliver(sessions[0]);
+            harness.Deliver(sessions[1]);
+        }
+
+        var flyer = harness.CatalogPlan.ArchetypeByName(nameof(ProjFlyer)).Idx;
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Replica(sessions[0]).NetIds(flyer), Has.Length.EqualTo(1), "26 m from the decoded position");
+            Assert.That(harness.Replica(sessions[1]).NetIds(flyer), Has.Length.EqualTo(1), "174 m from the decoded position, 276 m from the raw one");
         });
     }
 

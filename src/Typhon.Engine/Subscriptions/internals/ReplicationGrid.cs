@@ -39,6 +39,13 @@ internal sealed class ReplicationGrid
 
     public double OriginZ { get; private init; }
 
+    /// <summary>The spatial world's upper bounds, which every position codec quantizes up to: a decoded position never lies beyond them.</summary>
+    public double WorldMaxX { get; private init; }
+
+    public double WorldMaxY { get; private init; }
+
+    public double WorldMaxZ { get; private init; }
+
     public int DimX { get; private init; }
 
     public int DimY { get; private init; }
@@ -79,7 +86,7 @@ internal sealed class ReplicationGrid
 
         var dimX = Dim(spatial.WorldMax.X - spatial.WorldMin.X, cellM);
         var dimY = Dim(spatial.WorldMax.Y - spatial.WorldMin.Y, cellM);
-        var dimZ = spatial.GridDepth == 1 ? 1L : Dim(spatial.WorldMax.Z - spatial.WorldMin.Z, cellM);
+        var dimZ = IsFlat(spatial, cellM) ? 1L : Dim(spatial.WorldMax.Z - spatial.WorldMin.Z, cellM);
         var widest = Math.Max(dimX, Math.Max(dimY, dimZ));
         if (widest > MaxAxisCells)
         {
@@ -112,6 +119,9 @@ internal sealed class ReplicationGrid
         {
             CellM = cellM,
             OriginX = spatial.WorldMin.X,
+            WorldMaxX = spatial.WorldMax.X,
+            WorldMaxY = spatial.WorldMax.Y,
+            WorldMaxZ = spatial.WorldMax.Z,
             OriginY = spatial.WorldMin.Y,
             OriginZ = spatial.WorldMin.Z,
             DimX = (int)dimX,
@@ -125,6 +135,14 @@ internal sealed class ReplicationGrid
 
         static long Dim(double extent, double c) => Math.Max(1L, (long)Math.Min(Math.Ceiling(extent / c), long.MaxValue / 4));
     }
+
+    /// <summary>
+    /// Whether the replication grid over <paramref name="spatial"/> at cell side <paramref name="cellM"/> is one cell deep (10 § 3.1): a spatial world one
+    /// cell deep, or one whose Z extent is a single replication cell. The catalog's region codec follows the same rule, so a flat grid's regions are
+    /// polygons whatever the spatial world's depth. An undeclared side takes the spatial depth alone.
+    /// </summary>
+    public static bool IsFlat(in SpatialGridConfig spatial, double cellM) =>
+        spatial.GridDepth == 1 || (double.IsFinite(cellM) && cellM > 0 && Math.Ceiling((spatial.WorldMax.Z - spatial.WorldMin.Z) / cellM) <= 1);
 
     /// <summary>The <c>Start</c> log line's grid description.</summary>
     public override string ToString()

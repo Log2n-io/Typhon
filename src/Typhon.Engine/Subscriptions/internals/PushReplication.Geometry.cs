@@ -327,6 +327,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         }
     }
 
+    private protected override bool LogHolds(uint first, uint last) => LogCovers(first, last);
+
     public override void Commit(SessionId session)
     {
         ref var st = ref _sessions[session.Slot];
@@ -2508,9 +2510,6 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             return;
         }
 
-        var x0 = _gridMinX + (cx * CellSize);
-        var y0 = _gridMinY + (cy * CellSize);
-        var z0 = _gridMinZ + (cz * CellSize);
         var nearN = Math.Sqrt(n.Far2);
         var nearA = Math.Sqrt(a.Far2);
         foreach (var arch in _pushIndices)
@@ -2535,13 +2534,14 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             // The box is built from raw positions and the test below from decoded ones: a margin of a quantization step keeps the pruning sound.
             var margin = _pruneMargin[arch];
             double bz0 = 0, bz1 = 0;
-            using var e = hasZ
-                ? cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, z0 - 1d, x0 + CellSize + 1d, y0 + CellSize + 1d, z0 + CellSize + 1d)
-                : cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, double.NegativeInfinity, x0 + CellSize + 1d, y0 + CellSize + 1d, double.PositiveInfinity);
+            QueryBox(cx, cy, cz, hasZ, out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
+            using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))
             {
+                ClampToWorld(ref bx0, ref by0, ref bz0, ref bx1, ref by1, ref bz1, hasZ);
+
                 // A box wholly beyond R/2 of the new anchor, or wholly within R/2 of the old one, holds nobody who crossed inward.
                 if (!double.IsInfinity(bx0) && !double.IsInfinity(bx1) && (!hasZ || (!double.IsInfinity(bz0) && !double.IsInfinity(bz1)))
                     && (BoxMin2(n, bx0, by0, bz0, bx1, by1, bz1) > (nearN + margin) * (nearN + margin)
@@ -2590,7 +2590,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                         }
                     }
 
-                    FarCrescentStates++;
+                    Interlocked.Increment(ref FarCrescentStates);
                     EmitRecord(hot->NetId, (nint)block, (byte)slot, (ushort)arch, groups, plan.Moving && hot->GroupTicks[plan.MotionTickSlot] > lo,
                         scratch, ref updates);
                 }
@@ -2877,6 +2877,52 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         slot.FlushCellCount = cellAt;
     }
 
+    /// <summary>How far an edge cell's query reaches past the world on X and Y: 10⁹ km, beyond anything a position can mean.</summary>
+    private const double OpenEdgeM = 1e12;
+
+    /// <summary>
+    /// A cell's cluster query box: the cell and a metre around it, open to infinity on any side where the cell is the grid's last — an entity beyond the
+    /// world's bounds decodes into that cell, and a box that stopped at the edge would never find it. A flat grid's, and a 2D archetype's, Z is unbounded.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void QueryBox(int cx, int cy, int cz, bool hasZ, out double x0, out double y0, out double z0, out double x1, out double y1, out double z1)
+    {
+        var cellX = _gridMinX + (cx * CellSize);
+        var cellY = _gridMinY + (cy * CellSize);
+        // A far finite bound, not an infinity: the spatial query takes an unbounded Z ("every Z") but refuses a non-finite X or Y, and widens the box by
+        // a step below its low side, which would take -double.MaxValue to -Infinity.
+        x0 = cx == 0 ? -OpenEdgeM : cellX - 1d;
+        x1 = cx == _gridW - 1 ? OpenEdgeM : cellX + CellSize + 1d;
+        y0 = cy == 0 ? -OpenEdgeM : cellY - 1d;
+        y1 = cy == _gridH - 1 ? OpenEdgeM : cellY + CellSize + 1d;
+        z0 = double.NegativeInfinity;
+        z1 = double.PositiveInfinity;
+        if (TEvent.Deep && hasZ)
+        {
+            var cellZ = _gridMinZ + (cz * CellSize);
+            z0 = cz == 0 ? double.NegativeInfinity : cellZ - 1d;
+            z1 = cz == _gridD - 1 ? double.PositiveInfinity : cellZ + CellSize + 1d;
+        }
+    }
+
+    /// <summary>
+    /// A cluster's raw bounds brought into the world: every position is quantized, and so decoded, inside it, so a cluster lying beyond an edge holds
+    /// entities the tests see on that edge. Pruning on the raw box would prove them out of reach when their decoded positions are in it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ClampToWorld(ref double x0, ref double y0, ref double z0, ref double x1, ref double y1, ref double z1, bool hasZ)
+    {
+        x0 = Math.Clamp(x0, _gridMinX, _worldMaxX);
+        x1 = Math.Clamp(x1, _gridMinX, _worldMaxX);
+        y0 = Math.Clamp(y0, _gridMinY, _worldMaxY);
+        y1 = Math.Clamp(y1, _gridMinY, _worldMaxY);
+        if (TEvent.Deep && hasZ)
+        {
+            z0 = Math.Clamp(z0, _gridMinZ, _worldMaxZ);
+            z1 = Math.Clamp(z1, _gridMinZ, _worldMaxZ);
+        }
+    }
+
     // ══ Records, cell delivery and sweep ════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -2910,9 +2956,6 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         var decoded = 0;
         var entered = 0;
         const bool sweeping = false;
-        var x0 = _gridMinX + (cx * CellSize);
-        var y0 = _gridMinY + (cy * CellSize);
-        var z0 = _gridMinZ + (cz * CellSize);
         foreach (var a in _pushIndices)
         {
             if ((archetypeMask & (1UL << a)) == 0)
@@ -2930,13 +2973,13 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             var layout = state.Layout;
             var hasZ = TEvent.Deep && _hasZ[a];
             double bz0 = 0, bz1 = 0;
-            using var e = hasZ
-                ? cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, z0 - 1d, x0 + CellSize + 1d, y0 + CellSize + 1d, z0 + CellSize + 1d)
-                : cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, double.NegativeInfinity, x0 + CellSize + 1d, y0 + CellSize + 1d, double.PositiveInfinity);
+            QueryBox(cx, cy, cz, hasZ, out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
+            using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))
             {
+                ClampToWorld(ref bx0, ref by0, ref bz0, ref bx1, ref by1, ref bz1, hasZ);
                 if (!everywhere && SkipCluster(bx0, by0, bz0, bx1, by1, bz1, in n, in n, sweeping))
                 {
                     continue;
@@ -3002,9 +3045,6 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
         var from = FrameAssembler.PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
         var decoded = 0;
-        var x0 = _gridMinX + (cx * CellSize);
-        var y0 = _gridMinY + (cy * CellSize);
-        var z0 = _gridMinZ + (cz * CellSize);
         var visited = 0;
         const bool sweeping = true;
         foreach (var arch in _pushIndices)
@@ -3024,13 +3064,13 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             var layout = state.Layout;
             var hasZ = TEvent.Deep && _hasZ[arch];
             double bz0 = 0, bz1 = 0;
-            using var e = hasZ
-                ? cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, z0 - 1d, x0 + CellSize + 1d, y0 + CellSize + 1d, z0 + CellSize + 1d)
-                : cs.QueryAabb(cs.Grid, x0 - 1d, y0 - 1d, double.NegativeInfinity, x0 + CellSize + 1d, y0 + CellSize + 1d, double.PositiveInfinity);
+            QueryBox(cx, cy, cz, hasZ, out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
+            using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))
             {
+                ClampToWorld(ref bx0, ref by0, ref bz0, ref bx1, ref by1, ref bz1, hasZ);
                 if (SkipCluster(bx0, by0, bz0, bx1, by1, bz1, in a, in n, sweeping))
                 {
                     continue;

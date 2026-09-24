@@ -175,12 +175,15 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
         private readonly DatabaseEngine _engine;
         private long _tick;
 
-        public Deep(DatabaseEngine engine, Action<SubscriptionsRegistry> declare)
+        public Deep(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, double replicationCellM = 0)
         {
             _engine = engine;
             Registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "ClientRegion3DTests" });
             Allocator = new MemoryAllocator(Registry, new MemoryAllocatorOptions { Name = "ClientRegion3DAllocator" });
-            var options = new SubscriptionsOptions { MaxSessions = 32, IngressRingBytes = 4096, IngressPoolBudgetBytes = 1L * 1024 * 1024 };
+            var options = new SubscriptionsOptions
+            {
+                MaxSessions = 32, IngressRingBytes = 4096, IngressPoolBudgetBytes = 1L * 1024 * 1024, ReplicationCellM = replicationCellM,
+            };
             Subs = new SubscriptionsRegistry(options);
             Subs.Sessions.Kinds("god");
             Subs.Sessions.Admit = static (in AdmissionRequest _) => Admission.Accept(SessionRole.Spectator);
@@ -359,6 +362,25 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
         flat.Tick();
         var row = flat.Ingress.RowOf(session);
         Assert.That((row.HasRegion, row.Region.Dims, row.Region.PlaneCount), Is.EqualTo((true, (byte)2, 4)));
+    }
+
+    /// <summary>
+    /// The region codec follows the replication grid's depth, not the spatial one's (10 § 3.1): a spatial world two cells deep (200 m in 100 m cells)
+    /// under a 256 m replication cell is one replication cell deep, so its regions are polygons — a footprint on the ground is accepted, where a pos3
+    /// codec would have refused it as coplanar.
+    /// </summary>
+    [Test]
+    public void TheRegionCodecFollowsTheReplicationGridsDepth()
+    {
+        var spatial = new SpatialGridConfig(new Vector3D(-1024, -1024, 0), new Vector3D(1024, 1024, 200), 100);
+        using var flat = new Deep(ProjectionTestSchema.SetupEngine(ServiceProvider, spatial), DeclareFlyerRegion, replicationCellM: 256);
+        var vertices = Array.Find(flat.Plan.CommandByName(BuiltInCommands.ClientRegion).Body.Fields, f => f.Name == BuiltInCommands.RegionVerticesField);
+        Assert.That(vertices.Element.Kind, Is.EqualTo(CodecKind.Pos2));
+
+        var session = flat.Admit();
+        flat.Ingress.OnCommands(session, flat.RegionMessage(1, [-100, -100, 100, -100, 100, 100, -100, 100]));
+        flat.Tick();
+        Assert.That(flat.Ingress.RowOf(session).HasRegion, Is.True, "a ground footprint in a flat replication grid");
     }
 
     /// <summary>Ingress allocates nothing: the decode, the 3D hull, the ring record and the drain's planes all live on the stack or in place.</summary>

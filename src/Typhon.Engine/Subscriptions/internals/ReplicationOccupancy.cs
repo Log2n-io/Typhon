@@ -149,6 +149,16 @@ internal sealed class ReplicationOccupancy
         return new ReadOnlySpan<ulong>(_sorted, 0, _sortedCount);
     }
 
+    /// <summary>
+    /// <see cref="Ordered"/> as the array behind it and its length, for a reader that holds it across a parallel stage: valid until the next call to
+    /// either, which only a serial point makes.
+    /// </summary>
+    public ulong[] OrderedKeys(out int count)
+    {
+        count = Ordered().Length;
+        return _sorted;
+    }
+
     private void Toggled(ulong key)
     {
         if (!_ordering || _orderStale)

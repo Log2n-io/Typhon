@@ -153,6 +153,11 @@ internal abstract unsafe class PushReplication
     private protected readonly double _gridMinX;
     private protected readonly double _gridMinY;
     private protected readonly double _gridMinZ;
+
+    // The world's upper bounds: a decoded position is clamped into [grid min, world max] on every axis.
+    private protected readonly double _worldMaxX;
+    private protected readonly double _worldMaxY;
+    private protected readonly double _worldMaxZ;
     private protected readonly int _gridW;
     private protected readonly int _gridH;
     private protected readonly int _gridD;
@@ -454,6 +459,9 @@ internal abstract unsafe class PushReplication
         _gridMinX = grid.OriginX;
         _gridMinY = grid.OriginY;
         _gridMinZ = grid.OriginZ;
+        _worldMaxX = grid.WorldMaxX;
+        _worldMaxY = grid.WorldMaxY;
+        _worldMaxZ = grid.WorldMaxZ;
         _gridW = grid.DimX;
         _gridH = grid.DimY;
         _gridD = grid.DimZ;
@@ -1009,9 +1017,16 @@ internal abstract unsafe class PushReplication
     public void NoteWorldSession(SessionId session, bool forceReset)
     {
         ref var st = ref _sessions[session.Slot];
+
+        // Frames missed that the log covers are caught up without a fill; only a gap it does not cover resets. A reset the catch-up decides for a reused
+        // identity is not foreseen: that fill finds no order, delivers nothing, and the next tick's prologue takes the order for it.
+        var gap = st.LastTick + 1 != _tick && (_tick - st.LastTick - 1 >= LogDepth || !LogHolds(st.LastTick + 1, _tick));
         _worldOrderNeeded |= forceReset || !st.Bound || st.Generation != session.Generation || st.NeedsReset || !st.Anchored
-            || st.Cursor != ulong.MaxValue || st.LastTick + 1 != _tick;
+            || st.Cursor != ulong.MaxValue || gap;
     }
+
+    /// <summary>Whether the push log holds every tick from <paramref name="first"/> to <paramref name="last"/>.</summary>
+    private protected abstract bool LogHolds(uint first, uint last);
 
     /// <summary>
     /// Serial, in the frame prologue, after the index: the occupied cells in key order for this tick's World fills — taken only when some fill may run,
@@ -1022,19 +1037,16 @@ internal abstract unsafe class PushReplication
         _worldOrderCount = 0;
         if (!_worldOrderNeeded)
         {
+            // No fill can find this tick's order, even a second call in one tick after one that took it.
+            _worldOrderTick = uint.MaxValue;
             return;
         }
 
         _worldOrderNeeded = false;
         _worldOrderTick = _tick;
-        var ordered = _occupancy.Ordered();
-        if (_worldOrder.Length < ordered.Length)
-        {
-            _worldOrder = new ulong[Math.Max(64, ordered.Length + (ordered.Length >> 1))];
-        }
 
-        ordered.CopyTo(_worldOrder);
-        _worldOrderCount = ordered.Length;
+        // The occupancy's own array, read without a copy: it changes only at the next prologue's call, after every fill of this tick has read it.
+        _worldOrder = _occupancy.OrderedKeys(out _worldOrderCount);
     }
 
     // ══ Distance LOD: the far flushes (parallel stage after the index) ═══════════════════════════════════════════════════════════════════════════════

@@ -304,7 +304,8 @@ internal static class CatalogBuilder
         // world is one cell deep and three otherwise — so a runtime needs no 2D archetype to accept regions, and a deep one gets 3D regions.
         if (spatial is { } world)
         {
-            var deep = world.GridDepth > 1;
+            // The replication grid's depth rule, not the spatial one: a spatial world two cells deep over a single replication cell is flat.
+            var deep = !ReplicationGrid.IsFlat(world, registry.Options.ReplicationCellM);
             command = BuiltInCommands.CreateClientRegion(new CatalogCodec
             {
                 Kind = deep ? CodecKind.Pos3 : CodecKind.Pos2,
