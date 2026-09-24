@@ -214,6 +214,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>Where owner-group changes are routed to their controlling sessions (11 § 2.2); set only when the archetype declares owner fields.</summary>
     internal SelfTracker Self;
 
+    /// <summary>netId → entity, for a command's entity reference (SUB-26): bound where an identity is assigned, unbound where it is released.</summary>
+    internal NetIdEntityIndex EntityIndex;
+
     /// <summary>
     /// Every block by chunk id. A push archetype has a block for every live cluster and looks one up per pushed cluster per tick and per
     /// cluster a sweep reaches, so the directory's hash probe is replaced by an index. Written only by attach and release, which are serial.
@@ -585,6 +588,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         // The cold estimate is the pushed slots' blocks, an upper bound on the identities this tick can need: an entity gets one only when its entry has none,
         // and only a pushed slot is ever reached. It sizes the very first refill and nothing after it — see NetIdLeaseSet.BeginTick.
         _netIdLeases.BeginTick(NetIds, workers, _watchedBlocks.Count * Layout.SlotCount);
+
+        // Every identity a lease can hand out this tick is at or below the high-water mark the refill just moved: reserved here, bound from the chunks.
+        EntityIndex?.Reserve(NetIds.HighWaterMark);
         _scratch.BeginTick(workers);
     }
 
@@ -643,6 +649,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                 try
                 {
                     NetIds.Release(netId);
+                    EntityIndex?.Unbind(netId);
                     Interlocked.Increment(ref _identitiesReleased);
                 }
                 catch (Exception)

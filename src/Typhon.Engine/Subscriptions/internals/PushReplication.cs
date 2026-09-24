@@ -1006,10 +1006,15 @@ internal abstract unsafe partial class PushReplication
     /// The netId and v̂ of the entity in <paramref name="clusters"/>' chunk <paramref name="chunk"/>, slot <paramref name="slot"/> — false when its archetype
     /// is not replicated, its cluster has no block, or the slot holds no identity for it (09 § 11: an event's entity reference).
     /// </summary>
-    public bool TryEntityAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out uint netId, out float x, out float y, out float z)
+    public bool TryEntityAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out uint netId, out float x, out float y, out float z) =>
+        TryVisibilityAt(clusters, chunk, slot, entity, out _, out netId, out x, out y, out z);
+
+    /// <summary><see cref="TryEntityAt"/>, with the entity's plan index — what an archetype-set test needs (SUB-26).</summary>
+    public bool TryVisibilityAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out int archetype, out uint netId, out float x,
+        out float y, out float z)
     {
         x = y = z = 0f;
-        if (!TryReplicaAt(clusters, chunk, slot, entity, out var archetype, out var block, out netId))
+        if (!TryReplicaAt(clusters, chunk, slot, entity, out archetype, out var block, out netId))
         {
             return false;
         }
@@ -1168,6 +1173,18 @@ internal abstract unsafe partial class PushReplication
 
     /// <summary>Whether a World session has delivered the cell a point lies in, committed or pending.</summary>
     public abstract bool WorldSeesPoint(SessionId session, float x, float y, float z);
+
+    /// <summary>
+    /// Whether a session's COMMITTED geometry holds a point — what its client was last told (SUB-16), never the pending geometry of a frame not yet published:
+    /// the test a command's entity reference is judged by (SUB-26). The point is the entity's v̂ (SUB-20).
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="shape">The shape of the session's observer.</param>
+    /// <param name="x">The point.</param>
+    /// <param name="y">The point.</param>
+    /// <param name="z">The point.</param>
+    /// <returns><see langword="true"/> when the session holds an entity at that point.</returns>
+    public abstract bool HoldsCommitted(SessionId session, PushShape shape, float x, float y, float z);
 
     /// <summary>The cells a Sphere session's committed and pending spheres span: where its events' points can be.</summary>
     public abstract void SessionCellBox(SessionId session, out int minCx, out int maxCx, out int minCy, out int maxCy, out int minCz, out int maxCz);

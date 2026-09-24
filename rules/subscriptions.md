@@ -579,6 +579,31 @@
     SelfBlockTests.ADestroyedControlledEntityIsReportedGoneOnce, SelfBlockTests.AResetResendsEveryOwnerGroup,
     SelfBlockTests.AControlledEntityOutsideTheSessionsGeometryStillSendsItsOwnerState.
 
+### SUB-26: A command's entity reference resolves only to what its session holds `[fatal][silent]`
+  invariant TryResolve(s, netId) = e ⟺ netId is bound to e (the projection binds each identity it assigns and every release unbinds it), e is live in
+    the EntityMap and its replica still carries netId, AND (e is s's controlled entity OR s's COMMITTED geometry holds e: e's archetype is in the set of
+    the profile s's last published frame was built against — not a profile switched to since — and its v̂ passes SUB-16's test against that frame's
+    anchor, radius and delivered cells, or its committed hull and window, or its World cursor)
+  invariant an entity a client learned of only from an event (an attacker beyond its view) does not resolve: events inform, they do not grant reach
+  note the committed geometry is the last PUBLISHED frame's, which the client may not have applied yet: an entity that left in a frame still in flight is
+    refused while the client may still draw it. Judging each command against the frame the client last applied (COMMANDS.clientTick) would need per-session
+    geometry history, which push does not keep; a game treats the refusal as "out of reach". Likewise a session served every few ticks (a rate class,
+    overload) is judged against its last published frame while v̂ is this tick's: near the edge the two differ by those ticks' motion
+  note TryResolveAny keeps the liveness-only answer — bound, live, still that identity — for tools that are not clients (an admin console), under a name
+    that says so
+  scope: SubscriptionsCommands.TryResolve, SubscriptionsCommands.TryResolveAny, FrameAssembler.Holds, PushReplication.HoldsCommitted,
+    PushReplication.TryVisibilityAt, FrameAssembler.IsLive, SessionFrameState.CommittedProfile, NetIdEntityIndex.Bind, NetIdEntityIndex.Unbind,
+    NetIdEntityIndex.Reserve
+  on_violation: silent. A client that names a netId it guessed — or remembered from an event — targets, inspects or trades with an entity behind a wall or
+    across the map: an information leak and a cheat, and no error anywhere.
+  rationale: what a session holds is geometric (SUB-16) and costs nothing to store; the same test, on the committed state, answers "was it shown" with no
+    per-session memory.
+  verified: TryResolveTests.TryResolveAcceptsExactlyWhatTheClientHolds (for a Sphere, a World and a ClientRegion session, TryResolve over every entity
+    equals the replica the session's frames built — red when the geometric test is skipped), TryResolveTests.WhatResolvesFollowsTheViewTheClientWasSent,
+    TryResolveTests.APartialWorldFillAndAnUnobservedArchetypeAreRefused (red when a World session holds everything, and for an archetype outside the
+    set), TryResolveTests.AProfileSwitchResolvesTheOldViewUntilItsFrameIsPublished (red when the current profile is judged),
+    TryResolveTests.ADestroyedEntityIsRefusedBeforeItsIdentityIsReleased, TryResolveTests.TheControlledEntityResolvesAnywhereAndTryResolveAnyIgnoresTheView.
+
 ---
 
 ## Module: Ingress and Frame Hand-off

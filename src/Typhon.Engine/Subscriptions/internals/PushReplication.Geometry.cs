@@ -490,6 +490,25 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                && Held(Pending(ref st, session.Slot), st.POriginX, st.POriginY, st.POriginZ, key);
     }
 
+    public override bool HoldsCommitted(SessionId session, PushShape shape, float x, float y, float z)
+    {
+        ref var st = ref _sessions[session.Slot];
+        if (!st.Bound || st.Generation != session.Generation)
+        {
+            return false;
+        }
+
+        var pz = TEvent.Deep ? z : 0f;
+        var key = CellKey(x, y, pz);
+        return shape switch
+        {
+            PushShape.World => key < st.Cursor,
+            PushShape.Region => RegionHoldsCommitted(session, x, y, pz, key),
+            _ => st.Anchored && st.Radius > 0 && Within(st.AnchorX, st.AnchorY, st.AnchorZ, x, y, pz, st.Radius * st.Radius)
+                 && Held(Committed(ref st, session.Slot), st.OriginX, st.OriginY, st.OriginZ, key),
+        };
+    }
+
     public override bool WorldSeesPoint(SessionId session, float x, float y, float z)
     {
         ref var st = ref _sessions[session.Slot];

@@ -389,6 +389,7 @@ internal sealed class SessionFrameState
         StatsTick = tick;
         StatsBytesMark = 0;
         SelfEntity = EntityId.Null;
+        CommittedProfile = -1;
         SelfNetId = 0;
         SelfArchetype = -1;
         SentSeq = 0;
@@ -415,6 +416,12 @@ internal sealed class SessionFrameState
 
     /// <summary>The tick of the last published frame, up to which the session's acknowledgements were sent (11 § 2.3); 0 before the first.</summary>
     public uint AckTick { get; set; }
+
+    /// <summary>
+    /// The profile index the last published frame was built against, or -1 for none: what a command's entity reference is judged by (SUB-26). The
+    /// current profile can differ for as long as the switch's RESET frame is not published — ticks, for a lagging session.
+    /// </summary>
+    public int CommittedProfile { get; set; } = -1;
 }
 
 /// <summary>

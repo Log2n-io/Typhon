@@ -238,6 +238,9 @@ internal sealed class SubscriptionProfiles
     /// <summary>Whether profile <paramref name="profile"/> is served through a ClientRegion (09 § 7).</summary>
     public bool RegionOf(int profile) => _profiles[profile].Region;
 
+    /// <summary>Whether profile <paramref name="profile"/> is served through a <c>World</c> observer.</summary>
+    public bool IsWorld(int profile) => _profiles[profile].World;
+
     /// <summary>A ClientRegion profile's widest accepted extent, in metres.</summary>
     public double MaxEdgeOf(int profile) => _profiles[profile].MaxEdgeM;
 

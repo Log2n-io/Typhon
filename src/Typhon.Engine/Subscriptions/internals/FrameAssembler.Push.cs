@@ -430,7 +430,7 @@ internal sealed unsafe partial class FrameAssembler
         {
             _eventsLastTick[slot] = (uint)_tick;
             _eventsLastGeneration[slot] = session.Generation;
-            CommitSelf(session, state, in self, ref counters);
+            CommitSelf(session, state, in self, -1, ref counters);
             return;
         }
 
@@ -465,7 +465,7 @@ internal sealed unsafe partial class FrameAssembler
         buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
         send->PublishFrame(sequence, block, length, _tick);
         events?.NoteDelivered(count, lost);
-        CommitSelf(session, state, in self, ref counters);
+        CommitSelf(session, state, in self, -1, ref counters);
         _eventsLastTick[slot] = (uint)_tick;
         _eventsLastGeneration[slot] = session.Generation;
         state.PendingReset = false;
@@ -843,7 +843,7 @@ internal sealed unsafe partial class FrameAssembler
             ReturnIfValid(recycled);
             NoteSkip(state, counted: false);
             Push.Commit(session);
-            CommitSelf(session, state, in self, ref counters);
+            CommitSelf(session, state, in self, _pushProfiles[index], ref counters);
             if (aggDue)
             {
                 CommitAggregate(session, aggAnchor, _pushRegion[index] ? scratch : null);
@@ -931,7 +931,7 @@ internal sealed unsafe partial class FrameAssembler
 
         // COMMIT — the anchor and the delivered cells move with the frame that describes them, and so do the owner state and the acknowledgements.
         Push.Commit(session);
-        CommitSelf(session, state, in self, ref counters);
+        CommitSelf(session, state, in self, _pushProfiles[index], ref counters);
         if (aggDue)
         {
             CommitAggregate(session, aggAnchor, _pushRegion[index] ? scratch : null);

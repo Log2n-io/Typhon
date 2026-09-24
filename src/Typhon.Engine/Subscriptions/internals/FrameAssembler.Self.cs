@@ -173,9 +173,10 @@ internal sealed unsafe partial class FrameAssembler
     /// The frame that carried <paramref name="due"/> — or had nothing to carry — was published: what the client now holds of its owner state, its
     /// <c>lastSeq</c> and its acknowledgements advances with it (SUB-03's clause).
     /// </summary>
-    private void CommitSelf(SessionId session, SessionFrameState state, in SelfDue due, ref FrameCounters counters)
+    private void CommitSelf(SessionId session, SessionFrameState state, in SelfDue due, int profile, ref FrameCounters counters)
     {
         state.AckTick = (uint)_tick;
+        state.CommittedProfile = profile;
         Self?.Clear(session.Slot);
         counters.AcksWritten += due.Acks;
         counters.AcksOverflowed += due.AcksOverflowed;

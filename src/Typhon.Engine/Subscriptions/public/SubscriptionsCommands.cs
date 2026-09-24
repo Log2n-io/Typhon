@@ -648,27 +648,68 @@ public sealed class SubscriptionsCommands
     public bool Reject(SessionId session, ushort seq, byte reasonCode) => _ingress.Buffers.Acks.Add(session, seq, reasonCode);
 
     /// <summary>
-    /// Resolves an entity reference a client sent — a <c>netId</c> on the wire — back to the entity it names.
+    /// Resolves an entity reference a client sent — a <c>netId</c> on the wire — back to the entity it names, if the session holds it (SUB-26).
     /// </summary>
     /// <param name="session">The session that sent the reference.</param>
     /// <param name="netId">The network identity, as the command carried it.</param>
     /// <param name="entity">The entity.</param>
-    /// <returns><see langword="false"/> when nothing live holds that identity, or the session is gone.</returns>
+    /// <returns>
+    /// <see langword="false"/> when nothing live holds that identity, the session is gone, or the session does not hold the entity: it is neither the
+    /// session's controlled entity nor inside the geometry its client was last told about.
+    /// </returns>
     /// <remarks>
+    /// <para>
+    /// <b>A client can only name what it was shown</b> (01 § 7). What a session holds is geometric (SUB-16), so this is the geometric test against the
+    /// session's committed geometry — the anchor, radius and delivered cells of its last published frame, or its committed hull, or its World cursor — on the
+    /// entity's v̂. An entity that left the view this tick is still accepted: the client saw it when it sent the command. One that it learned of only from an
+    /// event (an attacker beyond its view) is refused — events inform, they do not grant reach.
+    /// </para>
     /// <para>
     /// <b>An unknown identity is not an error.</b> A client may name an entity that has since left, or one it was never shown; the answer is "no", and the
     /// system decides what that means. Treating it as malformed input would let one stale reference close a connection.
     /// </para>
     /// <para>
-    /// <b>The "was shown" half of this check is not built.</b> 01-model § 7 requires that a client can only target what it was shown. What a session holds is
-    /// geometric (SUB-16), so the check is a distance and a delivered-cell test against the session's anchor, and it is not made here: today the identity
-    /// must merely be live and bound, so a client that guesses a valid netId is not refused for it. The gap is stated rather than hidden.
+    /// Costs an EntityMap probe through freshly opened chunk accessors and a geometric test, ≈ 1–2 µs: call it for the commands that name entities, not per
+    /// entity per tick. It is committed-state accurate: a session served every few ticks (a rate class, overload) is judged against its last published frame,
+    /// while the entity's v̂ is this tick's — near the edge the two can disagree by the motion of those ticks.
     /// </para>
     /// </remarks>
     public bool TryResolve(SessionId session, uint netId, out EntityId entity)
     {
         entity = EntityId.Null;
-        return _ingress.Sessions.IsOpen(session) && _ingress.NetIds.TryGet(netId, out entity);
+        if (!_ingress.Sessions.IsOpen(session) || !_ingress.NetIds.TryGet(netId, out var candidate))
+        {
+            return false;
+        }
+
+        var frames = _ingress.Frames;
+        if (frames == null || !frames.Holds(session, netId, candidate))
+        {
+            return false;
+        }
+
+        entity = candidate;
+        return true;
+    }
+
+    /// <summary>
+    /// Resolves a <c>netId</c> to the live entity that holds it, whatever the session holds — for tools that are not clients (an admin console, a replay).
+    /// A client's command goes through <see cref="TryResolve"/>, which refuses what its client was never shown.
+    /// </summary>
+    /// <param name="session">The session that sent the reference.</param>
+    /// <param name="netId">The network identity.</param>
+    /// <param name="entity">The entity.</param>
+    /// <returns><see langword="false"/> when nothing live holds that identity, or the session is gone.</returns>
+    public bool TryResolveAny(SessionId session, uint netId, out EntityId entity)
+    {
+        entity = EntityId.Null;
+        if (!_ingress.Sessions.IsOpen(session) || !_ingress.NetIds.TryGet(netId, out var candidate) || _ingress.Frames?.IsLive(netId, candidate) != true)
+        {
+            return false;
+        }
+
+        entity = candidate;
+        return true;
     }
 
     /// <summary>

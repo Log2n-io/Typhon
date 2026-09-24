@@ -1240,6 +1240,19 @@ internal sealed unsafe partial class PushReplication<TEvent>
         r.Anchored = true;
     }
 
+    /// <summary>Whether a region session's committed hull and delivered window hold a point (SUB-26): what its client was last told.</summary>
+    private bool RegionHoldsCommitted(SessionId session, float x, float y, float pz, ulong key)
+    {
+        if ((uint)session.Slot >= (uint)_regions.Length)
+        {
+            return false;
+        }
+
+        var r = _regions[session.Slot];
+        return r != null && r.Generation == session.Generation && r.Anchored && InHull(in r.Hull, x, y, pz)
+               && RegionHeld(r.D, r.OriginX, r.OriginY, r.OriginZ, key);
+    }
+
     /// <summary>Whether a region session sees a point: in its committed hull with the cell delivered, or in its pending one (SUB-16, 09 § 11).</summary>
     private bool RegionSeesPoint(RegionSession r, ref PushSessionState st, float x, float y, float z, float viewRadius)
     {

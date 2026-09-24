@@ -166,6 +166,7 @@ internal static unsafe class ProjectionPass
                 // A controlled entity that leaves is news to its session: every owner group pending, so its next frame fails to locate it and says netId 0.
                 state.Self?.Notice(hot->Entity, -1);
 
+                state.EntityIndex?.Unbind(hot->NetId);
                 leases.Release(worker, hot->NetId);
                 released++;
             }
@@ -204,6 +205,7 @@ internal static unsafe class ProjectionPass
                     // A controlled entity that leaves is news to its session: every owner group pending, so its next frame fails to locate it and says netId 0.
                     state.Self?.Notice(hot->Entity, -1);
 
+                    state.EntityIndex?.Unbind(hot->NetId);
                     leases.Release(worker, hot->NetId);
                     released++;
                 }
@@ -321,6 +323,7 @@ internal static unsafe class ProjectionPass
 
                 hot->Entity = EntityId.FromRaw(entityIds[slot]);
                 hot->Flags = FlagInitializedThisTick;
+                state.EntityIndex?.Bind(hot->NetId, hot->Entity);
             }
             else
             {

@@ -224,6 +224,15 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _frames.Ingress = _ingress;
             _ingress.Frames = _frames;
             _ingress.ReplicationStates = _replicationStates;
+
+            // netId → entity for a command's entity references (SUB-26): the projection binds each identity it assigns, and every release unbinds it.
+            foreach (var state in _replicationStates)
+            {
+                if (state != null)
+                {
+                    state.EntityIndex = _ingress.NetIds;
+                }
+            }
             // Events (09 § 11): compiled against the catalog, and one commands view per worker slot, so Emit records into the worker's own buffer.
             Events = EventHub.Build(registry, CatalogPlan);
             _frames!.Events = Events;
