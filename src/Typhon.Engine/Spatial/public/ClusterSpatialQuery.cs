@@ -24,7 +24,7 @@ namespace Typhon.Engine;
 /// <b>Implementation.</b> This generic entry point exists to provide the tier-aware public API surface with a JIT-specialized dispatch path per concrete box
 /// type. The actual state machine lives on <see cref="AabbClusterEnumerator"/>, which is also consumed directly by engine-internal non-generic consumers via
 /// <see cref="ArchetypeClusterState.QueryAabb"/>. Both entry points drive the same iterator — the generic layer adds tier validation; the non-generic layer
-/// is used by consumers that iterate cluster archetypes at runtime (<c>SpatialTriggerSystem</c>, <c>SpatialInterestSystem</c>, <c>EcsQuery</c>).
+/// is used by consumers that iterate cluster archetypes at runtime (<c>SpatialTriggerSystem</c>, <c>EcsQuery</c>).
 /// </para>
 /// <para>
 /// <b>Epoch scope: call this from a system body and there is nothing to do.</b> The enumerator creates a <see cref="ChunkAccessor{TStore}"/> on the cluster

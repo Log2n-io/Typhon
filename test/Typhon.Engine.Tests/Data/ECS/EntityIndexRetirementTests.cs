@@ -861,66 +861,6 @@ class EntityIndexRetirementTests : TestBase<EntityIndexRetirementTests>
     }
 
     /// <summary>
-    /// <c>AC-13.2</c> — an interest observer's delta reports the entities that moved inside its region, driven through the public entry point.
-    /// </summary>
-    /// <remarks>
-    /// <b>The delta path is the half that lost the most code.</b> It used to accumulate the per-TABLE dirty ring and resolve each dirty chunk id through the
-    /// entity tree's back-pointer segment into a leaf entry — three structures, all removed. What remains reads bounds straight out of cluster storage using
-    /// the per-ARCHETYPE dirty ring, which is where entities have actually lived since #666. Asserting the observer still sees a move is what distinguishes
-    /// "ported" from "the walk was deleted and the result is now always empty" — which is why the negative half (an entity moving OUTSIDE the region must not
-    /// be reported) is asserted alongside it.
-    /// </remarks>
-    [Test]
-    [VerifiesRule("IM-04")]
-    [VerifiesRule("IM-01")]
-    public void InterestObserver_SeesMovementInsideItsRegion_ThroughThePublicEntryPoint()
-    {
-        ServiceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
-        using var scope = ServiceProvider.CreateScope();
-        using var dbe = Setup3D(scope);
-
-        EntityId inside, outside;
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            var insidePos = new RetirePos3 { Bounds = new AABB3F { MinX = 190, MinY = 190, MinZ = 190, MaxX = 210, MaxY = 210, MaxZ = 210 } };
-            inside = tx.Spawn<RetireUnit3>(RetireUnit3.Pos.Set(in insidePos));
-            var outsidePos = new RetirePos3 { Bounds = new AABB3F { MinX = 800, MinY = 800, MinZ = 800, MaxX = 820, MaxY = 820, MaxZ = 820 } };
-            outside = tx.Spawn<RetireUnit3>(RetireUnit3.Pos.Set(in outsidePos));
-            tx.Commit();
-        }
-        dbe.WriteTickFence(1);
-
-        var observers = dbe.SpatialObservers<RetirePos3>();
-        var handle = observers.RegisterObserver(new double[] { 100, 100, 100, 300, 300, 300 }, initialTick: 1);
-        Assert.That(observers.ActiveObserverCount, Is.EqualTo(1), "the observer was not registered");
-
-        // Move BOTH entities within their own neighbourhoods, so the observer has one change to report and one to reject.
-        using (var tx = dbe.CreateQuickTransaction())
-        {
-            ref var a = ref tx.OpenMut(inside).Write(RetireUnit3.Pos);
-            a.Bounds = new AABB3F { MinX = 195, MinY = 195, MinZ = 195, MaxX = 215, MaxY = 215, MaxZ = 215 };
-            ref var b = ref tx.OpenMut(outside).Write(RetireUnit3.Pos);
-            b.Bounds = new AABB3F { MinX = 805, MinY = 805, MinZ = 805, MaxX = 825, MaxY = 825, MaxZ = 825 };
-            tx.Commit();
-        }
-        dbe.WriteTickFence(2);
-
-        var changes = observers.GetSpatialChanges(handle, 2);
-        var changed = changes.ChangedEntities.ToArray();
-
-        Assert.Multiple(() =>
-        {
-            Assert.That(changed, Does.Contain((long)inside.RawValue),
-                "the observer reported no change for an entity that moved inside its region — the cluster delta walk is not running");
-            Assert.That(changed, Does.Not.Contain((long)outside.RawValue),
-                "the observer reported an entity that moved far outside its region, so the region test is not being applied");
-        });
-
-        observers.UnregisterObserver(handle);
-        Assert.That(observers.ActiveObserverCount, Is.EqualTo(0));
-    }
-
-    /// <summary>
     /// A handle to a destroyed region never validates against the slot's next tenant.
     /// </summary>
     /// <remarks>

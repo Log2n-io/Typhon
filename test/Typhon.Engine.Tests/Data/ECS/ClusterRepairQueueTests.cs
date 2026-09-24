@@ -822,7 +822,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         Assert.That(ranked.Length, Is.EqualTo(CellCount), "not every cell was queued, so the ordering below is over the wrong set");
         Assert.That(ranked[0], Is.Not.EqualTo(cellKeys[0]),
             "the Tier2 cell outranked five untiered cells of identical degradation and population — the only way that happens is TrailingZeroCount(0) == 32 "
-            + "scoring 'no tier information' at 1/33 instead of 1.0, which collapses the ranking in every world that runs no SpatialInterestSystem");
+            + "scoring 'no tier information' at 1/33 instead of 1.0, which collapses the ranking in every world whose game code assigns no tier");
         Assert.That(ranked[^1], Is.EqualTo(cellKeys[0]),
             "the tiered cell should rank LAST — a third of the weight of its untiered peers — and does not, so the tier term is not being applied at all");
     }

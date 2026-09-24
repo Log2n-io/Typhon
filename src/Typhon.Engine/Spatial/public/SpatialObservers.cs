@@ -4,94 +4,12 @@ using JetBrains.Annotations;
 namespace Typhon.Engine;
 
 /// <summary>
-/// Interest management for one spatial component type: register observers over a region, then ask each what changed since it last looked.
-/// </summary>
-/// <remarks>
-/// <para>Obtained from <see cref="SpatialObserverExtensions.SpatialObservers{T}"/>. The handle is a thin façade over per-component state the engine owns, so
-/// it is cheap to obtain and holds nothing that needs disposing; observers themselves live until unregistered.</para>
-/// <para><b>Delta, with a full-sync fallback.</b> <see cref="GetSpatialChanges"/> walks the entities that actually moved since the observer's last
-/// consumption tick and tests each against its region — work proportional to CHANGE, not to region population. An observer that falls further behind than the
-/// dirty ring is long gets a full sync instead, flagged by <see cref="SpatialChangeResult.IsFullSync"/>, because the ring can no longer say what it missed.
-/// </para>
-/// <para><b>Why this is public.</b> Before #872 step 13 the interest and trigger systems had no production entry point at all: they were reachable only from
-/// tests and benchmarks, and read an entity-level R-Tree that had had no writer since #666 — so the half that was reachable was querying an empty index.
-/// Step 13 removed that tree, moved both systems onto the per-cell cluster index, and had to resolve which of the two outcomes the design allowed: port them,
-/// or delete them together with their <c>rules/spatial.md</c> modules. They are ported, and this surface is what makes that a fact a test can check rather
-/// than a claim.</para>
-/// <para><b>And it is deprecated as of Phase 1 of engine-owned replication</b> (<c>design/Subscriptions/README.md</c> Q9, decided by Loïc 2026-09-17), so
-/// that "observer" names one concept. What replaces it is a declared observer on a subscriptions profile — <c>subs.Profile(name, p =&gt; p.World()...)</c>,
-/// with <c>Sphere</c> and <c>ClientRegion</c> in Phase 2 — which differs in three ways that matter: it reports leaves as well as movement, it costs
-/// <c>O(hits)</c> rather than <c>O(dirty × observers)</c>, and its state is per entity rather than per observer. Nothing is deleted here: this type and
-/// <see cref="SpatialObserverHandle"/> keep working for the callers that still hold them, and go once none is left.</para>
-/// </remarks>
-[PublicAPI]
-[Obsolete(DeprecationMessage)]
-public readonly struct SpatialObserverSet
-{
-    /// <summary>
-    /// The one spelling of the deprecation, shared with <see cref="SpatialObserverHandle"/> so the two cannot drift apart.
-    /// </summary>
-    /// <remarks>
-    /// <c>internal const</c> rather than a literal at each attribute: an <see cref="ObsoleteAttribute"/> message is what a caller reads instead of the
-    /// documentation, and two copies of it is two chances to update only one.
-    /// </remarks>
-    internal const string DeprecationMessage =
-        "Superseded by engine-owned subscriptions: declare interest on a profile - "
-        + "TyphonRuntime.Subscriptions.Profile(name, p => p.World().Of<TArchetype>()) - and let the replication track resolve it. "
-        + "That surface reports leaves, costs O(hits) rather than O(dirty x observers), and keeps its state per entity. "
-        + "See design/Subscriptions/01-model.md section 4.";
-
-    private readonly SpatialInterestSystem _system;
-
-    internal SpatialObserverSet(SpatialInterestSystem system) => _system = system;
-
-    /// <summary>
-    /// <c>false</c> for a <c>default</c>-constructed value, which every other member rejects.
-    /// </summary>
-    /// <remarks>
-    /// A public <c>struct</c> can always be default-constructed, and this one is a façade over engine state it cannot invent. Without the check every member
-    /// would throw <see cref="NullReferenceException"/> — the one exception that tells a caller nothing about what they did wrong.
-    /// </remarks>
-    public bool IsValid => _system != null;
-
-    /// <summary>How many observers are currently registered.</summary>
-    public int ActiveObserverCount => Checked().ActiveObserverCount;
-
-    private SpatialInterestSystem Checked() => _system
-        ?? throw new InvalidOperationException("This SpatialObserverSet was default-constructed. Obtain one from DatabaseEngine.SpatialObservers<T>().");
-
-    /// <summary>
-    /// Register an observer watching <paramref name="bounds"/>.
-    /// </summary>
-    /// <param name="bounds">
-    /// <c>[minX, minY, maxX, maxY]</c> for a 2D component, <c>[minX, minY, minZ, maxX, maxY, maxZ]</c> for a 3D one.
-    /// </param>
-    /// <param name="categoryMask">Category bits the observer cares about; <c>0</c> means "no filter".</param>
-    /// <param name="initialTick">The tick the observer is considered to have already consumed. Pass the current tick to start from "nothing new".</param>
-    public SpatialObserverHandle RegisterObserver(ReadOnlySpan<double> bounds, uint categoryMask = 0, long initialTick = 0)
-        => Checked().RegisterObserver(bounds, categoryMask, initialTick);
-
-    /// <summary>Release an observer and its buffers. The handle is invalid afterwards.</summary>
-    public void UnregisterObserver(SpatialObserverHandle handle) => Checked().UnregisterObserver(handle);
-
-    /// <summary>Move or resize an observer's region. Its consumption tick is unaffected.</summary>
-    public void UpdateObserverBounds(SpatialObserverHandle handle, ReadOnlySpan<double> newBounds) => Checked().UpdateObserverBounds(handle, newBounds);
-
-    /// <summary>
-    /// Entities whose spatial position changed inside the observer's region since it last consumed.
-    /// </summary>
-    /// <remarks>
-    /// The returned spans point into the observer's own buffers and are valid only until this observer's next call.
-    /// </remarks>
-    public SpatialChangeResult GetSpatialChanges(SpatialObserverHandle handle, long currentTick) => Checked().GetSpatialChanges(handle, currentTick);
-}
-
-/// <summary>
 /// Trigger volumes for one spatial component type: define regions, then ask each which entities entered, left, or stayed since the last evaluation.
 /// </summary>
 /// <remarks>
-/// <para>Obtained from <see cref="SpatialObserverExtensions.SpatialTriggers{T}"/>. See <see cref="SpatialObserverSet"/> for why both surfaces became public in
-/// #872 step 13.</para>
+/// <para>Obtained from <see cref="SpatialObserverExtensions.SpatialTriggers{T}"/>. Public since #872 step 13, which moved the system onto the per-cell
+/// cluster index: a subsystem reachable only from tests could not be told apart from one that had stopped working. Its sibling, the observer set, was
+/// superseded by engine-owned subscriptions and deleted (design/Subscriptions/09 § 15, F4).</para>
 /// <para><b>Evaluation is a set diff, not a bitmap XOR.</b> Occupancy is tracked by entity id against the per-cell cluster index; the component-chunk-id
 /// bitmap the old entity-level path used could not represent cluster storage, whose chunk ids live in a different namespace.</para>
 /// </remarks>
@@ -102,7 +20,11 @@ public readonly struct SpatialTriggerVolumes
 
     internal SpatialTriggerVolumes(SpatialTriggerSystem system) => _system = system;
 
-    /// <inheritdoc cref="SpatialObserverSet.IsValid"/>
+    /// <summary><c>false</c> for a <c>default</c>-constructed value, which every other member rejects.</summary>
+    /// <remarks>
+    /// A public <c>struct</c> can always be default-constructed, and this one is a façade over engine state it cannot invent. Without the check every member
+    /// would throw <see cref="NullReferenceException"/> — the one exception that tells a caller nothing about what they did wrong.
+    /// </remarks>
     public bool IsValid => _system != null;
 
     /// <summary>How many regions are currently defined.</summary>
@@ -140,37 +62,17 @@ public readonly struct SpatialTriggerVolumes
     public SpatialTriggerResult EvaluateRegion(SpatialRegionHandle handle, int currentTick) => Checked().EvaluateRegion(handle, currentTick);
 }
 
-/// <summary>Entry points for the two systems layered on the spatial index.</summary>
+/// <summary>Entry point for the trigger volumes layered on the spatial index.</summary>
 [PublicAPI]
 public static class SpatialObserverExtensions
 {
     /// <summary>
-    /// Interest management for component <typeparamref name="T"/>, which must carry a <c>[SpatialIndex]</c> field.
+    /// Trigger volumes for component <typeparamref name="T"/>, which must carry a <c>[SpatialIndex]</c> field.
     /// </summary>
     /// <remarks>
     /// The underlying state is created on first use and lives as long as the component's <c>ComponentTable</c> does — which is the engine's lifetime in
     /// ordinary use, but NOT across a schema migration that reconstructs the table. Obtain the façade again after one rather than holding it across.
     /// </remarks>
-    // CS0618: this IS the entry point to the deprecated surface, so it necessarily names it. Marking the method obsolete as well would say the same thing
-    // twice at every call site and is not what README Q9 asked for; the type's own attribute is what a caller sees.
-#pragma warning disable CS0618
-    public static SpatialObserverSet SpatialObservers<T>(this DatabaseEngine engine) where T : unmanaged
-    {
-        ArgumentNullException.ThrowIfNull(engine);
-        var table = engine.GetComponentTable<T>();
-        if (table?.SpatialIndex == null)
-        {
-            throw new InvalidOperationException($"Component {typeof(T).Name} has no [SpatialIndex] field, so it has no interest management.");
-        }
-
-        return new SpatialObserverSet(table.SpatialIndex.GetOrCreateInterestSystem(table));
-    }
-#pragma warning restore CS0618
-
-    /// <summary>
-    /// Trigger volumes for component <typeparamref name="T"/>, which must carry a <c>[SpatialIndex]</c> field.
-    /// </summary>
-    /// <inheritdoc cref="SpatialObservers{T}" path="/remarks"/>
     public static SpatialTriggerVolumes SpatialTriggers<T>(this DatabaseEngine engine) where T : unmanaged
     {
         ArgumentNullException.ThrowIfNull(engine);

@@ -4,7 +4,7 @@
 |-------|-------|
 | Status | Living |
 | Last Updated | 2026-09-15 |
-| Domain | Spatial R-Tree, Queries, Trigger Volumes, Interest Management, Spatial Tiers (Clusters, Dormancy, Checkerboard, Migration) |
+| Domain | Spatial R-Tree, Queries, Trigger Volumes, Spatial Tiers (Clusters, Dormancy, Checkerboard, Migration) |
 
 > Invariants that ensure spatial query correctness, tree structural integrity,
 > consistent interaction with the ECS lifecycle, and spatial-tier cluster management
@@ -221,17 +221,14 @@
     and a per-node UnionCategoryMask and its leaf scan matches on `(entry.CategoryMask & queryMask) == queryMask` — every requested bit
     present. Since #872 step 13 the only spatial index is the per-cell cluster index (SH-01), so those masks are written, refit and never
     read by a query. Keep the semantics stated: they are the contract of that layer, not of any query
-  invariant the two semantics BOTH run in production, at two levels of one query, and are not alternatives to choose between:
-    SpatialInterestSystem admits clusters any-bit through QueryAabb, then skips a changed entity unless
-    (SpatialFieldInfo.Category & observerMask) == observerMask — all requested bits present, tested against the archetype constant.
-    SpatialTriggerSystem applies the any-bit cluster admit and NO second test. So an observer asking for `Player|Alive` sees nothing from
-    an archetype declaring only `Player`, while a trigger region with the same mask sees it
+  invariant SpatialTriggerSystem applies the any-bit cluster admit and NO second test, so a trigger region asking for `Player|Alive` sees an
+    archetype declaring only `Player`. (The all-bits test at entity level was the deleted interest system's.)
   scope: AabbClusterEnumerator.CategoryAdmits, AabbClusterEnumerator, ArchetypeClusterState.QueryAabb, ArchetypeClusterState.QueryRadius,
     ArchetypeClusterState.QueryRay, ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest, ClusterRadiusBatch,
     CellClusterTree.Query, CellClusterTree.QueryWith, CellClusterTree.QueryF32, CellClusterTree.QueryF32With, CellClusterTree.QueryRay,
     CellClusterTree.QueryFrustum, CellClusterTree.EnumerateClusterIds, CellClusterTree.Tree,
     ClusterSpatialAabb.CategoryMask, CellSpatialIndex.CategoryMasks, SpatialFieldInfo, SpatialRTree.Query.cs,
-    SpatialNodeHelper.ReadLeafCategoryMask, SpatialNodeHelper.ReadUnionCategoryMask, SpatialInterestSystem, SpatialTriggerSystem
+    SpatialNodeHelper.ReadLeafCategoryMask, SpatialNodeHelper.ReadUnionCategoryMask, SpatialTriggerSystem
   verified: ClusterCategoryFilterTests — two archetypes declaring DIFFERENT categories, separated through the public ClusterSpatialQuery
     AABB and Radius surfaces in BOTH the linear and the promoted arm (AQueryMaskSelectsOneArchetypeAndNotTheOther, and the promoted cases
     of the same, which assert PromotedCellCount > 0 as a precondition so a cell that quietly stopped promoting cannot pass them);
@@ -534,44 +531,18 @@
 
 ---
 
-## Module: Interest Management
-
-### IM-01: No missed changes `[fatal]`
-  invariant ∀ entity E mutated at tick T, ∀ observer O where O.LastConsumedTick < T ≤ currentTick:
-    E within O.InterestRegion ∧ (E.CategoryMask & O.CategoryMask) matches
-    → E ∈ O.ChangeBuffer
-  scope: SpatialInterestSystem.GetSpatialChanges
-  on_violation: observer misses entity update → client sees stale state → desync
-
-### IM-02: Ring buffer safety `[fatal]`
-  invariant currentTick - observer.LastConsumedTick > RingSize → observer flagged for full sync
-  never stale (recycled) bitmaps used for dirty accumulation
-  scope: SpatialInterestSystem.GetSpatialChanges, DirtyBitmapRing
-  on_violation: observer uses recycled bitmap data → phantom changes or missed changes
-
-### IM-03: SV-only scope `[fatal]`
-  invariant interest management dirty tracking only applies to SingleVersion ComponentTables
-  never Versioned tables participate in ring buffer system
-  scope: SpatialInterestSystem
-  on_violation: DirtyBitmap infrastructure doesn't exist for Versioned → crash or undefined behavior
-
-### IM-04: Both systems read the cluster index, and both are reachable from production `[fatal]`
-  invariant SpatialInterestSystem and SpatialTriggerSystem resolve entities ONLY through the per-cell cluster
-            index — QueryAabb for a region, the per-ARCHETYPE ClusterDirtyRing for a delta. Neither may acquire
-            an entity-level index of its own (SH-01 forbids one existing).
-  invariant 🔴 each has a PUBLIC entry point, and a test drives it through that entry point rather than through
-            the internal factory. This is not a style preference: before #872 step 13 the only callers were tests
-            and benchmarks reaching `GetOrCreate…System` directly, and the one production reference was a
-            null-conditional read of a field production never assigned. A subsystem whose sole exercise is a test
-            that constructs it by hand cannot be distinguished from a subsystem that has quietly stopped working,
-            which is exactly what had happened: the half of each that read the entity tree had been querying an
-            empty index since #666.
-  scope: SpatialObserverExtensions.SpatialObservers, SpatialObserverExtensions.SpatialTriggers,
-         SpatialInterestSystem.GetSpatialChanges, SpatialTriggerSystem.EvaluateRegion
-  on_violation: an observer or region silently reports nothing, and no test notices because none reaches the code
-    the way a caller would
-
----
+### IM-04: The trigger system reads the cluster index, and is reachable from production `[fatal]`
+  invariant SpatialTriggerSystem resolves entities ONLY through the per-cell cluster index (QueryAabb for a region). It may not acquire an
+            entity-level index of its own (SH-01 forbids one existing).
+  invariant 🔴 it has a PUBLIC entry point (SpatialObserverExtensions.SpatialTriggers), and a test drives it through that entry point rather than
+            through the internal factory. This is not a style preference: before #872 step 13 the only callers were tests and benchmarks reaching
+            `GetOrCreate…System` directly, and the one production reference was a null-conditional read of a field production never assigned. A
+            subsystem whose sole exercise is a test that constructs it by hand cannot be distinguished from a subsystem that has quietly stopped
+            working, which is exactly what had happened: the half that read the entity tree had been querying an empty index since #666.
+  note the interest-management half — the interest system, the observer set, and the per-archetype dirty ring it alone read — was superseded by
+    engine-owned subscriptions and deleted with its rules IM-01..03 (design/Subscriptions/09-phase2-design.md § 15, F4)
+  scope: SpatialObserverExtensions.SpatialTriggers, SpatialTriggerSystem.EvaluateRegion
+  on_violation: a region silently reports nothing, and no test notices because none reaches the code the way a caller would
 
 ## Module: Cluster Spatial AABBs (Issue #230)
 
@@ -1344,7 +1315,7 @@
   invariant SimTier is a BIT FLAG (None=0, Tier0=1, Tier1=2, Tier2=4, Tier3=8), so the weight is over the INDEX,
     and SimTier.None must weigh 1.0 rather than fall out of the formula. TrailingZeroCount(0) is 32, so the naive
     1/(1+index) scores every cell in an untiered world at 1/33 — and an untiered world is the default, every
-    fixture, and any deployment with no SpatialInterestSystem. Absent information discounts nothing
+    fixture, and any deployment whose game code assigns no tier. Absent information discounts nothing
   invariant the queue is CAPPED at RepairQueueMaxCells and evicts by score, with the eviction count published. A
     per-tick list could not leak; a persistent one can
   invariant re-ranking is LAZY — on new nominations or a SpatialGrid.TierVersion change, never on a timer — and

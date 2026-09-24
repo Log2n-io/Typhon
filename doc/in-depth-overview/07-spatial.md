@@ -328,14 +328,12 @@ When an entity moves into a different grid cell (with hysteresis around the boun
 
 Migration is also the vehicle for the intra-cell repairs in [§7](#7-intra-cell-drift-relocation-and-repair): a relocation and a Morton re-pack both emit ordinary `MigrationRequest`s rather than duplicating entity-map keying, index element ids, zone maps and rollback for a rarer path.
 
-### Trigger and interest systems
+### Trigger system
 
-Two consumers sit on the same index, and both are reachable from application code. Each resolves entities only through the per-cell cluster index, neither acquires an entity-level index of its own, and each has a public entry point a test can drive rather than an internal factory.
+The trigger system sits on the same index and is reachable from application code. It resolves entities only through the per-cell cluster index, acquires no entity-level index of its own, and has a public entry point a test can drive rather than an internal factory.
 
 - [`SpatialTriggerSystem`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs) — volume occupancy ("which entities are inside this AABB?"), reached through `dbe.SpatialTriggers<T>()`. `CollectClusterOccupants` runs an AABB query through the per-cell index and the result is diffed as a **set of entity ids** against the previous evaluation. Not a bitmap over component chunk ids: cluster storage has its own chunk-id namespace, so such a bitmap would collide two entities onto one bit and report neither transition.
-- [`SpatialInterestSystem`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialInterestSystem.cs) — per-observer "what changed near me", reached through `dbe.SpatialObservers<T>()`. Its delta path reads each cluster archetype's dirty ring and the entity bounds in cluster storage; its full-sync fallback is an ordinary AABB query through the same per-cell index.
-
-Both are lazily created on first use (`GetOrCreateTriggerSystem` / `GetOrCreateInterestSystem` on `SpatialIndexState`).
+It is lazily created on first use (`GetOrCreateTriggerSystem` on `SpatialIndexState`). Its former sibling, the per-observer interest system (`dbe.SpatialObservers<T>()`), was superseded by the subscriptions' push replication and deleted.
 
 ---
 

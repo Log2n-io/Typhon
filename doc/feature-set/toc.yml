@@ -432,8 +432,6 @@
           href: Spatial/spatial-category-filtering.md
         - name: Cluster Spatial Queries
           href: Spatial/cluster-spatial-queries.md
-        - name: Interest Management (Delta Spatial Queries)
-          href: Spatial/spatial-interest-management.md
         - name: Trigger Volumes (Enter / Leave / Stay)
           href: Spatial/spatial-trigger-volumes.md
     - name: Tiered Simulation Dispatch

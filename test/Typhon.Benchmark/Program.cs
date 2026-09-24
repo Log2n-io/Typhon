@@ -85,12 +85,6 @@ class Program
                 return;
             }
 
-            if (args.Contains("--interest-direct"))
-            {
-                InterestDirect.Run(args);
-                return;
-            }
-
             if (args.Contains("--trigger-direct"))
             {
                 TriggerDirect.Run(args);

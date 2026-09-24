@@ -379,7 +379,6 @@ Every Internal feature, one line each — engine machinery with no direct applic
 |---|---|---|---|
 | Per-Cell Cluster Index Internals | Node layout, fanout and lock protocol of the R-Tree a cell half holds once its density crosses the promotion threshold. Most cells stay far below it and scan a linear list of cluster bounds instead. | ✅ Implemented | [→](Spatial/spatial-rtree-index/README.md) |
 | Trigger Volumes (Enter / Leave / Stay) | Region entities diffed against the spatial tree(s) each cycle to emit Enter/Leave/Stay events at a configurable per-region frequency. | ✅ Implemented | [→](Spatial/spatial-trigger-volumes.md) |
-| Interest Management (Delta Spatial Queries) | Per-observer "what changed near me" delta queries via an archived dirty-bitmap ring buffer, with full-sync fallback for stale observers. | 🚧 Partial | [→](Spatial/spatial-interest-management.md) |
 | Cluster Spatial Queries | Per-cell broadphase + per-entity narrowphase AABB/Radius queries. | 🚧 Partial | [→](Spatial/cluster-spatial-queries.md) |
 | Cluster Dormancy (Sleep / Wake) | Clusters with no component writes for N ticks sleep and skip dispatch entirely, waking within one tick of being touched. | ✅ Implemented | [→](Spatial/cluster-dormancy.md) |
 

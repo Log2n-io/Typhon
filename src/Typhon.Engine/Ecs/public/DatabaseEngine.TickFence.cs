@@ -352,11 +352,8 @@ public partial class DatabaseEngine
 
             // The per-entity spatial pass that used to run here rebuilt the entity-level R-Tree from this table's dirty bitmap. That tree is gone (#872 step
             // 13) — cluster AABBs are refreshed by the fence's own AabbRefresh phase, from cluster storage, in parallel — so there is nothing table-scoped
-            // left to do. `hasSpatial` now gates NOTHING: the ring archive below is unconditional, and the flag's only remaining reader is the trace byte on
-            // the tick-fence span, where it still answers "is this table spatial at all".
-
-            // Archive dirty bitmap into ring buffer for interest management delta queries
-            table.SpatialIndex?.InterestSystem?.DirtyRing.Archive(tickNumber, dirtyBits, dirtyBits.Length);
+            // left to do. `hasSpatial` now gates NOTHING: its only remaining reader is the trace byte on the tick-fence span, where it still answers "is this
+            // table spatial at all". (The interest ring's archive that followed went with the observer set, F4.)
 
             tableScope.WalPublished = walPublished ? (byte)1 : (byte)0;
             tableScope.HasShadow = hasShadow ? (byte)1 : (byte)0;
@@ -2024,9 +2021,6 @@ public partial class DatabaseEngine
 
         // Dormancy sweep with the final post-migration dirty bits.
         clusterState.DormancySweep(dirtyBits, tickNumber);
-
-        // Archive dirty bitmap into per-archetype DirtyBitmapRing for spatial interest management.
-        clusterState.ClusterDirtyRing?.Archive(tickNumber, dirtyBits, dirtyBits.Length);
 
         var entryCount = clusterState.FenceEntryCount;
         // Account for any net dirty-bit change from migrations: clears src bits, sets dst bits — net change is zero per migration in the common case, but a
