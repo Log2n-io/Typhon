@@ -42,6 +42,9 @@ internal sealed class SubscriptionProfiles
         /// <summary>The largest radius a session of this profile can be given (<c>SetRadius</c>); <see cref="Radius"/> when it is fixed.</summary>
         public double MaxRadius { get; init; }
 
+        /// <summary>A sphere's half-band h (09 § 2): what its archetypes' v̂ may trail by; zero for the other shapes. Shown to a debugging client.</summary>
+        public double Slack { get; init; }
+
         /// <summary>Where the sphere is centred (09 § 6): the session's placed viewpoint, a fixed position, a bound entity, or the controlled one.</summary>
         public ViewpointSource Source { get; init; }
 
@@ -188,6 +191,7 @@ internal sealed class SubscriptionProfiles
                 NearBudget = observer.Kind == ObserverKind.ClientRegion ? observer.NearBudget : 0,
                 Radius = observer.Kind == ObserverKind.Sphere ? observer.EffectiveRadius : 0d,
                 MaxRadius = observer.Kind == ObserverKind.Sphere ? Math.Max(observer.EffectiveRadius, observer.MaxRadius) : 0d,
+                Slack = observer.Kind == ObserverKind.Sphere ? observer.VisibilitySlack : 0d,
                 Source = observer.Kind != ObserverKind.Sphere ? ViewpointSource.Placed
                     : observer.FollowsControlled ? ViewpointSource.Controlled
                     : observer.BoundEntity != EntityId.Null ? ViewpointSource.Bound
@@ -392,6 +396,9 @@ internal sealed class SubscriptionProfiles
 
     /// <summary>The largest radius a session of profile <paramref name="profile"/> can be given; its R′ when the radius is fixed.</summary>
     public double MaxRadiusOf(int profile) => _profiles[profile].MaxRadius;
+
+    /// <summary>A sphere profile's half-band h; zero for the other shapes.</summary>
+    public double SlackOf(int profile) => _profiles[profile].Slack;
 
     /// <summary>Where profile <paramref name="profile"/>'s sphere is centred.</summary>
     public ViewpointSource SourceOf(int profile) => _profiles[profile].Source;

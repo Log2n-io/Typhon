@@ -118,6 +118,14 @@ public ref struct WireWriter
     /// <param name="value">The value.</param>
     public void WriteVari(int value) => WriteVaru((uint)((value << 1) ^ (value >> 31)));
 
+    /// <summary>Writes a little-endian <c>u64</c>.</summary>
+    /// <param name="value">The value.</param>
+    public void WriteU64(ulong value) => BinaryPrimitives.WriteUInt64LittleEndian(Take(8), value);
+
+    /// <summary>Writes a little-endian IEEE double; NaN as <c>0x7FF8000000000000</c>.</summary>
+    /// <param name="value">The value.</param>
+    public void WriteF64(double value) => BinaryPrimitives.WriteDoubleLittleEndian(Take(8), WireMath.CanonicalizeNaN(value));
+
     /// <summary>Writes a little-endian IEEE single, narrowing <paramref name="value"/> with ties to even; NaN as <c>0x7FC00000</c>.</summary>
     /// <param name="value">The value.</param>
     public void WriteF32(double value) => BinaryPrimitives.WriteUInt32LittleEndian(Take(4), WireMath.EncodeSingle(value));

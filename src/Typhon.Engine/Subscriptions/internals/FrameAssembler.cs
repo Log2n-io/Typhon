@@ -101,6 +101,9 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
     /// <inheritdoc cref="AggRegion"/>
     internal int AggRegionCount;
 
+    /// <summary>DEBUG (09 § 15): the current session's <c>PUSH_GEOMETRY</c> payload, built to be compared with the last one sent.</summary>
+    internal readonly byte[] DebugGeometry = new byte[PushGeometry.MaxBytes];
+
     /// <summary>Cell deliveries and sweeps this worker's current gather skipped as empty, added to the shared counter once per gather.</summary>
     internal long EmptyCellsSkipped;
 
@@ -497,6 +500,8 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _eventsLastTick = new uint[options.MaxSessions];
         _aggLastTick = new uint[options.MaxSessions];
         _aggGeneration = new ushort[options.MaxSessions];
+        _debugGeneration = new ushort[options.MaxSessions];
+        _debugHash = new ulong[options.MaxSessions];
         _aggAnchor = new Vector3D[options.MaxSessions];
         _aggRegion = new uint[options.MaxSessions][];
         _aggRegionCount = new int[options.MaxSessions];

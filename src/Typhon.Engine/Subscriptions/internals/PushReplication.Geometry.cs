@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
@@ -59,6 +60,38 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     private readonly TickLog[] _log = CreateLog();
 
     public override bool Deep => TEvent.Deep;
+
+    /// <inheritdoc />
+    public override int WriteDebugGeometry(SessionId session, PushShape shape, double slackM, int nearBudget, bool complete, Span<byte> into)
+    {
+        var w = new WireWriter(into);
+        var flags = (complete ? PushGeometryFlags.ViewComplete : PushGeometryFlags.None) | (TEvent.Deep ? PushGeometryFlags.Deep : PushGeometryFlags.None);
+        ref var st = ref _sessions[session.Slot];
+        switch (shape)
+        {
+            case PushShape.World:
+                PushGeometry.WriteWorld(ref w, flags, st.PCursor);
+                break;
+            case PushShape.Region:
+                WriteDebugRegion(session, flags, nearBudget, ref w);
+                break;
+            default:
+            {
+                PushGeometry.WriteSphere(ref w, flags, st.PAnchorX, st.PAnchorY, st.PAnchorZ, st.PRadius, slackM, st.PLevel);
+                ReadOnlySpan<ushort> pending = Pending(ref st, session.Slot);
+                Span<ulong> rows = stackalloc ulong[pending.Length];
+                for (var i = 0; i < rows.Length; i++)
+                {
+                    rows[i] = pending[i];
+                }
+
+                PushGeometry.WriteWindow(ref w, st.POriginX, st.POriginY, st.POriginZ, Window, rows);
+                break;
+            }
+        }
+
+        return w.Position;
+    }
 
     public PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic, ReplicationGrid grid,
         int maxSessions, bool shadow)
@@ -1812,7 +1845,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             }
 
             ref var e = ref source[(int)(uint)src];
-            var aggregated = (uint)e.Archetype < (uint)_counted.Length && _counted[e.Archetype];
+            var aggregated = e.Archetype < (uint)_counted.Length && _counted[e.Archetype];
             if ((sortKey & 1) != 0)
             {
                 // A secondary: the cell a mover left.

@@ -728,6 +728,9 @@ sealed class FrameLog : ITickSink
     /// <summary>Leaves, in stream order.</summary>
     public List<uint> Leaves { get; } = [];
 
+    /// <summary>The <c>DEBUG</c> sub-blocks, in stream order, with their payloads.</summary>
+    public List<(byte SubType, byte[] Payload)> Debugs { get; } = [];
+
     /// <summary>The frame's tick.</summary>
     public uint TickNumber { get; private set; }
 
@@ -808,7 +811,11 @@ sealed class FrameLog : ITickSink
     public void Metric(MetricPlan metric, int valueIndex, double value) => Calls.Add($"metric {metric.Name}");
 
     /// <inheritdoc />
-    public void Debug(byte subType, scoped ReadOnlySpan<byte> payload) => Calls.Add($"debug {subType}");
+    public void Debug(byte subType, scoped ReadOnlySpan<byte> payload)
+    {
+        Debugs.Add((subType, payload.ToArray()));
+        Calls.Add($"debug {subType}");
+    }
 
     /// <inheritdoc />
     public void Ext(uint appTypeId, scoped ReadOnlySpan<byte> payload) => Calls.Add($"ext {appTypeId}");

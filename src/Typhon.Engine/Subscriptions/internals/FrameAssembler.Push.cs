@@ -68,6 +68,10 @@ internal sealed unsafe partial class FrameAssembler
     private readonly ushort[] _aggGeneration = [];
     private readonly Vector3D[] _aggAnchor = [];
 
+    // DEBUG (09 § 15), by slot, committed with the frame: the generation the grid was sent to (0: none yet) and the hash of the last PUSH_GEOMETRY sent.
+    private readonly ushort[] _debugGeneration = [];
+    private readonly ulong[] _debugHash = [];
+
     // A ClientRegion session's aggregate region at its last AGG, sorted (09 § 8): its hull less what its near tier held.
     private readonly uint[][] _aggRegion = [];
     private readonly int[] _aggRegionCount = [];
@@ -784,7 +788,30 @@ internal sealed unsafe partial class FrameAssembler
         var stats = Stats;
         var emitStats = stats != null && stats.IsEmissionTick && (send->Caps & Capabilities.Stats) != 0;
         var newlyComplete = complete && !state.ViewComplete;
-        if (records == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete)
+
+        // DEBUG (09 § 15), for a session granted the cap — which admission grants only under AllowDebug: the grid with its first frame and every RESET, its
+        // push geometry whenever it changed. The geometry is the pending one, what the session holds once this frame is published.
+        var debugGrid = false;
+        var debugGeometry = 0;
+        var debugHash = 0UL;
+        if ((send->Caps & Capabilities.Debug) != 0 && (uint)session.Slot < (uint)_debugGeneration.Length)
+        {
+            var profile = _pushProfiles[index];
+            var shape = _pushRegion[index] ? PushShape.Region : _pushWorld[index] ? PushShape.World : PushShape.Sphere;
+            debugGeometry = Push.WriteDebugGeometry(session, shape, Profiles.SlackOf(profile), Profiles.NearOf(profile).Budget, complete,
+                scratch.DebugGeometry);
+            var hash = CanonicalHashBuilder.Create();
+            hash.AddBytes(scratch.DebugGeometry.AsSpan(0, debugGeometry));
+            debugHash = hash.Value;
+            debugGrid = reset || _debugGeneration[session.Slot] != session.Generation;
+            if (!debugGrid && debugHash == _debugHash[session.Slot])
+            {
+                debugGeometry = 0;
+            }
+        }
+
+        var debugWrite = debugGrid || debugGeometry > 0;
+        if (records == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite)
         {
             // Nothing to say. The anchor may still have moved and a cell with nothing in it may have been delivered; neither changes what the client holds,
             // so the pending state is committed even though no frame is.
@@ -802,7 +829,7 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0) + (eventCount > 0 ? eventBytes + 16 : 0)
-            + (aggWrite ? 24 + (aggRows * 5 * (1 + aggCounts.ArchetypeCount)) : 0);
+            + (aggWrite ? 24 + (aggRows * 5 * (1 + aggCounts.ArchetypeCount)) : 0) + (debugWrite ? 16 + DebugGrid.MaxBytes + debugGeometry : 0);
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags);
@@ -831,6 +858,11 @@ internal sealed unsafe partial class FrameAssembler
         if (emitStats)
         {
             stats.WriteBlock(ref writer, session, state, _tick);
+        }
+
+        if (debugWrite)
+        {
+            WriteDebug(ref writer, debugGrid, scratch.DebugGeometry.AsSpan(0, debugGeometry));
         }
 
         var length = writer.Position;
@@ -900,6 +932,15 @@ internal sealed unsafe partial class FrameAssembler
             StatsEncoder.NoteBlockPublished(state, _tick);
         }
 
+        if (debugWrite)
+        {
+            _debugGeneration[session.Slot] = session.Generation;
+            if (debugGeometry > 0)
+            {
+                _debugHash[session.Slot] = debugHash;
+            }
+        }
+
         state.BytesPublished += length;
         state.PendingReset = false;
         state.FramesProduced++;
@@ -914,6 +955,30 @@ internal sealed unsafe partial class FrameAssembler
             counters.EntersEmitted += scratch.Count(a, FrameListKind.Enter);
             counters.LeavesEmitted += scratch.Count(a, FrameListKind.Leave);
         }
+    }
+
+    /// <summary>Writes a <c>DEBUG</c> block (03 § 3, 09 § 15): the <c>GRID</c> sub-block when asked, then the <c>PUSH_GEOMETRY</c> payload when there is one.</summary>
+    private void WriteDebug(ref WireWriter w, bool grid, ReadOnlySpan<byte> geometry)
+    {
+        var mark = TickWriter.BeginBlock(ref w, BlockTypes.Debug);
+        if (grid)
+        {
+            Span<byte> payload = stackalloc byte[DebugGrid.MaxBytes];
+            var g = new WireWriter(payload);
+            Push.DebugGrid.Write(ref g);
+            w.WriteU8(DebugSubTypes.Grid);
+            w.WriteVaru((uint)g.Position);
+            w.WriteBytes(g.Written);
+        }
+
+        if (geometry.Length > 0)
+        {
+            w.WriteU8(DebugSubTypes.PushGeometry);
+            w.WriteVaru((uint)geometry.Length);
+            w.WriteBytes(geometry);
+        }
+
+        TickWriter.EndBlock(ref w, mark);
     }
 }
 

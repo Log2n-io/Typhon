@@ -1116,6 +1116,15 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Tests only: a ClientRegion session's committed delivered cells.</summary>
     internal abstract int RegionDeliveredCells(SessionId session);
 
+    /// <summary>The replication grid, as a debugging client is shown it (<c>DEBUG</c> <c>GRID</c>, 09 § 15).</summary>
+    public DebugGrid DebugGrid => new(_gridMinX, _gridMinY, _gridMinZ, CellSize, _gridW, _gridH, Deep ? _gridD : 1);
+
+    /// <summary>
+    /// A debugging session's <c>PUSH_GEOMETRY</c> payload (09 § 15) into <paramref name="into"/>: its pending geometry — its anchor or hull and its delivered
+    /// window as they are once this frame is published. After its gather. Returns the payload's length.
+    /// </summary>
+    public abstract int WriteDebugGeometry(SessionId session, PushShape shape, double slackM, int nearBudget, bool complete, Span<byte> into);
+
     /// <summary>A session's pending anchor, after its gather: where an aggregate's radius is centred.</summary>
     public Vector3D PendingAnchorOf(SessionId session)
     {

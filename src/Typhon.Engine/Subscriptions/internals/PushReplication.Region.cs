@@ -5,6 +5,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
@@ -1275,6 +1276,31 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 (minCz, maxCz) = (Math.Min(minCz, z0), Math.Max(maxCz, z1));
             }
         }
+    }
+
+    /// <summary>A region's <c>PUSH_GEOMETRY</c> body: the pending hull's vertices, the near budget's estimate and the pending window.</summary>
+    private void WriteDebugRegion(SessionId session, PushGeometryFlags flags, int nearBudget, ref WireWriter w)
+    {
+        var r = (uint)session.Slot < (uint)_regions.Length ? _regions[session.Slot] : null;
+        if (r == null || r.Generation != session.Generation)
+        {
+            PushGeometry.WriteRegion(ref w, flags, TEvent.Deep ? 3 : 2, [], 0, nearBudget);
+            PushGeometry.WriteWindow(ref w, 0, 0, 0, 0, []);
+            return;
+        }
+
+        ref readonly var hull = ref r.PHull;
+        var count = hull.PlaneCount > 0 ? hull.VertexCount : 0;
+        Span<double> vertices = stackalloc double[3 * BuiltInCommands.MaxRegionVertices];
+        for (var i = 0; i < count; i++)
+        {
+            vertices[3 * i] = hull.Vertices[i].X;
+            vertices[(3 * i) + 1] = hull.Vertices[i].Y;
+            vertices[(3 * i) + 2] = hull.Vertices[i].Z;
+        }
+
+        PushGeometry.WriteRegion(ref w, flags, hull.Dims == 3 ? 3 : 2, vertices[..(3 * count)], r.PHeld, nearBudget);
+        PushGeometry.WriteWindow(ref w, r.POriginX, r.POriginY, r.POriginZ, RegionWindow, r.P);
     }
 
     public override bool RegionAggregates(SessionId session, AggregateCounts counts, uint tile)

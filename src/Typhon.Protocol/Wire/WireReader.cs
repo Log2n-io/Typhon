@@ -152,6 +152,14 @@ public ref struct WireReader
         return (int)value;
     }
 
+    /// <summary>Reads a little-endian <c>u64</c>.</summary>
+    /// <returns>The value.</returns>
+    public ulong ReadU64() => BinaryPrimitives.ReadUInt64LittleEndian(Take(8));
+
+    /// <summary>Reads a little-endian IEEE double.</summary>
+    /// <returns>The value; every NaN pattern decodes as the canonical NaN.</returns>
+    public double ReadF64() => WireMath.CanonicalizeNaN(BinaryPrimitives.ReadDoubleLittleEndian(Take(8)));
+
     /// <summary>Reads a little-endian IEEE single.</summary>
     /// <returns>The value, widened exactly to a double; every NaN pattern decodes as the canonical NaN (<see cref="WireMath.CanonicalNaN"/>).</returns>
     public double ReadF32() => WireMath.CanonicalizeNaN(BinaryPrimitives.ReadSingleLittleEndian(Take(4)));
