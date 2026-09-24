@@ -17,7 +17,7 @@
     "typhon-codegen": "./bin/typhon-codegen.mjs"
   },
   "files": [
-    "bin",
+    "bin/typhon-codegen.mjs",
     "dist",
     "src"
   ],

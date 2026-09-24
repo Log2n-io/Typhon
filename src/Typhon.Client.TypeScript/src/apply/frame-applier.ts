@@ -248,6 +248,8 @@ export class FrameApplier implements TickSink, EntitiesTarget {
     this.target = slot < 0 ? Target.None : Target.Entity;
   }
 
+  // ── EntitiesTarget: what a generated decoder calls, only from inside `apply`, while its archetype's ENTITIES block is read. ──
+
   archetypeStore(idx: number): ArchetypeStore {
     return this.world.archetypeStore(idx);
   }
