@@ -47,6 +47,43 @@ class ReplicationOccupancyTests
     }
 
     [Test]
+    public void TheOrderIsTheOccupiedKeysAscendingThroughChurn([Values(1, 2)] int seed)
+    {
+        var map = new ReplicationOccupancy();
+        var reference = new Dictionary<ulong, int>();
+        var random = new Random(seed);
+        for (var op = 0; op < 60_000; op++)
+        {
+            var key = PushReplication.Key(random.Next(400), random.Next(300));
+            var held = reference.GetValueOrDefault(key);
+            var delta = held == 0 || random.Next(2) == 0 ? 1 : -held;
+            map.Add(key, delta);
+            if (held + delta == 0)
+            {
+                reference.Remove(key);
+            }
+            else
+            {
+                reference[key] = held + delta;
+            }
+
+            // Asked for irregularly, so the merge sees anything from one noted cell to more than the map holds (a rebuild), and a clear now and then.
+            if (random.Next(500) == 0)
+            {
+                var expected = new List<ulong>(reference.Keys);
+                expected.Sort();
+                Assert.That(map.Ordered().ToArray(), Is.EqualTo(expected.ToArray()), $"op {op}");
+            }
+
+            if (random.Next(20_000) == 0)
+            {
+                map.Clear();
+                reference.Clear();
+            }
+        }
+    }
+
+    [Test]
     public void AnUnderflowIsCountedAndLeavesNoEntry()
     {
         var map = new ReplicationOccupancy();

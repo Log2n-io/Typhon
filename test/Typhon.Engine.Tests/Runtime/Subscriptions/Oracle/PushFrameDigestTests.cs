@@ -15,7 +15,7 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 /// </para>
 /// <para>
 /// <b>Pinned on Typhon <c>0740cd37</c></b> (Phase 1.5.0, whose frames are the baseline's): the values below are what that engine produced for these
-/// runs, with this digest.
+/// runs, with this digest — except <see cref="WorldObserversPacedOverAFineGrid"/>, re-pinned by 1.5.3, whose pacing counts occupied cells only.
 /// </para>
 /// <para>
 /// <b>When a constant may change.</b> Only with a step that changes frames on purpose and says so (10 § 12: 1.5.3, <c>World</c> pacing on occupied
@@ -59,14 +59,27 @@ class PushFrameDigestTests : TestBase<PushFrameDigestTests>
         Assert.That(Run(oracle), Is.EqualTo(17210926344840522847UL));
     }
 
-    /// <summary>A grid of 129 × 129 cells, so a <c>World</c> session's fill is paced over several frames (4 096 cells visited per frame).</summary>
+    /// <summary>
+    /// A grid of 128 × 128 cells. Before 1.5.3 a <c>World</c> session's fill visited 4 096 cells a frame, empty or not, and took five frames here; it now
+    /// visits occupied cells only (1.5.3's pre-registered criterion: fewer frames to <c>VIEW_COMPLETE</c>), so the frames changed on purpose and the
+    /// constant was re-pinned (the 1.5.1 engine gave 5680082172371474769).
+    /// </summary>
     [Test]
     public void WorldObserversPacedOverAFineGrid()
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1505, [0, 30, 60], nameof(PushFrameDigestTests),
             worldObserver: true, bigWorld: true, deterministicProjection: true, replicationCellM: 128);
 
-        Assert.That(Run(oracle), Is.EqualTo(5680082172371474769UL));
+        var digest = Run(oracle);
+        Assert.Multiple(() =>
+        {
+            for (var s = 0; s < oracle.Sessions.Length; s++)
+            {
+                Assert.That(oracle.Frames.FramesToComplete(oracle.Sessions[s]), Is.EqualTo(1), $"session {s}: frames to VIEW_COMPLETE (five before 1.5.3)");
+            }
+
+            Assert.That(digest, Is.EqualTo(1442836563172249734UL));
+        });
     }
 
     [Test]

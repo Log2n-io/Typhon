@@ -21,7 +21,7 @@ class ReplicationGridTests : TestBase<ReplicationGridTests>
         Assert.Multiple(() =>
         {
             Assert.That(grid.CellM, Is.EqualTo(64));
-            Assert.That((grid.DimX, grid.DimY, grid.DimZ), Is.EqualTo((251, 251, 1)));
+            Assert.That((grid.DimX, grid.DimY, grid.DimZ), Is.EqualTo((250, 250, 1)));
             Assert.That((grid.OriginX, grid.OriginY), Is.EqualTo((0d, 0d)));
             Assert.That((grid.Half, grid.Window), Is.EqualTo((5, 11)));
             Assert.That(grid.AnchorSlack, Is.EqualTo(4d));
@@ -45,7 +45,7 @@ class ReplicationGridTests : TestBase<ReplicationGridTests>
 
         var grid = ReplicationGrid.Resolve(64, spatial, 192);
 
-        Assert.That((grid.DimX, grid.DimY, grid.DimZ, grid.Flat), Is.EqualTo((33, 33, 33, false)));
+        Assert.That((grid.DimX, grid.DimY, grid.DimZ, grid.Flat), Is.EqualTo((32, 32, 32, false)));
     }
 
     [Test]

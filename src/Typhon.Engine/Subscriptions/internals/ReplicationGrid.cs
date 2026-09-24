@@ -18,9 +18,7 @@ namespace Typhon.Engine;
 /// is resolved and reported so the model and the API do not change when it does.
 /// </para>
 /// <para>
-/// <b>Cells per axis are <c>⌈extent / c⌉ + 1</c></b>, one more than the half-open bounds need. Kept from the grid this replaces because <c>World</c> delivery
-/// paces by cells visited in dense order, so one column fewer would change the frames a <c>World</c> session receives; it goes when pacing counts occupied
-/// cells (1.5.3).
+/// <b>Cells per axis are <c>⌈extent / c⌉</c></b>, the half-open bounds exactly; a position on the upper bound is clamped into the last cell.
 /// </para>
 /// </remarks>
 internal sealed class ReplicationGrid
@@ -91,14 +89,6 @@ internal sealed class ReplicationGrid
                 + $"world; a cell key addresses at most {MaxAxisCells} cells per axis. Raise the cell side.");
         }
 
-        // A World session's cursor is a dense cell index in an int until 1.5.3 walks the occupied cells instead (10 § 2.4).
-        if (dimX * dimY > int.MaxValue)
-        {
-            throw new InvalidOperationException(
-                $"SubscriptionsOptions.ReplicationCellM = {Format(cellM)} gives a replication grid of {dimX} x {dimY} cells, more than a World session's "
-                + "cursor can address. Raise the cell side.");
-        }
-
         var radius = Math.Max(0, maxRadius);
         var half = (int)Math.Ceiling(radius / cellM) + 2;
         var window = (2 * half) + 1;
@@ -128,7 +118,7 @@ internal sealed class ReplicationGrid
             Window = window,
         };
 
-        static long Dim(double extent, double c) => Math.Max(1L, (long)Math.Min(Math.Ceiling(extent / c) + 1, long.MaxValue / 4));
+        static long Dim(double extent, double c) => Math.Max(1L, (long)Math.Min(Math.Ceiling(extent / c), long.MaxValue / 4));
     }
 
     /// <summary>The <c>Start</c> log line's grid description.</summary>

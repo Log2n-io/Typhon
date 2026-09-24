@@ -76,6 +76,11 @@ internal sealed unsafe partial class FrameAssembler
             _pushMasks[n] = mask;
             _pushSessions[n++] = session;
             PrepareSession(session);
+            if (world)
+            {
+                var sessionState = StateOf(session);
+                Push.NoteWorldSession(session, sessionState != null && sessionState.PendingReset);
+            }
         }
 
         _pushSessionCount = n;
@@ -86,6 +91,9 @@ internal sealed unsafe partial class FrameAssembler
         {
             Push.BuildIndex();
         }
+
+        // After the index, whose finish brought the occupancy to this tick: the occupied cells in order, for the World fills still under way.
+        Push.PrepareWorldOrder();
 
         // Distance LOD: the far flushes into the tick's log slot — folded by their stage, or here when the index was built here.
         if (n > 0)

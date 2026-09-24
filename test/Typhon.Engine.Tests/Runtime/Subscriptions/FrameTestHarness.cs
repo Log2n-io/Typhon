@@ -238,7 +238,19 @@ sealed unsafe class FrameHarness : IDisposable
         sink.Fold($"s{session.Value}");
         TickReader.Read(frame, CatalogPlan, ref sink);
         Digest = sink.Hash;
+        var fill = _fillFrames.GetValueOrDefault(session.Value);
+        if (fill.CompleteAt == 0)
+        {
+            fill.Frames++;
+            fill.CompleteAt = (sink.Flags & TickFlags.ViewComplete) != 0 ? fill.Frames : 0;
+            _fillFrames[session.Value] = fill;
+        }
     }
+
+    private readonly System.Collections.Generic.Dictionary<uint, (int Frames, int CompleteAt)> _fillFrames = [];
+
+    /// <summary>While <see cref="DigestFrames"/> is set: the frames a session was delivered up to and including its first <c>VIEW_COMPLETE</c>; 0 before.</summary>
+    public int FramesToComplete(SessionId session) => _fillFrames.GetValueOrDefault(session.Value).CompleteAt;
 
     /// <summary>
     /// Folds everything a decoded frame hands a client — records with their positions, velocities, segment times and epochs, field values, events —
@@ -247,8 +259,13 @@ sealed unsafe class FrameHarness : IDisposable
     private struct DigestSink : ITickSink
     {
         public ulong Hash;
+        public TickFlags Flags;
 
-        public DigestSink(ulong seed) => Hash = seed;
+        public DigestSink(ulong seed)
+        {
+            Hash = seed;
+            Flags = TickFlags.None;
+        }
 
         public void Fold(string s)
         {
@@ -280,6 +297,7 @@ sealed unsafe class FrameHarness : IDisposable
 
         public void BeginTick(uint tick, TickFlags flags, uint periodUs)
         {
+            Flags = flags;
             Mix(1);
             Mix(tick);
             Mix((ulong)flags);

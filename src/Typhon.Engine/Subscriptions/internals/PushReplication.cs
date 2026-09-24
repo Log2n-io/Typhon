@@ -93,9 +93,12 @@ internal struct PushSessionState
     /// <summary>The tick of the last committed frame: the push log replays every event after it.</summary>
     public uint LastTick;
 
-    /// <summary>A World session: the cells below this index, in grid order, have been delivered. Its whole known-set.</summary>
-    public int Cursor;
-    public int PCursor;
+    /// <summary>
+    /// A World session: every cell whose key is below this one has been delivered — its whole known-set. <see cref="ulong.MaxValue"/> once the walk has
+    /// passed the last occupied cell, so a cell occupied later is known through its events rather than delivered again.
+    /// </summary>
+    public ulong Cursor;
+    public ulong PCursor;
 
     // Computed by the gather, applied only when the frame is published (SUB-03's discipline: a frame that was not sent changes nothing).
     public double PAnchorX;
@@ -2497,12 +2500,60 @@ internal sealed unsafe class PushReplication
 
     // ══ World sessions ══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    /// <summary>How many grid cells a World session's delivery may visit in one frame, empty or not: bounds the first frame's cost.</summary>
+    /// <summary>How many occupied cells a World session's delivery may visit in one frame: bounds a frame's cost (10 § 2.4, 1.5.3).</summary>
     private const int WorldCellsPerFrame = 4096;
 
+    /// <summary>World frames that ended before the session's fill was complete — cumulative; what the fill's pacing costs in frames.</summary>
+    public long WorldFillFrames;
+
+    /// <summary>World gathers that needed the occupied cells' order on a tick it was not taken: each one delivered nothing that frame. Zero when sound.</summary>
+    public long WorldOrderMissing;
+
+    // Set by NoteWorldSession when some World session may fill this tick: only then is the occupancy's order kept up to date.
+    private bool _worldOrderNeeded;
+    private ulong[] _worldOrder = [];
+    private int _worldOrderCount;
+    private uint _worldOrderTick = uint.MaxValue;
+
     /// <summary>
-    /// A World session: it holds every entity of its archetypes whose cell it has been delivered, and cells are delivered in grid order behind one cursor
-    /// — so its whole known-set is <c>cell(v) &lt; cursor</c>. Each frame delivers cells onward under the enter budget, then carries the tick's events.
+    /// Serial, in the frame prologue: notes a World session this tick, so its fill can walk the occupied cells in order. A session may fill when its fill is
+    /// incomplete, or when its frame may reset — a reset asked for, or frames missed, which the log may not cover.
+    /// </summary>
+    public void NoteWorldSession(SessionId session, bool forceReset)
+    {
+        ref var st = ref _sessions[session.Slot];
+        _worldOrderNeeded |= forceReset || !st.Bound || st.Generation != session.Generation || st.NeedsReset || !st.Anchored
+            || st.Cursor != ulong.MaxValue || st.LastTick + 1 != _tick;
+    }
+
+    /// <summary>
+    /// Serial, in the frame prologue, after the index: the occupied cells in key order for this tick's World fills — taken only when some fill is
+    /// incomplete, so a runtime whose World sessions all hold the world pays nothing for it.
+    /// </summary>
+    public void PrepareWorldOrder()
+    {
+        _worldOrderCount = 0;
+        if (!_worldOrderNeeded)
+        {
+            return;
+        }
+
+        _worldOrderNeeded = false;
+        _worldOrderTick = _tick;
+        var ordered = _occupancy.Ordered();
+        if (_worldOrder.Length < ordered.Length)
+        {
+            _worldOrder = new ulong[Math.Max(64, ordered.Length + (ordered.Length >> 1))];
+        }
+
+        ordered.CopyTo(_worldOrder);
+        _worldOrderCount = ordered.Length;
+    }
+
+    /// <summary>
+    /// A World session: it holds every entity of its archetypes whose cell it has been delivered, and occupied cells are delivered in key order behind one
+    /// cursor — so its whole known-set is <c>key(cell(v)) &lt; cursor</c>. Each frame delivers occupied cells onward under the enter budget, then carries
+    /// the tick's events.
     /// </summary>
     public bool GatherWorld(SessionId session, bool forceReset, ulong archetypeMask, FrameWorkerScratch scratch, int enterBudget, ref long enters,
         ref long leaves, ref long updates, out bool complete)
@@ -2517,7 +2568,6 @@ internal sealed unsafe class PushReplication
         }
 
         var tick = _tick;
-        var cells = _gridW * _gridH;
         var reset = st.NeedsReset || forceReset;
         var gap = st.Anchored && !reset ? (int)(tick - st.LastTick - 1) : 0;
         var log = Log ??= new LogTable();
@@ -2545,20 +2595,41 @@ internal sealed unsafe class PushReplication
         }
 
         var flagged = reset && st.Anchored;
-        var oldCursor = reset || !st.Anchored ? 0 : st.Cursor;
+        var oldCursor = reset || !st.Anchored ? 0UL : st.Cursor;
 
-        // ── 1. Deliver cells onward, under the enter budget ──
+        // ── 1. Deliver occupied cells onward, under the enter budget ──
+        // An empty cell holds nobody to enter, so only occupied ones are visited; past the last of them the whole world is delivered.
         var cursor = oldCursor;
         var entered = 0;
-        var visited = 0;
-        while (cursor < cells && entered < enterBudget && visited < WorldCellsPerFrame)
+        if (cursor != ulong.MaxValue && _worldOrderTick != tick)
         {
-            entered += DeliverCell(cursor % _gridW, cursor / _gridW, 0d, 0d, double.PositiveInfinity, archetypeMask, scratch, tick, gap, everywhere: true);
-            cursor++;
-            visited++;
+            // NoteWorldSession did not foresee this fill. Nothing is delivered and the cursor stays where it is — never "complete" over an order nobody
+            // took — and the next prologue sees the fill and takes it.
+            Interlocked.Increment(ref WorldOrderMissing);
+        }
+        else if (cursor != ulong.MaxValue)
+        {
+            var k = LowerBound(_worldOrder, 0, _worldOrderCount, cursor);
+            var visited = 0;
+            for (; k < _worldOrderCount && entered < enterBudget && visited < WorldCellsPerFrame; k++, visited++)
+            {
+                var key = _worldOrder[k];
+                entered += DeliverCell(KeyX(key), KeyY(key), 0d, 0d, double.PositiveInfinity, archetypeMask, scratch, tick, gap, everywhere: true);
+                cursor = key + 1;
+            }
+
+            if (k == _worldOrderCount)
+            {
+                cursor = ulong.MaxValue;
+            }
         }
 
-        complete = cursor >= cells;
+        complete = cursor == ulong.MaxValue;
+        if (!complete)
+        {
+            Interlocked.Increment(ref WorldFillFrames);
+        }
+
         enters += entered;
 
         // ── 2. The events: this tick's, or every missed tick's folded ──
@@ -2568,8 +2639,8 @@ internal sealed unsafe class PushReplication
             {
                 ref var entry = ref log.Entries[i];
                 ref readonly var e = ref entry.Last;
-                var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && ((entry.OldCy * _gridW) + entry.OldCx) < oldCursor;
-                var isIn = (e.Flags & PushEvent.HasNew) != 0 && ((e.NewCy * _gridW) + e.NewCx) < cursor;
+                var was = (entry.FirstFlags & PushEvent.HasOld) != 0 && Key(entry.OldCx, entry.OldCy) < oldCursor;
+                var isIn = (e.Flags & PushEvent.HasNew) != 0 && e.NewKey < cursor;
                 EmitWorld(in e, was, isIn, entry.Groups, entry.Segment, scratch, ref enters, ref leaves, ref updates);
             }
         }
@@ -2586,8 +2657,8 @@ internal sealed unsafe class PushReplication
                         continue;
                     }
 
-                    var was = (e.Flags & PushEvent.HasOld) != 0 && ((e.OldCy * _gridW) + e.OldCx) < oldCursor;
-                    var isIn = (e.Flags & PushEvent.HasNew) != 0 && ((e.NewCy * _gridW) + e.NewCx) < cursor;
+                    var was = (e.Flags & PushEvent.HasOld) != 0 && e.OldKey < oldCursor;
+                    var isIn = (e.Flags & PushEvent.HasNew) != 0 && e.NewKey < cursor;
                     EmitWorld(in e, was, isIn, e.Groups, (e.Flags & PushEvent.Segment) != 0, scratch, ref enters, ref leaves, ref updates);
                 }
             }
@@ -2632,7 +2703,7 @@ internal sealed unsafe class PushReplication
     }
 
     /// <summary>The World form of <see cref="CollectLog"/>: every cell, primaries only (each event once per tick).</summary>
-    private bool CollectLogWorld(uint first, int cursor, ulong archetypeMask, LogTable table)
+    private bool CollectLogWorld(uint first, ulong cursor, ulong archetypeMask, LogTable table)
     {
         for (var t = first; t != _tick + 1; t++)
         {
@@ -2673,7 +2744,7 @@ internal sealed unsafe class PushReplication
         for (var i = 0; i < table.Count; i++)
         {
             ref var entry = ref table.Entries[i];
-            if (entry.Replaced && (entry.FirstFlags & PushEvent.HasOld) != 0 && ((entry.OldCy * _gridW) + entry.OldCx) < cursor
+            if (entry.Replaced && (entry.FirstFlags & PushEvent.HasOld) != 0 && Key(entry.OldCx, entry.OldCy) < cursor
                 && (entry.Last.Flags & PushEvent.HasNew) != 0)
             {
                 return false;

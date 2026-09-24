@@ -18,6 +18,11 @@ namespace Typhon.Engine.Internals;
 /// <b>Sparse.</b> Open addressing on the packed cell key, deleted by backward shift when a count reaches zero, so the table holds exactly the occupied
 /// cells and never tombstones. Single writer: the index's serial finish.
 /// </para>
+/// <para>
+/// <b>Ordered on demand</b> (<see cref="Ordered"/>): the occupied keys ascending, what a <c>World</c> session's delivery walks. Built the first time it is
+/// asked for; from then on every cell that appears or empties is noted, and the next call merges the noted cells into the order — O(occupied cells) on a
+/// tick whose set changed, nothing otherwise, and nothing at all for a runtime that never asks.
+/// </para>
 /// </remarks>
 internal sealed class ReplicationOccupancy
 {
@@ -25,6 +30,15 @@ internal sealed class ReplicationOccupancy
     private ulong[] _keys = new ulong[1024];
     private int[] _counts = new int[1024];
     private int _mask = 1023;
+
+    // The ordered view: the occupied keys ascending, valid up to the cells noted since (_toggled, unsorted, possibly repeated).
+    private bool _ordering;
+    private bool _orderStale = true;
+    private ulong[] _sorted = [];
+    private ulong[] _sortedNext = [];
+    private int _sortedCount;
+    private ulong[] _toggled = new ulong[64];
+    private int _toggledCount;
 
     /// <summary>Cells with at least one entity.</summary>
     public int Count { get; private set; }
@@ -83,6 +97,7 @@ internal sealed class ReplicationOccupancy
                 }
 
                 RemoveAt(h);
+                Toggled(key);
                 return;
             }
 
@@ -96,6 +111,7 @@ internal sealed class ReplicationOccupancy
 
                 _keys[h] = tagged;
                 _counts[h] = delta;
+                Toggled(key);
                 if (++Count * 2 > _keys.Length)
                 {
                     Grow();
@@ -113,6 +129,111 @@ internal sealed class ReplicationOccupancy
     {
         Array.Clear(_keys);
         Count = 0;
+        _orderStale = true;
+    }
+
+    /// <summary>
+    /// The occupied cells' keys, ascending. Serial: called between index finishes, never while the map changes. The span is valid until the next call.
+    /// </summary>
+    public ReadOnlySpan<ulong> Ordered()
+    {
+        if (!_ordering || _orderStale)
+        {
+            RebuildOrder();
+        }
+        else if (_toggledCount > 0)
+        {
+            MergeToggled();
+        }
+
+        return new ReadOnlySpan<ulong>(_sorted, 0, _sortedCount);
+    }
+
+    private void Toggled(ulong key)
+    {
+        if (!_ordering || _orderStale)
+        {
+            return;
+        }
+
+        // Past the map's own size a merge costs no less than a rebuild, and the list would grow without bound while nobody asks for the order.
+        if (_toggledCount == _toggled.Length)
+        {
+            if (_toggledCount >= Math.Max(64, Count))
+            {
+                _orderStale = true;
+                _toggledCount = 0;
+                return;
+            }
+
+            Array.Resize(ref _toggled, _toggledCount * 2);
+        }
+
+        _toggled[_toggledCount++] = key;
+    }
+
+    private void RebuildOrder()
+    {
+        if (_sorted.Length < Count)
+        {
+            _sorted = new ulong[Math.Max(64, Count + (Count >> 1))];
+        }
+
+        var n = 0;
+        for (var i = 0; i < _keys.Length; i++)
+        {
+            if (_keys[i] != 0)
+            {
+                _sorted[n++] = _keys[i] - 1;
+            }
+        }
+
+        Array.Sort(_sorted, 0, n);
+        _sortedCount = n;
+        _toggledCount = 0;
+        _ordering = true;
+        _orderStale = false;
+    }
+
+    // One pass over the order and the noted cells, both ascending: a noted cell is in the order when it holds something now, whatever it held before.
+    private void MergeToggled()
+    {
+        Array.Sort(_toggled, 0, _toggledCount);
+        if (_sortedNext.Length < Count)
+        {
+            _sortedNext = new ulong[Math.Max(64, Count + (Count >> 1))];
+        }
+
+        var output = _sortedNext;
+        int i = 0, j = 0, n = 0;
+        while (i < _sortedCount || j < _toggledCount)
+        {
+            if (j == _toggledCount || (i < _sortedCount && _sorted[i] < _toggled[j]))
+            {
+                output[n++] = _sorted[i++];
+                continue;
+            }
+
+            var key = _toggled[j];
+            while (j < _toggledCount && _toggled[j] == key)
+            {
+                j++;
+            }
+
+            if (i < _sortedCount && _sorted[i] == key)
+            {
+                i++;
+            }
+
+            if (Get(key) != 0)
+            {
+                output[n++] = key;
+            }
+        }
+
+        (_sorted, _sortedNext) = (_sortedNext, _sorted);
+        _sortedCount = n;
+        _toggledCount = 0;
     }
 
     /// <summary>The cells whose counts differ between this map and <paramref name="other"/>, counted from both sides.</summary>

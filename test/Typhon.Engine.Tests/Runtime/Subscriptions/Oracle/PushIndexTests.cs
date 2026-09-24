@@ -377,4 +377,30 @@ class PushIndexTests : TestBase<PushIndexTests>
             Assert.That(push.IndexEntries, Is.EqualTo(entries), $"tick {i}: entries");
         }
     }
+
+    /// <summary>
+    /// A <c>World</c> fill over a grid of 2 048 × 2 048 cells holding a few hundred entities (10 § 12, 1.5.3): it visits the occupied cells only, so it
+    /// completes in one frame and no cell delivery ever meets an empty cell — where the dense walk needed a thousand frames of 4 096 cells.
+    /// </summary>
+    [Test]
+    public void AWorldFillVisitsOnlyOccupiedCells()
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 1531, [0, 60], nameof(PushIndexTests),
+            worldObserver: true, bigWorld: true, replicationCellM: 8);
+        oracle.Frames.DigestFrames = true;
+        for (var i = 0; i < 100; i++)
+        {
+            oracle.Step();
+        }
+
+        oracle.Quiesce();
+        oracle.AssertConverged("a World fill over a sparse fine grid");
+        Assert.Multiple(() =>
+        {
+            Assert.That(oracle.Frames.FramesToComplete(oracle.Sessions[0]), Is.EqualTo(1), "frames to VIEW_COMPLETE");
+            Assert.That(oracle.Push.EmptyCellsSkipped, Is.Zero, "a World delivery met an empty cell");
+            Assert.That(oracle.Push.WorldOrderMissing, Is.Zero, "a fill found no order taken for it");
+            Assert.That(oracle.Push.Occupancy.Count, Is.GreaterThan(100), "the fill had little to walk");
+        });
+    }
 }
