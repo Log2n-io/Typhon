@@ -199,7 +199,7 @@ function render(applier: FrameApplier, events: LogEntry[]): LogEntry {
  * vector of either kind has to be classified by whoever adds it instead of being silently swept into the wrong reader
  * — which is how `stream-engine` reached this glob and turned the whole suite red on an `undefined.bin`.
  */
-const CALL_LOG_VECTORS = ['stream-engine'];
+const CALL_LOG_VECTORS = ['stream-engine', 'stream-engine-3d'];
 
 describe('golden streams', () => {
   const names = goldenNames('stream-').filter((n) => !CALL_LOG_VECTORS.includes(n));

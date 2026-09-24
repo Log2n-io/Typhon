@@ -1,0 +1,85 @@
+{
+  "description": "The engine\u0027s ENTITIES encoder over a deep replication grid (a 2 km cube at c = 256 m, the deep implementation), as a TCP-framed stream (u32 length LE \u002B message, W31): a WELCOME carrying the catalog, then one TICK per tick of a driven track serving a 1 000 m sphere at the origin. 3D movers (pos3, vel3) beside 2D walkers on the plane z = 0 and a static archetype; the frames cover the fill (VIEW_COMPLETE), 3D motion segments, state records, leaves after enters in one frame, and a RESET refill. The expectation is the sequence of calls a decoder makes.",
+  "catalogHash": "4ab9914cf3677c6c",
+  "frames": [
+    {
+      "tick": 1,
+      "flags": 1,
+      "calls": [
+        "beginTick 1",
+        "beginEntities ProjFlyer",
+        "enter 50",
+        "enter 51",
+        "enter 52",
+        "enter 53",
+        "enter 54",
+        "beginEntities ProjCreature",
+        "enter 106",
+        "enter 107",
+        "enter 108",
+        "beginEntities ProjRock",
+        "enter 156",
+        "enter 157",
+        "endTick"
+      ]
+    },
+    {
+      "tick": 2,
+      "flags": 1,
+      "calls": [
+        "beginTick 2",
+        "beginEntities ProjFlyer",
+        "segment 52",
+        "segment 53",
+        "segment 54",
+        "endTick"
+      ]
+    },
+    {
+      "tick": 3,
+      "flags": 1,
+      "calls": [
+        "beginTick 3",
+        "beginEntities ProjFlyer",
+        "state 50 0x01",
+        "state 51 0x01",
+        "state 52 0x01",
+        "state 53 0x01",
+        "state 54 0x01",
+        "endTick"
+      ]
+    },
+    {
+      "tick": 4,
+      "flags": 1,
+      "calls": [
+        "beginTick 4",
+        "beginEntities ProjFlyer",
+        "enter 32",
+        "leave 53",
+        "leave 54",
+        "endTick"
+      ]
+    },
+    {
+      "tick": 5,
+      "flags": 3,
+      "calls": [
+        "beginTick 5",
+        "beginEntities ProjFlyer",
+        "enter 32",
+        "enter 50",
+        "enter 51",
+        "enter 52",
+        "beginEntities ProjCreature",
+        "enter 106",
+        "enter 107",
+        "enter 108",
+        "beginEntities ProjRock",
+        "enter 156",
+        "enter 157",
+        "endTick"
+      ]
+    }
+  ]
+}

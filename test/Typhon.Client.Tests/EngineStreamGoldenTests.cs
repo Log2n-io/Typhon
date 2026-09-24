@@ -64,6 +64,54 @@ public class EngineStreamGoldenTests
         });
     }
 
+    /// <summary>
+    /// <c>stream-engine-3d</c>: the engine's encoder over a deep grid (design/Subscriptions/10 § 9) — 3D movers beside 2D walkers on z = 0 and a static
+    /// archetype — read the same way.
+    /// </summary>
+    [Test]
+    public void TheDeepEngineStreamAppliesIntoAReplica()
+    {
+        var messages = Unframe(GoldenFiles.ReadBin("stream-engine-3d"));
+        var welcome = WelcomeMessage.Parse(messages[0]);
+        Assert.That(CatalogSerializer.HashBytes(welcome.CatalogJson), Is.EqualTo(welcome.CatalogHash));
+
+        var plan = CatalogPlan.Compile(CatalogSerializer.FromUtf8(welcome.CatalogJson));
+        var store = new WorldStore(plan);
+        var applier = new FrameApplier(store);
+        var sink = new RecordingSink();
+        foreach (var frame in messages.Skip(1))
+        {
+            applier.Apply(frame);
+            TickReader.Read(frame, plan, ref sink);
+        }
+
+        var expected = GoldenFiles.ReadJson("stream-engine-3d")!["frames"]!.AsArray();
+        var flyer = plan.ArchetypeByName("ProjFlyer");
+        var creature = plan.ArchetypeByName("ProjCreature");
+        var rock = plan.ArchetypeByName("ProjRock");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.Anomalies, Is.Zero);
+            Assert.That(sink.Frames, Is.EqualTo(expected.Select(f => f!["calls"]!.AsArray().Select(c => c!.GetValue<string>()).ToArray()).ToArray()));
+            Assert.That(flyer.Position.Dims, Is.EqualTo(3), "the flyer's position is pos3");
+            Assert.That(store.Archetypes[flyer.Idx].LiveCount, Is.EqualTo(4), "five flyers, two left, one entered");
+            Assert.That(store.Archetypes[creature.Idx].LiveCount, Is.EqualTo(3));
+            Assert.That(store.Archetypes[rock.Idx].LiveCount, Is.EqualTo(2));
+            Assert.That(store.Flags & TickFlags.Reset, Is.EqualTo(TickFlags.Reset), "the last frame is the profile switch");
+
+            // A flyer that jumped carries its altitude: the third axis survived the engine, the wire and the decoder.
+            var archetype = store.Archetypes[flyer.Idx];
+            var altitudes = new List<double>();
+            for (var i = 0; i < archetype.LiveCount; i++)
+            {
+                altitudes.Add(archetype.HeadPosition(archetype.Live[i])[2]);
+            }
+
+            Assert.That(altitudes, Has.Some.EqualTo(-200d).Within(0.01d), "a jumped flyer is at z = −200");
+        });
+    }
+
     /// <summary>Splits a TCP stream into its messages: <c>u32 len</c> little-endian, excluding itself (03 § 10, W31).</summary>
     private static List<byte[]> Unframe(byte[] stream)
     {
