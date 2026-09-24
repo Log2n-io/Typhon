@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-09-23 |
+| Last Updated | 2026-09-25 |
 | Domain | Engine-owned replication: per-entity replication state, its storage, and what bounds its cost |
 
 > Invariants that keep replication cost tied to what changed, keep what a session holds exactly what its geometry names, and keep per-entity
@@ -522,6 +522,10 @@
   invariant skip = union: a session's next frame after missed ticks folds every event of the missed ticks from the push log — an entity's first old
     position, its last new one, and the union of what changed — while every missed tick is still in the log; otherwise the frame is a RESET that
     re-delivers the view cell by cell
+  invariant a session's pending owner mask (SUB-11), the lastSeq its last SELF carried and the tick its acknowledgements were sent up to advance only
+    with a published frame, like its geometry: a skipped frame leaves all three as they were, so its next frame carries the union of the owner groups
+    changed meanwhile and every rejection the acknowledgement history still holds. They record WHICH groups and WHICH ticks, never values — the values
+    are read, current, from the owner entry when SELF is written — so they are not the per-session value memory the next line forbids
   never commit a session's geometry before the frame describing it is published — the commit is the LAST step of assembling a frame, after the encode and
     after the hand-off's release
   never encode a delta, a run-length against a previous frame, or a "changed since you last acked" set: a session that missed K frames must converge on
@@ -529,7 +533,8 @@
   never let a skip — no free frame slot, an exhausted frame pool, a frame above the ceiling, a lagging acknowledgement — be distinguishable from a tick
     that produced nothing: all of them leave the session untouched and are counted
   scope: FrameAssembler.NoteSkip, PushReplication.Commit, PushReplication.NoteNotPublished, PushReplication.CollectLog, PushReplication.EmitLog,
-    SessionFrameState.PendingReset, SessionSendState.TryBeginFrame, SessionSendState.AbandonFrame, SessionSendState.AbandonIdleFrame
+    SessionFrameState.PendingReset, SessionSendState.TryBeginFrame, SessionSendState.AbandonFrame, SessionSendState.AbandonIdleFrame,
+    FrameAssembler.CommitSelf, AckHistory.Collect
   on_violation: the session diverges PERMANENTLY and in silence. Geometry committed for a frame that was never sent makes the session believe its client
     holds entities it was never told about, so no enter is ever sent for them, and leaves are sent for entities the client never had. There is no
     retransmission to fall back on, because there is no per-session value memory to retransmit from. It is the same failure SUB-02's "suppress publish
@@ -545,6 +550,34 @@
     (rate classes replay the log by design) and PushOracleTests.AFarFlushMetFirstAsASecondaryReachesACaughtUpSession (a far flush carried by catch-up).
     Falsifiability is proved by FrameAssemblerTests.ASessionCommittedOnASkippedTickIsDetected, which turns on the push path's own
     `CommitOnSkipForTest` — the one move this rule forbids, applied to the production path — and requires the verifier's assertion to reject it.
+    The owner-state clause: SelfBlockTests.OwnerGroupsChangedWhileSkippedArriveAsTheirUnion (groups changed on skipped ticks arrive together, current;
+    red when a skip clears the pending mask) and SelfBlockTests.LastSeqAndRejectionsReachTheClient (a rejection on a skipped tick still arrives).
+
+### SUB-11: Owner state reaches its controlling session only, every group after a Control change, and the union after a skip `[fatal][silent]`
+  invariant ∀ session s controlling entity e (Control): s's next published frame after a Control change, a RESET or its first frame naming e carries a
+    SELF with every owner group of e; otherwise a SELF carries exactly the owner groups of e that changed since s's last published frame, read current
+    from e's owner entry — and a frame with no changed group and no new lastSeq carries no SELF
+  invariant owner values reach no session that does not control e, and never travel in ENTITIES: the owner section has its own bit space (03 W17), and
+    SELF is the only block whose writer reads the owner entry — the projection compares it and migration copies it, neither sends it
+  invariant a Control change marks every owner group pending, whatever the next frame finds: a flip A → B → A between two published frames sends A's every
+    group, since A's changes during the B ticks were routed to nobody
+  invariant ∀ session s controlling nothing, or whose entity replication cannot locate: a SELF, when one is due, names netId 0 (W17′) — an acknowledgement
+    only — and s is told once, with netId 0, that the entity its last SELF named is no longer its
+  invariant an owner change is routed to its sessions by the projection (SelfTracker.Notice) through a reverse Control map rebuilt only when a controlled
+    entity changed (SessionTable.ControlVersion): the per-tick cost follows owner changes, not sessions (SUB-13)
+  note a change needs a push like any replicated write (ADR-067): the projection compares owner groups only for pushed entities
+  scope: SelfTracker.Notice, SelfTracker.Refresh, SelfTracker.Clear, FrameAssembler.PrepareSelf, FrameAssembler.WriteSelf, FrameAssembler.CommitSelf,
+    EntitiesEncoder.WriteSelf, SessionTable.SetControlled, SessionTable.ControlVersion, ProjectionPass.ProjectBlock
+  on_violation: silent either way. A missing group leaves a client showing an empty wallet after possessing a character until the value happens to
+    change; a group sent to the wrong session shows one player another's private state — credits, inventory, cooldowns.
+  rationale: private state belongs to one entity and one controller; routing its changes by push keeps SELF's cost with the changes, and the pending mask
+    gives a skipped session the union the push log gives its entities.
+  verified: SelfBlockTests.APrivateFieldReachesItsOwnerAndNoOneElse (every group first, then only the changed one; the session beside it never sees a
+    SELF), SelfBlockTests.AControlChangeSendsEveryOwnerGroupOnceAndAReleaseSaysSo (every group of the new entity once though none changes, then netId 0
+    once on release), SelfBlockTests.OwnerGroupsChangedWhileSkippedArriveAsTheirUnion, SelfBlockTests.AControlFlipBetweenTwoFramesStillSendsTheOwnerGroups
+    (red when the frame only compares entities), SelfBlockTests.TwoSessionsControllingOneEntityBothReceiveItsChanges (the reverse map's chain),
+    SelfBlockTests.ADestroyedControlledEntityIsReportedGoneOnce, SelfBlockTests.AResetResendsEveryOwnerGroup,
+    SelfBlockTests.AControlledEntityOutsideTheSessionsGeometryStillSendsItsOwnerState.
 
 ---
 

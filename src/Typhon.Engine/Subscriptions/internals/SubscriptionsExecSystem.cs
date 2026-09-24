@@ -235,6 +235,9 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 
         push.PrepareBlocks(tick);
 
+        // Owner routing (11 § 2.2): the reverse Control map the projection's chunks read, rebuilt only when a session's controlled entity changed.
+        subs.Self?.Refresh(subs.Sessions);
+
         var t1 = timed ? Stopwatch.GetTimestamp() : 0L;
 
         // Entries the fence's migration step could not place, because their destination cluster had no block when the entity arrived in it. AFTER the blocks

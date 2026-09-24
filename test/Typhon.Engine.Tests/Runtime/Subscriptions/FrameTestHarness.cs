@@ -92,6 +92,24 @@ sealed unsafe class FrameHarness : IDisposable
         return sessions;
     }
 
+    /// <summary>The netId replication gave <paramref name="entity"/>, located as a frame locates a controlled entity; 0 when it has none.</summary>
+    /// <param name="entity">The entity.</param>
+    /// <returns>The netId.</returns>
+    public uint NetIdOf(EntityId entity)
+    {
+        using var epoch = EpochGuard.Enter(Engine.EpochManager);
+        var locator = new BoundViewpoint(Engine) { Push = Subscriptions.Push };
+        try
+        {
+            return locator.TryLocate(entity, out var clusters, out var chunk, out var slot)
+                && Subscriptions.Push.TryReplicaAt(clusters, chunk, slot, entity, out _, out _, out var netId) ? netId : 0u;
+        }
+        finally
+        {
+            locator.Dispose();
+        }
+    }
+
     /// <summary>The client-side replica a session's frames have been applied to.</summary>
     /// <param name="session">The session.</param>
     /// <returns>The replica.</returns>
@@ -131,6 +149,29 @@ sealed unsafe class FrameHarness : IDisposable
     /// </summary>
     public bool DrainNetIds { get; set; }
 
+    /// <summary>Whether <see cref="RunTick"/> drains the ingress first, as Engine-Pre does: commands framed before it become this tick's.</summary>
+    public bool RunIngress { get; set; }
+
+    /// <summary>Called after the ingress drain of each tick, where an application system would apply (or reject) the tick's commands.</summary>
+    public Action<long> AfterIngress { get; set; }
+
+    private readonly SubscriptionsContext _ingressContext = new();
+
+    /// <summary>Runs one tick's ingress drain, exactly as the Engine-Pre system dispatches it.</summary>
+    /// <param name="tick">The tick.</param>
+    public void DrainIngress(long tick)
+    {
+        var ingress = Subscriptions.Ingress;
+        _ingressContext.Reset(tick, 1);
+        var chunks = ingress.BeginTick(_ingressContext);
+        for (var chunk = 0; chunk < chunks; chunk++)
+        {
+            ingress.DrainChunk(chunk, chunks);
+        }
+
+        Assert.That(ingress.DrainFaults, Is.Zero, "the ingress drain threw");
+    }
+
     /// <summary>Runs one whole tick of the track: blocks, projection, the push index, frames, then the durability gate.</summary>
     /// <param name="tick">The tick number, which must advance.</param>
     /// <param name="workers">Worker-pool width for the frame stage; the projection runs as one chunk.</param>
@@ -139,6 +180,12 @@ sealed unsafe class FrameHarness : IDisposable
     {
         Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
         Tick = tick;
+        if (RunIngress)
+        {
+            DrainIngress(tick);
+            AfterIngress?.Invoke(tick);
+        }
+
         if (RunFence)
         {
             Engine.WriteTickFence(tick);
@@ -505,6 +552,7 @@ sealed unsafe class FrameHarness : IDisposable
         // The runtime's order (SubscriptionsProjectExecSystem.BlocksStep): the push set and a block for every cluster in it, before the parked drain, so an
         // entity that migrated into a cluster with no block lands in one this tick.
         push.PrepareBlocks(stamp);
+        Subscriptions.Self?.Refresh(Sessions);
         for (var a = 0; a < states.Length; a++)
         {
             states[a].DrainParkedEntries();
@@ -731,6 +779,17 @@ sealed class FrameLog : ITickSink
     /// <summary>The <c>DEBUG</c> sub-blocks, in stream order, with their payloads.</summary>
     public List<(byte SubType, byte[] Payload)> Debugs { get; } = [];
 
+    /// <summary>The <c>SELF</c> blocks: the archetype (null for none, W17′), the netId, <c>lastSeq</c> and the owner mask.</summary>
+    public List<(string Archetype, uint NetId, ushort LastSeq, byte Mask)> Selves { get; } = [];
+
+    /// <summary>The owner field values the <c>SELF</c> blocks carried, by field name (the last one wins).</summary>
+    public Dictionary<string, double> SelfNumbers { get; } = [];
+
+    /// <summary>The <c>ACKS</c> records, in stream order.</summary>
+    public List<(ushort Seq, byte Reason)> Acks { get; } = [];
+
+    private bool _inSelf;
+
     /// <summary>The frame's tick.</summary>
     public uint TickNumber { get; private set; }
 
@@ -757,6 +816,7 @@ sealed class FrameLog : ITickSink
     /// <inheritdoc />
     public void BeginEntities(ArchetypePlan archetype)
     {
+        _inSelf = false;
         Blocks.Add(archetype.Name);
         Calls.Add($"beginEntities {archetype.Name}");
     }
@@ -790,13 +850,27 @@ sealed class FrameLog : ITickSink
     }
 
     /// <inheritdoc />
-    public void Event(MessagePlan type) => Calls.Add($"event {type.Name}");
+    public void Event(MessagePlan type)
+    {
+        _inSelf = false;
+        Calls.Add($"event {type.Name}");
+    }
 
     /// <inheritdoc />
-    public void Self(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask) => Calls.Add($"self {netId}");
+    public void Self(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask)
+    {
+        _inSelf = true;
+        Selves.Add((archetype?.Name, netId, lastSeq, ownerMask));
+        Calls.Add($"self {netId}");
+    }
 
     /// <inheritdoc />
-    public void Ack(ushort seq, byte reason) => Calls.Add($"ack {seq}");
+    public void Ack(ushort seq, byte reason)
+    {
+        _inSelf = false;
+        Acks.Add((seq, reason));
+        Calls.Add($"ack {seq}");
+    }
 
     /// <inheritdoc />
     public void Source(ushort requestId, byte status, ushort code) => Calls.Add($"source {requestId}");
@@ -827,7 +901,13 @@ sealed class FrameLog : ITickSink
     public void EndTick() => Calls.Add("endTick");
 
     /// <inheritdoc />
-    public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) { }
+    public void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
+    {
+        if (_inSelf)
+        {
+            SelfNumbers[field.Name] = components[0];
+        }
+    }
 
     /// <inheritdoc />
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) { }
@@ -881,7 +961,7 @@ sealed class FrameLog : ITickSink
 
         public void EndTick() => _log.EndTick();
 
-        public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) { }
+        public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => _log.Number(field, components);
 
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) { }
 

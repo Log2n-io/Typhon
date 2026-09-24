@@ -964,13 +964,14 @@ internal abstract unsafe partial class PushReplication
     }
 
     /// <summary>
-    /// The netId and v̂ of the entity in <paramref name="clusters"/>' chunk <paramref name="chunk"/>, slot <paramref name="slot"/> — false when its archetype
-    /// is not replicated, its cluster has no block, or the slot holds no identity for it (09 § 11: an event's entity reference).
+    /// The plan index, replication block and netId of the entity in <paramref name="clusters"/>' chunk <paramref name="chunk"/>, slot
+    /// <paramref name="slot"/> — what a <c>SELF</c> reads its owner entry through (11 § 2.4); false as <see cref="TryEntityAt"/> is.
     /// </summary>
-    public bool TryEntityAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out uint netId, out float x, out float y, out float z)
+    public bool TryReplicaAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out int archetype, out nint block, out uint netId)
     {
+        archetype = -1;
+        block = 0;
         netId = 0;
-        x = y = z = 0f;
         for (var a = 0; a < _states.Length; a++)
         {
             var state = _states[a];
@@ -979,25 +980,43 @@ internal abstract unsafe partial class PushReplication
                 continue;
             }
 
-            var block = BlockOf(a, chunk);
-            if (block == null || (uint)slot >= 64)
+            var header = BlockOf(a, chunk);
+            if (header == null || (uint)slot >= 64)
             {
                 return false;
             }
 
             var layout = state.Layout;
-            var hot = (ReplicationHotEntry*)((byte*)block + layout.HotOffset + (slot * layout.HotStride));
+            var hot = (ReplicationHotEntry*)((byte*)header + layout.HotOffset + (slot * layout.HotStride));
             if (hot->Entity != entity || hot->NetId == NetIdAllocator.NoNetId)
             {
                 return false;
             }
 
+            archetype = a;
+            block = (nint)header;
             netId = hot->NetId;
-            Decode(a, (byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + PositionOffset(a), out x, out y, out z);
             return true;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// The netId and v̂ of the entity in <paramref name="clusters"/>' chunk <paramref name="chunk"/>, slot <paramref name="slot"/> — false when its archetype
+    /// is not replicated, its cluster has no block, or the slot holds no identity for it (09 § 11: an event's entity reference).
+    /// </summary>
+    public bool TryEntityAt(ArchetypeClusterState clusters, int chunk, int slot, EntityId entity, out uint netId, out float x, out float y, out float z)
+    {
+        x = y = z = 0f;
+        if (!TryReplicaAt(clusters, chunk, slot, entity, out var archetype, out var block, out netId))
+        {
+            return false;
+        }
+
+        var layout = _states[archetype].Layout;
+        Decode(archetype, (byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + PositionOffset(archetype), out x, out y, out z);
+        return true;
     }
 
     /// <summary>This tick's departed entities, every replicated archetype's (09 § 11, Q7). Serial, in the frame prologue.</summary>

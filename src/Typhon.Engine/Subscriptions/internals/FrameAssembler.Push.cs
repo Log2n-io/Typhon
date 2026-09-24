@@ -89,6 +89,9 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
+        // This tick's rejections, sorted by session into the acknowledgement history (11 § 2.3).
+        RecordAcks();
+
         // Overload (09 § 10): while the tick is stretched, every profile is served half as often (up to every fourth tick) and every Sphere session's LOD
         // level rises a step (the budget loop adds it); the enter budget shrinks by the multiplier. Stateless: it follows the multiplier the tick started
         // with, and the detector's hold is what brings it back.
@@ -100,18 +103,15 @@ internal sealed unsafe partial class FrameAssembler
         {
             if (!Profiles.TryGetProfile(session, out var profile, out var world, out var divisor))
             {
-                // No profile, no view: but a broadcast or an EmitTo still reaches it (09 § 11), in a frame of events alone.
-                if (Events != null)
+                // No profile, no view: but a broadcast or an EmitTo still reaches it (09 § 11), and so do its SELF and its acknowledgements (11 § 2), in
+                // a frame of those alone.
+                if (_eventSessionCount == _eventSessions.Length)
                 {
-                    if (_eventSessionCount == _eventSessions.Length)
-                    {
-                        Array.Resize(ref _eventSessions, Math.Max(16, _eventSessionCount * 2));
-                    }
-
-                    _eventSessions[_eventSessionCount++] = session;
-                    PrepareSession(session);
+                    Array.Resize(ref _eventSessions, Math.Max(16, _eventSessionCount * 2));
                 }
 
+                _eventSessions[_eventSessionCount++] = session;
+                PrepareSession(session);
                 continue;
             }
 
@@ -320,15 +320,26 @@ internal sealed unsafe partial class FrameAssembler
             Interlocked.Add(ref BoundLost, lost);
         }
 
-        while (true)
+        if (_eventSessionCount > 0)
         {
-            var i = Interlocked.Increment(ref _eventCursor) - 1;
-            if (i >= _eventSessionCount)
+            var locator = new BoundViewpoint(Engine);
+            try
             {
-                break;
-            }
+                while (true)
+                {
+                    var i = Interlocked.Increment(ref _eventCursor) - 1;
+                    if (i >= _eventSessionCount)
+                    {
+                        break;
+                    }
 
-            AssembleEventsOnly(_eventSessions[i], scratch, ref counters);
+                    AssembleEventsOnly(_eventSessions[i], scratch, ref locator, ref counters);
+                }
+            }
+            finally
+            {
+                locator.Dispose();
+            }
         }
 
         Interlocked.Add(ref Push.Enters, enters);
@@ -389,7 +400,7 @@ internal sealed unsafe partial class FrameAssembler
     /// A session bound to no profile: a frame of the events routed to it — broadcasts and its own <c>EmitTo</c> — since its last one, and nothing else
     /// (09 § 11). No frame when none is owed; a frame not sent leaves the events owed, caught up from the log.
     /// </summary>
-    private void AssembleEventsOnly(SessionId session, FrameWorkerScratch scratch, ref FrameCounters counters)
+    private void AssembleEventsOnly(SessionId session, FrameWorkerScratch scratch, ref BoundViewpoint locator, ref FrameCounters counters)
     {
         var state = StateOf(session);
         var slot = session.Slot;
@@ -399,19 +410,27 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         var events = Events;
-        var last = _eventsLastGeneration[slot] == session.Generation ? _eventsLastTick[slot] : 0u;
-        var nowhere = default(NoEventGeometry);
-        events.Collect(scratch.EventPicks, last, (uint)_tick, EntityId.Null, session, ref nowhere, out var count, out var bytes, out var lost);
-        if (bytes > _maxFrameBytes / 2)
+        var count = 0;
+        var bytes = 0;
+        var lost = 0L;
+        if (events != null)
         {
-            EventHub.Shed(scratch.EventPicks, ref count, ref bytes, ref lost);
+            var last = _eventsLastGeneration[slot] == session.Generation ? _eventsLastTick[slot] : 0u;
+            var nowhere = default(NoEventGeometry);
+            events.Collect(scratch.EventPicks, last, (uint)_tick, EntityId.Null, session, ref nowhere, out count, out bytes, out lost);
+            if (bytes > _maxFrameBytes / 2)
+            {
+                EventHub.Shed(scratch.EventPicks, ref count, ref bytes, ref lost);
+            }
         }
 
         var reset = state.PendingReset;
-        if (count == 0 && !reset)
+        PrepareSelf(session, state, reset, scratch, ref locator, out var self);
+        if (count == 0 && !reset && !self.Write && self.Acks == 0)
         {
             _eventsLastTick[slot] = (uint)_tick;
             _eventsLastGeneration[slot] = session.Generation;
+            CommitSelf(session, state, in self, ref counters);
             return;
         }
 
@@ -423,9 +442,10 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        var buffer = scratch.Bytes(64 + bytes);
+        var buffer = scratch.Bytes(64 + bytes + SelfBound(in self));
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, reset ? TickFlags.Reset : TickFlags.None);
+        WriteSelf(ref writer, in self, scratch);
         if (count > 0)
         {
             events.Write(ref writer, scratch.EventPicks, count, lost);
@@ -444,7 +464,8 @@ internal sealed unsafe partial class FrameAssembler
         ReturnIfValid(previous);
         buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
         send->PublishFrame(sequence, block, length, _tick);
-        events.NoteDelivered(count, lost);
+        events?.NoteDelivered(count, lost);
+        CommitSelf(session, state, in self, ref counters);
         _eventsLastTick[slot] = (uint)_tick;
         _eventsLastGeneration[slot] = session.Generation;
         state.PendingReset = false;
@@ -811,7 +832,10 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         var debugWrite = debugGrid || debugGeometry > 0;
-        if (records == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite)
+
+        // SELF and ACKS (11 § 2): the controlled entity's owner groups changed since the last published frame, lastSeq, and the rejections since then.
+        PrepareSelf(session, state, reset, scratch, ref follow, out var self);
+        if (records == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite && !self.Write && self.Acks == 0)
         {
             // Nothing to say. The anchor may still have moved and a cell with nothing in it may have been delivered; neither changes what the client holds,
             // so the pending state is committed even though no frame is.
@@ -819,6 +843,7 @@ internal sealed unsafe partial class FrameAssembler
             ReturnIfValid(recycled);
             NoteSkip(state, counted: false);
             Push.Commit(session);
+            CommitSelf(session, state, in self, ref counters);
             if (aggDue)
             {
                 CommitAggregate(session, aggAnchor, _pushRegion[index] ? scratch : null);
@@ -829,7 +854,8 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0) + (eventCount > 0 ? eventBytes + 16 : 0)
-            + (aggWrite ? 24 + (aggRows * 5 * (1 + aggCounts.ArchetypeCount)) : 0) + (debugWrite ? 16 + DebugGrid.MaxBytes + debugGeometry : 0);
+            + (aggWrite ? 24 + (aggRows * 5 * (1 + aggCounts.ArchetypeCount)) : 0) + (debugWrite ? 16 + DebugGrid.MaxBytes + debugGeometry : 0)
+            + SelfBound(in self);
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
         EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags);
@@ -845,6 +871,7 @@ internal sealed unsafe partial class FrameAssembler
                 scratch.List(a, FrameListKind.State), scratch.List(a, FrameListKind.Leave));
         }
 
+        WriteSelf(ref writer, in self, scratch);
         if (eventCount > 0)
         {
             events.Write(ref writer, scratch.EventPicks, eventCount, eventsLost);
@@ -902,8 +929,9 @@ internal sealed unsafe partial class FrameAssembler
             events.NoteDelivered(eventCount, eventsLost);
         }
 
-        // COMMIT — the anchor and the delivered cells move with the frame that describes them.
+        // COMMIT — the anchor and the delivered cells move with the frame that describes them, and so do the owner state and the acknowledgements.
         Push.Commit(session);
+        CommitSelf(session, state, in self, ref counters);
         if (aggDue)
         {
             CommitAggregate(session, aggAnchor, _pushRegion[index] ? scratch : null);

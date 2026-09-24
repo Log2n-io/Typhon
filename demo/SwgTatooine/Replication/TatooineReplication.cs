@@ -107,10 +107,16 @@ public static class TatooineReplication
             .Motion(CityNpc.Bounds, m => m.Tolerance(0.05).Teleport(MaxSpeedMps))
             .Field(CityNpc.Ai, x => x.Mode, Codec.U8, name: "mode"));
 
+        // Everyone sees a player's health as an 8-bit bar; the player alone sees the exact number and its mission waypoint, in SELF (11 § 2) — SWG's own
+        // HAM display and quest marker.
         subs.Archetype<Player>(a => a
             .Motion(Player.Bounds, m => m.Teleport(MaxSpeedMps))
             .Field(Player.State, s => s.Activity, Codec.U8, name: "activity")
-            .Fraction(Player.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals"));
+            .Fraction(Player.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals")
+            .Owner(o => o
+                .Field(Player.Vitals, v => v.Health, Codec.VarUInt, name: "health")
+                .Field(Player.State, s => s.MissionX, Codec.F32, name: "missionX", group: "mission")
+                .Field(Player.State, s => s.MissionZ, Codec.F32, name: "missionZ", group: "mission")));
 
         subs.Archetype<CreatureLair>(a => a
             .Position(CreatureLair.Bounds)

@@ -163,6 +163,9 @@ internal static unsafe class ProjectionPass
                     EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId, leases, hot->Entity);
                 }
 
+                // A controlled entity that leaves is news to its session: every owner group pending, so its next frame fails to locate it and says netId 0.
+                state.Self?.Notice(hot->Entity, -1);
+
                 leases.Release(worker, hot->NetId);
                 released++;
             }
@@ -197,6 +200,9 @@ internal static unsafe class ProjectionPass
                     {
                         EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId, leases, hot->Entity);
                     }
+
+                    // A controlled entity that leaves is news to its session: every owner group pending, so its next frame fails to locate it and says netId 0.
+                    state.Self?.Notice(hot->Entity, -1);
 
                     leases.Release(worker, hot->NetId);
                     released++;
@@ -422,6 +428,11 @@ internal static unsafe class ProjectionPass
                 var ownerChanged = EncodeAndCompare(plan.OwnerGroups, ownerFields, fields.Length, codes, slot, pack, ownerScratch,
                     blockBytes + layout.OwnerOffset + (slot * layout.OwnerEntrySize), ownerLength, ownerOffset, hot, tick, initialize, stampTicks: false);
                 hot->Flags |= (ushort)(ownerChanged << OwnerChangedMaskShift);
+                if (ownerChanged != 0)
+                {
+                    // To the sessions that control this entity, as a pending mask their next published frame's SELF carries (11 § 2.2).
+                    state.Self?.Notice(hot->Entity, ownerChanged);
+                }
             }
 
             if (push != null)

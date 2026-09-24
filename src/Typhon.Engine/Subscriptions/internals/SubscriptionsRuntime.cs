@@ -151,6 +151,28 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // The push path (ADR-067): every archetype some profile observes is served by it.
             var observed = Profiles.ObservedArchetypes;
             var automatic = Profiles.AutomaticArchetypes;
+
+            // An archetype with owner fields has replication state whether or not a profile observes it (11 § 2.4, Q5): owner data follows Control, not
+            // geometry, and a controlled entity with no state would have nowhere to be compared. No session's archetype set names it, so it sends no record.
+            for (var a = 0; a < Plans.Length; a++)
+            {
+                if (Plans[a].OwnerFields.Length > 0)
+                {
+                    if (Plans[a].Position == null)
+                    {
+                        throw new NotSupportedException(
+                            $"Archetype '{Plans[a].Name}' declares owner fields but no position. Owner state is served through the push path, which locates "
+                            + "a controlled entity by its position (11 § 2.4); owner data with no place in the world is a shared or keyed source's, which Phase 4 "
+                            + "builds. Declare a Position or Motion, or move the fields to the positioned entity the session controls.");
+                    }
+
+                    observed[a] = true;
+                    Self ??= new SelfTracker(Options.MaxSessions);
+                    _replicationStates[a].Self = Self;
+                }
+            }
+
+            _frames.Self = Self;
             if (Array.IndexOf(automatic, true) >= 0 && !Options.AllowAutomaticPushDetection)
             {
                 throw new NotSupportedException(
@@ -445,6 +467,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     /// <summary>The push path, or <see langword="null"/> when no profile observes anything.</summary>
     internal PushReplication Push { get; private set; }
+
+    /// <summary>The owner routing (11 § 2.2), when an archetype declares owner fields; <see langword="null"/> otherwise.</summary>
+    internal SelfTracker Self { get; private set; }
 
     /// <summary>The replication grid resolved at <c>Start</c>, or <see langword="null"/> when no profile observes anything.</summary>
     internal ReplicationGrid Grid { get; private set; }

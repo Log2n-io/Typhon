@@ -312,11 +312,16 @@ internal sealed class CommandTypeBuffers
             }
         }
 
-        Acks = new CommandAckLog(Math.Clamp(maxSessions, 64, 16384));
+        Acks = new CommandAckLog(AckCapacity(maxSessions));
     }
 
     /// <summary>This tick's rejections.</summary>
     public CommandAckLog Acks { get; }
+
+    /// <summary>The most rejections one tick can record: the ack log's ceiling, which the acknowledgement history is sized to.</summary>
+    /// <param name="maxSessions">The session table's width.</param>
+    /// <returns>The capacity.</returns>
+    public static int AckCapacity(int maxSessions) => Math.Clamp(maxSessions, 64, 16384);
 
     /// <summary>The tick the buffers currently describe.</summary>
     public long Tick { get; private set; } = long.MinValue;

@@ -211,6 +211,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>The push path, when this archetype is push-served; <see langword="null"/> otherwise.</summary>
     internal PushReplication Push;
 
+    /// <summary>Where owner-group changes are routed to their controlling sessions (11 § 2.2); set only when the archetype declares owner fields.</summary>
+    internal SelfTracker Self;
+
     /// <summary>
     /// Every block by chunk id. A push archetype has a block for every live cluster and looks one up per pushed cluster per tick and per
     /// cluster a sweep reaches, so the directory's hash probe is replaced by an index. Written only by attach and release, which are serial.

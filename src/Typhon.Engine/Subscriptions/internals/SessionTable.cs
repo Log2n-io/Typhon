@@ -1112,6 +1112,14 @@ internal sealed unsafe class SessionTable : IDisposable
         }
     }
 
+    private int _controlVersion;
+
+    /// <summary>
+    /// Moves whenever a session's controlled entity may have changed — a <see cref="SetControlled"/> that changed it, or a slot recycled — so the owner
+    /// routing (<see cref="SelfTracker"/>) rebuilds its reverse map only then.
+    /// </summary>
+    public int ControlVersion => Volatile.Read(ref _controlVersion);
+
     /// <summary>Binds a session to the entity it controls. Tick side, from the request log.</summary>
     /// <param name="session">The identity.</param>
     /// <param name="entity">The entity, or <see cref="EntityId.Null"/> to release.</param>
@@ -1130,7 +1138,12 @@ internal sealed unsafe class SessionTable : IDisposable
                 return false;
             }
 
-            row->Controlled = entity;
+            if (row->Controlled != entity)
+            {
+                row->Controlled = entity;
+                Interlocked.Increment(ref _controlVersion);
+            }
+
             return true;
         }
         finally
@@ -1286,7 +1299,12 @@ internal sealed unsafe class SessionTable : IDisposable
         _appData[slot] = null;
         _declaredLimits[slot] = null;
 
-        row->Controlled = EntityId.Null;
+        if (!row->Controlled.IsNull)
+        {
+            row->Controlled = EntityId.Null;
+            Interlocked.Increment(ref _controlVersion);
+        }
+
         Volatile.Write(ref row->State, (int)SessionSlotState.Free);
 
         Push(new SessionId((ushort)slot, generation));
