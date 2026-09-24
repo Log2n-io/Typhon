@@ -34,7 +34,7 @@ class ClientRegionCommandTests : TestBase<ClientRegionCommandTests>
         private readonly DatabaseEngine _engine;
         private long _tick;
 
-        public Harness(DatabaseEngine engine)
+        public Harness(DatabaseEngine engine, Action<SubscriptionsRegistry> declare = null, bool regionCodecFromGrid = false)
         {
             _engine = engine;
             Registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "ClientRegionCommandTests" });
@@ -45,13 +45,21 @@ class ClientRegionCommandTests : TestBase<ClientRegionCommandTests>
             Subs = new SubscriptionsRegistry(options);
             Subs.Sessions.Kinds("god");
             Subs.Sessions.Admit = static (in AdmissionRequest _) => Admission.Accept(SessionRole.Spectator);
-            ProjectionTestSchema.DeclareCreature(Subs);
+            if (declare != null)
+            {
+                declare(Subs);
+            }
+            else
+            {
+                ProjectionTestSchema.DeclareCreature(Subs);
 
-            // The catalog lists ClientRegion only when a profile declares the observer that reads it (W27), so the profile is what turns the built-in on.
-            Subs.Profile("god", p => p.ClientRegion(MaxEdgeM).Of<ProjCreature>());
+                // The catalog lists ClientRegion only when a profile declares the observer that reads it (W27), so the profile turns the built-in on.
+                Subs.Profile("god", p => p.ClientRegion(MaxEdgeM).Of<ProjCreature>());
+            }
 
             var plans = ProjectionCompiler.Compile(Subs, engine, ProjectionTestSchema.TickPeriodSeconds, largestTickMultiplier: 1);
-            var export = CatalogBuilder.Build(Subs, plans, CatalogBuilder.DefaultAppName, appRevision: 0, tickPeriodUs: 10_000, systemNames: []);
+            var export = CatalogBuilder.Build(Subs, plans, CatalogBuilder.DefaultAppName, appRevision: 0, tickPeriodUs: 10_000, systemNames: [],
+                regionCodecFromGrid ? engine.SpatialGrid.Config : null);
             Plan = CatalogPlan.Compile(export.Canonical);
 
             SessionTable = new SessionTable("Sessions", Registry.Runtime, Allocator, options, Subs.Sessions.SessionEvents);
@@ -292,8 +300,8 @@ class ClientRegionCommandTests : TestBase<ClientRegionCommandTests>
         {
             minX = Math.Min(minX, region.Vertices[i].X);
             maxX = Math.Max(maxX, region.Vertices[i].X);
-            minZ = Math.Min(minZ, region.Vertices[i].Z);
-            maxZ = Math.Max(maxZ, region.Vertices[i].Z);
+            minZ = Math.Min(minZ, region.Vertices[i].Y);
+            maxZ = Math.Max(maxZ, region.Vertices[i].Y);
         }
 
         Assert.Multiple(() =>

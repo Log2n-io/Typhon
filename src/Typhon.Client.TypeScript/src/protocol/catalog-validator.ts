@@ -312,9 +312,10 @@ function hasClientRegionShape(cmd: CatalogCommand): boolean {
     cmd.rate?.perSec === 5 &&
     cmd.rate.burst === 5 &&
     vertices?.t === 'list' &&
-    vertices.minCount === 3 &&
+    // A flat world's region is a polygon (pos2, 3–16 points), a deep world's a polyhedron (pos3, 4–16).
+    ((vertices.of?.t === 'pos2' && vertices.minCount === 3) ||
+      (vertices.of?.t === 'pos3' && vertices.minCount === 4)) &&
     vertices.maxCount === 16 &&
-    vertices.of?.t === 'pos2' &&
     field(BuiltInCommand.regionAltitudeField)?.t === 'f16' &&
     field(BuiltInCommand.regionBudgetField)?.t === 'u16' &&
     cmd.fields.every((f) => f.group === undefined && f.onEnter !== true && f.enum === undefined)

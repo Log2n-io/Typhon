@@ -200,6 +200,7 @@ export {
   createClientRegion,
   REGION_MAX_VERTICES,
   REGION_MIN_VERTICES,
+  REGION_MIN_VERTICES_3D,
   REGION_RATE,
   RegionSender,
   type RegionOptions,

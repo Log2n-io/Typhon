@@ -19,8 +19,16 @@ public static class BuiltInCommands
     /// <summary>The reserved index of <see cref="SubscribeRequest"/>.</summary>
     public const int SubscribeRequestIdx = 1;
 
-    /// <summary>The fewest footprint vertices a region may carry.</summary>
+    /// <summary>The fewest vertices a flat world's region may carry: a triangle.</summary>
     public const int MinRegionVertices = 3;
+
+    /// <summary>The fewest vertices a deep world's region may carry: a tetrahedron (10 § 6).</summary>
+    public const int MinRegionVertices3 = 4;
+
+    /// <summary>The fewest vertices a region may carry over a position codec of <paramref name="dims"/> axes.</summary>
+    /// <param name="dims">2 or 3.</param>
+    /// <returns><see cref="MinRegionVertices"/> or <see cref="MinRegionVertices3"/>.</returns>
+    public static int MinVertices(int dims) => dims == 3 ? MinRegionVertices3 : MinRegionVertices;
 
     /// <summary>The most footprint vertices a region may carry: a horizon-clipped frustum needs 5–8, 16 is headroom.</summary>
     public const int MaxRegionVertices = 16;
@@ -59,7 +67,8 @@ public static class BuiltInCommands
         return fields.Length == 3
             && command.Delivery == CatalogCommand.LatestDelivery
             && command.Rate is { PerSec: 5, Burst: 5 }
-            && vertices is { Kind: CodecKind.List, MinCount: MinRegionVertices, MaxCount: MaxRegionVertices, Of.Kind: CodecKind.Pos2 }
+            && vertices is { Kind: CodecKind.List, MaxCount: MaxRegionVertices, Of.Kind: CodecKind.Pos2 or CodecKind.Pos3 }
+            && vertices.MinCount == MinVertices(vertices.Of.Kind == CodecKind.Pos3 ? 3 : 2)
             && altitude?.Kind == CodecKind.F16
             && budget?.Kind == CodecKind.U16
             && Array.TrueForAll(fields, f => f is { Group: null, OnEnter: false, Enum: null });
@@ -67,9 +76,10 @@ public static class BuiltInCommands
 
     /// <summary>
     /// Builds the <c>ClientRegion</c> command for a world whose positions use <paramref name="position"/>: its vertices are quantized exactly like the
-    /// archetypes' positions, so a decoded region can never leave the world.
+    /// archetypes' positions, so a decoded region can never leave the world. A flat world's region is a polygon of 3–16 points, a deep world's a
+    /// polyhedron of 4–16 (10 § 6).
     /// </summary>
-    /// <param name="position">The grid's <see cref="CodecKind.Pos2"/> codec.</param>
+    /// <param name="position">The grid's <see cref="CodecKind.Pos2"/> codec in a flat world, its <see cref="CodecKind.Pos3"/> codec in a deep one.</param>
     /// <returns>The command definition: latest-wins, at most 5 per second.</returns>
     public static CatalogCommand CreateClientRegion(CatalogCodec position)
     {
@@ -87,7 +97,8 @@ public static class BuiltInCommands
                     Name = RegionVerticesField,
                     Codec = new CatalogCodec
                     {
-                        Kind = CodecKind.List, Of = position, MinCount = MinRegionVertices, MaxCount = MaxRegionVertices,
+                        Kind = CodecKind.List, Of = position, MinCount = MinVertices(position.Kind == CodecKind.Pos3 ? 3 : 2),
+                        MaxCount = MaxRegionVertices,
                     },
                 },
                 new CatalogField { Name = RegionAltitudeField, Codec = new CatalogCodec { Kind = CodecKind.F16 } },

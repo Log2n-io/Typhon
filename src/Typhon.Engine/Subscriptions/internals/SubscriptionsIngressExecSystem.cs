@@ -533,6 +533,13 @@ internal sealed class SubscriptionsIngress : IDisposable
         }
 
         region.ClampToMaxEdge(MaxEdgeOf(row.Session));
+        if (!region.BuildPlanes())
+        {
+            // The ingress hull accepted it and the clamp scales it uniformly, so this is a hostile or corrupted record, refused like one.
+            Buffers.Acks.Add(row.Session, seq, AckReasons.RegionInvalid);
+            return;
+        }
+
         row.Region = region;
         row.HasRegion = true;
     }
@@ -660,6 +667,7 @@ internal ref struct IngressCommandSink : ICommandSink
     private ushort _seq;
     private uint _clientTick;
     private int _vertexCount;
+    private int _vertexDims;
     private float _altitudeM;
     private ushort _budgetKiBps;
     private bool _open;
@@ -688,6 +696,7 @@ internal ref struct IngressCommandSink : ICommandSink
         _seq = seq;
         _clientTick = clientTick;
         _vertexCount = 0;
+        _vertexDims = 2;
         _altitudeM = 0;
         _budgetKiBps = 0;
         _open = _current != null;
@@ -764,10 +773,13 @@ internal ref struct IngressCommandSink : ICommandSink
             return;
         }
 
+        // The codec's axes are the world's (10 § 6): a pos2 vertex is (x, y) on the plane z = 0, a pos3 vertex (x, y, z).
+        _vertexDims = field.Components == 3 ? 3 : 2;
         _vertexCount = Math.Min(count, BuiltInCommands.MaxRegionVertices);
         for (var i = 0; i < _vertexCount; i++)
         {
-            _vertices[i] = new RegionVertex { X = components[i * 2], Z = components[(i * 2) + 1] };
+            var at = i * _vertexDims;
+            _vertices[i] = new RegionVertex { X = components[at], Y = components[at + 1], Z = _vertexDims == 3 ? components[at + 2] : 0d };
         }
     }
 
@@ -801,7 +813,7 @@ internal ref struct IngressCommandSink : ICommandSink
     {
         // The hull is taken here, on the transport thread: it needs no engine state, and a footprint that cannot become a polygon must never reach the tick.
         // The profile's edge clamp is the tick's, because the profile is session state the transport side does not own (SUB-05).
-        if (ConvexHull.Build(_vertices[.._vertexCount], _altitudeM, _budgetKiBps, out var region) != ClientRegionOutcome.Accepted)
+        if (ConvexHull.Build(_vertices[.._vertexCount], _vertexDims, _altitudeM, _budgetKiBps, out var region) != ClientRegionOutcome.Accepted)
         {
             _row.RefusedCommands++;
             Span<byte> reason = [AckReasons.RegionInvalid];

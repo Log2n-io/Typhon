@@ -63,10 +63,14 @@ internal static class CatalogBuilder
     /// The scheduled systems' names, in schedule order: the labels of the built-in <c>typhon.system.mean</c>. Empty omits that metric, which would otherwise
     /// be a vector metric carrying no values.
     /// </param>
+    /// <param name="spatial">
+    /// The spatial world, whose bounds a region's vertices are quantized over (10 § 6): <c>pos2</c> when it is one cell deep, <c>pos3</c> otherwise.
+    /// <see langword="null"/> takes the codec from the first 2D-position archetype instead, for a catalog built without an engine.
+    /// </param>
     /// <returns>The canonical catalog, its UTF-8 bytes and their digest.</returns>
     /// <exception cref="CatalogException">The declarations produce a catalog that breaks a wire rule.</exception>
     public static CatalogExport Build(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, string appName, int appRevision, int tickPeriodUs,
-        IReadOnlyList<string> systemNames)
+        IReadOnlyList<string> systemNames, SpatialGridConfig? spatial = null)
     {
         ArgumentNullException.ThrowIfNull(registry);
         plans ??= [];
@@ -93,7 +97,7 @@ internal static class CatalogBuilder
             Archetypes = archetypes,
             Enums = enums,
             Events = BuildEvents(registry, enums),
-            Commands = BuildCommands(registry, plans, enums),
+            Commands = BuildCommands(registry, plans, enums, spatial),
 
             // Empty, and not for want of a grid: a grid describes the aggregate tiers and the region clamp of Phase 2. Emitting the engine's spatial grid now
             // would put a tuning knob nobody decodes into the digest, and re-send the catalog to every client the first time it was retuned.
@@ -241,13 +245,14 @@ internal static class CatalogBuilder
             "Declare RouteNear, RouteToKnown, RouteToOwner or Broadcast."),
     };
 
-    private static CatalogCommand[] BuildCommands(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, Dictionary<string, string[]> enums)
+    private static CatalogCommand[] BuildCommands(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, Dictionary<string, string[]> enums,
+        SpatialGridConfig? spatial)
     {
         var commands = new List<CatalogCommand>(registry.Commands.Count + 1);
 
         // W27: a built-in is listed only when it is enabled. ClientRegion is enabled by a profile declaring the observer that reads it, so a catalog that
         // named it unconditionally would tell every client it may send a footprint the server has nowhere to put.
-        if (TryBuildClientRegion(registry, plans, out var region))
+        if (TryBuildClientRegion(registry, plans, spatial, out var region))
         {
             commands.Add(region);
         }
@@ -268,7 +273,8 @@ internal static class CatalogBuilder
         return commands.ToArray();
     }
 
-    private static bool TryBuildClientRegion(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, out CatalogCommand command)
+    private static bool TryBuildClientRegion(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, SpatialGridConfig? spatial,
+        out CatalogCommand command)
     {
         command = null;
         ProfileDeclaration asking = null;
@@ -294,8 +300,22 @@ internal static class CatalogBuilder
             return false;
         }
 
-        // The region's vertices are quantized exactly like the archetypes' positions, so a decoded footprint can never leave the world (W28). Taken from the
-        // canonically-first 2-D position rather than an arbitrary one: every position quantizes over the same grid, so the choice only has to be stable.
+        // The codec comes from the grid, not from an archetype (10 § 6): the spatial world's bounds at the default position width, two axes when the
+        // world is one cell deep and three otherwise — so a runtime needs no 2D archetype to accept regions, and a deep one gets 3D regions.
+        if (spatial is { } world)
+        {
+            var deep = world.GridDepth > 1;
+            command = BuiltInCommands.CreateClientRegion(new CatalogCodec
+            {
+                Kind = deep ? CodecKind.Pos3 : CodecKind.Pos2,
+                Bits = Codec.DefaultPositionBits,
+                Min = deep ? [world.WorldMin.X, world.WorldMin.Y, world.WorldMin.Z] : [world.WorldMin.X, world.WorldMin.Y],
+                Max = deep ? [world.WorldMax.X, world.WorldMax.Y, world.WorldMax.Z] : [world.WorldMax.X, world.WorldMax.Y],
+            });
+            return true;
+        }
+
+        // Without an engine: the canonically-first 2-D position, quantized over the same grid, so the choice only has to be stable.
         CatalogCodec position = null;
         var chosen = (string)null;
         foreach (var plan in plans)
