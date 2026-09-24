@@ -531,6 +531,40 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     }
 
     /// <summary>
+    /// Two Sphere profiles of different radii in one runtime, one of them with a leave band (09 § 3–4): even sessions hold the band's disc,
+    /// <c>Sphere(1 500, leave: 1 600)</c> tested at R′ = 1 550 m, odd sessions a 1 000 m disc — each exactly, with steady walkers, walking sessions,
+    /// teleports, churn and skipped frames.
+    /// </summary>
+    /// <param name="skipPercent">The percentage of ticks on which each session's frames are left undrained.</param>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    [VerifiesRule("SUB-20")]
+    public void TwoProfilesAndABandEachHoldTheirOwnDisc([Values(0, 60)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 9400 + skipPercent,
+            [skipPercent, skipPercent, 0, 30, skipPercent, 0], nameof(PushOracleTests), walkRadius: 1500, leaveRadius: 1600, secondRadius: 1000);
+        oracle.Workload.WalkStrideM = 1.5f;
+
+        // h_A is the smaller profile's: the band asks for (1 600 − 1 500) / 2 = 50 m, the plain 1 000 m disc for 1 000 / 48.
+        Assert.That(oracle.CreatureSlackM, Is.EqualTo(1000d / 48d).Within(1e-9), "h_A is the smallest over the profiles");
+
+        var required = 0L;
+        for (var i = 0; i < GateTicks; i++)
+        {
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"two profiles and a band, after {i + 1} ticks at a {skipPercent}% skip rate");
+                oracle.AssertWritesSurvived($"two profiles and a band, after {i + 1} ticks");
+                required += oracle.RequiredAtLastPoint;
+            }
+        }
+
+        Assert.That(required, Is.GreaterThan(200), "the discs held too little for the comparison to mean anything");
+    }
+
+    /// <summary>
     /// The contract explicit detection rests on, shown failing: a system that writes and does not push leaves its clients stale, and the oracle sees it.
     /// </summary>
     /// <remarks>

@@ -52,7 +52,7 @@ internal sealed class ReplicationGrid
 
     public int DimZ { get; private init; }
 
-    /// <summary>The largest sphere radius any profile declares; zero when every profile is <c>World</c>.</summary>
+    /// <summary>The largest radius any session can take — a Sphere's R′ or its declared maximum; zero when every profile is <c>World</c>.</summary>
     public double Radius { get; private init; }
 
     /// <summary>How far a viewpoint may drift from its anchor before the anchor moves: <c>min(R / 48, c / 2)</c> (10 § 4.1).</summary>
@@ -72,7 +72,7 @@ internal sealed class ReplicationGrid
     /// <summary>Resolves the grid, refusing a configuration the replication cannot serve.</summary>
     /// <param name="cellM">The declared cell side, <see cref="SubscriptionsOptions.ReplicationCellM"/>.</param>
     /// <param name="spatial">The spatial world the grid covers.</param>
-    /// <param name="maxRadius">The largest sphere radius any profile declares, zero when every profile is <c>World</c>.</param>
+    /// <param name="maxRadius">The largest radius any session can take (every Sphere's R′ and max:), zero when every profile is <c>World</c>.</param>
     /// <exception cref="InvalidOperationException">No cell side, a grid too wide for the cell key, or a window past its bound.</exception>
     public static ReplicationGrid Resolve(double cellM, in SpatialGridConfig spatial, double maxRadius)
     {
@@ -109,7 +109,8 @@ internal sealed class ReplicationGrid
             // The side named is rounded UP to the precision it is printed at, so the value the message suggests is one this check accepts.
             var smallest = Math.Ceiling(radius / reach * 1000d) / 1000d;
             throw new InvalidOperationException(
-                $"SubscriptionsOptions.ReplicationCellM = {Format(cellM)} is too small for the largest Sphere radius, {Format(radius)}: a session's window "
+                $"SubscriptionsOptions.ReplicationCellM = {Format(cellM)} is too small for the largest radius a session can take, {Format(radius)} "
+                + "(a Sphere's radius — its band's midpoint with a leave radius — or its max:): a session's window "
                 + $"would be {window} cells wide (2⌈R / c⌉ + 5), and the widest it may be is {widestWindow} in a {(deep ? "deep" : "flat")} grid "
                 + $"({(deep ? "W³" : "W²")} ≤ {MaxWindowCells} cells), so ⌈R / c⌉ must be at most {reach}. Raise the cell side to at least "
                 + $"{Format(smallest)}.");

@@ -88,9 +88,8 @@ Clients connect over the built-in TCP transport or through ASP.NET Core (`servic
 - **Correct on x64 and arm64:** every cross-thread hand-off is a named release/acquire pair.
 - **Zero steady-state managed allocation** in the replication path.
 - **Built today:** one `World` or one `Sphere` observer per profile, centred on the viewpoint the application places; flat and volumetric
-  worlds (a world one spatial cell deep is served in the plane, a deeper one in 3D — 2D archetypes then live on the plane z = 0); one Sphere
-  radius shared by every profile; up to 255 replicated archetypes, any number of them observed by one profile. The replication cell side is declared (`SubscriptionsOptions.ReplicationCellM`). **Refused at `Start` until they are built:** a leave radius
-  (hysteresis), a Sphere following an entity, several observers or near/far tiers in one profile, `ClientRegion`, `Aggregate`, headings,
+  worlds (a world one spatial cell deep is served in the plane, a deeper one in 3D — 2D archetypes then live on the plane z = 0); Sphere
+  profiles of any radius, with a leave band (`Sphere(192, leave: 208)`) and a run-time range (`Sphere(192, max: 1500)` + `SetRadius`); up to 255 replicated archetypes, any number of them observed by one profile. The replication cell side is declared (`SubscriptionsOptions.ReplicationCellM`). **Refused at `Start` until they are built:** a Sphere following an entity, several observers or near/far tiers in one profile, `ClientRegion`, `Aggregate`, headings,
   shared sources. Events are declared and exported but not delivered yet.
 - **A session never placed holds nothing** — not the area around the origin.
 

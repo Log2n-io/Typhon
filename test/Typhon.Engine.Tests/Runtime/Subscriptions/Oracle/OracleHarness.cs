@@ -42,6 +42,9 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <summary>The profile every oracle session is bound to.</summary>
     public const string Profile = "oracle-world";
 
+    /// <summary>The second Sphere profile's name, when the oracle declares one (odd sessions).</summary>
+    public const string SecondProfile = "oracle-second";
+
     /// <summary>
     /// How far a moving entity's predicted position may sit from its true one: the declared 5 cm motion tolerance, plus the position quantum and a margin.
     /// </summary>
@@ -72,13 +75,18 @@ internal sealed unsafe class OracleHarness : IDisposable
 
     // The geometric mode: sessions with a disc smaller than the world, walking and now and then teleporting. Their truth is the disc.
     private readonly double _radius;
+
+    // Each session's R′ — the band's midpoint with a leave radius — and its anchor slack: two profiles give odd sessions another radius (09 § 3–4).
+    private readonly double[] _sessionRadius;
+    private readonly double[] _anchorSlack;
     private readonly bool _walk;
     private readonly Vector3D[] _viewpoints;
     private readonly Random _walker;
 
     private long _tick;
 
-    private OracleHarness(FrameHarness harness, int[] skipPercent, int seed, PushDetection detection, double radius, bool walk)
+    private OracleHarness(FrameHarness harness, int[] skipPercent, int seed, PushDetection detection, double radius, bool walk, double leaveRadius = 0,
+        double secondRadius = 0)
     {
         _harness = harness;
         _skipPercent = skipPercent;
@@ -87,9 +95,20 @@ internal sealed unsafe class OracleHarness : IDisposable
         _walker = new Random(seed ^ 0x5EED);
         _sessions = harness.OpenSessions(skipPercent.Length, Profile);
         _viewpoints = new Vector3D[_sessions.Length];
+        _sessionRadius = new double[_sessions.Length];
+        _anchorSlack = new double[_sessions.Length];
+        var cell = harness.Subscriptions.Push?.CellSize ?? double.PositiveInfinity;
         // A session sees nothing until it is placed.
         for (var i = 0; i < _sessions.Length; i++)
         {
+            var second = secondRadius > 0 && i % 2 == 1;
+            if (second)
+            {
+                Assert.That(harness.Sessions.SetProfile(_sessions[i], SecondProfile), Is.True);
+            }
+
+            _sessionRadius[i] = second ? secondRadius : leaveRadius > 0 ? (radius + leaveRadius) / 2d : radius;
+            _anchorSlack[i] = Math.Min(_sessionRadius[i] / 48d, cell / 2d);
             _viewpoints[i] = walk ? RandomViewpoint() : new Vector3D(0d, 0d, 0d);
             Assert.That(harness.Sessions.SetViewpoint(_sessions[i], _viewpoints[i]), Is.True, "a just-opened session can be placed");
         }
@@ -134,7 +153,7 @@ internal sealed unsafe class OracleHarness : IDisposable
             else if (roll < 90)
             {
                 var angle = _walker.NextDouble() * Math.PI * 2.0;
-                var stride = _radius * 0.01;
+                var stride = _sessionRadius[i] * 0.01;
                 _viewpoints[i] = new Vector3D(
                     Math.Clamp(_viewpoints[i].X + (Math.Cos(angle) * stride), -Limit, Limit),
                     Math.Clamp(_viewpoints[i].Y + (Math.Sin(angle) * stride), -Limit, Limit),
@@ -220,22 +239,24 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <param name="replicationCellM">The replication cell side; zero for <c>ProjectionTestSchema.ReplicationCellFor</c> of the profile's radius.</param>
     /// <param name="forceDeep">Serve the flat world with the deep implementation, which must agree with the flat one on it (10 § 3.5).</param>
     /// <param name="visibilitySlackM">The creatures' visibility slack h (09 § 2); <see cref="double.NaN"/> for the rule, R / 48.</param>
+    /// <param name="leaveRadius">The walking disc's leave radius (09 § 3); 0 for none.</param>
+    /// <param name="secondRadius">When positive, a second Sphere profile of this radius, which every odd session is bound to (09 § 4).</param>
     public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, PushDetection detection = PushDetection.Explicit,
         double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false,
-        double replicationCellM = 0, bool forceDeep = false, double visibilitySlackM = double.NaN)
+        double replicationCellM = 0, bool forceDeep = false, double visibilitySlackM = double.NaN, double leaveRadius = 0, double secondRadius = 0)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
         var walk = walkRadius > 0;
         var radius = walk ? walkRadius : PushRadiusM;
-        var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every), name,
+        var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every, leaveRadius, secondRadius), name,
             Options(detection == PushDetection.Automatic, deterministicProjection,
                 replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(worldObserver && !walk ? 0 : radius), forceDeep,
                 visibilitySlackM));
         try
         {
             harness.SerialIndex = deterministicProjection;
-            var oracle = new OracleHarness(harness, skipPercent, seed, detection, radius, walk);
+            var oracle = new OracleHarness(harness, skipPercent, seed, detection, radius, walk, leaveRadius, secondRadius);
 
             // A walking disc covers a few percent of the world, so the world is denser for it to hold anything worth comparing.
             oracle.Workload.Seed(creatures: walk || bigWorld ? 400 : 24, rocks: walk || bigWorld ? 120 : 8);
@@ -315,7 +336,7 @@ internal sealed unsafe class OracleHarness : IDisposable
         for (var i = 0; i < _sessions.Length; i++)
         {
             var angle = _walker.NextDouble() * Math.PI * 2.0;
-            var stride = _radius * strideOfRadius;
+            var stride = _sessionRadius[i] * strideOfRadius;
             _viewpoints[i] = new Vector3D(
                 Math.Clamp(_viewpoints[i].X + (Math.Cos(angle) * stride), -Limit, Limit),
                 Math.Clamp(_viewpoints[i].Y + (Math.Sin(angle) * stride), -Limit, Limit),
@@ -543,13 +564,14 @@ internal sealed unsafe class OracleHarness : IDisposable
         List<string> divergences)
     {
         var held = new HashSet<uint>(replica.NetIds(plan));
-        var slack = _radius / 3.0 / 16.0;
+        var radius = _sessionRadius[session];
+        var slack = _anchorSlack[session];
 
         // v̂ trails a mover's true position by up to h (09 § 2): held within R − h, dropped past R + h, either between.
         var visibility = plan == _creatureIndex ? _harness.Subscriptions.Plans[plan].VisibilitySlackM : 0d;
         var margin = slack + visibility + MotionToleranceM + 0.01;
-        var inner = _radius - margin;
-        var outer = _radius + margin;
+        var inner = radius - margin;
+        var outer = radius + margin;
         var viewpoint = _viewpoints[session];
         foreach (var netId in held)
         {
@@ -573,13 +595,13 @@ internal sealed unsafe class OracleHarness : IDisposable
                 if (!holds)
                 {
                     divergences.Add($"session {session}: {name} netId {netId} (entity {entity.RawValue}) is {distance:F2} m from the viewpoint, inside the "
-                        + $"{_radius} m disc, and the client does not hold it");
+                        + $"{radius} m disc, and the client does not hold it");
                     continue;
                 }
             }
             else if (distance > outer && holds)
             {
-                divergences.Add($"session {session}: {name} netId {netId} is {distance:F2} m from the viewpoint, outside the {_radius} m disc, and the client "
+                divergences.Add($"session {session}: {name} netId {netId} is {distance:F2} m from the viewpoint, outside the {radius} m disc, and the client "
                     + "still holds it");
                 continue;
             }
@@ -709,7 +731,8 @@ internal sealed unsafe class OracleHarness : IDisposable
     };
 
     /// <summary>The projections and the profile the oracle runs against: a disc, or the whole world.</summary>
-    private static void Declare(SubscriptionsRegistry subs, PushDetection detection, double radius, bool world, int every)
+    private static void Declare(SubscriptionsRegistry subs, PushDetection detection, double radius, bool world, int every, double leaveRadius = 0,
+        double secondRadius = 0)
     {
         ProjectionTestSchema.DeclareCreature(subs);
         ProjectionTestSchema.DeclareRock(subs);
@@ -719,7 +742,11 @@ internal sealed unsafe class OracleHarness : IDisposable
         }
         else
         {
-            subs.Profile(Profile, p => p.Detection(detection).Every(every).Sphere(radius).Of<ProjCreature>().Of<ProjRock>());
+            subs.Profile(Profile, p => p.Detection(detection).Every(every).Sphere(radius, leave: leaveRadius).Of<ProjCreature>().Of<ProjRock>());
+            if (secondRadius > 0)
+            {
+                subs.Profile(SecondProfile, p => p.Detection(detection).Every(every).Sphere(secondRadius).Of<ProjCreature>().Of<ProjRock>());
+            }
         }
     }
 

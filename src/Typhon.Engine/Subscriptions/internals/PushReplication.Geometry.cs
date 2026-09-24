@@ -1553,8 +1553,8 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (a.R - margin) * (a.R - margin);
     }
 
-    public override bool Gather(SessionId session, bool placed, Vector3D viewpoint, bool forceReset, in ArchetypeSet archetypes, FrameWorkerScratch scratch,
-        ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves, ref long updates, out bool complete)
+    public override bool Gather(SessionId session, bool placed, Vector3D viewpoint, double radius, bool forceReset, in ArchetypeSet archetypes,
+        FrameWorkerScratch scratch, ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves, ref long updates, out bool complete)
     {
         complete = true;
         var from = Stopwatch.GetTimestamp();
@@ -1568,9 +1568,13 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         var reset = st.NeedsReset || forceReset;
         var tick = _tick;
 
-        // The radius this frame moves to, and the one the committed known-set was built with (10 § 5): a change is a shell sweep, not a reset.
-        var rNew = st.RequestedRadius > 0 ? st.RequestedRadius : Radius;
+        // The radius this frame moves to — the profile's R′, or the session's SetRadius — and the one the committed known-set was built with (09 § 4,
+        // 10 § 5): a change is a shell sweep, not a reset. The window is sized for the largest any session can take.
+        var rNew = radius > 0 && radius <= Radius ? radius : Radius;
         var rOld = st.Radius > 0 ? st.Radius : rNew;
+
+        // The anchor slack is the session's own: R′ / 48, capped at half a cell so a slack move never skips one (09 § 4).
+        var anchorSlack = Math.Min(rNew / 48d, CellSize / 2d);
 
         // Missed frames: replayed from the push log while every missed tick is still in it, reset otherwise (SUB-03: skip = union).
         var gap = st.Anchored && !reset && placed ? (int)(tick - st.LastTick - 1) : 0;
@@ -1655,7 +1659,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             drift2 += dvz * dvz;
         }
 
-        if (drift2 > AnchorSlack * AnchorSlack)
+        if (drift2 > anchorSlack * anchorSlack)
         {
             if (drift2 > CellSize * CellSize)
             {

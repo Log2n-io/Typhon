@@ -137,4 +137,27 @@ class ReplicationGridTests : TestBase<ReplicationGridTests>
 
         Assert.That(ex!.Message, Does.Contain("ReplicationCellM"));
     }
+
+    /// <summary>
+    /// A profile's run-time maximum counts against the window bound at <c>Start</c> (09 § 4): <c>Sphere(192, max: 1 500)</c> at a 64 m cell needs a window
+    /// of 2⌈1 500 / 64⌉ + 5 = 53 cells, past the flat grid's 15, and the message names the setting and the radius.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void AProfileWhoseRunTimeMaximumPassesTheWindowIsRefusedAtStart()
+    {
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var harness = ReplicationHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("near", p => p.Sphere(128).Of<ProjCreature>());
+                subs.Profile("flying", p => p.Sphere(192, max: 1500).Of<ProjCreature>());
+            }, "MaxRefusal", new SubscriptionsOptions { MaxSessions = 16, ReplicationCellM = 64 });
+        });
+
+        Assert.That(ex!.Message, Does.Contain("ReplicationCellM").And.Contain("1500").And.Contain("max:"));
+    }
 }

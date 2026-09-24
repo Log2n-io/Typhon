@@ -144,6 +144,19 @@ public sealed class ObserverDeclaration
     /// <summary>A sphere's leave radius, in metres; 0 when the declaration left the hysteresis band to the engine.</summary>
     public double LeaveRadius { get; internal set; }
 
+    /// <summary>A sphere's largest run-time radius, in metres (<c>SetRadius</c>); 0 when a session's radius is fixed.</summary>
+    public double MaxRadius { get; internal set; }
+
+    /// <summary>
+    /// The radius a sphere's sessions test against: the band's midpoint <c>(R + L) / 2</c> with a leave radius, the enter radius without (09 § 3).
+    /// </summary>
+    public double EffectiveRadius => LeaveRadius > 0 ? (Radius + LeaveRadius) / 2d : Radius;
+
+    /// <summary>
+    /// The sphere's visibility slack <c>h_p</c> (09 § 2–3): half its band with a leave radius, the anchor slack's mirror <c>R / 48</c> without.
+    /// </summary>
+    public double VisibilitySlack => LeaveRadius > 0 ? (LeaveRadius - Radius) / 2d : Radius / 48d;
+
     /// <summary>A client region's longest accepted edge, in metres.</summary>
     public double MaxEdgeM { get; internal set; }
 

@@ -568,31 +568,6 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
         Assert.That(ex.Message, Does.Contain("viewpoint"));
     }
 
-    /// <summary>A Sphere's leave radius is declarable and refused at <c>Start</c>: an entity is held within one radius, and Phase 2 builds the band.</summary>
-    [Test]
-    [VerifiesRule("SUB-16")]
-    public void ASphereLeaveRadiusIsRefusedUntilHysteresisIsBuilt()
-    {
-        using var runtime = CreateRuntime();
-        runtime.Subscriptions.Profile("p", p => p.Sphere(192, leave: 208).Of<SwgCreature>());
-
-        var ex = Assert.Throws<NotSupportedException>(runtime.Start);
-        Assert.That(ex.Message, Does.Contain("leave radius"));
-    }
-
-    /// <summary>Two Sphere profiles with different radii are refused: the push index is sized from one radius, and the second would be served at it.</summary>
-    [Test]
-    [VerifiesRule("SUB-16")]
-    public void TwoSphereRadiiAreRefused()
-    {
-        using var runtime = CreateRuntime();
-        runtime.Subscriptions.Profile("near", p => p.Sphere(100).Of<SwgCreature>());
-        runtime.Subscriptions.Profile("far", p => p.Sphere(200).Of<SwgCreature>());
-
-        var ex = Assert.Throws<NotSupportedException>(runtime.Start);
-        Assert.That(ex.Message, Does.Contain("one radius"));
-    }
-
     /// <summary>A profile with two observers is refused, even of one shape and one radius: it would be a tier, and Phase 2 builds tiers.</summary>
     [Test]
     [VerifiesRule("SUB-16")]

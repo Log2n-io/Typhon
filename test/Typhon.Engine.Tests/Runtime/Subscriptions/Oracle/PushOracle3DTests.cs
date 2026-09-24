@@ -104,7 +104,7 @@ class PushOracle3DTests : TestBase<PushOracle3DTests>
     }
 
     /// <summary>
-    /// 10 § 5's shell: a session's radius goes 192 → 1 500 → 192 m through the seam while it walks. Each change sweeps the shell between the two spheres —
+    /// 10 § 5's shell, through 09 § 4's <c>SetRadius</c>: a session of a <c>Sphere(192, max: 1 500)</c> profile goes 192 → 1 500 → 192 m while it walks. Each change sweeps the shell between the two spheres —
     /// enters on the way out, leaves on the way in — and never resets. The window is sized for 1 500 m, the largest radius: ⌈R / c⌉ ≤ 4 deep.
     /// </summary>
     [Test]
@@ -112,7 +112,7 @@ class PushOracle3DTests : TestBase<PushOracle3DTests>
     public void TheRadiusShellSweepsWithoutAResetInADeepGrid()
     {
         using var oracle = VolumeOracle.Create(ProjectionTestSchema.SetupEngine(ServiceProvider, volumetric: true), volumetric: true, seed: 3302, [0, 0],
-            nameof(PushOracle3DTests), radius: 1500, cellM: 375, flyers: 400, walkers: 200);
+            nameof(PushOracle3DTests), radius: 1500, cellM: 375, flyers: 400, walkers: 200, startRadius: 192);
         Shell(oracle);
     }
 
@@ -122,7 +122,7 @@ class PushOracle3DTests : TestBase<PushOracle3DTests>
     public void TheRadiusShellSweepsWithoutAResetInAFlatGrid()
     {
         using var oracle = VolumeOracle.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), volumetric: false, seed: 3302, [0, 0],
-            nameof(PushOracle3DTests), radius: 1500, cellM: 300, flyers: 600, walkers: 300, rocks: 120, spanM: 2500);
+            nameof(PushOracle3DTests), radius: 1500, cellM: 300, flyers: 600, walkers: 300, rocks: 120, spanM: 2500, startRadius: 192);
         Shell(oracle);
     }
 

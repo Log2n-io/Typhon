@@ -1,5 +1,6 @@
 using NUnit.Framework;
 using System;
+using System.Numerics;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime;
@@ -181,6 +182,98 @@ class SphereObserverTests : TestBase<SphereObserverTests>
             Assert.That(second, Has.Length.EqualTo(PointsWithin(330d, 330d, Radius)), "the second session holds its own disc");
             Assert.That(first, Has.No.AnyOf(second), "two discs this far apart share no entity");
         });
+    }
+
+    /// <summary>
+    /// 09 § 3's band: with <c>Sphere(192, leave: 208)</c> a session tests R′ = 200 m against v̂, which moves only past h = 8 m. A creature spawned just
+    /// inside R′ and walked back and forth across it by up to h − 0.1 m, for 1 000 ticks, is entered once and never left; the same walk under a plain
+    /// 200 m sphere (h = 200 / 48 ≈ 4.2 m) makes v̂ follow it across the edge, and the control shows the flapping the band removes.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-20")]
+    public void AnEntityOscillatingInsideTheBandIsEnteredOnceAndNeverLeft([Values] bool band)
+    {
+        var dbe = SetupEngine();
+        using var harness = FrameHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("near", p => (band ? p.Sphere(192, leave: 208) : p.Sphere(200)).Of<ProjCreature>());
+            },
+            nameof(AnEntityOscillatingInsideTheBandIsEnteredOnceAndNeverLeft), replicationCellM: 64);
+        harness.RunFence = true;
+        var session = harness.OpenSessions(1, "near")[0];
+        harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d));
+
+        // Spawned 0.5 m inside R′; the walk goes out to 7.4 m past it — under h = 8 m from where v̂ was set — in strides under the 2 m teleport step.
+        const float Inside = 199.5f;
+        const float Outside = 207.4f;
+        EntityId creature;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            creature = tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(PointAt(Inside, 0f)));
+            tx.Commit();
+        }
+
+        var x = Inside;
+        var step = 1.5f;
+        var held = 0;
+        var changes = 0;
+        var wasHeld = false;
+        for (var tick = 1; tick <= 1000; tick++)
+        {
+            if (tick > 1)
+            {
+                x += step;
+                if (x >= Outside || x <= Inside)
+                {
+                    x = Math.Clamp(x, Inside, Outside);
+                    step = -step;
+                }
+
+                using var tx = dbe.CreateQuickTransaction();
+                var accessor = tx.For<ProjCreature>();
+                foreach (var cluster in accessor.GetClusterEnumerator())
+                {
+                    var occupancy = cluster.OccupancyBits;
+                    while (occupancy != 0)
+                    {
+                        var slot = BitOperations.TrailingZeroCount(occupancy);
+                        occupancy &= occupancy - 1;
+                        if (cluster.GetEntityId(slot) == creature)
+                        {
+                            cluster.WriteSpatial(ProjCreature.Bounds, slot, PointAt(x, 0f));
+                        }
+                    }
+                }
+
+                accessor.Dispose();
+                tx.Commit();
+            }
+
+            harness.RunTick(tick);
+            harness.Deliver(session);
+            var holds = Held(harness, session) == 1;
+            if (holds != wasHeld)
+            {
+                changes++;
+                wasHeld = holds;
+            }
+
+            held += holds ? 1 : 0;
+        }
+
+        if (band)
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(changes, Is.EqualTo(1), "entered once and never left");
+                Assert.That(held, Is.EqualTo(1000), "held on every tick from the first");
+            });
+        }
+        else
+        {
+            Assert.That(changes, Is.GreaterThan(20), "the control: without a band v̂ follows the walk across R′, and the entity flaps");
+        }
     }
 
     /// <summary>A session nobody placed holds nothing, rather than everything near the origin.</summary>

@@ -209,7 +209,7 @@ public readonly struct CommandBatch<T> where T : unmanaged
 
                 _remaining--;
                 _index++;
-                _current = CommandBatch<T>.Read(_buffer, _onlySegment, _index);
+                _current = Read(_buffer, _onlySegment, _index);
                 return true;
             }
 
@@ -218,7 +218,7 @@ public readonly struct CommandBatch<T> where T : unmanaged
                 _index++;
                 if (_index < _buffer.CountIn(_segment))
                 {
-                    _current = CommandBatch<T>.Read(_buffer, _segment, _index);
+                    _current = Read(_buffer, _segment, _index);
                     return true;
                 }
 
@@ -320,6 +320,47 @@ public sealed class SubscriptionsCommands
     public bool Place(SessionId session, Vector3D position) => _ingress.Sessions.SetViewpoint(session, position);
 
     /// <summary>
+    /// Changes a session's Sphere radius from this tick on, within the range its profile declares — <c>Sphere(r, max: m)</c> (09 § 4).
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="radius">
+    /// The radius, in metres: between the profile's own (its band's midpoint when it declares a leave radius) and its declared maximum. 0 returns to the
+    /// profile's own.
+    /// </param>
+    /// <returns><see langword="false"/> when the session is closing or gone.</returns>
+    /// <exception cref="InvalidOperationException">The session's profile is not a Sphere.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The radius is outside the profile's declared range.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>A player boarding an aircraft.</b> The change is geometry like an anchor move: the next frame sweeps the shell between the two radii — enters when
+    /// it grows, leaves when it shrinks — with no reset, so the client keeps everything it already holds.
+    /// </para>
+    /// <para>
+    /// <b>It applies now, like <see cref="Place"/>,</b> and holds until the session's profile changes, which returns it to the new profile's own radius.
+    /// Call it after the profile it is checked against has been applied.
+    /// </para>
+    /// </remarks>
+    public bool SetRadius(SessionId session, double radius)
+    {
+        var profiles = _ingress.Frames?.Profiles;
+        var profile = _ingress.Sessions.ProfileIndex(session);
+        if (profiles == null || profile < 0 || profiles.RadiusOf(profile) <= 0)
+        {
+            throw new InvalidOperationException("SetRadius applies to a session whose profile is a Sphere, and this session's profile is not.");
+        }
+
+        var own = profiles.RadiusOf(profile);
+        var max = profiles.MaxRadiusOf(profile);
+        if (radius != 0 && (!double.IsFinite(radius) || radius < own || radius > max))
+        {
+            throw new ArgumentOutOfRangeException(nameof(radius), radius,
+                $"Profile '{profiles.NameOf(profile)}' lets a session's radius range over [{own}, {max}] m; declare Sphere(..., max: ...) to widen it.");
+        }
+
+        return _ingress.Sessions.SetRadius(session, radius == own ? 0d : radius);
+    }
+
+    /// <summary>
     /// Tells the engine that the entity in <paramref name="slot"/> of <paramref name="cluster"/> changed something a client sees (ADR-067: replication is
     /// explicit).
     /// </summary>
@@ -419,10 +460,10 @@ public sealed class SubscriptionsCommands
     {
         get
         {
-            var count = Volatile.Read(ref Internals.SubscriptionsExecSystemBase.EpochEnterCount);
+            var count = Volatile.Read(ref SubscriptionsExecSystemBase.EpochEnterCount);
             return count == 0
                 ? default
-                : (Volatile.Read(ref Internals.SubscriptionsExecSystemBase.EpochEnterTicks) * 1_000_000d / System.Diagnostics.Stopwatch.Frequency / count, count);
+                : (Volatile.Read(ref SubscriptionsExecSystemBase.EpochEnterTicks) * 1_000_000d / System.Diagnostics.Stopwatch.Frequency / count, count);
         }
     }
 
@@ -437,15 +478,15 @@ public sealed class SubscriptionsCommands
     {
         get
         {
-            var n = Volatile.Read(ref Internals.SubscriptionsProjectExecSystem.PrologueCount);
+            var n = Volatile.Read(ref SubscriptionsProjectExecSystem.PrologueCount);
             if (n == 0)
             {
                 return default;
             }
 
             var k = 1000d / System.Diagnostics.Stopwatch.Frequency / n;
-            return (Internals.SubscriptionsProjectExecSystem.PrologueCreateTicks * k, Internals.SubscriptionsProjectExecSystem.PrologueDrainTicks * k,
-                Internals.SubscriptionsProjectExecSystem.PrologueGatherTicks * k, Volatile.Read(ref Internals.SubscriptionsProjectExecSystem.ProjectBusyTicks) * k);
+            return (SubscriptionsProjectExecSystem.PrologueCreateTicks * k, SubscriptionsProjectExecSystem.PrologueDrainTicks * k,
+                SubscriptionsProjectExecSystem.PrologueGatherTicks * k, Volatile.Read(ref SubscriptionsProjectExecSystem.ProjectBusyTicks) * k);
         }
     }
 

@@ -558,9 +558,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// Resolves each moving archetype's visibility slack <c>h_A</c> (09 § 2) and widens its layout for v̂ when it is above zero.
     /// </summary>
     /// <remarks>
-    /// <c>h_A</c> is the smallest slack over the Sphere profiles observing the archetype, so every profile's bound holds: a profile's slack mirrors the anchor
-    /// slack its sessions already accept, <c>R / 48</c> (Q1). A <c>World</c> profile holds every entity whatever its position and asks for none; an
-    /// archetype no Sphere observes stays exact. Step 2.2's leave band replaces a profile's <c>R / 48</c> with its half-band (§ 3).
+    /// <c>h_A</c> is the smallest slack over the Sphere profiles observing the archetype, so every profile's bound holds: without a band a profile's slack
+    /// mirrors the anchor slack its sessions already accept, <c>R / 48</c> (Q1). A <c>World</c> profile holds every entity whatever its position and asks for none; an
+    /// archetype no Sphere observes stays exact. A profile with a leave band asks for its half-band, <c>(L − R) / 2</c> (§ 3).
     /// </remarks>
     private static void ResolveVisibilitySlack(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, double overrideM)
     {
@@ -586,7 +586,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                     {
                         if (type == plan.ArchetypeType)
                         {
-                            slack = Math.Min(slack, observer.Radius / 48d);
+                            slack = Math.Min(slack, observer.VisibilitySlack);
                         }
                     }
                 }

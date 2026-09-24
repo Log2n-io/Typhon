@@ -83,13 +83,23 @@ public sealed class ProfileBuilder
     /// </summary>
     /// <param name="radius">The enter radius, in metres.</param>
     /// <param name="leave">The leave radius, in metres — larger than <paramref name="radius"/>. Zero: no band.</param>
+    /// <param name="max">
+    /// The largest radius a session of this profile can be given at run time through <see cref="SubscriptionsCommands.SetRadius"/> — a player boarding
+    /// an aircraft. Zero: the session's radius is fixed. The window is sized for it at <c>Start</c>, so it counts against the window bound.
+    /// </param>
     /// <returns>The observer's builder.</returns>
     /// <remarks>
+    /// <para>
     /// The two radii are not a refinement: an entity hovering on one boundary would enter and leave every tick, and every re-entry costs a full enter record.
-    /// Hysteresis is what makes the cost of jitter zero instead of unbounded. <b>A leave radius is declared now and refused at <c>Start</c>: Phase 2 builds
-    /// it.</b>
+    /// Hysteresis is what makes the cost of jitter zero instead of unbounded.
+    /// </para>
+    /// <para>
+    /// <b>The band is a bound, not per-entity memory</b> (09 § 3): an entity whose true position is within <paramref name="radius"/> is held, one past
+    /// <paramref name="leave"/> is not, and between them it may be either. The profile's sessions test the midpoint <c>R′ = (R + L) / 2</c> against a
+    /// position that moves only past half the band, so an entity oscillating by less than that never flaps.
+    /// </para>
     /// </remarks>
-    public ObserverBuilder Sphere(double radius, double leave = 0)
+    public ObserverBuilder Sphere(double radius, double leave = 0, double max = 0)
     {
         if (!double.IsFinite(radius) || radius <= 0)
         {
@@ -101,7 +111,15 @@ public sealed class ProfileBuilder
             throw new ArgumentOutOfRangeException(nameof(leave), leave, "A sphere's leave radius must be larger than its enter radius.");
         }
 
-        return _profile.Add(new ObserverDeclaration(ObserverKind.Sphere) { Radius = radius, LeaveRadius = leave });
+        var effective = leave > 0 ? (radius + leave) / 2d : radius;
+        if (max != 0 && (!double.IsFinite(max) || max < effective))
+        {
+            throw new ArgumentOutOfRangeException(nameof(max), max,
+                $"A sphere's largest run-time radius must be at least the radius its sessions start with, {effective} m (the band's midpoint when a leave "
+                + "radius is declared).");
+        }
+
+        return _profile.Add(new ObserverDeclaration(ObserverKind.Sphere) { Radius = radius, LeaveRadius = leave, MaxRadius = max });
     }
 
     /// <summary>

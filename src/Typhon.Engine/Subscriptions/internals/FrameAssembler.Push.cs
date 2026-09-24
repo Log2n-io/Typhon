@@ -29,6 +29,7 @@ internal sealed unsafe partial class FrameAssembler
     private Vector3D[] _pushViewpoints = [];
     private bool[] _pushPlaced = [];
     private int[] _pushProfiles = [];
+    private double[] _pushRadius = [];
     private bool[] _pushWorld = [];
     private int[] _pushDivisor = [];
     private int _pushSessionCount;
@@ -59,6 +60,7 @@ internal sealed unsafe partial class FrameAssembler
                 Array.Resize(ref _pushViewpoints, grown);
                 Array.Resize(ref _pushPlaced, grown);
                 Array.Resize(ref _pushProfiles, grown);
+                Array.Resize(ref _pushRadius, grown);
                 Array.Resize(ref _pushWorld, grown);
                 Array.Resize(ref _pushDivisor, grown);
             }
@@ -68,6 +70,10 @@ internal sealed unsafe partial class FrameAssembler
             _pushPlaced[n] = _sessions.TryGetViewpoint(session, out var viewpoint);
             _pushViewpoints[n] = viewpoint;
             _pushProfiles[n] = profile;
+
+            // The radius this frame is gathered at: the session's run-time one when SetRadius gave it one, its profile's R′ otherwise (09 § 3–4).
+            var radius = _sessions.Radius(session);
+            _pushRadius[n] = radius > 0 ? radius : Profiles.RadiusOf(profile);
             _pushSessions[n++] = session;
             PrepareSession(session);
             // Only a World session served this tick can fill: a rate class skips the others (the check the frame stage repeats below).
@@ -235,7 +241,8 @@ internal sealed unsafe partial class FrameAssembler
         var reset = _pushWorld[index]
             ? Push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves,
                 ref updates, out var complete)
-            : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch,
+            : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], state.PendingReset, in Profiles.SetOf(_pushProfiles[index]),
+                scratch,
                 _encodePlans,
                 Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves, ref updates, out complete);
 

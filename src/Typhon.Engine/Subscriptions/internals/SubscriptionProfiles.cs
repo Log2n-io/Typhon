@@ -24,8 +24,11 @@ internal sealed class SubscriptionProfiles
         /// <summary>Whether the observer is <c>World</c> rather than a <c>Sphere</c>.</summary>
         public bool World { get; init; }
 
-        /// <summary>The sphere's radius, in world units; zero for <c>World</c>.</summary>
+        /// <summary>The radius the sphere's sessions start with, in world units — the band's midpoint R′ with a leave radius; zero for <c>World</c>.</summary>
         public double Radius { get; init; }
+
+        /// <summary>The largest radius a session of this profile can be given (<c>SetRadius</c>); <see cref="Radius"/> when it is fixed.</summary>
+        public double MaxRadius { get; init; }
 
         /// <summary>Whether the engine compares every live entity instead of waiting for <c>Replicate</c>.</summary>
         public bool Automatic { get; init; }
@@ -121,7 +124,8 @@ internal sealed class SubscriptionProfiles
                 Name = declaration.Name,
                 ArchetypeIndices = indices.ToArray(),
                 World = observer.Kind == ObserverKind.World,
-                Radius = observer.Kind == ObserverKind.Sphere ? observer.Radius : 0d,
+                Radius = observer.Kind == ObserverKind.Sphere ? observer.EffectiveRadius : 0d,
+                MaxRadius = observer.Kind == ObserverKind.Sphere ? Math.Max(observer.EffectiveRadius, observer.MaxRadius) : 0d,
                 Automatic = declaration.PushDetection == PushDetection.Automatic,
                 TickDivisor = declaration.TickDivisor,
             };
@@ -164,7 +168,10 @@ internal sealed class SubscriptionProfiles
     /// <summary>Which plan indices a profile with automatic detection observes.</summary>
     public bool[] AutomaticArchetypes => Archetypes(automaticOnly: true);
 
-    /// <summary>The largest sphere radius any profile declares, or zero when every profile is <c>World</c>.</summary>
+    /// <summary>
+    /// The largest radius any session can take — every Sphere profile's R′ and declared maximum — or zero when every profile is <c>World</c>. The one
+    /// window is sized for it (09 § 4).
+    /// </summary>
     public double MaxRadius
     {
         get
@@ -172,12 +179,21 @@ internal sealed class SubscriptionProfiles
             var r = 0d;
             foreach (var profile in _profiles)
             {
-                r = Math.Max(r, profile.Radius);
+                r = Math.Max(r, profile.MaxRadius);
             }
 
             return r;
         }
     }
+
+    /// <summary>The radius a session of profile <paramref name="profile"/> starts with: its R′; zero for <c>World</c>.</summary>
+    public double RadiusOf(int profile) => _profiles[profile].Radius;
+
+    /// <summary>The largest radius a session of profile <paramref name="profile"/> can be given; its R′ when the radius is fixed.</summary>
+    public double MaxRadiusOf(int profile) => _profiles[profile].MaxRadius;
+
+    /// <summary>The name of profile <paramref name="profile"/>, for messages.</summary>
+    public string NameOf(int profile) => _profiles[profile].Name;
 
     private bool[] Archetypes(bool automaticOnly)
     {

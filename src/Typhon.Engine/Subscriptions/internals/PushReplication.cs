@@ -29,14 +29,8 @@ internal struct PushSessionState
     public int OriginY;
     public int OriginZ;
 
-    /// <summary>The radius the committed known-set was built with; zero until the first frame, which takes the grid's.</summary>
+    /// <summary>The radius the committed known-set was built with; zero until the first frame, which takes the one it is gathered at.</summary>
     public double Radius;
-
-    /// <summary>
-    /// Test seam (10 § 5): the radius the next frame moves to; zero for the grid's. Phase 2's <c>SetRadius</c> will set it. The window is sized for the grid's
-    /// radius, the largest a session may take.
-    /// </summary>
-    public double RequestedRadius;
 
     /// <summary>The flat implementation's delivered window, one row per <see cref="ushort"/>; the deep implementation's lives in a slab.</summary>
     public WindowRows D;
@@ -972,17 +966,6 @@ internal abstract unsafe class PushReplication
         return _occupancy.Differences(recount);
     }
 
-    /// <summary>Tests only (10 § 5): the radius a session's next frames move to — a spherical shell sweep, not a reset. At most the grid's radius.</summary>
-    internal void SetRadiusForTest(SessionId session, double radius)
-    {
-        if (radius <= 0 || radius > Radius)
-        {
-            throw new ArgumentOutOfRangeException(nameof(radius), radius, $"a session's radius is in (0, {Radius}], the radius its window is sized for");
-        }
-
-        _sessions[session.Slot].RequestedRadius = radius;
-    }
-
     // ══ Per-session gather (parallel over sessions) ══════════════════════════════════════════════════════════════════════════════════════════════════
 
     /// <summary>Whether a session slot is in a state that needs a RESET before anything else is sent.</summary>
@@ -1011,8 +994,8 @@ internal abstract unsafe class PushReplication
     /// Builds one push session's records into <paramref name="scratch"/>. Returns whether the frame must carry a RESET (first frame after a lost one, a
     /// teleport, or a profile switch).
     /// </summary>
-    public abstract bool Gather(SessionId session, bool placed, Vector3D viewpoint, bool forceReset, in ArchetypeSet archetypes, FrameWorkerScratch scratch,
-        ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves, ref long updates, out bool complete);
+    public abstract bool Gather(SessionId session, bool placed, Vector3D viewpoint, double radius, bool forceReset, in ArchetypeSet archetypes,
+        FrameWorkerScratch scratch, ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves, ref long updates, out bool complete);
 
     /// <summary>
     /// A World session: it holds every entity of its archetypes whose cell it has been delivered, and occupied cells are delivered in key order behind one

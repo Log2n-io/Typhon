@@ -343,8 +343,9 @@
 ## Module: Observers
 
 ### SUB-16: A session holds exactly what its geometry names, and a session with no region holds nothing `[fatal][silent]`
-  invariant ∀ session s with a Sphere observer of radius r, ∀ tick T after s's fill: s holds entity e iff e's last pushed position lies within r of s's
-    committed anchor AND e's cell is in s's delivered window — no entity outside that is held, and none inside it is left out. The distance is 3D;
+  invariant ∀ session s with a Sphere observer, gathered at radius r — its profile's R′ (the band's midpoint (R + L) / 2 with a leave radius, R
+    without), or the radius SetRadius gave it within [R′, max] — ∀ tick T after s's fill: s holds entity e iff e's v̂ (SUB-20) lies within r of s's
+    committed anchor AND v̂'s cell is in s's delivered window — no entity outside that is held, and none inside it is left out. The distance is 3D;
     its z terms are 0 in a grid one cell deep and for a 2D-position archetype, which lies on the plane z = 0 (the spatial grid's convention), so
     a flat world's known-set is the 2D one bit for bit whichever implementation serves it
   invariant ∀ session s with a World observer: s holds every live entity of its archetypes whose cell the delivery cursor has passed
@@ -352,11 +353,14 @@
     position, and every event that moves an anchor, moves an entity or delivers a cell emits exactly the enters and leaves that keep it true
   invariant [s has never been placed] → s holds NOTHING. A default position is a legal world position, so "never placed" and "placed at the origin"
     must be distinguishable, and the unplaced session is the one that sees nothing
-  invariant a profile is served through exactly ONE observer, World or Sphere; a leave radius (hysteresis), a second observer, near/far tiers and the
-    other shapes are refused at Start until Phase 2 builds them
+  invariant a profile is served through exactly ONE observer, World or Sphere; a second observer, near/far tiers and the other shapes are refused at
+    Start until Phase 2 builds them. Profiles may declare different radii, a leave radius and a run-time maximum (09 § 3–4): one window serves them all,
+    sized for the largest radius any session can take, and that radius counts against the window bound at Start
+  invariant a radius change (SetRadius, or a profile change between Sphere radii) is geometry like an anchor move: the next frame sweeps the shell
+    between the two radii and does not reset
   invariant a session's archetype set is its profile's, as plan indices in 256 bits (ArchetypeSet): every plan index the registry admits (at most 255)
     has its own bit, so an event reaches s only if s's profile observes that event's archetype, whatever the number of projections declared
-  invariant every Sphere declares the SAME radius, and every observed archetype has a 2D or 3D position — each refused at Start rather than served approximately; a 2D-position archetype is refused in a deep
+  invariant every observed archetype has a 2D or 3D position — each refused at Start rather than served approximately; a 2D-position archetype is refused in a deep
     grid whose Z range excludes 0, where its plane would lie outside every cell
   invariant the replication grid's cell side is DECLARED (SubscriptionsOptions.ReplicationCellM), never derived: a runtime that observes an archetype
     without one is refused at Start, World-only included; so is a grid past 2²¹ cells on an axis and a window past its bound — the cells a gather
@@ -366,8 +370,8 @@
     the tiers differ in budget, rate and record kind, so their union is a wrong answer rather than an approximation
   never centre a region somewhere the declaration did not name — an observer that asked to follow an entity and got the session's viewpoint
     instead is a silent substitution; refuse it while the follow is unbuilt
-  scope: PushReplication.Gather, PushReplication.GatherWorld, PushReplication.Commit, SubscriptionProfiles.TryGetProfile, SubscriptionProfiles.SetOf, ArchetypeSet.Contains,
-    SessionTable.ProfileIndex, SessionTable.SetViewpoint,
+  scope: PushReplication.Gather, PushReplication.GatherWorld, PushReplication.Commit, SubscriptionProfiles.TryGetProfile, SubscriptionProfiles.RadiusOf,
+    SubscriptionsCommands.SetRadius, SubscriptionProfiles.SetOf, ArchetypeSet.Contains, SessionTable.ProfileIndex, SessionTable.SetViewpoint,
     SessionTable.TryGetViewpoint, SubscriptionsCommands.Place, SubscriptionsRegistry, ReplicationGrid.Resolve
   on_violation: silent in both directions. A session that holds too much is told about entities it cannot see — bandwidth, and a client that can see
     through the world; one that holds too little has players who never appear. The unplaced case is quieter still: an application that forgot to place
@@ -379,7 +383,7 @@
     radius" from "bounded at all"; SphereObserverTests.AnUnplacedSessionHoldsNothing over a populated origin; SphereObserverTests.AWorldObserverOverTheSameEntitiesHoldsAllOfThem;
     PushOracleTests.WalkingSessionsHoldExactlyWhatTheirDiscNames, where sessions walk and teleport under seeded churn;
     SubscriptionsRegistryTests.ASphereThatFollowsAnEntityIsRefusedUntilTheEngineSideFollowExists,
-    SubscriptionsRegistryTests.ASphereLeaveRadiusIsRefusedUntilHysteresisIsBuilt, SubscriptionsRegistryTests.TwoSphereRadiiAreRefused,
+    PushOracleTests.TwoProfilesAndABandEachHoldTheirOwnDisc, ReplicationGridTests.AProfileWhoseRunTimeMaximumPassesTheWindowIsRefusedAtStart,
     SubscriptionsRegistryTests.AProfileWithTwoObserversIsRefused; ReplicationGridTests.AnUndeclaredCellSideIsRefused,
     ReplicationGridTests.ARuntimeThatObservesAnArchetypeWithoutACellSideRefusesToStart, ReplicationGridTests.AGridWiderThanTheCellKeyIsRefused,
     ReplicationGridTests.AWindowPastSixteenCellsIsRefusedAndTheMessageNamesTheSmallestSide, ReplicationGridTests.ADeepWindowPastThirteenCellsIsRefused,

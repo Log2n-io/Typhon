@@ -113,7 +113,8 @@ internal sealed unsafe class VolumeOracle : IDisposable
     /// <param name="forceDeep">Serve a flat world with the deep implementation.</param>
     /// <param name="spanM">Confine entities and viewers to ±span on the plane axes; zero for the whole world less a margin.</param>
     public static VolumeOracle Create(DatabaseEngine engine, bool volumetric, int seed, int[] skipPercent, string name, double radius, double cellM,
-        VolumeMovers movers = VolumeMovers.Both, bool forceDeep = false, int flyers = 300, int walkers = 150, int rocks = 60, double spanM = 0)
+        VolumeMovers movers = VolumeMovers.Both, bool forceDeep = false, int flyers = 300, int walkers = 150, int rocks = 60, double spanM = 0,
+        double startRadius = 0)
     {
         var options = new SubscriptionsOptions
         {
@@ -133,12 +134,15 @@ internal sealed unsafe class VolumeOracle : IDisposable
                 .Field(ProjFlyer.Ai, x => x.Level, Codec.U16, name: "level"));
             ProjectionTestSchema.DeclareCreature(subs);
             ProjectionTestSchema.DeclareRock(subs);
-            subs.Profile(Profile, p => p.Detection(PushDetection.Explicit).Sphere(radius).Of<ProjFlyer>().Of<ProjCreature>().Of<ProjRock>());
+            // With a start radius, the profile is Sphere(start, max: radius): sessions begin at the start and SetRadius ranges up to radius (09 § 4).
+            subs.Profile(Profile, p => p.Detection(PushDetection.Explicit)
+                .Sphere(startRadius > 0 ? startRadius : radius, max: startRadius > 0 ? radius : 0)
+                .Of<ProjFlyer>().Of<ProjCreature>().Of<ProjRock>());
         }, name, options);
 
         try
         {
-            var oracle = new VolumeOracle(harness, seed, skipPercent, volumetric, movers, radius, spanM);
+            var oracle = new VolumeOracle(harness, seed, skipPercent, volumetric, movers, startRadius > 0 ? startRadius : radius, spanM);
             oracle.Seed(movers == VolumeMovers.Walkers ? 0 : flyers, movers == VolumeMovers.Flyers ? 0 : walkers, rocks);
             oracle._tick = 1;
             engine.WriteTickFence(1);
@@ -175,11 +179,11 @@ internal sealed unsafe class VolumeOracle : IDisposable
     /// <summary>Viewpoint teleports, each a reset.</summary>
     public int ViewpointTeleports { get; private set; }
 
-    /// <summary>A session's sphere radius from now on, through the seam (10 § 5): the next frames sweep the shell between the two spheres.</summary>
+    /// <summary>A session's sphere radius from now on, through <c>SetRadius</c> (09 § 4): the next frames sweep the shell between the two spheres.</summary>
     public void SetRadius(int session, double radius)
     {
         _radii[session] = radius;
-        Push.SetRadiusForTest(_sessions[session], radius);
+        Assert.That(_harness.Subscriptions.Commands.SetRadius(_sessions[session], radius), Is.True);
     }
 
     // ── The world ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -795,7 +799,9 @@ internal sealed unsafe class VolumeOracle : IDisposable
         var radius = _radii[session];
         var slack = Math.Min(Push.Radius / 48.0, Push.CellSize / 2.0);
         var tolerance = 0.05 + (2.0 * _positionStep) + 0.005;
-        var margin = slack + tolerance + 0.01;
+
+        // v̂ trails a mover by up to h (09 § 2): held within R − h, dropped past R + h.
+        var margin = slack + _harness.Subscriptions.Plans[plan].VisibilitySlackM + tolerance + 0.01;
         var viewpoint = _viewpoints[session];
         foreach (var netId in held)
         {
