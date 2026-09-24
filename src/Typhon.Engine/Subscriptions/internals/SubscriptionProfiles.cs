@@ -35,6 +35,9 @@ internal sealed class SubscriptionProfiles
     }
 
     private readonly CompiledProfile[] _profiles;
+
+    // Each profile's archetypes as a set of plan indices, beside the list: the geometry tests an event's archetype against it (09 § 12).
+    private readonly ArchetypeSet[] _sets;
     private readonly Dictionary<string, int> _byName = new(StringComparer.Ordinal);
     private readonly SessionTable _sessions;
     private readonly int _planCount;
@@ -54,6 +57,7 @@ internal sealed class SubscriptionProfiles
         _sessions = sessions;
         _planCount = plans.Length;
         _profiles = new CompiledProfile[registry.Profiles.Count];
+        _sets = new ArchetypeSet[registry.Profiles.Count];
         var indices = new List<int>();
         for (var p = 0; p < registry.Profiles.Count; p++)
         {
@@ -97,9 +101,18 @@ internal sealed class SubscriptionProfiles
                         + "projection, so declare one with subs.Archetype<" + archetype.Name + ">(...) or drop it from the profile.");
                 }
 
+                if (index >= ArchetypeSet.Capacity)
+                {
+                    // The registry refuses a 256th archetype before a plan exists; a registry built directly reaches here.
+                    throw new NotSupportedException(
+                        $"Profile '{declaration.Name}' observes '{archetype.Name}' at plan index {index}. A profile's archetype set holds plan indices below "
+                        + $"{ArchetypeSet.Capacity}.");
+                }
+
                 if (!indices.Contains(index))
                 {
                     indices.Add(index);
+                    _sets[p].Add(index);
                 }
             }
 
@@ -113,30 +126,37 @@ internal sealed class SubscriptionProfiles
                 TickDivisor = declaration.TickDivisor,
             };
         }
+
+        sessions.BindProfiles(name => _byName.TryGetValue(name, out var index) ? index : -1);
     }
 
     /// <summary>The profile a session is bound to, or <see langword="false"/> when it has none or its observer reaches nothing.</summary>
     /// <param name="session">The session.</param>
-    /// <param name="archetypes">The plan indices the profile observes.</param>
+    /// <param name="profile">The profile's index, for <see cref="SetOf"/>.</param>
     /// <param name="world">Whether the profile's observer is <c>World</c> rather than a sphere.</param>
     /// <param name="divisor">The profile's tick divisor: its sessions are served one tick in this many.</param>
     /// <returns>Whether the session is served.</returns>
-    public bool TryGetProfile(SessionId session, out int[] archetypes, out bool world, out int divisor)
+    /// <remarks>Tick side: the index is the session table's, resolved when the profile was set, so no name is hashed here.</remarks>
+    public bool TryGetProfile(SessionId session, out int profile, out bool world, out int divisor)
     {
-        archetypes = null;
         world = false;
         divisor = 1;
-        var name = _sessions.ProfileName(session);
-        if (name == null || !_byName.TryGetValue(name, out var index) || _profiles[index].ArchetypeIndices.Length == 0)
+        var index = _sessions.ProfileIndex(session);
+        profile = index;
+        if (index < 0 || _profiles[index].ArchetypeIndices.Length == 0)
         {
             return false;
         }
 
-        archetypes = _profiles[index].ArchetypeIndices;
         world = _profiles[index].World;
         divisor = _profiles[index].TickDivisor;
         return true;
     }
+
+    /// <summary>The archetypes profile <paramref name="profile"/> observes, as a set of plan indices.</summary>
+    /// <param name="profile">An index <see cref="TryGetProfile"/> returned.</param>
+    /// <returns>The set, by reference: it lives as long as the runtime.</returns>
+    public ref readonly ArchetypeSet SetOf(int profile) => ref _sets[profile];
 
     /// <summary>Which plan indices some profile observes.</summary>
     public bool[] ObservedArchetypes => Archetypes(automaticOnly: false);

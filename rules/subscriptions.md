@@ -354,8 +354,9 @@
     must be distinguishable, and the unplaced session is the one that sees nothing
   invariant a profile is served through exactly ONE observer, World or Sphere; a leave radius (hysteresis), a second observer, near/far tiers and the
     other shapes are refused at Start until Phase 2 builds them
-  invariant every Sphere declares the SAME radius, at most 64 archetypes are observed (a session's archetype set is a 64-bit mask), and every
-    observed archetype has a 2D or 3D position — each refused at Start rather than served approximately; a 2D-position archetype is refused in a deep
+  invariant a session's archetype set is its profile's, as plan indices in 256 bits (ArchetypeSet): every plan index the registry admits (at most 255)
+    has its own bit, so an event reaches s only if s's profile observes that event's archetype, whatever the number of projections declared
+  invariant every Sphere declares the SAME radius, and every observed archetype has a 2D or 3D position — each refused at Start rather than served approximately; a 2D-position archetype is refused in a deep
     grid whose Z range excludes 0, where its plane would lie outside every cell
   invariant the replication grid's cell side is DECLARED (SubscriptionsOptions.ReplicationCellM), never derived: a runtime that observes an archetype
     without one is refused at Start, World-only included; so is a grid past 2²¹ cells on an axis and a window past its bound — the cells a gather
@@ -365,7 +366,8 @@
     the tiers differ in budget, rate and record kind, so their union is a wrong answer rather than an approximation
   never centre a region somewhere the declaration did not name — an observer that asked to follow an entity and got the session's viewpoint
     instead is a silent substitution; refuse it while the follow is unbuilt
-  scope: PushReplication.Gather, PushReplication.GatherWorld, PushReplication.Commit, SubscriptionProfiles.TryGetProfile, SessionTable.SetViewpoint,
+  scope: PushReplication.Gather, PushReplication.GatherWorld, PushReplication.Commit, SubscriptionProfiles.TryGetProfile, SubscriptionProfiles.SetOf, ArchetypeSet.Contains,
+    SessionTable.ProfileIndex, SessionTable.SetViewpoint,
     SessionTable.TryGetViewpoint, SubscriptionsCommands.Place, SubscriptionsRegistry, ReplicationGrid.Resolve
   on_violation: silent in both directions. A session that holds too much is told about entities it cannot see — bandwidth, and a client that can see
     through the world; one that holds too little has players who never appear. The unplaced case is quieter still: an application that forgot to place
@@ -383,8 +385,9 @@
     ReplicationGridTests.AWindowPastSixteenCellsIsRefusedAndTheMessageNamesTheSmallestSide, ReplicationGridTests.ADeepWindowPastThirteenCellsIsRefused,
     ReplicationGridTests.ATwoDimensionalArchetypeIsRefusedInADeepGridWhoseZRangeExcludesZero; PushOracle3DTests.AClientsWorldIsItsSphereInADeepGrid,
     the same oracle in 3D with 2D walkers on z = 0 beside 3D flyers; PushOracle3DTests.AThirdAxisChangesNothingInAFlatGrid and
-    AThirdAxisChangesNothingInAFlatGridServedDeep, the degeneracy clause; PushFrameDigestTests, every flat run served by both implementations. The
-    64-archetype refusal has no test.
+    AThirdAxisChangesNothingInAFlatGridServedDeep, the degeneracy clause; PushFrameDigestTests, every flat run served by both implementations;
+    ArchetypeSetTests.AnArchetypePastPlanIndexSixtyThreeReachesOnlyTheSessionsThatObserveIt, red under a 64-bit set (plan index 70 aliases 6),
+    ArchetypeSetTests.AProfileObservingMoreThanSixtyFourArchetypesServesEveryOne, SubscriptionsRegistryTests.The256thArchetype_IsRefused.
 
 ---
 

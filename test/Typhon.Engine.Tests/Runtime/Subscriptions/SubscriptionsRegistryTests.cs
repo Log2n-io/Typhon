@@ -484,6 +484,7 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
 
     /// <summary>A client's entity handle holds the archetype in 8 bits, so 255 archetypes may be replicated and the 256th is refused.</summary>
     [Test]
+    [VerifiesRule("SUB-16")]
     public void The256thArchetype_IsRefused()
     {
         var subs = new SubscriptionsRegistry();

@@ -28,7 +28,7 @@ internal sealed unsafe partial class FrameAssembler
     private SessionId[] _pushSessions = [];
     private Vector3D[] _pushViewpoints = [];
     private bool[] _pushPlaced = [];
-    private ulong[] _pushMasks = [];
+    private int[] _pushProfiles = [];
     private bool[] _pushWorld = [];
     private int[] _pushDivisor = [];
     private int _pushSessionCount;
@@ -47,7 +47,7 @@ internal sealed unsafe partial class FrameAssembler
         var n = 0;
         foreach (var session in _sessions)
         {
-            if (!Profiles.TryGetProfile(session, out var archetypes, out var world, out var divisor))
+            if (!Profiles.TryGetProfile(session, out var profile, out var world, out var divisor))
             {
                 continue;
             }
@@ -58,7 +58,7 @@ internal sealed unsafe partial class FrameAssembler
                 Array.Resize(ref _pushSessions, grown);
                 Array.Resize(ref _pushViewpoints, grown);
                 Array.Resize(ref _pushPlaced, grown);
-                Array.Resize(ref _pushMasks, grown);
+                Array.Resize(ref _pushProfiles, grown);
                 Array.Resize(ref _pushWorld, grown);
                 Array.Resize(ref _pushDivisor, grown);
             }
@@ -67,13 +67,7 @@ internal sealed unsafe partial class FrameAssembler
             _pushDivisor[n] = divisor;
             _pushPlaced[n] = _sessions.TryGetViewpoint(session, out var viewpoint);
             _pushViewpoints[n] = viewpoint;
-            var mask = 0UL;
-            foreach (var a in archetypes)
-            {
-                mask |= 1UL << a;
-            }
-
-            _pushMasks[n] = mask;
+            _pushProfiles[n] = profile;
             _pushSessions[n++] = session;
             PrepareSession(session);
             // Only a World session served this tick can fill: a rate class skips the others (the check the frame stage repeats below).
@@ -112,7 +106,7 @@ internal sealed unsafe partial class FrameAssembler
             for (var i = 0; i < sample; i++)
             {
                 var k = (int)((i * (long)n) / sample);
-                Push.QueueShadowCheck(_pushSessions[k], _pushMasks[k]);
+                Push.QueueShadowCheck(_pushSessions[k], in Profiles.SetOf(_pushProfiles[k]));
             }
         }
 
@@ -239,9 +233,10 @@ internal sealed unsafe partial class FrameAssembler
 
         scratch.BeginSession(_plans.Length);
         var reset = _pushWorld[index]
-            ? Push.GatherWorld(session, state.PendingReset, _pushMasks[index], scratch, Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves,
+            ? Push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves,
                 ref updates, out var complete)
-            : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], state.PendingReset, _pushMasks[index], scratch, _encodePlans,
+            : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch,
+                _encodePlans,
                 Math.Max(1, _options.EnterBudgetPerFrame), ref enters, ref leaves, ref updates, out complete);
 
         if (timing)

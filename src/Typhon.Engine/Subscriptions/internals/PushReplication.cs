@@ -540,33 +540,33 @@ internal abstract unsafe class PushReplication
         }
     }
 
-    private readonly List<(SessionId Session, ulong Mask)> _shadowQueue = [];
+    private readonly List<(SessionId Session, ArchetypeSet Archetypes)> _shadowQueue = [];
 
     /// <summary>Shadow oracle: queues a session for the check at the start of the next blocks step.</summary>
-    public void QueueShadowCheck(SessionId session, ulong mask) => _shadowQueue.Add((session, mask));
+    public void QueueShadowCheck(SessionId session, in ArchetypeSet archetypes) => _shadowQueue.Add((session, archetypes));
 
     public void RunQueuedShadowChecks()
     {
-        foreach (var (session, mask) in _shadowQueue)
+        foreach (var (session, archetypes) in _shadowQueue)
         {
-            ShadowCheck(session, mask);
+            ShadowCheck(session, in archetypes);
         }
 
         _shadowQueue.Clear();
     }
 
     /// <summary>Shadow oracle, serial: compares a session's shadow with the geometric known-set recomputed from every block.</summary>
-    public abstract void ShadowCheck(SessionId session, ulong archetypeMask);
+    public abstract void ShadowCheck(SessionId session, in ArchetypeSet archetypes);
 
     public long GoneInUnoccupiedSlot;
     public long GoneOccupiedButNotProjected;
     public long GoneNowhere;
 
-    private protected void ClassifyGone(uint netId, ulong archetypeMask)
+    private protected void ClassifyGone(uint netId, in ArchetypeSet archetypes)
     {
         foreach (var a in _pushIndices)
         {
-            if ((archetypeMask & (1UL << a)) == 0)
+            if (!archetypes.Contains(a))
             {
                 continue;
             }
@@ -999,7 +999,7 @@ internal abstract unsafe class PushReplication
     /// Builds one push session's records into <paramref name="scratch"/>. Returns whether the frame must carry a RESET (first frame after a lost one, a
     /// teleport, or a profile switch).
     /// </summary>
-    public abstract bool Gather(SessionId session, bool placed, Vector3D viewpoint, bool forceReset, ulong archetypeMask, FrameWorkerScratch scratch,
+    public abstract bool Gather(SessionId session, bool placed, Vector3D viewpoint, bool forceReset, in ArchetypeSet archetypes, FrameWorkerScratch scratch,
         ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves, ref long updates, out bool complete);
 
     /// <summary>
@@ -1007,7 +1007,7 @@ internal abstract unsafe class PushReplication
     /// cursor — so its whole known-set is <c>key(cell(v)) &lt; cursor</c>. Each frame delivers occupied cells onward under the enter budget, then carries
     /// the tick's events.
     /// </summary>
-    public abstract bool GatherWorld(SessionId session, bool forceReset, ulong archetypeMask, FrameWorkerScratch scratch, int enterBudget, ref long enters,
+    public abstract bool GatherWorld(SessionId session, bool forceReset, in ArchetypeSet archetypes, FrameWorkerScratch scratch, int enterBudget, ref long enters,
         ref long leaves, ref long updates, out bool complete);
 
     /// <summary>

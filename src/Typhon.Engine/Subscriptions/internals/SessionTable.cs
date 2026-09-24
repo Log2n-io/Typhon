@@ -89,6 +89,11 @@ internal sealed unsafe class SessionTable : IDisposable
     // arrays are keyed by SLOT and the slot outlives its occupant.
     private readonly string[] _sessionKinds;
     private readonly string[] _profileNames;
+
+    // The index of each slot's profile in the compiled profiles, or -1: tick side only, written with the name and read by the frame stage's prologue so it
+    // never hashes a profile name per session per tick. The resolver is bound at Start, when the profiles are compiled.
+    private readonly int[] _profileIndices;
+    private Func<string, int> _profileResolver;
     private readonly string[] _closeReasons;
     private readonly object[] _appData;
     private readonly SessionViewpoint[] _viewpoints;
@@ -158,6 +163,8 @@ internal sealed unsafe class SessionTable : IDisposable
         _viewpoints = new SessionViewpoint[_capacity];
         _sessionKinds = new string[_capacity];
         _profileNames = new string[_capacity];
+        _profileIndices = new int[_capacity];
+        Array.Fill(_profileIndices, -1);
         _closeReasons = new string[_capacity];
         _appData = new object[_capacity];
         _declaredLimits = new SessionLimits[_capacity];
@@ -366,6 +373,7 @@ internal sealed unsafe class SessionTable : IDisposable
 
             _sessionKinds[slot] = sessionKind;
             _profileNames[slot] = null;
+            _profileIndices[slot] = -1;
             _closeReasons[slot] = null;
             _appData[slot] = admission.AppData;
             _declaredLimits[slot] = limits;
@@ -533,6 +541,29 @@ internal sealed unsafe class SessionTable : IDisposable
     /// <param name="session">The identity.</param>
     /// <returns>The profile's name.</returns>
     public string ProfileName(SessionId session) => (string)SlotReference(session, _profileNames);
+
+    /// <summary>
+    /// The index of the profile a session is bound to among the compiled profiles, or -1 when it has none, names no declared profile, or no profiles are
+    /// bound yet. Tick side, like <see cref="TryGetViewpoint"/>: a profile is set only from the request log, on the tick.
+    /// </summary>
+    /// <param name="session">The identity; its slot is read without a generation check, as the tick's session enumeration hands out open ones.</param>
+    /// <returns>The index.</returns>
+    public int ProfileIndex(SessionId session) => (uint)session.Slot < (uint)_capacity ? _profileIndices[session.Slot] : -1;
+
+    /// <summary>
+    /// Binds the name → index map of the compiled profiles, and resolves the names already set. Once, at <c>Start</c>, before the first tick.
+    /// </summary>
+    /// <param name="resolve">The index of a profile name, or -1 for a name no profile declares.</param>
+    public void BindProfiles(Func<string, int> resolve)
+    {
+        ArgumentNullException.ThrowIfNull(resolve);
+        _profileResolver = resolve;
+        for (var slot = 0; slot < _capacity; slot++)
+        {
+            var name = _profileNames[slot];
+            _profileIndices[slot] = name == null ? -1 : resolve(name);
+        }
+    }
 
     /// <summary>The reason text a close carried, for the <c>KICK</c> the transport sends. <see langword="null"/> when there was none.</summary>
     /// <param name="session">The identity.</param>
@@ -1029,6 +1060,7 @@ internal sealed unsafe class SessionTable : IDisposable
             }
 
             _profileNames[session.Slot] = profileName;
+            _profileIndices[session.Slot] = _profileResolver == null || profileName == null ? -1 : _profileResolver(profileName);
             return true;
         }
         finally
@@ -1191,6 +1223,7 @@ internal sealed unsafe class SessionTable : IDisposable
 
         _sessionKinds[slot] = null;
         _profileNames[slot] = null;
+        _profileIndices[slot] = -1;
         _closeReasons[slot] = null;
         _appData[slot] = null;
         _declaredLimits[slot] = null;
@@ -1373,6 +1406,7 @@ internal sealed unsafe class SessionTable : IDisposable
 
         Array.Clear(_sessionKinds);
         Array.Clear(_profileNames);
+        Array.Fill(_profileIndices, -1);
         Array.Clear(_closeReasons);
         Array.Clear(_appData);
         Array.Clear(_declaredLimits);

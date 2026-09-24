@@ -20,8 +20,8 @@ namespace Typhon.Engine;
 public sealed record SessionLimits
 {
     /// <summary>
-    /// The outbound byte budget, in bytes per second. Zero means no per-session budget — the frame ceiling and the enter budget still apply. Within a budget
-    /// records are deferred by priority and never dropped, so a small number slows a view down rather than corrupting it.
+    /// The outbound byte budget, in bytes per second. Zero means no per-session budget — the frame ceiling and the enter budget still apply. <b>Recorded, not
+    /// yet applied</b>: nothing reads it until Phase 2's per-session budget (step 2.4); once applied, records are deferred and never dropped.
     /// </summary>
     public int BytesPerSecond { get; init; }
 

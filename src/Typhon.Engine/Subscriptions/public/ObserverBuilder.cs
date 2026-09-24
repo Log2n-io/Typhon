@@ -10,7 +10,7 @@ namespace Typhon.Engine;
 [PublicAPI]
 public enum ObserverKind
 {
-    /// <summary>Everything, of the listed archetypes. Sessions that hold only this and are fully synced share one encoded frame.</summary>
+    /// <summary>Everything, of the listed archetypes: the whole world, filled cell by cell under the enter budget, then kept by its events.</summary>
     World = 0,
 
     /// <summary>A radius with hysteresis, around a bound entity, the controlled entity, or a fixed point.</summary>
@@ -28,8 +28,8 @@ public enum ObserverKind
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Phase 1 ships <see cref="ObserverKind.World"/> only.</b> The other three are declarable today and refused at <c>Start</c> with the phase that builds
-/// them, which is deliberate: the alternative is an API that grows verbs later, so every application written against it has to be revisited when the verb it
+/// <b><see cref="ObserverKind.World"/> and <see cref="ObserverKind.Sphere"/> ship.</b> The other two are declarable today and refused at <c>Start</c> with
+/// the phase that builds them, which is deliberate: the alternative is an API that grows verbs later, so every application written against it has to be revisited when the verb it
 /// always wanted finally exists. Declaring the full shape now costs a clear error message and buys a public surface that does not move.
 /// </para>
 /// <para>
@@ -123,19 +123,6 @@ public sealed class ObserverBuilder
         return this;
     }
 
-    /// <summary>Caps the bytes this observer's records may take in one frame.</summary>
-    /// <param name="bytes">The byte budget.</param>
-    /// <returns>This builder.</returns>
-    public ObserverBuilder Budget(int bytes)
-    {
-        if (bytes <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(bytes), bytes, "An observer budget is a positive byte count.");
-        }
-
-        _observer.ByteBudget = bytes;
-        return this;
-    }
 }
 
 /// <summary>
@@ -174,9 +161,6 @@ public sealed class ObserverDeclaration
 
     /// <summary>The far tier's refresh rate in hertz; 0 when there is no far tier.</summary>
     public double FarMaxHz { get; internal set; }
-
-    /// <summary>The observer's byte budget; 0 when none was declared.</summary>
-    public int ByteBudget { get; internal set; }
 
     /// <summary>The entity a sphere is bound to, or <see cref="EntityId.Null"/> when it is not bound to one.</summary>
     public EntityId BoundEntity { get; internal set; }

@@ -389,12 +389,10 @@ public sealed class SubscriptionsRegistry
 
         // One radius for every Sphere: the push index's cells are sized from it, so a second radius would be served at the first's without a word.
         var radius = 0d;
-        var observed = new HashSet<Type>();
         foreach (var profile in _profiles)
         {
             foreach (var observer in profile.Observers)
             {
-                observed.UnionWith(observer.Archetypes);
                 if (observer.Kind != ObserverKind.Sphere)
                 {
                     continue;
@@ -409,12 +407,6 @@ public sealed class SubscriptionsRegistry
 
                 radius = observer.Radius;
             }
-        }
-
-        if (observed.Count > 64)
-        {
-            throw new NotSupportedException(
-                $"The profiles observe {observed.Count} archetypes. A session's archetype set is a 64-bit mask, so at most 64 can be observed.");
         }
 
         if (_sources.Count > 0)

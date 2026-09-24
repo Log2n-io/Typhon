@@ -1551,7 +1551,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                && BoxMax2(a, bx0, by0, bz0, bx1, by1, bz1) <= (a.R - 0.01) * (a.R - 0.01);
     }
 
-    public override bool Gather(SessionId session, bool placed, Vector3D viewpoint, bool forceReset, ulong archetypeMask, FrameWorkerScratch scratch,
+    public override bool Gather(SessionId session, bool placed, Vector3D viewpoint, bool forceReset, in ArchetypeSet archetypes, FrameWorkerScratch scratch,
         ArchetypeEncodePlan[] encodePlans, int enterBudget, ref long enters, ref long leaves, ref long updates, out bool complete)
     {
         complete = true;
@@ -1585,7 +1585,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 reset = true;
                 gap = 0;
             }
-            else if (!CollectLog(ref st, slotIndex, viewpoint, rOld, rNew, archetypeMask, log))
+            else if (!CollectLog(ref st, slotIndex, viewpoint, rOld, rNew, in archetypes, log))
             {
                 Interlocked.Increment(ref LogAmbiguous);
                 reset = true;
@@ -1736,7 +1736,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
                         Set(d, row, bit);
                         Set(fresh, row, bit);
-                        entered += DeliverCell(cx, cy, cz, in nBall, archetypeMask, scratch, tick, gap);
+                        entered += DeliverCell(cx, cy, cz, in nBall, in archetypes, scratch, tick, gap);
                         Interlocked.Increment(ref CellsDelivered);
                     }
                 }
@@ -1782,7 +1782,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 for (var i = b; i < end; i++)
                 {
                     ref var e = ref _indexed[i];
-                    if ((archetypeMask & (1UL << e.Archetype)) == 0)
+                    if (!archetypes.Contains(e.Archetype))
                     {
                         continue;
                     }
@@ -1863,7 +1863,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                             continue;
                         }
 
-                        SweepCell(cx, cy, cz, in aBall, in nBall, archetypeMask, scratch, tick, gap, ref enters, ref leaves);
+                        SweepCell(cx, cy, cz, in aBall, in nBall, in archetypes, scratch, tick, gap, ref enters, ref leaves);
                     }
                 }
             }
@@ -1893,7 +1893,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                             continue;
                         }
 
-                        FarSweepCell(cx, cy, cz, in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, archetypeMask, scratch, tick, gap, ref updates);
+                        FarSweepCell(cx, cy, cz, in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, in archetypes, scratch, tick, gap, ref updates);
                     }
                 }
             }
@@ -1903,7 +1903,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         // After missed frames the log's replay folded them, with the events.
         if (lod && gap == 0)
         {
-            FlushEntries(in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, nOriginX, nOriginY, nOriginZ, d, archetypeMask, scratch, ref updates);
+            FlushEntries(in aBall, oOriginX, oOriginY, oOriginZ, o, in nBall, nOriginX, nOriginY, nOriginZ, d, in archetypes, scratch, ref updates);
         }
 
         if (scratch.Deferred != 0)
@@ -1931,7 +1931,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     /// <summary>How many occupied cells a World session's delivery may visit in one frame: bounds a frame's cost (10 § 2.4, 1.5.3).</summary>
     private const int WorldCellsPerFrame = 4096;
 
-    public override bool GatherWorld(SessionId session, bool forceReset, ulong archetypeMask, FrameWorkerScratch scratch, int enterBudget, ref long enters,
+    public override bool GatherWorld(SessionId session, bool forceReset, in ArchetypeSet archetypes, FrameWorkerScratch scratch, int enterBudget, ref long enters,
         ref long leaves, ref long updates, out bool complete)
     {
         var from = Stopwatch.GetTimestamp();
@@ -1954,7 +1954,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 reset = true;
                 gap = 0;
             }
-            else if (!CollectLogWorld(st.LastTick + 1, st.Cursor, archetypeMask, log))
+            else if (!CollectLogWorld(st.LastTick + 1, st.Cursor, in archetypes, log))
             {
                 Interlocked.Increment(ref LogAmbiguous);
                 reset = true;
@@ -1989,7 +1989,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             for (; k < _worldOrderCount && entered < enterBudget && visited < WorldCellsPerFrame; k++, visited++)
             {
                 var key = _worldOrder[k];
-                entered += DeliverCell(TEvent.KeyX(key), TEvent.KeyY(key), TEvent.KeyZ(key), in nowhere, archetypeMask, scratch, tick, gap,
+                entered += DeliverCell(TEvent.KeyX(key), TEvent.KeyY(key), TEvent.KeyZ(key), in nowhere, in archetypes, scratch, tick, gap,
                     everywhere: true);
                 cursor = key + 1;
             }
@@ -2028,7 +2028,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
                 {
                     ref var e = ref slot.Events[i];
-                    if ((archetypeMask & (1UL << e.Archetype)) == 0)
+                    if (!archetypes.Contains(e.Archetype))
                     {
                         continue;
                     }
@@ -2076,7 +2076,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     }
 
     /// <summary>The World form of <see cref="CollectLog"/>: every cell, primaries only (each event once per tick).</summary>
-    private bool CollectLogWorld(uint first, ulong cursor, ulong archetypeMask, LogTable table)
+    private bool CollectLogWorld(uint first, ulong cursor, in ArchetypeSet archetypes, LogTable table)
     {
         for (var t = first; t != _tick + 1; t++)
         {
@@ -2086,7 +2086,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 for (var i = slot.Starts[k]; i < slot.PrimaryEnds[k]; i++)
                 {
                     ref var e = ref slot.Events[i];
-                    if ((archetypeMask & (1UL << e.Archetype)) == 0)
+                    if (!archetypes.Contains(e.Archetype))
                     {
                         continue;
                     }
@@ -2251,7 +2251,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     /// Folds every event the session missed, in tick order, over the cells either sphere can reach. Returns <see langword="false"/> when an identity it
     /// held was reused inside the window and would be both left and entered in one frame (SUB-06), which only a RESET can say.
     /// </summary>
-    private bool CollectLog(ref PushSessionState st, int slotIndex, Vector3D viewpoint, double rOld, double rNew, ulong archetypeMask, LogTable table)
+    private bool CollectLog(ref PushSessionState st, int slotIndex, Vector3D viewpoint, double rOld, double rNew, in ArchetypeSet archetypes, LogTable table)
     {
         var ax = st.AnchorX;
         var ay = st.AnchorY;
@@ -2272,7 +2272,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 for (var i = slot.Starts[k]; i < slot.Starts[k + 1]; i++)
                 {
                     ref var e = ref slot.Events[i];
-                    if ((archetypeMask & (1UL << e.Archetype)) == 0)
+                    if (!archetypes.Contains(e.Archetype))
                     {
                         continue;
                     }
@@ -2329,7 +2329,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                     for (var i = slot.FlushStarts[k]; i < slot.FlushStarts[k + 1]; i++)
                     {
                         ref var f = ref slot.Flush[i];
-                        if ((archetypeMask & (1UL << f.Archetype)) == 0)
+                        if (!archetypes.Contains(f.Archetype))
                         {
                             continue;
                         }
@@ -2461,7 +2461,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
     /// <summary>Distance LOD: this tick's flush entries in the sphere, to a session that held the entity before this frame and holds it far now.</summary>
     private void FlushEntries(in Ball a, int oOriginX, int oOriginY, int oOriginZ, ReadOnlySpan<ushort> o, in Ball n, int nOriginX, int nOriginY,
-        int nOriginZ, ReadOnlySpan<ushort> d, ulong archetypeMask, FrameWorkerScratch scratch, ref long updates)
+        int nOriginZ, ReadOnlySpan<ushort> d, in ArchetypeSet archetypes, FrameWorkerScratch scratch, ref long updates)
     {
         var slot = _log[_tick % LogDepth];
         if (slot.FlushCellCount == 0 || slot.Tick != _tick)
@@ -2485,7 +2485,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
             for (var i = slot.FlushStarts[k]; i < slot.FlushStarts[k + 1]; i++)
             {
                 ref var f = ref slot.Flush[i];
-                if ((archetypeMask & (1UL << f.Archetype)) == 0 || Within(n.X, n.Y, n.Z, f.NewX, f.NewY, f.NewZ, n.Far2) || !Within(n, f.NewX, f.NewY, f.NewZ)
+                if (!archetypes.Contains(f.Archetype) || Within(n.X, n.Y, n.Z, f.NewX, f.NewY, f.NewZ, n.Far2) || !Within(n, f.NewX, f.NewY, f.NewZ)
                     || !Held(d, nOriginX, nOriginY, nOriginZ, f.NewKey) || !Within(a, f.NewX, f.NewY, f.NewZ)
                     || !Held(o, oOriginX, oOriginY, oOriginZ, f.NewKey))
                 {
@@ -2503,7 +2503,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     /// session ignores.
     /// </summary>
     private void FarSweepCell(int cx, int cy, int cz, in Ball a, int oOriginX, int oOriginY, int oOriginZ, ReadOnlySpan<ushort> o, in Ball n,
-        ulong archetypeMask, FrameWorkerScratch scratch, uint tick, int gap, ref long updates)
+        in ArchetypeSet archetypes, FrameWorkerScratch scratch, uint tick, int gap, ref long updates)
     {
         if (!Local(oOriginX, oOriginY, oOriginZ, cx, cy, cz, out var row, out var bit) || !Has(o, row, bit) || _occupancy.Get(TEvent.Key(cx, cy, cz)) == 0)
         {
@@ -2514,7 +2514,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         var nearA = Math.Sqrt(a.Far2);
         foreach (var arch in _pushIndices)
         {
-            if ((archetypeMask & (1UL << arch)) == 0)
+            if (!archetypes.Contains(arch))
             {
                 continue;
             }
@@ -2943,7 +2943,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     }
 
     /// <summary>Enters every entity of the cell inside the sphere that was not pushed this tick (a pushed one is the push step's).</summary>
-    private int DeliverCell(int cx, int cy, int cz, in Ball n, ulong archetypeMask, FrameWorkerScratch scratch, uint tick, int gap, bool everywhere = false)
+    private int DeliverCell(int cx, int cy, int cz, in Ball n, in ArchetypeSet archetypes, FrameWorkerScratch scratch, uint tick, int gap, bool everywhere = false)
     {
         // Nobody's last pushed position is in the cell: its cluster query could find nothing to enter.
         if (_occupancy.Get(TEvent.Key(cx, cy, cz)) == 0)
@@ -2958,7 +2958,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         const bool sweeping = false;
         foreach (var a in _pushIndices)
         {
-            if ((archetypeMask & (1UL << a)) == 0)
+            if (!archetypes.Contains(a))
             {
                 continue;
             }
@@ -3034,7 +3034,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
     }
 
     /// <summary>Emits the enters and leaves the anchor's move caused among one delivered cell's entities that were not pushed this tick.</summary>
-    private void SweepCell(int cx, int cy, int cz, in Ball a, in Ball n, ulong archetypeMask, FrameWorkerScratch scratch, uint tick, int gap, ref long enters,
+    private void SweepCell(int cx, int cy, int cz, in Ball a, in Ball n, in ArchetypeSet archetypes, FrameWorkerScratch scratch, uint tick, int gap, ref long enters,
         ref long leaves)
     {
         if (_occupancy.Get(TEvent.Key(cx, cy, cz)) == 0)
@@ -3049,7 +3049,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         const bool sweeping = true;
         foreach (var arch in _pushIndices)
         {
-            if ((archetypeMask & (1UL << arch)) == 0)
+            if (!archetypes.Contains(arch))
             {
                 continue;
             }
@@ -3136,7 +3136,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
 
     // ══ Shadow oracle ════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
-    public override void ShadowCheck(SessionId session, ulong archetypeMask)
+    public override void ShadowCheck(SessionId session, in ArchetypeSet archetypes)
     {
         var slotIndex = session.Slot;
         ref var st = ref _sessions[slotIndex];
@@ -3153,7 +3153,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
         var where = new Dictionary<uint, (float X, float Y, float Z, bool Delivered)>();
         foreach (var a in _pushIndices)
         {
-            if ((archetypeMask & (1UL << a)) == 0)
+            if (!archetypes.Contains(a))
             {
                 continue;
             }
@@ -3213,7 +3213,7 @@ internal sealed unsafe class PushReplication<TEvent> : PushReplication where TEv
                 if (!where.TryGetValue(id, out var w))
                 {
                     ExtraGone++;
-                    ClassifyGone(id, archetypeMask);
+                    ClassifyGone(id, in archetypes);
                 }
                 else if (!Within(held, w.X, w.Y, w.Z))
                 {
