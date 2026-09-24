@@ -143,6 +143,7 @@ export {
   writeEventsBlock,
   writeExtBlock,
   writeSelfBlock,
+  writeSelfNoneBlock,
   writeSourcesBlock,
   writeStatsBlock,
   writeTickHeader,

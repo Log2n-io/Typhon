@@ -312,7 +312,7 @@ export class FrameApplier implements TickSink, EntitiesTarget {
     // Events are read by the second pass (EventPass); the first pass never selects their blocks.
   }
 
-  self(archetype: ArchetypePlan, netId: number, lastSeq: number, ownerMask: number): void {
+  self(archetype: ArchetypePlan | null, netId: number, lastSeq: number, ownerMask: number): void {
     this.selfState.receive(archetype, netId, lastSeq, ownerMask);
     this.target = Target.Owner;
   }

@@ -57,6 +57,9 @@ public class GoldenRefusalTests
         var drone = (byte)Kitchen.ArchetypeByName("Drone").Idx;
         // Drone has two owner groups, so ownerMask bit 2 names none.
         Tick(cases, "self-owner-mask-unknown-group", Block(BlockTypes.Self, drone, 0x01, 0x00, 0x00, 0x04));
+        // netId 0 is no controlled entity (W17′): it names archetype 0 and carries no owner group.
+        Tick(cases, "self-no-entity-with-owner-mask", Block(BlockTypes.Self, 0x00, 0x00, 0x00, 0x00, 0x01));
+        Tick(cases, "self-no-entity-naming-an-archetype", Block(BlockTypes.Self, 0x01, 0x00, 0x00, 0x00, 0x00));
         Tick(cases, "debug-sub-block-overrun", Block(BlockTypes.Debug, 0x01, 0x05, 0xAA));
         Tick(cases, "period-truncated", [MessageTypes.Tick, 0x70, 0x11, 0x01, 0x00, (byte)TickFlags.Period, 0x01, 0x02]);
         byte[] emptyLedger = [BlockTypes.Entities, 0x05, ledger, 0x00, 0x00, 0x00, 0x00];

@@ -43,8 +43,11 @@ export interface TickSink extends FieldSink {
   leave(netId: number): void;
   /** An event: its fields follow. */
   event(type: MessagePlan): void;
-  /** The `SELF` block: the owner groups in `ownerMask` follow. */
-  self(archetype: ArchetypePlan, netId: number, lastSeq: number, ownerMask: number): void;
+  /**
+   * The `SELF` block: the owner groups in `ownerMask` follow. `archetype` is `null` and `netId` 0 when the session
+   * controls no entity (W17′): an acknowledgement only, which also tells the client to drop the owner state it holds.
+   */
+  self(archetype: ArchetypePlan | null, netId: number, lastSeq: number, ownerMask: number): void;
   /** A command rejection. */
   ack(seq: number, reason: number): void;
   /** A source lifecycle entry; `code` is 0 unless `status` is {@link SourceStatus.Error}. */
@@ -379,10 +382,26 @@ export class TickReader {
 
   private readSelf(tick: number, sink: TickSink): void {
     const r = this.r;
-    const archetype = this.plan.archetype(r.varu());
+    const archetypeIdx = r.varu();
     const netId = r.varu();
     const lastSeq = r.u16();
     const mask = r.u8();
+
+    // netId 0 is never an entity: it is "no controlled entity" (W17′), an acknowledgement only, so it names no
+    // archetype and carries no group.
+    if (netId === 0) {
+      if (archetypeIdx !== 0 || mask !== 0) {
+        throw malformed(
+          `SELF with no controlled entity must name archetype 0 and no owner group ` +
+            `(archetype ${archetypeIdx}, mask 0x${mask.toString(16)})`,
+        );
+      }
+
+      sink.self(null, 0, lastSeq, 0);
+      return;
+    }
+
+    const archetype = this.plan.archetype(archetypeIdx);
     const groupCount = archetype.ownerGroups.length;
     if (mask >> groupCount !== 0) {
       throw malformed(`SELF owner mask 0x${mask.toString(16)} is invalid for ${groupCount} owner group(s)`);

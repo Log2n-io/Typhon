@@ -138,7 +138,7 @@ internal sealed class RecordingSink : ITickSink, ICommandSink
     public void Event(MessagePlan type) => Log.Add(new JsonObject { ["call"] = "event", ["type"] = type.Name, ["idx"] = type.Idx });
 
     public void Self(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask) =>
-        Log.Add(new JsonObject { ["call"] = "self", ["archetype"] = archetype.Name, ["netId"] = netId, ["lastSeq"] = lastSeq, ["ownerMask"] = ownerMask });
+        Log.Add(new JsonObject { ["call"] = "self", ["archetype"] = archetype?.Name, ["netId"] = netId, ["lastSeq"] = lastSeq, ["ownerMask"] = ownerMask });
 
     public void Ack(ushort seq, byte reason) => Log.Add(new JsonObject { ["call"] = "ack", ["seq"] = seq, ["reason"] = reason });
 

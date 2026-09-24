@@ -234,10 +234,10 @@ public sealed class WorldStore
 /// <summary>The controlled entity's owner-only state (W17), accumulated across <c>SELF</c> blocks.</summary>
 public sealed class SelfState
 {
-    /// <summary>The controlled entity's archetype, or <see langword="null"/> before the first <c>SELF</c>.</summary>
+    /// <summary>The controlled entity's archetype, or <see langword="null"/> before the first <c>SELF</c> and while the session controls none.</summary>
     public ArchetypePlan Archetype { get; private set; }
 
-    /// <summary>The controlled entity.</summary>
+    /// <summary>The controlled entity; 0 for none (W17′).</summary>
     public uint NetId { get; private set; }
 
     /// <summary>The highest command sequence the server drained into a tick at or before the latest frame.</summary>
@@ -260,8 +260,16 @@ public sealed class SelfState
 
     internal void Receive(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask)
     {
-        // Owner values belong to one entity (W17): a control change starts from nothing, and SUB-11 resends every owner group in its frame.
-        if (Archetype != archetype || NetId != netId)
+        // Owner values belong to one entity (W17): a control change starts from nothing, and SUB-11 resends every owner group in its frame. netId 0 is
+        // no entity at all (W17′): the owner state is dropped and only lastSeq is kept.
+        if (archetype == null)
+        {
+            Archetype = null;
+            Numbers = [];
+            Texts = [];
+            Bytes = [];
+        }
+        else if (Archetype != archetype || NetId != netId)
         {
             Archetype = archetype;
             Numbers = new double[archetype.OwnerFields.Length][];

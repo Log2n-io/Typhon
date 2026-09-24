@@ -143,6 +143,34 @@ public class FrameApplierTests
         });
     }
 
+    /// <summary>W17′: a <c>SELF</c> with netId 0 is no controlled entity — the owner state goes, <c>lastSeq</c> stays.</summary>
+    [Test]
+    public void OwnerStateIsDroppedWhenTheSessionControlsNoEntity()
+    {
+        var drone = Plan.ArchetypeByName("Drone");
+        var store = new WorldStore(Plan);
+        var applier = new FrameApplier(store);
+
+        var w = new WireWriter(new byte[4096]);
+        TickWriter.WriteHeader(ref w, 1, TickFlags.None);
+        TickWriter.WriteSelf(ref w, drone, 100, 1, 0b10, new RecordValues { ["pin"] = FieldValue.Of(42), ["vault"] = FieldValue.Of(1) });
+        applier.Apply(w.Written.ToArray());
+
+        w = new WireWriter(new byte[4096]);
+        TickWriter.WriteHeader(ref w, 2, TickFlags.None);
+        TickWriter.WriteSelfNone(ref w, 7);
+        applier.Apply(w.Written.ToArray());
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.Self.Received, Is.True);
+            Assert.That(store.Self.Archetype, Is.Null);
+            Assert.That(store.Self.NetId, Is.Zero);
+            Assert.That(store.Self.LastSeq, Is.EqualTo(7));
+            Assert.That(store.Self.Numbers, Is.Empty, "the old entity's owner values are gone");
+        });
+    }
+
     [Test]
     public void UnknownNetIdsAreCountedNotThrown()
     {

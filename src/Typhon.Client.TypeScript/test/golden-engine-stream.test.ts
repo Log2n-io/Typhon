@@ -73,7 +73,7 @@ class RecordingSink implements TickSink {
 
   // The archetype comes first and is not logged; `no-unused-vars` defaults to `after-used`, so a leading parameter kept
   // only to reach the next one is not a finding.
-  self(_archetype: ArchetypePlan, netId: number): void {
+  self(_archetype: ArchetypePlan | null, netId: number): void {
     this.calls.push(`self ${netId}`);
   }
 

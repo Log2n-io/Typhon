@@ -219,6 +219,18 @@
       "closeCode": 1007
     },
     {
+      "name": "self-no-entity-with-owner-mask",
+      "kind": "tick",
+      "hex": "02701101000003050000000001",
+      "closeCode": 1007
+    },
+    {
+      "name": "self-no-entity-naming-an-archetype",
+      "kind": "tick",
+      "hex": "02701101000003050100000000",
+      "closeCode": 1007
+    },
+    {
       "name": "debug-sub-block-overrun",
       "kind": "tick",
       "hex": "02701101000006030105aa",

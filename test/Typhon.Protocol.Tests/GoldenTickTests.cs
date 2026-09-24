@@ -162,6 +162,32 @@ public class GoldenTickTests
     }
 
     [Test]
+    public void ASelfWithNoControlledEntity()
+    {
+        var buffer = new byte[32];
+        var w = new WireWriter(buffer);
+        TickWriter.WriteHeader(ref w, Tick + 2, TickFlags.None);
+        TickWriter.WriteSelfNone(ref w, 42);
+        var log = Record(w.Written);
+
+        Assert.That(log[1]!["archetype"], Is.Null, "no controlled entity names no archetype");
+        Golden.Assert("tick-self-none", w.Written.ToArray(), Expectation(
+            "SELF with netId 0 (W17′): a session that controls no entity — a spectator's acknowledgement, lastSeq 42, archetype index 0 and no owner "
+            + "group; the client drops any owner state it holds.", log));
+    }
+
+    [Test]
+    public void TheEntityWriterRefusesNetIdZero()
+    {
+        var buffer = new byte[64];
+        Assert.Throws<ArgumentException>(() =>
+        {
+            var w = new WireWriter(buffer);
+            TickWriter.WriteSelf(ref w, Plan.ArchetypeByName("Drone"), 0, 1, 0, new RecordValues());
+        }, "netId 0 is WriteSelfNone's");
+    }
+
+    [Test]
     public void Keepalive()
     {
         var buffer = new byte[16];

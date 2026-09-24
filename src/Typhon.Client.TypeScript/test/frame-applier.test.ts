@@ -24,6 +24,7 @@ import {
   writeEntitiesBlock,
   writeEventsBlock,
   writeSelfBlock,
+  writeSelfNoneBlock,
   writeSourcesBlock,
   writeStatsBlock,
   writeTickHeader,
@@ -234,6 +235,46 @@ describe('FrameApplier', () => {
     expect(applier.stats.value('typhon.system.mean', 2)).toBe(3);
     expect(applier.stats.value('app.queue')).toBe(9);
     expect(applier.stats.received).toBe(false);
+  });
+
+  it('refuses netId 0 in the entity SELF writer: it is writeSelfNoneBlock', () => {
+    expect(() => {
+      frame({
+        tick: 1,
+        write: (w) => {
+          writeSelfBlock(w, drone, 0, 1, 0, {});
+        },
+      });
+    }).toThrow(RangeError);
+  });
+
+  it('drops the owner state and keeps lastSeq on a SELF with no controlled entity (W17′)', () => {
+    const applier = new FrameApplier(plan);
+    applier.apply(
+      frame({
+        tick: 1,
+        write: (w) => {
+          writeSelfBlock(w, drone, 9, 4, 0b01, { fuel: 2.5, manifest: Uint8Array.of(7) });
+        },
+      }),
+    );
+    expect(applier.selfState.archetype).toBe(drone);
+
+    applier.apply(
+      frame({
+        tick: 2,
+        write: (w) => {
+          writeSelfNoneBlock(w, 5);
+        },
+      }),
+    );
+    const self = applier.selfState;
+    expect(self.received).toBe(true);
+    expect(self.archetype).toBeNull();
+    expect(self.netId).toBe(0);
+    expect(self.lastSeq).toBe(5);
+    expect(self.numbers.length).toBe(0);
+    expect(self.present.length).toBe(0);
   });
 
   it('lets a netId come back as another archetype in a later frame, and replaces a live one inside a frame', () => {
