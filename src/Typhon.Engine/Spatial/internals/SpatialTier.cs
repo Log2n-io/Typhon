@@ -74,6 +74,6 @@ internal static class SpatialTierExtensions
         }
         throw new NotSupportedException(
             $"SpatialTierExtensions.TBoxToTier: unknown ISpatialBox implementer '{typeof(TBox).FullName}'. " +
-            "Add a case here and to every ClusterSpatialQuery dispatch site (search for 'typeof(TBox) ==' in Typhon.Engine/Data/SpatialIndex).");
+            "Add a case here and to every ClusterSpatialQuery dispatch site (search for 'typeof(TBox) ==' in Typhon.Engine/Spatial).");
     }
 }
