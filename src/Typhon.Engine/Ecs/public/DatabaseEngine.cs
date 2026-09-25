@@ -4003,6 +4003,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // a torn cluster-index node page was neither loud-failed nor rebuilt, but silently served.
         RebuildClusterIndexes();
 
+        // Phase 5b — SPATIAL (RB-01, #1054). The cell layer is derived exactly like the indexes, and the only rebuild so far — InitializeArchetypes' — saw
+        // the clusters as they were BEFORE this window was applied. Replayed spawns claim cell-agnostic slots (RecoveryApplier), often into clusters that
+        // rebuild never saw at all (a crash before the first checkpoint leaves the cluster segment empty at open), so the reopened database answered every
+        // spatial query with nothing. Rebuilt from scratch now that cluster data is final; its per-slot check files any mixed-cell cluster's strays for
+        // the first fence (Realms P0.2).
+        RebuildSpatialLayerAfterRecovery();
+
         // Phase 6 — SUSPECT RESOLUTION (03-recovery.md §9, RB-04): now that derived structures are rebuilt and chains scrubbed, classify every page that failed
         // CRC during recovery (RecoverySuspect mode). Derived/orphaned suspects are already healed (rebuilt / freed by scrub); a suspect page still holding a live
         // primary chunk is unhealable torn data → fail the open loudly. Before the seal so a loud failure aborts before the data file is rewritten.
@@ -4016,6 +4023,36 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // final only afterwards. The corrected bitmap is held dirty (DC > 0, so it can't be evicted stale) and consolidated by the next checkpoint / clean shutdown;
         // if this session crashes again first, recovery simply re-derives (idempotent).
         RederiveOccupancyOnCrash();
+    }
+
+    /// <summary>
+    /// Recovery's spatial phase: drop the whole cell layer and rebuild it from the recovered cluster data, for every cluster-spatial archetype. The same
+    /// fresh-grid, fresh-pool precondition <see cref="ArchetypeClusterState.RebuildSpatialStateFromData"/> documents; the grid is shared, so it is reset
+    /// once and every archetype refilled.
+    /// </summary>
+    private void RebuildSpatialLayerAfterRecovery()
+    {
+        if (_spatialGrid == null)
+        {
+            return;
+        }
+
+        var start = Stopwatch.GetTimestamp();
+        using var guard = EpochGuard.Enter(EpochManager);
+        _spatialGrid.ResetCellState();
+        foreach (var es in _archetypeStates)
+        {
+            var clusterState = es?.ClusterState;
+            if (clusterState == null || !clusterState.SpatialSlot.HasSpatialIndex)
+            {
+                continue;
+            }
+
+            clusterState.CellClusterPool = new CellClusterPool(_spatialGrid.CellCount);
+            clusterState.RebuildSpatialStateFromData(_spatialGrid, EpochManager);
+        }
+
+        _openClusterAabbRebuildMs += (Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency;
     }
 
     /// <summary>

@@ -1772,6 +1772,9 @@ uniformly (no silent acceptance) — proven by `SuspectPageClassification_Partit
   scope: crash path clears + recreates indexes empty at open (ComponentTable.BuildIndexedFieldInfo /
     BTreeBase.ClearSharedSegment) and repopulates from final HEADs after apply+scrub via
     ArchetypeClusterState.RebuildIndexesFromData, driven by DatabaseEngine.RebuildClusterIndexes on the crash path.
+    The spatial cell layer is rebuilt the same way, after apply (DatabaseEngine.RebuildSpatialLayerAfterRecovery, #1054):
+    the only rebuild before it runs in InitializeArchetypes, BEFORE the WAL window is applied, and a crash before the
+    first checkpoint leaves the cluster segment empty there — every replayed spawn was then invisible to spatial queries.
     ClearMultiValueTail is gone with the shared index home (#629); the per-archetype tree is cleared and rebuilt whole
     rather than having its multi-value tail cleared separately.
   🔴 The EntityMap half has a second precondition that is NOT integrity doubt: a schema migration allocates a fresh

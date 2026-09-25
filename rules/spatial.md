@@ -1638,13 +1638,22 @@
     documents as a known residual) all leave a flag whose destination is not where the entity is. The drain
     (DatabaseEngine.DrainPreFlaggedMigrations) therefore re-reads the position and decides from it — dropping the
     flag when the entity is home (LastTickStaleFlagsDropped) — exactly as the dirty-bits scan does
+  invariant at a rebuild (RebuildSpatialStateFromData) a cluster takes its FIRST occupied slot's cell, and every other
+    slot is checked against it: a slot whose centre lies outside that cell by more than the hysteresis band is filed
+    as a crossing for the first fence (FileForeignCellSlots) — the cluster stays whole and its AABB keeps covering the
+    slot (CA-01) until it moves. A recovery or schema-migration claim (ClaimSlot) is cell-agnostic, so without the check
+    a mixed-cell cluster survived until its entities were next written. The check is O(1) per cluster whose box fits
+    the cell plus the band; only the others scan their slots (Realms P0.2)
   invariant CellClusterPool's per-cell (head, count) pair and its backing array are published and read in a fixed
     order (release: pool → head → entry → count; acquire: count → head → pool). A reader pairing a new count with
     an old head runs past its cell's segment into the next cell's, and a claim lands in a cluster of another cell
   scope: ArchetypeClusterState.AddClusterToPerCellIndex, ArchetypeClusterState.AddClusterToPerCellIndexLocked,
     ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.TryClaimPinnedSlot, ArchetypeClusterState.ClusterCellMap,
-    DatabaseEngine.DrainPreFlaggedMigrations, CellClusterPool.GetClusters, CellClusterPool.AddCluster
-  verified: ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell — eight writers spawning
+    DatabaseEngine.DrainPreFlaggedMigrations, CellClusterPool.GetClusters, CellClusterPool.AddCluster,
+    ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.FileForeignCellSlots
+  verified: RecoverySpatialRebuildTests.MixedCellClusterFromRecoveryClaim_FiledAtRebuild_FixedAtFirstFence (the replay packs
+    four cells into shared clusters; the rebuild files exactly the slots outside their cluster's cell and none survives the
+    first fence). ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell — eight writers spawning
     into two adjacent cells race eight writers moving entities across their boundary; after the fence every
     occupied slot resolves to its cluster's mapped cell and the two cells count what was spawned (7 of 30 runs
     failed before the latch and the occupancy-before-publish ordering; about 1 cold launch in 10 before the drain

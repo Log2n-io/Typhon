@@ -28,7 +28,8 @@ namespace Typhon.Engine.Tests;
 /// <c>SpatialGrid.GetCell(0)</c> throws a <see cref="NullReferenceException"/> because no cell chunk was ever allocated.
 /// Four arms were run (clean/crash x repair-on/repair-off); the two crash arms failed identically and the two clean arms
 /// passed, so the fault is independent of everything step 12 introduced. Shipping it red would attribute a pre-existing
-/// gap to this step; asserting the broken behaviour would freeze it. It is reported separately instead.</para>
+/// gap to this step; asserting the broken behaviour would freeze it. It was reported separately as #1054, fixed by the recovery's
+/// own spatial rebuild (Realms P0.2), and is covered by <see cref="RecoverySpatialRebuildTests"/>.</para>
 /// </remarks>
 [TestFixture]
 [NonParallelizable]

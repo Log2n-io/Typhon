@@ -4455,6 +4455,10 @@ internal sealed unsafe partial class ArchetypeClusterState
         public int CellZ;
         public int PopCount;
         public ClusterSpatialAabb Aabb;
+
+        /// <summary>Occupied slots whose centre lies outside the cluster's cell by more than CC-02's hysteresis band — see
+        /// <see cref="FindForeignCellSlots"/>. Filed as crossings by the reduce.</summary>
+        public ulong ForeignCellSlots;
     }
 
     /// <summary>
@@ -4493,7 +4497,94 @@ internal sealed unsafe partial class ArchetypeClusterState
         // had no test at all.
         grid.CellOriginFromCoords(result.CellX, result.CellY, result.CellZ, out var originX, out var originY, out var originZ);
         result.Aabb = RecomputeClusterAabb(chunkId, ref accessor, originX, originY, originZ);
+
+        // Realms P0.2 (§9.3-2): the cell is the FIRST slot's, and nothing checked the others. A recovery or schema-migration claim is cell-agnostic
+        // (ClaimSlot), so a rebuild can meet a cluster whose entities sit in several cells — CC-02 broken silently until they are next written, since an
+        // extent under 1.2 cells never trips the outlier guard. A box inside the cell plus CC-02's band cannot hold a centre outside it, so only the rare
+        // cluster whose box is not pays a per-slot scan.
+        var margin = grid.Config.CellSize * grid.Config.MigrationHysteresisRatio;
+        if (!BoxFitsCellWithBand(result.Aabb, (float)grid.Config.CellSize, (float)margin))
+        {
+            result.ForeignCellSlots = FindForeignCellSlots(clusterBase, occupancy, originX, originY, originZ, grid.Config.CellSize, margin);
+        }
+
         return result;
+    }
+
+    /// <summary>
+    /// True when the cell-relative <paramref name="aabb"/> lies inside <c>[-margin, cellSize + margin]</c> on every axis — then every slot's centre does too.
+    /// An empty box (every slot degenerate) fits trivially: its bounds are the ±infinity sentinel.
+    /// </summary>
+    private static bool BoxFitsCellWithBand(in ClusterSpatialAabb aabb, float cellSize, float margin) =>
+        aabb.MinX >= -margin && aabb.MinY >= -margin && aabb.MinZ >= -margin
+        && aabb.MaxX <= cellSize + margin && aabb.MaxY <= cellSize + margin && aabb.MaxZ <= cellSize + margin;
+
+    /// <summary>
+    /// The occupied slots whose centre lies outside <c>[origin - margin, origin + cellSize + margin]</c> on some axis: entities CC-02 does not allow in
+    /// this cell. The same centre the grid files a spawn by (<see cref="SpatialGrid.ReadCellCoordsFromSpatialField"/>); a degenerate (NaN) centre compares
+    /// false and stays, as the AABB union skips it. A flat grid reports centre Z = 0 inside the one Z layer, so the Z pair never fires there.
+    /// </summary>
+    private ulong FindForeignCellSlots(byte* clusterBase, ulong occupancy, double originX, double originY, double originZ, double cellSize, double margin)
+    {
+        ref readonly var ss = ref SpatialSlot;
+        var firstField = clusterBase + Layout.ComponentOffset(ss.Slot) + ss.FieldOffset;
+        var stride = Layout.ComponentSize(ss.Slot);
+        var fieldType = ss.FieldInfo.FieldType;
+        double loX = originX - margin, loY = originY - margin, loZ = originZ - margin;
+        double hiX = originX + cellSize + margin, hiY = originY + cellSize + margin, hiZ = originZ + cellSize + margin;
+
+        ulong foreign = 0;
+        var bits = occupancy;
+        while (bits != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(bits);
+            bits &= bits - 1;
+            SpatialGrid.ReadSpatialCenter3D(firstField + slot * stride, fieldType, out var x, out var y, out var z);
+            if (x < loX || x > hiX || y < loY || y > hiY || z < loZ || z > hiZ)
+            {
+                foreign |= 1UL << slot;
+            }
+        }
+
+        return foreign;
+    }
+
+    /// <summary>
+    /// Entities the last <see cref="RebuildSpatialStateFromData"/> found outside their cluster's cell (beyond CC-02's band) and filed as crossings for the
+    /// first fence. Zero on a database whose clusters were all claimed by cell; non-zero after a recovery or schema-migration claim mixed cells.
+    /// </summary>
+    internal int LastRebuildForeignCellSlots;
+
+    /// <summary>
+    /// Files each of <paramref name="foreignSlots"/> as a crossing to the cell its centre lies in, for the first fence to move — the reduce half of the
+    /// per-slot check. Serial (the reduce), so the destination cells it creates are created in a deterministic order.
+    /// </summary>
+    private void FileForeignCellSlots(int chunkId, int cellKey, ulong foreignSlots, SpatialGrid grid)
+    {
+        ref readonly var ss = ref SpatialSlot;
+        var accessor = ClusterSegment.CreateChunkAccessor();
+        try
+        {
+            var firstField = accessor.GetChunkAddress(chunkId) + Layout.ComponentOffset(ss.Slot) + ss.FieldOffset;
+            var stride = Layout.ComponentSize(ss.Slot);
+            var bits = foreignSlots;
+            while (bits != 0)
+            {
+                var slot = BitOperations.TrailingZeroCount(bits);
+                bits &= bits - 1;
+                SpatialGrid.ReadSpatialCenter3D(firstField + slot * stride, ss.FieldInfo.FieldType, out var x, out var y, out var z);
+                var destCellKey = grid.WorldToCellKey(x, y, z);
+                if (destCellKey != cellKey)
+                {
+                    EnqueueMigration(new MigrationRequest(chunkId, slot, destCellKey));
+                    LastRebuildForeignCellSlots++;
+                }
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
     }
 
     /// <summary>
@@ -4633,6 +4724,10 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         // ─── Reduce ───
         // Serial, in ActiveClusterIds order, so the append-ordered index slots and pool contents do not depend on how the map was scheduled.
+        // Crossings queued before this rebuild name cells of the layer it replaces (VG-01) — at open, only a previous rebuild's own filings (recovery
+        // rebuilds twice, #1054); re-filed below from the current data, never kept twice.
+        PendingMigrationCount = 0;
+        LastRebuildForeignCellSlots = 0;
         for (var i = 0; i < count; i++)
         {
             var chunkId = ActiveClusterIds[i];
@@ -4656,6 +4751,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             ref var cell = ref grid.GetCell(cellKey);
             cell.ClusterCount++;
             cell.EntityCount += m.PopCount;
+
+            // The cluster stays whole and its AABB keeps covering every slot (CA-01 holds until they move); the first fence moves the strays.
+            if (m.ForeignCellSlots != 0)
+            {
+                FileForeignCellSlots(chunkId, cellKey, m.ForeignCellSlots, grid);
+            }
 
             if (float.IsPositiveInfinity(m.Aabb.MinX))
             {
