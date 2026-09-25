@@ -178,6 +178,36 @@ internal sealed class BulkLoadApiSurfaceTests
         Assert.That(bulk.EntitiesSpawned, Is.EqualTo(1));
     }
 
+    /// <summary>#997: the bulk session exposes the writable open in both forms; <c>TryOpenMut</c> is one resolve and returns false on a miss.</summary>
+    [Test]
+    public void TryOpenMut_WritesSpawnedEntity_AndMissesCleanly()
+    {
+        EntityId id;
+        using (var bulk = _engine.BeginBulkLoad())
+        {
+            var a = new CompA(1, 0f, 0d);
+            id = bulk.Spawn<CompAArch>(CompAArch.A.Set(in a));
+            Assert.That(bulk.TryOpenMut(id, out var entity), Is.True);
+            entity.Write(CompAArch.A).A = 55;
+            Assert.That(bulk.TryOpenMut(new EntityId(id.EntityKey + 1_000, id.ArchetypeId), out var missing), Is.False);
+            Assert.That(missing.IsValid, Is.False);
+            bulk.CompleteBulkLoad();
+        }
+
+        using var tx = _engine.CreateQuickTransaction();
+        Assert.That(tx.Open(id).Read(CompAArch.A).A, Is.EqualTo(55));
+    }
+
+    [Test]
+    public void TryOpenMut_OnClosedSession_Throws()
+    {
+        var bulk = _engine.BeginBulkLoad();
+        bulk.Dispose();
+
+        Assert.Throws<BulkSessionClosedException>(() => bulk.TryOpenMut(default, out _));
+        Assert.Throws<BulkSessionClosedException>(() => bulk.OpenMut(default));
+    }
+
     [Test]
     public void Destroy_OnClosedSession_Throws()
     {

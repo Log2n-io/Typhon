@@ -3,8 +3,8 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-09-19 |
-| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, view lifetime |
+| Last Updated | 2026-09-25 |
+| Domain | Component schema identity, archetype registry, component-type identity, tick-fence dirty bitmaps, spawn payload staging, entity handles, view lifetime |
 
 > Type-location: `Ecs/internals/ArchetypeRegistry.cs`, `Ecs/internals/ArchetypeMetadata.cs` (+ `ArchetypeEngineState`), `Ecs/public/DatabaseEngine.cs`
 > (`RegisterComponentFromAccessor`, the reopen schema-load path), `Schema.Definition/Attributes.cs` (`[Component]`).
@@ -493,7 +493,7 @@ reclaimed.
         SingleVersion or Transient content-chunk id could occupy — that is a structural impossibility, not an omission.
   scope: Transaction.SpawnInternal, Transaction.SpawnBatch, Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll,
          Transaction.FinalizeSpawns, Transaction.CleanupEcsState, Transaction.SpawnSlotLocation, Transaction.ResolveEntity,
-         EntityAccessor.ResolveSpawnAwarePayload, EntityAccessor.ShadowIndexedFields, EntityRef.Write,
+         EntityAccessor.ResolveSpawnAwarePayload, EntityAccessor.ShadowIndexedFields, EntityRefMut.Write,
          EcsQuery.CollectPendingSpawnsFull, SpawnStagingArena, DeferredCleanupManager.ReleaseCollectionBuffers
   on_violation: the chunk becomes unreachable the instant `FinalizeSpawns` copies the payload into the cluster, and
                 nothing frees it — every free site is gated on rollback or on Versioned. The file then grows with
@@ -524,7 +524,7 @@ reclaimed.
         disabled; `root = 0 ⟹ defect` warns on every partial spawn.
   never inventing a value for an unsupplied component — neither the previous occupant's bytes nor zero. `Enable(comp)`
         must refuse, because it has no value to enable; `Enable(comp, in value)` is the way to supply one mid-life.
-  scope: EntityRef.Enable, EntityRef.IsVersionedSlotAbsent, EntityRef.ReadRaw, Transaction.CreateVersionedContentAndWrite,
+  scope: EntityRefMut.Enable, EntityRef.IsVersionedSlotAbsent, EntityRef.ReadRaw, Transaction.CreateVersionedContentAndWrite,
          Transaction.AllocateVersionedSlotContent, Transaction.PublishNewVersionedChainRoots,
          Transaction.SpawnBatchAllocate, Transaction.SpawnBatchWriteAll, Transaction.FinalizeSpawns,
          ArchetypeClusterState.RebuildVersionedHeadFromChain, VersionedHeadRebuildSkips, DatabaseEngine.RebuildClusterFromChains,
@@ -599,7 +599,7 @@ second copy is not derived on demand, so every path that changes one copy has to
   never writing a slot the entity no longer occupies. The record a commit reads can be a TOMBSTONE — another transaction
         destroyed the entity and committed first, releasing the slot at commit — and a spawn may already hold that slot.
         The publish writes only while the slot's occupancy bit is set and its EntityIds tail holds this entity's id.
-  never writing the cluster bit at staging. `EntityRef.Enable/Disable` stage the change and nothing else; a staged bit
+  never writing the cluster bit at staging. `EntityRefMut.Enable/Disable` stage the change and nothing else; a staged bit
         is visible to every concurrent bulk scan (the words are shared and unversioned) and nothing restores it on
         rollback.
   never a plain read-modify-write of an `EnabledBits` word on a live commit path. One word holds a component's bit for
@@ -608,7 +608,7 @@ second copy is not derived on demand, so every path that changes one copy has to
         (single-threaded), and the fence's cluster migration — the tick-fence window excludes every committing
         transaction (EW-01; an enable/disable commit writes the EntityMap), and the Migrate slices are carved on
         destination cell, so no two workers write the same destination cluster.
-  scope: EntityRef.Enable, EntityRef.Disable, Transaction.StageEnableDisable, Transaction.FlushPendingEnableDisable,
+  scope: EntityRefMut.Enable, EntityRefMut.Disable, Transaction.StageEnableDisable, Transaction.FlushPendingEnableDisable,
          Transaction.PublishClusterEnabledBits, Transaction.FinalizeSpawns, RecoveryApplier.ApplySetEnabledBitsToExisting,
          RecoveryApplier.ApplySpawnedEntityToCluster, DatabaseEngine.RebuildClusterFromChains,
          DatabaseEngine.RebuildClusterEntityMapEntries, DatabaseEngine.ExecuteMigrations, ArchetypeClusterState.ClearSlotBits,
@@ -639,6 +639,52 @@ second copy is not derived on demand, so every path that changes one copy has to
             LifecycleDurabilityBugTests.Issue847_EnabledChange_RecoveredFromWal_ReachesTheClusterSoA (the replay path).
             EnableDisableTests.ConcurrentCommitsInOneCluster_LoseNoBit guards the atomicity clause but is not counted as
             a verifier: a timing race can be caught, never forced.
+
+## Module: ACCESS — Entity handles
+
+An entity is reached by point access through a handle: `EntityRef` (read-only) or `EntityRefMut` (read + write). Which one a
+caller holds decides what it may do, and the write paths rely on preconditions only a writable open establishes.
+
+### ACCESS-01: A component write is reachable only from a writable open `[fatal]`
+  invariant `EntityRef` has no member that writes, enables or disables: `Write`, `Enable` and `Disable` exist on
+            `EntityRefMut` only, and `EntityRefMut` is produced only by `OpenMut` / `TryOpenMut` (on `EntityAccessor` and
+            every subclass, `ArchetypeAccessor`, `BulkLoadSession`) — no public constructor, no conversion into it
+  invariant ∀ writable open o on accessor A: o runs A's mutation prep BEFORE resolving the entity, found or not, on
+            EVERY open — `PrepareOpenMut` (a `Transaction`: `EnsureMutable`, then `InProgress`); `ArchetypeAccessor`
+            runs it inside the `PrepareForMutation` span on its first writable open and directly on every later one —
+            and resolves the entity's cluster page with `GetChunkAddress(…, dirty: true)`
+  invariant `EntityRefMut` is exactly one `EntityRef` field: resolvers reinterpret with `Unsafe.BitCast`, which throws
+            on every writable open once the sizes differ (a wrap instead of the cast copies the ~200-byte handle,
+            +10 ns per open, measured)
+  invariant no defensive copy of a handle: every member of `EntityRef` / `EntityRefMut` other than `Write`, `Enable`,
+            `Disable` is `readonly` (the read path's Versioned memo writes through `Unsafe.AsRef(in this)`), and a
+            non-`readonly` member called on a read-only receiver is a compile error (analyzer TYPHON012)
+  never a runtime access flag. Read-only-ness is the handle's TYPE; the check costs nothing and cannot be switched off.
+        The conversion goes one way only: `EntityRefMut` → `EntityRef` (implicit, a copy).
+  never a once-per-accessor prep: an `ArchetypeAccessor` taken before its transaction commits and used after would
+        write in place into HEAD from a finished transaction.
+  scope: EntityRef, EntityRefMut, EntityHandleDefensiveCopyAnalyzer, EntityAccessor.OpenMut, EntityAccessor.TryOpenMut, EntityAccessor.PrepareOpenMut,
+         EntityAccessor.PrepareForMutation, Transaction.PrepareOpenMut, Transaction.PrepareForMutation,
+         ArchetypeAccessor.OpenMut, ArchetypeAccessor.TryOpenMut, ArchetypeAccessor.PrepareMutation,
+         BulkLoadSession.OpenMut, BulkLoadSession.TryOpenMut
+  on_violation: before #997 one `EntityRef` served both kinds of open, told apart by a `_writable` flag checked only
+                when `CheckConfig.Enabled` (off by default). With checks off, `Open(id).Write(...)` wrote in place into
+                HEAD from a transaction that never ran `EnsureMutable` — a read-only or already finalized one included —
+                and never moved to InProgress. The value was not lost (the fence's PS-10 backstop records the page); the
+                transaction's own contract was.
+  note: `Commit()` on a transaction that did nothing returns true and leaves it in `Created`, so it still accepts a
+        writable open afterwards. That is the commit path's behaviour, not a gap in the prep.
+  verified: EntityRefMutTests.EntityRef_ExposesNoWriteMember_EntityRefMutDoes [VerifiesRule] (the type split as an
+            allowlist, no producer of `EntityRefMut` but the opens, no `_writable` left),
+            EntityRefMutTests.EntityRefMut_IsExactlyOneEntityRef [VerifiesRule] (the BitCast layout),
+            EntityRefMutTests.EveryNonWritingMember_IsReadonly [VerifiesRule] (no defensive copy on a read-only receiver;
+            fails with one `readonly` removed, checked), EntityHandleDefensiveCopyAnalyzerTests (TYPHON012),
+            EntityRefMutTests.WritableOpens_RunTheMutationPrep [VerifiesRule] (read-only and finished transactions refuse
+            `TryOpenMut` / `OpenMut`, even for a missing id, on `Transaction` and `ArchetypeAccessor`; an
+            `ArchetypeAccessor` reused after commit is refused — fails with a once-per-accessor prep, checked; a writable
+            open moves the transaction to InProgress).
+            TickFenceE2ETests.TickFence_SV_TryOpenMutWrite_SurvivesCheckpointAndReopen covers the end-to-end write but
+            does not isolate the dirty resolve: since #1009 the fence records the page too, so it would pass without it.
 
 ## Module: REAP — Reclaiming what a destroy leaves behind
 

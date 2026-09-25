@@ -3754,8 +3754,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Iterates pre-collected query results, yielding read-only EntityRefs with zero-copy component access.
-    /// Entities returned by query enumeration are opened as read-only — use <see cref="Transaction.OpenMut"/> for writes.
+    /// Iterates pre-collected query results, yielding read-only <see cref="EntityRef"/>s with zero-copy component access.
+    /// To write, open the entity with <see cref="EntityAccessor.OpenMut"/> or <see cref="EntityAccessor.TryOpenMut"/>.
     /// </summary>
     [PublicAPI]
     public ref struct EcsQueryEnumerator
@@ -3819,7 +3819,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                     }
                     else
                     {
-                        _current = new EntityRef(id, meta, engineState, _tx, enabledBits, false);
+                        _current = new EntityRef(id, meta, engineState, _tx, enabledBits);
                         _current.CopyLocationsFrom(in locations, meta.ComponentCount);
                     }
                 }

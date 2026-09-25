@@ -49,11 +49,136 @@ static class ArchetypeAccessorBenchmark
         double accessorUs = sw.Elapsed.TotalMicroseconds;
         double accessorPerEntity = accessorUs / (iterations * entityCount) * 1000; // ns
 
+        // ── Read-only Open paths (#997: ArchetypeAccessor.Open now checks visibility + archetype and throws on a miss) ──
+        RunStandardRead(dbe, entityIds, 10);
+        RunArchetypeAccessorRead(dbe, entityIds, 10);
+        GC.Collect(2, GCCollectionMode.Aggressive, true, true);
+        sw.Restart();
+        RunStandardRead(dbe, entityIds, iterations);
+        sw.Stop();
+        double standardReadPerEntity = sw.Elapsed.TotalMicroseconds / (iterations * entityCount) * 1000;
+        GC.Collect(2, GCCollectionMode.Aggressive, true, true);
+        sw.Restart();
+        RunArchetypeAccessorRead(dbe, entityIds, iterations);
+        sw.Stop();
+        double accessorReadPerEntity = sw.Elapsed.TotalMicroseconds / (iterations * entityCount) * 1000;
+
         Console.WriteLine();
         Console.WriteLine($"  Standard EntityAccessor:    {standardUs / iterations,8:F0} µs/iter  ({standardPerEntity:F1} ns/entity)");
         Console.WriteLine($"  ArchetypeAccessor:          {accessorUs / iterations,8:F0} µs/iter  ({accessorPerEntity:F1} ns/entity)");
         Console.WriteLine($"  Speedup:                    {standardUs / accessorUs:F2}x");
+        Console.WriteLine($"  Standard Open (read):       {standardReadPerEntity:F1} ns/entity");
+        Console.WriteLine($"  ArchetypeAccessor.Open:     {accessorReadPerEntity:F1} ns/entity");
+
+        // ── Maybe-stale target, then write (#997): one resolve vs the old TryOpen + OpenMut pair ──
+        RunTryOpenMut(dbe, entityIds, 10);
+        RunTryOpenThenOpenMut(dbe, entityIds, 10);
+        GC.Collect(2, GCCollectionMode.Aggressive, true, true);
+        sw.Restart();
+        RunTryOpenMut(dbe, entityIds, iterations);
+        sw.Stop();
+        double tryOpenMutPerEntity = sw.Elapsed.TotalMicroseconds / (iterations * entityCount) * 1000;
+        GC.Collect(2, GCCollectionMode.Aggressive, true, true);
+        sw.Restart();
+        RunTryOpenThenOpenMut(dbe, entityIds, iterations);
+        sw.Stop();
+        double tryOpenThenOpenMutPerEntity = sw.Elapsed.TotalMicroseconds / (iterations * entityCount) * 1000;
+        Console.WriteLine($"  TryOpenMut + write:         {tryOpenMutPerEntity:F1} ns/entity");
+        Console.WriteLine($"  TryOpen + OpenMut + write:  {tryOpenThenOpenMutPerEntity:F1} ns/entity");
+
+        // ── foreach over a query, 2 reads per entity: the loop variable is a readonly local, so a non-readonly member call on it copies the handle ──
+        RunQueryForeachRead(dbe, 10);
+        GC.Collect(2, GCCollectionMode.Aggressive, true, true);
+        sw.Restart();
+        RunQueryForeachRead(dbe, iterations / 10);
+        sw.Stop();
+        double foreachPerEntity = sw.Elapsed.TotalMicroseconds / (iterations / 10 * entityCount) * 1000;
+        Console.WriteLine($"  foreach Query + 2 reads:    {foreachPerEntity:F1} ns/entity");
         Console.WriteLine();
+    }
+
+    static void RunTryOpenMut(DatabaseEngine dbe, EntityId[] ids, int iterations)
+    {
+        for (int iter = 0; iter < iterations; iter++)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (int i = 0; i < ids.Length; i++)
+            {
+                if (tx.TryOpenMut(ids[i], out var entity))
+                {
+                    entity.Write(AaBenchAnt.Position).X += 0.016f;
+                }
+            }
+            tx.Commit();
+        }
+    }
+
+    static void RunQueryForeachRead(DatabaseEngine dbe, int iterations)
+    {
+        var sum = 0f;
+        for (int iter = 0; iter < iterations; iter++)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            foreach (var entity in tx.Query<AaBenchAnt>())
+            {
+                sum += entity.Read(AaBenchAnt.Movement).VX + entity.Read(AaBenchAnt.Position).X;
+            }
+            tx.Commit();
+        }
+        ReadSink = sum;
+    }
+
+    static void RunTryOpenThenOpenMut(DatabaseEngine dbe, EntityId[] ids, int iterations)
+    {
+        for (int iter = 0; iter < iterations; iter++)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (int i = 0; i < ids.Length; i++)
+            {
+                if (tx.TryOpen(ids[i], out _))
+                {
+                    tx.OpenMut(ids[i]).Write(AaBenchAnt.Position).X += 0.016f;
+                }
+            }
+            tx.Commit();
+        }
+    }
+
+    /// <summary>The read loops store their sum here: a static store the JIT cannot drop, so neither can it drop the reads.</summary>
+    internal static float ReadSink;
+
+    static void RunStandardRead(DatabaseEngine dbe, EntityId[] ids, int iterations)
+    {
+        var sum = 0f;
+        for (int iter = 0; iter < iterations; iter++)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            for (int i = 0; i < ids.Length; i++)
+            {
+                var entity = tx.Open(ids[i]);
+                sum += entity.Read(AaBenchAnt.Movement).VX;
+            }
+            tx.Commit();
+        }
+        ReadSink = sum;
+    }
+
+    static void RunArchetypeAccessorRead(DatabaseEngine dbe, EntityId[] ids, int iterations)
+    {
+        var sum = 0f;
+        for (int iter = 0; iter < iterations; iter++)
+        {
+            using var tx = dbe.CreateQuickTransaction();
+            var ants = tx.For<AaBenchAnt>();
+            for (int i = 0; i < ids.Length; i++)
+            {
+                var entity = ants.Open(ids[i]);
+                sum += entity.Read(AaBenchAnt.Movement).VX;
+            }
+            ants.Dispose();
+            tx.Commit();
+        }
+        ReadSink = sum;
     }
 
     /// <summary>Run with standard EntityAccessor.Open/OpenMut path (for profiling).</summary>

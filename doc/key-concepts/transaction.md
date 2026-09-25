@@ -27,7 +27,7 @@ A transaction is a true ACID envelope **only for the `Versioned` data it touches
 
 - [`Transaction`](xref:Typhon.Engine.Transaction) — the type itself.
 - [`DatabaseEngine`](xref:Typhon.Engine.DatabaseEngine) — `CreateQuickTransaction` / `CreateReadOnlyTransaction`, or [`CreateUnitOfWork(...)`](xref:Typhon.Engine.DatabaseEngine.CreateUnitOfWork*)`.CreateTransaction(...)`.
-- [`EntityRef`](xref:Typhon.Engine.EntityRef) — [`Read<T>`](xref:Typhon.Engine.EntityRef.Read*) / [`Write<T>`](xref:Typhon.Engine.EntityRef.Write*) on an opened entity.
+- [`EntityRef`](xref:Typhon.Engine.EntityRef) / [`EntityRefMut`](xref:Typhon.Engine.EntityRefMut) — [`Read<T>`](xref:Typhon.Engine.EntityRef.Read*) / [`Write<T>`](xref:Typhon.Engine.EntityRefMut.Write*) on an opened entity.
 
 ## Learn & use
 

@@ -67,7 +67,7 @@ side.Commit();
 - Discipline is fixed per transaction: once any write escalates a transaction to `Commit` — explicitly, or
   because a component declares `DefaultDiscipline = CommitDiscipline.Commit` — every `SingleVersion` write
   in that transaction is commit-staged.
-- Read-your-own-writes works for point reads (`EntityRef.Read`/`Write`) inside the writing transaction. Bulk
+- Read-your-own-writes works for point reads (`EntityRef.Read` / `EntityRefMut.Write`) inside the writing transaction. Bulk
   span reads (`ClusterRef.GetSpan<T>`) inside that same transaction do **not** see staged values — read HEAD
   through a side-transaction or after commit instead.
 - Isolation is read-committed, not snapshot — `ReadsSnapshot` on a `Commit`-discipline (or plain

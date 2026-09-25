@@ -68,7 +68,7 @@ side.Commit();
 
 - Applies only to `StorageMode.SingleVersion` components — `Versioned` is always commit-scoped already (no
   benefit), `Transient` is never durable (discipline is meaningless there).
-- Read-your-own-writes works for point reads (`EntityRef.Read`/`Write`) inside the writing transaction. Bulk
+- Read-your-own-writes works for point reads (`EntityRef.Read` / `EntityRefMut.Write`) inside the writing transaction. Bulk
   span reads (`ClusterRef.GetSpan<T>`) inside that same transaction do **not** see staged values — read HEAD
   through a side-transaction or after commit instead.
 - Isolation is **read-committed**, not snapshot — a `Commit`-discipline (or plain `SingleVersion`) component

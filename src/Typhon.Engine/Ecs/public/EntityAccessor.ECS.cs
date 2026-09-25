@@ -18,8 +18,8 @@ public unsafe partial class EntityAccessor
 
     /// <summary>
     /// Create a fast-path <see cref="ArchetypeAccessor{TArch}"/> pre-bound to a specific archetype.
-    /// Bypasses epoch checks, archetype lookup, and MVCC visibility on every Open/OpenMut call.
-    /// Intended for PTA workers in parallel QuerySystems where these checks are redundant.
+    /// Bypasses the epoch checks and archetype lookup of every Open/OpenMut call; MVCC visibility is still checked, and the transaction's pending destroys
+    /// are misses. Its own spawns are not seen — they are not in the EntityMap until commit. Intended for PTA workers in parallel QuerySystems.
     /// </summary>
     public ArchetypeAccessor<TArch> For<TArch>() where TArch : class
     {
@@ -150,34 +150,117 @@ public unsafe partial class EntityAccessor
     }
 
     /// <summary>Open an entity for reading. Throws if not found or not visible.</summary>
-    public EntityRef Open(EntityId id)
+    public EntityRef Open(EntityId id) => ResolveEntity(id, false, true);
+
+    /// <summary>Open an entity for reading and writing. Throws if not found or not visible.</summary>
+    /// <remarks>Runs the accessor's mutation prep first (<see cref="PrepareOpenMut"/>), then resolves the entity's cluster page dirty.</remarks>
+    public EntityRefMut OpenMut(EntityId id)
     {
-        var entity = ResolveEntity(id, false);
-        if (!entity.IsValid)
-        {
-            throw new InvalidOperationException($"Entity {id} not found or not visible at TSN {TSN}");
-        }
-        return entity;
+        PrepareOpenMut();
+        return Unsafe.BitCast<EntityRef, EntityRefMut>(ResolveEntity(id, true, true));   // not `new EntityRefMut(…)`: see EntityRefMut._ref
     }
 
-    /// <summary>Open an entity for reading and writing (SV/Transient only).
-    /// Override in Transaction to add EnsureMutable + state transition.</summary>
-    public virtual EntityRef OpenMut(EntityId id)
-    {
-        var entity = ResolveEntity(id, true);
-        if (!entity.IsValid)
-        {
-            throw new InvalidOperationException($"Entity {id} not found or not visible at TSN {TSN}");
-        }
-        return entity;
-    }
-
-    /// <summary>Try to open an entity. Returns false if the entity doesn't exist or isn't visible.</summary>
+    /// <summary>Try to open an entity for reading. Returns false if the entity doesn't exist or isn't visible.</summary>
     public bool TryOpen(EntityId id, out EntityRef entity)
     {
-        entity = ResolveEntity(id, false);
+        entity = ResolveEntity(id, false, false);
         return entity.IsValid;
     }
+
+    /// <summary>
+    /// Try to open an entity for reading and writing. Returns false if the entity doesn't exist or isn't visible. One resolve — the writable counterpart of
+    /// <see cref="TryOpen"/>, for a target that may be stale (a stored id, a link) and is written when present.
+    /// </summary>
+    /// <remarks>Same preconditions as <see cref="OpenMut"/>: the mutation prep runs whether or not the entity is found, so a read-only transaction throws
+    /// here even for a missing id.</remarks>
+    public bool TryOpenMut(EntityId id, out EntityRefMut entity)
+    {
+        PrepareOpenMut();
+        entity = Unsafe.BitCast<EntityRef, EntityRefMut>(ResolveEntity(id, true, false));
+        return entity.IsValid;
+    }
+
+    /// <summary>
+    /// Check whether an entity is alive — exists and is visible at this accessor's TSN. The existence probe: one EntityMap lookup, without the component
+    /// location, cluster page and enabled-bits resolution an open performs.
+    /// </summary>
+    public virtual bool IsAlive(EntityId id)
+    {
+        AssertThreadAffinity();
+        return IsCommittedAlive(id, !_ownsPersistentEpochScope && !_epochManager.IsCurrentThreadInScope);
+    }
+
+    /// <summary>
+    /// The committed half of <see cref="IsAlive"/>: <paramref name="id"/> is in its archetype's EntityMap and visible at this accessor's TSN. One cached,
+    /// hinted lookup — the same accessor cache <c>ResolveEntity</c> uses. <paramref name="needsGuard"/> enters an epoch scope around it; a caller that
+    /// already holds one passes false.
+    /// </summary>
+    private protected bool IsCommittedAlive(EntityId id, bool needsGuard)
+    {
+        if (id.IsNull)
+        {
+            return false;
+        }
+
+        var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
+        if (meta == null)
+        {
+            return false;
+        }
+        var es = _dbe._archetypeStates[meta.ArchetypeId];
+        if (es?.EntityMap == null)
+        {
+            return false;
+        }
+
+        byte* readBuf = stackalloc byte[meta._entityRecordSize];
+        var guard = needsGuard ? EpochGuard.Enter(_epochManager) : default;
+        // Same cached accessor and hinted lookup as ResolveEntity.
+        if (!_hasEntityMapCache || _entityMapCacheArchId != id.ArchetypeId)
+        {
+            if (_hasEntityMapCache)
+            {
+                _entityMapCacheAccessor.Dispose();
+            }
+
+            _entityMapCacheAccessor = es.EntityMap.Segment.CreateChunkAccessor();
+            _entityMapCacheArchId = id.ArchetypeId;
+            _hasEntityMapCache = true;
+        }
+        bool found = es.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapCacheAccessor);
+        if (needsGuard)
+        {
+            guard.Dispose();
+        }
+
+        return found && EntityRecordAccessor.GetHeader(readBuf).IsVisibleAt(TSN);
+    }
+
+    /// <summary>Check whether an entity link target is alive.</summary>
+    public bool IsAlive<T>(EntityLink<T> link) where T : class => IsAlive(link.Id);
+
+    /// <summary>
+    /// Mutation prep run before EVERY writable resolve — <see cref="OpenMut"/>, <see cref="TryOpenMut"/> and <see cref="ArchetypeAccessor{TArch}"/>'s
+    /// writable opens (ACCESS-01). No-op here; <see cref="Transaction"/> overrides it with <c>EnsureMutable</c> + the <c>InProgress</c> transition.
+    /// </summary>
+    internal virtual void PrepareOpenMut() { }
+
+    /// <summary>
+    /// A resolver's miss: throws for <c>Open</c> / <c>OpenMut</c>, returns <c>default</c> for the try forms. The throw lives inside the resolver so
+    /// <c>Open</c> / <c>OpenMut</c> stay one forwarding call; testing <see cref="EntityRef.IsValid"/> in them needs a local the JIT copies the
+    /// ~200-byte handle out of (#997).
+    /// </summary>
+    private protected EntityRef Miss(EntityId id, bool throwOnMiss)
+    {
+        if (throwOnMiss)
+        {
+            ThrowEntityNotFound(id);
+        }
+        return default;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private protected void ThrowEntityNotFound(EntityId id) => throw new InvalidOperationException($"Entity {id} not found or not visible at TSN {TSN}");
 
     // ═══════════════════════════════════════════════════════════════════════
     // Entity resolution — simplified (no spawn/destroy/CompRevInfo caching)
@@ -188,25 +271,25 @@ public unsafe partial class EntityAccessor
     /// Base implementation: committed entities only (no spawn/destroy checks, no CompRevInfo caching).
     /// Transaction overrides with full spawn/destroy/caching logic.
     /// </summary>
-    private protected virtual EntityRef ResolveEntity(EntityId id, bool writable)
+    private protected virtual EntityRef ResolveEntity(EntityId id, bool writable, bool throwOnMiss)
     {
         AssertThreadAffinity();
 
         if (id.IsNull)
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
         if (meta == null)
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         var es = _dbe._archetypeStates[meta.ArchetypeId];
         if (es?.EntityMap == null)
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         // Read from EntityMap — cache the ChunkAccessor for same-archetype repeated lookups
@@ -245,7 +328,7 @@ public unsafe partial class EntityAccessor
 
         if (!found)
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
@@ -253,13 +336,13 @@ public unsafe partial class EntityAccessor
         // MVCC visibility check
         if (!header.IsVisibleAt(TSN))
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         // Resolve EnabledBits with MVCC overrides
         ushort enabledBits = _dbe.EnabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, TSN);
 
-        var result = new EntityRef(id, meta, es, this, enabledBits, writable);
+        var result = new EntityRef(id, meta, es, this, enabledBits);
 
         if (meta.IsClusterEligible && es.ClusterState != null)
         {
@@ -516,7 +599,7 @@ public unsafe partial class EntityAccessor
 
     /// <summary>
     /// Capture old indexed field values before the first SV in-place mutation per entity per tick.
-    /// Called from <see cref="EntityRef.Write{T}(Comp{T})"/> for SingleVersion components with indexed fields.
+    /// Called from <see cref="EntityRefMut.Write{T}(Comp{T})"/> for SingleVersion components with indexed fields.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void ShadowIndexedFields<T>(ComponentTable table, int chunkId, EntityId entityId) where T : unmanaged
@@ -709,8 +792,8 @@ public unsafe partial class EntityAccessor
     /// Creates a Versioned slot's content chunk and first revision for a LIVE entity, and writes <paramref name="value"/> into it.
     /// </summary>
     /// <remarks>
-    /// Backs <see cref="EntityRef.Enable{T}(Comp{T}, in T)"/> for the one case the no-value overload refuses: a component the spawn never supplied, which has
-    /// no chain and therefore nothing to enable. Spawn used to be the only producer of a first revision, because design decision #14 guaranteed every slot
+    /// Backs <see cref="EntityRefMut.Enable{T}(Comp{T}, in T)"/> for the one case the no-value overload refuses: a component the spawn never supplied, which
+    /// has no chain and therefore nothing to enable. Spawn used to be the only producer of a first revision, because design decision #14 guaranteed every slot
     /// existed from spawn; once an unsupplied slot is genuinely absent (#845) that guarantee is gone and a component can begin mid-life.
     /// </remarks>
     internal virtual int CreateVersionedContentAndWrite<T>(EntityId id, byte slot, in T value) where T : unmanaged

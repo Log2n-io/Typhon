@@ -25,7 +25,7 @@ This is transparent engine plumbing — every component write, index update, and
 using var uow = db.CreateUnitOfWork();            // owns the ChangeSet for this scope
 using var tx = uow.CreateTransaction();           // epoch scope entered here
 
-EntityRef e = tx.OpenMut(entityId);
+EntityRefMut e = tx.OpenMut(entityId);
 ref Position p = ref e.Write<Position>();         // touched pages: epoch-tagged + DirtyCounter++
 p.X += 1f;
 tx.Commit();                                      // epoch scope exited; dirty marks released to 1

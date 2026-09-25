@@ -106,7 +106,7 @@ scoped.
         captured, and under `CommitDiscipline.Commit` not even those - the SingleVersion members are reconciled by the commit
         publish instead
   enforce both sides read the split from ONE method (`ArchetypeMetadata.FenceMaintainedSlotsUnder`) rather than each computing it
-  scope: ArchetypeMetadata.FenceMaintainedSlotsUnder (the single definition), EntityRef.ShadowClusterIndexedFields (skips its
+  scope: ArchetypeMetadata.FenceMaintainedSlotsUnder (the single definition), EntityRefMut.ShadowClusterIndexedFields (skips its
          complement), Transaction.FlushEcsPendingOperations (the destroy hand-off; removes its complement via
          RemoveClusterIndexEntries' slot mask), Transaction.ReconcileClusterIndexAndViews (commit-scoped maintenance must not run
          for an entity the same transaction destroys)

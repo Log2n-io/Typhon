@@ -86,9 +86,9 @@ class RenderSystem : QuerySystem
   documented, intentional deviation from the intra-phase meaning.
 - `SideWrites<T>()` (writes via a `DurabilityMode.Immediate` side-transaction) is surfaced to tooling
   but intentionally does **not** participate in scheduler ordering.
-- A DEBUG-only check (`SystemAccessValidator`) throws `InvalidAccessException` when `EntityRef.Write<T>()`
-  runs from a system that didn't declare `Writes<T>`/`SideWrites<T>` — silently skipped for systems
-  with zero declarations (migration window) and compiled out entirely in RELEASE.
+- An opt-in check (`SystemAccessValidator`, `Typhon:Checks:DeclaredAccess`) throws `InvalidAccessException` when
+  `EntityRefMut.Write<T>()` runs from a system that didn't declare `Writes<T>`/`SideWrites<T>` — silently skipped
+  for systems with zero declarations (migration window) and folded away by the JIT when the check is off.
 - Conflict checks consult only direct `.After()`/`.Before()` adjacency, not transitive reachability —
   a chain `A.Before(B).Before(C)` does not implicitly resolve an `A`/`C` write conflict; each pair
   needs its own edge.
@@ -99,7 +99,7 @@ class RenderSystem : QuerySystem
 
 - Parent feature: [Declarative Scheduling — Auto-DAG (RFC 07)](./README.md)
 - Sibling: [Track → DAG → Phase Partitioning](./track-dag-phase-partitioning.md) — the phase/DAG structure this access derivation runs within.
-- Sibling: [Runtime/Scheduler Declared-Access Validation](../../Errors/runtime-access-validation.md) — the DEBUG-only runtime check that cross-verifies these declarations.
+- Sibling: [Runtime/Scheduler Declared-Access Validation](../../Errors/runtime-access-validation.md) — the opt-in runtime check that cross-verifies these declarations.
 
 <!-- Deep dive: claude/design/Runtime/07-system-access-declarations.md -->
 <!-- Deep dive: rules/runtime-scheduling.md (AC-01..AC-05, ED-01..ED-05f, DV-01..DV-03) -->

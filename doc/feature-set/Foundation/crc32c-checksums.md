@@ -24,7 +24,7 @@ This is transparent engine plumbing — every page write/read and WAL record wri
 ```csharp
 using var tx = dbe.CreateQuickTransaction();
 
-EntityRef e = tx.OpenMut(entityId);
+EntityRefMut e = tx.OpenMut(entityId);
 ref Position p = ref e.Write(Unit.Pos);
 p.X += 1f;
 tx.Commit();

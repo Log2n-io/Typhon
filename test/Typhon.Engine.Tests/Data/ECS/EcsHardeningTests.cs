@@ -171,8 +171,8 @@ class EcsHardeningTests : TestBase<EcsHardeningTests>
         Assert.That(entity.IsEnabled(EcsUnit.Position), Is.True);
 
         // The no-value overload has nothing to enable and must say so
-        // Message-checked deliberately: Enable also throws InvalidOperationException for "opened as read-only", so a bare
-        // catch would report safety if the refusal ever fired for an unrelated reason.
+        // Message-checked deliberately: the try block throws InvalidOperationException for other reasons too (OpenMut on a read-only or
+        // finalized transaction, an out-of-range slot), so a bare catch would report safety if the refusal ever fired for an unrelated reason.
         string message = null;
         try
         {

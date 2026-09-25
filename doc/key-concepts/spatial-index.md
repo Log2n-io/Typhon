@@ -14,7 +14,7 @@ A spatial index indexes an **axis-aligned box** — 2D (`AABB2F`) or 3D (`AABB3F
 
 The index is maintained at the **[tick fence](xref:concept-tick-fence)** — automatically each tick under the runtime, or via `dbe.WriteTickFence(n)` from a bare transaction. Mutate a `[SpatialIndex]` field through the `WriteSpatial` barrier so the refresh isn't skipped: the barrier flags the move at the write site, which is how the fence knows to visit that cluster at all.
 
-> ⚠️ The barrier is a **convention**, only partly enforced. `TYPHON009` warns on a `ClusterRef.GetSpan<T>` / `Get<T>` write to a spatial component, but it does **not** cover `EntityRef.Write` — a plain write through an `EntityRef` compiles, runs, and silently leaves the index stale. See [Guide ch.2 §5](xref:guide-modeling).
+> ⚠️ The barrier is a **convention**, only partly enforced. `TYPHON009` warns on a `ClusterRef.GetSpan<T>` / `Get<T>` write to a spatial component, but it does **not** cover `EntityRefMut.Write` — a plain write through an `EntityRefMut` compiles, runs, and silently leaves the index stale. See [Guide ch.2 §5](xref:guide-modeling).
 
 ## Structure: sparse grid, per-cell static & dynamic cluster indexes
 

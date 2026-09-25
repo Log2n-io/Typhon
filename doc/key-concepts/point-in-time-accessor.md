@@ -24,7 +24,7 @@ description: 'A thread-safe, frozen current snapshot fanned across many worker t
 ## In the API
 
 - [`PointInTimeAccessor`](xref:Typhon.Engine.PointInTimeAccessor) — [`Create(dbe, workerCount)`](xref:Typhon.Engine.PointInTimeAccessor.Create*), [`GetWorkerAccessor(i)`](xref:Typhon.Engine.PointInTimeAccessor.GetWorkerAccessor*), [`TSN`](xref:Typhon.Engine.PointInTimeAccessor.TSN).
-- [`EntityRef`](xref:Typhon.Engine.EntityRef) — [`Read<T>`](xref:Typhon.Engine.EntityRef.Read*) / [`Write<T>`](xref:Typhon.Engine.EntityRef.Write*) through a worker accessor.
+- [`EntityRef`](xref:Typhon.Engine.EntityRef) / [`EntityRefMut`](xref:Typhon.Engine.EntityRefMut) — [`Read<T>`](xref:Typhon.Engine.EntityRef.Read*) / [`Write<T>`](xref:Typhon.Engine.EntityRefMut.Write*) through a worker accessor.
 
 ## Learn & use
 

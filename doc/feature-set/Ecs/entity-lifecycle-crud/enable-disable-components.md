@@ -21,7 +21,7 @@ untouched.
 ## ⚙️ How it works (in brief)
 
 Each entity carries one `EnabledBits` bitmask on its `EntityRecord` — one bit per archetype component slot.
-`Enable<T>(Comp<T>)`/`Disable<T>(Comp<T>)` on a writable `EntityRef` flip that bit locally and stage the change via
+`Enable<T>(Comp<T>)`/`Disable<T>(Comp<T>)` on an `EntityRefMut` (from `OpenMut`) flip that bit locally and stage the change via
 `StageEnableDisable` for commit; a read-only `EntityAccessor`/`PointInTimeAccessor` worker throws, since only a full
 `Transaction` supports staging structural changes. If the entity lives in cluster (batched SoA) storage, the
 cluster's own enabled-bit vector is updated immediately too, so bulk cluster iteration sees the change without
@@ -42,7 +42,7 @@ var id = tx.Spawn<Unit>(Unit.Pos.Set(new Position { X = 0, Y = 0, Z = 0 }));
 tx.Commit();
 
 using var wtx = dbe.CreateQuickTransaction();
-EntityRef e = wtx.OpenMut(id);
+EntityRefMut e = wtx.OpenMut(id);
 bool moving = e.IsEnabled(Unit.Vel);   // false — never set at Spawn
 e.Enable(Unit.Vel, in vel);             // absent → supply a value and enable; Enable(Unit.Vel) alone would throw
 e.Disable(Unit.Pos);                    // O(1) bit flip — data preserved, not freed

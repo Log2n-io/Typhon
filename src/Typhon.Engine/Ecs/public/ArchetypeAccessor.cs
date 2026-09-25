@@ -29,8 +29,10 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
     private readonly ArchetypeMetadata _archetype;
     private readonly ArchetypeEngineState _engineState;
     private readonly EntityAccessor _accessor;
+    private readonly Transaction _transaction;   // _accessor as a Transaction (null for a PTA worker) — for its pending destroys
     private readonly EnabledBitsOverrides _enabledBitsOverrides;
     private readonly long _tsn;
+    private readonly ushort _routingId;
     private readonly int _recordSize;
     private readonly bool _hasVersionedSlots;
     private bool _mutationPrepared;
@@ -48,8 +50,10 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         _archetype = archetype;
         _engineState = engineState;
         _accessor = accessor;
+        _transaction = accessor as Transaction;
         _enabledBitsOverrides = dbe.EnabledBitsOverrides;
         _tsn = accessor.TSN;
+        _routingId = dbe.RoutingIdOf(archetype);
         _recordSize = archetype._entityRecordSize;
         _entityMapAccessor = engineState.EntityMap.Segment.CreateChunkAccessor();
 
@@ -74,36 +78,127 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
         _transientClusterAccessor = _hasTransientCluster ? _clusterState.TransientSegment.CreateChunkAccessor() : default;
     }
 
-    /// <summary>Open an entity for read-only access.</summary>
+    /// <summary>Open an entity for reading. Throws if it is not an entity of this archetype visible at the accessor's TSN.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public EntityRef Open(EntityId id) => Resolve(id, false);
+    public EntityRef Open(EntityId id) => Resolve(id, false, throwOnMiss: true);
 
-    /// <summary>Open an entity for read-write access.</summary>
+    /// <summary>Open an entity for reading and writing. Throws if it is not an entity of this archetype visible at the accessor's TSN.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public EntityRef OpenMut(EntityId id)
+    public EntityRefMut OpenMut(EntityId id)
     {
-        if (!_mutationPrepared)
-        {
-            _accessor.PrepareForMutation();
-            _mutationPrepared = true;
-        }
-        return Resolve(id, true);
+        PrepareMutation();
+        return Unsafe.BitCast<EntityRef, EntityRefMut>(Resolve(id, true, throwOnMiss: true));
     }
 
+    /// <summary>Try to open an entity for reading. Returns false if it is not an entity of this archetype visible at the accessor's TSN.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private EntityRef Resolve(EntityId id, bool writable)
+    public bool TryOpen(EntityId id, out EntityRef entity)
     {
+        entity = Resolve(id, false, throwOnMiss: false);
+        return entity.IsValid;
+    }
+
+    /// <summary>
+    /// Try to open an entity for reading and writing, in one resolve. Returns false if it is not an entity of this archetype visible at the accessor's TSN.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public bool TryOpenMut(EntityId id, out EntityRefMut entity)
+    {
+        PrepareMutation();
+        entity = Unsafe.BitCast<EntityRef, EntityRefMut>(Resolve(id, true, throwOnMiss: false));
+        return entity.IsValid;
+    }
+
+    /// <summary>
+    /// Check whether <paramref name="id"/> is an entity of this archetype visible at the accessor's TSN — the predicate every open above uses.
+    /// </summary>
+    public bool IsAlive(EntityId id)
+    {
+        if (id.ArchetypeId != _routingId || IsPendingDestroy(id))
+        {
+            return false;
+        }
+        byte* readBuf = stackalloc byte[_recordSize];
+        return _engineState.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapAccessor)
+            && EntityRecordAccessor.GetHeader(readBuf).IsVisibleAt(_tsn);
+    }
+
+    /// <summary>
+    /// True when the owning transaction has destroyed <paramref name="id"/> but not committed yet. Two field loads and a count test when nothing is
+    /// pending — the common case — and a hash lookup only when destroys are.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private readonly bool IsPendingDestroy(EntityId id)
+    {
+        var pending = _transaction?.PendingDestroys;
+        return pending != null && pending.Count != 0 && pending.Contains(id);
+    }
+
+    /// <summary>
+    /// Mutation prep before every writable open (ACCESS-01) — not once per accessor: an accessor taken before its transaction commits and used after must
+    /// still be refused. The first open runs it inside the profiling span.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void PrepareMutation()
+    {
+        if (_mutationPrepared)
+        {
+            _accessor.PrepareOpenMut();
+            return;
+        }
+        _accessor.PrepareForMutation();
+        _mutationPrepared = true;
+    }
+
+    private readonly EntityRef Miss(EntityId id, bool throwOnMiss)
+    {
+        if (throwOnMiss)
+        {
+            ThrowEntityNotFound(id, _tsn);
+        }
+        return default;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowEntityNotFound(EntityId id, long tsn) =>
+        throw new InvalidOperationException($"Entity {id} is not an entity of archetype {typeof(TArch).Name} visible at TSN {tsn}");
+
+    /// <summary>
+    /// Resolves <paramref name="id"/> against this archetype's EntityMap. A miss — the id is null or routes to another archetype, is absent, or is not
+    /// visible at the accessor's TSN — throws when <paramref name="throwOnMiss"/> is set and returns <c>default</c> (<see cref="EntityRef.IsValid"/>
+    /// false) otherwise. An entity the owning transaction has destroyed but not committed is a miss too. Its own spawns are not seen: they are not in
+    /// the EntityMap until commit.
+    /// </summary>
+    /// <remarks>
+    /// Built so that no open copies the ~200-byte handle (#997). The throw lives here, not in <see cref="Open"/> / <see cref="OpenMut"/>, so those stay
+    /// one forwarding call that hands their caller's return buffer straight to this method: testing <see cref="EntityRef.IsValid"/> in the caller needs
+    /// a local, and the JIT copies out of it (measured +8 ns on a ~50 ns <see cref="Open"/>). The writable opens reinterpret the result with
+    /// <c>Unsafe.BitCast</c> instead of wrapping it — see the field comment on <c>EntityRefMut._ref</c>.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private EntityRef Resolve(EntityId id, bool writable, bool throwOnMiss)
+    {
+        // Also rejects EntityId.Null: routing id 0 is reserved, so no archetype has it.
+        if (id.ArchetypeId != _routingId || IsPendingDestroy(id))
+        {
+            return Miss(id, throwOnMiss);
+        }
+
         byte* readBuf = stackalloc byte[_recordSize];
         // Hinted lookup — see the note in EntityAccessor.ResolveEntity. Same map, same key shape, same reason.
         if (!_engineState.EntityMap.TryGetWithHint(id.EntityKey, readBuf, ref _entityMapAccessor))
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
+        if (!header.IsVisibleAt(_tsn))
+        {
+            return Miss(id, throwOnMiss);
+        }
         ushort enabledBits = _enabledBitsOverrides.ResolveEnabledBits(id.EntityKey, header.EnabledBits, _tsn);
 
-        var result = new EntityRef(id, _archetype, _engineState, _accessor, enabledBits, writable);
+        var result = new EntityRef(id, _archetype, _engineState, _accessor, enabledBits);
 
         if (_hasClusterStorage)
         {

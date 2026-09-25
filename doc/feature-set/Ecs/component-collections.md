@@ -45,7 +45,7 @@ public struct Waypoint   // plain struct, not an archetype — no identity, no i
 }
 
 // Append elements
-EntityRef path = tx.OpenMut(pathId);
+EntityRefMut path = tx.OpenMut(pathId);
 ref PathData data = ref path.Write<PathData>();
 using (var cca = tx.CreateComponentCollectionAccessor(ref data.Waypoints))
 {

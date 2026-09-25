@@ -1,7 +1,6 @@
 using System;
 using System.Numerics;
 using System.Threading;
-using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
 
@@ -19,9 +18,9 @@ namespace SwgTatooine;
 /// <c>difficulty * (900 + random(200))</c> hit points, with its defenders arriving as mobiles around it in three waves
 /// gated on the lair's damage rather than on a timer. Once those defenders die they stay dead; <c>checkRespawn</c>
 /// short-circuits for a destroy-mission lair, unlike a wild one.</para>
-/// <para><b>Why it runs from the lair's side and out of a pool.</b> Cross-archetype writes stall the tick loop (#907) and
-/// structural spawns are unavailable for the same reason, so a fixed set of mission lairs is created at world build and
-/// recycled: a dormant one that finds a player without a mission TELEPORTS to a fresh point 1-2 km from them and becomes
+/// <para><b>Why it runs from the lair's side and out of a pool.</b> Cross-archetype writes are legal API, but in this
+/// workload they stalled the tick loop when it was written (#907, still open), so a fixed set of mission lairs is created
+/// at world build and recycled: a dormant one that finds a player without a mission TELEPORTS to a fresh point 1-2 km from them and becomes
 /// live. That teleport is the most violent thing in the simulation from the index's point of view — a lair and its
 /// defenders jumping a kilometre and a half, forcing a cell change and a cluster-bound recomputation for every one of
 /// them — which makes it the most useful part of the workload rather than a compromise.</para>

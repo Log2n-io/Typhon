@@ -3337,7 +3337,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             // ═══════════════════════════════════════════════════════════════════════
             // An indexed Transient field no longer disqualifies its archetype (#655). Both documented reasons for that exclusion were wrong: the
             // BTree<TransientStore> / BTree<PersistentStore> split constrains tree INSTANCES rather than archetype placement, and the "cluster Write<T>
-            // returns a ref so there is no hook" claim was false — EntityRef's Transient write branch already runs the shadow capture before returning the
+            // returns a ref so there is no hook" claim was false — EntityRefMut's Transient write branch already runs the shadow capture before returning the
             // ref. Deferred-fence indexing never needs a post-mutation hook: capture the old key before the write, read the new value at the fence.
             var hasClusterIndexableFields = false;  // Any indexed field, in either index home (for per-archetype B+Trees)
             var hasSpatialField = false;

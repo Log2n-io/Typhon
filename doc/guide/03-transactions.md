@@ -128,4 +128,4 @@ You can now write, commit, roll back, and reason about what survives a crash and
 
 **Concepts** (the mental model — one page each): [Transaction](../key-concepts/transaction.md) · [Unit of Work](../key-concepts/unit-of-work.md) · [Snapshot isolation](../key-concepts/snapshot-isolation.md) · [Storage mode](../key-concepts/storage-mode.md) · [Durability — mode & discipline](../key-concepts/durability.md) · [Tick fence](../key-concepts/tick-fence.md).
 
-**Exact calls:** `DatabaseEngine.CreateUnitOfWork(DurabilityMode)` · `UnitOfWork.CreateTransaction(CommitDiscipline)` · `CreateQuickTransaction` / `CreateReadOnlyTransaction` · `Transaction.OpenMut` + `EntityRef.Write<T>` · `Commit()` / `Rollback()`.
+**Exact calls:** `DatabaseEngine.CreateUnitOfWork(DurabilityMode)` · `UnitOfWork.CreateTransaction(CommitDiscipline)` · `CreateQuickTransaction` / `CreateReadOnlyTransaction` · `Transaction.OpenMut` + `EntityRefMut.Write<T>` · `Commit()` / `Rollback()`.

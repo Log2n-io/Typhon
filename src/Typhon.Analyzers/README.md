@@ -16,6 +16,7 @@ Custom Roslyn analyzers for the Typhon database engine project.
 | TYPHON009 | Warning | Spatial component mutated via `GetSpan`/`Get` instead of the `WriteSpatial` barrier |
 | TYPHON010 | Warning | Component struct stores padding beyond a 4-byte multiple — every entity pays for bytes that carry no field |
 | TYPHON011 | Error | Component struct's managed and marshalled layouts differ (`bool` / `char`) — the schema cannot describe it correctly |
+| TYPHON012 | Error | Non-readonly member of `EntityRef` / `EntityRefMut` called on a read-only receiver — a hidden ~200-byte defensive copy |
 
 ---
 
@@ -521,3 +522,30 @@ To enable these analyzers in additional projects, add to the `.csproj` file:
   - Microsoft.CodeAnalysis.CSharp 5.0.0
   - Microsoft.CodeAnalysis.CSharp.Workspaces 5.0.0
   - Microsoft.CodeAnalysis.Analyzers 3.11.0
+
+---
+
+## EntityHandleDefensiveCopyAnalyzer (TYPHON012)
+
+**Severity:** Error
+
+C# copies a struct before calling a member that is not `readonly` on a receiver it may not modify. For the entity handles
+(`EntityRef`, `EntityRefMut`, ~200-byte ref structs on the hottest path in the engine) that copy is never acceptable, and
+for `EntityRefMut.Write` / `Enable` / `Disable` it is also a bug: the handle state they update (a Versioned slot's new
+location, the enabled bits) lands on the copy and is lost.
+
+Every non-writing member of both handles is `readonly` (#997; `EntityRefMutTests.EveryNonWritingMember_IsReadonly` pins
+it), so reads never copy. This rule catches the rest: a mutator — or any member added later without `readonly` — called on
+
+- an `in` / `ref readonly` parameter, or a `ref readonly` local
+- a `foreach` or `using` variable
+- a `readonly` field, or a field of `this` inside a `readonly` member
+- a `ref readonly` return
+
+```csharp
+void Hit(in EntityRefMut e) => e.Write(Unit.Health).Value -= 1;   // ERROR TYPHON012
+
+void Hit(ref EntityRefMut e) => e.Write(Unit.Health).Value -= 1;  // OK
+var e = tx.OpenMut(id); e.Write(Unit.Health).Value -= 1;          // OK — a mutable local
+```
+

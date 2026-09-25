@@ -1,11 +1,11 @@
 ---
 uid: feature-errors-runtime-access-validation
 title: 'Runtime/Scheduler Declared-Access Validation'
-description: 'DEBUG-only InvalidAccessException when a system writes a component it never declared.'
+description: 'Opt-in InvalidAccessException when a system writes a component it never declared.'
 ---
 
 # Runtime/Scheduler Declared-Access Validation
-> DEBUG-only `InvalidAccessException` when a system writes a component it never declared.
+> Opt-in `InvalidAccessException` when a system writes a component it never declared.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🟣 Advanced · **Category:** [Errors](./README.md)
 
@@ -17,16 +17,17 @@ system's code drifts from its declaration — someone adds a `entity.Write(Comp)
 matching builder declaration — the scheduler keeps building a DAG from stale information. Nothing about
 that failure is loud: the write still succeeds, but the parallelism/ordering guarantees the scheduler
 computed around the declared set are now silently wrong. This validator turns that drift into an
-immediate, specific exception in DEBUG builds, before it ships as a hard-to-reproduce race.
+immediate, specific exception when the check is switched on, before it ships as a hard-to-reproduce race.
 
 ## ⚙️ How it works (in brief)
 
-Every `EntityRef.Write<T>()` call, in DEBUG builds, is checked against the declared `Writes`/`SideWrites`
+With the check enabled, every `EntityRefMut.Write<T>()` call is checked against the declared `Writes`/`SideWrites`
 set of the currently-executing system. A mismatch throws `InvalidAccessException` naming the system, the
 undeclared component type, and everything the system *did* declare. Systems that haven't declared any
 access yet (migration window) are exempt — the check only activates once a system declares at least one
-`Writes`/`SideWrites`. In RELEASE builds the check is `[Conditional("DEBUG")]`-stripped at the call site,
-so there is no trace of it in production binaries.
+`Writes`/`SideWrites`. It is a runtime strict-mode check, not a build flavour: enabled by `Typhon:Checks:Enabled`
+**and** `Typhon:Checks:DeclaredAccess` (both default `false`, in Debug and Release alike). Off, the gate is a
+`static readonly` bool the JIT folds away — zero cost on the `Write` path.
 
 ## 💻 Usage
 
@@ -45,7 +46,7 @@ class ClampSystem : QuerySystem
             ref var pos = ref entity.Write(Unit.Position);   // OK: Position is declared
             pos.X = Math.Clamp(pos.X, 0, WorldWidth);
 
-            ref var vel = ref entity.Write(Unit.Velocity);   // DEBUG: throws InvalidAccessException
+            ref var vel = ref entity.Write(Unit.Velocity);   // check on: throws InvalidAccessException
         }                                                    // (Velocity was never declared)
     }
 }
@@ -63,9 +64,9 @@ catch (InvalidAccessException ex)
 
 ## ⚠️ Guarantees & limits
 
-- DEBUG-only: `[Conditional("DEBUG")]` strips every check call site in RELEASE — zero runtime cost in
-  production, but also zero protection there. Treat a clean DEBUG test run as the enforcement gate, not
-  RELEASE behavior.
+- Opt-in (`Typhon:Checks:Enabled` + `Typhon:Checks:DeclaredAccess`, both off by default in every build): zero
+  runtime cost when off, but also zero protection. It costs two `HashSet` lookups per write when on, so enable it
+  in test runs (the engine test suite does) rather than in production.
 - Fires only on writes. Reads are not cross-checked at runtime — `Reads<T>()`/`ReadsFresh<T>()`/
   `ReadsSnapshot<T>()` correctness is enforced at `Build()` time (see [Declarative Scheduling](../Runtime/declarative-scheduling/README.md)), not per-call.
 - Exempts systems with zero declarations entirely (not just the specific undeclared type) — a

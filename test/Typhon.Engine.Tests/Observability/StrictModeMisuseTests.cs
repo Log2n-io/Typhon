@@ -38,21 +38,6 @@ class StrictModeMisuseTests : TestBase<StrictModeMisuseTests>
     }
 
     [Test]
-    public void Write_ThroughReadOnlyRef_Throws()
-    {
-        Assume.That(CheckConfig.Enabled, Is.True, "Requires strict mode (typhon.telemetry.json Checks:Enabled=true).");
-        using var dbe = SetupEngine();
-        var id = SpawnOne(dbe);
-
-        using var tx = dbe.CreateQuickTransaction();
-        Assert.Throws<InvalidOperationException>(() =>
-        {
-            var e = tx.Open(id);                     // read-only ref (Open, not OpenMut)
-            e.Write(CompAArch.A) = new CompA(2);     // writing through a read-only ref is misuse → strict-mode throw
-        });
-    }
-
-    [Test]
     public void Destroy_NullEntity_Throws()
     {
         Assume.That(CheckConfig.Enabled, Is.True, "Requires strict mode (typhon.telemetry.json Checks:Enabled=true).");

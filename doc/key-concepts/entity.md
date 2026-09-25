@@ -8,7 +8,7 @@ description: 'An entity is one instance of an archetype, identified by a 64-bit 
 
 > **In one line:** one instance of an [archetype](xref:concept-archetype), identified by a 64-bit **`EntityId`**.
 
-Entities are created with `tx.Spawn<Unit>(…)` (which returns an `EntityId`) and removed with `Destroy(id)` — both transactional in *all* [storage modes](xref:concept-storage-mode). To read or write an entity you **open** it inside a [transaction](xref:concept-transaction): `tx.Open(id)` returns a read `EntityRef`, `tx.OpenMut(id)` a writable one. From an `EntityRef` you call `Read<T>` / `Write<T>` with a component's `Comp<T>` handle.
+Entities are created with `tx.Spawn<Unit>(…)` (which returns an `EntityId`) and removed with `Destroy(id)` — both transactional in *all* [storage modes](xref:concept-storage-mode). To read or write an entity you **open** it inside a [transaction](xref:concept-transaction): `tx.Open(id)` returns a read-only `EntityRef`, `tx.OpenMut(id)` a writable `EntityRefMut` — the access is in the type, so writing through `Open` does not compile. You call `Read<T>` (both) / `Write<T>` (`EntityRefMut`) with a component's `Comp<T>` handle; `TryOpen` / `TryOpenMut` return `false` for a stale id, and `IsAlive(id)` tests existence.
 
 An `EntityId` is a compact value you can store and pass around; a typed cross-entity reference is an [`EntityLink<T>`](xref:concept-entity-link).
 
@@ -22,7 +22,7 @@ An `EntityId` is a compact value you can store and pass around; a typed cross-en
 ## In the API
 
 - [`EntityId`](xref:Typhon.Engine.EntityId) — the 64-bit identity returned by [`Spawn`](xref:Typhon.Engine.Transaction.Spawn*).
-- [`EntityRef`](xref:Typhon.Engine.EntityRef) — the handle from `Open`/`OpenMut`; [`Read<T>`](xref:Typhon.Engine.EntityRef.Read*) / [`Write<T>`](xref:Typhon.Engine.EntityRef.Write*).
+- [`EntityRef`](xref:Typhon.Engine.EntityRef) / [`EntityRefMut`](xref:Typhon.Engine.EntityRefMut) — the handles from `Open` / `OpenMut`; [`Read<T>`](xref:Typhon.Engine.EntityRef.Read*) / [`Write<T>`](xref:Typhon.Engine.EntityRefMut.Write*).
 
 ## Learn & use
 

@@ -247,15 +247,17 @@ public unsafe partial class Transaction : EntityAccessor
         _inFlightLsnFloor = 0;
     }
 
-    /// <summary>Prepare for mutation via ArchetypeAccessor. Sets state to InProgress so Commit processes writes.</summary>
+    /// <summary>
+    /// <see cref="PrepareOpenMut"/> inside a profiling span — the first writable open of an <see cref="ArchetypeAccessor{TArch}"/>. Its later opens run
+    /// the span-less <see cref="PrepareOpenMut"/> directly, so one body decides what "mutable" means.
+    /// </summary>
     internal override void PrepareForMutation()
     {
         // Residual risk: EnsureMutable can throw on programmer-error (read-only tx mutated) — accepted per intentional-validation policy.
         var scope = TyphonEvent.BeginDataTransactionPrepare(TSN);
         // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw on the success path. EnsureMutable is intentional validation;
         // its ThrowHelper paths terminate the operation, so dropping the span there is acceptable.
-        EnsureMutable();
-        State = TransactionState.InProgress;
+        PrepareOpenMut();
         // PROFILING-SPAN-NO-THROW-END
         scope.Dispose();
     }
@@ -1728,7 +1730,7 @@ public unsafe partial class Transaction : EntityAccessor
             //
             // The exemption is PENDING SPAWNS, not the Created flag. FinalizeSpawns does the cluster copy for entities spawned in this transaction, so
             // repeating it here would be redundant — but since #845 a component can also be CREATED mid-life on an already-published entity, via
-            // EntityRef.Enable(comp, in value) on a slot the spawn never supplied. That carries Created too, and testing the flag alone silently skipped its
+            // EntityRefMut.Enable(comp, in value) on a slot the spawn never supplied. That carries Created too, and testing the flag alone silently skipped its
             // Phase B: the new value reached the revision chain but never the cluster slot the read resolves through, so it read as zero.
             bool copyToCluster = (compRevInfo.Operations & ComponentInfo.OperationType.Created) == 0 || !SpawnedContains(EntityId.FromRaw(pk));
             PrepareClusterVersionedSlot(pk, commitMeta, compRevInfo, readCompChunkId, info.ComponentTable, info.ComponentTypeId, copyToCluster,
