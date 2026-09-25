@@ -407,6 +407,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal const string BK_SysSchemaHistory       = "sys.SchemaHistory";
     internal const string BK_SysAssemblyR1          = "sys.AssemblyR1";
     internal const string BK_SpatialGridConfig      = "spatial.GridConfig";
+    internal const string BK_SysRealmR1             = "sys.RealmR1";
 
     /// <summary>
     /// Values in the persisted <see cref="SpatialGridConfig"/> record: <c>WorldMin.xyz</c>, <c>WorldMax.xyz</c> and the cell size as doubles (two int slots
@@ -508,6 +509,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private ComponentTable _componentsTable;
     private ComponentTable _schemaHistoryTable;
     private ComponentTable _assembliesTable;
+
+    // The persisted realm catalog (Realms D-1): every NAMED realm's identity. Null until a realm other than 0 is first registered on this database.
+    private ComponentTable _realmsTable;
+    private Dictionary<ushort, (int ChunkId, RealmR1 Row)> _persistedRealms;
     private ConcurrentDictionary<Type, ComponentTable> _componentTableByType;
 
     // ─── ArchetypeRegistry lifecycle tracking ───────────────────────────────────────────────────────────
@@ -887,6 +892,148 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>The engine's realms: <see cref="RealmRegistry.Register"/> before <see cref="InitializeArchetypes"/>, and what is registered.</summary>
     [PublicAPI]
     public RealmRegistry Realms => _realmRegistry ??= new RealmRegistry(this);
+
+    /// <summary>
+    /// Merges the application's realm registrations with the persisted catalog (Realms D-1), at <see cref="InitializeArchetypes"/>. Returns the
+    /// registrations to build the realm table from; <paramref name="toPersist"/> receives the named realms the catalog does not hold yet.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>A catalog realm the application did not register is registered from the catalog</b>, simulated always: a generic opener (Workbench,
+    /// <c>typhon check</c>) or an application that does not name every realm still rebuilds every realm's spatial layer — the data is in it.</para>
+    /// <para><b>A registration whose identity differs from the catalog's is refused</b>: bounds, cell size or hysteresis decide which cell every entity
+    /// of the realm is filed in, so accepting it would silently misfile the realm (the C13 failure, per realm).</para>
+    /// <para><b>The realm count is the application's, never clamped</b> (RLM-02): below the catalog's highest id it is refused. An application that
+    /// never called <see cref="ConfigureRealms"/> is a generic opener, and gets exactly what the file needs — the count is the file's, not a guess.</para>
+    /// </remarks>
+    private Dictionary<ushort, RealmConfig> MergeRealmCatalog(IReadOnlyDictionary<ushort, RealmConfig> registered, out List<ushort> toPersist)
+    {
+        toPersist = null;
+        var merged = registered != null ? new Dictionary<ushort, RealmConfig>(registered) : null;
+        if (_persistedRealms is { Count: > 0 })
+        {
+            var needed = 0;
+            foreach (var id in _persistedRealms.Keys)
+            {
+                needed = Math.Max(needed, id + 1);
+            }
+
+            if (needed > _maxRealms)
+            {
+                if (_maxRealmsConfigured)
+                {
+                    throw new InvalidOperationException(
+                        $"ConfigureRealms({_maxRealms}) is below what this database holds: its realm catalog names realm {needed - 1}. Configure at least "
+                        + $"{needed} realms. The count is never clamped.");
+                }
+
+                _maxRealms = needed;
+            }
+
+            merged ??= [];
+            foreach (var (id, (_, row)) in _persistedRealms)
+            {
+                var persisted = GridConfigOf(in row);
+                if (merged.TryGetValue(id, out var app))
+                {
+                    if (!SameRealmIdentity(in persisted, app.Grid))
+                    {
+                        throw new InvalidOperationException(
+                            $"Realm {id} is registered with a grid that differs from the one this database was written with (bounds "
+                            + $"{app.Grid.WorldMin}..{app.Grid.WorldMax}, cell {app.Grid.CellSize}, hysteresis {app.Grid.MigrationHysteresisRatio}; "
+                            + $"the catalog holds {persisted.WorldMin}..{persisted.WorldMax}, cell {persisted.CellSize}, "
+                            + $"hysteresis {persisted.MigrationHysteresisRatio}). "
+                            + "A realm's identity decides which cell every entity of it is filed in, so it cannot change under existing data.");
+                    }
+                }
+                else
+                {
+                    merged[id] = RealmConfig.SimulatedAlways(persisted);
+                }
+            }
+        }
+
+        if (registered != null)
+        {
+            foreach (var id in registered.Keys)
+            {
+                if (id != RealmId.Default.Value && (_persistedRealms == null || !_persistedRealms.ContainsKey(id)))
+                {
+                    (toPersist ??= []).Add(id);
+                }
+            }
+        }
+
+        return merged;
+    }
+
+    /// <summary>
+    /// Writes the catalog entries of newly registered named realms, synchronously: the spatial rebuild at the next open runs before the WAL is
+    /// replayed, so a realm known only to the WAL would be unknown exactly when its clusters are filed (02-runtime-lifecycle §3, "ordering trap").
+    /// Creates the catalog table on first use.
+    /// </summary>
+    private void PersistRealmCatalogEntries(List<ushort> ids)
+    {
+        var cs = MMF.CreateChangeSet();
+        if (_realmsTable == null)
+        {
+            RegisterComponentFromAccessor<RealmR1>(cs);
+            _realmsTable = GetComponentTable<RealmR1>();
+            MMF.Bootstrap.Set(BK_SysRealmR1, BootstrapDictionary.Value.FromInt2(
+                _realmsTable.ComponentSegment.RootPageIndex,
+                _realmsTable.CompRevTableSegment.RootPageIndex));
+        }
+
+        _persistedRealms ??= [];
+        foreach (var id in ids)
+        {
+            var row = RowOf(id, _realms.Get(id).GridConfig);
+            var chunkId = SystemCrud.Create(_realmsTable, ref row, EpochManager, cs);
+            _persistedRealms[id] = (chunkId, row);
+        }
+
+        MMF.SaveBootstrap(cs);
+        cs.SaveChanges();
+    }
+
+    /// <summary>The catalog row of realm <paramref name="id"/>: its identity fields.</summary>
+    private static RealmR1 RowOf(ushort id, in SpatialGridConfig grid) => new()
+    {
+        Id = id,
+        Generation = 0,
+        WorldMinX = grid.WorldMin.X,
+        WorldMinY = grid.WorldMin.Y,
+        WorldMinZ = grid.WorldMin.Z,
+        WorldMaxX = grid.WorldMax.X,
+        WorldMaxY = grid.WorldMax.Y,
+        WorldMaxZ = grid.WorldMax.Z,
+        CellSize = grid.CellSize,
+        MigrationHysteresisRatio = grid.MigrationHysteresisRatio,
+    };
+
+    /// <summary>The grid a catalog row describes: its identity, every tuning knob at its default (they move no entity).</summary>
+    private static SpatialGridConfig GridConfigOf(in RealmR1 row) =>
+        new(new Vector3D(row.WorldMinX, row.WorldMinY, row.WorldMinZ), new Vector3D(row.WorldMaxX, row.WorldMaxY, row.WorldMaxZ), row.CellSize,
+            row.MigrationHysteresisRatio);
+
+    /// <summary>True when two grids file every position in the same cell: same bounds, cell size and hysteresis band.</summary>
+    private static bool SameRealmIdentity(in SpatialGridConfig a, in SpatialGridConfig b) =>
+        a.WorldMin == b.WorldMin && a.WorldMax == b.WorldMax && a.CellSize == b.CellSize && a.MigrationHysteresisRatio == b.MigrationHysteresisRatio;
+
+    /// <summary>Test hook: the catalog's persisted rows (null when the database has none).</summary>
+    internal IReadOnlyDictionary<ushort, (int ChunkId, RealmR1 Row)> PersistedRealmCatalog => _persistedRealms;
+
+    /// <summary>
+    /// Test hook: rewrites catalog entry <paramref name="id"/> to claim id <paramref name="newId"/> instead — the shape of a catalog that lost an
+    /// entry, which a reopen must refuse rather than open with that realm's clusters unfiled (RLM-01).
+    /// </summary>
+    internal void RenumberRealmCatalogEntryForTest(ushort id, int newId)
+    {
+        var (chunkId, row) = _persistedRealms[id];
+        row.Id = newId;
+        var cs = MMF.CreateChangeSet();
+        SystemCrud.Update(_realmsTable, chunkId, ref row, EpochManager, cs);
+        cs.SaveChanges();
+    }
 
     /// <summary>True when the archetype's spatial component carries a <c>[RealmKey]</c> field.</summary>
     private static bool ArchetypeHasRealmKey(ComponentTable[] slotToTable)
@@ -2478,6 +2625,31 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
         }
 
+        // RealmR1 — the realm catalog (Realms D-1). Absent until a named realm was first registered; loaded eagerly so a generic opener rebuilds every
+        // realm's spatial layer at InitializeArchetypes, before any entity is readable.
+        if (bootstrap.ContainsKey(BK_SysRealmR1))
+        {
+            DBD.CreateFromAccessor<RealmR1>();
+            var realmDef = DBD.GetComponent(RealmR1.SchemaName, 1);
+            var realmSPIs = bootstrap.Get(BK_SysRealmR1);
+            _realmsTable = new ComponentTable(this, realmDef, this, realmSPIs.GetInt(), realmSPIs.GetInt(1));
+            _componentTableByType.TryAdd(typeof(RealmR1), _realmsTable);
+
+            var realmWalTypeId = (ushort)_realmsTable.ComponentSegment.RootPageIndex;
+            _realmsTable.WalTypeId = realmWalTypeId;
+            _componentTableByWalTypeId.TryAdd(realmWalTypeId, _realmsTable);
+
+            _persistedRealms = [];
+            var realmSeg = _realmsTable.ComponentSegment;
+            for (var chunkId = 1; chunkId < realmSeg.ChunkCapacity; chunkId++)
+            {
+                if (realmSeg.IsChunkAllocated(chunkId) && SystemCrud.Read(_realmsTable, chunkId, out RealmR1 realm, EpochManager))
+                {
+                    _persistedRealms[(ushort)realm.Id] = (chunkId, realm);
+                }
+            }
+        }
+
         // Load the ComponentCollection segment for FieldR1
         var fieldCollectionSPI = bootstrap.GetInt(BK_CollectionFieldR1);
         if (fieldCollectionSPI != 0)
@@ -3348,7 +3520,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // the grid and fully initialize the cluster-spatial archetypes — otherwise their cluster / entity-map segments stay unattributed in introspection.
         // Realms (C1): realm 0 comes from ConfigureSpatialGrid, from a Realms.Register(0, …), or — for a generic opener — from the persisted realm-0
         // record; every other realm from its registration. The table is sized by ConfigureRealms (one realm without it).
-        var pendingRealms = _realmRegistry?.Pending;
+        var pendingRealms = MergeRealmCatalog(_realmRegistry?.Pending, out var realmsToPersist);
         RealmConfig realm0 = null;
         if (_pendingGridConfig.HasValue)
         {
@@ -3369,6 +3541,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     _realms.Register(new RealmId(id), new SpatialGrid(config.Grid), config);
                 }
             }
+        }
+
+        if (realmsToPersist != null)
+        {
+            PersistRealmCatalogEntries(realmsToPersist);
         }
 
         if (realm0 != null)

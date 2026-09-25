@@ -2226,3 +2226,30 @@
     returns each redden them
   on_violation: the maintenance controller that reads candidates per hit steers on a number the queries did not produce — a copied query read
     twice, a batch read as cheaper than the queries it answers, the same world read differently on two machines
+
+---
+
+## Module: Realms — catalog and open (Realms C2, decision D-1)
+
+### RLM-01: Every realm the data names is known at open, from the catalog if not from the application `[fatal][silent]`
+  invariant every named realm's identity (bounds, cell size, hysteresis) is persisted in the realm catalog (RealmR1) at its first registration,
+    SYNCHRONOUSLY: the spatial rebuild at the next open runs before the WAL is replayed, so a realm known only to the WAL would be unknown
+    exactly when its clusters are filed
+  invariant at open, a catalog realm the application did not register is registered from the catalog (a generic opener rebuilds every realm);
+    a registration whose identity differs from the catalog's is refused — the identity decides which cell every entity of the realm is in
+  invariant a cluster whose realm is neither registered nor catalogued refuses the open, naming the realm; it is never filed elsewhere
+  never let an open proceed with a realm's clusters unfiled: every spatial query of that realm would answer empty, silently
+  scope: DatabaseEngine.MergeRealmCatalog, DatabaseEngine.PersistRealmCatalogEntries, ArchetypeClusterState.RebuildSpatialStateFromData, RealmR1
+  verified: RealmCatalogTests (a generic opener reconstructs every realm; a differing identity is refused; a catalog that lost realm 2 refuses
+    the open) and RealmCatalogCrashTests.HardCrashBeforeAnyCheckpoint_TheCatalogStillNamesTheRealm (dropping the synchronous save fails it)
+  on_violation: a reopened realm answers every query with nothing, or files its entities in cells another geometry chose
+
+### RLM-02: The realm count is the application's, never clamped `[fatal]`
+  invariant ConfigureRealms(n) accepts n in [1, 65 535] and refuses anything else; below the catalog's highest id + 1 it refuses the open
+  invariant an application that never configured the count is a generic opener and gets the catalog's highest id + 1 — the file's own
+    requirement, not a value derived from a workload
+  never clamp the count up or down: a clamped count silently drops realms or silently sizes every archetype's per-realm table for realms that
+    do not exist
+  scope: DatabaseEngine.ConfigureRealms, DatabaseEngine.MergeRealmCatalog
+  verified: RealmRegistrationTests.ConfigureRealms_OutOfRange_Refused, RealmCatalogTests.ConfigureRealms_BelowTheCatalogsHighestId_IsRefused_NeverClamped
+  on_violation: realms missing after a reopen, or memory sized to a count nobody asked for

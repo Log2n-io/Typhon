@@ -24,6 +24,7 @@ class RealmRegistrationTests : TestBase<RealmRegistrationTests>
     [TestCase(0)]
     [TestCase(-1)]
     [TestCase(RealmId.MaxCount + 1)]
+    [VerifiesRule("RLM-02")]
     public void ConfigureRealms_OutOfRange_Refused(int maxRealms) =>
         Assert.Throws<ArgumentOutOfRangeException>(() => Engine().ConfigureRealms(maxRealms));
 
