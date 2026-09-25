@@ -776,7 +776,7 @@ internal sealed unsafe class SpatialGrid
     }
 
     /// <summary>
-    /// Throws when an <b>f32-tier</b> archetype is registered on a world whose cell origins are not exactly representable in f32 (#919 AC-9).
+    /// Throws when an <b>f32-tier</b> archetype is registered on a world where one f32 step at the extent is not finer than a cell (#919 AC-9).
     /// </summary>
     /// <remarks>
     /// <para><b>What actually breaks, and why it is a configuration error rather than a runtime branch.</b> An f32-tier archetype stores its own entity
