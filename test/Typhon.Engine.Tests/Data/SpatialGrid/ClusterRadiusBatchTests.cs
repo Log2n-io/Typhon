@@ -419,7 +419,7 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
         }
 
         dbe.WriteTickFence(1);
-        Assert.That(Volatile.Read(ref StateOf<ClBatchUnit>(dbe).EscapedClusters).Count, Is.EqualTo(1), "precondition: the outlier is named");
+        Assert.That(Volatile.Read(ref StateOf<ClBatchUnit>(dbe).DefaultRealmSpatial.EscapedClusters).Count, Is.EqualTo(1), "precondition: the outlier is named");
 
         BSphere2F[] members =
         [

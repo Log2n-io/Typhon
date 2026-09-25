@@ -64,8 +64,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Widened by ClusterReach: a cluster box can reach that far past the cell it is filed in, so a box entering the region from a cell outside the
         // caller's bounding box would otherwise never be classified (SQ-01). The planes still decide what is inside. The outliers that reach further are
         // named in EscapedClusters and classified after the walk.
-        double overhang = Volatile.Read(ref ClusterReach);
-        var escaped = Volatile.Read(ref EscapedClusters);
+        double overhang = Volatile.Read(ref DefaultRealmSpatial.ClusterReach);
+        var escaped = Volatile.Read(ref DefaultRealmSpatial.EscapedClusters);
         // The low side stepped one double down: a box ending exactly on a cell boundary still touches a region starting there (see AabbClusterEnumerator).
         grid.WorldToCellRange(Math.BitDecrement(boundsMin.X - overhang), Math.BitDecrement(boundsMin.Y - overhang),
             is3D ? Math.BitDecrement(boundsMin.Z - overhang) : double.NegativeInfinity,

@@ -58,8 +58,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Widened by ClusterReach: a cluster box can reach that far past the cell it is filed in, so a box crossing the ray from a cell outside the
         // segment's bounding box would otherwise never be examined (SQ-01). The slab test still runs against the cluster and entity boxes themselves. The
         // outliers that reach further are named in EscapedClusters and tested after the walk.
-        double overhang = Volatile.Read(ref ClusterReach);
-        var escaped = Volatile.Read(ref EscapedClusters);
+        double overhang = Volatile.Read(ref DefaultRealmSpatial.ClusterReach);
+        var escaped = Volatile.Read(ref DefaultRealmSpatial.EscapedClusters);
         // The low side stepped one double down: a box ending exactly on a cell boundary still touches a segment starting there (see AabbClusterEnumerator).
         grid.WorldToCellRange(Math.BitDecrement(Math.Min(originX, endX) - overhang), Math.BitDecrement(Math.Min(originY, endY) - overhang),
             is3D ? Math.BitDecrement(Math.Min(originZ, endZ) - overhang) : double.NegativeInfinity,

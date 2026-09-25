@@ -55,7 +55,7 @@ class ClusterOverhangTests : TestBase<ClusterOverhangTests>
         grid.WorldToCellCoords(0d, QueryMinY, 0d, out _, out int queryRow, out _);
         Assert.That(homeRow, Is.LessThan(queryRow), "the entity must be filed in a row the queries do not cover");
         var cs = ClusterStateOf(dbe);
-        Assert.That(Volatile.Read(ref cs.ClusterReach) >= EntityBox.MaxY - ((homeRow + 1) * CellSize) || Volatile.Read(ref cs.EscapedClusters).Count > 0,
+        Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.ClusterReach) >= EntityBox.MaxY - ((homeRow + 1) * CellSize) || Volatile.Read(ref cs.DefaultRealmSpatial.EscapedClusters).Count > 0,
             Is.True, "the reach covers the overhang, or the cluster is named");
         return dbe;
     }

@@ -201,8 +201,8 @@ public partial class DatabaseEngine
             ArrivalCellsTouched = clusterState.LastTickArrivalCellsTouched,
             RelocationSpendNs = clusterState.LastTickRelocationSpendNs,
             RepairBudgetStarvedNs = clusterState.LastTickRepairBudgetStarvedNs,
-            ClusterReach = Volatile.Read(ref clusterState.ClusterReach),
-            EscapedClusterCount = Volatile.Read(ref clusterState.EscapedClusters).Count,
+            ClusterReach = (clusterState.DefaultRealmSpatial is { } rsReach ? Volatile.Read(ref rsReach.ClusterReach) : 0f),
+            EscapedClusterCount = (clusterState.DefaultRealmSpatial is { } rsEsc ? Volatile.Read(ref rsEsc.EscapedClusters).Count : 0),
             CellTreePromotions = clusterState.LastTickCellTreePromotions,
             CellTreeDemotions = clusterState.LastTickCellTreeDemotions,
             TightnessSampleCount = samples,
@@ -412,13 +412,13 @@ public partial class DatabaseEngine
 
             // MAXED, not summed — see SpatialMigrationTelemetry.ClusterReach. It is a bound every walk widens by, and the engine-wide bound is the largest
             // any archetype needs, not the sum of what each needs separately. The named outliers, by contrast, are distinct clusters and do add.
-            var reach = Volatile.Read(ref clusterState.ClusterReach);
+            var reach = (clusterState.DefaultRealmSpatial is { } rsReach ? Volatile.Read(ref rsReach.ClusterReach) : 0f);
             if (reach > maxReach)
             {
                 maxReach = reach;
             }
 
-            escapedClusters += Volatile.Read(ref clusterState.EscapedClusters).Count;
+            escapedClusters += (clusterState.DefaultRealmSpatial is { } rsEsc ? Volatile.Read(ref rsEsc.EscapedClusters).Count : 0);
 
             // Summed as NUMERATORS, divided once at the end: a mean of the per-archetype means would weight a quiet archetype that scanned one cluster
             // equally with a busy one that scanned ten thousand. Read the sample count once for the same reason the per-archetype accessor does.

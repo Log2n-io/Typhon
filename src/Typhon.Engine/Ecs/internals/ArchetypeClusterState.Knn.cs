@@ -80,8 +80,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         // the rings cannot be trusted to collect them in time. Skipped when a ring reaches their home cell. Only CURRENT entries are named: one whose chunk
         // id was freed and reused elsewhere is left to the rings, which see it like any other. Reach and set are read once, so the whole search uses
         // one consistent pair.
-        double reach = Volatile.Read(ref ClusterReach);
-        var escaped = Volatile.Read(ref EscapedClusters);
+        double reach = Volatile.Read(ref DefaultRealmSpatial.ClusterReach);
+        var escaped = Volatile.Read(ref DefaultRealmSpatial.EscapedClusters);
         Span<int> named = stackalloc int[EscapedClusterSet.Capacity];
         int namedCount = 0;
         for (int e = 0; e < escaped.Count; e++)

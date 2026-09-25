@@ -233,8 +233,8 @@ internal static unsafe class ClusterRadiusBatch
             _z = grid.FlatPlaneZ;
 
             // Read once, as a single query reads them at construction: every member walks with one reach and one set of names.
-            var reach = (double)Volatile.Read(ref state.ClusterReach);
-            _escaped = Volatile.Read(ref state.EscapedClusters);
+            var reach = (double)Volatile.Read(ref state.DefaultRealmSpatial.ClusterReach);
+            _escaped = Volatile.Read(ref state.DefaultRealmSpatial.EscapedClusters);
 
             int uy0 = int.MaxValue, uy1 = int.MinValue;
             for (int j = 0; j < members.Length; j++)

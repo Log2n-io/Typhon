@@ -187,8 +187,8 @@ public unsafe ref struct AabbClusterEnumerator
         //
         // The low side is stepped down one double below the widened value. A box is a closed interval, so a box ending exactly on a cell boundary still
         // touches a query starting there — and the floor would otherwise map that boundary to the next cell up and skip the box's own cell.
-        var overhang = (double)Volatile.Read(ref state.ClusterReach);
-        _escaped = Volatile.Read(ref state.EscapedClusters);
+        var overhang = (double)Volatile.Read(ref state.DefaultRealmSpatial.ClusterReach);
+        _escaped = Volatile.Read(ref state.DefaultRealmSpatial.EscapedClusters);
         grid.WorldToCellRange(Math.BitDecrement(minX - overhang), Math.BitDecrement(minY - overhang), Math.BitDecrement(minZ - overhang),
             maxX + overhang, maxY + overhang, maxZ + overhang,
             out _cellMinX, out _cellMinY, out _cellMinZ, out _cellMaxX, out _cellMaxY, out _cellMaxZ);
