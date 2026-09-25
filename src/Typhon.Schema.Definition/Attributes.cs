@@ -203,11 +203,17 @@ public enum SpatialMode : byte
 }
 
 /// <summary>
-/// Marks the <see cref="ushort"/> field that names the realm an entity is in (Typhon Realms). It lives in the same component as the
-/// <see cref="SpatialIndexAttribute"/> field: the realm is the frame the spatial field's coordinates are expressed in. An archetype without one lives in
-/// realm 0. Writing the field through <c>WriteSpatial</c> (or <c>Transaction.Teleport</c>) moves the entity to that realm at the next tick fence.
+/// Marks the <see cref="ushort"/> field that names the realm an entity is in (Typhon Realms): the frame the archetype's <see cref="SpatialIndexAttribute"/>
+/// field's coordinates are expressed in. An archetype without one lives in realm 0. <c>Transaction.Teleport</c> moves an entity to another realm at the
+/// next tick fence; so does a <c>WriteSpatial</c> whose value carries a new key, when the key sits in the spatial component itself.
 /// </summary>
-/// <remarks>At most one per component; the field's type must be <see cref="ushort"/>; not on a Transient component (the spatial field cannot be).</remarks>
+/// <remarks>
+/// <para>At most one per archetype, on a SingleVersion component, of type <see cref="ushort"/>, without <see cref="IndexAttribute"/>; the archetype must
+/// have a spatial component.</para>
+/// <para><b>Beside the spatial field or in a component of its own.</b> A key of its own keeps a 2D AABB spatial component at 16 bytes, the stride the
+/// SIMD narrowphase requires — measured on the SWG demo, a query-heavy workload loses ~20 % of a tick without it. Realm changes then go through
+/// <c>Transaction.Teleport</c> (or a raw write of the key, found by the fence's dirty scan on a non-barrier archetype).</para>
+/// </remarks>
 [AttributeUsage(AttributeTargets.Field)]
 [PublicAPI]
 public sealed class RealmKeyAttribute : Attribute

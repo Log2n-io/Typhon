@@ -431,7 +431,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
         // Realms C4: a write that changes the entity's [RealmKey] is a realm change, not a move within this cluster's frame. One hoisted test for an
         // unkeyed archetype; a keyed one pays a two-byte compare, and only an actual change leaves the ordinary path.
-        if (spatialSlot.HasRealmKey && WriteSpatialRealmChange(slotIndex, slotBytes, spatialSlot.RealmKeyOffset, in newValue))
+        if (spatialSlot.RealmKeyInSpatialComponent && WriteSpatialRealmChange(slotIndex, slotBytes, spatialSlot.RealmKeyOffset, in newValue))
         {
             return;
         }
@@ -534,7 +534,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
         // Realms C4: a slot that changes realm leaves the batch's frame. Rare, so the whole call then takes the single writes, which handle it — the
         // batch's shared bound and crossing test assume one frame for every slot.
-        if (spatialSlot.HasRealmKey && AnySlotLeavesClusterRealm(spatialSlot.RealmKeyOffset, slots, newValues))
+        if (spatialSlot.RealmKeyInSpatialComponent && AnySlotLeavesClusterRealm(spatialSlot.RealmKeyOffset, slots, newValues))
         {
             for (var rest = slots; rest != 0; rest &= rest - 1)
             {

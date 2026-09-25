@@ -3152,7 +3152,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal ushort ResolveSlotRealmAtFence(byte* clusterBase, int chunkId, int slotIndex, ushort clusterRealm)
     {
         ref readonly var ss = ref SpatialSlot;
-        var key = (ushort*)(clusterBase + Layout.ComponentOffset(ss.Slot) + slotIndex * Layout.ComponentSize(ss.Slot) + ss.RealmKeyOffset);
+        var key = RealmKeyAt(clusterBase, slotIndex);
         var realm = *key;
         if (realm == clusterRealm || IsValidRealmForEntity(realm))
         {
@@ -3164,7 +3164,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Both halves of durability: the page is modified (the fence's Prep accessor has no change set, so without this the checkpoint would never
         // write it and an eviction would reload the invalid key — PS-10), and the slot is dirty so the fence's WAL carries the correction.
         NoteClusterPageModified(chunkId);
-        SetDirty(chunkId, slotIndex, ss.Slot);
+        SetDirty(chunkId, slotIndex, ss.RealmKeySlot);
         return clusterRealm;
     }
 
@@ -3191,7 +3191,83 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>Bytes from a cluster's base to slot 0's <c>[RealmKey]</c>, or <c>-1</c> for an archetype without one.</summary>
-    internal int RealmKeyColumn => SpatialSlot.HasRealmKey ? Layout.ComponentOffset(SpatialSlot.Slot) + SpatialSlot.RealmKeyOffset : -1;
+    internal int RealmKeyColumn => SpatialSlot.HasRealmKey ? Layout.ComponentOffset(SpatialSlot.RealmKeySlot) + SpatialSlot.RealmKeyOffset : -1;
+
+    /// <summary>Bytes from one entity's <c>[RealmKey]</c> to the next: its component's size.</summary>
+    internal int RealmKeyStride => SpatialSlot.HasRealmKey ? Layout.ComponentSize(SpatialSlot.RealmKeySlot) : 0;
+
+    /// <summary>The <c>[RealmKey]</c> of entity slot <paramref name="slotIndex"/> in the cluster at <paramref name="clusterBase"/>.</summary>
+    internal ushort* RealmKeyAt(byte* clusterBase, int slotIndex) => (ushort*)(clusterBase + RealmKeyColumn + slotIndex * RealmKeyStride);
+
+    /// <summary>Writes an entity's realm key through the mutation path of its OWN component (dirty bit, commit staging), typed once per archetype.</summary>
+    internal delegate void RealmKeyWriterFn(ref EntityRefMut entity, ushort realm);
+
+    private delegate void TypedRealmKeyWriter(ref EntityRefMut entity, ushort realm, int componentTypeId, int keyOffset);
+
+    private RealmKeyWriterFn _realmKeyWriter;
+
+    /// <summary>
+    /// <see cref="RealmKeyWriterFn"/> for this archetype's key component, built on first use by closing <see cref="WriteRealmKeyOf{TKey}"/> over the
+    /// component's type — a realm change is rare, and the delegate is cached. Only for a key in its own component: one in the spatial component rides in
+    /// the spatial value.
+    /// </summary>
+    internal RealmKeyWriterFn RealmKeyWriter
+    {
+        get
+        {
+            if (_realmKeyWriter != null)
+            {
+                return _realmKeyWriter;
+            }
+
+            var meta = ArchetypeRegistry.GetMetadata((ushort)ArchetypeId);
+            var keySlot = SpatialSlot.RealmKeySlot;
+            var typed = typeof(ArchetypeClusterState)
+                .GetMethod(nameof(WriteRealmKeyOf), System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+                .MakeGenericMethod(meta._slotToComponentType[keySlot])
+                .CreateDelegate<TypedRealmKeyWriter>();
+            var typeId = meta._componentTypeIds[keySlot];
+            var offset = SpatialSlot.RealmKeyOffset;
+            return _realmKeyWriter = (ref EntityRefMut entity, ushort realm) => typed(ref entity, realm, typeId, offset);
+        }
+    }
+
+    private static void WriteRealmKeyOf<TKey>(ref EntityRefMut entity, ushort realm, int componentTypeId, int keyOffset) where TKey : unmanaged
+    {
+        ref var value = ref entity.Write(new Comp<TKey>(componentTypeId));
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref Unsafe.As<TKey, byte>(ref value), keyOffset), realm);
+    }
+
+    /// <summary>
+    /// Finds the archetype's <c>[RealmKey]</c> among its components: at most one, and SingleVersion (a Versioned key would be re-derived from its chain
+    /// over a D-2 revert; a Transient one would not survive the reopen the rebuild files clusters from).
+    /// </summary>
+    private static void ResolveRealmKey(ComponentTable[] slotToTable, ref ClusterSpatialSlot spatialSlot)
+    {
+        spatialSlot.RealmKeyOffset = -1;
+        for (var slot = 0; slot < slotToTable.Length; slot++)
+        {
+            var field = slotToTable[slot]?.Definition.RealmKeyField;
+            if (field == null)
+            {
+                continue;
+            }
+
+            if (spatialSlot.RealmKeyOffset >= 0)
+            {
+                throw new InvalidOperationException("An archetype carries at most one [RealmKey]: two of its components declare one.");
+            }
+
+            if (slotToTable[slot].StorageMode != StorageMode.SingleVersion)
+            {
+                throw new InvalidOperationException(
+                    $"[RealmKey] component '{slotToTable[slot].Definition.Name}' must be SingleVersion, not {slotToTable[slot].StorageMode}.");
+            }
+
+            spatialSlot.RealmKeySlot = slot;
+            spatialSlot.RealmKeyOffset = field.OffsetInComponentStorage;
+        }
+    }
 
     /// <summary>Realm changes this archetype's fence detected this tick (cross-realm crossings filed). Reset per tick.</summary>
     internal int LastTickRealmChanges;
@@ -4918,8 +4994,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         // the reduce creates the realm's state, and refuses a cluster none of whose keys is valid — its realm is missing from the catalog (RLM-01).
         if (ss.HasRealmKey)
         {
-            var keyColumn = clusterBase + Layout.ComponentOffset(ss.Slot) + ss.RealmKeyOffset;
-            var stride = Layout.ComponentSize(ss.Slot);
+            var keyColumn = clusterBase + RealmKeyColumn;
+            var stride = RealmKeyStride;
             var chosen = -1;
             for (var rest = occupancy; rest != 0; rest &= rest - 1)
             {
@@ -5107,14 +5183,15 @@ internal sealed unsafe partial class ArchetypeClusterState
         var accessor = ClusterSegment.CreateChunkAccessor();
         try
         {
-            var component = accessor.GetChunkAddress(chunkId, true) + Layout.ComponentOffset(ss.Slot);
+            var clusterBase = accessor.GetChunkAddress(chunkId, true);
+            var component = clusterBase + Layout.ComponentOffset(ss.Slot);
             var stride = Layout.ComponentSize(ss.Slot);
             for (var rest = invalidSlots; rest != 0; rest &= rest - 1)
             {
                 var slot = BitOperations.TrailingZeroCount(rest);
-                *(ushort*)(component + slot * stride + ss.RealmKeyOffset) = clusterRealm;
+                *RealmKeyAt(clusterBase, slot) = clusterRealm;
                 NoteClusterPageModified(chunkId);   // this accessor has no change set: the page must be marked for the checkpoint (PS-10)
-                SetDirty(chunkId, slot, ss.Slot);
+                SetDirty(chunkId, slot, ss.RealmKeySlot);
                 LastRebuildRealmKeyReverts++;
             }
 
@@ -5134,7 +5211,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             for (var rest = foreignSlots; rest != 0; rest &= rest - 1)
             {
                 var slot = BitOperations.TrailingZeroCount(rest);
-                var realm = *(ushort*)(component + slot * stride + ss.RealmKeyOffset);
+                var realm = *RealmKeyAt(clusterBase, slot);
                 SpatialGrid.ReadSpatialCenter3D(component + slot * stride + ss.FieldOffset, ss.FieldInfo.FieldType, out var x, out var y, out var z);
                 EnqueueMigration(new MigrationRequest(chunkId, slot, realm, GridOfRealm(realm).WorldToCellKey(x, y, z)));
             }
@@ -10223,13 +10300,6 @@ internal sealed unsafe partial class ArchetypeClusterState
             RealmSpatial = new RealmArchetypeSpatial[realms.HighestRegisteredId + 1];
             _presentRealmSpatial = new RealmArchetypeSpatial[4];
             _presentRealmCount = 0;
-            // Realm 0's eagerly only for an UNKEYED archetype, which lives nowhere else: a keyed one gets it on its first cluster there, like any realm —
-            // an eager realm-0 state it never uses would make every second realm take the multi-realm reach pass and allocate a pool for nothing.
-            if (realms.TryGet(RealmId.Default.Value) != null && !SpatialSlot.HasRealmKey)
-            {
-                GetOrCreateRealmSpatial(RealmId.Default.Value);
-            }
-
             // Issue #233: allocate dormancy arrays for spatial archetypes. Non-spatial archetypes leave SleepStates null (zero overhead).
             var capacity = Math.Max(16, PrimarySegmentCapacity);
             SleepStates = new ClusterSleepState[capacity];
@@ -10242,8 +10312,17 @@ internal sealed unsafe partial class ArchetypeClusterState
                 FieldOffset = clusterFieldOffset,
                 FieldInfo = fi,
                 Descriptor = descriptor,
-                RealmKeyOffset = table.Definition.RealmKeyField?.OffsetInComponentStorage ?? -1,
             };
+            ResolveRealmKey(slotToTable, ref SpatialSlot);
+
+            // Realm 0's state eagerly only for an UNKEYED archetype, which lives nowhere else: a keyed one gets it on its first cluster there, like any
+            // realm — an eager realm-0 state it never uses would make every second realm take the multi-realm reach pass and allocate a pool for
+            // nothing. After the key is resolved, which is what decides it.
+            if (realms.TryGet(RealmId.Default.Value) != null && !SpatialSlot.HasRealmKey)
+            {
+                GetOrCreateRealmSpatial(RealmId.Default.Value);
+            }
+
             break; // Only one spatial field per archetype
         }
     }
@@ -10475,20 +10554,29 @@ internal struct ClusterSpatialSlot
     public SpatialNodeDescriptor Descriptor;
 
     /// <summary>
-    /// Byte offset of the <c>[RealmKey]</c> <see cref="ushort"/> within the spatial component (no ComponentOverhead), or <c>-1</c> when the archetype
-    /// has none and lives in realm 0. Same component as the spatial field, so the key sits in the row the placement already reads.
+    /// Byte offset of the <c>[RealmKey]</c> <see cref="ushort"/> within its component (<see cref="RealmKeySlot"/>, no ComponentOverhead), or <c>-1</c>
+    /// when the archetype has none and lives in realm 0.
     /// </summary>
     /// <remarks>Stored plus one, so the default slot — every non-spatial archetype's — reads "no realm key" rather than "a key at offset 0".</remarks>
     public int RealmKeyOffset
     {
         readonly get => _realmKeyOffsetPlusOne - 1;
-        init => _realmKeyOffsetPlusOne = value + 1;
+        set => _realmKeyOffsetPlusOne = value + 1;
     }
 
     private int _realmKeyOffsetPlusOne;
 
     /// <summary>True when the archetype names its realm per entity.</summary>
     public readonly bool HasRealmKey => RealmKeyOffset >= 0;
+
+    /// <summary>
+    /// The component slot holding the <c>[RealmKey]</c>: the spatial component's own slot, or a component of its own. A key of its own keeps the spatial
+    /// component at the width the AABB2F SIMD narrowphase requires (16 bytes) — measured on SWG, losing that kernel costs ~20 % of a tick.
+    /// </summary>
+    public int RealmKeySlot;
+
+    /// <summary>True when the key sits in the spatial component itself, so a <c>WriteSpatial</c> value carries it (Realms C4).</summary>
+    public readonly bool RealmKeyInSpatialComponent => RealmKeyOffset >= 0 && RealmKeySlot == Slot;
 }
 
 /// <summary>

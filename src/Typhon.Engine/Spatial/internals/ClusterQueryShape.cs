@@ -30,9 +30,13 @@ internal readonly struct ClusterFieldLayout
     /// set.</summary>
     public readonly int RealmKeyColumn;
 
+    /// <summary>Bytes from one entity's <c>[RealmKey]</c> to the next — its own component's size, which need not be <see cref="Stride"/>.</summary>
+    public readonly int RealmKeyStride;
+
     internal ClusterFieldLayout(ArchetypeClusterState state)
     {
         RealmKeyColumn = state.RealmKeyColumn;
+        RealmKeyStride = state.RealmKeyStride;
         // ref readonly, not a copy: ClusterSpatialSlot is ~104 bytes, and copying it to read four fields was a memcpy on every query (#916 O3).
         ref readonly var ss = ref state.SpatialSlot;
         FieldType = ss.FieldInfo.FieldType;
@@ -54,6 +58,7 @@ internal readonly struct ClusterFieldLayout
         IdsOffset = idsOffset;
         Aabb2FBlocks = aabb2FBlocks;
         RealmKeyColumn = -1;
+        RealmKeyStride = 0;
     }
 }
 

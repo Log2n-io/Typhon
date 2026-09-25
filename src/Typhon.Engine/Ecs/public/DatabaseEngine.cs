@@ -1041,14 +1041,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         cs.SaveChanges();
     }
 
-    /// <summary>True when the archetype's spatial component carries a <c>[RealmKey]</c> field.</summary>
+    /// <summary>True when one of the archetype's components carries a <c>[RealmKey]</c> field.</summary>
     private static bool ArchetypeHasRealmKey(ComponentTable[] slotToTable)
     {
         foreach (var table in slotToTable)
         {
-            if (table?.SpatialIndex != null)
+            if (table?.Definition.RealmKeyField != null)
             {
-                return table.Definition.RealmKeyField != null;
+                return true;
             }
         }
 
@@ -4050,6 +4050,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     {
                         changeSet.SaveChanges();
                     }
+                }
+
+                // A realm key names the frame of the archetype's spatial field: without one, it would be a ushort nothing reads (Realms).
+                if (!meta.HasClusterSpatial && ArchetypeHasRealmKey(slotToTable))
+                {
+                    throw new InvalidOperationException(
+                        $"Archetype '{meta.ArchetypeType?.Name}' carries a [RealmKey] but no [SpatialIndex] component: the realm key names the frame of the "
+                        + "archetype's spatial field.");
                 }
 
                 // Initialize per-archetype spatial state for cluster archetypes with spatial fields.

@@ -1056,7 +1056,8 @@ public unsafe ref struct AabbClusterEnumerator
         // RM-04: an entity whose realm key names another realm (written this tick, moved at the next fence) is not this query's.
         if (_layout.RealmKeyColumn >= 0)
         {
-            occupancy = ArchetypeClusterState.SlotsInRealm(_currentClusterBase, occupancy, _layout.RealmKeyColumn, _layout.Stride, _rs.Realm.Value);
+            occupancy = ArchetypeClusterState.SlotsInRealm(_currentClusterBase, occupancy, _layout.RealmKeyColumn, _layout.RealmKeyStride,
+                _rs.Realm.Value);
         }
 
         _currentOccupancyBits = occupancy;

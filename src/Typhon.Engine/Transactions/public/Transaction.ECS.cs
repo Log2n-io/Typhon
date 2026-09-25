@@ -752,10 +752,10 @@ public unsafe partial class Transaction
     private ushort ValidateSpawnRealm(ArchetypeMetadata meta, ArchetypeClusterState clusterState, ReadOnlySpan<ComponentValue> values)
     {
         ref readonly var ss = ref clusterState.SpatialSlot;
-        var spatialType = meta._slotToComponentType[ss.Slot];
+        var archetypeName = meta.ArchetypeType?.Name ?? meta.ArchetypeId.ToString();
         for (var v = 0; v < values.Length; v++)
         {
-            if (!meta.TryGetSlot(values[v].ComponentTypeId, out var slot) || slot != ss.Slot)
+            if (!meta.TryGetSlot(values[v].ComponentTypeId, out var slot) || slot != ss.RealmKeySlot)
             {
                 continue;
             }
@@ -766,15 +766,17 @@ public unsafe partial class Transaction
             if (payload.Length < ss.RealmKeyOffset + sizeof(ushort))
             {
                 throw new InvalidOperationException(
-                    $"The spatial component value supplied to spawn '{meta.ArchetypeType?.Name}' holds {payload.Length} bytes; its realm key is at byte "
+                    $"The realm-key component value supplied to spawn '{archetypeName}' holds {payload.Length} bytes; its realm key is at byte "
                     + $"{ss.RealmKeyOffset}.");
             }
 
             var realm = MemoryMarshal.Read<ushort>(payload.Slice(ss.RealmKeyOffset));
-            _dbe.RealmGridForEntry(realm, meta.ArchetypeId, meta.ArchetypeType?.Name ?? spatialType?.Name ?? meta.ArchetypeId.ToString());
+            _dbe.RealmGridForEntry(realm, meta.ArchetypeId, archetypeName);
             return realm;
         }
 
+        // No value for the key's component: the key reads 0, so realm 0 must be able to hold the entity — checked here, not at commit.
+        _dbe.RealmGridForEntry(0, meta.ArchetypeId, archetypeName);
         return 0;
     }
 
@@ -1903,6 +1905,8 @@ public unsafe partial class Transaction
         // Realms: offset of the [RealmKey] in the spatial component (-1: the archetype lives in realm 0), and the last realm resolved with its grid —
         // one realm-table load per realm change, none per entity in a single-realm batch.
         public int RealmKeyOffsetCached;
+        public int RealmKeySlotCached;
+        public int RealmKeyOverheadCached;
         public int LastSpawnRealm;
         public SpatialGrid LastSpawnRealmGrid;
         public int SpatialSlotIndexCached;
@@ -2058,7 +2062,12 @@ public unsafe partial class Transaction
                         spawnGrid = ctx.SpatialGridCached;
                         if (ctx.RealmKeyOffsetCached >= 0)
                         {
-                            var key = (ushort*)(spatialSrcAddr + ctx.SpatialComponentOverheadCached + ctx.RealmKeyOffsetCached);
+                            // The key's own staged row (its component may be the spatial one or another); no stage = no value = realm 0.
+                            var keyStage = entry.Stage[ctx.RealmKeySlotCached];
+                            ushort keyFallback = 0;
+                            var key = keyStage != 0
+                                ? (ushort*)(SpawnArena.Resolve(keyStage) + ctx.RealmKeyOverheadCached + ctx.RealmKeyOffsetCached)
+                                : &keyFallback;
                             var realm = *key;
                             if (realm != ctx.LastSpawnRealm)
                             {
@@ -2470,6 +2479,8 @@ public unsafe partial class Transaction
             var fieldType = SpatialFieldType.AABB2F;
             var orderRealm = -1;
             SpatialGrid orderGrid = null;
+            var realmKeySlot = 0;
+            var realmKeyOverhead = 0;
 
             for (var i = 0; i < count; i++)
             {
@@ -2492,6 +2503,8 @@ public unsafe partial class Transaction
                             componentOverhead = table.ComponentOverhead;
                             fieldOffset = ss.FieldOffset;
                             realmKeyOffset = ss.RealmKeyOffset;
+                            realmKeySlot = ss.RealmKeySlot;
+                            realmKeyOverhead = ss.HasRealmKey ? engineState.SlotToComponentTable[ss.RealmKeySlot].ComponentOverhead : 0;
                             fieldType = ss.FieldInfo.FieldType;
                         }
                     }
@@ -2511,7 +2524,8 @@ public unsafe partial class Transaction
                         var grid = realm0Grid;
                         if (realmKeyOffset >= 0)
                         {
-                            realm = *(ushort*)(row + realmKeyOffset);
+                            var keyStage = entry.Stage[realmKeySlot];
+                            realm = keyStage != 0 ? *(ushort*)(SpawnArena.Resolve(keyStage) + realmKeyOverhead + realmKeyOffset) : (ushort)0;
                             if (realm != orderRealm)
                             {
                                 // An invalid staged key sorts where FinalizeSpawns will place it: in the realm Spawn validated.
@@ -2766,6 +2780,10 @@ public unsafe partial class Transaction
             // decide between ClaimSlot and ClaimSlotInCell — no per-entity pointer chasing through EngineState → table → overhead.
             ctx.SpatialGridCached = _dbe.Realm0Grid;
             ctx.RealmKeyOffsetCached = ctx.ClusterState.SpatialSlot.RealmKeyOffset;
+            ctx.RealmKeySlotCached = ctx.ClusterState.SpatialSlot.RealmKeySlot;
+            ctx.RealmKeyOverheadCached = ctx.ClusterState.SpatialSlot.HasRealmKey
+                ? ctx.EngineState.SlotToComponentTable[ctx.ClusterState.SpatialSlot.RealmKeySlot].ComponentOverhead
+                : 0;
             ctx.LastSpawnRealm = -1;
             ctx.LastSpawnRealmGrid = null;
             var realmKeyed = ctx.ClusterState.SpatialSlot.HasSpatialIndex && ctx.ClusterState.SpatialSlot.HasRealmKey;

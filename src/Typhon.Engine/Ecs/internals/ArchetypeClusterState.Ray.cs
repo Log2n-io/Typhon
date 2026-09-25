@@ -243,7 +243,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var realmKeyColumn = RealmKeyColumn;
         if (realmKeyColumn >= 0)
         {
-            occupancy = SlotsInRealm(clusterBase, occupancy, realmKeyColumn, compSize, ClusterRealmMap[clusterChunkId]);
+            occupancy = SlotsInRealm(clusterBase, occupancy, realmKeyColumn, RealmKeyStride, ClusterRealmMap[clusterChunkId]);
         }
 
         Span<double> entityCoords = stackalloc double[6];

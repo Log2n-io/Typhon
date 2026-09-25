@@ -144,11 +144,10 @@ class RealmKeyTests : TestBase<RealmKeyTests>
     // ── schema ──
 
     [Test]
-    public void RealmKey_WithoutSpatialField_Refused()
-    {
-        var ex = Assert.Throws<InvalidOperationException>(() => Engine().RegisterComponentFromAccessor<RealmKeyWithoutSpatial>());
-        Assert.That(ex.Message, Does.Contain("[RealmKey]").And.Contain("[SpatialIndex]"));
-    }
+    public void RealmKey_InAComponentOfItsOwn_IsAccepted_AtComponentLevel() =>
+        // Since G1 the key may live outside the spatial component (a key of its own keeps the spatial component within the SIMD narrowphase's stride);
+        // the archetype-level rules — one key, on a spatial archetype — are checked at open (RealmKeyComponentTests).
+        Assert.DoesNotThrow(() => Engine().RegisterComponentFromAccessor<RealmKeyWithoutSpatial>());
 
     [Test]
     public void RealmKey_NotUShort_Refused()

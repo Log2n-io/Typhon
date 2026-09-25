@@ -180,7 +180,8 @@ public unsafe partial class EntityAccessor
         if (state == null || !state.SpatialSlot.HasRealmKey || state.SpatialSlot.Slot != mut._ref._archetype.GetSlot(spatial._componentTypeId))
         {
             throw new InvalidOperationException(
-                $"Teleport needs the archetype's realm-keyed spatial component: {typeof(T).Name} is not the [SpatialIndex] component carrying a [RealmKey].");
+                $"Teleport needs a realm-keyed archetype's spatial component: {typeof(T).Name} is not the [SpatialIndex] component of an archetype with a "
+                + "[RealmKey].");
         }
 
         state.ValidateRealmEntry(realm.Value);
@@ -194,7 +195,15 @@ public unsafe partial class EntityAccessor
 
         ref var stored = ref mut.Write(spatial);
         stored = value;
-        Unsafe.WriteUnaligned(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref stored), state.SpatialSlot.RealmKeyOffset), realm.Value);
+        if (state.SpatialSlot.RealmKeyInSpatialComponent)
+        {
+            Unsafe.WriteUnaligned(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref stored), state.SpatialSlot.RealmKeyOffset), realm.Value);
+        }
+        else
+        {
+            // The key's own component, written through the same mutation path as any component (dirty bit, commit staging, shadows).
+            state.RealmKeyWriter(ref mut, realm.Value);
+        }
 
         // An entity spawned in this transaction has no cluster yet: its placement reads the staged key at commit, and there is nothing to flag.
         if (mut._ref._isOwnSpawn)

@@ -504,8 +504,9 @@
     when unnamed) and walks only realm r's grid: ∀ hit h: ClusterRealmMap[h.ClusterChunkId] == r. Two realms
     share coordinates and, with the same geometry, cell keys — a query keyed by cell alone would answer with
     another world's entities, plausibly and wrongly
-  invariant an entity is placed in the realm its [RealmKey] names (realm 0 without one), in THAT realm's grid and
-    cell geometry; the batch spawn sort orders by (archetype, realm, cell), never by cell alone
+  invariant an entity is placed in the realm its [RealmKey] names (realm 0 without one) — the key in the spatial component or in a SingleVersion
+    component of its own (one per archetype) — in THAT realm's grid and cell geometry; the batch spawn sort orders by (archetype, realm, cell), never
+    by cell alone
   invariant a realm that is not registered is an application error at the call (spawn, query), never an empty
     answer. A registered realm the archetype has no cluster in answers empty
   never resolve a query's grid from Realm0Grid on a path that takes a realm

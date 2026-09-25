@@ -400,17 +400,12 @@ public class DatabaseDefinitions
             {
                 throw new InvalidOperationException($"Component '{spec.Name}' has {realmKeyCount} [RealmKey] fields, but at most one is allowed.");
             }
-            if (realmKeyCount == 1 && spec.StorageMode == StorageMode.Versioned)
+            if (realmKeyCount == 1 && spec.StorageMode != StorageMode.SingleVersion)
             {
-                // A fence or rebuild revert (D-2) rewrites the cluster slot, the HEAD a Versioned component re-derives from its chain on the next open.
-                throw new InvalidOperationException(
-                    $"[RealmKey] is not supported on Versioned component '{spec.Name}' (yet): use SingleVersion for the realm-keyed spatial component.");
-            }
-            if (realmKeyCount == 1 && spatialCount == 0)
-            {
-                throw new InvalidOperationException(
-                    $"Component '{spec.Name}' has a [RealmKey] field but no [SpatialIndex] field: the realm key names the frame of the spatial field "
-                    + "beside it, so both belong to the same component.");
+                // Versioned: a fence or rebuild revert (D-2) rewrites the cluster slot, the HEAD a Versioned component re-derives from its chain on the next
+                // open. Transient: the rebuild that files clusters by realm reads persisted data. The archetype-level rule (one key, on a spatial
+                // archetype) is checked when the archetype is initialised.
+                throw new InvalidOperationException($"[RealmKey] component '{spec.Name}' must be SingleVersion, not {spec.StorageMode}.");
             }
         }
 
