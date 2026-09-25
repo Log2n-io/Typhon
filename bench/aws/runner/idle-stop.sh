@@ -25,8 +25,30 @@ echo "$n" > "$STATE"
 echo "idle tick ${n}/${IDLE_MINUTES}"
 [ "$n" -lt "$IDLE_MINUTES" ] && exit 0
 
+# Take the runner OFFLINE before stopping the box (#1048). Stopping the instance with the runner online left a window of
+# ~15-20 s — the stop call, then the OS shutdown — in which GitHub could hand a new job to a box that was going down: it
+# was killed mid-checkout. With the runner offline, a job queued from here on stays `queued` on GitHub, and the
+# power-toggle Lambda waits out the stop and starts the box again. The only window left is between the check below and
+# the service stop, a few milliseconds.
+RUNNER_UNIT=$(systemctl list-units --type=service --all --plain --no-legend 'actions.runner.*' | awk '{print $1}' | head -n1)
+if pgrep -f '[R]unner\.Worker' >/dev/null 2>&1; then
+  echo 0 > "$STATE"
+  echo "a job started while deciding — idle counter reset"
+  exit 0
+fi
+if [ -n "$RUNNER_UNIT" ]; then
+  systemctl stop "$RUNNER_UNIT"
+  echo "runner ${RUNNER_UNIT} stopped: new jobs stay queued"
+fi
+
 # IMDSv2 (token-required) — works whether or not the box enforces it.
 TOKEN=$(curl -sS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
 IID=$(curl -sS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
 echo "idle ${IDLE_MINUTES} min — stopping ${IID}"
-aws ec2 stop-instances --instance-ids "$IID" --region "$REGION"
+if ! aws ec2 stop-instances --instance-ids "$IID" --region "$REGION"; then
+  # The box stays up: bring the runner back so queued jobs are served, and count idle from zero again.
+  [ -n "$RUNNER_UNIT" ] && systemctl start "$RUNNER_UNIT"
+  echo 0 > "$STATE"
+  echo "stop-instances failed — runner restarted" >&2
+  exit 1
+fi
