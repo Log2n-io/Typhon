@@ -48,6 +48,8 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     // to -1; migration moves ENTITIES between clusters, never a cluster between cells).
     private const int CellFrameUnresolved = -2;
     private int _cachedCellKey;
+    // The cluster's realm grid, resolved with the cell origin (once per cluster) so the per-entity write paths pay no realm resolution (Realms SP-3).
+    private SpatialGrid _cachedGrid;
     private double _cachedOriginX;
     private double _cachedOriginY;
     private double _cachedOriginZ;
@@ -61,6 +63,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         _chunkId = chunkId;
         _state = state;
         _cachedCellKey = CellFrameUnresolved;
+        _cachedGrid = null;
         _cachedOriginX = 0f;
         _cachedOriginY = 0f;
         _cachedOriginZ = 0f;
@@ -773,7 +776,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         var start = Volatile.Read(ref _state.ClusterAabbs)![_chunkId];
         float runMinX = start.MinX, runMinY = start.MinY, runMinZ = start.MinZ, runMaxX = start.MaxX, runMaxY = start.MaxY, runMaxZ = start.MaxZ;
 
-        var grid = _state.SpatialOfCluster(_chunkId).Grid;
+        var grid = _cachedGrid ?? _state.SpatialOfCluster(_chunkId).Grid;
         ref readonly var cfg = ref grid.Config;
         var cellSize = (float)cfg.CellSize;
         var hyster = cellSize * cfg.MigrationHysteresisRatio;
@@ -1074,6 +1077,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         if (cellKey >= 0)
         {
             _cachedCellKey = cellKey;
+            _cachedGrid = grid;
             _cachedOriginX = originX;
             _cachedOriginY = originY;
             _cachedOriginZ = originZ;
@@ -1091,7 +1095,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         // The cell key and origin are PASSED IN rather than re-derived. The caller resolved both to convert the entity's bounds into the cluster's frame,
         // and this method used to repeat all of it — two array loads, a bounds check, CellKeyToCoords (itself two dependent loads into the cell's CellState)
         // and three multiplies — per entity per tick, inlined into the AntHill simulation barrier.
-        var grid = _state.SpatialOfCluster(_chunkId).Grid;
+        var grid = _cachedGrid ?? _state.SpatialOfCluster(_chunkId).Grid;
 
         ref readonly var cfg = ref grid.Config;
 

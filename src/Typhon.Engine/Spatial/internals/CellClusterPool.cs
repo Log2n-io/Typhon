@@ -58,10 +58,6 @@ internal sealed class CellClusterPool
     private int _tail;
 
     /// <summary>Start index of each cell's segment inside <see cref="_pool"/>. <c>-1</c> when the cell has no segment allocated yet. Indexed by cell key.</summary>
-    // Side-array chunk 0's length and the outer arrays' initial length (Realms SP-4): the whole world's cell count when it fits in one chunk, so a
-    // one-cell interior's pool holds four 1-int arrays rather than four 256-int ones. Every key is below that count, so no key indexes past chunk 0.
-    private readonly int _firstChunkLength;
-
     private int[][] _cellHeads = new int[4][];
 
     /// <summary>Number of cluster chunk IDs currently stored in each cell's segment. Indexed by cell key.</summary>
@@ -82,6 +78,11 @@ internal sealed class CellClusterPool
 
     /// <summary>Managed thread id of the writer currently inside <see cref="AddCluster"/> or <see cref="RemoveCluster"/>; zero when there is none.</summary>
     private int _writerInFlight;
+
+    // Side-array chunk 0's length and the outer arrays' initial length (Realms SP-4): the whole world's cell count when it fits in one chunk, so a
+    // one-cell interior's pool holds four 1-int arrays rather than four 256-int ones. Every key of the pool's own grid is below that count; EnsureCell
+    // refuses one that is not (a key from another realm's grid), which would otherwise index past chunk 0 on the read side.
+    private readonly int _firstChunkLength;
 
     /// <summary>
     /// Build an empty pool. <paramref name="initialCellCapacity"/> is a sizing HINT, not a bound: cell keys are pool slots handed out lazily by the VDB grid
@@ -131,6 +132,12 @@ internal sealed class CellClusterPool
         }
 
         int chunk = cellKey >> CellChunkShift;
+        if (chunk == 0 && cellKey >= _firstChunkLength)
+        {
+            throw new ArgumentOutOfRangeException(nameof(cellKey), cellKey,
+                $"Cell key {cellKey} is past this pool's world ({_firstChunkLength} cell slots): a key of another realm's grid reached this realm's pool.");
+        }
+
         var heads = Volatile.Read(ref _cellHeads);
         if ((uint)chunk < (uint)heads.Length && Volatile.Read(ref heads[chunk]) != null)
         {

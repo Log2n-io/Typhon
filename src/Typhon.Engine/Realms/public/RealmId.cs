@@ -37,8 +37,8 @@ public readonly struct RealmId : IEquatable<RealmId>
     /// <summary>True for <see cref="None"/>.</summary>
     public bool IsNone => Value == NoneValue;
 
-    /// <summary>The index.</summary>
-    public static implicit operator ushort(RealmId realm) => realm.Value;
+    /// <summary>The index. Explicit: <see cref="None"/> converts to 65 535, which indexes nothing, so a conversion is a decision, never an accident.</summary>
+    public static explicit operator ushort(RealmId realm) => realm.Value;
 
     /// <summary>A realm id from its index.</summary>
     public static explicit operator RealmId(ushort value) => new(value);

@@ -443,7 +443,7 @@ public sealed partial class TyphonRuntime : IDisposable
             _subscriptionsRuntime = built;
             if (built.Grid is { } grid)
             {
-                LogReplicationGrid(grid.CellM, Engine.SpatialGrid.Config.CellSize, grid.DimX, grid.DimY, grid.DimZ, grid.Window, grid.Radius,
+                LogReplicationGrid(grid.CellM, Engine.Realm0Grid.Config.CellSize, grid.DimX, grid.DimY, grid.DimZ, grid.Window, grid.Radius,
                     grid.Flat ? "flat" : "deep");
             }
 
@@ -525,7 +525,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 CreateSideTransaction = _createSideTxDelegate,
                 Entities = PooledEntityList.Empty,
                 TierBudgetMetrics = _previousTickMetrics,
-                SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Subscriptions = _subscriptionsRuntime?.Commands,
                 // Runs on whichever thread called Shutdown()/FatalStop() — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
@@ -859,7 +859,7 @@ public sealed partial class TyphonRuntime : IDisposable
     private unsafe int ScanClusterDirtyEntities(ComponentTable table, ViewBase view, SimTier effectiveTier, Span<EntityId> span, int count)
     {
         int maxArchId = Math.Min(ArchetypeRegistry.MaxArchetypeId, Engine._archetypeStates.Length - 1);
-        bool tierFiltered = effectiveTier != SimTier.All && Engine.SpatialGrid != null;
+        bool tierFiltered = effectiveTier != SimTier.All && Engine.Realm0Grid != null;
 
         for (int archId = 0; archId <= maxArchId; archId++)
         {
@@ -1310,7 +1310,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var sys = Scheduler.Systems[sysIdx];
         var view = _systemViews[sysIdx];
         var tier = view == null ? sys.TierFilter : (SimTier)((byte)sys.TierFilter & (byte)view.TierFilter);
-        return Engine?.SpatialGrid == null ? SimTier.All : tier;
+        return Engine?.Realm0Grid == null ? SimTier.All : tier;
     }
 
     /// <summary>
@@ -1827,7 +1827,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks,
             TierBudgetMetrics = _previousTickMetrics,
-            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId)
         };
         ctx.DebugValidateWorkerId(Scheduler.WorkerSlotCount, sys.Name);
@@ -1958,7 +1958,7 @@ public sealed partial class TyphonRuntime : IDisposable
             EndClusterIndex = clusterEnd,
             ClusterIds = clusterIdArray,
             TierBudgetMetrics = _previousTickMetrics,
-            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
@@ -2002,7 +2002,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var srcIds = _systemTierClusterIds[sysIdx];
         int srcCount = _systemTierClusterCount[sysIdx];
         var cs = _systemClusterStates[sysIdx];
-        var grid = Engine?.SpatialGrid;
+        var grid = Engine?.Realm0Grid;
 
         // If no cluster data or no grid, Red = full list, Black = empty (degenerate: non-spatial archetype)
         if (srcIds == null || cs?.ClusterCellMap == null || grid == null)
@@ -2102,7 +2102,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 EndClusterIndex = clusterEnd,
                 ClusterIds = clusterIdArray,
                 TierBudgetMetrics = _previousTickMetrics,
-                SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
                 WorkerId = workerId,
                 ChunkIndex = chunkIndex,
@@ -2208,7 +2208,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 CreateSideTransaction = _createSideTxDelegate,
                 Entities = PooledEntityList.Empty,
                 TierBudgetMetrics = _previousTickMetrics,
-                SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Subscriptions = _subscriptionsRuntime?.Commands,
                 // Runs on the tick thread before any worker wakes — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
@@ -2288,7 +2288,7 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     private void BuildTierIndexesAtTickStart()
     {
-        var grid = Engine?.SpatialGrid;
+        var grid = Engine?.Realm0Grid;
         if (grid == null)
         {
             return;
@@ -2899,7 +2899,7 @@ public sealed partial class TyphonRuntime : IDisposable
             Entities = entities,
             ConsumedQueues = _systemConsumedQueues[sysIdx],
             TierBudgetMetrics = _previousTickMetrics,
-            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             // Single-invocation system: one chunk, index 0. Left at the default 0 before #860, which made the documented slicing formula

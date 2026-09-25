@@ -727,7 +727,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (cellUpperBound > 0)
         {
             // Realm 0's grid bounds the cell keys today; SP-5 pre-sizes every destination realm's index (PreSizeMigrationBuffers per DestRealm).
-            EnsurePerCellIndexCapacity(DefaultRealmSpatial, cellUpperBound);
+            EnsurePerCellIndexCapacity(Realm0Spatial, cellUpperBound);
         }
 
         // Deferred-drain list sized to PendingMigrationCount (each migration drains at most one source slot, so the cluster-drain count cannot exceed migration
@@ -2954,8 +2954,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal RealmArchetypeSpatial[] RealmSpatial;
 
-    /// <summary>Realm 0's spatial state (<c>RealmSpatial[0]</c>), or null for a non-spatial archetype. The forwarding properties read it.</summary>
-    internal RealmArchetypeSpatial DefaultRealmSpatial;
+    /// <summary>Realm 0's spatial state (<c>RealmSpatial[0]</c>), or null for a non-spatial archetype. Test-facing; engine code says <see cref="Realm0Spatial"/>.</summary>
+    [Obsolete(Realm0Shortcut, DiagnosticId = "TYRLM001")]
+    internal RealmArchetypeSpatial DefaultRealmSpatial => _realm0Spatial;
+
+    /// <summary>Realm 0's spatial state, named as such at the engine sites that are single-realm until the multi-realm steps (see the Realms plan).</summary>
+    internal RealmArchetypeSpatial Realm0Spatial => _realm0Spatial;
+
+    private RealmArchetypeSpatial _realm0Spatial;
 
     /// <summary>
     /// The message of the realm-0 forwarding properties' <c>TYRLM001</c>: engine code must name the realm it works in, or a second realm silently reads
@@ -2970,8 +2976,18 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// old fields.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal RealmArchetypeSpatial SpatialOf(SpatialGrid grid) =>
-        grid == null || RealmSpatial == null ? RealmArchetypeSpatial.None : RealmSpatial[grid.Realm.Value] ?? RealmArchetypeSpatial.None;
+    internal RealmArchetypeSpatial SpatialOf(SpatialGrid grid)
+    {
+        var byRealm = RealmSpatial;
+        if (grid == null || byRealm == null)
+        {
+            return RealmArchetypeSpatial.None;
+        }
+
+        // Bounded: an archetype absent from a realm (no state there yet) answers None, never an out-of-range throw on a query or tick path.
+        var realm = grid.Realm.Value;
+        return realm < (uint)byRealm.Length ? byRealm[realm] ?? RealmArchetypeSpatial.None : RealmArchetypeSpatial.None;
+    }
 
     /// <summary>True when any realm of this archetype serves a cell from a tree. Walks the archetype's realms (one today; SP-5 keeps a count).</summary>
     internal bool HasPromotedCells
@@ -3007,7 +3023,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>The spatial state of the realm cluster <paramref name="chunkId"/> is in. Realm 0 until SP-5 gives every cluster a realm.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal RealmArchetypeSpatial SpatialOfCluster(int chunkId) => DefaultRealmSpatial ?? RealmArchetypeSpatial.None;
+    internal RealmArchetypeSpatial SpatialOfCluster(int chunkId) => Realm0Spatial ?? RealmArchetypeSpatial.None;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Issue #231: Tier dispatch state. The version counter is bumped whenever
@@ -5520,6 +5536,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void EnsurePerCellIndexCapacityLocked(RealmArchetypeSpatial rs, int requiredLength)
     {
         AssertFinalizeLockHeld(nameof(EnsurePerCellIndexCapacityLocked));
+        RealmArchetypeSpatial.AssertNotNone(rs);
         if (rs.PerCellIndex == null)
         {
             Volatile.Write(ref rs.PerCellIndex, new PerCellSpatialSlot[Math.Max(16, requiredLength)]);
@@ -6655,6 +6672,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <summary>Raise <see cref="ClusterReach"/> to at least <paramref name="reach"/>: a CAS max, since spawns on several threads raise it together.</summary>
     private static void RaiseClusterReach(RealmArchetypeSpatial rs, float reach)
     {
+        RealmArchetypeSpatial.AssertNotNone(rs);
         var current = Volatile.Read(ref rs.ClusterReach);
         while (reach > current)
         {
@@ -7809,6 +7827,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     private void PromoteCellHalf(RealmArchetypeSpatial rs, PerCellSpatialSlot slot, bool isStatic, int cellKey, CellSpatialIndex linear)
     {
+        RealmArchetypeSpatial.AssertNotNone(rs);
         var tree = new CellClusterTree(CellTreeSegment, ClusterSpatialIndexSlot);
 
         // Retire the LINEAR slot indices before re-issuing tree handles into the same array. The two representations share ClusterSpatialIndexSlot, and a
@@ -7876,7 +7895,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal bool ForceCellHalfStructure(int cellKey, bool tree)
     {
         // A test and profiling helper addressed by cell key alone, so realm 0 by contract.
-        var rs = DefaultRealmSpatial ?? RealmArchetypeSpatial.None;
+        var rs = Realm0Spatial ?? RealmArchetypeSpatial.None;
         // Before the latch: the segment's creation takes _finalizeLock itself, and the latch is not re-entrant.
         if (tree && !TryEnsureCellTreeSegment())
         {
@@ -9545,8 +9564,8 @@ internal sealed unsafe partial class ArchetypeClusterState
             // Issue #229 Q10: allocate this archetype's own CellClusterPool. Other cluster-spatial archetypes sharing the same grid each get their own
             // instance, so claim-list scans at spawn time only walk clusters of the current archetype.
             // Realms SP-2: the per-cell state lives in the realm's RealmArchetypeSpatial; one realm (0) today.
-            DefaultRealmSpatial = new RealmArchetypeSpatial(this, RealmId.Default, grid);
-            RealmSpatial = [DefaultRealmSpatial];
+            _realm0Spatial = new RealmArchetypeSpatial(this, RealmId.Default, grid);
+            RealmSpatial = [_realm0Spatial];
 
             // Issue #233: allocate dormancy arrays for spatial archetypes. Non-spatial archetypes leave SleepStates null (zero overhead).
             var capacity = Math.Max(16, PrimarySegmentCapacity);

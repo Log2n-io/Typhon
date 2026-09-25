@@ -56,11 +56,12 @@ class RealmFootprintTests
 
     /// <summary>The dense directory (small worlds) and the hash map (large ones) must answer every read identically — and neither may create on a read.</summary>
     [VerifiesRule("VG-01")]
-    [TestCase(64, TestName = "DenseDirectory")]
-    [TestCase(2100, TestName = "HashMapDirectory")]
-    public void BlockDirectory_ReadPathsDoNotCreate_AndNeighboursResolveAcrossAbsentBlocks(int cellsPerSide)
+    [TestCase(64, true, TestName = "DenseDirectory")]
+    [TestCase(2100, false, TestName = "HashMapDirectory")]
+    public void BlockDirectory_ReadPathsDoNotCreate_AndNeighboursResolveAcrossAbsentBlocks(int cellsPerSide, bool dense)
     {
         var grid = new SpatialGrid(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(cellsPerSide, cellsPerSide), 1f));
+        Assert.That(grid.UsesDenseDirectory, Is.EqualTo(dense), "the case must exercise the directory form it is named after");
 
         // Three cells far apart, in three different blocks.
         var a = grid.WorldToCellKey(0.5, 0.5, 0);
@@ -80,8 +81,12 @@ class RealmFootprintTests
         Assert.That(grid.TryGetCellKey(0, 0, 0, out var ka) && ka == a, Is.True);
         Assert.That(grid.TryGetCellKey(cellsPerSide - 1, cellsPerSide - 1, 0, out var kc) && kc == c, Is.True);
 
-        // VG-01: a neighbour step into an absent block answers "no cell", never a stale or foreign one.
-        Assert.That(grid.TryGetNeighbourCellKey(a, 1, 0, 0, out _), Is.False);
+        // VG-01: a neighbour step into an ABSENT BLOCK answers "no cell", never a stale or foreign one — and the cell once it exists. Cell (15, 0) sits
+        // at the edge of block (0, 0); its +X neighbour (16, 0) is in block (1, 0), which nothing has created.
+        var edge = grid.WorldToCellKey(15.5, 0.5, 0);
+        Assert.That(grid.TryGetNeighbourCellKey(edge, 1, 0, 0, out _), Is.False);
+        var across = grid.WorldToCellKey(16.5, 0.5, 0);
+        Assert.That(grid.TryGetNeighbourCellKey(edge, 1, 0, 0, out var appeared) && appeared == across, Is.True, "absent, then appears");
 
         // After a reset the directory is empty again, in both forms.
         grid.ResetCellState();

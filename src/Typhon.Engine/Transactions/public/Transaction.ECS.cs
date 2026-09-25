@@ -1909,7 +1909,7 @@ public unsafe partial class Transaction
 
         // Step 15 (D4): a batch of spatial spawns is placed in per-cell Morton order, so a bulk load is born at the packing bound instead of at ~100 %
         // of every cell it touches. The list itself is left alone — _spawnedEntityIndex maps ids into it — and only the visiting order changes.
-        var sortThreshold = _dbe.SpatialGrid != null ? _dbe.SpatialGrid.Config.BatchSpawnSortThreshold : 0;
+        var sortThreshold = _dbe.Realm0Grid != null ? _dbe.Realm0Grid.Config.BatchSpawnSortThreshold : 0;
         var spawnOrder = sortThreshold > 0 && _spawnedEntities.Count >= sortThreshold ? BuildSpatialSpawnOrder() : null;
 
         try
@@ -2373,7 +2373,7 @@ public unsafe partial class Transaction
         var runKeys = ArrayPool<ulong>.Shared.Rent(count);
         try
         {
-            var grid = _dbe.SpatialGrid;
+            var grid = _dbe.Realm0Grid;
             var lastArchId = -1;
             var spatialSlot = -1;
             var componentOverhead = 0;
@@ -2646,7 +2646,7 @@ public unsafe partial class Transaction
 
             // Issue #229 Phase 1+2: cache spatial-cell routing info once per archetype. The hot spawn path reads SpatialSlotIndexCached once per entity to
             // decide between ClaimSlot and ClaimSlotInCell — no per-entity pointer chasing through EngineState → table → overhead.
-            ctx.SpatialGridCached = _dbe.SpatialGrid;
+            ctx.SpatialGridCached = _dbe.Realm0Grid;
             if (ctx.SpatialGridCached != null && ctx.ClusterState.SpatialSlot.HasSpatialIndex)
             {
                 ref readonly var ss = ref ctx.ClusterState.SpatialSlot;
@@ -2979,11 +2979,11 @@ public unsafe partial class Transaction
                         // via FinaliseEmptyClusterCellState when the source cluster becomes empty.
                         if (hasClusterAccessor)
                         {
-                            destroyClusterState.ReleaseSlot(ref clusterAccessor, clusterChunkId, slotIndex, _changeSet, _dbe.SpatialGrid);
+                            destroyClusterState.ReleaseSlot(ref clusterAccessor, clusterChunkId, slotIndex, _changeSet, _dbe.Realm0Grid);
                         }
                         else if (hasDestroyTransientClusterAccessor)
                         {
-                            destroyClusterState.ReleaseSlot(ref destroyTransientClusterAccessor, clusterChunkId, slotIndex, _dbe.SpatialGrid);
+                            destroyClusterState.ReleaseSlot(ref destroyTransientClusterAccessor, clusterChunkId, slotIndex, _dbe.Realm0Grid);
                         }
                     }
 

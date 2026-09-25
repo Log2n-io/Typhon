@@ -443,6 +443,6 @@ public static class ClusterSpatialQueryExtensions
             throw new InvalidOperationException(
                 $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no cluster state.");
         }
-        return new ClusterSpatialQuery<TArch>(state, engine.SpatialGrid);
+        return new ClusterSpatialQuery<TArch>(state, engine.Realm0Grid);
     }
 }

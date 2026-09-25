@@ -99,8 +99,9 @@ internal sealed class RealmTable
                 throw new InvalidOperationException($"Realm {id.Value} is already registered.");
             }
 
-            // Before the release stores below: a reader that finds the realm finds its grid already naming it.
-            grid.Realm = id;
+            // Before the release stores below: a reader that finds the realm finds its grid already naming it. Refused, and nothing mutated, when the
+            // grid already belongs to a realm.
+            grid.BindToRealm(id);
             realm = new Realm(id, grid);
 
             var registered = _registered;

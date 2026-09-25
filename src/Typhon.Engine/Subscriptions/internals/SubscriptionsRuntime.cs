@@ -132,7 +132,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 Options.VisibilitySlackMForTest);
 
             Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames,
-                engine.SpatialGrid?.Config);
+                engine.Realm0Grid?.Config);
 
             _sessions = new SessionTable("Subscriptions.Sessions", parent, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
 
@@ -184,7 +184,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             if (Array.IndexOf(observed, true) >= 0)
             {
                 // Null only when no spatial grid is configured, and then an observed archetype has no position, which the push path refuses by name first.
-                var spatial = engine.SpatialGrid;
+                var spatial = engine.Realm0Grid;
                 Grid = spatial == null ? null : ReplicationGrid.Resolve(Options.ReplicationCellM, spatial.Config, Profiles.MaxRadius);
                 Push = PushReplication.Create(Plans, _replicationStates, observed, automatic, Grid, Options.MaxSessions, Options.PushShadow,
                     Options.ForceDeepReplicationForTest);

@@ -854,7 +854,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Realm 0's spatial grid — the single world of an application that never names a realm — or <c>null</c> if no grid was configured. Set by
     /// <see cref="InitializeArchetypes"/> from the pending config (if any).
     /// </summary>
+    [Obsolete(ArchetypeClusterState.Realm0Shortcut, DiagnosticId = "TYRLM001")]
     internal SpatialGrid SpatialGrid => _realms?.Default?.Grid;
+
+    /// <summary>
+    /// Realm 0's grid, named as such: the engine sites that are single-realm today say so here, and each is on the Realms plan's list of what the
+    /// multi-realm steps replace (SP-5 fence and open paths, RT-3 dispatch, F1 replication). <see cref="SpatialGrid"/> is the test-facing alias.
+    /// </summary>
+    internal SpatialGrid Realm0Grid => _realms?.Default?.Grid;
 
     /// <summary>The engine's realms, or <c>null</c> before <see cref="InitializeArchetypes"/> or when no grid was configured.</summary>
     internal RealmTable Realms => _realms;
@@ -3738,7 +3745,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     // Issue #230 Phase 3 Option B: ConfigureSpatialGrid() is REQUIRED for cluster spatial archetypes. The pre-Option-B fallback to the legacy
                     // per-entity R-Tree is gone; the per-cell cluster index is the single source of truth. Surface misconfiguration at engine startup rather
                     // than at the first spawn, when the user can still do something about it.
-                    if (SpatialGrid == null)
+                    if (Realm0Grid == null)
                     {
                         throw new InvalidOperationException(
                             $"Archetype '{meta.ArchetypeType?.Name ?? meta.ArchetypeId.ToString()}' declares a [SpatialIndex] field and is cluster-eligible, " +
@@ -3758,7 +3765,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                                 // #919 AC-9. Separate from the type check above because it asks a different question: not "can the grid decode this
                                 // field?" but "can this field's own precision address the world the game configured?". It runs HERE rather than in
                                 // ConfigureSpatialGrid because it needs both halves — the grid is configured before any archetype is known.
-                                SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType, in SpatialGrid.Config, archName);
+                                SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType, in Realm0Grid.Config, archName);
                             }
                         }
 
@@ -3774,7 +3781,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // Issue #230 Phase 3 Option B: no per-archetype R-Tree + back-pointer CBS segments to allocate or load. The per-cell cluster index
                         // is transient and is rebuilt from cluster data at startup by RebuildCellState + RebuildClusterAabbs below.
                         // Issue #229 Q10: InitializeSpatial now also allocates this archetype's own CellClusterPool sized to the grid's cell count.
-                        clusterState.InitializeSpatial(slotToTable, SpatialGrid, meta.ArchetypeId);
+                        clusterState.InitializeSpatial(slotToTable, Realm0Grid, meta.ArchetypeId);
 
                         // Register with the per-table spatial state, which the trigger system reads
                         for (var slot = 0; slot < meta.ComponentCount; slot++)
@@ -3807,7 +3814,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             // zero and the whole cost lands in clusterAabbTicks. Kept as two fields rather than collapsed to one so the open-time log line and
                             // the step-1 telemetry accessors keep their shape.
                             var rebuildStart = Stopwatch.GetTimestamp();
-                            clusterState.RebuildSpatialStateFromData(SpatialGrid, EpochManager);
+                            clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);
                             clusterAabbTicks += Stopwatch.GetTimestamp() - rebuildStart;
                         }
                     }
@@ -4039,7 +4046,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     private void RebuildSpatialLayerAfterRecovery()
     {
-        if (SpatialGrid == null)
+        if (_realms == null)
         {
             return;
         }
@@ -4060,8 +4067,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             clusterState.ResetRealmCellPools();
-            // Realm 0's grid: the rebuild walks every cluster of the archetype, and SP-5 files each in its own realm.
-            clusterState.RebuildSpatialStateFromData(SpatialGrid, EpochManager);
+            // Realm 0's grid: the rebuild walks every cluster of the archetype, and SP-5 files each in its own realm. Until then one realm is all
+            // there is — asserted, so a second realm cannot reopen silently empty.
+            Debug.Assert(_realms.Registered.Length == 1, "the spatial rebuild files every cluster in realm 0 until SP-5");
+            clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);
         }
 
         _openClusterAabbRebuildMs += (Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency;
@@ -4932,10 +4941,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Spatial state is the third derived structure over cluster data, and its normal rebuild runs inside InitializeArchetypes — before this method has
         // placed anything, so it would have seen an empty cluster. Redo it here or the archetype reopens with entities present and every spatial query empty.
-        if (meta.HasClusterSpatial && SpatialGrid != null && clusterState.ActiveClusterCount > 0)
+        if (meta.HasClusterSpatial && Realm0Grid != null && clusterState.ActiveClusterCount > 0)
         {
             // One walk, same as InitializeArchetypes — the ordering constraint that used to force cell state first is internal to it now (#872 step 2).
-            clusterState.RebuildSpatialStateFromData(SpatialGrid, EpochManager);
+            clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);
         }
 
         cs.SaveChanges();

@@ -246,7 +246,7 @@ public partial class DatabaseEngine
         // The frame of the realm the current cluster is in (Realms SP-3), re-resolved only when that realm changes — never with one realm.
         RealmArchetypeSpatial realmSpatial = null;
         SpatialGrid grid = null;
-        SpatialGridConfig cfg = default;
+        ref readonly var cfg = ref Unsafe.NullRef<SpatialGridConfig>();
         double cellSize = 0, hysteresisMargin = 0;
         var staleDropped = 0;
         var jumps = 0;
@@ -280,7 +280,7 @@ public partial class DatabaseEngine
                 {
                     realmSpatial = clusterRealm;
                     grid = realmSpatial.Grid;
-                    cfg = grid.Config;
+                    cfg = ref grid.Config;
                     cellSize = cfg.CellSize;
                     hysteresisMargin = cellSize * cfg.MigrationHysteresisRatio;
                 }
@@ -430,7 +430,7 @@ public partial class DatabaseEngine
             var compSlot = ss.Slot;
             var compSize = layout.ComponentSize(compSlot);
             var compOffset = layout.ComponentOffset(compSlot);
-            var grid = SpatialGrid;
+            var grid = Realm0Grid;
             var clusterCellMap = clusterState.ClusterCellMap;
             var fieldType = ss.FieldInfo.FieldType;
             var is3D = fieldType.Is3D();
@@ -817,7 +817,7 @@ public partial class DatabaseEngine
         var relocationCount = 0;
         var repairCount = 0;
 
-        var grid = SpatialGrid;
+        var grid = Realm0Grid;
         var transientMask = layout.TransientSlotMask;
         ref var ss = ref clusterState.SpatialSlot;
         var spatialCompSlot = ss.Slot;
@@ -1157,7 +1157,7 @@ public partial class DatabaseEngine
                         var dstCellKey = clusterState.ClusterCellMap[dstChunkId];
                         if (dstCellKey >= 0)
                         {
-                            SpatialGrid.CellOrigin(dstCellKey, out double dstOriginX, out double dstOriginY, out double dstOriginZ);
+                            Realm0Grid.CellOrigin(dstCellKey, out double dstOriginX, out double dstOriginY, out double dstOriginZ);
                             if (ss.FieldInfo.FieldType.Is3D())
                             {
                                 dstClusterAabb.Union3F(

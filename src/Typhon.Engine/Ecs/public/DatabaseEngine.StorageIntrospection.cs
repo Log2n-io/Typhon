@@ -325,9 +325,9 @@ public partial class DatabaseEngine
             }
 
             isSpatial = cluster.SpatialSlot.HasSpatialIndex;
-            if (isSpatial && SpatialGrid != null)
+            if (isSpatial && Realm0Grid != null)
             {
-                ref readonly var cfg = ref SpatialGrid.Config;
+                ref readonly var cfg = ref Realm0Grid.Config;
                 cellSize = (float)cfg.CellSize;
                 gridWidth = cfg.GridWidth;
                 gridHeight = cfg.GridHeight;
@@ -366,7 +366,7 @@ public partial class DatabaseEngine
         aabbMaxY = 0;
         aabbMaxZ = 0;
 
-        var grid = SpatialGrid;
+        var grid = Realm0Grid;
         if (grid == null)
         {
             return false;

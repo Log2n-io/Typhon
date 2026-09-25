@@ -31,8 +31,11 @@ class RealmTableTests : TestBase<RealmTableTests>
         var table = new RealmTable(2);
         table.Register(RealmId.Default, Grid());
 
-        Assert.Throws<ArgumentOutOfRangeException>(() => table.Register(new RealmId(2), Grid()));
-        Assert.Throws<InvalidOperationException>(() => table.Register(RealmId.Default, Grid()));
+        var refused = Grid();
+        Assert.Throws<ArgumentOutOfRangeException>(() => table.Register(new RealmId(2), refused));
+        Assert.Throws<InvalidOperationException>(() => table.Register(RealmId.Default, refused));
+        Assert.That(refused.IsRegistered, Is.False, "a refused registration binds nothing");
+        Assert.That(table.Registered.Length, Is.EqualTo(1));
         Assert.Throws<InvalidOperationException>(() => table.Get(1));
         Assert.That(table.TryGet(5), Is.Null, "out of range reads as absent, never throws");
     }
@@ -70,5 +73,35 @@ class RealmTableTests : TestBase<RealmTableTests>
         dbe.InitializeArchetypes();
 
         Assert.That(dbe.SpatialGrid, Is.Null);
+    }
+
+    /// <summary>A grid belongs to one realm: registering it twice would make its realm id name the wrong realm's state (SpatialOf).</summary>
+    [Test]
+    public void SameGrid_RegisteredTwice_Refused()
+    {
+        var table = new RealmTable(2);
+        var grid = Grid();
+        table.Register(RealmId.Default, grid);
+        Assert.Throws<InvalidOperationException>(() => table.Register(new RealmId(1), grid));
+        Assert.That(grid.Realm, Is.EqualTo(RealmId.Default));
+        Assert.That(table.IsRegistered(1), Is.False);
+    }
+
+    [Test]
+    public void Registered_KeepsRegistrationOrder_AcrossGrowth()
+    {
+        var table = new RealmTable(40);
+        var order = new ushort[] { 7, 3, 39, 0, 12, 5, 21, 1, 30, 2 };
+        foreach (var id in order)
+        {
+            table.Register(new RealmId(id), Grid());
+        }
+
+        var registered = table.Registered.ToArray();
+        Assert.That(registered, Has.Length.EqualTo(order.Length));
+        for (var i = 0; i < order.Length; i++)
+        {
+            Assert.That(registered[i].Id.Value, Is.EqualTo(order[i]));
+        }
     }
 }

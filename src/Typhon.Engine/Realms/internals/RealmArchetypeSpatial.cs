@@ -64,6 +64,14 @@ internal sealed class RealmArchetypeSpatial
 
     private RealmArchetypeSpatial() => Realm = RealmId.None;
 
+    /// <summary>
+    /// Debug guard at every path that WRITES realm state: <see cref="None"/> is shared by every non-spatial archetype and missing grid in the process, so a
+    /// write into it would leak one archetype's cells into all of them. Unreachable today (the paths run only for spatial archetypes, whose state exists).
+    /// </summary>
+    [System.Diagnostics.Conditional("DEBUG")]
+    internal static void AssertNotNone(RealmArchetypeSpatial rs) =>
+        System.Diagnostics.Debug.Assert(!ReferenceEquals(rs, None), "a write reached RealmArchetypeSpatial.None — the shared state of no realm");
+
     internal RealmArchetypeSpatial(ArchetypeClusterState owner, RealmId realm, SpatialGrid grid)
     {
         Owner = owner;

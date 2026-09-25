@@ -483,7 +483,7 @@ internal static class ProjectionCompiler
             return null;
         }
 
-        var grid = engine.SpatialGrid;
+        var grid = engine.Realm0Grid;
         if (grid == null)
         {
             throw new InvalidOperationException(

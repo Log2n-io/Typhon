@@ -53,12 +53,13 @@ internal sealed unsafe class SpatialGrid
 
     // ── Root: block coords -> block id ─────────────────────────────────────
     // Two forms, chosen once from the configured extent (Realms SP-4). A world of at most DenseBlockDirectoryMax blocks keeps a DENSE directory — one int
-    // per block, -1 = absent, published with a release store under _creationLock — which costs 4 B per block of the world and resolves in one load; that is
-    // every interior, dungeon and planet-at-tens-of-metres realm, where the hash map's ~25 KB of stripes would dominate the realm's whole footprint.
+    // per block, -1 = absent, published with a release store under _creationLock — which costs 4 B per block of the world (16 KiB at the threshold, never
+    // more than the ~25 KiB of stripes the hash map starts with) and resolves in one load; that is every interior, dungeon and planet-at-tens-of-metres
+    // realm (a 1 024 x 1 024-cell flat world), where the hash map's fixed cost would dominate the realm's whole footprint.
     // A larger world keeps the packed-key hash map: lock-free reads (per-stripe OLC), every write under _creationLock, so the map's own write path is
     // never contended. Deliberately not disposed: its Dispose only nulls managed references, so letting the GC reclaim the POH arrays along with the grid is
     // correct and saves making SpatialGrid IDisposable — a change that would reach every construction site including a dozen tests.
-    private const int DenseBlockDirectoryMax = 16384;
+    private const int DenseBlockDirectoryMax = 4096;
     private readonly int[] _denseBlocks;
     private readonly int _denseBlocksX;
     private readonly int _denseBlocksY;
@@ -106,7 +107,11 @@ internal sealed unsafe class SpatialGrid
     // §3.2 expects a spatially coherent sweep to resolve the same block repeatedly; this turns that into one hash probe per BLOCK instead of one per cell,
     // which is what keeps a full-grid tier pass affordable. Keyed by grid INSTANCE because the fields are static: a process runs many engines, and a stale
     // hit from another grid would return a block id that means something else entirely.
-    [ThreadStatic] private static SpatialGrid _lastBlockGrid;
+    // Keyed by a process-unique grid ID, not a reference: a strong thread-static reference would keep one discarded grid (directory, blocks, cells)
+    // alive per pool thread once realms can be unregistered.
+    [ThreadStatic] private static int _lastBlockGridId;
+    private static int s_nextGridId;
+    private readonly int _gridId = Interlocked.Increment(ref s_nextGridId);
     [ThreadStatic] private static int _lastBlockEpoch;
     [ThreadStatic] private static long _lastBlockKey;
     [ThreadStatic] private static int _lastBlockId;
@@ -116,7 +121,7 @@ internal sealed unsafe class SpatialGrid
     /// </summary>
     /// <remarks>
     /// Clearing only the resetting thread's copy is not enough, and believing it was is the defect this replaces. A reset renumbers block ids from zero; any
-    /// OTHER thread that had resolved a block still holds <c>_lastBlockGrid == this</c> with an id from the discarded numbering, and the fast path returns it
+    /// OTHER thread that had resolved a block still holds <c>_lastBlockGridId == _gridId</c> with an id from the discarded numbering, and the fast path returns it
     /// <b>without probing the map</b>. That is either a null block array, or — the bad case — a live block belonging to a different region, into which the
     /// thread then files entities. "Reset happens on a quiescent grid" is the wrong invariant: quiescence during the reset says nothing about a per-thread
     /// cache consumed after it, and pool threads outlive both.
@@ -135,9 +140,10 @@ internal sealed unsafe class SpatialGrid
         _logBlockZ = BitOperations.Log2((uint)_blockDimZ);
         _blockCellCount = _blockDimX * _blockDimY * _blockDimZ;
 
-        _denseBlocksX = (config.GridWidth + _blockDimX - 1) >> _logBlockX;
-        _denseBlocksY = (config.GridHeight + _blockDimY - 1) >> _logBlockY;
-        var denseBlocksZ = (config.GridDepth + _blockDimZ - 1) >> _logBlockZ;
+        // ((n - 1) >> log) + 1 rather than (n + dim - 1) >> log: a one-row world may be int.MaxValue cells wide, and the sum would overflow.
+        _denseBlocksX = ((config.GridWidth - 1) >> _logBlockX) + 1;
+        _denseBlocksY = ((config.GridHeight - 1) >> _logBlockY) + 1;
+        var denseBlocksZ = ((config.GridDepth - 1) >> _logBlockZ) + 1;
         long totalBlocks = (long)_denseBlocksX * _denseBlocksY * denseBlocksZ;
         if (totalBlocks <= DenseBlockDirectoryMax)
         {
@@ -190,7 +196,25 @@ internal sealed unsafe class SpatialGrid
     /// per-realm spatial state from it in one load (<see cref="ArchetypeClusterState.SpatialOf"/>). Set once, by <see cref="RealmTable.Register"/>,
     /// before the grid is published; a standalone grid (tests) is realm 0.
     /// </summary>
-    internal RealmId Realm { get; set; }
+    internal RealmId Realm { get; private set; }
+
+    /// <summary>True once <see cref="RealmTable.Register"/> has bound this grid to a realm. A grid belongs to one realm, for its lifetime.</summary>
+    internal bool IsRegistered { get; private set; }
+
+    /// <summary>Binds the grid to <paramref name="realm"/>, once; a second binding would make <see cref="Realm"/> name the wrong realm's state.</summary>
+    internal void BindToRealm(RealmId realm)
+    {
+        if (IsRegistered)
+        {
+            throw new InvalidOperationException($"This grid already belongs to realm {Realm.Value}; every realm owns its own grid.");
+        }
+
+        Realm = realm;
+        IsRegistered = true;
+    }
+
+    /// <summary>True when blocks resolve through the dense directory rather than the hash map (small worlds; tests assert the form they exercise).</summary>
+    internal bool UsesDenseDirectory => _denseBlocks != null;
 
     /// <summary>Number of cells that actually exist. Grows as cells are first touched; never shrinks, because step 8 has no destruction path.</summary>
     public int CellCount => Volatile.Read(ref _cellCount);
@@ -240,8 +264,9 @@ internal sealed unsafe class SpatialGrid
     }
 
     /// <summary>
-    /// Bytes the grid's own structures hold: the per-block index arrays plus the allocated cell chunks. Excludes the root map (a fixed-size POH allocation)
-    /// and the per-archetype pools. AC-8.5's numerator.
+    /// Bytes the grid's structures hold for what exists: the per-block index arrays and the allocated cell chunks at their real length. Excludes the root
+    /// directory in either form — the hash map's POH stripes or the dense directory — which is fixed at construction, and the per-archetype pools.
+    /// AC-8.5's numerator.
     /// </summary>
     public long ResidentBytes
     {
@@ -253,7 +278,7 @@ internal sealed unsafe class SpatialGrid
             {
                 if (chunks[i] != null)
                 {
-                    total += (long)CellChunkSize * 64;
+                    total += (long)chunks[i].Length * 64;
                 }
             }
             return total;
@@ -382,7 +407,7 @@ internal sealed unsafe class SpatialGrid
         long key = BlockKey(cellX >> _logBlockX, cellY >> _logBlockY, cellZ >> _logBlockZ);
 
         int epoch = Volatile.Read(ref _structureEpoch);
-        if (ReferenceEquals(_lastBlockGrid, this) && _lastBlockEpoch == epoch && _lastBlockKey == key)
+        if (_lastBlockGridId == _gridId && _lastBlockEpoch == epoch && _lastBlockKey == key)
         {
             return _lastBlockId;
         }
@@ -427,7 +452,7 @@ internal sealed unsafe class SpatialGrid
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void CacheBlock(int epoch, long key, int blockId)
     {
-        _lastBlockGrid = this;
+        _lastBlockGridId = _gridId;
         _lastBlockEpoch = epoch;
         _lastBlockKey = key;
         _lastBlockId = blockId;
@@ -943,7 +968,7 @@ internal sealed unsafe class SpatialGrid
             // Invalidates EVERY thread's cached block id, not only this one's — see _structureEpoch. Released after the new structure is in place, so a
             // thread that observes the new epoch cannot then read the old arrays.
             Volatile.Write(ref _structureEpoch, _structureEpoch + 1);
-            _lastBlockGrid = null;
+            _lastBlockGridId = 0;
         }
     }
 
@@ -1056,7 +1081,6 @@ internal sealed unsafe class SpatialGrid
         // that: it memoises hits only, because a cached MISS is the silent false negative §3.3 forbids. An observer box over an 80 %-empty world — the case
         // C2 exists for — is mostly misses, so cell-major would defeat §3.2's "one probe per block" exactly where it matters. Here an absent block costs one
         // probe and its whole extent is skipped; a present one costs one probe and then index arithmetic.
-        var blocks = Volatile.Read(ref _blocks);
         for (int bz = cellMinZ >> _logBlockZ; bz <= cellMaxZ >> _logBlockZ; bz++)
         {
             for (int by = cellMinY >> _logBlockY; by <= cellMaxY >> _logBlockY; by++)
@@ -1068,7 +1092,9 @@ internal sealed unsafe class SpatialGrid
                         continue;
                     }
 
-                    var block = blocks[blockId];
+                    // Re-read per block: a spawn creating a block during the sweep can grow _blocks past the snapshot taken above, and the id just
+                    // resolved may be one it added. The directory entry was published after the grown array (CreateBlock), so this read sees it.
+                    var block = Volatile.Read(ref _blocks)[blockId];
                     int zLo = Math.Max(cellMinZ, bz << _logBlockZ);
                     int zHi = Math.Min(cellMaxZ, ((bz + 1) << _logBlockZ) - 1);
                     int yLo = Math.Max(cellMinY, by << _logBlockY);

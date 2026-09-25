@@ -321,7 +321,7 @@ internal sealed class SpatialTriggerSystem
             qMaxZ = queryCoords[5];
         }
 
-        var grid = _table.DBE.SpatialGrid;
+        var grid = _table.DBE.Realm0Grid;
         foreach (var cs in clusterArchetypes)
         {
             if (!cs.SpatialSlot.HasSpatialIndex)

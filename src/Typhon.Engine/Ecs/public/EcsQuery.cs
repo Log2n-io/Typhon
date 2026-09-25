@@ -2466,7 +2466,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // The SpatialGrid is guaranteed non-null for cluster spatial archetypes (enforced at DatabaseEngine.InitializeArchetypes).
         if (state.ClusterArchetypes != null)
         {
-            var grid = _tx.DBE.SpatialGrid;
+            var grid = _tx.DBE.Realm0Grid;
 
             // MVCC born/died gate, the same one the SoA scan applies (04-data.md "Isolation guarantees").
             //
