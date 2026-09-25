@@ -182,14 +182,17 @@ Reading and mutating components flows through accessors. Three flavours, dependi
 [`Ecs/public/EntityAccessor.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityAccessor.cs), [`EntityAccessor.ECS.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityAccessor.ECS.cs)
 
 ```csharp
-EntityRef e = accessor.Open(id);                    // read-only
+EntityRef e = accessor.Open(id);                    // read-only: no Write/Enable/Disable member at all
 if (accessor.TryOpen(id, out EntityRef e2)) { ... }
-EntityRef em = accessor.OpenMut(id);                // SV/Transient writes only
+EntityRefMut em = accessor.OpenMut(id);             // writable; converts implicitly to EntityRef
+if (accessor.TryOpenMut(id, out EntityRefMut e3)) { ... }   // one resolve for a maybe-stale target
+bool alive = accessor.IsAlive(id);                  // the existence probe
 ```
 
-- `Open` and `TryOpen` resolve the entity at the accessor's `TSN`, applying MVCC visibility (`BornTSN ≤ TSN < DeadTSN`) and `EnabledBits` overrides.
-- The returned `EntityRef` is a `ref struct` — stack-allocated, must not outlive the accessor that created it.
-- `OpenMut` on the **base** `EntityAccessor` is for **SingleVersion / Transient** components only. Versioned writes need a `Transaction.OpenMut` override (which adds `EnsureMutable` + state transition).
+- All four opens resolve the entity at the accessor's `TSN`, applying MVCC visibility (`BornTSN ≤ TSN < DeadTSN`) and `EnabledBits` overrides. `Open`/`OpenMut` throw on a miss, `TryOpen`/`TryOpenMut` return `false`.
+- Access is the handle's **type**: `Open`/`TryOpen` return `EntityRef`, `OpenMut`/`TryOpenMut` return `EntityRefMut`. Writing through a read-only open does not compile.
+- The returned handles are `ref struct`s — stack-allocated, must not outlive the accessor that created them.
+- `OpenMut`/`TryOpenMut` on the **base** `EntityAccessor` write **SingleVersion / Transient** components only. Versioned writes need a `Transaction`, whose mutation prep (`EnsureMutable` + state transition) runs before every writable open.
 
 ### `Transaction` (extends `EntityAccessor`)
 
@@ -222,7 +225,7 @@ ArchetypeAccessor<Ant> ants = accessor.For<Ant>();
 EntityRef ant = ants.Open(id);
 ```
 
-Pre-bound to a specific archetype. Bypasses epoch checks, archetype lookup, and MVCC visibility on every `Open` call — intended for PTA workers in parallel `QuerySystem`s where these checks are amortized to once per dispatch, not once per entity.
+Pre-bound to a specific archetype. Bypasses the epoch check and archetype lookup of every open — intended for PTA workers in parallel `QuerySystem`s, where those are amortized to once per dispatch, not once per entity. It still checks MVCC visibility and that the id belongs to its archetype, and has the same `Open` / `OpenMut` / `TryOpen` / `TryOpenMut` / `IsAlive` contract as the transaction — except that it does not see its transaction's own spawns, which are not in the EntityMap until commit. Its pending destroys are misses, as on the transaction.
 
 ### Generated accessors — `ReadAll` / `ReadWriteAll`
 
@@ -255,17 +258,18 @@ Inheritance flows through: `FlyingAnt.ReadAll(tx, id)` exposes the parent's `Pos
 
 [`Ecs/public/EntityRef.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityRef.cs)
 
-A `ref struct` returned by `Open` / `OpenMut`. Carries the entity's location data inline (a `fixed int[16]` array of chunk IDs, one per component slot) plus optional cluster-storage fields.
+`EntityRef` is the `ref struct` returned by `Open` / `TryOpen`; `EntityRefMut`, returned by `OpenMut` / `TryOpenMut`, wraps one and adds the write members. Carries the entity's location data inline (a `fixed int[16]` array of chunk IDs, one per component slot) plus optional cluster-storage fields.
 
 ```csharp
 EntityRef ant = accessor.Open(id);
 ref readonly var pos = ref ant.Read(Ant.Position);  // zero-copy
-ant.Write(Ant.Position, new Position(x, y));        // requires writable EntityRef
+EntityRefMut antMut = accessor.OpenMut(id);
+antMut.Write(Ant.Position) = new Position(x, y);    // ant.Write(...) would not compile
 ```
 
 - `Read<T>(Comp<T>)` returns a `ref readonly T` directly into the chunk page (or cluster slot). Zero copy.
-- `Write<T>(Comp<T>, T)` mutates in place; for Versioned components, this is the *initial write before commit* — the actual revision-chain extension happens during commit.
-- `IsValid`, `IsWritable` properties. `IsWritable` reflects whether the `EntityRef` was obtained via `OpenMut` (true) vs `Open` (false).
+- `Write<T>(Comp<T>)` (on `EntityRefMut`) returns a `ref T` to mutate in place; for Versioned components, this is the *initial write before commit* — the actual revision-chain extension happens during commit.
+- `IsValid` on both. There is no runtime writability flag: `EntityRefMut` → `EntityRef` is an implicit copy, and nothing converts back.
 - `EnabledBits` tracks per-component enable state (16-bit mask, up to 16 components per archetype). A *disabled* component was supplied at Spawn (its storage exists) but is logically absent from queries — re-enabling it is a free O(1) bit flip. An *absent* component was never supplied and has no storage (for `Versioned`: no chunk, no revision chain); re-enabling requires `Enable(comp, in value)` to supply the value first.
 
 ---

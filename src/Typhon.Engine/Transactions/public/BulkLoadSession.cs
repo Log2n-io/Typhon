@@ -174,8 +174,8 @@ public sealed class BulkLoadSession : IDisposable
     }
 
     /// <summary>
-    /// Open an entity for mutation. Returned <see cref="EntityRef"/> behaves like the one from <see cref="Transaction.OpenMut"/>; use <c>Write&lt;T&gt;</c> on
-    /// it to assign component values.
+    /// Open an entity for mutation. Returned <see cref="EntityRefMut"/> behaves like the one from <see cref="EntityAccessor.OpenMut"/>; use
+    /// <c>Write&lt;T&gt;</c> on it to assign component values.
     /// </summary>
     /// <remarks>
     /// Per the bulk contract, the entity should have been spawned earlier in the same session. Bulk sessions are not designed to update entities that exist
@@ -183,11 +183,23 @@ public sealed class BulkLoadSession : IDisposable
     /// pre-bulk entity update would lose atomicity vs. concurrent readers).
     /// </remarks>
     /// <exception cref="BulkSessionClosedException">Session has been completed or disposed.</exception>
-    public EntityRef OpenMut(EntityId entity)
+    public EntityRefMut OpenMut(EntityId entity)
     {
         ThrowIfClosed();
         RecycleTransactionIfNeeded();
         return _currentTransaction.OpenMut(entity);
+    }
+
+    /// <summary>
+    /// Try to open an entity for mutation, in one resolve. Returns false if the entity doesn't exist or isn't visible; same contract as
+    /// <see cref="OpenMut"/> otherwise.
+    /// </summary>
+    /// <exception cref="BulkSessionClosedException">Session has been completed or disposed.</exception>
+    public bool TryOpenMut(EntityId entity, out EntityRefMut entityRef)
+    {
+        ThrowIfClosed();
+        RecycleTransactionIfNeeded();
+        return _currentTransaction.TryOpenMut(entity, out entityRef);
     }
 
     /// <summary>

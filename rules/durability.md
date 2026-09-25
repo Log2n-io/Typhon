@@ -632,7 +632,7 @@ rejected and is the TLA+ mutant.
 
 ### CM-01: No uncommitted staged bytes in page memory `[fatal]`
   never a Commit-discipline transaction writes staged values into cluster/page memory before its Append
-  scope: EntityRef write path, Transaction staging arena (Variant A)
+  scope: EntityRefMut write path, Transaction staging arena (Variant A)
   on_violation: a fuzzy checkpoint persists uncommitted data with no compensating record
   spec: rules/tla/CommittedDiscipline.tla — CM01_HeadCommitted + CM01_NoUncommittedDurable. The BreakStaging mutant is
         Variant B and violates at depth 2 — this is the machine-checked argument behind ADR-057.

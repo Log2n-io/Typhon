@@ -116,7 +116,7 @@ Terms that show up across multiple chapters. Each entry points to where the type
 | **DurabilityMode** | `Deferred` / `GroupCommit` / `Immediate` — per-UoW persistence policy | [08-transactions](08-transactions.md), [11-durability](11-durability.md) |
 | **`EntityId`** | 64-bit ID: 48-bit monotonic key + 16-bit archetype routing id | [06-ecs](06-ecs.md) |
 | **`EntityLink<T>`** | Typed entity reference (polymorphic over archetype hierarchy) | [06-ecs](06-ecs.md) |
-| **`EntityRef`** | `ref struct` working handle returned by `Open`/`OpenMut` | [06-ecs](06-ecs.md) |
+| **`EntityRef`** / **`EntityRefMut`** | `ref struct` working handles: read-only from `Open`/`TryOpen`, writable from `OpenMut`/`TryOpenMut` | [06-ecs](06-ecs.md) |
 | **Epoch / `EpochGuard`** | Per-thread page protection — pages tagged ≥ MinActiveEpoch can't be evicted | [01-foundation](01-foundation.md) |
 | **LSN** | Log Sequence Number — monotonic position in the WAL stream | [11-durability](11-durability.md) |
 | **MVCC** | Multi-Version Concurrency Control — Typhon's snapshot isolation model | [05-revision](05-revision.md) |

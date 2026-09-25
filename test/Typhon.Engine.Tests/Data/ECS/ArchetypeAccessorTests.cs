@@ -144,12 +144,22 @@ class ArchetypeAccessorTests : TestBase<ArchetypeAccessorTests>
     }
 
     [Test]
-    public void SV_Open_NonExistentEntity_ReturnsInvalid()
+    public void SV_Open_NonExistentEntity_Throws_TryOpenReturnsFalse()
     {
         using var dbe = SetupEngine();
         using var tx = dbe.CreateQuickTransaction();
         var accessor = tx.For<SvUnit>();
-        var entity = accessor.Open(new EntityId(99999, 150));
+        var threw = false;
+        try
+        {
+            accessor.Open(new EntityId(99999, 150));
+        }
+        catch (System.InvalidOperationException)
+        {
+            threw = true;
+        }
+        Assert.That(threw, Is.True, "Open throws on a missing entity, like EntityAccessor.Open (#997)");
+        Assert.That(accessor.TryOpen(new EntityId(99999, 150), out var entity), Is.False);
         Assert.That(entity.IsValid, Is.False);
         accessor.Dispose();
     }

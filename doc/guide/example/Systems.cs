@@ -311,21 +311,20 @@ internal sealed class TradeSystem : CallbackSystem
             int ai = (int)((ctx.TickNumber * 7 + k * 2) % n);
             int bi = (ai + 1) % n;
 
-            // The roster can name an entity destroyed since the last refresh, so open defensively rather than letting OpenMut throw.
-            if (!ctx.Transaction.TryOpen(_roster[ai], out _) || !ctx.Transaction.TryOpen(_roster[bi], out _))
+            // The roster can name an entity destroyed since the last refresh: TryOpenMut opens for writing in one lookup and returns false
+            // instead of throwing, where TryOpen-then-OpenMut would look each entity up twice. The receiver is opened only once the payer can pay.
+            if (!ctx.Transaction.TryOpenMut(_roster[ai], out var from))
             {
                 continue;
             }
 
-            var from = ctx.Transaction.OpenMut(_roster[ai]);
-            ref var fromWallet = ref from.Write(Character.Wallet);
-            long amount = Math.Min(10L, fromWallet.Credits);
-            if (amount <= 0)
+            long amount = Math.Min(10L, from.Read(Character.Wallet).Credits);
+            if (amount <= 0 || !ctx.Transaction.TryOpenMut(_roster[bi], out var to))
             {
                 continue;
             }
-            fromWallet.Credits -= amount;
-            ctx.Transaction.OpenMut(_roster[bi]).Write(Character.Wallet).Credits += amount;
+            from.Write(Character.Wallet).Credits -= amount;
+            to.Write(Character.Wallet).Credits += amount;
         }
     }
 

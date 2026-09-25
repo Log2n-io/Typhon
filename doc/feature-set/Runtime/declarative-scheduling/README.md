@@ -44,11 +44,11 @@ the DAG gets *built* changed.
 - Access tracking is component-level, not field-level — `Writes<T>()` means "touches any field of T."
 - `.After()` / `.Before()` remain as the escape hatch for non-access ordering constraints, and as the
   required disambiguation tool for an intentional same-phase `W×W`.
-- A DEBUG-only assertion checks every `EntityRef.Write<T>()` against the executing system's declared
-  `Writes`/`SideWrites` set; `[Conditional("DEBUG")]` strips the call entirely in RELEASE — zero
-  production overhead.
+- An opt-in runtime check (`Typhon:Checks:DeclaredAccess`, off by default in every build) asserts every
+  `EntityRefMut.Write<T>()` against the executing system's declared `Writes`/`SideWrites` set; off, the JIT
+  folds the gate away — zero overhead.
 - This is declaration, not inference — Typhon never inspects a system body to detect its actual
-  reads/writes. An undeclared access is simply invisible to the scheduler (and, in DEBUG, only the
+  reads/writes. An undeclared access is simply invisible to the scheduler (and, with the check on, only the
   write side is cross-checked at runtime).
 - `Build()` validation has no suppress switch — it's a one-shot startup cost; a false positive should
   be fixed by correcting the declaration, not disabled.

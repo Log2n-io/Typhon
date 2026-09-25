@@ -85,7 +85,7 @@ deathTx.Commit();
 ## 🔗 Related
 
 - Related feature: [Revision Chain Storage](./revision-chain-storage.md) (the layout this populates), [MVCC Snapshot Visibility](./mvcc-snapshot-visibility.md), [Write-Conflict Baseline Tracking](./optimistic-conflict-baseline.md) (Prev/Cur are first set here), [Revision Garbage Collection & Compaction](./revision-gc-compaction.md)
-- Source: [`ComponentRevisionManager.AddCompRev`/`AllocCompRevStorage`/`GrowChain`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs), [`Transaction.Spawn`/`Transaction.Destroy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs), [`EntityRef.Write`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityRef.cs)
+- Source: [`ComponentRevisionManager.AddCompRev`/`AllocCompRevStorage`/`GrowChain`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Revision/internals/ComponentRevisionManager.cs), [`Transaction.Spawn`/`Transaction.Destroy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs), [`EntityRefMut.Write`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/public/EntityRefMut.cs)
 
 <!-- Deep dive: claude/design/Revision/01-revision-chain-storage.md, claude/design/Revision/README.md -->
 <!-- ADR: claude/adr/003-mvcc-snapshot-isolation.md -->

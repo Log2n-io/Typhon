@@ -17,9 +17,11 @@ The idioms that trip up first attempts:
 - **An archetype is** `[Archetype] partial class Foo : Archetype<Foo>` with `public static readonly Comp<T> X = Register<T>();`
   (no id arg — identity is the CLR type name, or `[Archetype(Name="…")]`); it **self-registers at assembly load**, so there is no `RegisterArchetype` call; spawn via `tx.Spawn<Foo>(Foo.X.Set(new T{…}))`.
 - **All mutation happens inside a transaction.** `Commit()` returning does not imply on-disk durability
-  unless the unit of work uses a durable mode. Open an entity with `tx.OpenMut(id)` to write.
+  unless the unit of work uses a durable mode. Open an entity with `tx.OpenMut(id)` (an `EntityRefMut`) to write;
+  `tx.Open(id)` returns a read-only `EntityRef` with no write member. For an id that may be stale, `TryOpenMut` /
+  `TryOpen` return `false` instead of throwing, and `IsAlive(id)` tests existence.
 - **Query with the fluent view API** — `tx.Query<Foo>().Where<T>(x => …).Count()` — **not** LINQ-to-SQL; then
-  **read/mutate each entity via `tx.Open(id)`**, not the query-enumerated reference.
+  **read each entity via `tx.Open(id)`, mutate it via `tx.OpenMut(id)`**, not the query-enumerated reference.
 - **Bootstrap** with `DatabaseEngine.Open(path, …)`, or via DI with `services.AddTyphon(…)` (it self-registers a no-op logger, so `AddLogging()` is optional).
 - **Storage mode sets the ACID scope** (Versioned / SingleVersion / Transient / Committed) — chosen per component.
 

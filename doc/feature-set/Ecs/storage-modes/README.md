@@ -25,7 +25,7 @@ changing how a component is stored requires bumping the `[Component]` revision �
 different mode throws `InvalidOperationException` on reopen. `Versioned` keeps a full MVCC revision chain
 (snapshot isolation, zero loss); `SingleVersion` stores one in-place HEAD slot with WAL tick-fence durability
 (≤1 tick loss); `Transient` is heap-only and never persisted. All three are read and written through the same
-`EntityRef.Read<T>()` / `Write<T>()` calls — only the cost and guarantees differ, not the API. A runtime
+`EntityRef.Read<T>()` / `EntityRefMut.Write<T>()` calls — only the cost and guarantees differ, not the API. A runtime
 commit discipline (`Committed`) layers commit-time, zero-loss atomicity onto the `SingleVersion` layout
 without paying for a revision chain.
 

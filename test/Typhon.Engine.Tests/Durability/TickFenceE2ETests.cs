@@ -153,6 +153,49 @@ class TickFenceE2ETests
         }
     }
 
+    /// <summary>
+    /// #997: a write through <c>TryOpenMut</c> — the one-resolve open for a target that may be stale — survives the full durability path: fence, a
+    /// checkpoint that covers the fence record, and a reopen. A missing id on the same transaction is a clean <c>false</c>.
+    /// </summary>
+    [Test]
+    [CancelAfter(15000)]
+    public void TickFence_SV_TryOpenMutWrite_SurvivesCheckpointAndReopen()
+    {
+        EntityId id;
+        const int updatedValue = 777;
+
+        using (var scope1 = _serviceProvider.CreateScope())
+        {
+            var dbe = CreateEngine(scope1);
+            using (var t = dbe.CreateQuickTransaction())
+            {
+                var comp = new CompSmSingleVersion(42);
+                id = t.Spawn<SvTestArchetype>(SvTestArchetype.SvComp.Set(in comp));
+                t.Commit();
+            }
+            dbe.WriteTickFence(1);
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True);
+
+            using (var t = dbe.CreateQuickTransaction())
+            {
+                Assert.That(t.TryOpenMut(new EntityId(id.EntityKey + 1_000, id.ArchetypeId), out _), Is.False);
+                Assert.That(t.TryOpenMut(id, out var entity), Is.True);
+                entity.Write(SvTestArchetype.SvComp).Value = updatedValue;
+                t.Commit();
+            }
+            dbe.WriteTickFence(2);
+            // The checkpoint covers the fence record, so the reopen below reads the data file, not a WAL replay.
+            Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(10)), Is.True);
+        }
+
+        using (var scope2 = _serviceProvider.CreateScope())
+        {
+            var dbe = CreateEngine(scope2);
+            using var t = dbe.CreateQuickTransaction();
+            Assert.That(t.Open(id).Read(SvTestArchetype.SvComp).Value, Is.EqualTo(updatedValue));
+        }
+    }
+
     [Test]
     [CancelAfter(15000)]
     public void TickFence_SV_MultipleUpdates_LastTickFenceWins()

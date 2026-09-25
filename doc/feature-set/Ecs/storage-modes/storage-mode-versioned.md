@@ -18,7 +18,7 @@ commit is WAL-durable, and concurrent readers always see a consistent value.
 
 ## ⚙️ How it works (in brief)
 
-A `Versioned` component keeps a per-entity revision chain alongside its data. `EntityRef.Write<T>()` is
+A `Versioned` component keeps a per-entity revision chain alongside its data. `EntityRefMut.Write<T>()` is
 copy-on-write — it allocates a new revision and copies forward rather than overwriting in place, so concurrent
 readers keep seeing the prior committed value until your transaction commits. Every transaction is WAL-logged;
 on commit the new revision becomes the visible HEAD and is durable. Reads walk the chain under transaction-

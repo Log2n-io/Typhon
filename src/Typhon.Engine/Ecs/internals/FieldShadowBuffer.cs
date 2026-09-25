@@ -22,7 +22,7 @@ internal struct ShadowEntry
 /// <summary>
 /// Per-indexed-field append buffer that captures old index keys before SV in-place mutations.
 /// <para>
-/// <b>Write path (concurrent):</b> <see cref="Append"/> is called from <c>EntityRef.Write&lt;T&gt;()</c> on the first mutation per entity per tick
+/// <b>Write path (concurrent):</b> <see cref="Append"/> is called from <c>EntityRefMut.Write&lt;T&gt;()</c> on the first mutation per entity per tick
 /// (guarded by <see cref="DirtyBitmap.TestAndSet"/>).
 /// Multiple threads may append concurrently for different entities.
 /// </para>

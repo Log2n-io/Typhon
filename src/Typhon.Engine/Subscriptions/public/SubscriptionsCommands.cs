@@ -440,7 +440,7 @@ public sealed class SubscriptionsCommands
     /// </para>
     /// <para>
     /// <b>The contract is the developer's.</b> A change that is never pushed is never sent. Spawns, destroys and <c>WriteSpatial</c> moves are pushed by the
-    /// engine; a component written through <c>GetSpan</c> or <c>EntityRef</c> is not. A no-op for an archetype no push profile observes.
+    /// engine; a component written through <c>GetSpan</c> or <c>EntityRefMut</c> is not. A no-op for an archetype no push profile observes.
     /// </para>
     /// </remarks>
     public void Replicate<TArchetype>(in ClusterRef<TArchetype> cluster, int slot) where TArchetype : class
@@ -471,7 +471,7 @@ public sealed class SubscriptionsCommands
     /// The same mark, in the same per-cluster word: one interlocked OR, duplicates free. Call it after the write, as with the cluster form; a no-op for an
     /// archetype no profile observes.
     /// </remarks>
-    public void Replicate(in EntityRef entity) => entity.NotePushed();
+    public void Replicate(in EntityRefMut entity) => entity.NotePushed();
 
     /// <summary>Every session that is open right now, for an application that has to touch all of them — placing their observers, most of it.</summary>
     public OpenSessionView OpenSessions => new(_ingress.Sessions);

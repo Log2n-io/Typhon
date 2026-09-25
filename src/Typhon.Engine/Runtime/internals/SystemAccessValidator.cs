@@ -6,7 +6,7 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Runtime safety net for declared system access (RFC 07 — Unit 4). The scheduler tags each worker thread with the currently-executing
-/// system's <see cref="SystemAccessDescriptor"/> via <see cref="EnterSystem"/>; <see cref="EntityRef.Write{T}(Comp{T})"/> calls
+/// system's <see cref="SystemAccessDescriptor"/> via <see cref="EnterSystem"/>; <see cref="EntityRefMut.Write{T}(Comp{T})"/> calls
 /// <see cref="AssertWrite{T}"/> to verify the type was declared. All three methods are runtime-gated by
 /// <see cref="CheckConfig.DeclaredAccessActive"/> — strict mode's separate declared-access opt-in (#422), off by default. When off, each body is
 /// JIT dead-code-eliminated (the gate is a <c>static readonly bool</c>), so the dispatch path takes zero overhead in production and the descriptor
@@ -87,7 +87,7 @@ internal static class SystemAccessValidator
     public static void AssertWrite<T>() where T : unmanaged
     {
         // Fast/slow split (#422): the gate is the ONLY thing on the per-Write<T> hot path. When DeclaredAccessActive is off
-        // (the default) this inlines into EntityRef.Write and the folded-false gate erases the call — zero cost. The core (2
+        // (the default) this inlines into EntityRefMut.Write and the folded-false gate erases the call — zero cost. The core (2
         // HashSet lookups + typeof) is too large to inline, hence NoInlining to keep the hot path small.
         if (CheckConfig.DeclaredAccessActive)
         {

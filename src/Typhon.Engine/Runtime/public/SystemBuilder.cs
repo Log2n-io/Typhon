@@ -235,7 +235,7 @@ public sealed class SystemBuilder
     // ═══════════════════════════════════════════════════════════════
     // Access declarations (RFC 07 — Unit 2)
     // Storage only; conflict detection + DAG-edge derivation lands in Unit 3.
-    // Generic constraint matches EntityRef.Write&lt;T&gt;: where T : unmanaged.
+    // Generic constraint matches EntityRefMut.Write&lt;T&gt;: where T : unmanaged.
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>Declare that this system reads component T. Unit 3 errors at <c>Build()</c> if a same-phase writer of T exists — upgrade to <see cref="ReadsFresh{T}"/> or <see cref="ReadsSnapshot{T}"/>.</summary>
@@ -266,7 +266,7 @@ public sealed class SystemBuilder
         return this;
     }
 
-    /// <summary>Declare that this system mutates component T via <c>EntityRef.Write&lt;T&gt;()</c>. Unit 3 errors at <c>Build()</c> if another system in the same phase also declares <c>Writes&lt;T&gt;</c> without an explicit <see cref="After"/>/<see cref="Before"/>.</summary>
+    /// <summary>Declare that this system mutates component T via <c>EntityRefMut.Write&lt;T&gt;()</c>. Unit 3 errors at <c>Build()</c> if another system in the same phase also declares <c>Writes&lt;T&gt;</c> without an explicit <see cref="After"/>/<see cref="Before"/>.</summary>
     public SystemBuilder Writes<T>() where T : unmanaged
     {
         _access.Writes.Add(typeof(T));

@@ -72,14 +72,14 @@ protected override void Configure(SystemBuilder b) => b
   systems in phase N+1 with a declared data dependency on it, not every system in the phase.
 - `Build()` validation has no suppress switch — a false positive is fixed by correcting the
   declaration, not disabling the check.
-- DEBUG builds assert every `EntityRef.Write<T>()` against the executing system's declared writes;
-  RELEASE strips the check (`[Conditional("DEBUG")]`) for zero production overhead.
+- An opt-in runtime check (`Typhon:Checks:DeclaredAccess`, off by default in every build) asserts every
+  `EntityRefMut.Write<T>()` against the executing system's declared writes; off, it costs nothing.
 
 ## 🧪 Tests
 
 - [AccessDagDerivationTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/AccessDagDerivationTests.cs) — W×W same-phase throws, `.After()`/`.Before()` disambiguation, `ReadsFresh`/`ReadsSnapshot` edge derivation, `ReadsSnapshot` on SingleVersion rejected
 - [SystemBuilderFluentTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemBuilderFluentTests.cs) — `Reads`/`Writes`/`ReadsFresh`/`ReadsSnapshot` declaration API, dedup, `Before`/`After` cycle detection
-- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — DEBUG-only assert that `EntityRef.Write<T>()` matches the system's declared writes
+- [SystemAccessValidatorTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/SystemAccessValidatorTests.cs) — opt-in assert that `EntityRefMut.Write<T>()` matches the system's declared writes
 
 ## 🔗 Related
 - Parent feature: [Runtime](./README.md)

@@ -66,7 +66,7 @@ side.Commit();
 
 - All of a transaction's `Commit`-discipline writes become visible together at commit, or none do — `Rollback()`
   discards the staged values and HEAD is unaffected (CM-01).
-- Read-your-own-writes works for point reads (`EntityRef.Read`/`Write`) inside the writing transaction. Bulk span
+- Read-your-own-writes works for point reads (`EntityRef.Read` / `EntityRefMut.Write`) inside the writing transaction. Bulk span
   reads (`ClusterRef.GetSpan<T>`) taken *inside* that same transaction do **not** see staged values — they read
   HEAD. Read after commit, or through a different transaction, instead.
 - Isolation is **read-committed**, not snapshot — a `Commit`-discipline component used with `ReadsSnapshot` fails

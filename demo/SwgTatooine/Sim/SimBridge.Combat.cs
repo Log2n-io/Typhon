@@ -2,7 +2,6 @@ using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
-using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
 
@@ -10,12 +9,13 @@ namespace SwgTatooine;
 /// Combat, death and revival, run from the creature's side.
 /// </summary>
 /// <remarks>
-/// <para><b>Why the creature applies the damage to itself rather than the player applying it to the creature.</b> A
-/// system may only write components of its own input archetype. Reaching across — opening a Creature from a system whose
-/// input is Player, through <c>ctx.Transaction</c>, and writing its vitals — stalls the tick loop outright: the runtime
-/// reached tick 1 and never advanced again, with Spawn and Destroy both disabled, so it is the cross-archetype
-/// open-and-write itself. That is filed against the engine. The model here is inverted instead, and the inversion is not
-/// a distortion of the workload: the spatial query, the range test, the weapon cadence and the health arithmetic are
+/// <para><b>Why the creature applies the damage to itself rather than the player applying it to the creature.</b> Writing
+/// another archetype's components is legal: a system may <c>OpenMut</c> (or <c>TryOpenMut</c>) any entity through
+/// <c>ctx.Transaction</c> and write it. Doing exactly that — opening a Creature from a system whose input is Player and
+/// writing its vitals — stalled the tick loop in this workload when it was written: the runtime reached tick 1 and never
+/// advanced again, with Spawn and Destroy both disabled (#907, still open). A minimal cross-archetype repro no longer
+/// stalls, but the workload itself has not been re-run that way, so the model here stays inverted, and the inversion is
+/// not a distortion of the workload: the spatial query, the range test, the weapon cadence and the health arithmetic are
 /// identical, and only which side of the exchange executes them has moved.</para>
 /// <para><b>Death is pooled, not structural.</b> A killed creature goes to <see cref="AiMode.Dead"/> and is revived at
 /// its lair after the respawn interval rather than being destroyed and re-created. That is close to what SWG lairs did —

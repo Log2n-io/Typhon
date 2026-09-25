@@ -65,12 +65,12 @@ tx.Commit();
   `Refs`/`MutRefs`/`ReadAll`/`ReadWriteAll` are emitted, and no diagnostic is raised.
 - `Refs`/`MutRefs` are `ref struct` — stack-only, same lifetime constraints as `EntityRef`; cannot be stored in
   a field, boxed, or escape the call site.
-- Cost is one `Open`/`OpenMut` (~350ns) plus N ref assignments (~1-5ns each for `SingleVersion`/`Transient`);
+- Cost is one `Open`/`OpenMut` (~90–100 ns warm, see [the CRUD page](README.md)) plus N ref assignments (~1-5ns each for `SingleVersion`/`Transient`);
   `Versioned` fields additionally pay the per-`Write` copy-on-write allocation.
 - Generated field names match the `Comp<T>` declarations exactly — there is no positional `C1`/`C2` form to
   disambiguate.
 - `ReadWriteAll` opens the entity read-write and exposes every field mutably at once; there is no generated
-  partial-write overload — use `EntityRef.Write` directly when only a subset of components needs mutation.
+  partial-write overload — use `EntityRefMut.Write` directly when only a subset of components needs mutation.
 
 ## 🧪 Tests
 

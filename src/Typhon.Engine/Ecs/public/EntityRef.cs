@@ -6,12 +6,13 @@ using Typhon.Schema.Definition;
 namespace Typhon.Engine;
 
 /// <summary>
-/// Zero-copy entity accessor. A ref struct (~96 bytes) that copies the EntityRecord from the per-archetype LinearHash and provides typed component access
+/// Read-only, zero-copy entity handle. A ref struct that copies the EntityRecord from the per-archetype LinearHash and provides typed component reads
 /// via cached Location ChunkIds.
 /// </summary>
 /// <remarks>
-/// <para>Created by <see cref="EntityAccessor.Open"/> or <see cref="EntityAccessor.OpenMut"/>. Must not outlive the creating accessor.</para>
-/// <para>Read/Write operations delegate to the EntityAccessor for chunk accessor management.</para>
+/// <para>Created by <c>Open</c> / <c>TryOpen</c> on any accessor. It has no write member: writes go through <see cref="EntityRefMut"/>, returned by
+/// <c>OpenMut</c> / <c>TryOpenMut</c>, which converts implicitly to <see cref="EntityRef"/> (#997). Must not outlive the creating accessor.</para>
+/// <para>Reads delegate to the EntityAccessor for chunk accessor management.</para>
 /// </remarks>
 [PublicAPI]
 public unsafe ref struct EntityRef
@@ -21,7 +22,6 @@ public unsafe ref struct EntityRef
     internal readonly ArchetypeEngineState _engineState;
     internal readonly EntityAccessor _accessor;
     internal ushort _enabledBits;
-    internal readonly bool _writable;
 
     /// <summary>
     /// True when this ref was built from a <c>SpawnEntry</c> of the OPEN transaction — the entity exists only in spawn-staging chunks and is not in the
@@ -33,7 +33,8 @@ public unsafe ref struct EntityRef
 
     /// <summary>
     /// Per-slot revision-chain ROOT chunk ids for Versioned slots (0 = not resolved via point-open). Set by <c>Transaction.ResolveEntity</c> so the
-    /// first <see cref="Write{T}(Comp{T})"/> can re-resolve the <c>CompRevInfo</c> with a direct (fast-path) chain walk instead of a PK-index lookup —
+    /// first <see cref="EntityRefMut.Write{T}(Comp{T})"/> can re-resolve the <c>CompRevInfo</c> with a direct (fast-path) chain walk instead of a PK-index
+    /// lookup —
     /// read-only resolves no longer populate <c>ComponentInfo.SingleCache</c> (deferred-insert: the cache holds only written/spawned entries).
     /// </summary>
     private fixed int _chainRoots[16];
@@ -62,14 +63,13 @@ public unsafe ref struct EntityRef
     /// </summary>
     internal readonly void NotePushed() => _engineState?.ClusterState?.NoteStructureSlots(_clusterChunkId, 1UL << _clusterSlotIndex);
 
-    internal EntityRef(EntityId id, ArchetypeMetadata archetype, ArchetypeEngineState engineState, EntityAccessor accessor, ushort enabledBits, bool writable)
+    internal EntityRef(EntityId id, ArchetypeMetadata archetype, ArchetypeEngineState engineState, EntityAccessor accessor, ushort enabledBits)
     {
         _id = id;
         _archetype = archetype;
         _engineState = engineState;
         _accessor = accessor;
         _enabledBits = enabledBits;
-        _writable = writable;
     }
 
     /// <summary>Copy locations from a raw EntityRecord byte pointer into this ref struct.</summary>
@@ -82,10 +82,41 @@ public unsafe ref struct EntityRef
     }
 
     /// <summary>Read the chunkId at a specific slot.</summary>
-    internal int GetLocation(int slot) => _locations[slot];
+    internal readonly int GetLocation(int slot) => _locations[slot];
 
     /// <summary>Override the chunkId at a specific slot. Used by ResolveEntity for MVCC revision chain resolution.</summary>
     internal void SetLocation(int slot, int chunkId) => _locations[slot] = chunkId;
+
+    /// <summary>The revision-chain root chunk id recorded for a Versioned slot (0 = not resolved via point-open).</summary>
+    internal readonly int ChainRoot(int slot) => _chainRoots[slot];
+
+    /// <summary>
+    /// Record a Versioned copy-on-write: <paramref name="slot"/> now reads <paramref name="newChunkId"/>, and any deferred chain walk for it is dropped —
+    /// the COW result supersedes it, and a later read must not re-resolve to the old revision. The one place that keeps the location and the pending
+    /// mask in step (see <c>_versionedPending</c>).
+    /// </summary>
+    internal void ApplyCopyOnWrite(int slot, int newChunkId)
+    {
+        _locations[slot] = newChunkId;
+        _versionedPending &= (ushort)~(1 << slot);
+    }
+
+    /// <summary>True when <paramref name="slot"/> is a Versioned component this entity has no revision chain for — genuinely absent (#845).</summary>
+    /// <remarks>
+    /// Three signals, because three different resolvers build an <see cref="EntityRef"/> and they populate different fields.
+    /// <list type="bullet">
+    /// <item><c>_chainRoots[slot]</c> is the record's <c>CompRevFirstChunkId</c> and is the authoritative absence signal — but it is never populated on an
+    /// own-spawn ref, whose slot state lives in <c>_locations</c> (the SpawnEntry's VerLoc).</item>
+    /// <item><c>_locations[slot]</c> alone is 0 for a FAILED chain walk and for every slot still unresolved on the deferred path, neither of which is
+    /// absence.</item>
+    /// <item><c>_clusterLayout</c> cannot be consulted at all: it is null on an own-spawn ref, which is what made the first version of this guard throw a
+    /// NullReferenceException on the ordinary disable/enable round trip.</item>
+    /// </list>
+    /// <c>VersionedSlotMask</c> is zeroed for non-cluster archetypes, so the whole predicate short-circuits to false there.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal readonly bool IsVersionedSlotAbsent(byte slot) =>
+        (_archetype.VersionedSlotMask & (1 << slot)) != 0 && _chainRoots[slot] == 0 && _locations[slot] == 0;
 
     /// <summary>Record the revision-chain root chunk id for a Versioned slot (see <c>_chainRoots</c>).</summary>
     internal void SetChainRoot(int slot, int chainRootChunkId) => _chainRoots[slot] = chainRootChunkId;
@@ -96,12 +127,15 @@ public unsafe ref struct EntityRef
     /// </summary>
     internal void MarkVersionedPending(int slot) => _versionedPending |= (ushort)(1 << slot);
 
+    /// <summary>True while any Versioned slot still waits for its deferred chain walk (tests: proves the memo landed on this handle, not a copy).</summary>
+    internal readonly bool HasPendingVersionedSlots => _versionedPending != 0;
+
     /// <summary>
     /// Resolve <paramref name="slot"/>'s deferred revision chain if it is still pending. Inlined so the common case (nothing pending, or already resolved)
     /// is a single mask test; the walk itself lives in a non-inlined slow path.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private void EnsureVersionedResolved(int slot)
+    private readonly void EnsureVersionedResolved(int slot)
     {
         if ((_versionedPending & (1 << slot)) != 0)
         {
@@ -110,11 +144,20 @@ public unsafe ref struct EntityRef
     }
 
     /// <summary>Walk the deferred chain for <paramref name="slot"/> and memoize the visible content chunk. Runs at most once per slot per EntityRef.</summary>
+    /// <remarks>
+    /// <c>readonly</c>, and it still writes: the memo is a cache, invisible to callers, so the read members stay <c>readonly</c> and a call through a
+    /// read-only receiver (an <c>in</c> parameter, a <c>foreach</c> variable) costs no defensive copy of this ~200-byte handle. The write goes through
+    /// <c>Unsafe.AsRef(in this)</c> — the receiver itself, never a copy, because a <c>readonly</c> member is exactly what stops the compiler from making
+    /// one. Safe because a ref struct lives on one stack and is used by one thread.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private void ResolveVersionedSlot(int slot)
+    private readonly void ResolveVersionedSlot(int slot)
     {
-        _versionedPending &= (ushort)~(1 << slot);
-        _locations[slot] = _accessor.ResolveVersionedContentChunk(_archetype, slot, _chainRoots[slot]);
+        ref var self = ref Unsafe.AsRef(in this);
+        // Walk first, then clear: a walk that throws (an expired snapshot) must leave the slot pending, so a caught retry walks — and throws — again
+        // instead of reading location 0 as if it had been resolved.
+        self._locations[slot] = _accessor.ResolveVersionedContentChunk(_archetype, slot, _chainRoots[slot]);
+        self._versionedPending &= (ushort)~(1 << slot);
     }
 
     /// <summary>Copy locations from a managed byte array.</summary>
@@ -141,16 +184,13 @@ public unsafe ref struct EntityRef
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>The entity's unique identifier.</summary>
-    public EntityId Id => _id;
+    public readonly EntityId Id => _id;
 
     /// <summary>The archetype ID of this entity.</summary>
-    public ushort ArchetypeId => _id.ArchetypeId;
+    public readonly ushort ArchetypeId => _id.ArchetypeId;
 
     /// <summary>True if this EntityRef refers to a valid entity.</summary>
-    public bool IsValid => !_id.IsNull;
-
-    /// <summary>True if this EntityRef allows writes.</summary>
-    public bool IsWritable => _writable;
+    public readonly bool IsValid => !_id.IsNull;
 
     // ═══════════════════════════════════════════════════════════════════════
     // Component access — by handle (O(1), preferred)
@@ -158,7 +198,7 @@ public unsafe ref struct EntityRef
 
     /// <summary>Read a component by handle. Zero-copy — returns a ref into the chunk page (or cluster slot).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref readonly T Read<T>(Comp<T> comp) where T : unmanaged
+    public readonly ref readonly T Read<T>(Comp<T> comp) where T : unmanaged
     {
         byte slot = _archetype.GetSlot(comp._componentTypeId);
         // Hot path: guaranteed-fold inline guard (not CheckConfig.Require) — the interpolated-string handler
@@ -205,133 +245,12 @@ public unsafe ref struct EntityRef
         return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue, _isOwnSpawn);
     }
 
-    /// <summary>Write a component by handle. Returns a mutable ref into the chunk page (or cluster slot).
-    /// For Versioned: copy-on-write (allocates new chunk, preserves old for concurrent readers).
-    /// For SingleVersion with indexes: shadows old field values on first write per tick for deferred index maintenance.</summary>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public ref T Write<T>(Comp<T> comp) where T : unmanaged
-    {
-        if (CheckConfig.Enabled && !_writable)
-        {
-            ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only — use OpenMut for writes");
-        }
-        SystemAccessValidator.AssertWrite<T>();
-        byte slot = _archetype.GetSlot(comp._componentTypeId);
-        // Hot path: guaranteed-fold inline guard (not CheckConfig.Require) — the interpolated-string handler
-        // materializes a 32-byte struct per call even when off (~9ns); `CheckConfig.Enabled &&` folds to nothing (#422 AC#6).
-        if (CheckConfig.Enabled && slot >= _archetype.ComponentCount)
-        {
-            ThrowHelper.ThrowInvalidOp($"Slot {slot} out of range for archetype with {_archetype.ComponentCount} components");
-        }
-        if (CheckConfig.Enabled && (_enabledBits & (1 << slot)) == 0)
-        {
-            ThrowHelper.ThrowInvalidOp($"Component at slot {slot} is disabled");
-        }
-
-        if (_clusterBase != null)
-        {
-            // Versioned cluster: COW path (same as legacy Versioned — cluster slot updated at commit)
-            if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
-            {
-                var table = _engineState.SlotToComponentTable[slot];
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
-                _locations[slot] = newChunkId;
-                _versionedPending &= (ushort)~(1 << slot);   // COW result supersedes any deferred walk — a later read must not re-resolve to the old revision
-
-                return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
-            }
-
-            var clusterState = _engineState.ClusterState;
-
-            // Transient cluster: in-place write to TransientStore segment (no COW, no revision chain)
-            if (_transientClusterBase != null && (_archetype.TransientSlotMask & (1 << slot)) != 0)
-            {
-                // Shadow capture for SV indexed fields (first write per entity per tick — captures SV fields, skips T and V)
-                if (clusterState.IndexSlots != null)
-                {
-                    int entityIndex = _clusterChunkId * 64 + _clusterSlotIndex;
-                    if (!clusterState.ClusterShadowBitmap.TestAndSet(entityIndex))
-                    {
-                        ShadowClusterIndexedFields(clusterState);
-                    }
-                }
-                clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex, slot);
-                return ref Unsafe.AsRef<T>(_transientClusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot));
-            }
-
-            // SV cluster fast path: direct pointer arithmetic into SoA array.
-            // Page was already marked dirty at resolve time (OpenMut → GetChunkAddress(dirty:true)).
-            byte* svHeadPtr = _clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot);
-            var svTable = _engineState.SlotToComponentTable[slot];
-
-            // CM-02: a DefaultDiscipline=Commit component escalates the whole transaction to Commit on first touch.
-            if (svTable.Discipline == CommitDiscipline.Commit)
-            {
-                _accessor.ResolveCommitDiscipline(svTable);
-            }
-
-            // Commit discipline (Variant A): stage the write — leave the cluster HEAD untouched, no dirty bit, no shadow capture (CM-01).
-            // The exact B+Tree index is reconciled at commit (read old key from HEAD, new from the staged slot).
-            if (_accessor.Discipline == CommitDiscipline.Commit)
-            {
-                return ref _accessor.StageClusterCommitWrite<T>(
-                    svTable, comp._componentTypeId, (long)_id.RawValue, _clusterChunkId * 64 + _clusterSlotIndex, svHeadPtr);
-            }
-
-            // Shadow capture for per-archetype B+Tree index maintenance (first write per entity per tick)
-            if (clusterState.IndexSlots != null)
-            {
-                int entityIndex = _clusterChunkId * 64 + _clusterSlotIndex;
-                if (!clusterState.ClusterShadowBitmap.TestAndSet(entityIndex))
-                {
-                    ShadowClusterIndexedFields(clusterState);
-                }
-            }
-
-            _accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
-            clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex, slot);
-            return ref Unsafe.AsRef<T>(svHeadPtr);
-        }
-
-        {
-            int chunkId = _locations[slot];
-            var table = _engineState.SlotToComponentTable[slot];
-
-            if (table.StorageMode == StorageMode.Versioned)
-            {
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
-                _locations[slot] = newChunkId;
-                _versionedPending &= (ushort)~(1 << slot);   // COW result supersedes any deferred walk — a later read must not re-resolve to the old revision
-
-                return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
-            }
-
-            // CM-02: a DefaultDiscipline=Commit component escalates the whole tx to Commit before the (skipped) shadow capture below.
-            if (table.StorageMode == StorageMode.SingleVersion && table.Discipline == CommitDiscipline.Commit)
-            {
-                _accessor.ResolveCommitDiscipline(table);
-            }
-
-            // Commit discipline stages and reconciles indexes at commit — skip the per-tick shadow capture (which feeds the fence-time Move).
-            // An own-spawn is skipped for two independent reasons. It has no OLD key to shadow: FinalizeSpawns inserts this entity's index entries fresh from
-            // the final staged bytes, so there is no Move for the fence to perform — the same argument DIRTY-01 makes about the dirty bit. And since #839 the
-            // location of an unpublished non-Versioned slot is a spawn-arena handle, which ShadowIndexedFields would dereference against the ComponentSegment,
-            // reading an unrelated chunk's bytes as the "old key" and recording the handle as a chunk id for fence-time index maintenance.
-            if (table.HasShadowableIndexes && _accessor.Discipline != CommitDiscipline.Commit && !_isOwnSpawn)
-            {
-                _accessor.ShadowIndexedFields<T>(table, chunkId, _id);
-            }
-
-            return ref _accessor.WriteEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
-        }
-    }
-
     // ═══════════════════════════════════════════════════════════════════════
     // Component access — by type (slot lookup, slower)
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>Read a component by type. Resolves slot via archetype metadata.</summary>
-    public ref readonly T Read<T>() where T : unmanaged
+    public readonly ref readonly T Read<T>() where T : unmanaged
     {
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         if (CheckConfig.Enabled && typeId < 0)
@@ -371,180 +290,17 @@ public unsafe ref struct EntityRef
         return ref _accessor.ReadEcsComponentData<T>(table2, chunkId2, (long)_id.RawValue, _isOwnSpawn);
     }
 
-    /// <summary>Write a component by type. Resolves slot via archetype metadata.
-    /// For Versioned: copy-on-write (allocates new chunk, preserves old for concurrent readers).
-    /// For SingleVersion with indexes: shadows old field values on first write per tick for deferred index maintenance.</summary>
-    public ref T Write<T>() where T : unmanaged
-    {
-        if (CheckConfig.Enabled && !_writable)
-        {
-            ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only — use OpenMut for writes");
-        }
-        SystemAccessValidator.AssertWrite<T>();
-        int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
-        if (CheckConfig.Enabled && typeId < 0)
-        {
-            ThrowHelper.ThrowInvalidOp($"Component type {typeof(T).Name} not registered");
-        }
-        byte slot = _archetype.GetSlot(typeId);
-        if (CheckConfig.Enabled && (_enabledBits & (1 << slot)) == 0)
-        {
-            ThrowHelper.ThrowInvalidOp($"Component {typeof(T).Name} at slot {slot} is disabled");
-        }
-
-        if (_clusterBase != null)
-        {
-            // Versioned cluster: COW path
-            if ((_archetype.VersionedSlotMask & (1 << slot)) != 0)
-            {
-                var table = _engineState.SlotToComponentTable[slot];
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
-                _locations[slot] = newChunkId;
-                _versionedPending &= (ushort)~(1 << slot);   // COW result supersedes any deferred walk — a later read must not re-resolve to the old revision
-
-                return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
-            }
-
-            // SV cluster fast path
-            var clusterState = _engineState.ClusterState;
-            byte* svHeadPtr = _clusterBase + _clusterLayout.ComponentOffset(slot) + _clusterSlotIndex * _clusterLayout.ComponentSize(slot);
-            var svTable = _engineState.SlotToComponentTable[slot];
-
-            // CM-02: a DefaultDiscipline=Commit component escalates the whole transaction to Commit on first touch.
-            if (svTable.Discipline == CommitDiscipline.Commit)
-            {
-                _accessor.ResolveCommitDiscipline(svTable);
-            }
-
-            // Commit discipline (Variant A): stage the write — HEAD untouched, no dirty/shadow (CM-01). Index reconciled at commit.
-            if (_accessor.Discipline == CommitDiscipline.Commit)
-            {
-                return ref _accessor.StageClusterCommitWrite<T>(svTable, typeId, (long)_id.RawValue, _clusterChunkId * 64 + _clusterSlotIndex, svHeadPtr);
-            }
-
-            // Shadow capture for per-archetype B+Tree index maintenance (first write per entity per tick)
-            if (clusterState.IndexSlots != null)
-            {
-                int entityIndex = _clusterChunkId * 64 + _clusterSlotIndex;
-                if (!clusterState.ClusterShadowBitmap.TestAndSet(entityIndex))
-                {
-                    ShadowClusterIndexedFields(clusterState);
-                }
-            }
-
-            _accessor.NoteSvInPlaceWrite();   // CM-02: an in-place TickFence write happened — blocks late auto-escalation to Commit
-            clusterState.SetDirty(_clusterChunkId, _clusterSlotIndex, slot);
-            return ref Unsafe.AsRef<T>(svHeadPtr);
-        }
-
-        {
-            int chunkId = _locations[slot];
-            var table = _engineState.SlotToComponentTable[slot];
-
-            if (table.StorageMode == StorageMode.Versioned)
-            {
-                var (newChunkId, rawPtr) = _accessor.EcsVersionedCopyOnWrite(typeof(T), _id, table, _chainRoots[slot]);
-                _locations[slot] = newChunkId;
-                _versionedPending &= (ushort)~(1 << slot);   // COW result supersedes any deferred walk — a later read must not re-resolve to the old revision
-
-                return ref Unsafe.AsRef<T>((byte*)rawPtr + table.ComponentOverhead);
-            }
-
-            // CM-02: a DefaultDiscipline=Commit component escalates the whole tx to Commit before the (skipped) shadow capture below.
-            if (table.StorageMode == StorageMode.SingleVersion && table.Discipline == CommitDiscipline.Commit)
-            {
-                _accessor.ResolveCommitDiscipline(table);
-            }
-
-            // Commit discipline stages and reconciles indexes at commit — skip the per-tick shadow capture (which feeds the fence-time Move).
-            // An own-spawn is skipped for two independent reasons. It has no OLD key to shadow: FinalizeSpawns inserts this entity's index entries fresh from
-            // the final staged bytes, so there is no Move for the fence to perform — the same argument DIRTY-01 makes about the dirty bit. And since #839 the
-            // location of an unpublished non-Versioned slot is a spawn-arena handle, which ShadowIndexedFields would dereference against the ComponentSegment,
-            // reading an unrelated chunk's bytes as the "old key" and recording the handle as a chunk id for fence-time index maintenance.
-            if (table.HasShadowableIndexes && _accessor.Discipline != CommitDiscipline.Commit && !_isOwnSpawn)
-            {
-                _accessor.ShadowIndexedFields<T>(table, chunkId, _id);
-            }
-
-            return ref _accessor.WriteEcsComponentData<T>(table, chunkId, (long)_id.RawValue, _isOwnSpawn);
-        }
-    }
-
-    /// <summary>
-    /// Capture old indexed field values from cluster SoA for all indexed components.
-    /// Called once per entity per tick, before the first write mutation.
-    /// </summary>
-    /// <remarks>
-    /// Walks both index homes since #655. A slot's bytes live in the segment matching its storage mode, so the base is chosen per home rather than taken from
-    /// <c>_clusterBase</c> for all of them — a Transient slot's key read off a MIXED archetype's cluster base would capture whatever the SoA holds at that
-    /// offset, which is another component's data. That is silent: the shadow entry looks well-formed and the drain moves the index off a key the entity never
-    /// had.
-    /// </remarks>
-    private void ShadowClusterIndexedFields(ArchetypeClusterState clusterState)
-    {
-        int entityIndex = _clusterChunkId * 64 + _clusterSlotIndex;
-
-        // Skip every slot whose index is maintained at COMMIT rather than at the fence — Versioned always, and SingleVersion too when this transaction runs
-        // under Commit discipline (its writes are staged and reconciled by PublishStagedCommitWrites). Capturing a commit-maintained slot is not merely
-        // wasted work: the fence would then apply a SECOND Move for it, from a pre-write OldKey the commit publish has already moved away from, which
-        // corrupts the entry rather than refreshing it (#711, the SvPlusTransient+Commit half).
-        //
-        // This mask MUST stay the exact complement of the one the destroy path removes inline — see Transaction.FlushEcsPendingOperations. The two
-        // disagreeing is what #711 was.
-        var skipMask = (ushort)~_archetype.FenceMaintainedSlotsUnder(_accessor.Discipline);
-        CaptureIndexedSlots(clusterState.IndexSlots, _clusterBase, entityIndex, skipMask);
-
-        // A PURE-Transient archetype has no second base — _clusterBase already IS the Transient one (see the field comment on _transientClusterBase), so it
-        // stays null here. Passing it straight through hit CaptureIndexedSlots' null guard and captured NOTHING, leaving the tree on the pre-mutation key for
-        // the entity's whole lifetime: spawn indexed correctly, every later in-place write was invisible to the index.
-        byte* transientBase = _transientClusterBase != null ? _transientClusterBase : _clusterBase;
-        CaptureIndexedSlots(clusterState.TransientIndexSlots, transientBase, entityIndex, skipMask);
-    }
-
-    /// <summary>
-    /// Appends every indexed field of every non-skipped slot in <paramref name="slots"/> to its shadow buffer, reading from
-    /// <paramref name="segmentBase"/>.
-    /// </summary>
-    private void CaptureIndexedSlots<TStore>(ClusterIndexSlot<TStore>[] slots, byte* segmentBase, int entityIndex, ushort skipMask)
-        where TStore : struct, IPageStore
-    {
-        if (slots == null || segmentBase == null)
-        {
-            return;
-        }
-
-        for (int s = 0; s < slots.Length; s++)
-        {
-            ref var ixSlot = ref slots[s];
-
-            if ((skipMask & (1 << ixSlot.Slot)) != 0)
-            {
-                continue;
-            }
-
-            int compSize = _clusterLayout.ComponentSize(ixSlot.Slot);
-            byte* compBase = segmentBase + _clusterLayout.ComponentOffset(ixSlot.Slot) + _clusterSlotIndex * compSize;
-
-            for (int f = 0; f < ixSlot.Fields.Length; f++)
-            {
-                ref var field = ref ixSlot.Fields[f];
-                var oldKey = KeyBytes8.FromPointer(compBase + field.FieldOffset, field.FieldSize);
-                ixSlot.ShadowBuffers[f].Append(entityIndex, _id, oldKey);
-            }
-        }
-    }
-
     // ═══════════════════════════════════════════════════════════════════════
-    // Enable/Disable
+    // Enabled state
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>Check if a component at the given slot is enabled.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool IsEnabled(byte slotIndex) => (_enabledBits & (1 << slotIndex)) != 0;
+    public readonly bool IsEnabled(byte slotIndex) => (_enabledBits & (1 << slotIndex)) != 0;
 
     /// <summary>Check if a component is enabled by handle.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public bool IsEnabled<T>(Comp<T> comp) where T : unmanaged
+    public readonly bool IsEnabled<T>(Comp<T> comp) where T : unmanaged
     {
         byte slot = _archetype.GetSlot(comp._componentTypeId);
         return (_enabledBits & (1 << slot)) != 0;
@@ -559,7 +315,7 @@ public unsafe ref struct EntityRef
     /// Returns a copy (not ref) since out parameters can't be ref readonly.
     /// For zero-copy, use <c>if (entity.IsEnabled(comp)) { ref readonly var v = ref entity.Read(comp); }</c>.
     /// </summary>
-    public bool TryRead<T>(out T value) where T : unmanaged
+    public readonly bool TryRead<T>(out T value) where T : unmanaged
     {
         int typeId = ArchetypeRegistry.GetComponentTypeId<T>();
         if (typeId < 0 || !_archetype.TryGetSlot(typeId, out byte slot))
@@ -606,13 +362,13 @@ public unsafe ref struct EntityRef
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>Number of component slots declared by this entity's archetype. Slots are addressable <c>[0, ComponentCount)</c>.</summary>
-    public int ComponentCount => _archetype.ComponentCount;
+    public readonly int ComponentCount => _archetype.ComponentCount;
 
     /// <summary>
     /// The registered name of the component at <paramref name="slot"/> — matches <c>ComponentTable.Definition.Name</c> (the join key for the schema layout).
     /// Pairs with <see cref="ReadRaw"/> for runtime, non-generic component decode.
     /// </summary>
-    public string GetComponentName(int slot)
+    public readonly string GetComponentName(int slot)
     {
         if ((uint)slot >= (uint)_archetype.ComponentCount)
         {
@@ -632,7 +388,7 @@ public unsafe ref struct EntityRef
     /// (zero-copy) ref with no manual offset decoding. Reach for <see cref="ReadRaw"/> only when the component type is not available statically.
     /// </para>
     /// </summary>
-    public ReadOnlySpan<byte> ReadRaw(int slot)
+    public readonly ReadOnlySpan<byte> ReadRaw(int slot)
     {
         if ((uint)slot >= (uint)_archetype.ComponentCount)
         {
@@ -677,108 +433,4 @@ public unsafe ref struct EntityRef
         return new ReadOnlySpan<byte>(p, size);
     }
 
-    /// <summary>Disable a component by handle. Stages the change for commit.</summary>
-    public void Disable<T>(Comp<T> comp) where T : unmanaged
-    {
-        if (CheckConfig.Enabled && !_writable)
-        {
-            ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only");
-        }
-        byte slot = _archetype.GetSlot(comp._componentTypeId);
-        _enabledBits &= (ushort)~(1 << slot);
-
-        // Staged only. The cluster's EnabledBits copy is written at commit by FlushPendingEnableDisable, never from here: a write at staging reached every
-        // concurrent bulk scan before commit and survived a rollback (#998, rule ENABLE-01).
-        _accessor.StageEnableDisable(_id, _enabledBits);
-    }
-
-    /// <summary>True when <paramref name="slot"/> is a Versioned component this entity has no revision chain for — genuinely absent (#845).</summary>
-    /// <remarks>
-    /// Three signals, because three different resolvers build an <see cref="EntityRef"/> and they populate different fields.
-    /// <list type="bullet">
-    /// <item><c>_chainRoots[slot]</c> is the record's <c>CompRevFirstChunkId</c> and is the authoritative absence signal — but it is never populated on an
-    /// own-spawn ref, whose slot state lives in <c>_locations</c> (the SpawnEntry's VerLoc).</item>
-    /// <item><c>_locations[slot]</c> alone is 0 for a FAILED chain walk and for every slot still unresolved on the deferred path, neither of which is
-    /// absence.</item>
-    /// <item><c>_clusterLayout</c> cannot be consulted at all: it is null on an own-spawn ref, which is what made the first version of this guard throw a
-    /// NullReferenceException on the ordinary disable/enable round trip.</item>
-    /// </list>
-    /// <c>VersionedSlotMask</c> is zeroed for non-cluster archetypes, so the whole predicate short-circuits to false there.
-    /// </remarks>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private bool IsVersionedSlotAbsent(byte slot) => (_archetype.VersionedSlotMask & (1 << slot)) != 0 && _chainRoots[slot] == 0 && _locations[slot] == 0;
-
-    /// <summary>
-    /// Supplies a value for a component and enables it, in one step.
-    /// </summary>
-    /// <remarks>
-    /// The complement to <see cref="Enable{T}(Comp{T})"/>, not a replacement for it. The no-value overload re-enables a component that already has one —
-    /// disabling preserves the payload, so a disable/enable round trip needs no value and must not demand one. This overload exists for the case that
-    /// overload refuses: a component the spawn never supplied, which has no value to enable. Write is gated by the same EnabledBits as Read, so a caller
-    /// cannot set the value first; enabling and supplying have to happen together (#845).
-    /// </remarks>
-    public void Enable<T>(Comp<T> comp, in T value) where T : unmanaged
-    {
-        if (CheckConfig.Enabled && !_writable)
-        {
-            ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only");
-        }
-
-        byte slot = _archetype.GetSlot(comp._componentTypeId);
-        if (CheckConfig.Enabled && slot >= _archetype.ComponentCount)
-        {
-            ThrowHelper.ThrowInvalidOp($"Component slot {slot} is out of range for archetype {_archetype.ArchetypeId}");
-        }
-
-        var needsContent = IsVersionedSlotAbsent(slot);
-
-        // A never-supplied Versioned slot has no chain, so Write's copy-on-write has nothing to copy from — it must be CREATED, not written. Everything else
-        // (a re-enable, or any non-Versioned slot) already has storage, so the ordinary enable-then-write path applies.
-        if (needsContent)
-        {
-            SetLocation(slot, _accessor.CreateVersionedContentAndWrite(_id, slot, in value));
-        }
-
-        // Enable AFTER the content exists: the bit is what makes the slot readable, so publishing it earlier would briefly expose a slot with no value.
-        // Staged only — the cluster copy is written at commit (see Disable).
-        _enabledBits |= (ushort)(1 << slot);
-        _accessor.StageEnableDisable(_id, _enabledBits);
-
-        if (!needsContent)
-        {
-            Write(comp) = value;
-        }
-    }
-
-    /// <summary>Enable a component by handle. Stages the change for commit.</summary>
-    public void Enable<T>(Comp<T> comp) where T : unmanaged
-    {
-        if (CheckConfig.Enabled && !_writable)
-        {
-            ThrowHelper.ThrowInvalidOp($"EntityRef opened as read-only");
-        }
-        byte slot = _archetype.GetSlot(comp._componentTypeId);
-        if (CheckConfig.Enabled && slot >= _archetype.ComponentCount)
-        {
-            ThrowHelper.ThrowInvalidOp($"Component slot {slot} is out of range for archetype {_archetype.ArchetypeId}");
-        }
-
-        // #845: refuse to enable a Versioned component that has no value. A spawn allocates a slot's chunk and chain only for the components it supplies, so
-        // an unsupplied one has no content at all and _locations stays 0 — the same "never written" state every chain-root reader in the engine already
-        // recognises. Enabling it used to hand back whatever a recycled chunk held, which against a reused chunk is a DESTROYED entity's committed values.
-        //
-        // This is the case Disable/Enable cannot express: disabling preserves the payload, so a re-enable is fine and finds a non-zero location. There is no
-        // way for a caller to initialise a never-supplied slot first, because Write is gated by the same EnabledBits as Read — which is why the old contract
-        // (design decision #14) zero-initialised instead. Use the Enable(comp, in value) overload to supply the value and enable in one step.
-        if (IsVersionedSlotAbsent(slot))
-        {
-            ThrowHelper.ThrowInvalidOp(
-                $"Component at slot {slot} was never supplied for this entity, so it has no value to enable. "
-              + "Use Enable(comp, in value) to supply one, or set it at Spawn.");
-        }
-
-        // Staged only — the cluster copy is written at commit (see Disable).
-        _enabledBits |= (ushort)(1 << slot);
-        _accessor.StageEnableDisable(_id, _enabledBits);
-    }
 }

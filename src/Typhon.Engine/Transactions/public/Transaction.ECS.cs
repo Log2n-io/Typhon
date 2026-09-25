@@ -25,7 +25,7 @@ public unsafe partial class Transaction
     /// </para>
     /// <para>
     /// This REPLACES design decision #14 ("Spawn always allocates all components… Omitted components are zero-initialized and disabled"). Zero-init was the
-    /// right answer only because <see cref="EntityRef.Enable{T}(Comp{T})"/> had no way to tell "never supplied" from "written then disabled" — both being a
+    /// right answer only because <see cref="EntityRefMut.Enable{T}(Comp{T})"/> had no way to tell "never supplied" from "written then disabled" — both being a
     /// clear bit with a live payload — so it had to be total. A missing chain root distinguishes them for free, in a field the record already carries, so
     /// Enable can refuse instead of inventing a value. SingleVersion and Transient keep zero-init because their bytes live in the cluster slot, which exists
     /// the moment the entity does: there is no absent state to represent.
@@ -728,70 +728,40 @@ public unsafe partial class Transaction
     // Open
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>Open an entity for reading and writing. Adds EnsureMutable check + state transition.</summary>
-    public override EntityRef OpenMut(EntityId id)
+    /// <summary>Mutation prep for <c>OpenMut</c> / <c>TryOpenMut</c>: refuses a read-only or finalized transaction, then moves it to InProgress.</summary>
+    internal override void PrepareOpenMut()
     {
         EnsureMutable();
         State = TransactionState.InProgress;
-        var entity = ResolveEntity(id, true);
-        if (!entity.IsValid)
-        {
-            throw new InvalidOperationException($"Entity {id} not found or not visible at TSN {TSN}");
-        }
-        return entity;
     }
 
-    /// <summary>Check whether an entity is alive (exists and visible at this transaction's TSN).</summary>
-    public bool IsAlive(EntityId id)
+    /// <summary>
+    /// Check whether an entity is alive (exists and visible at this transaction's TSN). Sees this transaction's own spawns and pending destroys.
+    /// </summary>
+    public override bool IsAlive(EntityId id)
     {
+        AssertThreadAffinity();
         if (id.IsNull)
         {
             return false;
         }
 
-        // Check spawned entities first (not yet in EntityMap)
-        if (SpawnedContains(id))
-        {
-            // Check if also pending destroy
-            return _pendingDestroys == null || !_pendingDestroys.Contains(id);
-        }
-
-        // Check LinearHash
-        var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
-        if (meta == null)
-        {
-            return false;
-        }
-        var engineState = _dbe._archetypeStates[meta.ArchetypeId];
-        if (engineState?.EntityMap == null)
-        {
-            return false;
-        }
-
-        int recordSize = meta._entityRecordSize;
-        byte* readBuf = stackalloc byte[recordSize];
-
-        using var guard = EpochGuard.Enter(_epochManager);
-        var accessor = engineState.EntityMap.Segment.CreateChunkAccessor();
-        bool found = engineState.EntityMap.TryGet(id.EntityKey, readBuf, ref accessor);
-        accessor.Dispose();
-
-        if (!found)
-        {
-            return false;
-        }
-
-        // Check if pending destroy (committed entity marked for destruction in this transaction)
+        // Pending destroy wins for both kinds: an own spawn destroyed in this transaction, and a committed entity marked for destruction.
         if (_pendingDestroys != null && _pendingDestroys.Contains(id))
         {
             return false;
         }
 
-        return EntityRecordAccessor.GetHeader(readBuf).IsVisibleAt(TSN);
-    }
+        // An own spawn is not in the EntityMap yet.
+        if (SpawnedContains(id))
+        {
+            return true;
+        }
 
-    /// <summary>Check whether an entity link target is alive.</summary>
-    public bool IsAlive<T>(EntityLink<T> link) where T : class => IsAlive(link.Id);
+        // Committed entity: one cached, hinted EntityMap lookup plus the visibility check at this TSN. No epoch guard — a transaction holds its epoch
+        // scope for its whole life (see ResolveEntity).
+        return IsCommittedAlive(id, needsGuard: false);
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Destroy
@@ -1065,7 +1035,7 @@ public unsafe partial class Transaction
     // Enable/Disable staging (called from EntityRef)
     // ═══════════════════════════════════════════════════════════════════════
 
-    /// <summary>Stage an EnabledBits change for commit. Called from EntityRef.Enable/Disable.</summary>
+    /// <summary>Stage an EnabledBits change for commit. Called from EntityRefMut.Enable/Disable.</summary>
     internal override void StageEnableDisable(EntityId id, ushort newEnabledBits)
     {
         _pendingEnableDisable ??= new Dictionary<EntityId, ushort>();
@@ -1089,20 +1059,20 @@ public unsafe partial class Transaction
     // Internal helpers — entity resolution
     // ═══════════════════════════════════════════════════════════════════════
 
-    private protected override EntityRef ResolveEntity(EntityId id, bool writable)
+    private protected override EntityRef ResolveEntity(EntityId id, bool writable, bool throwOnMiss)
     {
         AssertThreadAffinity();
 
 
         if (id.IsNull)
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         var meta = _dbe.GetMetaByRouting(id.ArchetypeId);
         if (meta == null)
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         // Check if this entity was spawned in this transaction (not yet in EntityMap)
@@ -1112,13 +1082,13 @@ public unsafe partial class Transaction
         // Early destroy check for own spawns
         if (isOwnSpawn && _pendingDestroys != null && _pendingDestroys.Contains(id))
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         var es = _dbe._archetypeStates[meta.ArchetypeId];
         if (es?.EntityMap == null)
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         if (isOwnSpawn)
@@ -1132,7 +1102,7 @@ public unsafe partial class Transaction
                 enabledBits = pendingBits;
             }
 
-            var result = new EntityRef(id, meta, es, this, enabledBits, writable);
+            var result = new EntityRef(id, meta, es, this, enabledBits);
             result._isOwnSpawn = true;   // #713: no HEAD yet — a Commit-discipline write goes in place into the staging payload, not through the staging buffer
             for (int slot = 0; slot < meta.ComponentCount; slot++)
             {
@@ -1184,13 +1154,13 @@ public unsafe partial class Transaction
 
         if (!found)
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         // Check pending destroy for committed entities
         if (_pendingDestroys != null && _pendingDestroys.Contains(id))
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         ref var header = ref EntityRecordAccessor.GetHeader(readBuf);
@@ -1198,7 +1168,7 @@ public unsafe partial class Transaction
         // Visibility check
         if (!header.IsVisibleAt(TSN))
         {
-            return default;
+            return Miss(id, throwOnMiss);
         }
 
         // Resolve EnabledBits: committed entities check MVCC overrides
@@ -1211,7 +1181,7 @@ public unsafe partial class Transaction
                 enabledBits = pendingBits;
             }
 
-            var result = new EntityRef(id, meta, es, this, enabledBits, writable);
+            var result = new EntityRef(id, meta, es, this, enabledBits);
 
             if (meta.IsClusterEligible && es.ClusterState != null)
             {
@@ -1386,7 +1356,7 @@ public unsafe partial class Transaction
 
     /// <summary>
     /// Copy-on-write for Versioned components: allocates new chunk, copies data, creates revision entry.
-    /// Called by EntityRef.Write for Versioned components. Returns (newChunkId, newChunkAddress).
+    /// Called by EntityRefMut.Write for Versioned components. Returns (newChunkId, newChunkAddress).
     /// First write per entity allocates; subsequent writes reuse the same new chunk.
     /// </summary>
     internal override (int chunkId, nint ptr) EcsVersionedCopyOnWrite(Type compType, EntityId entityId, ComponentTable table, int chainRootChunkId = 0)
@@ -3383,7 +3353,7 @@ public unsafe partial class Transaction
     /// </summary>
     /// <remarks>
     /// <para>
-    /// This used to happen in <c>EntityRef.Enable/Disable</c>, at staging. That published an uncommitted change to every concurrent bulk scan, and nothing
+    /// This used to happen in <c>EntityRefMut.Enable/Disable</c>, at staging. That published an uncommitted change to every concurrent bulk scan, and nothing
     /// undid it on rollback, so a rolled-back Disable hid the component from cluster iteration while the record still said enabled — and the next
     /// checkpoint persisted the divergence, which the crash rebuild then copies back into the record when it has no snapshot.
     /// </para>

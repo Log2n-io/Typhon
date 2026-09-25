@@ -26,7 +26,7 @@ public sealed class SystemAccessDescriptor
     /// <summary>Component types read beyond the system's primary View input (cross-entity reads).</summary>
     public readonly HashSet<Type> AdditionalReads = [];
 
-    /// <summary>Component types this system mutates via <c>EntityRef.Write&lt;T&gt;()</c>.</summary>
+    /// <summary>Component types this system mutates via <c>EntityRefMut.Write&lt;T&gt;()</c>.</summary>
     public readonly HashSet<Type> Writes = [];
 
     /// <summary>Component types written via <see cref="DurabilityMode.Immediate"/> side-transactions. Surfaced in tooling but does NOT affect scheduler ordering.</summary>

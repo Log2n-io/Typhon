@@ -111,9 +111,8 @@ public partial class EntityAccessor : IDisposable
     public long TSN { get; private protected set; }
 
     /// <summary>
-    /// Prepare this accessor for mutation. Called once by <see cref="ArchetypeAccessor{TArch}"/>
-    /// on first <c>OpenMut</c> to ensure the underlying accessor is in the correct state for writes.
-    /// Base implementation is a no-op. Transaction overrides to call EnsureMutable + set InProgress state.
+    /// Prepare this accessor for mutation, inside a profiling span. Called by <see cref="ArchetypeAccessor{TArch}"/> on its first writable open; later
+    /// opens call <c>PrepareOpenMut</c> directly. Base implementation is a no-op. Transaction overrides it to run <c>PrepareOpenMut</c> in the span.
     /// </summary>
     internal virtual void PrepareForMutation() { }
 

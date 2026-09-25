@@ -118,8 +118,8 @@ internal class ArchetypeMetadata
     /// Bitmask of the slots whose secondary-index maintenance runs at the TICK FENCE rather than at commit, under <see cref="CommitDiscipline.TickFence"/>
     /// — every slot that is neither Versioned (always commit-scoped) nor beyond <see cref="ComponentCount"/>. Under
     /// <see cref="CommitDiscipline.Commit"/> the SingleVersion members move to the commit path too, so callers narrow this further; see
-    /// <c>EntityRef.ShadowClusterIndexedFields</c> and the destroy hand-off in <c>Transaction.FlushEcsPendingOperations</c>, which MUST agree with each other
-    /// (#711 was them disagreeing).
+    /// <c>EntityRefMut.ShadowClusterIndexedFields</c> and the destroy hand-off in <c>Transaction.FlushEcsPendingOperations</c>, which MUST agree with each
+    /// other (#711 was them disagreeing).
     /// </summary>
     internal ushort FenceMaintainedSlotMask;
 

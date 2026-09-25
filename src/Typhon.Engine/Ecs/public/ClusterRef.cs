@@ -232,7 +232,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     }
 
     /// <summary>
-    /// Mark every occupied slot in this cluster dirty for ONE component column — the columnar counterpart to what <c>EntityRef.Write</c> does per entity.
+    /// Mark every occupied slot in this cluster dirty for ONE component column — the columnar counterpart to what <c>EntityRefMut.Write</c> does per entity.
     /// <para>
     /// <b>Required after writing through <see cref="GetSpan{T}"/> for any durable (SingleVersion) component.</b> The direct cluster path sets no dirty bits,
     /// so without this the tick fence never serialises the change and it is lost on reopen. Transient components need no call — they are never persisted.
