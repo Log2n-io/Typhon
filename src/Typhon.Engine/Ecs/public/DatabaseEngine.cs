@@ -4188,8 +4188,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
     /// <summary>
     /// Recovery's spatial phase: drop the whole cell layer and rebuild it from the recovered cluster data, for every cluster-spatial archetype. The same
-    /// fresh-grid, fresh-pool precondition <see cref="ArchetypeClusterState.RebuildSpatialStateFromData"/> documents; the grid is shared, so it is reset
-    /// once and every archetype refilled.
+    /// fresh-grid, fresh-pool precondition <see cref="ArchetypeClusterState.RebuildSpatialStateFromData"/> documents; every realm's grid is shared by
+    /// the archetypes in it, so each is reset once and every archetype refilled.
     /// </summary>
     private void RebuildSpatialLayerAfterRecovery()
     {
@@ -4214,9 +4214,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             clusterState.ResetRealmCellPools();
-            // Realm 0's grid: the rebuild walks every cluster of the archetype, and SP-5 files each in its own realm. Until then one realm is all
-            // there is — asserted, so a second realm cannot reopen silently empty.
-            Debug.Assert(_realms.Registered.Length == 1, "the spatial rebuild files every cluster in realm 0 until SP-5");
+            // Realm 0's grid for an unkeyed archetype; a realm-keyed one files each cluster in the realm its first entity names (Realms C1d).
             clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);
         }
 
@@ -5088,7 +5086,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Spatial state is the third derived structure over cluster data, and its normal rebuild runs inside InitializeArchetypes — before this method has
         // placed anything, so it would have seen an empty cluster. Redo it here or the archetype reopens with entities present and every spatial query empty.
-        if (meta.HasClusterSpatial && Realm0Grid != null && clusterState.ActiveClusterCount > 0)
+        if (meta.HasClusterSpatial && _realms != null && clusterState.ActiveClusterCount > 0)
         {
             // One walk, same as InitializeArchetypes — the ordering constraint that used to force cell state first is internal to it now (#872 step 2).
             clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);

@@ -4747,6 +4747,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         /// <summary>Occupied slots whose centre lies outside the cluster's cell by more than CC-02's hysteresis band — see
         /// <see cref="FindForeignCellSlots"/>. Filed as crossings by the reduce.</summary>
         public ulong ForeignCellSlots;
+
+        /// <summary>The cluster's realm: its first occupied slot's <c>[RealmKey]</c>, or the rebuild's grid's realm for an unkeyed archetype.</summary>
+        public ushort Realm;
     }
 
     /// <summary>
@@ -4776,7 +4779,25 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         ref readonly var ss = ref SpatialSlot;
         var firstSlot = BitOperations.TrailingZeroCount(occupancy);
-        var firstFieldPtr = clusterBase + Layout.ComponentOffset(ss.Slot) + firstSlot * Layout.ComponentSize(ss.Slot) + ss.FieldOffset;
+        var firstComponent = clusterBase + Layout.ComponentOffset(ss.Slot) + firstSlot * Layout.ComponentSize(ss.Slot);
+        var firstFieldPtr = firstComponent + ss.FieldOffset;
+
+        // Realms C1: a realm-keyed cluster is filed in the realm its first entity names — the same entity its cell is read from. The table is read-only
+        // here (the map runs on workers); the reduce creates the realm's state and refuses an unregistered realm.
+        if (ss.HasRealmKey)
+        {
+            result.Realm = *(ushort*)(firstComponent + ss.RealmKeyOffset);
+            grid = _realmTable.TryGet(result.Realm)?.Grid;
+            if (grid == null)
+            {
+                return result;   // unregistered: the reduce throws, naming the realm
+            }
+        }
+        else
+        {
+            result.Realm = grid.Realm.Value;
+        }
+
         grid.ReadCellCoordsFromSpatialField(firstFieldPtr, ss.FieldInfo.FieldType, out result.CellX, out result.CellY, out result.CellZ);
 
         // Delegate the union rather than inlining a twin of it. Inlining would save one GetChunkAddress (an MRU-cache hit on a line this method just touched)
@@ -4938,10 +4959,17 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     public void RebuildSpatialStateFromData(SpatialGrid grid, EpochManager epochManager, int maxWorkers = 0)
     {
-        var rs = grid == null ? RealmArchetypeSpatial.None : GetOrCreateRealmSpatial(grid.Realm.Value);
-        if (grid == null || !SpatialSlot.HasSpatialIndex || ClusterSegment == null)
+        // Realms C1: an unkeyed archetype lives in `grid`'s realm; a realm-keyed one is rebuilt cluster by cluster into the realm each cluster's first
+        // entity names, and `grid` is ignored (it may be null in a world made only of named realms).
+        var keyed = SpatialSlot.HasRealmKey;
+        if ((grid == null && !keyed) || !SpatialSlot.HasSpatialIndex || ClusterSegment == null)
         {
             return;
+        }
+
+        if (!keyed)
+        {
+            GetOrCreateRealmSpatial(grid.Realm.Value);
         }
 
         // Crossings queued before this rebuild name cells of the layer it replaces (VG-01) — at open, only a previous rebuild's own filings (recovery
@@ -4960,8 +4988,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         EnsureClusterAabbsCapacity(PrimarySegmentCapacity);
         EnsureClusterSpatialIndexSlotCapacity(PrimarySegmentCapacity);
         EnsureClusterWriteBookkeepingCapacity(PrimarySegmentCapacity);
-        if (rs.PerCellIndex != null)
+        // Every realm the archetype has state in: the rebuild refills the whole layer, and a realm the data no longer names must not keep an index.
+        foreach (var rs in PresentRealmSpatial)
         {
+            if (rs.PerCellIndex == null)
+            {
+                continue;
+            }
+
             // Before the clear, not after: clearing the slots drops the last reference to every promoted cell's tree, and those trees own chunks of a
             // TRANSIENT segment that nothing reclaims. See ReleaseAllCellTrees.
             ReleaseAllCellTrees(rs, epochManager);
@@ -5053,6 +5087,8 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         // ─── Reduce ───
         // Serial, in ActiveClusterIds order, so the append-ordered index slots and pool contents do not depend on how the map was scheduled.
+        var reduceRealm = -1;
+        RealmArchetypeSpatial rs2 = null;
         for (var i = 0; i < count; i++)
         {
             var chunkId = ActiveClusterIds[i];
@@ -5066,14 +5102,31 @@ internal sealed unsafe partial class ArchetypeClusterState
                 continue;   // RebuildCellState skipped these outright, leaving ClusterCellMap at -1
             }
 
+            // The cluster's realm state, created here in the serial reduce (never on a map worker), in ActiveClusterIds order. An entity whose realm is not
+            // registered refuses the open: its coordinates name a frame this engine does not have (Realms C1; C2 names the realms the file holds).
+            if (m.Realm != reduceRealm)
+            {
+                if (_realmTable.TryGet(m.Realm) == null)
+                {
+                    throw new InvalidOperationException(
+                        $"Archetype {ArchetypeId}: cluster {chunkId} holds entities of realm {m.Realm}, which is not registered. Register every realm the "
+                        + "database holds (Realms.Register) before InitializeArchetypes.");
+                }
+
+                reduceRealm = m.Realm;
+                rs2 = GetOrCreateRealmSpatial(m.Realm);
+                grid = rs2.Grid;
+            }
+
             // The cell is CREATED here, in the serial reduce, from the coordinates the parallel map produced. Creation order is therefore ActiveClusterIds
             // order — the same ordering that already makes ClusterSpatialIndexSlot independent of the worker count, and what keeps the whole rebuild's output
             // bit-identical across W (see the map/reduce rationale above).
             var cellKey = grid.ComputeCellKey(m.CellX, m.CellY, m.CellZ);
 
+            // The realm map is written before the cluster reaches its realm's pool and index, so every reader resolving it finds the realm it is in.
+            ClusterRealmMap[chunkId] = m.Realm;
             ClusterCellMap[chunkId] = cellKey;
-            ClusterRealmMap[chunkId] = grid.Realm.Value;
-            rs.CellClusterPool.AddCluster(cellKey, chunkId);
+            rs2.CellClusterPool.AddCluster(cellKey, chunkId);
             ref var cell = ref grid.GetCell(cellKey);
             cell.ClusterCount++;
             cell.EntityCount += m.PopCount;
