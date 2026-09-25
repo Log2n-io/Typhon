@@ -23,6 +23,17 @@ var connectBatch = int.Parse(Arg("--connect-batch") ?? "1");
 // A god camera's region edge, metres: what a ClientRegion god profile (the server's --god-region) observes. The default is the swarm's own.
 var regionM = Arg("--region-m");
 
+// --fuzz <clients> [--fuzz-rate <msgs/s per client>] [--fuzz-mode mixed|valid|churn|mixed-slow]: hostile connections instead of a swarm, for
+// AC-17's live half (Fuzzer). Rate 0 is the control arm.
+var fuzz = Arg("--fuzz");
+if (fuzz != null)
+{
+    using var fuzzStop = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
+    await new Fuzzer(new Uri(endpoint), int.Parse(fuzz), int.Parse(Arg("--fuzz-rate") ?? "500"), Arg("--fuzz-mode") ?? "mixed")
+        .RunAsync(fuzzStop.Token);
+    return 0;
+}
+
 var options = new BotSwarmOptions
 {
     Endpoint = new Uri(endpoint),

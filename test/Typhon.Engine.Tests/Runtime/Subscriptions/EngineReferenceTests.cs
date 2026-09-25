@@ -50,7 +50,7 @@ class EngineReferenceTests
     [Test]
     public void TheEngineShipsATransportOfItsOwn()
     {
-        var transport = typeof(Typhon.Engine.Internals.TcpSubscriptionTransport);
+        var transport = typeof(Typhon.Engine.TcpSubscriptionTransport);
 
         Assert.Multiple(() =>
         {

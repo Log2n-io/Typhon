@@ -41,7 +41,6 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
     private const string CodecFqn = Protocol + "CodecAttribute";
     private const string QuantFqn = Protocol + "QuantAttribute";
     private const string EntityRefFqn = Protocol + "EntityRefAttribute";
-    private const string FieldFqn = "Typhon.Schema.Definition.FieldAttribute";
 
     private static readonly string[] ComponentAttributes = [ReplicateFqn, OnEnterFqn, OwnerFqn, FractionFqn, HeadingFqn];
     private static readonly string[] MessageAttributes = [CodecFqn, QuantFqn, EntityRefFqn];
@@ -60,10 +59,8 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
         "Archetype '{0}' marks more than one Comp<T> field [Motion] or [Position]; an entity has one position",
         Category, DiagnosticSeverity.Error, true);
 
-    internal static readonly DiagnosticDescriptor NotAField = new(
-        "TPH1103", "Replicated field without [Field]",
-        "'{0}.{1}' carries a replication attribute but no [Field]: only a schema field is stored, so only a schema field can be replicated",
-        Category, DiagnosticSeverity.Error, true);
+    // TPH1103 is retired: it refused a replicated field without [Field], but every instance field of a supported type is stored — [Field] only
+    // renames it or pins its id — so it fired on ordinary components.
 
     internal static readonly DiagnosticDescriptor NoDefaultCodec = new(
         "TPH1104", "No default codec",
@@ -188,7 +185,6 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
                 }
 
                 var at = LocationOf(field, compLocation);
-                var declared = false;
                 var isPublic = false;
                 var isOwner = false;
                 foreach (var attr in BoundAttributes(field))
@@ -222,7 +218,6 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
                             continue;
                     }
 
-                    declared = true;
                     if (statement != null)
                     {
                         body.Add("archetype" + statement + ";");
@@ -234,10 +229,6 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
                     output.Diagnostics.Add(Diagnostic.Create(PublicAndPrivate, at, component.Name, field.Name));
                 }
 
-                if (declared && !field.GetAttributes().Any(a => a.AttributeClass?.ToDisplayString() == FieldFqn))
-                {
-                    output.Diagnostics.Add(Diagnostic.Create(NotAField, at, component.Name, field.Name));
-                }
             }
         }
 

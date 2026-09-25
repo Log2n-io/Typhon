@@ -462,6 +462,17 @@ public sealed class SubscriptionsCommands
         }
     }
 
+    /// <summary>
+    /// <see cref="Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/> for an entity reached by id rather than by walking its cluster — the target of a
+    /// command, resolved with <see cref="TryResolve"/> and opened with <c>OpenMut</c>.
+    /// </summary>
+    /// <param name="entity">The entity the system wrote.</param>
+    /// <remarks>
+    /// The same mark, in the same per-cluster word: one interlocked OR, duplicates free. Call it after the write, as with the cluster form; a no-op for an
+    /// archetype no profile observes.
+    /// </remarks>
+    public void Replicate(in EntityRef entity) => entity.NotePushed();
+
     /// <summary>Every session that is open right now, for an application that has to touch all of them — placing their observers, most of it.</summary>
     public OpenSessionView OpenSessions => new(_ingress.Sessions);
 

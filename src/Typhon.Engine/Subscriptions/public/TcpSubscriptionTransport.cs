@@ -1,3 +1,4 @@
+using JetBrains.Annotations;
 using System;
 using System.Collections.Concurrent;
 using System.Net;
@@ -5,9 +6,10 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using Typhon.Engine.Internals;
 using Typhon.Protocol;
 
-namespace Typhon.Engine.Internals;
+namespace Typhon.Engine;
 
 /// <summary>
 /// The engine's own listener: an asynchronous <see cref="Socket"/>, the <c>TYP2</c> preamble, <c>u32 len</c> framing, and no ASP.NET Core anywhere.
@@ -29,8 +31,13 @@ namespace Typhon.Engine.Internals;
 /// (<c>design/Subscriptions/03-wire-protocol.md § 12 W31</c>). Everything else — the handshake, admission, the caps, the close codes — happens behind
 /// <see cref="ISubscriptionAcceptor.Accept"/>.
 /// </para>
+/// <para>
+/// <b>Starting it:</b> after <c>runtime.Start()</c>, <c>runtime.StartSubscriptionTransport(new TcpSubscriptionTransport(new TcpSubscriptionOptions { Port =
+/// 9100 }))</c>; stop it with <see cref="StopAsync"/> before shutting the runtime down.
+/// </para>
 /// </remarks>
-internal sealed class TcpSubscriptionTransport : ISubscriptionTransport
+[PublicAPI]
+public sealed class TcpSubscriptionTransport : ISubscriptionTransport
 {
     /// <summary><c>IPPROTO_TCP</c>, the option level <c>TCP_NOTSENT_LOWAT</c> lives at.</summary>
     private const int IpProtoTcp = 6;

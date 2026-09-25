@@ -231,11 +231,24 @@ public partial class Outer
     [Position] public static readonly Comp<Brain> B = Register<Brain>();
 }"), Does.Contain("TPH1102"));
 
+    /// <summary>
+    /// A field needs no <c>[Field]</c> to be replicated: every instance field of a supported type is stored, and <c>[Field]</c> only renames it or pins
+    /// its id. (A retired diagnostic, TPH1103, refused this and fired on ordinary components.)
+    /// </summary>
     [Test]
-    public void AReplicatedFieldWithoutFieldIsRefused()
-        => Assert.That(Ids(@"
-[Component(""C"", 1)] public struct C { [Replicate(CodecKind.U8)] public byte Loose; }
-[Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"), Is.EqualTo(new[] { "TPH1103" }));
+    public void AFieldWithoutFieldAttributeIsReplicated()
+    {
+        var (source, diagnostics, errors) = Run(@"
+[Component(""C"", 1)] public struct C { [Replicate(CodecKind.U8)] public byte Loose; [Field] public float X; }
+[Archetype, Replicated] public partial class A : Archetype<A> { [Position] public static readonly Comp<C> X = Register<C>(); }");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(diagnostics, Is.Empty);
+            Assert.That(errors, Is.Empty);
+            Assert.That(source, Does.Contain("x) => x.Loose"));
+        });
+    }
 
     [Test]
     public void AWideTypeWithNoCodecIsRefused()
