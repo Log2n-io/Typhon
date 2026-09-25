@@ -1,30 +1,59 @@
 ---
 uid: concept-subscription
 title: 'Subscription'
-description: 'Engine state replicated outward to remote clients, each seeing what lies around it, with typed commands coming back.'
+description: 'Engine state replicated outward to remote clients — each session sees what lies around it — and their typed commands drained back into the tick. Built into the engine, pushed and explicit.'
 ---
 
 # Subscription
 
-> **In one line:** engine state replicated outward to remote clients, and their typed commands drained back into the tick.
+> **In one line:** engine state replicated outward to remote clients, each [session](xref:concept-replication-session) seeing what lies
+> around it, and their typed [commands](xref:concept-client-command) drained back into the [tick](xref:concept-tick).
 
-When the consumer of engine state is remote — a connected game client, a browser, another process — a subscription is what carries it
-there and keeps it current, so a client can mirror "the characters near my player" without re-querying and without the application
-writing encoding or networking.
+When the consumer of engine state is remote — a game client, a browser, a bot, another process — **Subscriptions** carry it there and keep
+it current. A client mirrors "the characters near my player" without querying, and the application writes no change detection, encoding
+or networking.
 
-The application declares what each archetype exposes and which profile a session follows — the whole world, or a radius around a point
-the application places — and it says, after each write it wants seen, that the entity changed (`Replicate`). The engine does the rest:
-it compares and encodes each changed entity once, gives every session the changes around it, fills a new view cell by cell, catches a
-lagging session up from a short log, and drains typed commands from clients into the next tick, where ordinary systems validate and apply
-them. Clients decode against a catalog rather than against C# type layouts, so a browser is as much a client as a native one.
+It is one engine feature with four moving parts:
+
+- **What is visible** — a [projection](xref:concept-projection) per archetype: which fields travel, quantized how, grouped how, and which
+  are private to the entity's owner. Declared once, by attributes on the data or by a builder call.
+- **Who sees what** — a [profile](xref:concept-replication-profile) per kind of viewer: the whole world, a sphere around a point or an
+  entity, a footprint the client sends, plus optional per-tile counts. A [session](xref:concept-replication-session) is bound to one.
+- **What changed** — **push replication**: after a system writes a replicated field it calls `Replicate(cluster, slot)`. The engine
+  pushes spawns, destroys, moves and migrations on its own, compares each pushed entity's quantized values with what it last sent, and
+  encodes a change **once**, whatever the number of sessions.
+- **What comes back** — typed [commands](xref:concept-client-command) from clients, rate-limited and role-checked, delivered to systems
+  in the next tick; and [events](xref:concept-replication-event) the server emits to the sessions they concern.
+
+Replication runs as an engine track after the [tick fence](xref:concept-tick-fence) and publishes after the tick's durability flush, so
+a client never sees a state the database could lose. Clients decode against a [catalog](xref:concept-replication-catalog) sent at
+connection, never against C# layouts, so a browser is as much a client as a .NET one.
+
+> ⚠️ **Not database replication.** Subscriptions send a *view of engine state* to clients. They are not a way to replicate a database to
+> another server: Typhon has no multi-node replication or clustering.
 
 ## How it relates
 
-- **[System](xref:concept-system)** — systems say what they changed; replication runs on its own engine track: compute after the
-  [tick](xref:concept-tick) fence, publish after the flush.
-- **[Query](xref:concept-query)** — a profile is a standing spatial question, answered per session from geometry rather than re-queried.
-- **[View](xref:concept-view)** — a later phase publishes shared views to subscribed clients; today replication reads declared projections.
+- **[System](xref:concept-system)** — systems say what they changed (`Replicate`), read commands and emit events through
+  [`TickContext.Subscriptions`](xref:concept-tick-context).
+- **[Spatial index](xref:concept-spatial-index)** — a replicated archetype has a position, and a session's view is found through the
+  spatial grid.
+- **[Tick fence](xref:concept-tick-fence)** — the fence records the tick's pushes; replication computes after it and publishes after the
+  flush.
+- **[View](xref:concept-view)** — a view is an in-process delta stream; a subscription is its remote counterpart, built from projections
+  rather than from a view.
+
+## In the API
+
+- [`TyphonRuntime.Subscriptions`](xref:Typhon.Engine.TyphonRuntime.Subscriptions) — the [`SubscriptionsRegistry`](xref:Typhon.Engine.SubscriptionsRegistry)
+  you declare everything on, before `Start()`.
+- [`SubscriptionsCommands`](xref:Typhon.Engine.SubscriptionsCommands) — what a system reaches as `ctx.Subscriptions`: `Replicate`,
+  `Commands<T>()`, `Emit`, `SessionEvents`, `Session(…)`, `TryResolve`.
+- [`SubscriptionsOptions`](xref:Typhon.Engine.SubscriptionsOptions) — capacity, budgets and the required replication cell.
 
 ## Learn & use
 
-- **Feature detail:** [subscriptions](xref:feature-subscriptions-index)
+- **Narrative:** [Guide ch.7 — serving remote clients](xref:guide-subscriptions)
+- **Feature detail:** [Subscriptions](xref:feature-subscriptions-index)
+- **Internals:** [Technical overview 15 — Subscriptions](xref:overview-subscriptions)
+- **The algorithm:** [who receives what, and why it scales](xref:overview-subscriptions#3-the-cell-algorithm-who-receives-what)

@@ -15,7 +15,7 @@ The series is *in-depth* in the sense that it explains mechanism (structures, li
 
 > **What Typhon is.** A real-time, low-latency ACID database engine with microsecond-level commit targets. Uses an ECS data model (entities, archetypes, components), MVCC snapshot isolation for reads, a write-ahead log + checkpoint loop for durability, and a tick-driven scheduler for coordinated parallelism. In-process — Typhon ships as a .NET library, not a server. One `DatabaseEngine` per process.
 
-> **What Typhon isn't.** Not SQL. Not a networked database. Not a key-value store. Not a queue. No built-in replication. No multi-process clustering. The engine focuses on extracting maximum throughput from a single machine.
+> **What Typhon isn't.** Not SQL. Not a networked database. Not a key-value store. Not a queue. No database replication and no multi-process clustering. The engine focuses on extracting maximum throughput from a single machine. (It *does* serve live world state to remote game clients — [15-subscriptions](15-subscriptions.md) — but that is client replication, not replicating a database.)
 
 > **Disk-backed, not RAM-bound.** Storage is a memory-mapped, paged store: resident memory is bounded by the page-cache size, not by database size, so a Typhon database can exceed RAM by orders of magnitude — only the working set is resident. Persistent component data, indexes, and the per-archetype `EntityMap` all page to disk; data volume scales with disk, not memory. This is conventional for SQL/embedded engines but unusual for an ECS, every mainstream one of which is in-memory only.
 
@@ -35,12 +35,13 @@ The series follows the engine's folder layout — every `src/Typhon.Engine/<Fold
 | **06** | [ECS](06-ecs.md) | The API users actually touch. `EntityId`, `Comp<T>`, `Archetype<TSelf>` declaration, `Spawn`/`Destroy`/`Open`/`OpenMut`, `EntityRef`, `EntityLink<T>`, `PointInTimeAccessor` for parallel reads, cluster storage, the three storage modes (Versioned/SingleVersion/Transient). |
 | **07** | [Spatial](07-spatial.md) | One spatial index in two levels: a sparse cell grid, and a per-cell cluster broadphase that promotes to an R-Tree once a cell is dense. Geometric primitives, the `[SpatialIndex]` attribute, query operators, and intra-cell drift and repair. |
 | **08** | [Transactions](08-transactions.md) | `UnitOfWork`, `Transaction`, the TransactionChain (singly-linked, CAS PushHead), `UowRegistry`, durability modes (Deferred/GroupCommit/Immediate), deferred cleanup, deadlines. The mutation entry point. |
-| **09** | [Querying](09-querying.md) | `EcsQuery`, DNF predicate parsing, plan building, the pipeline executor, the view system (`EcsView`, `ViewDeltaRingBuffer`, delta computation), statistics (HLL/MCV/Histogram), selectivity estimation. Plus a brief Subscriptions section. |
+| **09** | [Querying](09-querying.md) | `EcsQuery`, DNF predicate parsing, plan building, the pipeline executor, the view system (`EcsView`, `ViewDeltaRingBuffer`, delta computation), statistics (HLL/MCV/Histogram), selectivity estimation. |
 | **10** | [Runtime](10-runtime.md) | The scheduler. TickDriver, tracks (Engine-Pre / Public / Engine-Post), DAG construction from access patterns, worker threads, the parallel fence, overload management. |
 | **11** | [Durability](11-durability.md) | WAL v2 writer (group commit), wire format (chunk types, logical records via `RecordCodec`), checkpoint v2 (barrier → coverage gate → A/B meta flip → recycle), recovery (`RecoveryDriver` + scrub/rebuild, no full-page images), the UoW state machine, fail-fast (per ADR). |
 | **12** | [Observability](12-observability.md) | Zero-overhead typed event pipeline (`TyphonEvent.Begin*`/`Emit*`), gate flags (`TelemetryConfig`), the ~217 event kinds, source location attribution, wire protocol, profiler engine pipeline, Workbench viewer, OTel integration. |
 | **13** | [Resources](13-resources.md) | The resource graph — every long-lived engine object as `IResource`. Metrics (Memory/Capacity/DiskIO/Throughput/Duration), snapshots, alerts, configuration (`ResourceOptions`), exhaustion policies. |
 | **14** | [Errors](14-errors.md) | The exception hierarchy, error codes, the `Result<TValue,TStatus>` zero-cost pattern, status enums, the throw-don't-retry philosophy. |
+| **15** | [Subscriptions](15-subscriptions.md) | Replication to remote clients: the push set, projection and encode-once, per-entity state and v̂, the sparse push index and log, the geometric known-set, frames and send pumps, owner state, ingress and hardening, events, the catalog and the wire. |
 
 <!-- doc-links: ignore -->
 Each chapter is self-contained. Cross-references between chapters are marked `[NN-name](NN-name.md)` and only point where the next-step detail genuinely lives.
@@ -146,7 +147,7 @@ Every chapter in this series maps to **exactly one** `src/Typhon.Engine/<Folder>
 - **01-foundation** also covers a few small helpers from `src/Typhon.Engine/Hosting/` (§9), which doesn't have enough mass to justify its own chapter, and points to sibling-project types in `src/Typhon.Schema.Definition/` users may encounter.
 - **12-observability** merges `src/Typhon.Engine/Observability/` and `src/Typhon.Engine/Profiler/` because the typed event pipeline they implement is one cohesive story.
 
-`Subscriptions/` gets a short section inside [09-querying](09-querying.md) for now; it will graduate to its own chapter when it grows beyond the streaming-result-set surface.
+**15-subscriptions** covers `src/Typhon.Engine/Subscriptions/` and the sibling projects it ships with — `Typhon.Protocol` (the wire), `Typhon.Subscriptions.AspNetCore`, the two client SDKs and the replication generator — because the wire contract is one story across them.
 
 This rule is load-bearing: it's the structural decision that lets us catch documentation drift mechanically. When you `git mv` a folder, the chapter moves with it in the same commit. When a type is deleted, the chapter that *owns* it is the one to update. Internal-only details (file:line citations, implementation classes that aren't part of the public surface) are deliberately kept out — those rot fastest. Where a piece of context is invariant (a bit layout, a constant, an invariant of an algorithm), we document it; where it's incidental, we link to the source.
 

@@ -8,9 +8,9 @@ description: 'Documentation for every feature in src/Typhon.Engine, tagged Publi
 
 > Documentation for every feature in `src/Typhon.Engine`, tagged **Public** (usable by application developers embedding Typhon) or **Internal** (engine machinery, for contributors). Each entry covers what it's for, what problem it solves, and how it works. Scoped to the engine itself — Workbench, TyphonShell, and Patate (apps built on Typhon) are out of scope.
 
-> 📖 **New to Typhon?** This catalog is the *reference* — every feature, one page each, organized for lookup. If you want to *learn* Typhon end-to-end, start with the **[User Guide](../guide/README.md)** instead: a 6-chapter, read-as-you-go tutorial with a runnable example project. Come back here once you know what you're looking for.
+> 📖 **New to Typhon?** This catalog is the *reference* — every feature, one page each, organized for lookup. If you want to *learn* Typhon end-to-end, start with the **[User Guide](../guide/README.md)** instead: a 7-chapter, read-as-you-go tutorial with a runnable example project. Come back here once you know what you're looking for.
 
-> 🔬 **Want to understand *why*, not just *how*?** This catalog tells you what each feature does and how to use it — not the mechanism underneath. The **[In-Depth Overview](../in-depth-overview/README.md)** goes deeper: structures, invariants, and design trade-offs. That's useful whether you're embedding Typhon and want to reason about what it actually guarantees (durability, MVCC, the runtime model), or reading the engine's code for the first time — it's not contributor-only. A 14-chapter reference mirroring `src/Typhon.Engine/`'s folder layout; each category README below links to its corresponding chapter.
+> 🔬 **Want to understand *why*, not just *how*?** This catalog tells you what each feature does and how to use it — not the mechanism underneath. The **[In-Depth Overview](../in-depth-overview/README.md)** goes deeper: structures, invariants, and design trade-offs. That's useful whether you're embedding Typhon and want to reason about what it actually guarantees (durability, MVCC, the runtime model), or reading the engine's code for the first time — it's not contributor-only. A 15-chapter reference mirroring `src/Typhon.Engine/`'s folder layout; each category README below links to its corresponding chapter.
 
 **Who it's for:** application developers embedding Typhon get a task-oriented "what exists and how do I use it" reference — the [Public](#public--what-you-can-use) index is a complete, self-contained reading list; stop there. Engine contributors who need the machinery behind those features continue into [Internal](#internal--engine-internals-for-contributors).
 
@@ -32,7 +32,7 @@ description: 'Documentation for every feature in src/Typhon.Engine, tagged Publi
 | Spatial | R-Tree spatial indexing, spatial query predicates, trigger volumes, and cluster-based tiered simulation dispatch. | Mixed | [→](Spatial/README.md) |
 | Querying | The fluent query builder, execution planning, statistics, and incrementally-refreshed persistent Views. | Public | [→](Querying/README.md) |
 | Transactions | The three-tier execution model (Engine → UoW → Transaction) — durability modes/discipline, commit/rollback, conflict resolution. | Public | [→](Transactions/README.md) |
-| Subscriptions | Engine-owned replication: declared archetype state pushed to remote clients around each session, typed commands drained back into the tick. | Public | [→](Subscriptions/README.md) |
+| Subscriptions | Engine-owned replication: declared archetype state pushed to remote clients around each session, owner-only state, typed commands and events, over TCP or WebSocket. | Public | [→](Subscriptions/README.md) |
 | Runtime | The DAG-scheduled tick loop that dispatches systems — scheduling, system types, spatial-tier dispatch, overload management. | Public | [→](Runtime/README.md) |
 | Resources | The runtime resource graph tracking every engine resource's metrics, budgets, snapshots, and exhaustion handling. | Mixed | [→](Resources/README.md) |
 | Observability | Zero-overhead telemetry gating, distributed tracing, OpenTelemetry metrics export, and health/alerting. | Public | [→](Observability/README.md) |
@@ -193,7 +193,20 @@ Every Public feature, one line each — the application-facing surface, complete
 
 | Feature | Summary | Status | Level | Link |
 |---|---|---|---|---|
-| Engine-owned replication | Declared archetype state pushed to remote clients around each session, and typed commands drained back into the tick. World and radius observers, TCP and WebSocket, .NET and TypeScript clients built; hysteresis, regions, aggregates and events next. | 🚧 Partial | 🟣 Advanced | [→](Subscriptions/README.md) |
+| Engine-owned replication (overview) | Declared archetype state pushed to remote clients around each session; commands back into the tick. What is and is not built yet. | 🚧 Partial | 🔵 Core | [→](Subscriptions/README.md) |
+| &nbsp;&nbsp;↳ Push replication | `Replicate` after a write; the engine pushes structure and moves, compares quantized bytes, encodes each change once. | ✅ Implemented | 🔵 Core | [→](Subscriptions/push-replication.md) |
+| &nbsp;&nbsp;↳ Projections & codecs | Position as motion segments, fields in change groups, enter-only and owner-only fields, fractions, headings, static archetypes. | ✅ Implemented | 🔵 Core | [→](Subscriptions/projections-codecs.md) |
+| &nbsp;&nbsp;↳ Replication by attributes | `[Replicated]`, `[Motion]`, `[Replicate]`, `[Owner]`, `[ReplicatedMessage]`… compiled by a source generator; the builder overrides. | ✅ Implemented | 🔵 Core | [→](Subscriptions/replication-attributes.md) |
+| &nbsp;&nbsp;↳ Profiles & observers | `World`, `Sphere` (hysteresis, run-time radius, distance bands), `ClientRegion` with a near budget, `Aggregate` tiers. | ✅ Implemented | 🔵 Core | [→](Subscriptions/profiles-observers.md) |
+| &nbsp;&nbsp;↳ Sessions & admission | Kinds, an admission hook with roles and limits, session events, staged requests: profile, control, budget, kick. | ✅ Implemented | 🔵 Core | [→](Subscriptions/sessions-admission.md) |
+| &nbsp;&nbsp;↳ Owner state (`SELF`) | Fields only the controlling session receives, and the last applied command sequence. | ✅ Implemented | 🔵 Core | [→](Subscriptions/owner-state.md) |
+| &nbsp;&nbsp;↳ Commands & acknowledgements | Typed intents checked on the transport thread, drained per session in order; `TryResolve`; every refusal answered. | ✅ Implemented | 🔵 Core | [→](Subscriptions/commands.md) |
+| &nbsp;&nbsp;↳ Events | One-off facts routed near a point, to entity holders, owners, one session or all; best effort with a loss count. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/events.md) |
+| &nbsp;&nbsp;↳ Backpressure & budgets | Skip never queue, catch-up from the push log, rate classes, byte budgets and detail levels, inbound budget and abuse close. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/backpressure-budgets.md) |
+| &nbsp;&nbsp;↳ Transports & hosting | The engine's TCP listener and the ASP.NET Core WebSocket adapter; the catalog endpoint. | ✅ Implemented | 🔵 Core | [→](Subscriptions/transports-hosting.md) |
+| &nbsp;&nbsp;↳ Client SDKs | TypeScript and .NET clients: columnar stores, motion extrapolation, commands, reconnection, code generation. | ✅ Implemented | 🔵 Core | [→](Subscriptions/client-sdks.md) |
+| &nbsp;&nbsp;↳ Wire protocol & catalog | `typhon.2`: handshake with a canonical catalog, tick frames of typed blocks, codecs, close codes. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/wire-protocol.md) |
+| &nbsp;&nbsp;↳ Replication diagnostics | `STATS` metrics (built-in and yours), the `DEBUG` capability, the push validator. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/diagnostics.md) |
 
 ### Runtime
 
