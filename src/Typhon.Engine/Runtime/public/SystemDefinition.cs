@@ -242,8 +242,8 @@ public sealed class SystemDefinition
     public SimTier TierFilter { get; internal set; } = SimTier.All;
 
     /// <summary>
-    /// Cell-level amortization denominator (issue #231). When greater than 0, this system processes only <c>1/N</c> of the tier's clusters per tick,
-    /// rotating through buckets as <c>tickNumber % N</c>. The callback's <see cref="TickContext.AmortizedDeltaTime"/> is set to <c>DeltaTime × CellAmortize</c>
+    /// Cell-level amortization denominator (issue #231). When greater than 0, this system processes only <c>1/N</c> of the tier's clusters per run,
+    /// rotating through buckets as <c>runCount % N</c> — the system's own run count, so a <c>TickDivisor</c> cannot alias it (DSEL-02). The callback's <see cref="TickContext.AmortizedDeltaTime"/> is set to <c>DeltaTime × CellAmortize</c>
     /// so integrations over the full elapsed time happen in one step. Must be paired with a non-<see cref="SimTier.All"/> <see cref="TierFilter"/>; amortizing
     /// the full cluster set without tier scoping is rejected at <c>RuntimeSchedule.Build</c>.
     /// </summary>

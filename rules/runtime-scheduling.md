@@ -641,9 +641,40 @@ Between dispatches every worker parks in a kernel wait. These rules say how a di
 
 ---
 
-## Module: BIND — Parallel system ↔ archetype binding
+## Module: DSEL — Dispatch selection (Realms RT-1)
 
-A parallel `QuerySystem` is bound to one `ArchetypeClusterState` at runtime construction. That binding decides two things at
+Which clusters a QuerySystem runs over this tick — its tier, its `cellAmortize` bucket, the awake clusters — is decided in ONE place,
+`TyphonRuntime.SelectDispatchClusters`, and every dispatch path draws from it. Before RT-1 only the parallel non-Versioned path applied
+dormancy and amortization; the non-parallel path, the Versioned paths and the change-filter scans each re-derived their own list.
+
+### DSEL-01: Every QuerySystem path dispatches the one selection `[fatal]` `[silent]`
+  invariant ∀ QuerySystem S with a bound archetype, ∀ run: the entities S's callback receives come from the clusters
+            SelectDispatchClusters returned for that run (or, for a checkerboard system, the half of them its phase serves),
+            whatever S's shape — parallel or not, Versioned or not
+  invariant a null selection means "nothing narrows S": it covers its whole view (the zero-copy path); a non-null one is
+            materialized from those clusters, never from a fresh walk of the tier index
+  invariant sleeping clusters are absent from every path, including the change-filter dirty scans (both branches)
+  never cellAmortize together with a change filter (refused at build: striding a once-delivered dirty set drops changes)
+  scope: TyphonRuntime.SelectDispatchClusters, TyphonRuntime.OnParallelQueryPrepare, TyphonRuntime.BuildFullViewEntitySet,
+         TyphonRuntime.PrepareVersionedFallback, TyphonRuntime.ScanClusterDirtyEntities, TyphonRuntime.ScanClusterDirtyEntitiesIntoSet,
+         RuntimeSchedule.ValidateRegistration
+  on_violation: a non-parallel or Versioned tier system integrates every entity of every tier each tick — with cellAmortize N,
+                with N× dt (AmortizedDeltaTime) — and dormant clusters are simulated; a Versioned checkerboard system
+                processes its whole tier in both phases. Nothing raises.
+  verified: DispatchSelectionTests
+
+### DSEL-02: The cellAmortize bucket is keyed on the system's run count `[silent]`
+  invariant bucket(S, run) = runIndex(S) mod cellAmortize, where runIndex counts the runs S actually made (advanced once per run at
+            its entry point, never for a tick the scheduler skipped, never twice for a checkerboard's second phase)
+  never keyed on the tick number: a TickDivisor sharing a factor with cellAmortize then never visits some buckets
+        (TickDivisor 2 × cellAmortize 2 → tick always even → bucket 0 only → half the clusters never run)
+  scope: TyphonRuntime.SelectDispatchClusters, TyphonRuntime._systemRunCount
+  on_violation: clusters starved for the life of the process, silently
+  verified: DispatchSelectionTests.TickDivisor2_CellAmortize2_EveryClusterVisited
+
+## Module: BIND — QuerySystem ↔ archetype binding
+
+A `QuerySystem` — parallel or not (RT-1, Realms) — is bound to one `ArchetypeClusterState` at runtime construction. That binding decides two things at
 once: whether the system takes cluster-RANGE dispatch, and whether the #327 per-(system, archetype) touch rollup can emit at
 all. Both failures are silent.
 
