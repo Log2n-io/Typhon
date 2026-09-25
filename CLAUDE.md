@@ -176,6 +176,9 @@ Each line names the gate job it corresponds to, so a local failure is the same f
 - Keep `bench/aws/shards.json` balanced: when shard 0 (the catch-all for unplanned classes) runs far longer than the
   others, re-plan with `python3 bench/aws/shard.py plan --k 8 --trx <the per-shard trx>`. A plan five days stale once
   put 2 021 tests in shard 0 and made the sharded run take 183 s.
+- **Never hand-edit a filter.** To move a class, edit the `classes` lists, then `python3 bench/aws/shard.py sync` rewrites every
+  filter from them. `shard.py run` and the invariants job refuse a plan whose filters disagree with its lists (#1046): one hand
+  edit left six classes running twice, concurrently, colliding on one temp database.
 
 **Rebuilding the map:** the builder is **incremental**.
 - `python3 scripts/build-test-affected-map.py` — re-collects only fixtures whose test source has changed since the cached XML. ~0.3 s when nothing changed; ~5 s per touched fixture.
