@@ -27,6 +27,11 @@ data "aws_iam_policy_document" "toggle" {
     actions   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
     resources = ["arn:aws:logs:*:*:*"]
   }
+  # The webhook hands a box on its way down to an asynchronous copy of the function, which waits out the stop (#1048).
+  statement {
+    actions   = ["lambda:InvokeFunction"]
+    resources = [aws_lambda_function.toggle.arn]
+  }
 }
 
 resource "aws_iam_role" "toggle" {
@@ -46,7 +51,7 @@ resource "aws_lambda_function" "toggle" {
   handler          = "lambda_function.handler"
   filename         = data.archive_file.toggle.output_path
   source_code_hash = data.archive_file.toggle.output_base64sha256
-  timeout          = 15
+  timeout          = 300 # the waker: WAKE_OBSERVE_S (90) + WAKE_STOP_WAIT_S (180) + margin; the webhook path returns in < 1 s
 
   environment {
     variables = {

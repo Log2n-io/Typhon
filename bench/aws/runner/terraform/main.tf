@@ -101,7 +101,10 @@ resource "aws_instance" "runner" {
 
   # The AMI updates over time; don't let a newer default-AMI silently trigger a destroy/recreate of the box
   # that holds the registered runner + warm bin/obj. Rebuild deliberately (Q1 major-bump path) instead.
+  # associate_public_ip_address reads `false` whenever the box is stopped (a stopped instance has no public IP), and
+  # it forces replacement: without this, any apply made while the box is idle would destroy the runner (#1048).
+  # TyphonStartedAt is written by the power-toggle Lambda at every start and read by the max-uptime backstop.
   lifecycle {
-    ignore_changes = [ami]
+    ignore_changes = [ami, associate_public_ip_address, tags["TyphonStartedAt"]]
   }
 }
