@@ -25,6 +25,17 @@ public sealed class WorldCensus
     public int Players;
 
     /// <summary>Everything, which is the number the fence sees.</summary>
+    /// <summary>Two planets' censuses summed (Realms G1: the run reports the whole galaxy).</summary>
+    public WorldCensus Plus(WorldCensus other) => new()
+    {
+        StaticObjects = StaticObjects + other.StaticObjects,
+        PlayerStructures = PlayerStructures + other.PlayerStructures,
+        Lairs = Lairs + other.Lairs,
+        Creatures = Creatures + other.Creatures,
+        CityNpcs = CityNpcs + other.CityNpcs,
+        Players = Players + other.Players,
+    };
+
     public int Total => StaticObjects + PlayerStructures + Lairs + Creatures + CityNpcs + Players;
 
     /// <summary>Everything that can move — the only population the spatial fence does real work for.</summary>

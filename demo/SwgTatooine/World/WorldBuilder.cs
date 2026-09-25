@@ -25,15 +25,19 @@ public static class WorldBuilder
     /// Populate the database. Returns what was actually created, and fills <paramref name="index"/> with the entity ids
     /// the simulation systems need to address later.
     /// </summary>
-    public static WorldCensus Populate(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldIndex index = null)
+    /// <param name="realm">The planet's realm: every entity spawned here carries it (Realms G1). Planet 0 is Tatooine as it always was; a further planet
+    /// is its twin — the same map, populated from its own seed.</param>
+    public static WorldCensus Populate(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldIndex index = null, ushort realm = 0)
     {
         ArgumentNullException.ThrowIfNull(dbe);
         ArgumentNullException.ThrowIfNull(map);
         ArgumentNullException.ThrowIfNull(config);
 
         var census = new WorldCensus();
-        var rng = new Rng((uint)config.Seed);
+        // Planet 0's seed is the run's seed, so a one-planet run is the world it always was; a further planet draws its own.
+        var rng = new Rng((uint)config.Seed + realm * 0x9E3779B9u);
         index ??= new WorldIndex();
+        _realm = realm;
 
         SpawnCities(dbe, map, config, census, ref rng, index);
         SpawnPointsOfInterest(dbe, map, config, census, ref rng, index);
@@ -44,6 +48,10 @@ public static class WorldBuilder
 
         return census;
     }
+
+    // The planet being populated. The build is serial (one planet after another, on the opening thread), so every spawn helper reads it here rather than
+    // threading a parameter through all of them.
+    private static ushort _realm;
 
     // ── Cities ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -110,7 +118,8 @@ public static class WorldBuilder
                         CityNpc.Bounds.Set(in bounds),
                         CityNpc.Ai.Set(in ai),
                         CityNpc.Timers.Set(in npcTimers),
-                        CityNpc.Move.Set(in move));
+                        CityNpc.Move.Set(in move),
+                        CityNpc.Realm.Set(new NpcRealm(_realm)));
                     census.CityNpcs++;
                 }
 
@@ -203,7 +212,8 @@ public static class WorldBuilder
                 var lairId = tx.Spawn<CreatureLair>(
                     CreatureLair.Bounds.Set(in lairBounds),
                     CreatureLair.Spawner.Set(in lair),
-                    CreatureLair.Vitals.Set(in lairVitals));
+                    CreatureLair.Vitals.Set(in lairVitals),
+                    CreatureLair.Realm.Set(new LairRealm(_realm)));
                 census.Lairs++;
                 index.Lairs.Add(lairId);
 
@@ -263,7 +273,8 @@ public static class WorldBuilder
             Creature.Ai.Set(in ai),
             Creature.Timers.Set(in timers),
             Creature.Move.Set(in move),
-            Creature.Vitals.Set(in vitals));
+            Creature.Vitals.Set(in vitals),
+            Creature.Realm.Set(new CreatureRealm(_realm)));
     }
 
     // ── Player structures ───────────────────────────────────────────────────────────────────────────────────────────
@@ -461,7 +472,8 @@ public static class WorldBuilder
                     Player.Move.Set(in move),
                     Player.State.Set(in state),
                     Player.Vitals.Set(in vitals),
-                    Player.Inventory.Set(in inv));
+                    Player.Inventory.Set(in inv),
+                    Player.Realm.Set(new PlayerRealm(_realm)));
                 index.Players.Add(id);
                 census.Players++;
             }
@@ -521,7 +533,8 @@ public static class WorldBuilder
                 var lairId = tx.Spawn<CreatureLair>(
                     CreatureLair.Bounds.Set(in bounds),
                     CreatureLair.Spawner.Set(in lair),
-                    CreatureLair.Vitals.Set(in vitals));
+                    CreatureLair.Vitals.Set(in vitals),
+                    CreatureLair.Realm.Set(new LairRealm(_realm)));
                 census.Lairs++;
                 index.Lairs.Add(lairId);
 
@@ -574,7 +587,7 @@ public static class WorldBuilder
             // Staggered, so the economy does not arrive as a once-a-minute spike that the median tick never sees.
             TickCountdown = tickPeriod == 0 ? 0 : rng.NextInt(1, tickPeriod),
         };
-        tx.Spawn<WorldObject>(WorldObject.Bounds.Set(in bounds), WorldObject.Struct.Set(in s));
+        tx.Spawn<WorldObject>(WorldObject.Bounds.Set(in bounds), WorldObject.Struct.Set(in s), WorldObject.Realm.Set(new StructureRealm(_realm)));
     }
 
     /// <summary>A point on the planet that is not inside an NPC city.</summary>

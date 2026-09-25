@@ -115,7 +115,7 @@ public sealed partial class SimBridge
                 }
 
                 var sphere = new BSphere2F { CenterX = places[idx].X, CenterY = places[idx].Z, Radius = RangedRange };
-                var e = Dbe.ClusterSpatialQuery<Player>().Radius(in sphere);
+                var e = Dbe.ClusterSpatialQuery<Player>(cluster.Realm).Radius(in sphere);
                 var count = 0;
                 try
                 {
@@ -268,7 +268,7 @@ public sealed partial class SimBridge
 
         shooters[..m].Clear();
         var sink = new ShooterSink(shooters);
-        Dbe.ClusterSpatialQuery<Player>().ForEachInRadius(members[..m], ref sink);
+        Dbe.ClusterSpatialQuery<Player>(cluster.Realm).ForEachInRadius(members[..m], ref sink);
 
         for (var j = 0; j < m; j++)
         {

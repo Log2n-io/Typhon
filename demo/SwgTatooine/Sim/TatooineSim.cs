@@ -40,7 +40,11 @@ public sealed partial class TatooineSim : IDisposable
     public WorldCensus Census { get; private set; }
 
     /// <summary>Entity handles and place geometry the systems address after the build.</summary>
-    public WorldIndex Index { get; } = new();
+    /// <summary>Each planet's destinations and handles, indexed by its realm (Realms G1).</summary>
+    public WorldIndex[] Indexes { get; private set; } = [new WorldIndex()];
+
+    /// <summary>Planet 0's index — the single world's.</summary>
+    public WorldIndex Index => Indexes[0];
 
     public TatooineSim(SimConfig config)
     {
@@ -125,13 +129,18 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<Lair>();
         Dbe.RegisterComponentFromAccessor<Structure>();
         Dbe.RegisterComponentFromAccessor<Inventory>();
+        Dbe.RegisterComponentFromAccessor<StructureRealm>();
+        Dbe.RegisterComponentFromAccessor<LairRealm>();
+        Dbe.RegisterComponentFromAccessor<NpcRealm>();
+        Dbe.RegisterComponentFromAccessor<CreatureRealm>();
+        Dbe.RegisterComponentFromAccessor<PlayerRealm>();
 
         // SWG's coordinates are centred on the planet: -8192..+8192 on each axis at the real size. Keeping the origin in
         // the middle rather than at a corner is not cosmetic — every authentic coordinate in the map data is expressed
         // that way, and shifting them would put a transcription error between the source and the world.
         var half = _config.WorldEdgeM * 0.5f;
         var cell = _config.ResolveCellSize();
-        Dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
+        var planetGrid = SpatialGridConfig.Flat(
             worldMin: new Vector2(-half, -half),
             worldMax: new Vector2(half, half),
             cellSize: cell,
@@ -143,7 +152,20 @@ public sealed partial class TatooineSim : IDisposable
             repairCooldownTicks: _config.RepairCooldownTicks,
             queryEfficiencyTolerance: _config.QueryEfficiencyTolerance,
             clusterTargetPackingSlack: _config.ClusterTargetPackingSlack,
-            batchSpawnSortThreshold: _config.BatchSpawnSortThreshold));
+            batchSpawnSortThreshold: _config.BatchSpawnSortThreshold);
+
+        // Realms (G1): planet 0 is realm 0, configured as the single world always was; every further planet is a realm of its own with the same grid,
+        // simulated always (per-realm policy is G2's). Explicit count, never derived.
+        if (_config.Planets > 1)
+        {
+            Dbe.ConfigureRealms(_config.Planets);
+        }
+
+        Dbe.ConfigureSpatialGrid(planetGrid);
+        for (var planet = 1; planet < _config.Planets; planet++)
+        {
+            Dbe.Realms.Register(new RealmId((ushort)planet), RealmConfig.SimulatedAlways(planetGrid));
+        }
 
         Dbe.InitializeArchetypes();
 
@@ -184,7 +206,13 @@ public sealed partial class TatooineSim : IDisposable
         }
 
         Map = TatooineMap.Build(_config);
-        Census = WorldBuilder.Populate(Dbe, Map, _config, Index);
+        Indexes = new WorldIndex[_config.Planets];
+        for (var planet = 0; planet < _config.Planets; planet++)
+        {
+            Indexes[planet] = new WorldIndex();
+            var census = WorldBuilder.Populate(Dbe, Map, _config, Indexes[planet], (ushort)planet);
+            Census = planet == 0 ? census : Census.Plus(census);
+        }
     }
 
     public void Dispose()

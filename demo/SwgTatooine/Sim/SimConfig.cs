@@ -97,6 +97,14 @@ public sealed class SimConfig
     /// </summary>
     public float QueryEfficiencyTolerance = 0.1f;
 
+    // ── Realms (G1, #1019) ────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Planets, each a realm with today's flat grid: planet 0 is Tatooine as it always was (realm 0); a further planet is its twin — the same map,
+    /// populated from its own seed. One reproduces the single-world simulation, realm keys included.
+    /// </summary>
+    public int Planets = 1;
+
     // ── Shuttles (#910) ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Players also travel between cities by shuttle. Off reproduces the pre-shuttle simulation exactly.</summary>

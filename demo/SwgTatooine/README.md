@@ -278,6 +278,7 @@ Useful flags:
 | `--eff-tol <r>` / `--repair-cooldown <n>` | 0.1 / 50 | The two maintenance knobs above; `0` disables either |
 | `--promote <n>` / `--tightness <r>` | off / 1 | Turn per-cell R-tree promotion on |
 | `--no-shuttles` | shuttles on | Drop the shuttle systems and the mass-arrival traffic they produce |
+| `--planets N` | 1 | Realms: N planets, each a realm with the same grid; planet 0 is Tatooine, a further one its twin (same map, own seed). Every entity carries a realm key and every query is scoped to its cluster's realm |
 | `--tick-log <path>` | — | Every measured tick's duration, one per line |
 | `--seed <n>` | fixed | Every random decision, so two runs build the same world |
 

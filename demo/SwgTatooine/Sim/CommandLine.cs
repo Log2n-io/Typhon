@@ -31,6 +31,11 @@ public static class CommandLine
         c.ShuttleIntervalS = Float(args, "--shuttle-interval", c.ShuttleIntervalS);
         c.BoardingWindowS = Float(args, "--boarding-window", c.BoardingWindowS);
         c.Shuttles = Array.IndexOf(args, "--no-shuttles") < 0;
+        c.Planets = Int(args, "--planets", c.Planets);
+        if (c.Planets < 1)
+        {
+            throw new ArgumentException($"--planets takes 1 or more, not {c.Planets}");
+        }
         c.ShuttleBurst = Array.IndexOf(args, "--shuttle-burst") >= 0;
         c.Probe = Array.IndexOf(args, "--probe") >= 0;
         c.WorkProbe = Array.IndexOf(args, "--work-probe") >= 0;

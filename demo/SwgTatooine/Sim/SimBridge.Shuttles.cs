@@ -361,7 +361,7 @@ public sealed partial class SimBridge
         {
             var (x, y) = ProbeCentre(port, q);
             var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = AwarenessRadius };
-            hits += CountInRadius<Player>(in sphere);
+            hits += CountInRadius<Player>(in sphere, RealmId.Default);   // the probe watches planet 0's ports
         }
 
         var cold = Stopwatch.GetTimestamp();
@@ -369,7 +369,7 @@ public sealed partial class SimBridge
         {
             var (x, y) = ProbeCentre(port, q);
             var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = AwarenessRadius };
-            CountInRadius<Player>(in sphere);
+            CountInRadius<Player>(in sphere, RealmId.Default);
         }
 
         var warm = Stopwatch.GetTimestamp();

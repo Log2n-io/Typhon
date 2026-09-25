@@ -191,7 +191,8 @@ public sealed partial class SimBridge
                 {
                     aggroQueries++;
                     var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = ai.AggroRadius };
-                    var e = Dbe.ClusterSpatialQuery<Player>().Radius(in sphere);
+                    // The cluster's realm: a creature aggroes on the players of its own planet (Realms G1).
+                    var e = Dbe.ClusterSpatialQuery<Player>(cluster.Realm).Radius(in sphere);
                     try
                     {
                         var bestSq = double.MaxValue;
@@ -823,7 +824,7 @@ public sealed partial class SimBridge
                     m++;
                 }
 
-                AwarenessBatch(members[..m], counts[..m], only, sampled, work, ref queries, ref hits);
+                AwarenessBatch(cluster.Realm, members[..m], counts[..m], only, sampled, work, ref queries, ref hits);
                 continue;
             }
 
@@ -837,7 +838,7 @@ public sealed partial class SimBridge
                 var sample = probe && ((cluster.ChunkId * 64) + idx) % WorkProbeSampleEvery == 0;
                 if (only is null or AwarenessTarget.Structures)
                 {
-                    var n = CountInRadius<WorldObject>(in sphere);
+                    var n = CountInRadius<WorldObject>(in sphere, cluster.Realm);
                     hits += n;
                     queries++;
                     if (sample)
@@ -848,7 +849,7 @@ public sealed partial class SimBridge
 
                 if (only is null or AwarenessTarget.Creatures)
                 {
-                    var n = CountInRadius<Creature>(in sphere);
+                    var n = CountInRadius<Creature>(in sphere, cluster.Realm);
                     hits += n;
                     queries++;
                     if (sample)
@@ -859,7 +860,7 @@ public sealed partial class SimBridge
 
                 if (only is null or AwarenessTarget.Npcs)
                 {
-                    var n = CountInRadius<CityNpc>(in sphere);
+                    var n = CountInRadius<CityNpc>(in sphere, cluster.Realm);
                     hits += n;
                     queries++;
                     if (sample)
@@ -870,7 +871,7 @@ public sealed partial class SimBridge
 
                 if (only is null or AwarenessTarget.Players)
                 {
-                    var n = CountInRadius<Player>(in sphere);
+                    var n = CountInRadius<Player>(in sphere, cluster.Realm);
                     hits += n;
                     queries++;
                     if (sample)
@@ -900,20 +901,20 @@ public sealed partial class SimBridge
 
     // Each drain is its own NoInlining method, so a run never JIT-compiles the drains it does not use. That lets an A/B run an engine build that lacks
     // the newer query API under the same host binary.
-    private long CountInRadius<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new() => _config.AwarenessApi switch
+    private long CountInRadius<TArch>(in BSphere2F sphere, RealmId realm) where TArch : Archetype<TArch>, new() => _config.AwarenessApi switch
     {
-        AwarenessApi.MoveNext => CountByMoveNext<TArch>(in sphere),
-        AwarenessApi.Fill => CountByFill<TArch>(in sphere),
+        AwarenessApi.MoveNext => CountByMoveNext<TArch>(in sphere, realm),
+        AwarenessApi.Fill => CountByFill<TArch>(in sphere, realm),
         // A lone query — the shuttle port probe — has no batch to join: the batch arm counts it as the count arm does, so the two arms differ in the
         // awareness drain and nowhere else.
-        AwarenessApi.Count or AwarenessApi.Batch => CountByCount<TArch>(in sphere),
+        AwarenessApi.Count or AwarenessApi.Batch => CountByCount<TArch>(in sphere, realm),
         _ => throw new ArgumentOutOfRangeException(nameof(_config.AwarenessApi), _config.AwarenessApi, "no drain for this awareness API"),
     };
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private long CountByCount<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new()
+    private long CountByCount<TArch>(in BSphere2F sphere, RealmId realm) where TArch : Archetype<TArch>, new()
     {
-        var e = Dbe.ClusterSpatialQuery<TArch>().Radius(in sphere);
+        var e = Dbe.ClusterSpatialQuery<TArch>(realm).Radius(in sphere);
         try
         {
             return e.Count();
@@ -929,10 +930,10 @@ public sealed partial class SimBridge
     private static ClusterSpatialQueryResult[] _fillBuffer;
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private long CountByFill<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new()
+    private long CountByFill<TArch>(in BSphere2F sphere, RealmId realm) where TArch : Archetype<TArch>, new()
     {
         var buffer = _fillBuffer ??= new ClusterSpatialQueryResult[64];
-        var e = Dbe.ClusterSpatialQuery<TArch>().Radius(in sphere);
+        var e = Dbe.ClusterSpatialQuery<TArch>(realm).Radius(in sphere);
         try
         {
             long n = 0;
@@ -956,6 +957,7 @@ public sealed partial class SimBridge
     /// count is exactly its own query's, so the statistics are those of the per-player path.
     /// </summary>
     private void AwarenessBatch(
+        RealmId realm,
         ReadOnlySpan<BSphere2F> members,
         Span<int> counts,
         AwarenessTarget? only,
@@ -966,34 +968,34 @@ public sealed partial class SimBridge
     {
         if (only is null or AwarenessTarget.Structures)
         {
-            hits += CountBatch<WorldObject>(members, counts, 0, sampled, work);
+            hits += CountBatch<WorldObject>(realm, members, counts, 0, sampled, work);
             queries += members.Length;
         }
 
         if (only is null or AwarenessTarget.Creatures)
         {
-            hits += CountBatch<Creature>(members, counts, 1, sampled, work);
+            hits += CountBatch<Creature>(realm, members, counts, 1, sampled, work);
             queries += members.Length;
         }
 
         if (only is null or AwarenessTarget.Npcs)
         {
-            hits += CountBatch<CityNpc>(members, counts, 2, sampled, work);
+            hits += CountBatch<CityNpc>(realm, members, counts, 2, sampled, work);
             queries += members.Length;
         }
 
         if (only is null or AwarenessTarget.Players)
         {
-            hits += CountBatch<Player>(members, counts, 3, sampled, work);
+            hits += CountBatch<Player>(realm, members, counts, 3, sampled, work);
             queries += members.Length;
         }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private long CountBatch<TArch>(ReadOnlySpan<BSphere2F> members, Span<int> counts, int target, ulong sampled, Span<long> work)
+    private long CountBatch<TArch>(RealmId realm, ReadOnlySpan<BSphere2F> members, Span<int> counts, int target, ulong sampled, Span<long> work)
         where TArch : Archetype<TArch>, new()
     {
-        Dbe.ClusterSpatialQuery<TArch>().CountRadius(members, counts);
+        Dbe.ClusterSpatialQuery<TArch>(realm).CountRadius(members, counts);
         long n = 0;
         for (var j = 0; j < members.Length; j++)
         {
@@ -1010,9 +1012,9 @@ public sealed partial class SimBridge
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private long CountByMoveNext<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new()
+    private long CountByMoveNext<TArch>(in BSphere2F sphere, RealmId realm) where TArch : Archetype<TArch>, new()
     {
-        var e = Dbe.ClusterSpatialQuery<TArch>().Radius(in sphere);
+        var e = Dbe.ClusterSpatialQuery<TArch>(realm).Radius(in sphere);
         try
         {
             long n = 0;

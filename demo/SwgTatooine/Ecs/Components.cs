@@ -34,6 +34,73 @@ namespace SwgTatooine;
 // that decides per archetype, and a real game server has never had one durability policy.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// ── Realm keys (Realms G1) ──────────────────────────────────────────────────────────────────────────────────────────
+//
+// The realm an entity is in — which planet, and later which interior or space. In a component of its OWN rather than
+// beside Bounds: a 2D AABB placement stays 16 bytes, the stride the engine's SIMD narrowphase needs, and losing that
+// kernel measured ~20 % of a tick here. One type per archetype for the same reason the placements are split: the
+// scheduler's write-conflict test is per component type, and TeleportSystem writes the player's.
+
+/// <summary>The realm a building, house or prop is in.</summary>
+[Component("Swg.StructureRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct StructureRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public StructureRealm(ushort value) => Value = value;
+}
+
+/// <summary>The realm a lair is in.</summary>
+[Component("Swg.LairRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct LairRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public LairRealm(ushort value) => Value = value;
+}
+
+/// <summary>The realm a city NPC is in.</summary>
+[Component("Swg.NpcRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct NpcRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public NpcRealm(ushort value) => Value = value;
+}
+
+/// <summary>The realm a creature is in.</summary>
+[Component("Swg.CreatureRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct CreatureRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public CreatureRealm(ushort value) => Value = value;
+}
+
+/// <summary>The realm a player is in.</summary>
+[Component("Swg.PlayerRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PlayerRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public PlayerRealm(ushort value) => Value = value;
+}
+
 // ── Placement ───────────────────────────────────────────────────────────────────────────────────────────────────────
 //
 // Two dimensions, not three, and that is the faithful choice: SWG's own server indexes a planet with a 2D QuadTree over

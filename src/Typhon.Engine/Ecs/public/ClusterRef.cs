@@ -305,6 +305,16 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public readonly EntityId GetEntityId(int slotIndex) =>
         EntityId.FromRaw(*(long*)(_base + _layout.EntityIdsOffset + slotIndex * 8));
 
+    /// <summary>
+    /// The realm this cluster is in (Realms): every entity it holds is in that realm's frame, except one whose realm change awaits the next fence. A
+    /// system scopes its spatial queries by it — <c>dbe.ClusterSpatialQuery&lt;T&gt;(cluster.Realm)</c>. Realm 0 for an archetype without a realm key.
+    /// </summary>
+    public readonly RealmId Realm
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => _state?.ClusterRealmMap is { } map && (uint)_chunkId < (uint)map.Length ? new RealmId(map[_chunkId]) : RealmId.Default;
+    }
+
     /// <summary>The chunk ID of this cluster within the archetype's segment.</summary>
     public readonly int ChunkId
     {
