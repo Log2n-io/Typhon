@@ -736,6 +736,14 @@ public sealed class RuntimeSchedule
         {
             throw new InvalidOperationException($"System '{reg.Name}': checkerboard dispatch requires parallel: true. Add b.Parallel() or parallel: true.");
         }
+
+        // RT-1 (DSEL-01): a checkerboard system runs its dispatch twice, once per half, but a change filter's input is an entity list with no half —
+        // both phases would process every dirty entity. Nothing uses the pair, so it is refused rather than split per entity.
+        if (reg.Checkerboard && reg.ChangeFilter is { Length: > 0 })
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': checkerboard dispatch is incompatible with a change filter — both phases would process every dirty entity.");
+        }
     }
 
     internal void ThrowIfBuilt()

@@ -202,6 +202,65 @@ internal sealed class TierClusterIndex
         return new ReadOnlySpan<int>(arr, 0, count);
     }
 
+    /// <summary>
+    /// The read-only form of <see cref="GetClustersArray"/> for dispatch (RT-1): a single tier, or a multi-tier set whose merged entry tick start already
+    /// built. Returns false — and fills nothing — for a multi-tier set not built since the last rebuild, so concurrent readers never write the shared cache.
+    /// </summary>
+    public bool TryGetPreparedClusters(SimTier tier, out int[] ids, out int count)
+    {
+        if (tier == SimTier.None || BitOperations.PopCount((byte)tier) == 1)
+        {
+            ids = GetClustersArray(tier, out count);
+            return true;
+        }
+
+        var key = (byte)tier;
+        count = _mergedCounts[key];
+        if (count < 0)
+        {
+            ids = null;
+            count = 0;
+            return false;
+        }
+
+        ids = _mergedCache[key] ?? [];
+        return true;
+    }
+
+    /// <summary>How many clusters <see cref="CopyClusters"/> writes for <paramref name="tier"/>.</summary>
+    public int CountClusters(SimTier tier)
+    {
+        var total = 0;
+        for (var t = 0; t < TierExtensions.TierCount; t++)
+        {
+            if ((((byte)tier >> t) & 1) != 0)
+            {
+                total += _tierClusterCounts[t];
+            }
+        }
+
+        return total;
+    }
+
+    /// <summary>Concatenates the per-tier lists of <paramref name="tier"/> into a caller-owned <paramref name="destination"/>; returns the count.</summary>
+    public int CopyClusters(SimTier tier, int[] destination)
+    {
+        var offset = 0;
+        for (var t = 0; t < TierExtensions.TierCount; t++)
+        {
+            var count = _tierClusterCounts[t];
+            if ((((byte)tier >> t) & 1) == 0 || count == 0)
+            {
+                continue;
+            }
+
+            Array.Copy(_tierClusters[t], 0, destination, offset, count);
+            offset += count;
+        }
+
+        return offset;
+    }
+
     private void BuildMergedEntry(SimTier tier, int key)
     {
         // Compute total size.

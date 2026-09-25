@@ -4521,8 +4521,10 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>
     /// The occupied slots whose centre lies outside <c>[origin - margin, origin + cellSize + margin]</c> on some axis: entities CC-02 does not allow in
-    /// this cell. The same centre the grid files a spawn by (<see cref="SpatialGrid.ReadCellCoordsFromSpatialField"/>); a degenerate (NaN) centre compares
-    /// false and stays, as the AABB union skips it. A flat grid reports centre Z = 0 inside the one Z layer, so the Z pair never fires there.
+    /// this cell. The same centre the grid files a spawn by (<see cref="SpatialGrid.ReadCellCoordsFromSpatialField"/>); a non-finite centre is skipped, as
+    /// the AABB union skips its slot. A flat grid reports centre Z = 0 inside the one Z layer, so the Z pair never fires there. The caller's fast path
+    /// (the box fits the cell plus the band) covers every slot the union kept; a slot it dropped as degenerate (inverted bounds) is not checked either
+    /// way — the same slots the AABB ignores.
     /// </summary>
     private ulong FindForeignCellSlots(byte* clusterBase, ulong occupancy, double originX, double originY, double originZ, double cellSize, double margin)
     {
@@ -4540,6 +4542,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             var slot = BitOperations.TrailingZeroCount(bits);
             bits &= bits - 1;
             SpatialGrid.ReadSpatialCenter3D(firstField + slot * stride, fieldType, out var x, out var y, out var z);
+            // A non-finite centre has no cell to move to (WorldToCellKey refuses it) and the AABB union skips its slot; it stays, as it did before.
+            if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))
+            {
+                continue;
+            }
+
             if (x < loX || x > hiX || y < loY || y > hiY || z < loZ || z > hiZ)
             {
                 foreign |= 1UL << slot;
@@ -4556,17 +4564,26 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal int LastRebuildForeignCellSlots;
 
     /// <summary>
-    /// Files each of <paramref name="foreignSlots"/> as a crossing to the cell its centre lies in, for the first fence to move — the reduce half of the
-    /// per-slot check. Serial (the reduce), so the destination cells it creates are created in a deterministic order.
+    /// Files each of <paramref name="foreignSlots"/> for the first fence to move — the reduce half of the per-slot check. Serial (the reduce), so the
+    /// destination cells it creates are created in a deterministic order.
     /// </summary>
+    /// <remarks>
+    /// A <see cref="SpatialMode.Dynamic"/> archetype's strays are FLAGGED, exactly as a write-time crossing is (<see cref="FlagMigration"/> + the
+    /// process bit), not queued: the fence's drain (<c>DrainPreFlaggedMigrations</c>) visits each flagged slot once, re-reads its position and files one
+    /// request. Queued, a stray that the application also moved before the first fence would be named twice — once by this filing, once by the
+    /// detector — which CR-05 forbids (#877). A Static archetype runs no detector, so its strays are queued directly.
+    /// </remarks>
     private void FileForeignCellSlots(int chunkId, int cellKey, ulong foreignSlots, SpatialGrid grid)
     {
         ref readonly var ss = ref SpatialSlot;
+        var flag = ss.FieldInfo.Mode == SpatialMode.Dynamic;
         var accessor = ClusterSegment.CreateChunkAccessor();
         try
         {
             var firstField = accessor.GetChunkAddress(chunkId) + Layout.ComponentOffset(ss.Slot) + ss.FieldOffset;
             var stride = Layout.ComponentSize(ss.Slot);
+            ulong flagged = 0;
+            var lastDest = cellKey;
             var bits = foreignSlots;
             while (bits != 0)
             {
@@ -4574,11 +4591,28 @@ internal sealed unsafe partial class ArchetypeClusterState
                 bits &= bits - 1;
                 SpatialGrid.ReadSpatialCenter3D(firstField + slot * stride, ss.FieldInfo.FieldType, out var x, out var y, out var z);
                 var destCellKey = grid.WorldToCellKey(x, y, z);
-                if (destCellKey != cellKey)
+                if (destCellKey == cellKey)
+                {
+                    continue;
+                }
+
+                LastRebuildForeignCellSlots++;
+                if (flag)
+                {
+                    flagged |= 1UL << slot;
+                    lastDest = destCellKey;
+                }
+                else
                 {
                     EnqueueMigration(new MigrationRequest(chunkId, slot, destCellKey));
-                    LastRebuildForeignCellSlots++;
                 }
+            }
+
+            if (flagged != 0)
+            {
+                // The recorded destination is a hint the drain does not trust (it re-derives each slot's cell from its position, CC-02).
+                FlagMigration(chunkId, flagged, lastDest);
+                SetClusterProcessBit(chunkId);
             }
         }
         finally
@@ -4620,6 +4654,12 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             return;
         }
+
+        // Crossings queued before this rebuild name cells of the layer it replaces (VG-01) — at open, only a previous rebuild's own filings (recovery
+        // rebuilds twice, #1054); re-filed below from the current data, never kept twice. A slot a previous rebuild flagged stays flagged: its
+        // destination is only a hint, and the drain drops the flag when the entity is home.
+        PendingMigrationCount = 0;
+        LastRebuildForeignCellSlots = 0;
         if (ActiveClusterCount == 0)
         {
             return;
@@ -4724,10 +4764,6 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         // ─── Reduce ───
         // Serial, in ActiveClusterIds order, so the append-ordered index slots and pool contents do not depend on how the map was scheduled.
-        // Crossings queued before this rebuild name cells of the layer it replaces (VG-01) — at open, only a previous rebuild's own filings (recovery
-        // rebuilds twice, #1054); re-filed below from the current data, never kept twice.
-        PendingMigrationCount = 0;
-        LastRebuildForeignCellSlots = 0;
         for (var i = 0; i < count; i++)
         {
             var chunkId = ActiveClusterIds[i];

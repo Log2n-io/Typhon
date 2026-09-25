@@ -653,8 +653,16 @@ dormancy and amortization; the non-parallel path, the Versioned paths and the ch
             whatever S's shape — parallel or not, Versioned or not
   invariant a null selection means "nothing narrows S": it covers its whole view (the zero-copy path); a non-null one is
             materialized from those clusters, never from a fresh walk of the tier index
+  invariant ONE selection per run: made at the run's entry point (the parallel Prepare's first phase, OnSystemStartInternal) and
+            only read afterwards — every materialization, including a change filter's first-tick fallback, reads it
+            (BuildFullViewEntitySet); a second selection would rewrite the buffer the dispatch already handed out
+  invariant the tier selected is the EFFECTIVE tier: the system's filter AND its view's (ViewBase.TierFilter), on every path;
+            without a grid no tier applies, on every path; a disjoint pair is refused at runtime construction
+  invariant every tier a system can select is rebuilt and its multi-tier merge prepared at tick start (TI-01); dispatch never
+            rebuilds and never fills the shared merge cache (a set not prepared is merged into the system's own buffer)
   invariant sleeping clusters are absent from every path, including the change-filter dirty scans (both branches)
   never cellAmortize together with a change filter (refused at build: striding a once-delivered dirty set drops changes)
+  never checkerboard together with a change filter (refused at build: the dirty list has no half, both phases would process it)
   scope: TyphonRuntime.SelectDispatchClusters, TyphonRuntime.OnParallelQueryPrepare, TyphonRuntime.BuildFullViewEntitySet,
          TyphonRuntime.PrepareVersionedFallback, TyphonRuntime.ScanClusterDirtyEntities, TyphonRuntime.ScanClusterDirtyEntitiesIntoSet,
          RuntimeSchedule.ValidateRegistration

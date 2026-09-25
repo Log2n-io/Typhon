@@ -271,6 +271,71 @@ class DispatchSelectionTests : TestBase<DispatchSelectionTests>
         }
     }
 
+    [Test]
+    [VerifiesRule("DSEL-01")]
+    public void ViewTier_NarrowsEveryPath([Values] bool parallel, [Values] bool writesVersioned)
+    {
+        using var dbe = SetupEngineWithGrid();
+        var near = SpawnRow(dbe, 2, SimTier.Tier0);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(55f, 55f)));
+            tx.Commit();
+        }
+
+        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(55f, 55f, 0f), SimTier.Tier1);
+
+        using var txView = dbe.CreateQuickTransaction();
+        using var view = txView.Query<TierUnit>().ToView();
+        view.WithTier(SimTier.Tier0);
+        // The system declares no tier: the view's own tier is the only narrowing, and every path must honour it (the Versioned path once ignored it).
+        var runs = RunAndRecord(dbe,
+            (dag, body) => dag.QuerySystem("ViewTier", body, input: () => view, parallel: parallel, writesVersioned: parallel && writesVersioned),
+            runs: 3);
+
+        foreach (var run in runs)
+        {
+            Assert.That(run, Is.EquivalentTo(near));
+        }
+    }
+
+    [Test]
+    [VerifiesRule("DSEL-01")]
+    public void Checkerboard_WithChangeFilter_Refused()
+    {
+        using var dbe = SetupEngineWithGrid();
+        using var tx = dbe.CreateQuickTransaction();
+        using var view = tx.Query<TierUnit>().ToView();
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var runtime = TyphonRuntime.Create(dbe, schedule =>
+            {
+                var dag = schedule.PublicTrack.DeclareDag("Test");
+                dag.QuerySystem("Bad", _ => { }, input: () => view, changeFilter: [typeof(TierPos)], parallel: true, checkerboard: true);
+            }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        });
+        Assert.That(ex?.Message, Does.Contain("change filter"));
+    }
+
+    [Test]
+    [VerifiesRule("DSEL-01")]
+    public void DisjointSystemAndViewTiers_RefusedAtConstruction()
+    {
+        using var dbe = SetupEngineWithGrid();
+        using var tx = dbe.CreateQuickTransaction();
+        using var view = tx.Query<TierUnit>().ToView();
+        view.WithTier(SimTier.Tier1);
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var runtime = TyphonRuntime.Create(dbe, schedule =>
+            {
+                var dag = schedule.PublicTrack.DeclareDag("Test");
+                dag.QuerySystem("Disjoint", _ => { }, input: () => view, parallel: true, tier: SimTier.Tier0);
+            }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+        });
+        Assert.That(ex?.Message, Does.Contain("no overlap"));
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Run-count bucket (DSEL-02)
     // ═══════════════════════════════════════════════════════════════════════

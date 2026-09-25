@@ -1,4 +1,4 @@
-﻿using JetBrains.Annotations;
+using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using System;
@@ -609,6 +609,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 }
 
                 _systemViews[i].IsSystemInput = true;
+                ThrowIfTierFiltersDisjoint(sys, _systemViews[i]);
 
                 // Resolve the cluster state for parallel cluster dispatch from THIS system's own input view. It feeds ctx.ClusterIds /
                 // ctx.StartClusterIndex / ctx.EndClusterIndex, the tier index and the checkerboard split, so binding the wrong archetype hands a system
@@ -1093,35 +1094,15 @@ public sealed partial class TyphonRuntime : IDisposable
             return PooledEntityList.Empty;
         }
 
-        var sys = Scheduler.Systems[sysIdx];
-        var effectiveTier = (SimTier)((byte)sys.TierFilter & (byte)view.TierFilter);
-        var cs = _systemClusterStates[sysIdx];
-
-        // Detect a system tier filter and a view tier filter that are mutually exclusive (e.g. system declares Tier0 and the view was created via
-        // WithTier(Tier1)). Their bit-AND is None, which would otherwise silently materialize an empty entity set.
-        if (effectiveTier == SimTier.None && sys.TierFilter != SimTier.None && view.TierFilter != SimTier.None)
+        // RT-1: materialize exactly what this run dispatches — the selection its entry point made (OnSystemStartInternal, or the parallel Prepare, whose
+        // checkerboard half it is) — never a selection of its own: a second one would rewrite the buffer the dispatch already handed out, and could rebuild
+        // the tier index from a worker (TI-01). No selection: the whole view.
+        if (_systemTierClusterIds[sysIdx] != null)
         {
-            throw new InvalidOperationException(
-                $"System '{sys.Name}': system tier filter '{sys.TierFilter}' and view tier filter '{view.TierFilter}' have no overlap. " +
-                "Their intersection is SimTier.None, which would dispatch zero entities. Make the filters compatible " +
-                "(e.g. system Tier0 + view Near, where view's tier set is a superset of the system's).");
-        }
-
-        // RT-1: the same selection the parallel path dispatches (tier ∩ cellAmortize bucket ∩ awake). A tier needs the grid its cells carry; without one the
-        // tier is not applied, as before. The view's own tier filter can narrow a system that declares none, whose archetype then has no index until a
-        // read asks for one — created and refreshed here (a version compare when tick start already rebuilt it).
-        var grid = Engine?.SpatialGrid;
-        var tier = grid != null ? effectiveTier : SimTier.All;
-        if (tier != SimTier.All && cs != null)
-        {
-            cs.TierIndex ??= new TierClusterIndex();
-            cs.TierIndex.RebuildIfStale(grid, cs);
-        }
-
-        var selected = SelectDispatchClusters(sysIdx, tier, out var selectedCount);
-        if (selected != null)
-        {
-            return BuildClusterScopedEntityList(cs, selected, selectedCount, view, WithDescendants(sys, cs, tier));
+            var sys = Scheduler.Systems[sysIdx];
+            var cs = _systemClusterStates[sysIdx];
+            return BuildClusterScopedEntityList(cs, _dispatchClusterIds[sysIdx], _dispatchClusterCount[sysIdx], view,
+                WithDescendants(sys, cs, EffectiveTier(sysIdx)));
         }
 
         var list = PooledEntityList.Rent(view.Count);
@@ -1319,6 +1300,38 @@ public sealed partial class TyphonRuntime : IDisposable
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
+    /// The tier a system runs over: its own filter AND its input view's (<see cref="ViewBase.TierFilter"/>, a materialization scope). A tier is a
+    /// property of grid cells, so without a grid it is not applied — on every path alike. A disjoint pair yields <see cref="SimTier.None"/> (nothing
+    /// dispatched): it is refused at construction (<see cref="ThrowIfTierFiltersDisjoint"/>), and the dispatch path, which must not throw, only meets it
+    /// when a view's <c>WithTier</c> changed afterwards.
+    /// </summary>
+    private SimTier EffectiveTier(int sysIdx)
+    {
+        var sys = Scheduler.Systems[sysIdx];
+        var view = _systemViews[sysIdx];
+        var tier = view == null ? sys.TierFilter : (SimTier)((byte)sys.TierFilter & (byte)view.TierFilter);
+        return Engine?.SpatialGrid == null ? SimTier.All : tier;
+    }
+
+    /// <summary>
+    /// Refuses a system tier filter and a view tier filter that are mutually exclusive (e.g. system Tier0, view <c>WithTier(Tier1)</c>): their AND is
+    /// <see cref="SimTier.None"/>, which would silently dispatch zero entities.
+    /// </summary>
+    private static void ThrowIfTierFiltersDisjoint(SystemDefinition sys, ViewBase view)
+    {
+        if (view == null || sys.TierFilter == SimTier.None || view.TierFilter == SimTier.None
+            || ((byte)sys.TierFilter & (byte)view.TierFilter) != 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"System '{sys.Name}': system tier filter '{sys.TierFilter}' and view tier filter '{view.TierFilter}' have no overlap. " +
+            "Their intersection is SimTier.None, which would dispatch zero entities. Make the filters compatible " +
+            "(e.g. system Tier0 + view Near, where view's tier set is a superset of the system's).");
+    }
+
+    /// <summary>
     /// RT-1 — the one cluster selection every QuerySystem path dispatches from: the clusters of <paramref name="tier"/> (the archetype's whole active
     /// list for <see cref="SimTier.All"/>), strided to this run's <c>cellAmortize</c> bucket, minus sleeping clusters.
     /// </summary>
@@ -1343,7 +1356,14 @@ public sealed partial class TyphonRuntime : IDisposable
         int[] ids = null;
         if (tier != SimTier.All && cs.TierIndex != null)
         {
-            var tierIds = cs.TierIndex.GetClustersArray(tier, out var tierCount);
+            // Prepared at tick start (TI-01). A multi-tier set tick start did not prepare — a view whose WithTier changed mid-tick — is merged into this
+            // system's own buffer rather than into the index's shared cache, which concurrent Prepares would otherwise fill together.
+            if (!cs.TierIndex.TryGetPreparedClusters(tier, out var tierIds, out var tierCount))
+            {
+                tierIds = EnsureSelectionBuffer(sysIdx, cs.TierIndex.CountClusters(tier));
+                tierCount = cs.TierIndex.CopyClusters(tier, tierIds);
+            }
+
             if (sys.CellAmortize > 0)
             {
                 // Stride the tier list by index, which spreads it evenly whatever the cell-key encoding (Morton or row-major). The bucket is keyed on the
@@ -1351,7 +1371,8 @@ public sealed partial class TyphonRuntime : IDisposable
                 var amortize = sys.CellAmortize;
                 var startOffset = (int)((ulong)Math.Max(0, _systemRunCount[sysIdx] - 1) % (uint)amortize);
                 var bucketCount = tierCount > startOffset ? (tierCount - startOffset + amortize - 1) / amortize : 0;
-                var buf = EnsureSelectionBuffer(sysIdx, bucketCount);
+                // In place when the tier list already is this buffer (merged just above): the write cursor never overtakes the read cursor.
+                var buf = ReferenceEquals(tierIds, _systemAmortizationBuffers[sysIdx]) ? tierIds : EnsureSelectionBuffer(sysIdx, bucketCount);
                 for (var i = startOffset; i < tierCount; i += amortize)
                 {
                     buf[count++] = tierIds[i];
@@ -1405,7 +1426,8 @@ public sealed partial class TyphonRuntime : IDisposable
         var buf = _systemAmortizationBuffers[sysIdx];
         if (buf == null || buf.Length < needed)
         {
-            buf = new int[Math.Max(16, needed)];
+            // Doubling, not an exact fit: a slowly growing active list would otherwise reallocate on every run.
+            buf = new int[Math.Max(Math.Max(16, needed), (buf?.Length ?? 0) * 2)];
             _systemAmortizationBuffers[sysIdx] = buf;
         }
 
@@ -1454,7 +1476,7 @@ public sealed partial class TyphonRuntime : IDisposable
         if (!sys.IsCheckerboard || _checkerboardPhase[sysIdx] == 0)
         {
             _systemRunCount[sysIdx]++;
-            _systemTierClusterIds[sysIdx] = SelectDispatchClusters(sysIdx, sys.TierFilter, out var selectedCount);
+            _systemTierClusterIds[sysIdx] = SelectDispatchClusters(sysIdx, EffectiveTier(sysIdx), out var selectedCount);
             _systemTierClusterCount[sysIdx] = selectedCount;
         }
 
@@ -1625,17 +1647,10 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             entityList = BuildFilteredEntitySet(sysIdx);
         }
-        else if (_systemTierClusterIds[sysIdx] != null && _systemViews[sysIdx] != null)
-        {
-            // RT-1: the clusters this dispatch covers — the selection Prepare made, or its checkerboard half — not a fresh walk of the tier: that walk
-            // skipped neither sleeping clusters nor the cellAmortize bucket, and handed a checkerboard system the whole tier in both of its phases.
-            var sys = Scheduler.Systems[sysIdx];
-            var cs = _systemClusterStates[sysIdx];
-            entityList = BuildClusterScopedEntityList(cs, _dispatchClusterIds[sysIdx], _dispatchClusterCount[sysIdx], _systemViews[sysIdx],
-                WithDescendants(sys, cs, sys.TierFilter));
-        }
         else if (_systemViews[sysIdx] != null)
         {
+            // RT-1: the clusters this dispatch covers — Prepare's selection, or its checkerboard half — not a fresh walk of the tier: that walk skipped
+            // neither sleeping clusters nor the cellAmortize bucket, and handed a checkerboard system the whole tier in both of its phases.
             entityList = BuildFullViewEntitySet(sysIdx);
         }
         else
@@ -2295,16 +2310,11 @@ public sealed partial class TyphonRuntime : IDisposable
         for (int i = 0; i < Scheduler.AllSystemCount; i++)
         {
             var sys = Scheduler.Systems[i];
-            if (sys.TierFilter == SimTier.All)
-            {
-                continue;
-            }
-
             var cs = _systemClusterStates[i];
 
             // Late-spawn recovery: if the archetype had no ClusterState at all when ResolveChangeFilters ran, _systemClusterStates[i] is null. Re-evaluate
-            // now — the state may have been created between construction and the first tick. This check runs once per tick per tier-filtered system with a
-            // null slot; the inner archetype scan is O(registered archetypes) ≈ O(10), negligible.
+            // now — the state may have been created between construction and the first tick. One registry lookup per tick per unbound QuerySystem.
+            // RT-1: for every QuerySystem, not only tier ones — the sleep filter reads the same binding.
             //
             // #662 again: this used to take the FIRST cluster-eligible archetype it found rather than the system's own view archetype — the exact defect
             // #662 fixed at the construction site, left behind in the recovery path. In any schema with more than one cluster archetype it hands the system
@@ -2320,21 +2330,30 @@ public sealed partial class TyphonRuntime : IDisposable
                     if (meta is { IsClusterEligible: true } && es?.ClusterState != null)
                     {
                         cs = es.ClusterState;
-                        cs.TierIndex ??= new TierClusterIndex();
                         _systemClusterStates[i] = cs;
                         _systemArchetypeIds[i] = viewArchetypeId;
                     }
                 }
             }
 
-            if (cs == null || cs.TierIndex == null)
+            if (cs == null || _systemViews[i] == null)
             {
                 continue;
             }
+
+            // RT-1 / TI-01: every tier a system of this tick can select — its own AND its view's — is rebuilt and prepared HERE, single-threaded. Dispatch
+            // only reads: a rebuild from a worker would zero the per-tier arrays under a parallel system walking them zero-copy. A disjoint pair is left for
+            // the dispatch path to report (EffectiveTier throws there, as it always did); the tick path itself never throws.
+            var tier = (SimTier)((byte)sys.TierFilter & (byte)_systemViews[i].TierFilter);
+            if (tier == SimTier.All || tier == SimTier.None)
+            {
+                continue;
+            }
+
+            cs.TierIndex ??= new TierClusterIndex();
             cs.TierIndex.RebuildIfStale(grid, cs);
-            // RT-1: a multi-tier filter (SimTier.Near, …) is served from a merge cache the first read of a rebuild fills. Fill it here, single-threaded,
-            // so dispatch only ever reads it: two parallel systems sharing the archetype would otherwise both fill the same entry in their Prepare.
-            cs.TierIndex.GetClustersArray(sys.TierFilter, out _);
+            // A multi-tier set (SimTier.Near, …) is served from a merge cache the first read after a rebuild fills; fill it here so dispatch never does.
+            cs.TierIndex.GetClustersArray(tier, out _);
         }
     }
 
@@ -2823,8 +2842,16 @@ public sealed partial class TyphonRuntime : IDisposable
             _systemQueryPlanStartTicks[sysIdx] = Stopwatch.GetTimestamp();
         }
 
-        // RT-1: one run of this system — the cellAmortize bucket of the selection below is keyed on it.
+        // RT-1: one run of this system, and its one selection — the cellAmortize bucket is keyed on the run count. Stored where the parallel path keeps its
+        // own, so every materialization (BuildFullViewEntitySet, the change-filter fallback) reads the same clusters.
         _systemRunCount[sysIdx]++;
+        if (_systemViews[sysIdx] != null)
+        {
+            var selected = SelectDispatchClusters(sysIdx, EffectiveTier(sysIdx), out var selectedCount);
+            _systemTierClusterIds[sysIdx] = selected;
+            _dispatchClusterIds[sysIdx] = selected;
+            _dispatchClusterCount[sysIdx] = selected != null ? selectedCount : 0;
+        }
 
         // Create a Transaction on the CALLING THREAD (worker thread).
         // This respects Transaction's single-thread affinity constraint.

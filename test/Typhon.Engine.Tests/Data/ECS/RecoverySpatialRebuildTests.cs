@@ -22,6 +22,13 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
     /// <summary>Reopen needs WAL segments that outlive an engine dispose; the base class defaults to an in-memory backend that does not.</summary>
     protected override IWalFileIO CreateWalFileIO() => new WalFileIO();
 
+    /// <summary>No periodic checkpoint: one landing between the commit and the crash would empty the replay window, and the tests would stop testing it.</summary>
+    protected override void ConfigureEngineOptions(DatabaseEngineOptions o)
+    {
+        base.ConfigureEngineOptions(o);
+        o.Resources.CheckpointIntervalMs = int.MaxValue;
+    }
+
     private const float CellSize = 100f;
     private const float WorldMax = 1000f;
 
@@ -122,6 +129,7 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
     }
 
     [Test]
+    [VerifiesRule("RB-01")]
     [CancelAfter(30_000)]
     public void HardCrashBeforeCheckpoint_SpatialQueriesSeeEveryRecoveredEntity()
     {
@@ -181,7 +189,8 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
         for (var c = 0; c < cells.Length; c++)
         {
             var (cx, cy) = cells[c];
-            Assert.That(QueryTags(reopened, cx - 20, cy - 20, cx + 20, cy + 20), Has.Count.EqualTo(positions.Count / cells.Length), $"cell {c} before the fence");
+            Assert.That(QueryTags(reopened, cx - 20, cy - 20, cx + 20, cy + 20), Has.Count.EqualTo(positions.Count / cells.Length),
+                $"cell {c} before the fence");
         }
 
         reopened.WriteTickFence(1);
@@ -190,7 +199,83 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
         for (var c = 0; c < cells.Length; c++)
         {
             var (cx, cy) = cells[c];
-            Assert.That(QueryTags(reopened, cx - 20, cy - 20, cx + 20, cy + 20), Has.Count.EqualTo(positions.Count / cells.Length), $"cell {c} after the fence");
+            Assert.That(QueryTags(reopened, cx - 20, cy - 20, cx + 20, cy + 20), Has.Count.EqualTo(positions.Count / cells.Length),
+                $"cell {c} after the fence");
         }
+    }
+
+    [Test]
+    [VerifiesRule("CC-02")]
+    [CancelAfter(30_000)]
+    public void StrayMovedBeforeTheFirstFence_IsMigratedOnce()
+    {
+        (float x, float y)[] cells = [(50f, 50f), (950f, 950f)];
+        var positions = new List<(float, float)>();
+        for (var i = 0; i < 8; i++)
+        {
+            var (cx, cy) = cells[i % cells.Length];
+            positions.Add((cx + i, cy + i));
+        }
+
+        SpawnThenCrash(positions);
+
+        using var scope = ServiceProvider.CreateScope();
+        using var reopened = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        Configure(reopened);
+        var cs = reopened._archetypeStates[ArchetypeId].ClusterState;
+        Assert.That(cs.LastRebuildForeignCellSlots, Is.GreaterThan(0), "precondition: the replay mixed cells");
+
+        // Move every entity a little, inside its own cell, before the first fence: the rebuild already filed the strays, and the detector sees the
+        // writes too. One request per slot (CR-05; Debug asserts it at Prep), and every stray still lands home.
+        var moved = new List<EntityId>();
+        using (EpochGuard.Enter(reopened.EpochManager))
+        {
+            foreach (var r in cs.QueryAabb(reopened.SpatialGrid, 0, 0, double.NegativeInfinity, WorldMax, WorldMax, double.PositiveInfinity))
+            {
+                moved.Add(r.Entity);
+            }
+        }
+
+        using (var tx = reopened.CreateQuickTransaction())
+        {
+            foreach (var e in moved)
+            {
+                ref var pos = ref tx.OpenMut(e).Write(ClMigUnit.Pos);
+                pos.Bounds = new AABB2F { MinX = pos.Bounds.MinX + 0.5f, MinY = pos.Bounds.MinY, MaxX = pos.Bounds.MaxX + 0.5f, MaxY = pos.Bounds.MaxY };
+            }
+
+            tx.Commit();
+        }
+
+        reopened.WriteTickFence(1);
+
+        Assert.That(moved, Has.Count.EqualTo(positions.Count));
+        Assert.That(CountSlotsOutsideTheirClusterCell(reopened), Is.Zero);
+        Assert.That(QueryTags(reopened, 0, 0, WorldMax, WorldMax), Has.Count.EqualTo(positions.Count), "no entity lost or duplicated by the migration");
+    }
+
+    [Test]
+    [CancelAfter(30_000)]
+    public void CleanReopen_FilesNothing()
+    {
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            Configure(dbe);
+            using var tx = dbe.CreateQuickTransaction();
+            for (var i = 0; i < 64; i++)
+            {
+                tx.Spawn<ClMigUnit>(ClMigUnit.Pos.Set(PointAt(5f + i * 15 % 990, 5f + i * 37 % 990, i)));
+            }
+
+            tx.Commit();
+        }
+
+        using var scope2 = ServiceProvider.CreateScope();
+        using var reopened = scope2.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        Configure(reopened);
+        Assert.That(reopened._archetypeStates[ArchetypeId].ClusterState.LastRebuildForeignCellSlots, Is.Zero,
+            "clusters claimed by cell hold no stray: the check must not file anything on a clean reopen");
+        Assert.That(QueryTags(reopened, 0, 0, WorldMax, WorldMax), Has.Count.EqualTo(64));
     }
 }
