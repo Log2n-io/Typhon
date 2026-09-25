@@ -89,7 +89,7 @@ public partial class DatabaseEngine
     [PublicAPI]
     public SpatialGridOccupancy GetSpatialGridOccupancy()
     {
-        var grid = _spatialGrid;
+        var grid = SpatialGrid;
         if (grid == null)
         {
             return default;

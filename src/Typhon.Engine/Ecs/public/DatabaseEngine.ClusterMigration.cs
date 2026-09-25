@@ -419,7 +419,7 @@ public partial class DatabaseEngine
             var compSlot = ss.Slot;
             var compSize = layout.ComponentSize(compSlot);
             var compOffset = layout.ComponentOffset(compSlot);
-            var grid = _spatialGrid;
+            var grid = SpatialGrid;
             var clusterCellMap = clusterState.ClusterCellMap;
             var fieldType = ss.FieldInfo.FieldType;
             var is3D = fieldType.Is3D();
@@ -806,7 +806,7 @@ public partial class DatabaseEngine
         var relocationCount = 0;
         var repairCount = 0;
 
-        var grid = _spatialGrid;
+        var grid = SpatialGrid;
         var transientMask = layout.TransientSlotMask;
         ref var ss = ref clusterState.SpatialSlot;
         var spatialCompSlot = ss.Slot;
@@ -1146,7 +1146,7 @@ public partial class DatabaseEngine
                         var dstCellKey = clusterState.ClusterCellMap[dstChunkId];
                         if (dstCellKey >= 0)
                         {
-                            _spatialGrid.CellOrigin(dstCellKey, out double dstOriginX, out double dstOriginY, out double dstOriginZ);
+                            SpatialGrid.CellOrigin(dstCellKey, out double dstOriginX, out double dstOriginY, out double dstOriginZ);
                             if (ss.FieldInfo.FieldType.Is3D())
                             {
                                 dstClusterAabb.Union3F(
