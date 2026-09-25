@@ -84,6 +84,139 @@ internal sealed class RealmTable
         }
 
         _byId = new Realm[maxRealms];
+        _state = new RealmRunState[maxRealms];
+        _divisor = new ushort[maxRealms];
+        _observers = new int[maxRealms];
+        _unobservedTicks = new int[maxRealms];
+        _wakeRequested = new byte[maxRealms];
+    }
+
+    // ── Policy (Realms D1, RT-3) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // Structure of arrays indexed by realm id, sized once with the table. Written by EvaluatePolicy at tick start, single-threaded, before any dispatch
+    // (RLM-03); read by dispatch and the fence for the rest of the tick. Observers and wake requests arrive from any thread and are only READ by the
+    // evaluation, so a change lands at the next tick start.
+    private readonly RealmRunState[] _state;
+    private readonly ushort[] _divisor;
+    private readonly int[] _observers;
+    private readonly int[] _unobservedTicks;
+    private readonly byte[] _wakeRequested;
+
+    /// <summary>Moves whenever any realm's state or divisor changes — the runnable indexes' staleness stamp.</summary>
+    internal int PolicyEpoch { get; private set; }
+
+    /// <summary>Registered realms that are not runnable this tick (<see cref="RealmRunState.Dormant"/>). Zero ⇒ nothing is filtered anywhere (RLM-04).</summary>
+    internal int NonRunnableCount { get; private set; }
+
+    /// <summary>Evaluations run — tests read it to prove the policy runs once per tick.</summary>
+    internal long EvaluationCount { get; private set; }
+
+    /// <summary>The realm's state this tick. Refuses an id that is not registered.</summary>
+    internal RealmRunState StateOf(ushort id)
+    {
+        _ = Get(id);
+        return _state[id];
+    }
+
+    /// <summary>True when <paramref name="id"/>'s clusters are dispatched this tick. Hot path: one byte load, no registration check.</summary>
+    internal bool IsRunnable(ushort id) => _state[id] != RealmRunState.Dormant;
+
+    /// <summary>The realm's rate divisor this tick: 1 when observed, its <see cref="RealmConfig.UnobservedTickDivisor"/> otherwise.</summary>
+    internal int DivisorOf(ushort id) => _divisor[id];
+
+    /// <summary>A session or an application pin starts observing <paramref name="id"/>. Any thread; takes effect at the next tick start.</summary>
+    internal void AddObserver(ushort id)
+    {
+        _ = Get(id);
+        Interlocked.Increment(ref _observers[id]);
+    }
+
+    /// <summary>An observer of <paramref name="id"/> leaves. Any thread; takes effect at the next tick start.</summary>
+    internal void RemoveObserver(ushort id)
+    {
+        if (Interlocked.Decrement(ref _observers[id]) < 0)
+        {
+            Interlocked.Increment(ref _observers[id]);
+            throw new InvalidOperationException($"Realm {id}: an observer was removed that was never added.");
+        }
+    }
+
+    /// <summary>Requests that <paramref name="id"/> be simulated from the next tick on, restarting its sleep hold. Any thread.</summary>
+    internal void RequestWake(ushort id) => Volatile.Write(ref _wakeRequested[id], 1);
+
+    /// <summary>
+    /// Decides every registered realm's state and divisor for the tick about to run. Tick start only, single-threaded, before any dispatch (RLM-03).
+    /// </summary>
+    /// <remarks>
+    /// Observed ⇒ <see cref="RealmRunState.Active"/> at divisor 1. Unobserved: a wake request restarts the hold; a <see cref="RealmUnobserved.Sleep"/>
+    /// realm unobserved for more than <see cref="RealmConfig.SleepAfterTicks"/> ticks is <see cref="RealmRunState.Dormant"/>; anything else is
+    /// <see cref="RealmRunState.Simulated"/> at its <see cref="RealmConfig.UnobservedTickDivisor"/>. O(registered realms), no allocation.
+    /// </remarks>
+    internal void EvaluatePolicy()
+    {
+        EvaluationCount++;
+        var changed = false;
+        var nonRunnable = 0;
+        foreach (var realm in Registered)
+        {
+            var id = realm.Id.Value;
+            var config = realm.Config;
+            RealmRunState next;
+            ushort divisor;
+            if (Volatile.Read(ref _observers[id]) > 0)
+            {
+                next = RealmRunState.Active;
+                divisor = 1;
+                _unobservedTicks[id] = 0;
+                if (_wakeRequested[id] != 0)
+                {
+                    Volatile.Write(ref _wakeRequested[id], 0);
+                }
+            }
+            else
+            {
+                if (Volatile.Read(ref _wakeRequested[id]) != 0)
+                {
+                    Volatile.Write(ref _wakeRequested[id], 0);
+                    _unobservedTicks[id] = 0;
+                }
+                else if (_unobservedTicks[id] < int.MaxValue)
+                {
+                    _unobservedTicks[id]++;
+                }
+
+                if (config == null)
+                {
+                    next = RealmRunState.Simulated;
+                    divisor = 1;
+                }
+                else if (config.WhenUnobserved == RealmUnobserved.Sleep && _unobservedTicks[id] > config.SleepAfterTicks)
+                {
+                    next = RealmRunState.Dormant;
+                    divisor = 1;
+                }
+                else
+                {
+                    next = RealmRunState.Simulated;
+                    divisor = (ushort)Math.Min(config.UnobservedTickDivisor, ushort.MaxValue);
+                }
+            }
+
+            if (next != _state[id] || divisor != _divisor[id])
+            {
+                _state[id] = next;
+                _divisor[id] = divisor;
+                changed = true;
+            }
+
+            nonRunnable += next == RealmRunState.Dormant ? 1 : 0;
+        }
+
+        NonRunnableCount = nonRunnable;
+        if (changed)
+        {
+            PolicyEpoch++;
+        }
     }
 
     /// <summary>Bumped by every registered grid whenever a cell's tier changes — the tier index's engine-wide staleness stamp.</summary>
@@ -197,6 +330,11 @@ internal sealed class RealmTable
             }
 
             registered[_registeredCount] = realm;
+
+            // Simulated at full rate until the first evaluation decides otherwise: a Sleep realm holds SleepAfterTicks before it goes dormant.
+            _state[id.Value] = RealmRunState.Simulated;
+            _divisor[id.Value] = 1;
+            _unobservedTicks[id.Value] = 0;
             Volatile.Write(ref _byId[id.Value], realm);
             Volatile.Write(ref _registered, registered);
             Volatile.Write(ref _registeredCount, _registeredCount + 1);

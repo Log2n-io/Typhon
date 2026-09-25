@@ -41,6 +41,9 @@ internal sealed class TierClusterIndex
     private int _lastGridTierVersion = -1;
     private int _lastClusterSetVersion = -1;
 
+    // Realms D1: the runnable-set stamp (RealmDispatchIndex.Stamp) at the last rebuild; clusters of non-runnable realms are left out of every tier list.
+    private int _lastDispatchStamp = -1;
+
     // Telemetry — incremented each time a full rebuild runs. Tests read this to assert the version-skip fast path works.
     internal int RebuildCount { get; private set; }
 
@@ -90,10 +93,18 @@ internal sealed class TierClusterIndex
             // CLUSTERWALK-02: count first, then the array, through the one reader. Loading the array first — which this did — pairs an old array with a
             // count a concurrent spawn has already grown past.
             var activeIds = state.ReadActiveClusterList(out var active);
+            var dispatch = state.RealmDispatch;
+            var excludeDormant = dispatch is { Filtering: true };
             for (int i = 0; i < active; i++)
             {
                 int chunkId = activeIds[i];
                 if (cellMap == null || chunkId >= cellMap.Length)
+                {
+                    continue;
+                }
+
+                // Realms D1: a cluster of a non-runnable realm is in no tier list, so no tier system dispatches it.
+                if (excludeDormant && dispatch.IsExcluded(chunkId))
                 {
                     continue;
                 }
@@ -146,6 +157,7 @@ internal sealed class TierClusterIndex
 
             _lastGridTierVersion = tierVersion;
             _lastClusterSetVersion = versionAtWalk;
+            _lastDispatchStamp = dispatch?.Stamp ?? -1;
             RebuildCount++;
 
             // Sum cluster counts across all tiers for the span payload.
@@ -171,7 +183,8 @@ internal sealed class TierClusterIndex
     /// last rebuild. In steady state this is two int compares — effectively free.</summary>
     public void RebuildIfStale(ArchetypeClusterState state, int tierVersion)
     {
-        if (tierVersion == _lastGridTierVersion && state.ClusterSetVersion == _lastClusterSetVersion)
+        if (tierVersion == _lastGridTierVersion && state.ClusterSetVersion == _lastClusterSetVersion
+            && (state.RealmDispatch?.Stamp ?? -1) == _lastDispatchStamp)
         {
             // Phase 3: Spatial:TierIndex:VersionSkip instant — fast path, no rebuild needed.
             // reason: 0=both unchanged, 1=grid only, 2=cluster set only (here both unchanged).

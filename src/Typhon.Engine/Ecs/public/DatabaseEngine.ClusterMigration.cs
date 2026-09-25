@@ -1333,6 +1333,10 @@ public partial class DatabaseEngine
                 if (srcRealmSpatial.Realm.Value != req.DestRealm)
                 {
                     clusterState.RecordRealmChange(entityPK, srcRealmSpatial.Realm.Value, req.DestRealm);
+
+                    // Realms D3 (RT-5): an entry wakes the realm from the next tick on — a dormant interior a player walks into runs again. A byte store,
+                    // from a parallel Migrate slice; the tick-start evaluation reads it.
+                    _realms.RequestWake(req.DestRealm);
                 }
                 if (hasClusterAccessor)
                 {

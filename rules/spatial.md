@@ -2305,3 +2305,31 @@
   verified: RecoveryRealmTests (interleaved spawns replayed after a crash are split at the first fence; a committed, never-fenced teleport moves at
     the first fence after reopen; an invalid key in the file is rewritten at rebuild)
   on_violation: after a crash, entities answer the wrong realm's queries, or a cluster's box spans two worlds' coordinates
+
+## Module: Realms — policy and dispatch (Realms D)
+
+### RLM-03: A realm's policy is decided once per tick, at tick start, before any dispatch `[fatal][silent]`
+  invariant RealmTable.EvaluatePolicy runs once per tick on the tick thread, before the per-archetype runnable sets and the tier indexes are rebuilt
+    and before any system is dispatched; every dispatch, scan and fence stage of the tick reads the state it decided
+  invariant observed (a session or an application pin) ⇒ Active at divisor 1; unobserved ⇒ Simulated at the realm's UnobservedTickDivisor, except a
+    Sleep realm unobserved for more than SleepAfterTicks evaluations, which is Dormant; an entry (a cross-realm migration) or Wake restarts the hold
+  invariant observers and wake requests arrive from any thread and take effect at the next evaluation — never mid-tick
+  never re-evaluate from a worker, or between two systems of one tick: two systems of the tick would dispatch different realm sets, and a tier index
+    rebuilt mid-dispatch zeroes the arrays a parallel system is walking (TI-01)
+  scope: RealmTable.EvaluatePolicy, TyphonRuntime.UpdateRealmPolicyAtTickStart, RealmDispatchIndex.Update
+  verified: RealmPolicyTests (a Sleep realm runs for its hold, then its clusters reach no system; the hold counts evaluations; an entry wakes it
+    at the next evaluation, not at the fence)
+  on_violation: a realm half-dispatched within one tick, or a dormant realm's entities integrated by one system and not the next
+
+### RLM-04: With every realm runnable, dispatch is the pre-realm path; a dormant realm's clusters reach no QuerySystem on any path `[fatal][silent]`
+  invariant NonRunnableCount == 0 ⇒ no runnable index filters (RealmDispatchIndex.Filtering false) and every selection is what it was before realms —
+    the one-realm and all-awake cost is one branch per tick
+  invariant a Dormant realm's clusters are in no selection (parallel or not, whole-archetype or tier), in no tier list, and in no change-filtered
+    delivery; CallbackSystems are not realm-filtered (they choose with realm-scoped queries)
+  never filter by realm with a per-system copy of the active list every tick: the runnable set is rebuilt at tick start only when the policy or the
+    cluster set changed
+  scope: TyphonRuntime.SelectDispatchClusters, TierClusterIndex.Rebuild, TyphonRuntime.ScanClusterDirtyEntities, TyphonRuntime.ScanClusterDirtyEntitiesIntoSet
+  verified: RealmPolicyTests.DormantRealm_ZeroClustersDispatched (parallel, non-parallel, tier) and ChangeFilter_DirtyInDormantRealm_NotDelivered —
+    disabling the selection or the scan filter reddens them (run by hand 2026-09-26); Observer_KeepsTheRealmActive (no index ever built)
+  on_violation: dormant interiors simulated anyway (the cost realms exist to remove), or changes delivered for entities no system runs
+

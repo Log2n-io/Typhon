@@ -56,6 +56,30 @@ public sealed class RealmRegistry
     /// <summary>True when <paramref name="id"/> is registered (pending registrations count before <c>InitializeArchetypes</c>).</summary>
     public bool IsRegistered(RealmId id) => _engine.RealmTable?.IsRegistered(id.Value) ?? _pending.ContainsKey(id.Value);
 
+    /// <summary>
+    /// Pins realm <paramref name="id"/> active — observed, simulated at full rate — from the next tick on, until the returned handle is disposed. For an
+    /// application with no session in the realm (a headless server, a benchmark, a test); sessions observe through replication.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">Before <c>InitializeArchetypes</c>, or <paramref name="id"/> is not registered.</exception>
+    public RealmObserver Observe(RealmId id) => new(OpenTable(), id);
+
+    /// <summary>
+    /// Wakes realm <paramref name="id"/>: simulated from the next tick on, and a <see cref="RealmUnobserved.Sleep"/> realm holds for its
+    /// <see cref="RealmConfig.SleepAfterTicks"/> again before it may go dormant. Any thread.
+    /// </summary>
+    public void Wake(RealmId id)
+    {
+        var table = OpenTable();
+        _ = table.Get(id.Value);
+        table.RequestWake(id.Value);
+    }
+
+    /// <summary>What realm <paramref name="id"/> is doing this tick, as its policy decided at tick start.</summary>
+    public RealmRunState StateOf(RealmId id) => OpenTable().StateOf(id.Value);
+
+    private RealmTable OpenTable() => _engine.RealmTable
+        ?? throw new InvalidOperationException("Realms are observed, woken and inspected after InitializeArchetypes, once the realm table exists.");
+
     /// <summary>The registrations made before <c>InitializeArchetypes</c>, which builds the realm table from them.</summary>
     internal IReadOnlyDictionary<ushort, RealmConfig> Pending => _pending;
 }

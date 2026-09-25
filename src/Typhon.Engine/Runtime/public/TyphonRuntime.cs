@@ -919,10 +919,13 @@ public sealed partial class TyphonRuntime : IDisposable
                 {
                     // RT-1: sleeping clusters are skipped on this branch too, as on the tier branch above (issue #233) and on every other dispatch path.
                     var sleepStates = cs.SleepingClusterCount > 0 ? cs.SleepStates : null;
+                    // Realms D1: and so are the clusters of dormant realms — a change there reaches no system until the realm runs again.
+                    var dormant = cs.RealmDispatch is { Filtering: true } dispatch ? dispatch : null;
                     for (int wordIdx = 0; wordIdx < snapshot.Length; wordIdx++)
                     {
                         long word = snapshot[wordIdx];
-                        if (word == 0 || (sleepStates != null && wordIdx < sleepStates.Length && sleepStates[wordIdx] == ClusterSleepState.Sleeping))
+                        if (word == 0 || (sleepStates != null && wordIdx < sleepStates.Length && sleepStates[wordIdx] == ClusterSleepState.Sleeping)
+                            || (dormant != null && dormant.IsExcluded(wordIdx)))
                         {
                             continue;
                         }
@@ -1033,12 +1036,14 @@ public sealed partial class TyphonRuntime : IDisposable
             var clusterAccessor = cs.ClusterSegment.CreateChunkAccessor();
             try
             {
-                // RT-1: sleeping clusters are skipped, as on every other dispatch path (issue #233).
+                // RT-1: sleeping clusters are skipped, as on every other dispatch path (issue #233) — and, Realms D1, those of dormant realms.
                 var sleepStates = cs.SleepingClusterCount > 0 ? cs.SleepStates : null;
+                var dormant = cs.RealmDispatch is { Filtering: true } dispatch ? dispatch : null;
                 for (int wordIdx = 0; wordIdx < snapshot.Length; wordIdx++)
                 {
                     long word = snapshot[wordIdx];
-                    if (word == 0 || (sleepStates != null && wordIdx < sleepStates.Length && sleepStates[wordIdx] == ClusterSleepState.Sleeping))
+                    if (word == 0 || (sleepStates != null && wordIdx < sleepStates.Length && sleepStates[wordIdx] == ClusterSleepState.Sleeping)
+                        || (dormant != null && dormant.IsExcluded(wordIdx)))
                     {
                         continue;
                     }
@@ -1385,6 +1390,14 @@ public sealed partial class TyphonRuntime : IDisposable
                 ids = tierIds;
                 count = tierCount;
             }
+        }
+
+        // Realms D1: a system nothing else narrowed selects its archetype's runnable clusters — zero-copy, the index is rebuilt only at tick start. The tier
+        // lists above already leave dormant realms out. Filtering false (one realm, or none dormant) keeps the pre-realm path (RLM-04).
+        if (ids == null && tier == SimTier.All && cs.RealmDispatch is { Filtering: true } dispatch)
+        {
+            ids = dispatch.Ids;
+            count = dispatch.Count;
         }
 
         // Issue #233: sleeping clusters leave the selection. A system nothing else narrowed is "promoted" to a filtered copy of its archetype's active
@@ -2207,6 +2220,10 @@ public sealed partial class TyphonRuntime : IDisposable
         // read the view's entity set, and a set refreshed after them is a set the tier index does not know about.
         RefreshSystemInputViewsAtTickStart();
 
+        // Realms D1 (RLM-03): every realm's state and divisor for this tick, decided once, here, before anything is dispatched — then the per-archetype
+        // runnable sets the tier indexes and the dispatch below read.
+        UpdateRealmPolicyAtTickStart();
+
         // Rebuild per-archetype tier indexes ONCE per tick on the scheduler thread, before any parallel system dispatch. This eliminates the race where
         // multiple worker threads concurrently invoking OnParallelQueryPrepare for different systems on the same archetype would corrupt shared
         // TierClusterIndex buffers. After this point, every reader (parallel prepare callbacks, change-filter scans, view materialization) only READS the tier
@@ -2297,6 +2314,45 @@ public sealed partial class TyphonRuntime : IDisposable
             tx?.Dispose();
         }
     }
+
+    /// <summary>
+    /// Realms D1 (RT-3): evaluate the realm policy, then bring every spatial archetype's runnable set (<see cref="RealmDispatchIndex"/>) up to date. With
+    /// every realm runnable — one realm, or none dormant — the walk only clears indexes that were filtering, and is skipped outright once none is.
+    /// </summary>
+    private void UpdateRealmPolicyAtTickStart()
+    {
+        var realms = Engine?.RealmTable;
+        if (realms == null)
+        {
+            return;
+        }
+
+        realms.EvaluatePolicy();
+        if (realms.NonRunnableCount == 0 && !_realmFilteringActive)
+        {
+            return;
+        }
+
+        var filtering = false;
+        var states = Engine._archetypeStates;
+        for (var i = 0; i < states.Length; i++)
+        {
+            var cs = states[i]?.ClusterState;
+            if (cs?.ClusterRealmMap == null)
+            {
+                continue;
+            }
+
+            cs.RealmDispatch ??= new RealmDispatchIndex();
+            cs.RealmDispatch.Update(cs, realms);
+            filtering |= cs.RealmDispatch.Filtering;
+        }
+
+        _realmFilteringActive = filtering;
+    }
+
+    // True while some archetype's runnable set filters: the tick-start walk must then run even once every realm is runnable again, to clear it.
+    private bool _realmFilteringActive;
 
     /// <summary>
     /// Walk every system that declares a tier filter, and rebuild the per-archetype <see cref="TierClusterIndex"/> once per tick on the scheduler thread.

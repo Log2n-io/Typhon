@@ -3418,6 +3418,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// tier-filtered system runs against this archetype. Subsequent rebuilds are version-guarded and usually no-ops.</summary>
     internal TierClusterIndex TierIndex;
 
+    /// <summary>
+    /// Realms D1: this archetype's active clusters in runnable realms, rebuilt at tick start by the runtime. Null until the runtime first needs it, and for
+    /// an archetype without spatial realms; <see cref="RealmDispatchIndex.Filtering"/> false means nothing is filtered.
+    /// </summary>
+    internal RealmDispatchIndex RealmDispatch;
+
     // ═══════════════════════════════════════════════════════════════════════
     // Issue #233: Cluster dormancy state. Per-cluster sleep tracking for
     // skipping idle clusters during dispatch. Null arrays = dormancy not
