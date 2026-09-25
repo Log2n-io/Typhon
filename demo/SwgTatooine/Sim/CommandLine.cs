@@ -36,6 +36,29 @@ public static class CommandLine
         {
             throw new ArgumentException($"--planets takes 1 or more, not {c.Planets}");
         }
+
+        c.Interiors = Array.IndexOf(args, "--interiors") >= 0;
+        c.InteriorNpcs = Int(args, "--interior-npcs", c.InteriorNpcs);
+        c.InteriorShare = Float(args, "--interior-share", c.InteriorShare);
+        c.InteriorStayS = Float(args, "--interior-stay", c.InteriorStayS);
+        c.InterPlanetShare = Float(args, "--interplanet-share", c.InterPlanetShare);
+        if (!(c.InteriorStayS > 0f) || c.InterPlanetShare is < 0f or > 1f)
+        {
+            throw new ArgumentException($"--interior-stay takes a positive value and --interplanet-share one in [0, 1], not {c.InteriorStayS} / "
+                + $"{c.InterPlanetShare}");
+        }
+
+        c.Space = Array.IndexOf(args, "--space") >= 0;
+        c.Starships = Int(args, "--starships", c.Starships);
+        if (c.Starships < 0)
+        {
+            throw new ArgumentException($"--starships takes 0 or more, not {c.Starships}");
+        }
+
+        if (c.InteriorNpcs < 0 || c.InteriorShare is < 0f or > 1f)
+        {
+            throw new ArgumentException($"--interior-npcs takes 0 or more and --interior-share a value in [0, 1], not {c.InteriorNpcs} / {c.InteriorShare}");
+        }
         c.ShuttleBurst = Array.IndexOf(args, "--shuttle-burst") >= 0;
         c.Probe = Array.IndexOf(args, "--probe") >= 0;
         c.WorkProbe = Array.IndexOf(args, "--work-probe") >= 0;

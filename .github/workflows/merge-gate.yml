@@ -145,6 +145,9 @@ jobs:
               - 'test/Typhon.Shell.Tests.SchemaFixture/**'
               - 'test/Typhon.Samples.Swg.Tests/**'
               - 'demo/AntHill/**'
+              # The SWG demo's realm checks (Realms G1d) build the demo itself.
+              - 'demo/SwgTatooine/**'
+              - 'demo/SwgTatooine.Tests/**'
               # Typhon.Shell.Tests reaches the Workbench through its own references — surfaced by the closure check,
               # not by reading the csproj.
               - 'tools/Typhon.Workbench/**'
@@ -775,7 +778,7 @@ jobs:
 
       # One step, all five: a per-project step would stop at the first failure and hide the rest, and the whole
       # point is to learn the state of suites nobody has run. `rc` accumulates so every project reports.
-      - name: Test — analyzers, generators, protocol, shell, samples, websocket adapter, anthill harness
+      - name: Test — analyzers, generators, protocol, shell, samples, websocket adapter, anthill harness, swg realms
         run: |
           set -uo pipefail
           rc=0
@@ -786,7 +789,7 @@ jobs:
             test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj \
             test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj \
             test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj \
-            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj ; do
+            demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj             demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj ; do
             name=$(basename "$proj" .csproj)
             echo "::group::${name}"
             # Same category exclusion the gate's other suites apply, so "excluded from the gate" has one meaning.

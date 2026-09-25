@@ -279,6 +279,13 @@ Useful flags:
 | `--promote <n>` / `--tightness <r>` | off / 1 | Turn per-cell R-tree promotion on |
 | `--no-shuttles` | shuttles on | Drop the shuttle systems and the mass-arrival traffic they produce |
 | `--planets N` | 1 | Realms: N planets, each a realm with the same grid; planet 0 is Tatooine, a further one its twin (same map, own seed). Every entity carries a realm key and every query is scoped to its cluster's realm |
+| `--interiors` | off | Every enterable city building of every planet is a one-cell realm (64 m) with a portal pair and NPCs inside; players walk in and out through the serial Teleport system |
+| `--interior-npcs N` | 3 | NPCs standing in each interior |
+| `--interior-share F` | 0.25 | Share of in-city idle decisions that walk into a building |
+| `--interior-stay S` | 30 | Shortest stay inside, seconds; a stay lasts 1–4× this |
+| `--interplanet-share F` | 0.2 | With `--planets` ≥ 2, share of shuttle boardings bound for the same city on another planet (a realm change) |
+| `--space` | off | A space realm after the interiors: a deep 3D grid (16 km cube, 500 m cells) of AI starships with f64 bounds, flying waypoints and scanning 1 km around them |
+| `--starships N` | 250 | Starships at population scale 1 |
 | `--tick-log <path>` | — | Every measured tick's duration, one per line |
 | `--seed <n>` | fixed | Every random decision, so two runs build the same world |
 

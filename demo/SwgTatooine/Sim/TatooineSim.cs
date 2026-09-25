@@ -46,6 +46,12 @@ public sealed partial class TatooineSim : IDisposable
     /// <summary>Planet 0's index — the single world's.</summary>
     public WorldIndex Index => Indexes[0];
 
+    /// <summary>Interior realms per planet (Realms G1b): the enterable city buildings, 0 without <c>--interiors</c>.</summary>
+    public int InteriorsPerPlanet { get; private set; }
+
+    /// <summary>The space realm (Realms G1c), after the planets and the interiors; -1 without <c>--space</c>.</summary>
+    public int SpaceRealm { get; private set; } = -1;
+
     public TatooineSim(SimConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -134,6 +140,9 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<NpcRealm>();
         Dbe.RegisterComponentFromAccessor<CreatureRealm>();
         Dbe.RegisterComponentFromAccessor<PlayerRealm>();
+        Dbe.RegisterComponentFromAccessor<ShipPlacement>();
+        Dbe.RegisterComponentFromAccessor<ShipMotion>();
+        Dbe.RegisterComponentFromAccessor<ShipRealm>();
 
         // SWG's coordinates are centred on the planet: -8192..+8192 on each axis at the real size. Keeping the origin in
         // the middle rather than at a corner is not cosmetic — every authentic coordinate in the map data is expressed
@@ -155,16 +164,36 @@ public sealed partial class TatooineSim : IDisposable
             batchSpawnSortThreshold: _config.BatchSpawnSortThreshold);
 
         // Realms (G1): planet 0 is realm 0, configured as the single world always was; every further planet is a realm of its own with the same grid,
-        // simulated always (per-realm policy is G2's). Explicit count, never derived.
-        if (_config.Planets > 1)
+        // simulated always (per-realm policy is G2's). With --interiors, every enterable city building of every planet is a one-cell realm after the
+        // planets: portal j of planet p is realm Planets + p·N + j. The map is built first because it fixes N, and realms are registered at open.
+        Map = TatooineMap.Build(_config);
+        InteriorsPerPlanet = _config.Interiors ? WorldBuilder.CountEnterable(Map) : 0;
+        var realms = _config.Planets * (1 + InteriorsPerPlanet);
+        SpaceRealm = _config.Space ? realms++ : -1;
+        if (realms > 1)
         {
-            Dbe.ConfigureRealms(_config.Planets);
+            Dbe.ConfigureRealms(realms);
         }
 
         Dbe.ConfigureSpatialGrid(planetGrid);
         for (var planet = 1; planet < _config.Planets; planet++)
         {
             Dbe.Realms.Register(new RealmId((ushort)planet), RealmConfig.SimulatedAlways(planetGrid));
+        }
+
+        var interiorGrid = RealmConfig.SimulatedAlways(SpatialGridConfig.Flat(Vector2.Zero,
+            new Vector2(WorldBuilder.InteriorEdgeM, WorldBuilder.InteriorEdgeM), WorldBuilder.InteriorEdgeM));
+        for (var realm = _config.Planets; realm < _config.Planets * (1 + InteriorsPerPlanet); realm++)
+        {
+            Dbe.Realms.Register(new RealmId((ushort)realm), interiorGrid);
+        }
+
+        // Space (G1c): the last realm, a deep grid — a 16 km cube in 500 m cells, 32 deep — for the f64 starships.
+        if (SpaceRealm >= 0)
+        {
+            var edge = WorldBuilder.SpaceEdgeM * 0.5;
+            Dbe.Realms.Register(new RealmId((ushort)SpaceRealm),
+                RealmConfig.SimulatedAlways(new SpatialGridConfig(new Vector3D(-edge, -edge, -edge), new Vector3D(edge, edge, edge), 500d)));
         }
 
         Dbe.InitializeArchetypes();
@@ -193,6 +222,7 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.SetSpatialBarrierOnly<CityNpc>();
         Dbe.SetSpatialBarrierOnly<Creature>();
         Dbe.SetSpatialBarrierOnly<Player>();
+        Dbe.SetSpatialBarrierOnly<Starship>();
 
         // Cluster dormancy, off unless asked for (--dormancy N). It is applied to the populations that can genuinely go quiet and NOT to Player: a
         // player's cluster sleeping would stop dispatching the system that integrates its position, and a session's own avatar is the one entity whose
@@ -205,13 +235,22 @@ public sealed partial class TatooineSim : IDisposable
             Dbe.SetClusterDormancy<CreatureLair>(_config.DormancyTicks);
         }
 
-        Map = TatooineMap.Build(_config);
         Indexes = new WorldIndex[_config.Planets];
         for (var planet = 0; planet < _config.Planets; planet++)
         {
             Indexes[planet] = new WorldIndex();
             var census = WorldBuilder.Populate(Dbe, Map, _config, Indexes[planet], (ushort)planet);
+            if (InteriorsPerPlanet > 0)
+            {
+                WorldBuilder.PopulateInteriors(Dbe, _config, Indexes[planet], _config.Planets + (planet * InteriorsPerPlanet), census);
+            }
+
             Census = planet == 0 ? census : Census.Plus(census);
+        }
+
+        if (SpaceRealm >= 0)
+        {
+            Census.Starships = WorldBuilder.PopulateSpace(Dbe, _config, (ushort)SpaceRealm);
         }
     }
 
@@ -221,6 +260,7 @@ public sealed partial class TatooineSim : IDisposable
         _playerView?.Dispose();
         _creatureView?.Dispose();
         _npcView?.Dispose();
+        _shipView?.Dispose();
         _lairView?.Dispose();
         _structureView?.Dispose();
         _viewTx?.Dispose();

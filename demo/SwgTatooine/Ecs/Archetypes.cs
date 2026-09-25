@@ -90,6 +90,17 @@ public partial class CityNpc : Archetype<CityNpc>
 }
 
 /// <summary>
+/// An AI starship in the space realm (Realms G1c): the one deep-3D, f64 archetype. Not replicated yet (F1).
+/// </summary>
+[Archetype(1, "Starships", ClusterDurability = ClusterDurability.Checkpoint)]
+public partial class Starship : Archetype<Starship>
+{
+    public static readonly Comp<ShipPlacement> Bounds = Register<ShipPlacement>();
+    public static readonly Comp<ShipMotion> Move = Register<ShipMotion>();
+    public static readonly Comp<ShipRealm> Realm = Register<ShipRealm>();
+}
+
+/// <summary>
 /// A player character. The smallest population and the most expensive one: players move every tick, and every player is
 /// the centre of an awareness query that has to find everything around it.
 /// </summary>

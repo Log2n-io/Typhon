@@ -44,6 +44,7 @@
         "test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj",
         "test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj",
         "demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj",
+        "demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj",
         "test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj"
       ],
       "runs_via": "merge-gate.yml (free runner)"

@@ -348,6 +348,7 @@ public sealed partial class SimBridge
             var states = cluster.GetSpan(Player.State);
             var motions = cluster.GetSpan(Player.Move);
             var chunk = cluster.ChunkId;
+            var realm = cluster.Realm.Value;
 
             // Explicit replication (ADR-067): the players whose replicated activity this pass changes. Positions are pushed by WriteSpatial.
             var pushSlots = 0UL;
@@ -365,7 +366,8 @@ public sealed partial class SimBridge
                 if (state.ActivityTicks > 0)
                 {
                     state.ActivityTicks--;
-                    if (state.Activity is PlayerActivity.Travelling or PlayerActivity.Roaming or PlayerActivity.Combat or PlayerActivity.ToShuttle)
+                    if (state.Activity is PlayerActivity.Travelling or PlayerActivity.Roaming or PlayerActivity.Combat or PlayerActivity.ToShuttle
+                        or PlayerActivity.ToPortal)
                     {
                         var dx = move.DestX - x;
                         var dz = move.DestZ - z;
@@ -382,6 +384,13 @@ public sealed partial class SimBridge
                                 state.ActivityTicks = ShuttleWaitTicks;
                                 pushSlots |= 1UL << idx;
                             }
+                            else if (state.Activity == PlayerActivity.ToPortal)
+                            {
+                                // At the door: queue the crossing, which TeleportSystem applies next tick. Standing still until then, so Move
+                                // writes nothing that the teleport would overwrite.
+                                EnterPortal(ref state, cluster.GetEntityId(idx), realm, places[idx].HalfExtent, Salt(tick, chunk, idx, 0x0D1CE5A7u));
+                                pushSlots |= 1UL << idx;
+                            }
                             else if (state.Activity != PlayerActivity.Combat)
                             {
                                 state.ActivityTicks = 0;
@@ -396,8 +405,21 @@ public sealed partial class SimBridge
                     continue;
                 }
 
+                if (realm >= _config.Planets)
+                {
+                    // In an interior and done there: out through the door it came in by.
+                    ExitInterior(ref state, ref move, cluster.GetEntityId(idx), realm, places[idx].HalfExtent, Salt(tick, chunk, idx, 0x3A0B7C11u));
+                    pushSlots |= 1UL << idx;
+                    continue;
+                }
+
                 var roll = Hash01(Salt(tick, chunk, idx, 0xC2B2AE35u));
-                if (roll < 0.40f)
+                if (roll < 0.40f
+                    && TryWalkToPortal(ref state, ref move, x, z, realm, Salt(tick, chunk, idx, 0x7F4A7C15u), Salt(tick, chunk, idx, 0x2C1B3C6Du)))
+                {
+                    // Into a building (Realms G1b): walking to its door, where the crossing is queued.
+                }
+                else if (roll < 0.40f)
                 {
                     // Idle in a city. Stationary, so free to the fence — and still expensive to every awareness query.
                     state.Activity = PlayerActivity.Idle;
@@ -406,7 +428,7 @@ public sealed partial class SimBridge
                     move.VelZ = 0f;
                 }
                 else if (roll < 0.60f
-                         && TryTakeShuttle(ref state, ref move, x, z, Salt(tick, chunk, idx, 0x3C6EF372u), Salt(tick, chunk, idx, 0x165667B1u)))
+                         && TryTakeShuttle(ref state, ref move, x, z, realm, Salt(tick, chunk, idx, 0x3C6EF372u), Salt(tick, chunk, idx, 0x165667B1u)))
                 {
                     // Taking the shuttle (#910): walking to this city's port, where the Shuttle system will board it.
                 }

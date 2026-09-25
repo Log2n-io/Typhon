@@ -13,6 +13,7 @@ public sealed partial class TatooineSim
     private EcsView<Player> _playerView;
     private EcsView<Creature> _creatureView;
     private EcsView<CityNpc> _npcView;
+    private EcsView<Starship> _shipView;
     private EcsView<CreatureLair> _lairView;
     private EcsView<WorldObject> _structureView;
     private Transaction _viewTx;
@@ -44,15 +45,19 @@ public sealed partial class TatooineSim
         _playerView = _viewTx.Query<Player>().ToView();
         _creatureView = _viewTx.Query<Creature>().ToView();
         _npcView = _viewTx.Query<CityNpc>().ToView();
+        _shipView = SpaceRealm >= 0 ? _viewTx.Query<Starship>().ToView() : null;
         _lairView = _viewTx.Query<CreatureLair>().ToView();
         _structureView = _viewTx.Query<WorldObject>().ToView();
 
         _bridge = new SimBridge(_config, Map, Index)
         {
             Dbe = Dbe,
+            PlanetIndexes = Indexes,
+            InteriorsPerPlanet = InteriorsPerPlanet,
             PlayerView = _playerView,
             CreatureView = _creatureView,
             NpcView = _npcView,
+            ShipView = _shipView,
             LairView = _lairView,
             StructureView = _structureView,
         };
@@ -114,6 +119,15 @@ public sealed partial class TatooineSim
 
     /// <summary>What the shuttles did and, with <c>--probe</c>, what their arrivals cost the ports' queries (#910).</summary>
     public void PrintShuttleReport() => _bridge?.PrintShuttleReport();
+
+    /// <summary>What the portals did (Realms G1b).</summary>
+    public void PrintPortalReport() => _bridge?.PrintPortalReport();
+
+    /// <summary>Crossings over the run: into interiors, out of them, between planets (Realms G1b).</summary>
+    public (long Entries, long Exits, long InterPlanet) CrossingTotals => _bridge?.CrossingTotals ?? default;
+
+    /// <summary>What the starships did (Realms G1c).</summary>
+    public void PrintSpaceReport() => _bridge?.PrintSpaceReport();
 
     /// <summary>The fence's per-archetype drift and repair counters, as per-tick means over the measured window.</summary>
     public void PrintSpatialTelemetry() => _bridge?.PrintSpatialTelemetry();
@@ -352,6 +366,12 @@ public sealed partial class TatooineSim
             dag.Add(new ShuttleProbeSystem(_bridge));
         }
 
+        // Portal crossings, and with several planets the shuttles bound for another one: both are realm changes.
+        if (InteriorsPerPlanet > 0 || (_config.Planets > 1 && _config.Shuttles))
+        {
+            dag.Add(new TeleportSystem(_bridge, _config.Shuttles));
+        }
+
         dag.Add(new SpatialTelemetrySystem(_bridge));
 
         dag.Add(new CreatureThinkSystem(_bridge));
@@ -360,6 +380,11 @@ public sealed partial class TatooineSim
         dag.Add(new CreatureMoveSystem(_bridge));
         dag.Add(new PlayerMoveSystem(_bridge));
         dag.Add(new NpcMoveSystem(_bridge));
+        if (SpaceRealm >= 0)
+        {
+            dag.Add(new ShipMoveSystem(_bridge));
+            dag.Add(new ShipScanSystem(_bridge));
+        }
 
         if (_config.SplitAwareness)
         {

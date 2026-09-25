@@ -105,6 +105,33 @@ public sealed class SimConfig
     /// </summary>
     public int Planets = 1;
 
+    /// <summary>
+    /// Every city <c>Building</c> gets an interior: a realm of its own (one 64 m cell), a portal pair (the door on its planet ↔ the entrance inside) and
+    /// <see cref="InteriorNpcs"/> NPCs. Players walk in and out through a serial TeleportSystem. Off reproduces the simulation without interiors.
+    /// </summary>
+    public bool Interiors;
+
+    /// <summary>NPCs standing in each interior. [EST]</summary>
+    public int InteriorNpcs = 3;
+
+    /// <summary>Share of in-city idle decisions that walk into a building instead. [EST]</summary>
+    public float InteriorShare = 0.25f;
+
+    /// <summary>Shortest stay in an interior, seconds; a stay lasts one to four times this. [EST]</summary>
+    public float InteriorStayS = 30f;
+
+    /// <summary>With more than one planet, the share of shuttle boardings bound for another planet's port — a realm change. [EST]</summary>
+    public float InterPlanetShare = 0.2f;
+
+    /// <summary>
+    /// A space realm after the interiors: a deep 3D grid over a 16 km cube, holding <see cref="Starships"/> × population scale AI starships with f64
+    /// bounds, flying between waypoints and scanning for each other. Off reproduces the simulation without space.
+    /// </summary>
+    public bool Space;
+
+    /// <summary>Starships at population scale 1. [EST]</summary>
+    public int Starships = 250;
+
     // ── Shuttles (#910) ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Players also travel between cities by shuttle. Off reproduces the pre-shuttle simulation exactly.</summary>
@@ -373,7 +400,8 @@ public sealed class SimConfig
     /// the label keys sweep results.</remarks>
     public string Label =>
         $"{WorldEdgeKm:N0}km x{PopulationScale:N1} cell={ResolveCellSize():N0}m floors={ClusterTargetExtentRatio:G}/{ClusterRepairExtentRatio:G} "
-        + $"unit={RepairWorstClustersPerUnit} shuttles={(!Shuttles ? "off" : ShuttleBurst ? "burst" : "trickle")}{(Unpaced ? " unpaced" : "")}";
+        + $"unit={RepairWorstClustersPerUnit} shuttles={(!Shuttles ? "off" : ShuttleBurst ? "burst" : "trickle")}{(Unpaced ? " unpaced" : "")}"
+        + $"{(Planets > 1 ? $" planets={Planets}" : "")}{(Interiors ? " interiors" : "")}{(Space ? " space" : "")}";
 }
 
 /// <summary>How the awareness system drains its interest queries.</summary>

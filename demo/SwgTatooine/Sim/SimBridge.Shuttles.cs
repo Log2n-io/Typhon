@@ -98,7 +98,7 @@ public sealed partial class SimBridge
     /// A travel decision in a city takes the shuttle with probability <see cref="SimConfig.ShuttleShare"/>: point the player at its own city's port and
     /// remember where it is going. False leaves the decision to the ordinary travel branch, untouched.
     /// </summary>
-    private bool TryTakeShuttle(ref PlayerState state, ref PlayerMotion move, float x, float z, uint shareSalt, uint destSalt)
+    private bool TryTakeShuttle(ref PlayerState state, ref PlayerMotion move, float x, float z, ushort planet, uint shareSalt, uint destSalt)
     {
         if (!ShuttlesActive || Hash01(shareSalt) >= _config.ShuttleShare)
         {
@@ -117,7 +117,7 @@ public sealed partial class SimBridge
             dest = (dest + 1) % _index.Cities.Count;
         }
 
-        var (portX, portZ) = _index.Shuttleports[from];
+        var (portX, portZ) = PortsOf(planet)[from];
         move.DestX = portX;
         move.DestZ = portZ;
         move.SpeedMps = TatooineData.PlayerRunSpeedMps;
@@ -128,6 +128,11 @@ public sealed partial class SimBridge
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
         return true;
     }
+
+    /// <summary>A planet's shuttleports: the map's cities are every planet's, the ports' coordinates are each planet's own draw.</summary>
+    private List<(float X, float Z)> PortsOf(ushort planet) => PlanetIndexes != null && planet < PlanetIndexes.Length
+        ? PlanetIndexes[planet].Shuttleports
+        : _index.Shuttleports;
 
     /// <summary>The city whose disc contains the point, or -1.</summary>
     private int CityAt(float x, float z)
@@ -198,6 +203,8 @@ public sealed partial class SimBridge
             var motions = cluster.GetSpan(Player.Move);
             var places = cluster.GetReadOnlySpan(Player.Bounds);
             var chunk = cluster.ChunkId;
+            var planet = cluster.Realm.Value;
+            var planetPorts = PortsOf(planet);
             while (queued != 0)
             {
                 var idx = BitOperations.TrailingZeroCount(queued);
@@ -231,12 +238,21 @@ public sealed partial class SimBridge
                 }
 
                 var h = places[idx].HalfExtent;
-                var (portX, portZ) = ports[dest];
-                var r = ArrivalScatterM * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0x2F9B1D63u)));
-                var a = Hash01(Salt(tick, chunk, idx, 0x6C8E9CF5u)) * MathF.PI * 2f;
-                var nb = default(PlayerPlacement);
-                nb.SetAt(Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h), Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h), h);
-                cluster.WriteSpatial(Player.Bounds, idx, nb);
+                if (_config.Planets > 1 && planet < _config.Planets && Hash01(Salt(tick, chunk, idx, 0x0B4E1A37u)) < _config.InterPlanetShare)
+                {
+                    // Bound for another planet: a realm change, applied by TeleportSystem after this system.
+                    BoardInterPlanet(cluster.GetEntityId(idx), planet, dest, h, Salt(tick, chunk, idx, 0x5D2A0C8Fu));
+                }
+                else
+                {
+                    var (portX, portZ) = planetPorts[dest];
+                    var r = ArrivalScatterM * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0x2F9B1D63u)));
+                    var a = Hash01(Salt(tick, chunk, idx, 0x6C8E9CF5u)) * MathF.PI * 2f;
+                    var nb = default(PlayerPlacement);
+                    nb.SetAt(Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h), Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h),
+                        h);
+                    cluster.WriteSpatial(Player.Bounds, idx, nb);
+                }
 
                 ref var move = ref motions[idx];
                 move.VelX = 0f;

@@ -24,7 +24,9 @@ public sealed class WorldCensus
     /// <summary>Simulated players.</summary>
     public int Players;
 
-    /// <summary>Everything, which is the number the fence sees.</summary>
+    /// <summary>AI starships in the space realm (Realms G1c).</summary>
+    public int Starships;
+
     /// <summary>Two planets' censuses summed (Realms G1: the run reports the whole galaxy).</summary>
     public WorldCensus Plus(WorldCensus other) => new()
     {
@@ -34,14 +36,16 @@ public sealed class WorldCensus
         Creatures = Creatures + other.Creatures,
         CityNpcs = CityNpcs + other.CityNpcs,
         Players = Players + other.Players,
+        Starships = Starships + other.Starships,
     };
 
-    public int Total => StaticObjects + PlayerStructures + Lairs + Creatures + CityNpcs + Players;
+    /// <summary>Everything, which is the number the fence sees.</summary>
+    public int Total => StaticObjects + PlayerStructures + Lairs + Creatures + CityNpcs + Players + Starships;
 
     /// <summary>Everything that can move — the only population the spatial fence does real work for.</summary>
     public int Mobile => Creatures + Players;
 
     public override string ToString() =>
         $"{Total:N0} entities: {StaticObjects:N0} static, {PlayerStructures:N0} structures, {Lairs:N0} lairs, "
-        + $"{Creatures:N0} creatures, {CityNpcs:N0} NPCs, {Players:N0} players";
+        + $"{Creatures:N0} creatures, {CityNpcs:N0} NPCs, {Players:N0} players{(Starships > 0 ? $", {Starships:N0} starships" : "")}";
 }

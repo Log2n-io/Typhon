@@ -1,4 +1,4 @@
-namespace SwgTatooine;
+﻿namespace SwgTatooine;
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // Systems
@@ -116,6 +116,43 @@ internal sealed class NpcMoveSystem : QuerySystem
         .Input(() => _bridge.NpcView);
 
     protected override void Execute(TickContext ctx) => _bridge.NpcMoveTick(ctx);
+}
+
+/// <summary>Realms G1c: starships fly between waypoints in the space realm — the deep grid's movers.</summary>
+internal sealed class ShipMoveSystem : QuerySystem
+{
+    private readonly SimBridge _bridge;
+
+    public ShipMoveSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("ShipMove")
+        .Phase(SimPhases.Move)
+        .Parallel()
+        .ChunksPerWorker(2f)
+        .Writes<ShipPlacement>()
+        .Writes<ShipMotion>()
+        .Input(() => _bridge.ShipView);
+
+    protected override void Execute(TickContext ctx) => _bridge.ShipMoveTick(ctx);
+}
+
+/// <summary>Realms G1c: each starship scans a sphere around it every <c>ShipScanPeriodTicks</c>, staggered — the deep grid's 3D queries.</summary>
+internal sealed class ShipScanSystem : QuerySystem
+{
+    private readonly SimBridge _bridge;
+
+    public ShipScanSystem(SimBridge bridge) => _bridge = bridge;
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("ShipScan")
+        .Phase(SimPhases.Awareness)
+        .Parallel()
+        .ChunksPerWorker(2f)
+        .Reads<ShipPlacement>()
+        .Input(() => _bridge.ShipView);
+
+    protected override void Execute(TickContext ctx) => _bridge.ShipScanTick(ctx);
 }
 
 /// <summary>
@@ -267,6 +304,41 @@ internal sealed class ShuttleSystem : QuerySystem
         .Input(() => _bridge.PlayerView);
 
     protected override void Execute(TickContext ctx) => _bridge.ShuttleTick(ctx);
+}
+
+/// <summary>
+/// Realms G1b: applies the queued realm changes — portal crossings PlayerThink queued last tick, and shuttle boardings bound for another planet that
+/// Shuttle queued this tick — each a <c>Teleport</c>, in one side transaction with the Commit discipline, so a crossing is committed before the fence
+/// moves the entity.
+/// </summary>
+/// <remarks>
+/// Serial, in the Spawn phase after Shuttle (a deviation from 02 § G1's "after the move systems": Move already has a <see cref="PlayerPlacement"/>
+/// writer, and a crossing player stands still, so a portal's tick of latency costs nothing).
+/// </remarks>
+internal sealed class TeleportSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+    private readonly bool _afterShuttle;
+
+    public TeleportSystem(SimBridge bridge, bool afterShuttle)
+    {
+        _bridge = bridge;
+        _afterShuttle = afterShuttle;
+    }
+
+    protected override void Configure(SystemBuilder b)
+    {
+        b.Name("Teleport")
+            .Phase(SimPhases.Spawn)
+            .Writes<PlayerPlacement>()
+            .Writes<PlayerRealm>();
+        if (_afterShuttle)
+        {
+            b.After("Shuttle");
+        }
+    }
+
+    protected override void Execute(TickContext ctx) => _bridge.TeleportTick(ctx);
 }
 
 /// <summary>Per-tick shuttle bookkeeping and, with <c>--probe</c>, the arrival-cell query probe. It declares the player positions its queries read, like
