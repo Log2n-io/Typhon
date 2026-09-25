@@ -4860,6 +4860,14 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         /// <summary>The cluster's realm: its first occupied slot's <c>[RealmKey]</c>, or the rebuild's grid's realm for an unkeyed archetype.</summary>
         public ushort Realm;
+
+        /// <summary>Occupied slots whose valid <c>[RealmKey]</c> names another realm than <see cref="Realm"/> — a realm change the file holds but the
+        /// fence never ran (a recovery claim mixes realms as it mixes cells). Left out of the box and the cell check; filed as crossings (Realms C5).</summary>
+        public ulong ForeignRealmSlots;
+
+        /// <summary>Occupied slots whose <c>[RealmKey]</c> is not a valid realm for the archetype: rewritten to <see cref="Realm"/> by the reduce
+        /// (D-2).</summary>
+        public ulong InvalidRealmSlots;
     }
 
     /// <summary>
@@ -4889,24 +4897,53 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         ref readonly var ss = ref SpatialSlot;
         var firstSlot = BitOperations.TrailingZeroCount(occupancy);
-        var firstComponent = clusterBase + Layout.ComponentOffset(ss.Slot) + firstSlot * Layout.ComponentSize(ss.Slot);
-        var firstFieldPtr = firstComponent + ss.FieldOffset;
+        var inRealm = occupancy;
 
-        // Realms C1: a realm-keyed cluster is filed in the realm its first entity names — the same entity its cell is read from. The table is read-only
-        // here (the map runs on workers); the reduce creates the realm's state and refuses an unregistered realm.
+        // Realms C1/C5: a realm-keyed cluster is filed in the realm of its first entity whose key is valid, and that entity gives its cell. Every other
+        // slot is classified by its key: another valid realm (a realm change never fenced — filed as a crossing, left out of this cluster's box and cell
+        // check) or no valid realm at all (rewritten to this cluster's realm by the reduce, D-2). The table is read-only here (the map runs on workers);
+        // the reduce creates the realm's state, and refuses a cluster none of whose keys is valid — its realm is missing from the catalog (RLM-01).
         if (ss.HasRealmKey)
         {
-            result.Realm = *(ushort*)(firstComponent + ss.RealmKeyOffset);
-            grid = _realmTable.TryGet(result.Realm)?.Grid;
-            if (grid == null)
+            var keyColumn = clusterBase + Layout.ComponentOffset(ss.Slot) + ss.RealmKeyOffset;
+            var stride = Layout.ComponentSize(ss.Slot);
+            var chosen = -1;
+            for (var rest = occupancy; rest != 0; rest &= rest - 1)
             {
-                return result;   // unregistered: the reduce throws, naming the realm
+                var slot = BitOperations.TrailingZeroCount(rest);
+                var key = *(ushort*)(keyColumn + slot * stride);
+                if (!IsValidRealmForEntity(key))
+                {
+                    result.InvalidRealmSlots |= 1UL << slot;
+                }
+                else if (chosen < 0)
+                {
+                    chosen = key;
+                    firstSlot = slot;
+                }
+                else if (key != chosen)
+                {
+                    result.ForeignRealmSlots |= 1UL << slot;
+                }
             }
+
+            if (chosen < 0)
+            {
+                result.Realm = *(ushort*)(keyColumn + firstSlot * stride);
+                return result;   // no valid realm in the cluster: the reduce throws, naming it
+            }
+
+            result.Realm = (ushort)chosen;
+            grid = _realmTable.Get(result.Realm).Grid;
+            inRealm = occupancy & ~result.ForeignRealmSlots;
         }
         else
         {
             result.Realm = grid.Realm.Value;
         }
+
+        var firstComponent = clusterBase + Layout.ComponentOffset(ss.Slot) + firstSlot * Layout.ComponentSize(ss.Slot);
+        var firstFieldPtr = firstComponent + ss.FieldOffset;
 
         grid.ReadCellCoordsFromSpatialField(firstFieldPtr, ss.FieldInfo.FieldType, out result.CellX, out result.CellY, out result.CellZ);
 
@@ -4915,7 +4952,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // that could silently diverge from this one. The 3D branch in particular is only covered through RecomputeClusterAabb, so a twin's 3D half would have
         // had no test at all.
         grid.CellOriginFromCoords(result.CellX, result.CellY, result.CellZ, out var originX, out var originY, out var originZ);
-        result.Aabb = RecomputeClusterAabb(chunkId, ref accessor, originX, originY, originZ);
+        result.Aabb = RecomputeClusterAabb(chunkId, ref accessor, originX, originY, originZ, inRealm, out _);
 
         // Realms P0.2 (§9.3-2): the cell is the FIRST slot's, and nothing checked the others. A recovery or schema-migration claim is cell-agnostic
         // (ClaimSlot), so a rebuild can meet a cluster whose entities sit in several cells — CC-02 broken silently until they are next written, since an
@@ -4924,7 +4961,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var margin = grid.Config.CellSize * grid.Config.MigrationHysteresisRatio;
         if (!BoxFitsCellWithBand(result.Aabb, (float)grid.Config.CellSize, (float)margin))
         {
-            result.ForeignCellSlots = FindForeignCellSlots(clusterBase, occupancy, originX, originY, originZ, grid.Config.CellSize, margin);
+            result.ForeignCellSlots = FindForeignCellSlots(clusterBase, inRealm, originX, originY, originZ, grid.Config.CellSize, margin);
         }
 
         return result;
@@ -5040,6 +5077,60 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
     }
 
+    /// <summary>Slots the last rebuild found in another realm than their cluster's, filed as crossings for the first fence (Realms C5).</summary>
+    internal int LastRebuildForeignRealmSlots;
+
+    /// <summary>Invalid realm keys the last rebuild rewrote to their cluster's realm (D-2). Non-zero is an application bug.</summary>
+    internal int LastRebuildRealmKeyReverts;
+
+    /// <summary>
+    /// The reduce half of the per-slot realm check (Realms C5), serial. An invalid key is rewritten to the cluster's realm and the slot marked dirty, so
+    /// the WAL carries the correction (D-2). A slot of another valid realm is filed exactly as the fence's own detectors file a realm change: FLAGGED on a
+    /// Dynamic archetype (the pre-flagged drain reads the realm first, RM-03), queued with its destination on a Static one, which runs no detector.
+    /// </summary>
+    private void FileForeignRealmSlots(int chunkId, ushort clusterRealm, ulong foreignSlots, ulong invalidSlots)
+    {
+        ref readonly var ss = ref SpatialSlot;
+        var accessor = ClusterSegment.CreateChunkAccessor();
+        try
+        {
+            var component = accessor.GetChunkAddress(chunkId, true) + Layout.ComponentOffset(ss.Slot);
+            var stride = Layout.ComponentSize(ss.Slot);
+            for (var rest = invalidSlots; rest != 0; rest &= rest - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(rest);
+                *(ushort*)(component + slot * stride + ss.RealmKeyOffset) = clusterRealm;
+                SetDirty(chunkId, slot, ss.Slot);
+                LastRebuildRealmKeyReverts++;
+            }
+
+            if (foreignSlots == 0)
+            {
+                return;
+            }
+
+            LastRebuildForeignRealmSlots += BitOperations.PopCount(foreignSlots);
+            if (ss.FieldInfo.Mode == SpatialMode.Dynamic)
+            {
+                FlagMigration(chunkId, foreignSlots, -1);
+                SetClusterProcessBit(chunkId);
+                return;
+            }
+
+            for (var rest = foreignSlots; rest != 0; rest &= rest - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(rest);
+                var realm = *(ushort*)(component + slot * stride + ss.RealmKeyOffset);
+                SpatialGrid.ReadSpatialCenter3D(component + slot * stride + ss.FieldOffset, ss.FieldInfo.FieldType, out var x, out var y, out var z);
+                EnqueueMigration(new MigrationRequest(chunkId, slot, realm, GridOfRealm(realm).WorldToCellKey(x, y, z)));
+            }
+        }
+        finally
+        {
+            accessor.Dispose();
+        }
+    }
+
     /// <summary>
     /// Startup rebuild of the whole transient spatial layer from persisted cluster data, in ONE walk of the cluster segment. Replaces the back-to-back
     /// <see cref="RebuildCellState"/> + <see cref="RebuildClusterAabbs"/> pair at the two production call sites (#872 step 2).
@@ -5087,6 +5178,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         // destination is only a hint, and the drain drops the flag when the entity is home.
         PendingMigrationCount = 0;
         LastRebuildForeignCellSlots = 0;
+        LastRebuildForeignRealmSlots = 0;
+        LastRebuildRealmKeyReverts = 0;
         if (ActiveClusterCount == 0)
         {
             return;
@@ -5216,11 +5309,11 @@ internal sealed unsafe partial class ArchetypeClusterState
             // registered refuses the open: its coordinates name a frame this engine does not have (Realms C1; C2 names the realms the file holds).
             if (m.Realm != reduceRealm)
             {
-                if (_realmTable.TryGet(m.Realm) == null)
+                if (!IsValidRealmForEntity(m.Realm))
                 {
                     throw new InvalidOperationException(
-                        $"Archetype {ArchetypeId}: cluster {chunkId} holds entities of realm {m.Realm}, which is not registered. Register every realm the "
-                        + "database holds (Realms.Register) before InitializeArchetypes.");
+                        $"Archetype {ArchetypeId}: cluster {chunkId} holds entities of realm {m.Realm}, which is not registered "
+                        + "(or cannot hold the archetype). Register every realm the database holds (Realms.Register) before InitializeArchetypes.");
                 }
 
                 reduceRealm = m.Realm;
@@ -5245,6 +5338,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             if (m.ForeignCellSlots != 0)
             {
                 FileForeignCellSlots(chunkId, cellKey, m.ForeignCellSlots, grid);
+            }
+
+            // Realms C5: slots of another realm leave at the first fence; invalid keys are this cluster's realm from now on (D-2).
+            if ((m.ForeignRealmSlots | m.InvalidRealmSlots) != 0)
+            {
+                FileForeignRealmSlots(chunkId, m.Realm, m.ForeignRealmSlots, m.InvalidRealmSlots);
             }
 
             if (float.IsPositiveInfinity(m.Aabb.MinX))
@@ -6094,11 +6193,16 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// out of <c>ClusterCellMap</c> two statements earlier. Deriving it here would repeat that work once per cluster per tick for nothing.
     /// </remarks>
     internal ClusterSpatialAabb RecomputeClusterAabb(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor,
-        double originX, double originY, double originZ, out int slotsScanned)
+        double originX, double originY, double originZ, out int slotsScanned) =>
+        RecomputeClusterAabb(clusterChunkId, ref accessor, originX, originY, originZ, ulong.MaxValue, out slotsScanned);
+
+    /// <summary>As above, over the occupied slots in <paramref name="slotMask"/> only — the rebuild leaves out slots of another realm (Realms C5).</summary>
+    internal ClusterSpatialAabb RecomputeClusterAabb(int clusterChunkId, ref ChunkAccessor<PersistentStore> accessor,
+        double originX, double originY, double originZ, ulong slotMask, out int slotsScanned)
     {
         ref readonly var ss = ref SpatialSlot;
         var clusterBase = accessor.GetChunkAddress(clusterChunkId);
-        var occupancy = *(ulong*)clusterBase;
+        var occupancy = *(ulong*)clusterBase & slotMask;
         slotsScanned = BitOperations.PopCount(occupancy);
         var componentOffset = Layout.ComponentOffset(ss.Slot);
         var componentStride = Layout.ComponentSize(ss.Slot);

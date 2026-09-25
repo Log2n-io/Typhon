@@ -2285,3 +2285,15 @@
   verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown,
     CrossRealmMigrationTests.WriteSpatial_IntoAnUnregisteredRealm_Throws_AndStoresNothing
   on_violation: a stranded entity no query can see (and, with D-1, a reopen that refuses the database), or a fence that throws mid-way
+
+### RM-06: The rebuild checks every slot's realm, not only the first `[fatal][silent]`
+  invariant a realm-keyed cluster is filed in the realm of its first slot whose key is valid, and that slot gives its cell; a slot whose valid key
+    names another realm (a recovery claim mixes realms as it mixes cells; a realm change committed but never fenced) is left out of the cluster's box
+    and its cell check, and filed as a crossing for the first fence — flagged on a Dynamic archetype, queued with its destination on a Static one
+  invariant a slot whose key is not a valid realm is rewritten to its cluster's realm, marked dirty and counted (RM-05, at rebuild); a cluster with no
+    valid key at all is in a realm the engine does not know and refuses the open (RLM-01)
+  invariant after the first fence following an open, no cluster holds a slot of another realm (CC-02 per realm)
+  scope: ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.FileForeignRealmSlots
+  verified: RecoveryRealmTests (interleaved spawns replayed after a crash are split at the first fence; a committed, never-fenced teleport moves at
+    the first fence after reopen; an invalid key in the file is rewritten at rebuild)
+  on_violation: after a crash, entities answer the wrong realm's queries, or a cluster's box spans two worlds' coordinates
