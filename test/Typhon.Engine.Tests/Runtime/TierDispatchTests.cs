@@ -111,7 +111,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(35f, 5f, 0f), SimTier.Tier3);
 
         var index = new TierClusterIndex();
-        index.Rebuild(dbe.SpatialGrid, cs);
+        index.Rebuild(cs, dbe.RealmTable.TierVersion);
 
         Assert.That(index.GetClusters(SimTier.Tier0).Length, Is.EqualTo(1));
         Assert.That(index.GetClusters(SimTier.Tier1).Length, Is.EqualTo(1));
@@ -140,12 +140,12 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
 
         var index = new TierClusterIndex();
-        index.RebuildIfStale(dbe.SpatialGrid, cs);
+        index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
         int firstCount = index.RebuildCount;
         Assert.That(firstCount, Is.EqualTo(1));
 
         // Idempotent: calling again with no state change must be a no-op.
-        index.RebuildIfStale(dbe.SpatialGrid, cs);
+        index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
         Assert.That(index.RebuildCount, Is.EqualTo(firstCount));
     }
 
@@ -165,12 +165,12 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
 
         var index = new TierClusterIndex();
-        index.RebuildIfStale(dbe.SpatialGrid, cs);
+        index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
         Assert.That(index.RebuildCount, Is.EqualTo(1));
 
         // Change the cell's tier → version bumps → rebuild runs.
         dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier2);
-        index.RebuildIfStale(dbe.SpatialGrid, cs);
+        index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
         Assert.That(index.RebuildCount, Is.EqualTo(2));
         Assert.That(index.GetClusters(SimTier.Tier0).Length, Is.EqualTo(0));
         Assert.That(index.GetClusters(SimTier.Tier2).Length, Is.EqualTo(1));
@@ -192,7 +192,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
 
         var index = new TierClusterIndex();
-        index.RebuildIfStale(dbe.SpatialGrid, cs);
+        index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
         int rebuildsBeforeSpawn = index.RebuildCount;
 
         // Spawn in a new cell → new cluster → ClusterSetVersion bumps → rebuild runs.
@@ -203,7 +203,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         }
         dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(55f, 55f, 0f), SimTier.Tier0);
 
-        index.RebuildIfStale(dbe.SpatialGrid, cs);
+        index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
         Assert.That(index.RebuildCount, Is.GreaterThan(rebuildsBeforeSpawn));
         Assert.That(index.GetClusters(SimTier.Tier0).Length, Is.EqualTo(2));
     }
@@ -912,7 +912,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
         var index = new TierClusterIndex();
-        index.Rebuild(dbe.SpatialGrid, cs);
+        index.Rebuild(cs, dbe.RealmTable.TierVersion);
 
         // Near = Tier0 | Tier1. Tier1 is empty, so the merge result should equal Tier0's count.
         Assert.That(index.GetClusters(SimTier.Tier0).Length, Is.EqualTo(2));
@@ -948,7 +948,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(N), "Each entity should land in its own cluster (different cells).");
 
         var index = new TierClusterIndex();
-        index.Rebuild(dbe.SpatialGrid, cs);
+        index.Rebuild(cs, dbe.RealmTable.TierVersion);
 
         Assert.That(index.GetClusters(SimTier.Tier0).Length, Is.EqualTo(N),
             "All N clusters should appear in the Tier0 list after rebuild — buffer must have grown past 16.");

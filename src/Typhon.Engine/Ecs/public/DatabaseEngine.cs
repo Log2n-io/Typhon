@@ -861,7 +861,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Sizes the engine's realm table: realm ids are <c>[0, maxRealms)</c>. Must be called before <see cref="InitializeArchetypes"/> and before any
     /// <see cref="RealmRegistry.Register"/> of a realm other than 0. Without it the engine hosts one realm — the single-world form.
     /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxRealms"/> is not in <c>[1, 65 535]</c> (0xFFFF is <see cref="RealmId.None"/>).</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxRealms"/> is not in <c>[1, 65 535]</c> (0xFFFF is <see
+    /// cref="RealmId.None"/>).</exception>
     [PublicAPI]
     public void ConfigureRealms(int maxRealms)
     {
@@ -3903,7 +3904,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                                     {
                                         try
                                         {
-                                            SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType, in realm.GridConfig, archName);
+                                            SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType,
+                                                in realm.GridConfig, archName);
                                         }
                                         catch (InvalidOperationException e)
                                         {

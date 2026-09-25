@@ -11,7 +11,8 @@ namespace Typhon.Engine.Internals;
 /// + <see cref="SpatialGrid"/> cell tier bytes.
 /// </summary>
 /// <remarks>
-/// <para><b>Dual invalidation</b>: the rebuild is skipped when both (a) the grid's <see cref="SpatialGrid.TierVersion"/> hasn't changed since the last rebuild
+/// <para><b>Dual invalidation</b>: the rebuild is skipped when both (a) the engine-wide <see cref="RealmTable.TierVersion"/> (every realm grid bumps it)
+/// hasn't changed since the last rebuild
 /// (no <c>SetCellTier</c> call actually flipped a cell tier) AND (b) the archetype's own cluster-set version hasn't changed (no spawn, destroy, or migration
 /// added/removed clusters from the active list). In steady state (camera stationary, no cell-crossing migrations) the rebuild is a no-op and the tier query
 /// returns the cached result.</para>
@@ -49,9 +50,12 @@ internal sealed class TierClusterIndex
 
     /// <summary>Full rebuild from the archetype's active clusters — unconditional. Used by tests and by
     /// <see cref="RebuildIfStale"/> after the version check.</summary>
-    public void Rebuild(SpatialGrid grid, ArchetypeClusterState state)
+    /// <param name="state">The archetype whose clusters are grouped.</param>
+    /// <param name="tierVersion">The engine-wide tier version (<see cref="RealmTable.TierVersion"/>) read by the caller before this rebuild: every realm's
+    /// tier changes move it, and it is stamped as the version this list reflects.</param>
+    /// <remarks>Each cluster's tier is its cell's in the cluster's OWN realm (Realms C1): a cell key names a cell in every realm.</remarks>
+    public void Rebuild(ArchetypeClusterState state, int tierVersion)
     {
-        ArgumentNullException.ThrowIfNull(grid);
         ArgumentNullException.ThrowIfNull(state);
         Debug.Assert(Interlocked.CompareExchange(ref _rebuildInProgress, 1, 0) == 0,
             "TierClusterIndex.Rebuild called concurrently — this must run single-threaded from BuildTierIndexesAtTickStart.");
@@ -71,6 +75,10 @@ internal sealed class TierClusterIndex
             Array.Fill(_mergedCounts, -1);
 
             var cellMap = state.ClusterCellMap;
+            var realmMap = state.ClusterRealmMap;
+            var realmSpatial = state.RealmSpatial;
+            var gridRealm = -1;
+            SpatialGrid grid = null;
 
             // Read the version BEFORE the walk, and record THIS value at the end rather than re-reading it there. Recorded after, a spawn landing mid-walk
             // bumps the version, is absent from the list this rebuild produced, and is nonetheless covered by the version stamped against it — so
@@ -91,6 +99,19 @@ internal sealed class TierClusterIndex
                 }
                 int cellKey = cellMap[chunkId];
                 if (cellKey < 0)
+                {
+                    continue;
+                }
+
+                // The realm map is published before the cell map and grown with it, so a chunk id bounded by the latter indexes the former.
+                var realm = realmMap[chunkId];
+                if (realm != gridRealm)
+                {
+                    gridRealm = realm;
+                    grid = realmSpatial[realm]?.Grid;
+                }
+
+                if (grid == null)
                 {
                     continue;
                 }
@@ -123,7 +144,7 @@ internal sealed class TierClusterIndex
                 _tierClusterCounts[tierIdx] = cnt + 1;
             }
 
-            _lastGridTierVersion = grid.TierVersion;
+            _lastGridTierVersion = tierVersion;
             _lastClusterSetVersion = versionAtWalk;
             RebuildCount++;
 
@@ -148,16 +169,16 @@ internal sealed class TierClusterIndex
 
     /// <summary>Rebuild only when the grid tier version or the archetype's cluster-set version has changed since the
     /// last rebuild. In steady state this is two int compares — effectively free.</summary>
-    public void RebuildIfStale(SpatialGrid grid, ArchetypeClusterState state)
+    public void RebuildIfStale(ArchetypeClusterState state, int tierVersion)
     {
-        if (grid.TierVersion == _lastGridTierVersion && state.ClusterSetVersion == _lastClusterSetVersion)
+        if (tierVersion == _lastGridTierVersion && state.ClusterSetVersion == _lastClusterSetVersion)
         {
             // Phase 3: Spatial:TierIndex:VersionSkip instant — fast path, no rebuild needed.
             // reason: 0=both unchanged, 1=grid only, 2=cluster set only (here both unchanged).
             TyphonEvent.EmitSpatialTierIndexVersionSkip((ushort)Math.Min(state.ArchetypeId, ushort.MaxValue), _lastClusterSetVersion, 0);
             return;
         }
-        Rebuild(grid, state);
+        Rebuild(state, tierVersion);
     }
 
     /// <summary>

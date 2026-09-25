@@ -2272,7 +2272,8 @@ public unsafe partial class Transaction
 
                                     // Before the index widen below, which is what makes the entity queryable: every query must already reach as far past
                                     // this cell as the entity does (SQ-01). Between fences a spawn is the only thing that can push that reach out.
-                                    ctx.ClusterState.RaiseClusterReachForSpawn(clusterGrid, cellKey, cellOriginX, cellOriginY, cellOriginZ, spawnSpatialCoords, is3D);
+                                    ctx.ClusterState.RaiseClusterReachForSpawn(clusterGrid, cellKey, cellOriginX, cellOriginY, cellOriginZ,
+                                        spawnSpatialCoords, is3D);
                                 }
 
                                 // Stamped: a concurrent grow of ClusterAabbs copies the array, and a widen into the old one after the copy read this entry

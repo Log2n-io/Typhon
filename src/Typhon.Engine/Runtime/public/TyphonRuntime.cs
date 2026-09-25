@@ -859,7 +859,7 @@ public sealed partial class TyphonRuntime : IDisposable
     private unsafe int ScanClusterDirtyEntities(ComponentTable table, ViewBase view, SimTier effectiveTier, Span<EntityId> span, int count)
     {
         int maxArchId = Math.Min(ArchetypeRegistry.MaxArchetypeId, Engine._archetypeStates.Length - 1);
-        bool tierFiltered = effectiveTier != SimTier.All && Engine.Realm0Grid != null;
+        bool tierFiltered = effectiveTier != SimTier.All && Engine.PrimaryGrid != null;
 
         for (int archId = 0; archId <= maxArchId; archId++)
         {
@@ -1310,7 +1310,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var sys = Scheduler.Systems[sysIdx];
         var view = _systemViews[sysIdx];
         var tier = view == null ? sys.TierFilter : (SimTier)((byte)sys.TierFilter & (byte)view.TierFilter);
-        return Engine?.Realm0Grid == null ? SimTier.All : tier;
+        return Engine?.PrimaryGrid == null ? SimTier.All : tier;
     }
 
     /// <summary>
@@ -2002,10 +2002,9 @@ public sealed partial class TyphonRuntime : IDisposable
         var srcIds = _systemTierClusterIds[sysIdx];
         int srcCount = _systemTierClusterCount[sysIdx];
         var cs = _systemClusterStates[sysIdx];
-        var grid = Engine?.Realm0Grid;
 
         // If no cluster data or no grid, Red = full list, Black = empty (degenerate: non-spatial archetype)
-        if (srcIds == null || cs?.ClusterCellMap == null || grid == null)
+        if (srcIds == null || cs?.ClusterCellMap == null || cs.ClusterRealmMap == null || Engine?.PrimaryGrid == null)
         {
             _checkerboardRedIds[sysIdx] = srcIds;
             _checkerboardRedCount[sysIdx] = srcCount;
@@ -2027,13 +2026,30 @@ public sealed partial class TyphonRuntime : IDisposable
         int redCount = 0, blackCount = 0;
         var redBuf = _checkerboardRedIds[sysIdx];
         var blackBuf = _checkerboardBlackIds[sysIdx];
+        // Realm map first: it is published before the cell map, so it is at least as long as the cell map read after it.
+        var realmMap = cs.ClusterRealmMap;
         var cellMap = cs.ClusterCellMap;
+        var realmSpatial = cs.RealmSpatial;
+        var gridRealm = -1;
+        SpatialGrid grid = null;
 
         for (int i = 0; i < srcCount; i++)
         {
             int chunkId = srcIds[i];
             int cellKey = (chunkId < cellMap.Length) ? cellMap[chunkId] : -1;
-            if (cellKey < 0)
+            if (cellKey >= 0)
+            {
+                // Each cluster coloured in its OWN realm's grid (Realms C1). Two realms never share a neighbour, so CB-01 (no two adjacent cells one
+                // colour) is a per-realm property and a per-realm parity keeps it.
+                var realm = realmMap[chunkId];
+                if (realm != gridRealm)
+                {
+                    gridRealm = realm;
+                    grid = realmSpatial[realm]?.Grid;
+                }
+            }
+
+            if (cellKey < 0 || grid == null)
             {
                 // Unmapped cluster — put in Red as fallback
                 redBuf[redCount++] = chunkId;
@@ -2288,11 +2304,14 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     private void BuildTierIndexesAtTickStart()
     {
-        var grid = Engine?.Realm0Grid;
-        if (grid == null)
+        // One engine-wide tier version for every realm's grid (Realms C1): an archetype's tier index spans the realms it lives in.
+        var realms = Engine?.RealmTable;
+        if (realms == null)
         {
             return;
         }
+
+        var tierVersion = realms.TierVersion;
 
         // Issue #233: transition WakePending → Active for all archetypes BEFORE rebuilding tier indexes.
         // This ensures woken clusters appear in this tick's per-tier lists. The TransitionWakePendingToActive method is guarded by _lastWakeTransitionTick
@@ -2351,7 +2370,7 @@ public sealed partial class TyphonRuntime : IDisposable
             }
 
             cs.TierIndex ??= new TierClusterIndex();
-            cs.TierIndex.RebuildIfStale(grid, cs);
+            cs.TierIndex.RebuildIfStale(cs, tierVersion);
             // A multi-tier set (SimTier.Near, …) is served from a merge cache the first read after a rebuild fills; fill it here so dispatch never does.
             cs.TierIndex.GetClustersArray(tier, out _);
         }

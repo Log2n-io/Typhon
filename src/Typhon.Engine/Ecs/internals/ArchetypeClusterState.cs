@@ -3081,7 +3081,38 @@ internal sealed unsafe partial class ArchetypeClusterState
     private RealmArchetypeSpatial[] _presentRealmSpatial = [];
     private int _presentRealmCount;
 
-    /// <summary>True when any realm this archetype lives in has a per-cell cluster index — the whole-archetype form of <c>rs.PerCellIndex != null</c>.</summary>
+    /// <summary>The largest <c>ClusterReach</c> of any realm this archetype lives in — the telemetry's archetype-level reach (a MAX, like the engine's).</summary>
+    internal float MaxClusterReachAcrossRealms
+    {
+        get
+        {
+            var max = 0f;
+            foreach (var rs in PresentRealmSpatial)
+            {
+                max = Math.Max(max, Volatile.Read(ref rs.ClusterReach));
+            }
+
+            return max;
+        }
+    }
+
+    /// <summary>The named outliers of every realm this archetype lives in — distinct clusters, so they add.</summary>
+    internal int EscapedClusterCountAcrossRealms
+    {
+        get
+        {
+            var count = 0;
+            foreach (var rs in PresentRealmSpatial)
+            {
+                count += Volatile.Read(ref rs.EscapedClusters).Count;
+            }
+
+            return count;
+        }
+    }
+
+    /// <summary>True when any realm this archetype lives in has a per-cell cluster index — the whole-archetype form of <c>rs.PerCellIndex !=
+    /// null</c>.</summary>
     internal bool HasAnyPerCellIndex
     {
         get
@@ -6520,7 +6551,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                     // compares. Only a cluster that has actually spread pays for the walk, which is what makes §5.2's
                     // "you can afford to LOOK at everything" true of clusters rather than only of entities.
                     var guardFires = f.OutlierGuardActive &&
-                                     ((fresh.MaxX - fresh.MinX) > f.MaxExtent || (fresh.MaxY - fresh.MinY) > f.MaxExtent || (fresh.MaxZ - fresh.MinZ) > f.MaxExtent);
+                                     ((fresh.MaxX - fresh.MinX) > f.MaxExtent || (fresh.MaxY - fresh.MinY) > f.MaxExtent
+                                         || (fresh.MaxZ - fresh.MinZ) > f.MaxExtent);
 
                     // Step 14: the gates are the CELL's, resolved from its population (D1), and a cluster repair will re-sort is not one relocation is
                     // asked to nudge (D2) — greedy least-enlargement has no gradient once every box in the cell is wide, and was measured making tightness
@@ -7597,7 +7629,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         public int DriftNominationCap;
     }
 
-    /// <summary>The AABB refresh's quantities for <paramref name="rs"/>'s grid. <paramref name="nominateRepairs"/> false leaves the repair extent at zero.</summary>
+    /// <summary>The AABB refresh's quantities for <paramref name="rs"/>'s grid. <paramref name="nominateRepairs"/> false leaves the repair extent at
+    /// zero.</summary>
     private AabbRealmFrame LoadAabbRealmFrame(RealmArchetypeSpatial rs, bool nominateRepairs)
     {
         var grid = rs.Grid;

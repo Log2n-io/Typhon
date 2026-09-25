@@ -15,7 +15,9 @@ internal struct SpatialRegionConfig
     public uint CategoryMask;
     public byte EvaluationFrequency;
     public byte Active;  // 0=destroyed/free, 1=active
-    public byte _pad0, _pad1;
+
+    /// <summary>The realm the region is in (Realms C1): it sees only that realm's entities. Fixed for the region's life; the old padding's two bytes.</summary>
+    public ushort Realm;
 
     /// <summary>
     /// Monotonic per-slot handle generation. <b>Never reused for anything else</b> — see <see cref="NextFree"/>.
@@ -102,8 +104,10 @@ internal sealed class SpatialTriggerSystem
 
     // ── Region CRUD ──────────────────────────────────────────────────────
 
-    public SpatialRegionHandle CreateRegion(ReadOnlySpan<double> bounds, uint categoryMask = 0, byte evaluationFrequency = 1)
+    public SpatialRegionHandle CreateRegion(ReadOnlySpan<double> bounds, uint categoryMask = 0, byte evaluationFrequency = 1, RealmId realm = default)
     {
+        // Validated here, in application code: a region in a realm that does not exist is an error, never a volume that silently sees nothing.
+        _ = _table.DBE.RealmGridForQuery(realm);
         if (evaluationFrequency == 0)
         {
             evaluationFrequency = 1;
@@ -136,6 +140,7 @@ internal sealed class SpatialTriggerSystem
         config.MaxZ = halfCoord == 3 && bounds.Length > halfCoord + 2 ? bounds[halfCoord + 2] : 0;
         config.CategoryMask = categoryMask;
         config.EvaluationFrequency = evaluationFrequency;
+        config.Realm = realm.Value;
         config.Active = 1;
         config.Generation++;   // monotonic per slot, so a handle from a previous tenancy can never validate
         config.LastEvaluatedTick = int.MinValue; // force evaluation on first tick
@@ -218,7 +223,7 @@ internal sealed class SpatialTriggerSystem
             var guard = EpochGuard.Enter(_table.DBE.EpochManager);
             try
             {
-                CollectClusterOccupants(queryCoords, coordCount, config.CategoryMask, current);
+                CollectClusterOccupants(_table.DBE.RealmTable.Get(config.Realm).Grid, queryCoords, coordCount, config.CategoryMask, current);
             }
             finally
             {
@@ -290,7 +295,7 @@ internal sealed class SpatialTriggerSystem
     /// A 2D region is widened to infinite Z rather than being given the plane's own coordinates, so that a 2D archetype (whose Z is an empty sentinel) and a
     /// 3D one (whose Z is meaningful) both pass the Z overlap test on a query that did not ask about Z.
     /// </remarks>
-    private void CollectClusterOccupants(ReadOnlySpan<double> queryCoords, int coordCount, uint categoryMask, HashSet<long> into)
+    private void CollectClusterOccupants(SpatialGrid grid, ReadOnlySpan<double> queryCoords, int coordCount, uint categoryMask, HashSet<long> into)
     {
         var clusterArchetypes = _spatialState.ClusterArchetypes;
         if (clusterArchetypes == null)
@@ -321,7 +326,6 @@ internal sealed class SpatialTriggerSystem
             qMaxZ = queryCoords[5];
         }
 
-        var grid = _table.DBE.Realm0Grid;
         foreach (var cs in clusterArchetypes)
         {
             if (!cs.SpatialSlot.HasSpatialIndex)

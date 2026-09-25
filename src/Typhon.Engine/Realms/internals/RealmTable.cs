@@ -85,6 +85,12 @@ internal sealed class RealmTable
         _byId = new Realm[maxRealms];
     }
 
+    /// <summary>Bumped by every registered grid whenever a cell's tier changes — the tier index's engine-wide staleness stamp.</summary>
+    internal readonly TierVersionCounter TierVersionCounter = new();
+
+    /// <summary>The engine-wide tier version: moves whenever any realm's cell tier moves.</summary>
+    internal int TierVersion => Volatile.Read(ref TierVersionCounter.Value);
+
     /// <summary>The configured realm count: valid ids are <c>[0, MaxRealms)</c>.</summary>
     internal int MaxRealms => _byId.Length;
 
@@ -153,7 +159,7 @@ internal sealed class RealmTable
 
             // Before the release stores below: a reader that finds the realm finds its grid already naming it. Refused, and nothing mutated, when the
             // grid already belongs to a realm.
-            grid.BindToRealm(id);
+            grid.BindToRealm(id, TierVersionCounter);
             realm = new Realm(id, grid, config);
 
             var registered = _registered;
@@ -172,4 +178,10 @@ internal sealed class RealmTable
 
         return realm;
     }
+}
+
+/// <summary>A shared, bump-only tier version (Realms C1): every grid of one <see cref="RealmTable"/> increments it with its own.</summary>
+internal sealed class TierVersionCounter
+{
+    internal int Value;
 }

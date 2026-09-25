@@ -29,7 +29,8 @@ class MigrationDestCellRadixSortTests : TestBase<MigrationDestCellRadixSortTests
         var items = new MigrationRequest[count + 7];   // slack past `count`, which the sort must leave untouched
         for (var i = 0; i < items.Length; i++)
         {
-            items[i] = new MigrationRequest(sourceClusterChunkId: i, sourceSlotIndex: i & 63, destRealm: 0, destCellKey: key(rng), destClusterChunkId: rng.Next(100));
+            items[i] = new MigrationRequest(sourceClusterChunkId: i, sourceSlotIndex: i & 63, destRealm: 0, destCellKey: key(rng),
+                destClusterChunkId: rng.Next(100));
         }
 
         return items;

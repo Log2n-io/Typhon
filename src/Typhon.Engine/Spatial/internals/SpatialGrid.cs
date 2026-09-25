@@ -201,8 +201,11 @@ internal sealed unsafe class SpatialGrid
     /// <summary>True once <see cref="RealmTable.Register"/> has bound this grid to a realm. A grid belongs to one realm, for its lifetime.</summary>
     internal bool IsRegistered { get; private set; }
 
-    /// <summary>Binds the grid to <paramref name="realm"/>, once; a second binding would make <see cref="Realm"/> name the wrong realm's state.</summary>
-    internal void BindToRealm(RealmId realm)
+    /// <summary>
+    /// Binds the grid to <paramref name="realm"/>, once; a second binding would make <see cref="Realm"/> name the wrong realm's state.
+    /// <paramref name="engineTierVersion"/> is the table's engine-wide tier counter, bumped beside <see cref="TierVersion"/>.
+    /// </summary>
+    internal void BindToRealm(RealmId realm, TierVersionCounter engineTierVersion = null)
     {
         if (IsRegistered)
         {
@@ -210,7 +213,22 @@ internal sealed unsafe class SpatialGrid
         }
 
         Realm = realm;
+        _engineTierVersion = engineTierVersion;
         IsRegistered = true;
+    }
+
+    // The engine-wide tier version this grid also bumps (Realms C1): a tier index spans every realm an archetype is in, so its staleness test needs ONE
+    // number that moves when any realm's tiers move. Null for a standalone grid.
+    private TierVersionCounter _engineTierVersion;
+
+    /// <summary>A tier byte changed: this grid's version and the engine's move together. Same discipline as before — any change leaves a stamp stale.</summary>
+    private void BumpTierVersion()
+    {
+        _tierVersion++;
+        if (_engineTierVersion != null)
+        {
+            _engineTierVersion.Value++;
+        }
     }
 
     /// <summary>True when blocks resolve through the dense directory rather than the hash map (small worlds; tests assert the form they exercise).</summary>
@@ -1008,7 +1026,7 @@ internal sealed unsafe class SpatialGrid
         {
             byte oldTier = cell.Tier;
             cell.Tier = newTier;
-            _tierVersion++;
+            BumpTierVersion();
             TyphonEvent.EmitSpatialGridCellTierChange(cellKey, oldTier, newTier);
         }
     }
@@ -1036,7 +1054,7 @@ internal sealed unsafe class SpatialGrid
         if (cell.Tier == 0 || newTier < cell.Tier)
         {
             cell.Tier = newTier;
-            _tierVersion++;
+            BumpTierVersion();
         }
     }
 
@@ -1062,7 +1080,7 @@ internal sealed unsafe class SpatialGrid
         }
         if (changed)
         {
-            _tierVersion++;
+            BumpTierVersion();
         }
     }
 

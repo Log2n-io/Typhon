@@ -89,7 +89,8 @@ public partial class DatabaseEngine
     [PublicAPI]
     public SpatialGridOccupancy GetSpatialGridOccupancy()
     {
-        var grid = Realm0Grid;
+        // The primary realm's grid (realm 0 in a single-world database); per-realm occupancy is Realms RT-8's.
+        var grid = PrimaryGrid;
         if (grid == null)
         {
             return default;
@@ -201,8 +202,8 @@ public partial class DatabaseEngine
             ArrivalCellsTouched = clusterState.LastTickArrivalCellsTouched,
             RelocationSpendNs = clusterState.LastTickRelocationSpendNs,
             RepairBudgetStarvedNs = clusterState.LastTickRepairBudgetStarvedNs,
-            ClusterReach = (clusterState.Realm0Spatial is { } rsReach ? Volatile.Read(ref rsReach.ClusterReach) : 0f),
-            EscapedClusterCount = (clusterState.Realm0Spatial is { } rsEsc ? Volatile.Read(ref rsEsc.EscapedClusters).Count : 0),
+            ClusterReach = clusterState.MaxClusterReachAcrossRealms,
+            EscapedClusterCount = clusterState.EscapedClusterCountAcrossRealms,
             CellTreePromotions = clusterState.LastTickCellTreePromotions,
             CellTreeDemotions = clusterState.LastTickCellTreeDemotions,
             TightnessSampleCount = samples,
@@ -412,13 +413,13 @@ public partial class DatabaseEngine
 
             // MAXED, not summed — see SpatialMigrationTelemetry.ClusterReach. It is a bound every walk widens by, and the engine-wide bound is the largest
             // any archetype needs, not the sum of what each needs separately. The named outliers, by contrast, are distinct clusters and do add.
-            var reach = (clusterState.Realm0Spatial is { } rsReach ? Volatile.Read(ref rsReach.ClusterReach) : 0f);
+            var reach = clusterState.MaxClusterReachAcrossRealms;
             if (reach > maxReach)
             {
                 maxReach = reach;
             }
 
-            escapedClusters += (clusterState.Realm0Spatial is { } rsEsc ? Volatile.Read(ref rsEsc.EscapedClusters).Count : 0);
+            escapedClusters += clusterState.EscapedClusterCountAcrossRealms;
 
             // Summed as NUMERATORS, divided once at the end: a mean of the per-archetype means would weight a quiet archetype that scanned one cluster
             // equally with a busy one that scanned ten thousand. Read the sample count once for the same reason the per-archetype accessor does.

@@ -169,7 +169,8 @@ class RealmFenceTests : TestBase<RealmFenceTests>
         {
             MoveAll(dbe, round, viaOpenMut);
             RunFences(dbe, workers, ref tick);
-            AssertRealmsConsistent(dbe, round, $"round {round}, {(workers == SerialArm ? "serial" : $"W={workers}")}, {(viaOpenMut ? "OpenMut" : "WriteSpatial")}");
+            var arm = workers == SerialArm ? "serial" : $"W={workers}";
+            AssertRealmsConsistent(dbe, round, $"round {round}, {arm}, {(viaOpenMut ? "OpenMut" : "WriteSpatial")}");
         }
     }
 
@@ -285,7 +286,8 @@ class RealmFenceTests : TestBase<RealmFenceTests>
                         var cx = (v.Bounds.MinX + v.Bounds.MaxX) * 0.5;
                         var cy = (v.Bounds.MinY + v.Bounds.MaxY) * 0.5;
                         grid.CellOrigin(cellKey, out var ox, out var oy, out _);
-                        var inCell = cx >= ox - margin && cx <= ox + grid.Config.CellSize + margin && cy >= oy - margin && cy <= oy + grid.Config.CellSize + margin;
+                        var inCell = cx >= ox - margin && cx <= ox + grid.Config.CellSize + margin && cy >= oy - margin
+                            && cy <= oy + grid.Config.CellSize + margin;
                         Assert.That(inCell, Is.True, $"entity {v.Tag} of realm {realm} at ({cx}, {cy}) is filed in cell {cellKey} at ({ox}, {oy}), {context}");
                         perRealmCellCounts[(realm, cellKey)] = perRealmCellCounts.GetValueOrDefault((realm, cellKey)) + 1;
                         seen[realm]++;
