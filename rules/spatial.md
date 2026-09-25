@@ -2253,3 +2253,35 @@
   scope: DatabaseEngine.ConfigureRealms, DatabaseEngine.MergeRealmCatalog
   verified: RealmRegistrationTests.ConfigureRealms_OutOfRange_Refused, RealmCatalogTests.ConfigureRealms_BelowTheCatalogsHighestId_IsRefused_NeverClamped
   on_violation: realms missing after a reopen, or memory sized to a count nobody asked for
+
+### RM-03: A realm change is a mandatory crossing, whatever the hysteresis band `[fatal][silent]`
+  invariant a slot whose [RealmKey] differs from its cluster's realm at the fence is filed as a crossing into (key, the new realm's cell for its
+    position) — never absorbed by the band, never refused by the throttle (it is a CellCrossing); after the fence every occupied slot's key is its
+    cluster's realm (CC-02 per realm)
+  invariant the write that changes the key (WriteSpatial, OpenMut, Teleport) never grows the source cluster's box with the new coordinates — they
+    are another realm's frame (CA-01 holds: the box still covers where the entity was); a change undone within the tick is an ordinary write
+  invariant ExecuteMigrations claims in the destination realm's grid, releases in the source cluster's, and records one RealmChange per move
+  scope: ClusterRef.WriteSpatial, EntityAccessor.Teleport, DatabaseEngine.DrainPreFlaggedMigrations, DatabaseEngine.DetectClusterMigrationsRange,
+    DatabaseEngine.ExecuteMigrations, ArchetypeClusterState.RecordRealmChange
+  verified: CrossRealmMigrationTests (WriteSpatial, inside the band, OpenMut, Teleport incl. barrier-only, change-and-undo, source box not grown);
+    RealmFenceTests.RotatingRealms_EveryEntityChangesRealmEachRound_TheRealmsStayConsistent (serial and W = 2, 8; both write paths)
+  on_violation: an entity whose key names one realm lives in another's cluster: invisible to both realms' queries, silently
+
+### RM-04: The narrowphase answers only entities of the query's realm `[fatal][silent]`
+  invariant between a realm change's write and the fence that moves it, the entity is still in its old realm's cluster; every query path that opens
+    a cluster of a realm-keyed archetype masks out the slots whose key is not the cluster's realm (ArchetypeClusterState.SlotsInRealm) — the
+    enumerator, the batched radius query, ray, frustum and kNN
+  scope: AabbClusterEnumerator, ClusterRadiusBatch, ArchetypeClusterState.SlotsInRealm, ArchetypeClusterState.QueryRay,
+    ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest
+  verified: CrossRealmMigrationTests.RealmChange_ViaOpenMut_IsFoundByTheDirtyScan and WriteSpatial_RealmChange_MigratesAtTheFence_AndIsLogged
+    (the old realm answers nothing before the fence)
+  on_violation: an entity that left a realm answers that realm's queries with coordinates of another frame (SQ-08 broken for one tick)
+
+### RM-05: An invalid realm key is reverted at the fence, never thrown there `[fatal]`
+  invariant validated paths (Spawn, WriteSpatial, Teleport) throw at the call for an unregistered or incompatible realm; a raw write (OpenMut's ref,
+    GetSpan) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the slot dirty (the WAL carries it), counts
+    LastTickRealmKeyReverts — and never throws (a throw would leave migrations and WAL publication half done). Decision D-2
+  scope: ArchetypeClusterState.ResolveSlotRealmAtFence, ArchetypeClusterState.ValidateRealmEntry
+  verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown,
+    CrossRealmMigrationTests.WriteSpatial_IntoAnUnregisteredRealm_Throws_AndStoresNothing
+  on_violation: a stranded entity no query can see (and, with D-1, a reopen that refuses the database), or a fence that throws mid-way

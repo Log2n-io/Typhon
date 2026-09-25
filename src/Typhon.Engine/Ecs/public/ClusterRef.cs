@@ -429,6 +429,13 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         var slotBytes = ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T);
         var fieldPtr = slotBytes + spatialSlot.FieldOffset;
 
+        // Realms C4: a write that changes the entity's [RealmKey] is a realm change, not a move within this cluster's frame. One hoisted test for an
+        // unkeyed archetype; a keyed one pays a two-byte compare, and only an actual change leaves the ordinary path.
+        if (spatialSlot.HasRealmKey && WriteSpatialRealmChange(slotIndex, slotBytes, spatialSlot.RealmKeyOffset, in newValue))
+        {
+            return;
+        }
+
         var fieldType = spatialSlot.FieldInfo.FieldType;
         switch (fieldType)
         {
@@ -524,6 +531,20 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         var spatialSlot = _state.SpatialSlot;
         var column = ResolveBase(slot) + _layout.ComponentOffset(slot);
         var fieldOffset = spatialSlot.FieldOffset;
+
+        // Realms C4: a slot that changes realm leaves the batch's frame. Rare, so the whole call then takes the single writes, which handle it — the
+        // batch's shared bound and crossing test assume one frame for every slot.
+        if (spatialSlot.HasRealmKey && AnySlotChangesRealm(column, spatialSlot.RealmKeyOffset, slots, newValues))
+        {
+            for (var rest = slots; rest != 0; rest &= rest - 1)
+            {
+                var i = BitOperations.TrailingZeroCount(rest);
+                WriteSpatial(comp, i, newValues[i]);
+            }
+
+            return;
+        }
+
         var fieldType = spatialSlot.FieldInfo.FieldType;
         switch (fieldType)
         {
@@ -555,6 +576,55 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
                 throw new NotSupportedException(
                     $"WriteSpatial: spatial field type {fieldType} has no specialization. Add one when a new SpatialFieldType variant is introduced.");
         }
+    }
+
+    /// <summary>
+    /// A <c>WriteSpatial</c> whose value names another realm than the slot's (Realms C4): validated BEFORE anything is stored — an unregistered or
+    /// incompatible realm throws here, in application code (D-2) — then stored, and flagged as a mandatory crossing the fence moves into the new realm
+    /// whatever the hysteresis band says (RM-03). The cluster's bound is NOT grown with the new coordinates: they are another realm's frame, and would
+    /// widen this realm's box by the distance between two worlds (CA-01 still holds — the bound covers where the entity was, and the narrowphase realm
+    /// filter hides it from this realm's queries until it moves). Returns false, touching nothing, when the realm does not change.
+    /// </summary>
+    private bool WriteSpatialRealmChange<T>(int slotIndex, byte* slotBytes, int realmKeyOffset, in T newValue) where T : unmanaged
+    {
+        var newRealm = Unsafe.ReadUnaligned<ushort>(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref Unsafe.AsRef(in newValue)), realmKeyOffset));
+        if (newRealm == *(ushort*)(slotBytes + realmKeyOffset))
+        {
+            return false;
+        }
+
+        _state.ValidateRealmEntry(newRealm);
+
+        // Back to the cluster's own realm (a change and its undo in one tick): an ordinary write in this frame, which grows the bound to cover it. The
+        // earlier write's flag stays, and the fence drops it once it finds the entity home.
+        if (newRealm == _state.ClusterRealmMap[_chunkId])
+        {
+            return false;
+        }
+
+        *(T*)slotBytes = newValue;
+        // The entity leaves this cluster: every axis may shrink, which the fence's recompute decides.
+        _state.FlagShrinkAxes(_chunkId, 0x3F);
+        _state.FlagMigration(_chunkId, 1UL << slotIndex, -1);
+        _state.MigrationHint++;
+        SetClusterProcessBit();
+        return true;
+    }
+
+    /// <summary>True when a value of <paramref name="newValues"/> names another realm than its slot holds.</summary>
+    private static bool AnySlotChangesRealm<T>(byte* column, int realmKeyOffset, ulong slots, scoped ReadOnlySpan<T> newValues) where T : unmanaged
+    {
+        for (var rest = slots; rest != 0; rest &= rest - 1)
+        {
+            var i = BitOperations.TrailingZeroCount(rest);
+            var newRealm = Unsafe.ReadUnaligned<ushort>(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref Unsafe.AsRef(in newValues[i])), realmKeyOffset));
+            if (newRealm != *(ushort*)(column + i * sizeof(T) + realmKeyOffset))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>AABB3F specialization of <c>WriteSpatial</c> — the 3D tier #914 exists for.</summary>

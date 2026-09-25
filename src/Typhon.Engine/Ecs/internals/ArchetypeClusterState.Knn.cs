@@ -350,6 +350,13 @@ internal sealed unsafe partial class ArchetypeClusterState
         byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
         ulong occupancy = *(ulong*)clusterBase;
 
+        // RM-04: a slot whose realm key names another realm (changed this tick, moved at the next fence) is not this realm's.
+        var realmKeyColumn = RealmKeyColumn;
+        if (realmKeyColumn >= 0)
+        {
+            occupancy = SlotsInRealm(clusterBase, occupancy, realmKeyColumn, compSize, ClusterRealmMap[clusterChunkId]);
+        }
+
         Span<double> entityCoords = stackalloc double[6];
         while (occupancy != 0UL)
         {

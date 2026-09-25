@@ -3111,6 +3111,116 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Realm changes (Realms C4)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Refuses an entity of this archetype entering realm <paramref name="realm"/> when the realm is not registered or cannot hold the archetype — at the
+    /// call, in application code (D-2: validated paths throw, the fence never does).
+    /// </summary>
+    internal void ValidateRealmEntry(ushort realm)
+    {
+        var r = _realmTable?.TryGet(realm);
+        if (r == null)
+        {
+            throw new InvalidOperationException($"Realm {realm} is not registered: an entity of archetype {ArchetypeId} cannot enter it.");
+        }
+
+        if (!r.IsCompatible(ArchetypeId))
+        {
+            throw new InvalidOperationException($"Realm {realm} cannot hold archetype {ArchetypeId}: {r.IncompatibilityOf(ArchetypeId)}");
+        }
+    }
+
+    /// <summary>True when an entity of this archetype may be in realm <paramref name="realm"/>: registered, and able to hold it.</summary>
+    internal bool IsValidRealmForEntity(ushort realm) => _realmTable?.TryGet(realm) is { } r && r.IsCompatible(ArchetypeId);
+
+    /// <summary>The grid of registered realm <paramref name="realm"/>.</summary>
+    internal SpatialGrid GridOfRealm(ushort realm) => _realmTable.Get(realm).Grid;
+
+    /// <summary>
+    /// The realm the fence files slot <paramref name="slotIndex"/> of cluster <paramref name="chunkId"/> in: its <c>[RealmKey]</c> when valid, the
+    /// cluster's realm otherwise. An INVALID key — unregistered, or a realm that cannot hold the archetype, written through a raw path no validation
+    /// sees — is rewritten to the cluster's realm here (decision D-2), counted and marked dirty so the WAL carries the correction; the fence never throws.
+    /// </summary>
+    internal ushort ResolveSlotRealmAtFence(byte* clusterBase, int chunkId, int slotIndex, ushort clusterRealm)
+    {
+        ref readonly var ss = ref SpatialSlot;
+        var key = (ushort*)(clusterBase + Layout.ComponentOffset(ss.Slot) + slotIndex * Layout.ComponentSize(ss.Slot) + ss.RealmKeyOffset);
+        var realm = *key;
+        if (realm == clusterRealm || IsValidRealmForEntity(realm))
+        {
+            return realm;
+        }
+
+        *key = clusterRealm;
+        Interlocked.Increment(ref LastTickRealmKeyReverts);
+        SetDirty(chunkId, slotIndex, ss.Slot);
+        return clusterRealm;
+    }
+
+    /// <summary>
+    /// <paramref name="occupancy"/> without the slots whose <c>[RealmKey]</c> is not <paramref name="realm"/> — the narrowphase's realm filter (RM-04). A
+    /// realm change lands in the cluster's bytes at the write and moves the entity at the next fence; between the two, the entity is still in its old
+    /// realm's cluster and must not answer that realm's queries.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static ulong SlotsInRealm(byte* clusterBase, ulong occupancy, int realmKeyColumn, int stride, ushort realm)
+    {
+        var keys = clusterBase + realmKeyColumn;
+        var keep = occupancy;
+        for (var rest = occupancy; rest != 0; rest &= rest - 1)
+        {
+            var slot = BitOperations.TrailingZeroCount(rest);
+            if (*(ushort*)(keys + slot * stride) != realm)
+            {
+                keep &= ~(1UL << slot);
+            }
+        }
+
+        return keep;
+    }
+
+    /// <summary>Bytes from a cluster's base to slot 0's <c>[RealmKey]</c>, or <c>-1</c> for an archetype without one.</summary>
+    internal int RealmKeyColumn => SpatialSlot.HasRealmKey ? Layout.ComponentOffset(SpatialSlot.Slot) + SpatialSlot.RealmKeyOffset : -1;
+
+    /// <summary>Realm changes this archetype's fence detected this tick (cross-realm crossings filed). Reset per tick.</summary>
+    internal int LastTickRealmChanges;
+
+    /// <summary>Invalid realm keys the fence rewrote to the cluster's realm this tick (D-2). Reset per tick; non-zero is an application bug.</summary>
+    internal int LastTickRealmKeyReverts;
+
+    /// <summary>One entity's move between realms, recorded by the migration drain (Realms C4) for the replication layer (F3).</summary>
+    internal readonly record struct RealmChange(long EntityId, ushort FromRealm, ushort ToRealm);
+
+    // This tick's realm changes. Appended under a lock from Migrate slices (a realm change is rare next to a cell crossing); cleared with the per-tick
+    // counters at the top of the fence, so a tick with no consumer holds at most one tick of records.
+    private readonly List<RealmChange> _realmChanges = [];
+
+    /// <summary>Record one realm change. Thread-safe.</summary>
+    internal void RecordRealmChange(long entityId, ushort fromRealm, ushort toRealm)
+    {
+        lock (_realmChanges)
+        {
+            _realmChanges.Add(new RealmChange(entityId, fromRealm, toRealm));
+        }
+    }
+
+    /// <summary>The realm changes the last fence executed, in execution order per slice. Read after the fence.</summary>
+    internal IReadOnlyList<RealmChange> LastFenceRealmChanges => _realmChanges;
+
+    /// <summary>Clears the per-tick realm-change state. Called with the other per-tick counters at the top of the fence.</summary>
+    internal void ResetRealmChangeTickState()
+    {
+        LastTickRealmChanges = 0;
+        LastTickRealmKeyReverts = 0;
+        lock (_realmChanges)
+        {
+            _realmChanges.Clear();
+        }
+    }
+
     /// <summary>True when any realm this archetype lives in has a per-cell cluster index — the whole-archetype form of <c>rs.PerCellIndex !=
     /// null</c>.</summary>
     internal bool HasAnyPerCellIndex

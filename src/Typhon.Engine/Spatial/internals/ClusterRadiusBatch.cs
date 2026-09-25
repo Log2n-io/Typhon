@@ -589,6 +589,11 @@ internal static unsafe class ClusterRadiusBatch
             EnsureRent();
             byte* clusterBase = _entry.Accessor.GetChunkAddress(chunkId);
             ulong occupancy = *(ulong*)clusterBase;
+            if (_layout.RealmKeyColumn >= 0)
+            {
+                // RM-04, as the single query's cluster open applies it.
+                occupancy = ArchetypeClusterState.SlotsInRealm(clusterBase, occupancy, _layout.RealmKeyColumn, _layout.Stride, _rs.Realm.Value);
+            }
 
             // Opened once, counted once per member, with all its occupied slots: each member's own query would have opened it (SO-02).
             if (occupancy == 0UL)

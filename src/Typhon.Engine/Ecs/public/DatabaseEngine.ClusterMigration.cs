@@ -251,6 +251,8 @@ public partial class DatabaseEngine
         var staleDropped = 0;
         var jumps = 0;
         var clamped = 0;
+        var realmChanges = 0;
+        var keyed = ss.HasRealmKey;
 
         for (var wordIdx = 0; wordIdx < processBitmap.Length; wordIdx++)
         {
@@ -303,6 +305,23 @@ public partial class DatabaseEngine
                     slotMask &= slotMask - 1;
                     var fieldPtr = clusterBase + compOffset + slotIndex * compSize + ss.FieldOffset;
                     SpatialGrid.ReadSpatialCenter3D(fieldPtr, fieldType, out var posX, out var posY, out var posZ);
+
+                    // Realms C4: the realm first. A changed key is a mandatory crossing into the new realm's cell, whatever the hysteresis band (RM-03);
+                    // an invalid one is reverted to this cluster's realm (D-2) and the slot then tested as an ordinary move.
+                    if (keyed)
+                    {
+                        var clusterRealmId = grid.Realm.Value;
+                        var slotRealm = clusterState.ResolveSlotRealmAtFence(clusterBase, chunkId, slotIndex, clusterRealmId);
+                        if (slotRealm != clusterRealmId)
+                        {
+                            var realmDest = clusterState.GridOfRealm(slotRealm).WorldToCellKey(posX, posY, posZ);
+                            migrationsQueuedCount++;
+                            realmChanges++;
+                            clusterState.EnqueueMigration(chunkId, slotIndex, slotRealm, realmDest);
+                            continue;
+                        }
+                    }
+
                     var exited = posX < curCellMinX - hysteresisMargin || posX > curCellMinX + cellSize + hysteresisMargin
                                  || posY < curCellMinY - hysteresisMargin || posY > curCellMinY + cellSize + hysteresisMargin
                                  || posZ < curCellMinZ - hysteresisMargin || posZ > curCellMinZ + cellSize + hysteresisMargin;
@@ -327,6 +346,10 @@ public partial class DatabaseEngine
 
         clusterState.LastTickStaleFlagsDropped = staleDropped;
         AddCrossingClassification(clusterState, jumps, clamped);
+        if (realmChanges != 0)
+        {
+            Interlocked.Add(ref clusterState.LastTickRealmChanges, realmChanges);
+        }
     }
 
     /// <summary>
@@ -440,6 +463,8 @@ public partial class DatabaseEngine
             var frameRealm = -1;
             SpatialGrid grid = null;
             double cellSize = 0d, worldMinX = 0d, worldMinY = 0d, worldMinZ = 0d, hysteresisMargin = 0d;
+            var keyed = ss.HasRealmKey;
+            var realmChanges = 0;
 
             var end = Math.Min(dirtyBits.Length, firstWord + wordCount);
             for (var wordIdx = firstWord; wordIdx < end; wordIdx++)
@@ -502,6 +527,29 @@ public partial class DatabaseEngine
                             $"Non-finite position on spatial entity: entityId=0x{entityPK:X16}, clusterChunkId={clusterChunkId}, slotIndex={slotIndex}, "
                             + $"position=({posX}, {posY}, {posZ}).");
                     }
+
+                    // Realms C4, as in the pre-flagged drain: a changed key (an OpenMut write, which the barrier never saw) crosses into the new realm
+                    // whatever the band says; an invalid one is reverted (D-2).
+                    if (keyed)
+                    {
+                        var slotRealm = clusterState.ResolveSlotRealmAtFence(clusterBase, clusterChunkId, slotIndex, (ushort)frameRealm);
+                        if (slotRealm != frameRealm)
+                        {
+                            var realmDest = clusterState.GridOfRealm(slotRealm).WorldToCellKey(posX, posY, posZ);
+                            migrationsQueuedCount++;
+                            realmChanges++;
+                            if (sink != null)
+                            {
+                                sink.Add(new MigrationRequest(clusterChunkId, slotIndex, slotRealm, realmDest));
+                            }
+                            else
+                            {
+                                clusterState.EnqueueMigration(clusterChunkId, slotIndex, slotRealm, realmDest);
+                            }
+
+                            continue;
+                        }
+                    }
                     var exited = posX < curCellMinX - hysteresisMargin
                                  || posX > curCellMaxX + hysteresisMargin
                                  || posY < curCellMinY - hysteresisMargin
@@ -562,6 +610,10 @@ public partial class DatabaseEngine
             }
 
             AddCrossingClassification(clusterState, jumps, clamped);
+            if (realmChanges != 0)
+            {
+                Interlocked.Add(ref clusterState.LastTickRealmChanges, realmChanges);
+            }
 
             detectScanSpan.MigrationsQueued = migrationsQueuedCount;
             detectScanSpan.HysteresisAbsorbed = sink != null ? hysteresisAbsorbedCount : clusterState.LastTickHysteresisAbsorbedCount;
@@ -1274,8 +1326,14 @@ public partial class DatabaseEngine
                 // 10. Release the source slot. Clears occupancy, EnabledBits, EntityId, decrements cell.EntityCount. If the cluster becomes empty, the
                 // finalize-and-free is DEFERRED to FinalizeArchetypeFence (review C-1) — freeing here would race with a concurrent ClaimSlotInCell that may
                 // have just CAS-claimed a slot.
-                // The SOURCE cluster's realm: the same as the destination's for every move today, another for a realm change (C4).
-                var srcGrid = clusterState.SpatialOfCluster(srcChunkId).Grid;
+                // The SOURCE cluster's realm: the destination's for a move within a realm, another for a realm change (C4), which is recorded for the
+                // replication layer (F3) before the source slot is released.
+                var srcRealmSpatial = clusterState.SpatialOfCluster(srcChunkId);
+                var srcGrid = srcRealmSpatial.Grid;
+                if (srcRealmSpatial.Realm.Value != req.DestRealm)
+                {
+                    clusterState.RecordRealmChange(entityPK, srcRealmSpatial.Realm.Value, req.DestRealm);
+                }
                 if (hasClusterAccessor)
                 {
                     clusterState.ReleaseSlot(ref clusterAccessor, srcChunkId, srcSlot, changeSet, srcGrid, true);

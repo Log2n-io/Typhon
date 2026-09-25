@@ -26,8 +26,13 @@ internal readonly struct ClusterFieldLayout
     /// </summary>
     public readonly int Aabb2FBlocks;
 
+    /// <summary>Bytes from a cluster's base to slot 0's <c>[RealmKey]</c> (same stride), or <c>-1</c>: the narrowphase's realm filter runs only when
+    /// set.</summary>
+    public readonly int RealmKeyColumn;
+
     internal ClusterFieldLayout(ArchetypeClusterState state)
     {
+        RealmKeyColumn = state.RealmKeyColumn;
         // ref readonly, not a copy: ClusterSpatialSlot is ~104 bytes, and copying it to read four fields was a memcpy on every query (#916 O3).
         ref readonly var ss = ref state.SpatialSlot;
         FieldType = ss.FieldInfo.FieldType;
@@ -48,6 +53,7 @@ internal readonly struct ClusterFieldLayout
         Stride = stride;
         IdsOffset = idsOffset;
         Aabb2FBlocks = aabb2FBlocks;
+        RealmKeyColumn = -1;
     }
 }
 

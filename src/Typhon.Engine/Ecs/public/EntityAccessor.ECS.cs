@@ -160,6 +160,40 @@ public unsafe partial class EntityAccessor
         return Unsafe.BitCast<EntityRef, EntityRefMut>(ResolveEntity(id, true, true));   // not `new EntityRefMut(…)`: see EntityRefMut._ref
     }
 
+    /// <summary>
+    /// Moves entity <paramref name="id"/> into realm <paramref name="realm"/>, at <paramref name="value"/>'s position — a realm change (Realms C4). The
+    /// realm is validated here, before anything is written: an unregistered realm, or one that cannot hold the archetype, throws in the caller's code.
+    /// </summary>
+    /// <remarks>
+    /// <para>Writes the whole spatial component — <paramref name="value"/> with its <c>[RealmKey]</c> set to <paramref name="realm"/>, whatever it held —
+    /// and the next tick fence moves the entity into the new realm's cell. Until then it answers neither realm's spatial queries: the narrowphase realm
+    /// filter hides it from the old one, and it is not yet in the new one.</para>
+    /// <para>A write through the cluster barrier (<c>ClusterRef.WriteSpatial</c>) with a new key is the same operation; this is its entity-level form.</para>
+    /// </remarks>
+    /// <typeparam name="T">The archetype's spatial component, the one carrying <c>[RealmKey]</c>.</typeparam>
+    /// <exception cref="InvalidOperationException">The archetype is not realm-keyed through <paramref name="spatial"/>, or the realm is invalid for
+    /// it.</exception>
+    public void Teleport<T>(EntityId id, Comp<T> spatial, RealmId realm, in T value) where T : unmanaged
+    {
+        var mut = OpenMut(id);
+        var state = mut._ref._engineState?.ClusterState;
+        if (state == null || !state.SpatialSlot.HasRealmKey || state.SpatialSlot.Slot != mut._ref._archetype.GetSlot(spatial._componentTypeId))
+        {
+            throw new InvalidOperationException(
+                $"Teleport needs the archetype's realm-keyed spatial component: {typeof(T).Name} is not the [SpatialIndex] component carrying a [RealmKey].");
+        }
+
+        state.ValidateRealmEntry(realm.Value);
+        ref var stored = ref mut.Write(spatial);
+        stored = value;
+        Unsafe.WriteUnaligned(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref stored), state.SpatialSlot.RealmKeyOffset), realm.Value);
+
+        // The dirty scan finds this write; a barrier-only archetype's fence runs none, so the slot is flagged as the barrier would flag it.
+        state.FlagShrinkAxes(mut._ref._clusterChunkId, 0x3F);
+        state.FlagMigration(mut._ref._clusterChunkId, 1UL << mut._ref._clusterSlotIndex, -1);
+        state.SetClusterProcessBit(mut._ref._clusterChunkId);
+    }
+
     /// <summary>Try to open an entity for reading. Returns false if the entity doesn't exist or isn't visible.</summary>
     public bool TryOpen(EntityId id, out EntityRef entity)
     {

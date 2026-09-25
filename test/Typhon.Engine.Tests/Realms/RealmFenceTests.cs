@@ -69,7 +69,7 @@ class RealmFenceTests : TestBase<RealmFenceTests>
     /// Every entity to its round-<paramref name="round"/> box, keeping its realm key and tag — through <c>WriteSpatial</c> (the write barrier flags the
     /// crossing, drained per realm) or through <c>OpenMut</c> (no flag: the fence's dirty-bit scan detects it, per cluster realm).
     /// </summary>
-    private static void MoveAll(DatabaseEngine dbe, int round, bool viaOpenMut)
+    private static void MoveAll(DatabaseEngine dbe, int round, bool viaOpenMut, bool rotate = false)
     {
         if (viaOpenMut)
         {
@@ -101,7 +101,7 @@ class RealmFenceTests : TestBase<RealmFenceTests>
             foreach (var (id, realm, tag) in moves)
             {
                 ref var pos = ref wtx.OpenMut(id).Write(RealmUnit.Pos);
-                pos = new RealmPos { Bounds = BoxOf(round, tag), Realm = realm, Tag = tag };
+                pos = new RealmPos { Bounds = BoxOf(round, tag), Realm = rotate ? (ushort)((realm + 1) % RealmCount) : realm, Tag = tag };
             }
 
             wtx.Commit();
@@ -120,7 +120,8 @@ class RealmFenceTests : TestBase<RealmFenceTests>
                     var slot = BitOperations.TrailingZeroCount(bits);
                     bits &= bits - 1;
                     var current = cluster.GetReadOnly(RealmUnit.Pos, slot);
-                    cluster.WriteSpatial(RealmUnit.Pos, slot, current with { Bounds = BoxOf(round, current.Tag) });
+                    var realm = rotate ? (ushort)((current.Realm + 1) % RealmCount) : current.Realm;
+                    cluster.WriteSpatial(RealmUnit.Pos, slot, current with { Bounds = BoxOf(round, current.Tag), Realm = realm });
                 }
             }
         }
@@ -172,6 +173,31 @@ class RealmFenceTests : TestBase<RealmFenceTests>
             var arm = workers == SerialArm ? "serial" : $"W={workers}";
             AssertRealmsConsistent(dbe, round, $"round {round}, {arm}, {(viaOpenMut ? "OpenMut" : "WriteSpatial")}");
         }
+    }
+
+    /// <summary>
+    /// Realms C4 at scale: every entity moves AND changes realm every round (0 → 1 → 2 → 0; realm 2 has another cell geometry), through both fences
+    /// and both write paths. Each realm keeps one entity per tag, so the same invariants and the same brute-force oracle hold after every round.
+    /// </summary>
+    [Test]
+    [CancelAfter(60_000)]
+    [VerifiesRule("RM-03")]
+    public void RotatingRealms_EveryEntityChangesRealmEachRound_TheRealmsStayConsistent([Values(SerialArm, 2, 8)] int workers, [Values] bool viaOpenMut)
+    {
+        using var dbe = ThreeRealms();
+        SpawnMirrored(dbe);
+        var tick = 0L;
+        dbe.WriteTickFence(++tick);
+        var cs = StateOf(dbe);
+        for (var round = 1; round <= Rounds; round++)
+        {
+            MoveAll(dbe, round, viaOpenMut, rotate: true);
+            RunFences(dbe, workers, ref tick);
+            var arm = workers == SerialArm ? "serial" : $"W={workers}";
+            AssertRealmsConsistent(dbe, round, $"rotation round {round}, {arm}, {(viaOpenMut ? "OpenMut" : "WriteSpatial")}");
+        }
+
+        Assert.That(cs.LastTickRealmKeyReverts, Is.Zero);
     }
 
     [Test]

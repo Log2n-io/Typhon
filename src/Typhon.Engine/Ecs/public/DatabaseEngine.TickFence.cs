@@ -892,6 +892,7 @@ public partial class DatabaseEngine
         clusterState.LastTickCrossingsExecuted = 0;
         clusterState.LastTickJumpCrossings = 0;
         clusterState.LastTickClampedDestinations = 0;
+        clusterState.ResetRealmChangeTickState();
         clusterState.LastTickLargestArrivalRun = 0;
         clusterState.LastTickArrivalCellsTouched = 0;
         clusterState.LastTickRelocationsExecuted = 0;
