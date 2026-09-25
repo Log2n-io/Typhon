@@ -432,8 +432,6 @@
           href: Spatial/spatial-category-filtering.md
         - name: Cluster Spatial Queries
           href: Spatial/cluster-spatial-queries.md
-        - name: Interest Management (Delta Spatial Queries)
-          href: Spatial/spatial-interest-management.md
         - name: Trigger Volumes (Enter / Leave / Stay)
           href: Spatial/spatial-trigger-volumes.md
     - name: Tiered Simulation Dispatch
@@ -487,6 +485,33 @@
           href: Storage/pluggable-storage-backend/transient-store.md
 - name: Subscriptions
   href: Subscriptions/README.md
+  items:
+    - name: 'Push Replication'
+      href: Subscriptions/push-replication.md
+    - name: 'Projections & Codecs'
+      href: Subscriptions/projections-codecs.md
+    - name: 'Replication by Attributes'
+      href: Subscriptions/replication-attributes.md
+    - name: 'Profiles & Observers'
+      href: Subscriptions/profiles-observers.md
+    - name: 'Sessions & Admission'
+      href: Subscriptions/sessions-admission.md
+    - name: 'Owner State (SELF)'
+      href: Subscriptions/owner-state.md
+    - name: 'Commands & Acknowledgements'
+      href: Subscriptions/commands.md
+    - name: 'Events'
+      href: Subscriptions/events.md
+    - name: 'Backpressure & Budgets'
+      href: Subscriptions/backpressure-budgets.md
+    - name: 'Transports & Hosting'
+      href: Subscriptions/transports-hosting.md
+    - name: 'Client SDKs'
+      href: Subscriptions/client-sdks.md
+    - name: 'Wire Protocol & Catalog'
+      href: Subscriptions/wire-protocol.md
+    - name: 'Replication Diagnostics'
+      href: Subscriptions/diagnostics.md
 - name: Transactions
   href: Transactions/README.md
   items:

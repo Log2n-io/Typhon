@@ -3769,14 +3769,14 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // Issue #229 Q10: InitializeSpatial now also allocates this archetype's own CellClusterPool sized to the grid's cell count.
                         clusterState.InitializeSpatial(slotToTable, _spatialGrid, meta.ArchetypeId);
 
-                        // Register with per-table SpatialInterestSystem for fan-out
+                        // Register with the per-table spatial state, which the trigger system reads
                         for (var slot = 0; slot < meta.ComponentCount; slot++)
                         {
                             var table = slotToTable[slot];
                             if (table.SpatialIndex != null)
                             {
-                                // Register cluster archetype on SpatialIndexState — interest/trigger systems
-                                // access this list dynamically (they may not exist yet at init time).
+                                // Register cluster archetype on SpatialIndexState — the trigger system reads this list dynamically (it may not
+                                // exist yet at init time).
                                 table.SpatialIndex.RegisterClusterArchetype(clusterState);
                                 break;
                             }

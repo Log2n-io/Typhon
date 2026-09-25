@@ -138,6 +138,11 @@ public static class CatalogValidator
                 problems.Add($"event '{e.Name}' needs a scope");
             }
 
+            if (e.Name == BuiltInEvents.EventsLost && !BuiltInEvents.HasEventsLostShape(e))
+            {
+                problems.Add($"event '{BuiltInEvents.EventsLost}' is a built-in; declare it with BuiltInEvents.CreateEventsLost, not by name");
+            }
+
             CheckMessageFields($"event '{e.Name}'", e.Fields, enums, maxBytes, problems);
         }
 

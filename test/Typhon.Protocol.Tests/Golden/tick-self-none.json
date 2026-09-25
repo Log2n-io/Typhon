@@ -1,0 +1,22 @@
+{
+  "description": "SELF with netId 0 (W17\u2032): a session that controls no entity \u2014 a spectator\u0027s acknowledgement, lastSeq 42, archetype index 0 and no owner group; the client drops any owner state it holds.",
+  "catalog": "catalog-kitchen-sink",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 70002,
+      "flags": 0,
+      "periodUs": 0
+    },
+    {
+      "call": "self",
+      "archetype": null,
+      "netId": 0,
+      "lastSeq": 42,
+      "ownerMask": 0
+    },
+    {
+      "call": "endTick"
+    }
+  ]
+}

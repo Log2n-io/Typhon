@@ -6,6 +6,7 @@ import {
   createClientRegion,
   readCommands,
   REGION_MAX_VERTICES,
+  REGION_MIN_VERTICES_3D,
   RegionSender,
   validateCatalog,
   WireWriter,
@@ -56,6 +57,29 @@ describe('createClientRegion', () => {
     const vertices = built.fields.find((f) => f.name === BuiltInCommand.regionVerticesField)!;
     expect(vertices.codec.of).toBe(positionCodec);
     expect([vertices.codec.minCount, vertices.codec.maxCount]).toEqual([3, REGION_MAX_VERTICES]);
+  });
+
+  it('takes a polyhedron of 4–16 pos3 points in a deep world, and validates as the built-in', () => {
+    const pos3: CatalogCodec = { t: 'pos3', bits: 24, min: [-1024, -1024, -1024], max: [1024, 1024, 1024] };
+    const built = createClientRegion(pos3);
+    const vertices = built.fields.find((f) => f.name === BuiltInCommand.regionVerticesField)!;
+    expect([vertices.codec.minCount, vertices.codec.maxCount]).toEqual([REGION_MIN_VERTICES_3D, REGION_MAX_VERTICES]);
+
+    const base = catalog();
+    const problems: string[] = [];
+    validateCatalog({ ...base, commands: [built, ...base.commands.slice(1)] }, problems);
+    expect(problems).toEqual([]);
+
+    // A pos3 region that allows three points is not the built-in's shape.
+    const loose: CatalogCommand = {
+      ...built,
+      fields: built.fields.map((f) =>
+        f.name === BuiltInCommand.regionVerticesField ? { ...f, codec: { ...f.codec, minCount: 3 } } : f,
+      ),
+    };
+    const looseProblems: string[] = [];
+    validateCatalog({ ...base, commands: [loose, ...base.commands.slice(1)] }, looseProblems);
+    expect(looseProblems.join(String.fromCharCode(10))).toMatch(/built-in whose shape/);
   });
 });
 

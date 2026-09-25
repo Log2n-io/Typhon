@@ -3,6 +3,49 @@ using System;
 namespace Typhon.Protocol;
 
 /// <summary>
+/// The events the engine declares itself, at reserved indices 0–15 (W27): today one, <see cref="EventsLost"/>.
+/// </summary>
+public static class BuiltInEvents
+{
+    /// <summary>
+    /// The name of the event that tells a session how many events it was never sent: the ones routed to it while it was skipped for longer than the event
+    /// log keeps (09 § 11, D7). First in its frame's <c>EVENTS</c> block when present.
+    /// </summary>
+    public const string EventsLost = "EventsLost";
+
+    /// <summary>The reserved index of <see cref="EventsLost"/>.</summary>
+    public const int EventsLostIdx = 0;
+
+    /// <summary>The <c>EventsLost</c> field carrying the count.</summary>
+    public const string EventsLostCountField = "count";
+
+    /// <summary>The scope token of an event addressed to one session: <c>EventsLost</c>, and an application's <c>RouteToSession</c> events.</summary>
+    public const string SessionScope = "session";
+
+    /// <summary>The reserved index of a built-in event, or −1 when <paramref name="name"/> is an application event.</summary>
+    /// <param name="name">The event name.</param>
+    /// <returns>The reserved index, or −1.</returns>
+    public static int ReservedIdx(string name) => name == EventsLost ? EventsLostIdx : -1;
+
+    /// <summary>Whether <paramref name="e"/> is shaped exactly as <see cref="CreateEventsLost"/> builds it: one <c>varu</c> field named <c>count</c>.</summary>
+    /// <param name="e">An event named <see cref="EventsLost"/>.</param>
+    /// <returns><see langword="true"/> when the shape matches.</returns>
+    public static bool HasEventsLostShape(CatalogEvent e) =>
+        e.Fields is [{ Name: EventsLostCountField, Codec.Kind: CodecKind.Varu, Group: null, OnEnter: false, Enum: null }]
+        && e.Scope == SessionScope;
+
+    /// <summary>Builds the <c>EventsLost</c> event: one <c>varu</c> count.</summary>
+    /// <returns>The event definition.</returns>
+    public static CatalogEvent CreateEventsLost() => new()
+    {
+        Idx = EventsLostIdx,
+        Name = EventsLost,
+        Scope = SessionScope,
+        Fields = [new CatalogField { Name = EventsLostCountField, Codec = new CatalogCodec { Kind = CodecKind.Varu } }],
+    };
+}
+
+/// <summary>
 /// The commands the engine itself understands (W27, W28). They sit in the catalog beside the application's, at reserved indices that never move.
 /// </summary>
 public static class BuiltInCommands
@@ -19,8 +62,16 @@ public static class BuiltInCommands
     /// <summary>The reserved index of <see cref="SubscribeRequest"/>.</summary>
     public const int SubscribeRequestIdx = 1;
 
-    /// <summary>The fewest footprint vertices a region may carry.</summary>
+    /// <summary>The fewest vertices a flat world's region may carry: a triangle.</summary>
     public const int MinRegionVertices = 3;
+
+    /// <summary>The fewest vertices a deep world's region may carry: a tetrahedron (10 § 6).</summary>
+    public const int MinRegionVertices3 = 4;
+
+    /// <summary>The fewest vertices a region may carry over a position codec of <paramref name="dims"/> axes.</summary>
+    /// <param name="dims">2 or 3.</param>
+    /// <returns><see cref="MinRegionVertices"/> or <see cref="MinRegionVertices3"/>.</returns>
+    public static int MinVertices(int dims) => dims == 3 ? MinRegionVertices3 : MinRegionVertices;
 
     /// <summary>The most footprint vertices a region may carry: a horizon-clipped frustum needs 5–8, 16 is headroom.</summary>
     public const int MaxRegionVertices = 16;
@@ -59,7 +110,8 @@ public static class BuiltInCommands
         return fields.Length == 3
             && command.Delivery == CatalogCommand.LatestDelivery
             && command.Rate is { PerSec: 5, Burst: 5 }
-            && vertices is { Kind: CodecKind.List, MinCount: MinRegionVertices, MaxCount: MaxRegionVertices, Of.Kind: CodecKind.Pos2 }
+            && vertices is { Kind: CodecKind.List, MaxCount: MaxRegionVertices, Of.Kind: CodecKind.Pos2 or CodecKind.Pos3 }
+            && vertices.MinCount == MinVertices(vertices.Of.Kind == CodecKind.Pos3 ? 3 : 2)
             && altitude?.Kind == CodecKind.F16
             && budget?.Kind == CodecKind.U16
             && Array.TrueForAll(fields, f => f is { Group: null, OnEnter: false, Enum: null });
@@ -67,9 +119,10 @@ public static class BuiltInCommands
 
     /// <summary>
     /// Builds the <c>ClientRegion</c> command for a world whose positions use <paramref name="position"/>: its vertices are quantized exactly like the
-    /// archetypes' positions, so a decoded region can never leave the world.
+    /// archetypes' positions, so a decoded region can never leave the world. A flat world's region is a polygon of 3–16 points, a deep world's a
+    /// polyhedron of 4–16 (10 § 6).
     /// </summary>
-    /// <param name="position">The grid's <see cref="CodecKind.Pos2"/> codec.</param>
+    /// <param name="position">The grid's <see cref="CodecKind.Pos2"/> codec in a flat world, its <see cref="CodecKind.Pos3"/> codec in a deep one.</param>
     /// <returns>The command definition: latest-wins, at most 5 per second.</returns>
     public static CatalogCommand CreateClientRegion(CatalogCodec position)
     {
@@ -87,7 +140,8 @@ public static class BuiltInCommands
                     Name = RegionVerticesField,
                     Codec = new CatalogCodec
                     {
-                        Kind = CodecKind.List, Of = position, MinCount = MinRegionVertices, MaxCount = MaxRegionVertices,
+                        Kind = CodecKind.List, Of = position, MinCount = MinVertices(position.Kind == CodecKind.Pos3 ? 3 : 2),
+                        MaxCount = MaxRegionVertices,
                     },
                 },
                 new CatalogField { Name = RegionAltitudeField, Codec = new CatalogCodec { Kind = CodecKind.F16 } },
@@ -185,6 +239,9 @@ public static class AckReasons
 
     /// <summary>A <c>ClientRegion</c> whose convex hull has fewer than three points or no area; the previous region is kept.</summary>
     public const byte RegionInvalid = 3;
+
+    /// <summary>The session's role may not send this command type (the catalog's <c>roles</c>).</summary>
+    public const byte Forbidden = 4;
 
     /// <summary>The first application-defined reason code.</summary>
     public const byte FirstApplicationReason = 128;

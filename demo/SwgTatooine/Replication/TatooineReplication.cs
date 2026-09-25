@@ -24,6 +24,12 @@ public static class TatooineReplication
     /// <summary>The god camera's profile: the whole planet, every archetype, through a <c>World</c> observer.</summary>
     public const string GodProfile = "god-world";
 
+    /// <summary>
+    /// The god camera's profile under <c>--god-region</c>: the client's own hull (<c>ClientRegion</c>), a near budget, and an aggregate of the rest — the
+    /// shape AC-3 measures (design/Subscriptions/09 § 17). Declared instead of <see cref="GodProfile"/>, never beside it.
+    /// </summary>
+    public const string GodRegionProfile = "god-region";
+
     /// <summary>The session kind a client names in <c>HELLO</c>.</summary>
     public const string GodKind = "god";
 
@@ -43,12 +49,15 @@ public static class TatooineReplication
     /// </remarks>
     private const double PlayerRadiusM = 192d;
 
+    /// <summary>The replication grid's cell side (<see cref="SubscriptionsOptions.ReplicationCellM"/>): a third of <see cref="PlayerRadiusM"/>.</summary>
+    public const double ReplicationCellM = PlayerRadiusM / 3d;
+
     /// <summary>The fastest anything on Tatooine moves, in metres per second — a mounted player.</summary>
     /// <remarks>
     /// It sizes the motion codec: the teleport threshold is what separates "it moved" from "it was put somewhere else", and the velocity width is derived from
     /// it together with the tick period. Declaring it too high wastes a bit per segment; too low turns a sprint into a teleport.
     /// </remarks>
-    private const double MaxSpeedMps = 12.0;
+    internal const double MaxSpeedMps = 12.0;
 
     private static SubscriptionsCommands _pushCommands;
 
@@ -64,6 +73,21 @@ public static class TatooineReplication
     /// <param name="slots">The slots.</param>
     public static void Replicate<T>(in ClusterRef<T> cluster, ulong slots) where T : class => _pushCommands?.Replicate(in cluster, slots);
 
+    /// <summary>Each player session's outbound byte budget, bytes per second; 0 for none (<c>--session-budget</c>).</summary>
+    public static int PlayerBudgetBytesPerSecond { get; set; }
+
+    /// <summary>The players' leave radius, metres (<c>--player-leave</c>); 0 for none, the default. AC-2 and AC-3 run at 192/208 m.</summary>
+    public static double PlayerLeaveM { get; set; }
+
+    /// <summary>The god region's largest edge, metres (<c>--god-region</c>); 0 keeps the <c>World</c> god camera, the default.</summary>
+    public static double GodRegionMaxEdgeM { get; set; }
+
+    /// <summary>The god region's near budget, entities (<c>--god-near</c>); 10 000 by default, AC-3's.</summary>
+    public static int GodNearBudget { get; set; } = 10_000;
+
+    /// <summary>The god region's aggregate tile, metres; its counts refresh once a second.</summary>
+    private const double GodAggregateTileM = 256d;
+
     /// <summary>Declares everything a client can see.</summary>
     /// <param name="subs">The runtime's registry, before <c>Start</c>.</param>
     /// <param name="automatic">Whether the engine detects changes itself instead of relying on the simulation's <c>Replicate</c> calls (experimental).</param>
@@ -73,45 +97,51 @@ public static class TatooineReplication
 
         subs.Sessions.Kinds(GodKind, PlayerKind);
 
-        subs.Archetype<Creature>(a => a
-            .Motion(Creature.Bounds, m => m.Tolerance(0.05).Teleport(MaxSpeedMps))
-            .OnEnter(Creature.Ai, x => x.AggroRadius, Codec.F16, name: "aggro")
-            .Field(Creature.Ai, x => x.Mode, Codec.U8, name: "mode")
-            .Fraction(Creature.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals"));
-
-        subs.Archetype<CityNpc>(a => a
-            .Motion(CityNpc.Bounds, m => m.Tolerance(0.05).Teleport(MaxSpeedMps))
-            .Field(CityNpc.Ai, x => x.Mode, Codec.U8, name: "mode"));
-
-        subs.Archetype<Player>(a => a
-            .Motion(Player.Bounds, m => m.Teleport(MaxSpeedMps))
-            .Field(Player.State, s => s.Activity, Codec.U8, name: "activity")
-            .Fraction(Player.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals"));
-
-        subs.Archetype<CreatureLair>(a => a
-            .Position(CreatureLair.Bounds)
-            .OnEnter(CreatureLair.Spawner, l => l.CreatureTemplate, Codec.U16, name: "template"));
-
-        subs.Archetype<WorldObject>(a => a
-            .Position(WorldObject.Bounds)
-            .OnEnter(WorldObject.Struct, s => s.Kind, Codec.U8, name: "kind")
-            .OnEnter(WorldObject.Struct, s => s.OwnerRegion, Codec.I16, name: "region"));
+        // What each archetype replicates is declared on the data — [Replicated] on the archetype, [Motion] / [Position] on its placement, [Replicate],
+        // [OnEnter], [Fraction] and [Owner] on its components' fields (Ecs/Archetypes.cs, Ecs/Components.cs; design/Subscriptions/11 § 5). Everyone sees a
+        // player's health as an 8-bit bar; the player alone sees the exact number and its mission waypoint, in SELF (11 § 2) — SWG's own HAM display and
+        // quest marker. A builder call, subs.Archetype<T>(a => …), would replace an archetype's attributes for a deployment that wants otherwise.
+        subs.Archetype<Creature>();
+        subs.Archetype<CityNpc>();
+        subs.Archetype<Player>();
+        subs.Archetype<CreatureLair>();
+        subs.Archetype<WorldObject>();
 
         // The god camera through a World observer, the players through a disc with no band: the anchor's slack is its hysteresis for observer motion
         // (push-model.md § 4.5).
         var detection = automatic ? PushDetection.Automatic : PushDetection.Explicit;
-        subs.Profile(GodProfile, p => p
-            .Detection(detection)
-            .World()
-            .Of<Creature>()
-            .Of<CityNpc>()
-            .Of<Player>()
-            .Of<CreatureLair>()
-            .Of<WorldObject>());
+        if (GodRegionMaxEdgeM > 0)
+        {
+            subs.Profile(GodRegionProfile, p =>
+            {
+                p.Detection(detection)
+                    .ClientRegion(GodRegionMaxEdgeM)
+                    .Near(GodNearBudget)
+                    .Of<Creature>()
+                    .Of<CityNpc>()
+                    .Of<Player>()
+                    .Of<CreatureLair>()
+                    .Of<WorldObject>();
+                p.Aggregate(GodAggregateTileM, rateHz: 1).Of<Creature>().Of<CityNpc>().Of<Player>();
+            });
+        }
+        else
+        {
+            subs.Profile(GodProfile, p => p
+                .Detection(detection)
+                .World()
+                .Of<Creature>()
+                .Of<CityNpc>()
+                .Of<Player>()
+                .Of<CreatureLair>()
+                .Of<WorldObject>());
+        }
 
+        // Centred on the player the session controls, at its post-fence position (09 § 6): no per-tick Place.
         subs.Profile(PlayerProfile, p => p
             .Detection(detection)
-            .Sphere(PlayerRadiusM)
+            .Sphere(PlayerRadiusM, leave: PlayerLeaveM)
+            .AroundControlled()
             .Of<Player>()
             .Of<CityNpc>()
             .Of<Creature>());
@@ -140,7 +170,12 @@ public static class TatooineReplication
             if (e.Kind == SessionEventKind.Opened)
             {
                 // By kind, so one run can carry both shapes and a measurement can say which it measured.
-                subs.Session(e.Session).Profile(e.SessionKind == PlayerKind ? PlayerProfile : GodProfile);
+                var player = e.SessionKind == PlayerKind;
+                var request = subs.Session(e.Session).Profile(player ? PlayerProfile : GodRegionMaxEdgeM > 0 ? GodRegionProfile : GodProfile);
+                if (player && PlayerBudgetBytesPerSecond > 0)
+                {
+                    request.SetBudget(PlayerBudgetBytesPerSecond);
+                }
             }
         }
     }
@@ -255,7 +290,90 @@ public static class TatooineReplication
         }
 
         Console.Error.WriteLine(line.ToString());
+        ReportTail(ring, systems, first);
     }
+
+    /// <summary>
+    /// Where the window's slow ticks go: for the ticks at or above the window's 95th percentile, each system's mean span beyond its own median over the
+    /// window. A tail that a mean hides shows up here by name.
+    /// </summary>
+    private static void ReportTail(TickTelemetryRing ring, SystemDefinition[] systems, long first)
+    {
+        var durations = new List<float>();
+        var rows = new List<float[]>();
+        for (var t = first; t <= ring.NewestTick; t++)
+        {
+            ref readonly var tick = ref ring.GetTick(t);
+            if (tick.ActualDurationMs <= 0f)
+            {
+                continue;
+            }
+
+            var metrics = ring.GetSystemMetrics(t);
+            var row = new float[systems.Length];
+            for (var i = 0; i < metrics.Length && i < systems.Length; i++)
+            {
+                row[i] = metrics[i].WasSkipped ? 0f : metrics[i].DurationUs;
+            }
+
+            durations.Add(tick.ActualDurationMs);
+            rows.Add(row);
+        }
+
+        if (durations.Count < 20)
+        {
+            return;
+        }
+
+        var sorted = durations.ToArray();
+        Array.Sort(sorted);
+        var p95 = sorted[(int)(sorted.Length * 0.95)];
+        var median = new float[systems.Length];
+        var column = new float[rows.Count];
+        for (var i = 0; i < systems.Length; i++)
+        {
+            for (var r = 0; r < rows.Count; r++)
+            {
+                column[r] = rows[r][i];
+            }
+
+            Array.Sort(column);
+            median[i] = column[column.Length / 2];
+        }
+
+        var excess = new double[systems.Length];
+        var slow = 0;
+        for (var r = 0; r < rows.Count; r++)
+        {
+            if (durations[r] < p95)
+            {
+                continue;
+            }
+
+            slow++;
+            for (var i = 0; i < systems.Length; i++)
+            {
+                excess[i] += rows[r][i] - median[i];
+            }
+        }
+
+        var order = new int[systems.Length];
+        for (var i = 0; i < order.Length; i++)
+        {
+            order[i] = i;
+        }
+
+        Array.Sort(order, (x, y) => excess[y].CompareTo(excess[x]));
+        var line = new System.Text.StringBuilder(
+            $"  tail: {slow} ticks >= p95 {p95:F2} ms (median {sorted[sorted.Length / 2]:F2}); mean excess over each system's median, us:");
+        for (var k = 0; k < Math.Min(8, order.Length); k++)
+        {
+            line.Append($" {systems[order[k]].Name}={excess[order[k]] / slow:F0}");
+        }
+
+        Console.Error.WriteLine(line.ToString());
+    }
+
     private static long SendWindowFrom, SendFramesFrom, SendBytesFrom, SendAllocFrom, SendItemsFrom;
     private static double SendCpuFrom;
     private static int SendGen0From;
@@ -388,48 +506,37 @@ public static class TatooineReplication
             }
         }
 
-        // ONE walk: this tick's position for every player a session holds, and a player for every session that does not hold one yet.
-        BoundPositions.Clear();
+        // A player for every session that does not hold one yet, handed over once with Control: the engine centres the session's sphere on it from then
+        // on (AroundControlled), so there is no per-tick walk of every player and no Place.
         var cursor = 0;
-        foreach (var cluster in accessor.GetClusterEnumerator())
+        if (Unbound.Count > 0)
         {
-            var occupancy = cluster.OccupancyBits;
-            var placements = cluster.GetReadOnlySpan(Player.Bounds);
-            var ids = cluster.EntityIds;
-            while (occupancy != 0)
+            foreach (var cluster in accessor.GetClusterEnumerator())
             {
-                var slot = BitOperations.TrailingZeroCount(occupancy);
-                occupancy &= occupancy - 1;
-                var id = ids[slot];
-                var held = BoundIds.Contains(id);
-                if (!held && cursor >= Unbound.Count)
+                var occupancy = cluster.OccupancyBits;
+                var ids = cluster.EntityIds;
+                while (occupancy != 0 && cursor < Unbound.Count)
                 {
-                    continue;
-                }
+                    var slot = BitOperations.TrailingZeroCount(occupancy);
+                    occupancy &= occupancy - 1;
+                    var id = ids[slot];
+                    if (BoundIds.Contains(id))
+                    {
+                        continue;
+                    }
 
-                var b = placements[slot].Bounds;
-                var at = new Vector3D((b.MinX + b.MaxX) * 0.5, (b.MinY + b.MaxY) * 0.5, 0d);
-                if (!held)
-                {
                     var session = Unbound[cursor++];
                     BoundPlayer[session.Value] = id;
                     BoundIds.Add(id);
+                    subs.Session(session).Control(cluster.GetEntityId(slot));
                 }
 
-                BoundPositions[id] = at;
+                if (cursor >= Unbound.Count)
+                {
+                    break;
+                }
             }
         }
-
-        foreach (var session in subs.OpenSessions)
-        {
-            if (string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal)
-                && BoundPlayer.TryGetValue(session.Value, out var id)
-                && BoundPositions.TryGetValue(id, out var at))
-            {
-                subs.Place(session, at);
-            }
-        }
-
 
         // A closed session gives its player back, or the maps grow for the life of the process and every player eventually reads as held — at which
         // point a new session is bound to nothing and sees nothing.
@@ -474,9 +581,6 @@ public static class TatooineReplication
 
     /// <summary>The players held by some session, so the walk can tell a free one from a taken one without searching.</summary>
     private static readonly HashSet<long> BoundIds = [];
-
-    /// <summary>Scratch, reused every tick: this tick's position for each held player.</summary>
-    private static readonly Dictionary<long, Vector3D> BoundPositions = [];
 
     /// <summary>Scratch: the player sessions open this tick that hold no player yet.</summary>
     private static readonly List<SessionId> Unbound = [];

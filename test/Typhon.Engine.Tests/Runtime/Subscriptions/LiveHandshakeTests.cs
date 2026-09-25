@@ -39,7 +39,10 @@ class LiveHandshakeTests : TestBase<LiveHandshakeTests>
     private static TyphonRuntime CreateRuntime(DatabaseEngine dbe) => TyphonRuntime.Create(dbe, schedule =>
     {
         schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
-    }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = TickRateHz });
+    }, new RuntimeOptions
+    {
+        WorkerCount = 1, BaseTickRate = TickRateHz, Subscriptions = new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
+    });
 
     /// <summary>The SWG-shaped declaration of <see cref="SubscriptionsRuntimeTests"/>: three archetypes, a world profile, one session kind.</summary>
     private static void Declare(SubscriptionsRegistry subs)

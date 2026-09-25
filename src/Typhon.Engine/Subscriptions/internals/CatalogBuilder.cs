@@ -63,10 +63,14 @@ internal static class CatalogBuilder
     /// The scheduled systems' names, in schedule order: the labels of the built-in <c>typhon.system.mean</c>. Empty omits that metric, which would otherwise
     /// be a vector metric carrying no values.
     /// </param>
+    /// <param name="spatial">
+    /// The spatial world, whose bounds a region's vertices are quantized over (10 § 6): <c>pos2</c> when it is one cell deep, <c>pos3</c> otherwise.
+    /// <see langword="null"/> takes the codec from the first 2D-position archetype instead, for a catalog built without an engine.
+    /// </param>
     /// <returns>The canonical catalog, its UTF-8 bytes and their digest.</returns>
     /// <exception cref="CatalogException">The declarations produce a catalog that breaks a wire rule.</exception>
     public static CatalogExport Build(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, string appName, int appRevision, int tickPeriodUs,
-        IReadOnlyList<string> systemNames)
+        IReadOnlyList<string> systemNames, SpatialGridConfig? spatial = null)
     {
         ArgumentNullException.ThrowIfNull(registry);
         plans ??= [];
@@ -93,11 +97,10 @@ internal static class CatalogBuilder
             Archetypes = archetypes,
             Enums = enums,
             Events = BuildEvents(registry, enums),
-            Commands = BuildCommands(registry, plans, enums),
+            Commands = BuildCommands(registry, plans, enums, spatial),
 
-            // Empty, and not for want of a grid: a grid describes the aggregate tiers and the region clamp of Phase 2. Emitting the engine's spatial grid now
-            // would put a tuning knob nobody decodes into the digest, and re-send the catalog to every client the first time it was retuned.
-            Grids = [],
+            // The aggregate tiers' grids (09 § 8): one per distinct tile edge and archetype set, over the spatial world. None without an aggregate.
+            Grids = BuildGrids(registry, plans, spatial),
             Metrics = BuildMetrics(registry, archetypes, systemNames),
         };
 
@@ -210,12 +213,73 @@ internal static class CatalogBuilder
         return result;
     }
 
+    // ── Aggregate grids ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    private static CatalogGrid[] BuildGrids(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, SpatialGridConfig? spatial)
+    {
+        var grids = new List<CatalogGrid>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var profile in registry.Profiles)
+        {
+            foreach (var observer in profile.Observers)
+            {
+                if (observer.Kind != ObserverKind.Aggregate)
+                {
+                    continue;
+                }
+
+                var archetypes = new List<int>();
+                foreach (var type in observer.Archetypes)
+                {
+                    var index = Array.FindIndex(plans, p => p.ArchetypeType == type);
+                    if (index >= 0 && !archetypes.Contains(index))
+                    {
+                        archetypes.Add(index);
+                    }
+                }
+
+                archetypes.Sort();
+                if (!seen.Add(observer.TileM.ToString("R", System.Globalization.CultureInfo.InvariantCulture) + "|" + string.Join(',', archetypes)))
+                {
+                    continue;
+                }
+
+                if (spatial is not { } world)
+                {
+                    throw new InvalidOperationException($"Profile '{profile.Name}' declares an Aggregate, whose tiles are laid over the spatial world, and none is configured.");
+                }
+
+                var deep = !ReplicationGrid.IsFlat(world, registry.Options.ReplicationCellM);
+                var tile = observer.TileM;
+                int Dim(double min, double max) => Math.Max(1, (int)Math.Ceiling((max - min) / tile));
+                grids.Add(new CatalogGrid
+                {
+                    Origin = deep ? [world.WorldMin.X, world.WorldMin.Y, world.WorldMin.Z] : [world.WorldMin.X, world.WorldMin.Y],
+                    Cell = tile,
+                    Dims = deep
+                        ? [Dim(world.WorldMin.X, world.WorldMax.X), Dim(world.WorldMin.Y, world.WorldMax.Y), Dim(world.WorldMin.Z, world.WorldMax.Z)]
+                        : [Dim(world.WorldMin.X, world.WorldMax.X), Dim(world.WorldMin.Y, world.WorldMax.Y)],
+                    Archetypes = archetypes.ToArray(),
+                });
+            }
+        }
+
+        return grids.ToArray();
+    }
+
     // ── Events and commands ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     private static CatalogEvent[] BuildEvents(SubscriptionsRegistry registry, Dictionary<string, string[]> enums)
     {
-        var events = new CatalogEvent[registry.Events.Count];
-        for (var i = 0; i < events.Length; i++)
+        // A catalog that declares events carries the built-in EventsLost too (09 § 11, D7): a skipped session is told what it was not sent.
+        var declared = registry.Events.Count;
+        var events = new CatalogEvent[declared == 0 ? 0 : declared + 1];
+        if (declared > 0)
+        {
+            events[declared] = BuiltInEvents.CreateEventsLost();
+        }
+
+        for (var i = 0; i < declared; i++)
         {
             var declaration = registry.Events[i];
             events[i] = new CatalogEvent
@@ -236,18 +300,20 @@ internal static class CatalogBuilder
         EventRouting.ToKnown => "known",
         EventRouting.ToOwner => "owner",
         EventRouting.Broadcast => "broadcast",
+        EventRouting.ToSession => BuiltInEvents.SessionScope,
         _ => throw new InvalidOperationException(
             $"Event '{declaration.Name}' declares no routing, so it would reach no session and the catalog would name a scope that means nothing. " +
-            "Declare RouteNear, RouteToKnown, RouteToOwner or Broadcast."),
+            "Declare RouteNear, RouteToKnown, RouteToOwner, RouteToSession or Broadcast."),
     };
 
-    private static CatalogCommand[] BuildCommands(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, Dictionary<string, string[]> enums)
+    private static CatalogCommand[] BuildCommands(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, Dictionary<string, string[]> enums,
+        SpatialGridConfig? spatial)
     {
         var commands = new List<CatalogCommand>(registry.Commands.Count + 1);
 
         // W27: a built-in is listed only when it is enabled. ClientRegion is enabled by a profile declaring the observer that reads it, so a catalog that
         // named it unconditionally would tell every client it may send a footprint the server has nowhere to put.
-        if (TryBuildClientRegion(registry, plans, out var region))
+        if (TryBuildClientRegion(registry, plans, spatial, out var region))
         {
             commands.Add(region);
         }
@@ -268,7 +334,8 @@ internal static class CatalogBuilder
         return commands.ToArray();
     }
 
-    private static bool TryBuildClientRegion(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, out CatalogCommand command)
+    private static bool TryBuildClientRegion(SubscriptionsRegistry registry, CompiledProjectionPlan[] plans, SpatialGridConfig? spatial,
+        out CatalogCommand command)
     {
         command = null;
         ProfileDeclaration asking = null;
@@ -294,8 +361,23 @@ internal static class CatalogBuilder
             return false;
         }
 
-        // The region's vertices are quantized exactly like the archetypes' positions, so a decoded footprint can never leave the world (W28). Taken from the
-        // canonically-first 2-D position rather than an arbitrary one: every position quantizes over the same grid, so the choice only has to be stable.
+        // The codec comes from the grid, not from an archetype (10 § 6): the spatial world's bounds at the default position width, two axes when the
+        // world is one cell deep and three otherwise — so a runtime needs no 2D archetype to accept regions, and a deep one gets 3D regions.
+        if (spatial is { } world)
+        {
+            // The replication grid's depth rule, not the spatial one: a spatial world two cells deep over a single replication cell is flat.
+            var deep = !ReplicationGrid.IsFlat(world, registry.Options.ReplicationCellM);
+            command = BuiltInCommands.CreateClientRegion(new CatalogCodec
+            {
+                Kind = deep ? CodecKind.Pos3 : CodecKind.Pos2,
+                Bits = Codec.DefaultPositionBits,
+                Min = deep ? [world.WorldMin.X, world.WorldMin.Y, world.WorldMin.Z] : [world.WorldMin.X, world.WorldMin.Y],
+                Max = deep ? [world.WorldMax.X, world.WorldMax.Y, world.WorldMax.Z] : [world.WorldMax.X, world.WorldMax.Y],
+            });
+            return true;
+        }
+
+        // Without an engine: the canonically-first 2-D position, quantized over the same grid, so the choice only has to be stable.
         CatalogCodec position = null;
         var chosen = (string)null;
         foreach (var plan in plans)
@@ -397,6 +479,7 @@ internal static class CatalogBuilder
                 Codec = declaration.Codec.Catalog,
                 Kind = declaration.Kind == MetricKind.Counter ? CatalogMetric.CounterKind : null,
                 Labels = declaration.Labels.Count == 0 ? null : Copy(declaration.Labels),
+                Scope = declaration.PerSession ? CatalogMetric.SessionScope : null,
             });
         }
 

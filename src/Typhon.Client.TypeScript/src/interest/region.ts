@@ -2,8 +2,10 @@ import type { CatalogCodec, CatalogCommand, CatalogPlan, MessagePlan } from '../
 import { AckReason, BuiltInCommand } from '../protocol/constants.js';
 import type { FieldValues } from '../protocol/field-codec.js';
 
-/** The fewest footprint vertices a region may carry: a triangle. */
+/** The fewest vertices a flat world's region may carry: a triangle. */
 export const REGION_MIN_VERTICES = 3;
+/** The fewest vertices a deep world's region may carry: a tetrahedron. */
+export const REGION_MIN_VERTICES_3D = 4;
 /** The most: a horizon-clipped frustum needs 5–8, and 16 is headroom (W28). */
 export const REGION_MAX_VERTICES = 16;
 /** The built-in's rate, which is also the wire's ceiling for regions: 5 a second, burst 5. */
@@ -12,7 +14,8 @@ export const REGION_RATE = { perSec: 5, burst: 5 } as const;
 /**
  * The built-in `ClientRegion` command for a world whose positions use `position`, matching what the engine builds
  * (`BuiltInCommands.CreateClientRegion`). Its vertices are quantized exactly like the archetypes' positions, so a
- * decoded region can never leave the world, and its fields are in canonical wire order (W11, W28).
+ * decoded region can never leave the world, and its fields are in canonical wire order (W11, W28). A `pos2` world's
+ * region is a polygon of 3–16 points; a `pos3` world's a polyhedron of 4–16.
  */
 export function createClientRegion(position: CatalogCodec): CatalogCommand {
   return {
@@ -26,7 +29,12 @@ export function createClientRegion(position: CatalogCodec): CatalogCommand {
       { name: BuiltInCommand.regionBudgetField, codec: { t: 'u16' } },
       {
         name: BuiltInCommand.regionVerticesField,
-        codec: { t: 'list', of: position, minCount: REGION_MIN_VERTICES, maxCount: REGION_MAX_VERTICES },
+        codec: {
+          t: 'list',
+          of: position,
+          minCount: position.t === 'pos3' ? REGION_MIN_VERTICES_3D : REGION_MIN_VERTICES,
+          maxCount: REGION_MAX_VERTICES,
+        },
       },
     ],
   };
@@ -73,6 +81,8 @@ export class RegionSender {
   private readonly moveThreshold: number;
   private readonly altitudeThreshold: number;
   private readonly command: MessagePlan;
+  /** 2 for a flat world's polygon, 3 for a deep world's polyhedron: the vertex codec's axes. */
+  private readonly dims: number;
 
   /** The region last handed to {@link setRegion}, flattened `x, y` pairs. */
   private desired: Float64Array = new Float64Array(0);
@@ -98,6 +108,8 @@ export class RegionSender {
 
     this.options = options;
     this.command = command;
+    const vertices = command.body.fields.find((f) => f.name === BuiltInCommand.regionVerticesField);
+    this.dims = vertices?.components === 3 ? 3 : 2;
     this.now = options.now ?? Date.now;
     const rate = options.plan.catalog.commands.find((c) => c.idx === BuiltInCommand.ClientRegionIdx)?.rate;
     this.minIntervalMs = options.minIntervalMs ?? (rate === undefined ? 200 : 1000 / rate.perSec);
@@ -146,18 +158,22 @@ export class RegionSender {
   }
 
   /**
-   * Offers a new footprint: `vertices` is 3–16 flattened `x, y` pairs in the grid's units. Returns whether it went out
-   * now; otherwise it is either dropped as too similar, or kept for {@link poll}.
+   * Offers a new region: `vertices` is flattened `x, y` pairs (3–16) in a flat world, `x, y, z` triples (4–16) in a
+   * deep one, in the grid's units. Returns whether it went out now; otherwise it is either dropped as too similar, or
+   * kept for {@link poll}.
    */
   setRegion(vertices: ArrayLike<number>, altitudeM: number, budgetKiBps: number): boolean {
-    const count = vertices.length / 2;
-    if (!Number.isInteger(count) || count < REGION_MIN_VERTICES || count > REGION_MAX_VERTICES) {
-      throw new RangeError(`a region needs ${REGION_MIN_VERTICES}–${REGION_MAX_VERTICES} vertices, got ${count}`);
+    const count = vertices.length / this.dims;
+    const min = this.dims === 3 ? REGION_MIN_VERTICES_3D : REGION_MIN_VERTICES;
+    if (!Number.isInteger(count) || count < min || count > REGION_MAX_VERTICES) {
+      throw new RangeError(
+        `a region needs ${min}–${REGION_MAX_VERTICES} vertices of ${this.dims} axes, got ${vertices.length} values`,
+      );
     }
 
     for (let i = 0; i < vertices.length; i++) {
       if (!Number.isFinite(vertices[i]!)) {
-        throw new RangeError(`region vertex ${i >> 1} is not finite`);
+        throw new RangeError(`region vertex ${Math.floor(i / this.dims)} is not finite`);
       }
     }
 

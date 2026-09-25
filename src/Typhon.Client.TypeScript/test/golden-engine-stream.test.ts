@@ -73,7 +73,7 @@ class RecordingSink implements TickSink {
 
   // The archetype comes first and is not logged; `no-unused-vars` defaults to `after-used`, so a leading parameter kept
   // only to reach the next one is not a finding.
-  self(_archetype: ArchetypePlan, netId: number): void {
+  self(_archetype: ArchetypePlan | null, netId: number): void {
     this.calls.push(`self ${netId}`);
   }
 
@@ -181,6 +181,40 @@ describe('the engine stream', () => {
     expect(applier.world.frames, 'every frame applied').toBe(messages.length - 1);
     expect(applier.world.archetypeStore(creature.idx).liveCount, 'four creatures survived the churn').toBe(4);
     expect(applier.world.archetypeStore(rock.idx).liveCount, 'the static archetype re-entered with the rest').toBe(3);
+    expect(applier.flags & TickFlags.Reset, 'the last frame is the profile switch').toBe(TickFlags.Reset);
+  });
+});
+
+describe('the deep engine stream', () => {
+  const vector = goldenJson('stream-engine-3d') as {
+    catalogHash: string;
+    frames: { tick: number; flags: number; calls: string[] }[];
+  };
+
+  it('decodes a deep grid’s frames — pos3 movers, 2D walkers on z = 0, statics — into the calls the vector names', () => {
+    const messages = unframe(goldenBin('stream-engine-3d'));
+    const welcome = parseMessage(messages[0]!, MessageType.Welcome, readWelcome);
+    expect(catalogHashToHex(welcome.catalogHash)).toBe(vector.catalogHash);
+
+    const plan = CatalogPlan.compile(parseCatalog(welcome.catalogJson));
+    const applier = new FrameApplier(plan, {});
+    const reader = new TickReader(plan);
+    const sink = new RecordingSink();
+    for (const frame of messages.slice(1)) {
+      applier.apply(frame);
+      reader.read(frame, sink);
+    }
+
+    expect(sink.frames).toEqual(vector.frames.map((f) => f.calls));
+    expect(sink.ticks).toEqual(vector.frames.map((f) => f.tick));
+    expect(sink.flags).toEqual(vector.frames.map((f) => f.flags));
+
+    const flyer = plan.archetypeByName('ProjFlyer')!;
+    expect(flyer.position?.dims, 'the flyer’s position is pos3').toBe(3);
+    expect(applier.world.anomalies).toBe(0);
+    expect(applier.world.archetypeStore(flyer.idx).liveCount, 'five flyers, two left, one entered').toBe(4);
+    expect(applier.world.archetypeStore(plan.archetypeByName('ProjCreature')!.idx).liveCount).toBe(3);
+    expect(applier.world.archetypeStore(plan.archetypeByName('ProjRock')!.idx).liveCount).toBe(2);
     expect(applier.flags & TickFlags.Reset, 'the last frame is the profile switch').toBe(TickFlags.Reset);
   });
 });

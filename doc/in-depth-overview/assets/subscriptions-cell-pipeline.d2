@@ -1,0 +1,50 @@
+direction: down
+
+vars: {
+  d2-config: {
+    pad: 20
+  }
+}
+
+classes: {
+  work: {
+    style: {fill: "#e3f2fd"; stroke: "#1565c0"; border-radius: 6; font-size: 17}
+  }
+  shared: {
+    shape: cylinder
+    style: {fill: "#e8f5e9"; stroke: "#2e7d32"; font-size: 17}
+  }
+  step: {
+    style: {fill: "#fff3e0"; stroke: "#e65100"; border-radius: 6; font-size: 17}
+  }
+}
+
+project: "Project · parallel over the pushed clusters\nencode each pushed slot, compare its quantized bytes; a visible change → a PushEvent\n(netId, old/new v̂, old/new cell key, changed groups); each worker sorts its events by cell key" {class: work}
+
+merge: "PushIndex · parallel\nmerge the workers' sorted runs by key range" {class: work}
+
+state: "per-entity replication state\n(v̂, encoded bodies)\n+ the spatial cluster index" {class: shared}
+slot: "this tick's index\nevents in cell order · cell list\n= slot tick % 8 of the push log" {class: shared}
+occ: "occupancy map\nlive entities per cell" {class: shared}
+
+frames: "Frames · parallel over sessions · per session: anchor, radius, delivered-cell bits" {
+  label.near: bottom-center
+  style: {fill: "#fffaf3"; stroke: "#e65100"; stroke-dash: 3; font-size: 18}
+  deliver: "1 · deliver cells\nnearest first,\nunder the enter budget" {class: step}
+  events: "2 · this tick's events\nin the box around\nboth spheres" {class: step}
+  sweep: "3 · the crescent:\ncells straddling the\nold or the new sphere" {class: step}
+  catchup: "after a skip:\nthe missed ticks,\nfolded from the log" {class: step}
+}
+
+out: "enters · updates · leaves → the ENTITIES block · the pending geometry commits with the frame" {class: work}
+
+project -> merge
+project -> state: "writes v̂"
+merge -> slot
+merge -> occ: "counts"
+occ -> frames.deliver: "skip empty cells"
+state -> frames.deliver: "a cell's entities"
+slot -> frames.events
+state -> frames.sweep
+slot -> frames.catchup: "the last 8 slots"
+frames -> out

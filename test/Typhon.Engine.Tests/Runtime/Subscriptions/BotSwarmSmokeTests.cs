@@ -66,7 +66,7 @@ sealed class BotSwarmSmokeTests : TestBase<BotSwarmSmokeTests>
         Populate(dbe);
 
         // PingHz 30 puts the silence bound at 3 s / 30 = 100 ms, which is ten ticks here — long enough to be the real policy, short enough to be a test.
-        using var runtime = CreateRuntime(dbe, new SubscriptionsOptions { PingHz = 30 });
+        using var runtime = CreateRuntime(dbe, new SubscriptionsOptions { PingHz = 30, ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) });
         Declare(runtime.Subscriptions);
         runtime.Start();
 
@@ -281,7 +281,10 @@ sealed class BotSwarmSmokeTests : TestBase<BotSwarmSmokeTests>
         Populate(dbe);
 
         // Out of reach on purpose: nothing may be closed, so every session's run is free to climb to whatever the machine and the load make it.
-        var options = new SubscriptionsOptions { CloseStalledAfter = TimeSpan.FromMinutes(10) };
+        var options = new SubscriptionsOptions
+        {
+            CloseStalledAfter = TimeSpan.FromMinutes(10), ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0),
+        };
         using var runtime = CreateRuntime(dbe, options, tickRateHz, moving: true);
         Declare(runtime.Subscriptions);
         runtime.Start();
@@ -452,7 +455,9 @@ sealed class BotSwarmSmokeTests : TestBase<BotSwarmSmokeTests>
         {
             dag.CallbackSystem("MoveCreatures", ctx => MoveCreatures(ctx));
         }
-    }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = tickRateHz, Subscriptions = subscriptions ?? new SubscriptionsOptions() });
+    }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = tickRateHz, Subscriptions = subscriptions
+            ?? new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
+    });
 
     /// <summary>
     /// Nudges every creature, so that every session has something to send on every tick.

@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Typhon.Protocol;
 using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
@@ -193,7 +194,7 @@ public struct NpcMotion
 [StructLayout(LayoutKind.Sequential)]
 public struct CreatureVitals
 {
-    [Field] public int Health;
+    [Field, Fraction(nameof(MaxHealth), Bits = 8, Name = "hp", Group = "vitals")] public int Health;
     [Field] public int MaxHealth;
     [Field] public int AttackDamage;
 
@@ -205,7 +206,8 @@ public struct CreatureVitals
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerVitals
 {
-    [Field] public int Health;
+    // Everyone sees an 8-bit bar; the player alone sees the exact number, in SELF (design/Subscriptions/11 § 2).
+    [Field, Fraction(nameof(MaxHealth), Bits = 8, Name = "hp", Group = "vitals"), Owner(CodecKind.Varu, Name = "health")] public int Health;
     [Field] public int MaxHealth;
     [Field] public int AttackCooldown;
     [Field] public int AttackDamage;
@@ -235,7 +237,7 @@ public struct LairVitals
 public struct CreatureBrain
 {
     /// <summary>See <see cref="AiMode"/>.</summary>
-    [Field] public int Mode;
+    [Field, Replicate(CodecKind.U8, Name = "mode")] public int Mode;
 
     /// <summary>The lair this creature belongs to. Leashing is measured from here.</summary>
     [Field] public float HomeX;
@@ -246,7 +248,7 @@ public struct CreatureBrain
     [Field] public float LeashRadius;
 
     /// <summary>[CORE3] Distance at which a hostile is noticed — <c>DEFAULTAGGRORADIUS = 24</c>. Zero for a passive template.</summary>
-    [Field] public float AggroRadius;
+    [Field, OnEnter(CodecKind.F16, Name = "aggro")] public float AggroRadius;
 
     /// <summary>The lair that owns this creature, so a kill can decrement its live count.</summary>
     [Field] public EntityId Lair;
@@ -308,7 +310,7 @@ public struct CreatureTimers
 [StructLayout(LayoutKind.Sequential)]
 public struct NpcBrain
 {
-    [Field] public int Mode;
+    [Field, Replicate(CodecKind.U8, Name = "mode")] public int Mode;
     [Field] public float HomeX;
     [Field] public float HomeZ;
     [Field] public float LeashRadius;
@@ -357,15 +359,15 @@ public static class AiMode
 public struct PlayerState
 {
     /// <summary>See <see cref="PlayerActivity"/>.</summary>
-    [Field] public int Activity;
+    [Field, Replicate(CodecKind.U8, Name = "activity")] public int Activity;
 
     /// <summary>Ticks until this player re-evaluates what it is doing.</summary>
     [Field] public int ActivityTicks;
 
     /// <summary>Where the current mission camp is, cached so a travel leg does not re-resolve an entity every tick.</summary>
-    [Field] public float MissionX;
+    [Field, Owner(CodecKind.F32, Name = "missionX", Group = "mission")] public float MissionX;
 
-    [Field] public float MissionZ;
+    [Field, Owner(CodecKind.F32, Name = "missionZ", Group = "mission")] public float MissionZ;
 
     /// <summary>Missions completed — here only to prove the mission loop closes.</summary>
     [Field] public int MissionsCompleted;
@@ -413,7 +415,7 @@ public static class PlayerActivity
 public struct Lair
 {
     /// <summary>Which creature template this lair spawns; indexes <see cref="CreatureTemplates"/>.</summary>
-    [Field] public int CreatureTemplate;
+    [Field, OnEnter(CodecKind.U16, Name = "template")] public int CreatureTemplate;
 
     /// <summary>How many creatures this lair keeps alive.</summary>
     [Field] public int SpawnLimit;
@@ -444,10 +446,10 @@ public struct Lair
 public struct Structure
 {
     /// <summary>See <see cref="StructureKind"/>.</summary>
-    [Field] public int Kind;
+    [Field, OnEnter(CodecKind.U8, Name = "kind")] public int Kind;
 
     /// <summary>Which city or point of interest this belongs to; -1 for a structure standing alone in the wild.</summary>
-    [Field] public int OwnerRegion;
+    [Field, OnEnter(CodecKind.I16, Name = "region")] public int OwnerRegion;
 
     /// <summary>
     /// Ticks between updates. A building is 0 and never ticks. SWG's own arithmetic sets the others: manufacturing is

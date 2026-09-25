@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -426,7 +427,7 @@ internal sealed class CommandRegistry
     }
 
     /// <summary>The element kind of a struct field, unwrapping an enum and a single-component vector struct alike.</summary>
-    private static (CommandFieldElement Element, int Size) ElementOf(Type fieldType, string command, string wireField)
+    internal static (CommandFieldElement Element, int Size) ElementOf(Type fieldType, string command, string wireField)
     {
         var type = fieldType.IsEnum ? Enum.GetUnderlyingType(fieldType) : fieldType;
 
@@ -557,10 +558,14 @@ internal sealed class NetIdEntityIndex
     private EntityId[] _entities = [];
     private readonly Lock _growth = new();
 
-    /// <summary>Identities currently bound to an entity.</summary>
-    public int BoundCount { get; private set; }
+    /// <summary>
+    /// Grows the table to hold every identity up to <paramref name="highWaterMark"/>. Serial, before the projection's chunks: a <see cref="Bind"/> from a chunk
+    /// never grows it, so two workers binding different identities never race a growth that would drop one of their writes.
+    /// </summary>
+    /// <param name="highWaterMark">The highest identity the allocator has handed out, leases included.</param>
+    public void Reserve(uint highWaterMark) => EnsureCapacity(highWaterMark);
 
-    /// <summary>Binds an identity to the entity holding it.</summary>
+    /// <summary>Binds an identity to the entity holding it. From the projection's chunks: each identity is one worker's, and the table was reserved.</summary>
     /// <param name="netId">The identity.</param>
     /// <param name="entity">The entity.</param>
     public void Bind(uint netId, EntityId entity)
@@ -570,10 +575,12 @@ internal sealed class NetIdEntityIndex
             return;
         }
 
-        EnsureCapacity(netId);
-        if (_entities[netId].IsNull && !entity.IsNull)
+        if (netId >= (uint)_entities.Length)
         {
-            BoundCount++;
+            // Not reserved: a caller outside the projection (a test), alone. A projection chunk never gets here — Reserve ran before it — and growing under
+            // one would lose another chunk's write.
+            Debug.Assert(false, "NetIdEntityIndex.Bind past the reserved capacity");
+            EnsureCapacity(netId);
         }
 
         _entities[netId] = entity;
@@ -586,11 +593,6 @@ internal sealed class NetIdEntityIndex
         if (netId == NetIdAllocator.NoNetId || netId >= (uint)_entities.Length)
         {
             return;
-        }
-
-        if (!_entities[netId].IsNull)
-        {
-            BoundCount--;
         }
 
         _entities[netId] = EntityId.Null;
@@ -619,7 +621,6 @@ internal sealed class NetIdEntityIndex
         lock (_growth)
         {
             Array.Clear(_entities);
-            BoundCount = 0;
         }
     }
 

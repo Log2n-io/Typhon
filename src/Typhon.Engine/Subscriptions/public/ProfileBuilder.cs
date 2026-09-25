@@ -83,13 +83,23 @@ public sealed class ProfileBuilder
     /// </summary>
     /// <param name="radius">The enter radius, in metres.</param>
     /// <param name="leave">The leave radius, in metres — larger than <paramref name="radius"/>. Zero: no band.</param>
+    /// <param name="max">
+    /// The largest radius a session of this profile can be given at run time through <see cref="SubscriptionsCommands.SetRadius"/> — a player boarding
+    /// an aircraft. Zero: the session's radius is fixed. The window is sized for it at <c>Start</c>, so it counts against the window bound.
+    /// </param>
     /// <returns>The observer's builder.</returns>
     /// <remarks>
+    /// <para>
     /// The two radii are not a refinement: an entity hovering on one boundary would enter and leave every tick, and every re-entry costs a full enter record.
-    /// Hysteresis is what makes the cost of jitter zero instead of unbounded. <b>A leave radius is declared now and refused at <c>Start</c>: Phase 2 builds
-    /// it.</b>
+    /// Hysteresis is what makes the cost of jitter zero instead of unbounded.
+    /// </para>
+    /// <para>
+    /// <b>The band is a bound, not per-entity memory</b> (09 § 3): an entity whose true position is within <paramref name="radius"/> is held, one past
+    /// <paramref name="leave"/> is not, and between them it may be either. The profile's sessions test the midpoint <c>R′ = (R + L) / 2</c> against a
+    /// position that moves only past half the band, so an entity oscillating by less than that never flaps.
+    /// </para>
     /// </remarks>
-    public ObserverBuilder Sphere(double radius, double leave = 0)
+    public ObserverBuilder Sphere(double radius, double leave = 0, double max = 0)
     {
         if (!double.IsFinite(radius) || radius <= 0)
         {
@@ -101,15 +111,29 @@ public sealed class ProfileBuilder
             throw new ArgumentOutOfRangeException(nameof(leave), leave, "A sphere's leave radius must be larger than its enter radius.");
         }
 
-        return _profile.Add(new ObserverDeclaration(ObserverKind.Sphere) { Radius = radius, LeaveRadius = leave });
+        var effective = leave > 0 ? (radius + leave) / 2d : radius;
+        if (max != 0 && (!double.IsFinite(max) || max < effective))
+        {
+            throw new ArgumentOutOfRangeException(nameof(max), max,
+                $"A sphere's largest run-time radius must be at least the radius its sessions start with, {effective} m (the band's midpoint when a leave "
+                + "radius is declared).");
+        }
+
+        return _profile.Add(new ObserverDeclaration(ObserverKind.Sphere) { Radius = radius, LeaveRadius = leave, MaxRadius = max });
     }
 
     /// <summary>
     /// A convex ground footprint the client sends through the built-in <c>ClientRegion</c> command — a camera's view, clipped at the horizon.
     /// </summary>
-    /// <param name="maxEdgeM">The longest edge the server accepts, in metres. A client asking for more is clamped, not refused.</param>
+    /// <param name="maxEdgeM">
+    /// The widest the region's bounding box may be on any axis, in metres. A client asking for more is clamped about its centroid, not refused. It sizes every
+    /// session's window, <c>⌈maxEdgeM / c⌉ + 5</c> cells per axis, which counts against the window bound at <c>Start</c> (09 § 7).
+    /// </param>
     /// <returns>The observer's builder.</returns>
-    /// <remarks><b>Declared now, built in Phase 2.</b></remarks>
+    /// <remarks>
+    /// A session holds the entities whose visibility position lies in the region it last sent and whose cell it has been delivered; until it sends one it
+    /// holds nothing. <see cref="ObserverBuilder.Near"/> caps what it holds, by whole cells nearest the region's centroid.
+    /// </remarks>
     public ObserverBuilder ClientRegion(double maxEdgeM)
     {
         if (!double.IsFinite(maxEdgeM) || maxEdgeM <= 0)
@@ -123,12 +147,24 @@ public sealed class ProfileBuilder
     /// <summary>
     /// Per-cell counts per archetype, for a view too wide to send entities for: a strategic map, a far tier, a heat map.
     /// </summary>
-    /// <param name="tileM">The tile's edge, in metres.</param>
+    /// <param name="tileM">The tile's edge, in metres: a whole number of replication cells.</param>
     /// <param name="rateHz">How often the counts are refreshed, in hertz.</param>
+    /// <param name="radiusM">
+    /// The tiles a session is sent: those within this distance of its sphere's anchor; 0 for every tile. A <c>World</c> profile's aggregate covers every tile.
+    /// </param>
     /// <returns>The observer's builder.</returns>
-    /// <remarks><b>Declared now, built in Phase 2.</b></remarks>
-    public ObserverBuilder Aggregate(double tileM, double rateHz)
+    /// <remarks>
+    /// A tier (09 § 5, § 8): declared beside the profile's one entity observer (<c>World</c> or <c>Sphere</c>), it sends the tiles' counts in <c>AGG</c>
+    /// blocks — never entity records — refreshed at most <paramref name="rateHz"/> times a second, each time the tiles that changed. Every archetype it
+    /// counts must be one some profile replicates.
+    /// </remarks>
+    public ObserverBuilder Aggregate(double tileM, double rateHz, double radiusM = 0)
     {
+        if (!double.IsFinite(radiusM) || radiusM < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(radiusM), radiusM, "An aggregate's radius is zero (every tile) or a positive, finite distance.");
+        }
+
         if (!double.IsFinite(tileM) || tileM <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(tileM), tileM, "An aggregate observer needs a positive, finite tile edge.");
@@ -139,7 +175,7 @@ public sealed class ProfileBuilder
             throw new ArgumentOutOfRangeException(nameof(rateHz), rateHz, "An aggregate observer needs a positive, finite rate.");
         }
 
-        return _profile.Add(new ObserverDeclaration(ObserverKind.Aggregate) { TileM = tileM, RateHz = rateHz });
+        return _profile.Add(new ObserverDeclaration(ObserverKind.Aggregate) { TileM = tileM, RateHz = rateHz, AggregateRadiusM = radiusM });
     }
 }
 

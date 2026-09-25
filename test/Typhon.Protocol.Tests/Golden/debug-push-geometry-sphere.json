@@ -1,0 +1,45 @@
+{
+  "description": "A flat sphere\u0027s PUSH_GEOMETRY with VIEW_COMPLETE: anchor, R\u2032 500, h 10.5, level 2, and a 5-wide window of one byte per row from cell (3, -2).",
+  "catalog": "catalog-kitchen-sink",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 70000,
+      "flags": 0,
+      "periodUs": 0
+    },
+    {
+      "call": "debug",
+      "subType": 128,
+      "payload": "000100000000004a934000000000005053c000000000000000000000fa43000028410206030005040e1f0e04"
+    },
+    {
+      "call": "endTick"
+    }
+  ],
+  "decoded": {
+    "shape": "Sphere",
+    "flags": 1,
+    "anchor": [
+      "40934a0000000000",
+      "c053500000000000",
+      "0000000000000000"
+    ],
+    "radiusM": "407f400000000000",
+    "slackM": "4025000000000000",
+    "level": 2,
+    "window": [
+      3,
+      -2,
+      0,
+      5
+    ],
+    "rows": [
+      "4",
+      "e",
+      "1f",
+      "e",
+      "4"
+    ]
+  }
+}

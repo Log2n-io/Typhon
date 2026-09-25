@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -48,6 +49,19 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     private long _migrationsAbandoned;
     private readonly ProjectionScratchSet _scratch = new();
     private readonly NetIdLeaseSet _netIdLeases = new();
+
+    // The identities the orphan path took — entries that vanished without a projection to release them: a block released with live entries, an entry
+    // overwritten by a migration or by the parked drain, a parked entry dropped. Each became a leave event; each is handed back to the allocator at the
+    // SECOND BeginProjectTick after it, which is when the projection's own releases of a tick are (one tick queued in a lease, then released): taken during
+    // tick N's fence or blocks step, moved aside at N's BeginProjectTick, released at N+1's. Locked: a fence's migration slices and a commit's inline block
+    // release reach it from other threads.
+    private readonly Lock _orphanedLock = new();
+    private List<uint> _orphaned = [];
+    private List<uint> _orphanedPrevious = [];
+
+    // The list being released, outside the lock; touched by the track alone, then kept as the next tick's empty list.
+    private List<uint> _orphanedSpare = [];
+    private long _orphanReleaseFaults;
 
     private long _blocksProjected;
     private long _slotsProjected;
@@ -191,10 +205,17 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
     internal const int ProjectCursorSlot = 16;
 
+    // Diagnostic only: skips the scan of a released block's live entries, and with it their leaves AND the release of their identities — which then leak.
     private static readonly bool NoOrphanScan = Environment.GetEnvironmentVariable("TYPHON_PUSH_NO_ORPHAN_SCAN") == "1";
 
     /// <summary>The push path, when this archetype is push-served; <see langword="null"/> otherwise.</summary>
     internal PushReplication Push;
+
+    /// <summary>Where owner-group changes are routed to their controlling sessions (11 § 2.2); set only when the archetype declares owner fields.</summary>
+    internal SelfTracker Self;
+
+    /// <summary>netId → entity, for a command's entity reference (SUB-26): bound where an identity is assigned, unbound where it is released.</summary>
+    internal NetIdEntityIndex EntityIndex;
 
     /// <summary>
     /// Every block by chunk id. A push archetype has a block for every live cluster and looks one up per pushed cluster per tick and per
@@ -351,7 +372,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                 var overwritten = ((ReplicationHotEntry*)(dstBytes + Layout.HotOffset + (dstSlot * Layout.HotStride)))->NetId;
                 if (overwritten != NetIdAllocator.NoNetId)
                 {
-                    Push.Orphan(PushArchetypeIndex, destination, dstBytes + Layout.ColdOffset + (dstSlot * Layout.ColdStride), Layout, overwritten, 1);
+                    Orphaned(destination, dstBytes + Layout.ColdOffset + (dstSlot * Layout.ColdStride), overwritten, 1);
                 }
             }
 
@@ -492,7 +513,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     var overwritten = ((ReplicationHotEntry*)(dstBytes + Layout.HotOffset + (slot * Layout.HotStride)))->NetId;
                     if (overwritten != NetIdAllocator.NoNetId)
                     {
-                        Push.Orphan(PushArchetypeIndex, block, dstBytes + Layout.ColdOffset + (slot * Layout.ColdStride), Layout, overwritten, 2);
+                        Orphaned(block, dstBytes + Layout.ColdOffset + (slot * Layout.ColdStride), overwritten, 2);
                     }
                 }
 
@@ -512,6 +533,17 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             }
             else
             {
+                // Dropped: every session holding the entity is told it left, and the occupancy stops counting it where it was last described. It is
+                // initialised afresh, under a new identity, when a block next covers it.
+                if (Push != null)
+                {
+                    var droppedId = ((ReplicationHotEntry*)bytes)->NetId;
+                    if (droppedId != NetIdAllocator.NoNetId)
+                    {
+                        Orphaned(null, bytes + Layout.HotStride, droppedId, 2);
+                    }
+                }
+
                 Interlocked.Increment(ref _parkedDropped);
             }
         }
@@ -551,9 +583,14 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         ObjectDisposedException.ThrowIf(_disposed, this);
         ProjectCursor[ProjectCursorSlot] = 0;
 
+        ReleaseOrphaned();
+
         // The cold estimate is the pushed slots' blocks, an upper bound on the identities this tick can need: an entity gets one only when its entry has none,
         // and only a pushed slot is ever reached. It sizes the very first refill and nothing after it — see NetIdLeaseSet.BeginTick.
         _netIdLeases.BeginTick(NetIds, workers, _watchedBlocks.Count * Layout.SlotCount);
+
+        // Every identity a lease can hand out this tick is at or below the high-water mark the refill just moved: reserved here, bound from the chunks.
+        EntityIndex?.Reserve(NetIds.HighWaterMark);
         _scratch.BeginTick(workers);
     }
 
@@ -569,6 +606,82 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         // Sized by the directory: at most one listing per block that exists, so an append can never find the list full.
         _watchedBlocks.BeginTick(tick, Directory.Count);
     }
+
+    /// <summary>An entry vanished with no projection to see it go: every session holding it is told it left, and its identity goes back to the allocator.</summary>
+    private void Orphaned(ReplicationBlockHeader* block, byte* cold, uint netId, int cause)
+    {
+        Push.Orphan(PushArchetypeIndex, block, cold, Layout, netId, cause);
+        lock (_orphanedLock)
+        {
+            _orphaned.Add(netId);
+        }
+    }
+
+    /// <summary>
+    /// Serial, at the track's blocks step (<see cref="BeginProjectTick"/>, or <see cref="FlushIdleTick"/> on a tick with nothing to project): releases the
+    /// identities orphaned before the previous step, and sets aside those orphaned since. The lists are swapped under the lock and released outside it, so a
+    /// committing thread that orphans a block is not held up. An identity the allocator refuses — already free — and an identity orphaned twice before its
+    /// release (an entry exists in one place, so twice is a defect) are counted in <see cref="OrphanReleaseFaults"/>, not thrown: this runs on the track.
+    /// </summary>
+    private void ReleaseOrphaned()
+    {
+        List<uint> releasing;
+        lock (_orphanedLock)
+        {
+            releasing = _orphanedPrevious;
+            _orphanedPrevious = _orphaned;
+            _orphaned = _orphanedSpare;
+        }
+
+        try
+        {
+            releasing.Sort();
+            var last = NetIdAllocator.NoNetId;
+            foreach (var netId in releasing)
+            {
+                if (netId == last)
+                {
+                    Interlocked.Increment(ref _orphanReleaseFaults);
+                    continue;
+                }
+
+                last = netId;
+                try
+                {
+                    NetIds.Release(netId);
+                    EntityIndex?.Unbind(netId);
+                    Interlocked.Increment(ref _identitiesReleased);
+                }
+                catch (Exception)
+                {
+                    Interlocked.Increment(ref _orphanReleaseFaults);
+                }
+            }
+        }
+        finally
+        {
+            releasing.Clear();
+            _orphanedSpare = releasing;
+        }
+    }
+
+    /// <summary>
+    /// A tick the track runs with no block to project (the blocks step returns before <see cref="BeginProjectTick"/>): the releases a projection tick would
+    /// make still happen — the leases' queued ones and the orphans' — so identities do not stay live in a quiet world.
+    /// </summary>
+    public void FlushIdleTick()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        ReleaseOrphaned();
+        _netIdLeases.FlushReleases(NetIds);
+    }
+
+    /// <summary>Orphaned identities the allocator refused to release — already free. Zero when every orphan names a live identity once.</summary>
+    public long OrphanReleaseFaults => Volatile.Read(ref _orphanReleaseFaults);
 
     /// <summary>Accumulates one block's contribution to the pass's counters.</summary>
     /// <param name="blocks">Blocks walked.</param>
@@ -689,7 +802,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     var netId = ((ReplicationHotEntry*)(rb + Layout.HotOffset + (s * Layout.HotStride)))->NetId;
                     if (netId != NetIdAllocator.NoNetId)
                     {
-                        Push.Orphan(PushArchetypeIndex, releasing, rb + Layout.ColdOffset + (s * Layout.ColdStride), Layout, netId, 0);
+                        Orphaned(releasing, rb + Layout.ColdOffset + (s * Layout.ColdStride), netId, 0);
                     }
                 }
             }

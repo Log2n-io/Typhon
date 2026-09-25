@@ -1,6 +1,7 @@
 import { AggregateGrid } from '../aggregates/aggregate-grid.js';
 import type { Clock } from '../clock/clock.js';
 import {
+  ValueKind,
   type ArchetypePlan,
   type CatalogPlan,
   type FieldPlan,
@@ -9,7 +10,14 @@ import {
   type MetricPlan,
 } from '../protocol/catalog.js';
 import { TickFlags } from '../protocol/constants.js';
-import { BlockMask, TickReader, type TickSink } from '../protocol/tick-reader.js';
+import { catalogHashToHex } from '../protocol/messages.js';
+import {
+  BlockMask,
+  TickReader,
+  type EntitiesTarget,
+  type GeneratedDecoders,
+  type TickSink,
+} from '../protocol/tick-reader.js';
 import type { ArchetypeStore } from '../store/archetype-store.js';
 import type { FieldArray, NumericFieldKind } from '../store/schema.js';
 import { archetypeOf, NOT_FOUND, slotOf, WorldStore } from '../store/world-store.js';
@@ -40,6 +48,14 @@ export interface FrameApplierOptions {
   readonly onDebug?: (subType: number, data: Uint8Array, offset: number, length: number) => void;
   /** Called per `EXT` block with a view of the message, valid only during the call. */
   readonly onExt?: (appTypeId: number, data: Uint8Array, offset: number, length: number) => void;
+  /**
+   * Generated `ENTITIES` decoders (`typhon-codegen`, 05-sdks § 2): each archetype's records are decoded straight into
+   * the store, without the interpreter's per-field dispatch. Requires {@link catalogHash}; the applier refuses decoders
+   * generated from another catalog. Every other block, and an archetype the module leaves `null`, uses the interpreter.
+   */
+  readonly decoders?: GeneratedDecoders;
+  /** The session's catalog hash (`SessionInfo.catalogHash`), which {@link decoders} must have been generated from. */
+  readonly catalogHash?: Uint8Array;
 }
 
 /** A numeric column's element type, as {@link storeColumn} dispatches on it. */
@@ -77,7 +93,7 @@ type Target = (typeof Target)[keyof typeof Target];
  * enter beyond `maxNetId`. A malformed message throws `WireFormatError`; the store may then hold part of the frame, and
  * the connection must be closed with the error's code.
  */
-export class FrameApplier implements TickSink {
+export class FrameApplier implements TickSink, EntitiesTarget {
   readonly plan: CatalogPlan;
   readonly world: WorldStore;
   /** Per catalog grid, by index; each allocates its counts on its first `AGG`. */
@@ -136,7 +152,12 @@ export class FrameApplier implements TickSink {
     });
     this.grids = plan.grids.map((g) => new AggregateGrid(gridSchemaFromCatalog(g.grid)));
     this.stats = new StatsState(plan);
-    this.reader = new TickReader(plan);
+    const decoders = options.decoders;
+    if (decoders !== undefined) {
+      checkDecoders(plan, decoders, options.catalogHash, this.storeFieldOf);
+    }
+
+    this.reader = decoders === undefined ? new TickReader(plan) : new TickReader(plan, { decoders, target: this });
     this.eventPass = new EventPass(plan, options.onEvent);
   }
 
@@ -211,11 +232,33 @@ export class FrameApplier implements TickSink {
   }
 
   enter(netId: number, position: Float64Array, velocity: Float64Array, t0: Uint32Array, epoch: number): void {
+    const slot = this.enterSlot(netId, position, velocity, t0, epoch);
+    this.slot = slot;
+    this.target = slot < 0 ? Target.None : Target.Entity;
+  }
+
+  segment(netId: number, position: Float64Array, velocity: Float64Array, t0: Uint32Array, epoch: number): void {
+    this.target = Target.None;
+    this.segmentAt(netId, position, velocity, t0, epoch);
+  }
+
+  state(netId: number, groupMask: number): void {
+    const slot = this.stateSlot(netId, groupMask);
+    this.slot = slot;
+    this.target = slot < 0 ? Target.None : Target.Entity;
+  }
+
+  // ── EntitiesTarget: what a generated decoder calls, only from inside `apply`, while its archetype's ENTITIES block is read. ──
+
+  archetypeStore(idx: number): ArchetypeStore {
+    return this.world.archetypeStore(idx);
+  }
+
+  enterSlot(netId: number, position: Float64Array, velocity: Float64Array, t0: Uint32Array, epoch: number): number {
     const world = this.world;
     if (netId === 0 || netId > world.maxNetId) {
       world.anomalies++;
-      this.target = Target.None;
-      return;
+      return -1;
     }
 
     const store = this.store!;
@@ -224,12 +267,10 @@ export class FrameApplier implements TickSink {
       store.resetMotionFrom(slot, position, store.linear ? velocity : null, t0, epoch);
     }
 
-    this.slot = slot;
-    this.target = Target.Entity;
+    return slot;
   }
 
-  segment(netId: number, position: Float64Array, velocity: Float64Array, t0: Uint32Array, epoch: number): void {
-    this.target = Target.None;
+  segmentAt(netId: number, position: Float64Array, velocity: Float64Array, t0: Uint32Array, epoch: number): void {
     const location = this.world.locate(netId);
     if (location === NOT_FOUND || archetypeOf(location) !== this.archetype) {
       this.world.anomalies++;
@@ -240,17 +281,16 @@ export class FrameApplier implements TickSink {
     store.pushSegmentFrom(slotOf(location), position, store.linear ? velocity : null, t0, epoch);
   }
 
-  state(netId: number, groupMask: number): void {
+  stateSlot(netId: number, groupMask: number): number {
     const location = this.world.locate(netId);
     if (location === NOT_FOUND || archetypeOf(location) !== this.archetype) {
       this.world.anomalies++;
-      this.target = Target.None;
-      return;
+      return -1;
     }
 
-    this.slot = slotOf(location);
-    this.store!.markUpdated(this.slot, groupMask);
-    this.target = Target.Entity;
+    const slot = slotOf(location);
+    this.store!.markUpdated(slot, groupMask);
+    return slot;
   }
 
   leave(netId: number): void {
@@ -272,7 +312,7 @@ export class FrameApplier implements TickSink {
     // Events are read by the second pass (EventPass); the first pass never selects their blocks.
   }
 
-  self(archetype: ArchetypePlan, netId: number, lastSeq: number, ownerMask: number): void {
+  self(archetype: ArchetypePlan | null, netId: number, lastSeq: number, ownerMask: number): void {
     this.selfState.receive(archetype, netId, lastSeq, ownerMask);
     this.target = Target.Owner;
   }
@@ -367,6 +407,46 @@ export class FrameApplier implements TickSink {
 
   list(): void {
     // Lists are event and command fields only: the catalog refuses them on archetypes and owner sections.
+  }
+}
+
+/**
+ * Refuses generated decoders the applier cannot trust: generated from another catalog than the session's, shaped for
+ * another archetype count, or writing a field the store does not hold (every public field is stored, so this is a guard
+ * against a store schema that changed under a generated module).
+ */
+function checkDecoders(
+  plan: CatalogPlan,
+  decoders: GeneratedDecoders,
+  catalogHash: Uint8Array | undefined,
+  storeFieldOf: readonly Int32Array[],
+): void {
+  if (catalogHash === undefined) {
+    throw new Error('generated decoders need the session catalog hash (catalogHash) to be checked against');
+  }
+
+  const hash = catalogHashToHex(catalogHash);
+  if (hash !== decoders.catalogHash) {
+    throw new Error(
+      `the generated decoders come from catalog ${decoders.catalogHash}, but the session's is ${hash}: regenerate them with typhon-codegen`,
+    );
+  }
+
+  if (decoders.entities.length !== plan.archetypes.length) {
+    throw new Error(
+      `the generated decoders cover ${decoders.entities.length} archetype(s), the catalog ${plan.archetypes.length}`,
+    );
+  }
+
+  for (const archetype of plan.archetypes) {
+    const unstored = archetype.fields.some(
+      (f) => f.valueKind !== ValueKind.Skipped && storeFieldOf[archetype.idx]![f.index]! < 0,
+    );
+    if (decoders.entities[archetype.idx] != null && unstored) {
+      throw new Error(
+        `archetype '${archetype.name}' has a field the store does not hold; the generated decoder cannot write it`,
+      );
+    }
   }
 }
 

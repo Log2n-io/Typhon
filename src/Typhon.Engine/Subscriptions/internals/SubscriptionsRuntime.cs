@@ -63,6 +63,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     // would read the same value for the whole tick and place every round trip at the tick boundary.
     private long _tickOriginTimestamp;
     private uint _currentTick;
+    private IngressPolicy _ingressPolicy;
     private uint _tickPeriodUs;
 
     // COMMANDS messages that arrived well-formed and in state with nowhere to go. P1-05 turns this into a write into the session's ingress ring.
@@ -127,11 +128,14 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // A second detector instance is not a second copy of that arithmetic: the ladder stays in one place, which is what the exposed property is for.
             LargestTickMultiplier = new OverloadDetector(options.Overload, options.BaseTickRate).MaxTickMultiplier;
 
-            Plans = ProjectionCompiler.Compile(registry, engine, NominalTickPeriodSeconds, LargestTickMultiplier);
+            Plans = ProjectionCompiler.Compile(registry, engine, NominalTickPeriodSeconds, LargestTickMultiplier, Options.ReplicationCellM,
+                Options.VisibilitySlackMForTest);
 
-            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames);
+            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames,
+                engine.SpatialGrid?.Config);
 
             _sessions = new SessionTable("Subscriptions.Sessions", parent, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
+
             _replicationStates = AttachReplicationStates(engine, parent, netIds);
 
             // Built after the session table, whose rows name each session's profile. It resolves every profile to plan indices here, so the tick path never
@@ -143,10 +147,33 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _frames = new FrameAssembler("Subscriptions.Frames", parent, engine.MemoryAllocator, Options, Plans, Catalog.Canonical, _sessions,
                 NominalTickPeriodUs);
             _frames.Profiles = Profiles;
+            _frames.Engine = engine;
 
             // The push path (ADR-067): every archetype some profile observes is served by it.
             var observed = Profiles.ObservedArchetypes;
             var automatic = Profiles.AutomaticArchetypes;
+
+            // An archetype with owner fields has replication state whether or not a profile observes it (11 § 2.4, Q5): owner data follows Control, not
+            // geometry, and a controlled entity with no state would have nowhere to be compared. No session's archetype set names it, so it sends no record.
+            for (var a = 0; a < Plans.Length; a++)
+            {
+                if (Plans[a].OwnerFields.Length > 0)
+                {
+                    if (Plans[a].Position == null)
+                    {
+                        throw new NotSupportedException(
+                            $"Archetype '{Plans[a].Name}' declares owner fields but no position. Owner state is served through the push path, which locates "
+                            + "a controlled entity by its position (11 § 2.4); owner data with no place in the world is a shared or keyed source's, "
+                            + "which Phase 4 builds. Declare a Position or Motion, or move the fields to the positioned entity the session controls.");
+                    }
+
+                    observed[a] = true;
+                    Self ??= new SelfTracker(Options.MaxSessions);
+                    _replicationStates[a].Self = Self;
+                }
+            }
+
+            _frames.Self = Self;
             if (Array.IndexOf(automatic, true) >= 0 && !Options.AllowAutomaticPushDetection)
             {
                 throw new NotSupportedException(
@@ -156,7 +183,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
             if (Array.IndexOf(observed, true) >= 0)
             {
-                Push = new PushReplication(Plans, _replicationStates, observed, automatic, Profiles.MaxRadius, Options.MaxSessions, Options.PushShadow);
+                // Null only when no spatial grid is configured, and then an observed archetype has no position, which the push path refuses by name first.
+                var spatial = engine.SpatialGrid;
+                Grid = spatial == null ? null : ReplicationGrid.Resolve(Options.ReplicationCellM, spatial.Config, Profiles.MaxRadius);
+                Push = PushReplication.Create(Plans, _replicationStates, observed, automatic, Grid, Options.MaxSessions, Options.PushShadow,
+                    Options.ForceDeepReplicationForTest);
                 for (var a = 0; a < observed.Length; a++)
                 {
                     if (observed[a])
@@ -167,6 +198,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 }
 
                 _frames.Push = Push;
+                var (farPhase, farWindow) = Profiles.FarFold;
+                Push.ConfigureFar(farPhase, farWindow);
                 var encodePlans = new ArchetypeEncodePlan[Plans.Length];
                 for (var a = 0; a < Plans.Length; a++)
                 {
@@ -174,6 +207,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 }
 
                 Push.AttachEncodePlans(encodePlans);
+                ConfigureAggregates(observed);
+                ConfigureRegions();
             }
 
             // The send side (P1-14b). It holds no memory of its own beyond one view and one work item per slot; what it carries is the rule that a frame
@@ -184,12 +219,38 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // reading of the declarations; the ring pool is created here because a ring's lifetime is a session's, and sessions live in the table above it.
             CatalogPlan = CatalogPlan.Compile(Catalog.Canonical);
             CommandTypes = CommandRegistry.Build(registry, CatalogPlan);
+
+            // The inbound rails (11 § 4.2). The budget is required once clients can send commands — the application's or ClientRegion — because it is the one
+            // bound between a single client and the transport threads' decode work, and only the application knows what its commands cost.
+            ValidateIngressRails(Options, CommandTypes.Count);
+            _ingressPolicy = new IngressPolicy(Options.IngressBytesPerSecond, (long)(Options.AbuseWindow.TotalSeconds * Stopwatch.Frequency),
+                Options.AbuseRefusalsPerWindow, Options.AbuseWindows);
             _ingressRings = new IngressRingPool("Subscriptions.IngressRings", parent, engine.MemoryAllocator, Options);
             _ingress = new SubscriptionsIngress(_sessions, registry, CommandTypes, new CommandTypeBuffers(CommandTypes, Options.MaxSessions), _ingressRings,
                 Options.MaxSessions, _sendPump);
+            _frames.Ingress = _ingress;
             _ingress.Frames = _frames;
             _ingress.ReplicationStates = _replicationStates;
-            Commands = new SubscriptionsCommands(_ingress);
+
+            // netId → entity for a command's entity references (SUB-26): the projection binds each identity it assigns, and every release unbinds it.
+            foreach (var state in _replicationStates)
+            {
+                if (state != null)
+                {
+                    state.EntityIndex = _ingress.NetIds;
+                }
+            }
+            // Events (09 § 11): compiled against the catalog, and one commands view per worker slot, so Emit records into the worker's own buffer.
+            Events = EventHub.Build(registry, CatalogPlan);
+            _frames!.Events = Events;
+            var workerSlots = (parent as DagScheduler)?.WorkerSlotCount ?? 0;
+            Events?.BindWorkerSlots(workerSlots);
+            Commands = new SubscriptionsCommands(_ingress, Events);
+            _commandsByWorker = new SubscriptionsCommands[workerSlots];
+            for (var w = 0; w < workerSlots; w++)
+            {
+                _commandsByWorker[w] = new SubscriptionsCommands(_ingress, Events, w + 1);
+            }
 
             // STATS (P1-16). Last of the tick-path objects, because it reads across all of them — the session table's open count, the send pump's bytes, the
             // ingress rows' drop counters and the engine's per-archetype entity counts — and attached to the frame assembler rather than constructed by it,
@@ -277,10 +338,132 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// What an application system reads and answers commands through. <see langword="null"/> on an inactive runtime.
     /// </summary>
     /// <remarks>
-    /// The <c>ctx.Subscriptions</c> sugar of <c>design/Subscriptions/01-model.md § 7</c> is one property on <c>TickContext</c> that a later slice adds; this
-    /// is the object it will return, and a system can hold it directly in the meantime because it is created at <c>Start</c> and never replaced.
+    /// The view off a worker — lifecycle hooks and tests — whose events go to slot 0. A system reads <c>ctx.Subscriptions</c>, which is its own worker's
+    /// view (<see cref="CommandsFor"/>): holding this one instead would put its events on slot 0 with every other holder's.
     /// </remarks>
     public SubscriptionsCommands Commands { get; }
+
+    private readonly SubscriptionsCommands[] _commandsByWorker = [];
+
+    /// <summary>The commands view a system on worker <paramref name="workerId"/> is handed: its events go to that worker's buffer.</summary>
+    /// <param name="workerId">The worker, or <see cref="TickContext.NonWorkerId"/>.</param>
+    /// <returns>The view; <see cref="Commands"/> off a worker.</returns>
+    public SubscriptionsCommands CommandsFor(int workerId) =>
+        (uint)workerId < (uint)_commandsByWorker.Length ? _commandsByWorker[workerId] : Commands;
+
+    /// <summary>
+    /// ClientRegion sessions (09 § 7): one window width, sized for the widest extent any profile accepts, bounded like a Sphere's window, and the archetype
+    /// sets the near budgets count.
+    /// </summary>
+    private void ConfigureRegions()
+    {
+        // ClientRegion (09 § 7): one window width for every region session, sized for the widest extent any profile accepts, and bounded like a Sphere's
+        // window — the cells a gather pays for.
+        var edge = Profiles.MaxRegionEdgeM;
+        if (edge <= 0)
+        {
+            return;
+        }
+
+        // The implementation's depth, not the grid's: the deep one (a flat grid served deep only in tests) keeps W² rows of W cells.
+        var window = (long)Math.Ceiling(edge / Grid.CellM) + 5;
+        var cells = window * window * (Push.Deep ? window : 1);
+        if (window > 64 || cells > ReplicationGrid.MaxWindowCells)
+        {
+            var widest = Push.Deep ? 9 : 48;
+            throw new InvalidOperationException(
+                $"A ClientRegion accepts regions {edge} m wide, and with SubscriptionsOptions.ReplicationCellM = {Grid.CellM} its sessions' window would be " +
+                $"{window} cells per axis (⌈maxEdgeM / c⌉ + 5), {cells} cells, past the bound of {ReplicationGrid.MaxWindowCells}. In a " +
+                $"{(Push.Deep ? "deep" : "flat")} grid maxEdgeM is at most {widest} cells, {widest * Grid.CellM} m: lower it, or raise the cell side to at " +
+                $"least {Math.Ceiling(edge / widest * 1000d) / 1000d} m.");
+        }
+
+        Push.ConfigureRegions((int)window, Profiles.BindNearCounts().ToArray());
+    }
+
+    /// <summary>
+    /// The aggregate tiers' counts (09 § 8): one per canonical catalog grid, bound to the profiles that read them. A tile must be a whole number of replication
+    /// cells over the same origin — the counts follow cell changes, so a tile edge inside a cell would let a move cross it unseen — and every archetype a grid
+    /// counts must be one push replication serves.
+    /// </summary>
+    private void ConfigureAggregates(bool[] observed)
+    {
+        var canonical = Catalog.Canonical.Grids ?? [];
+        if (canonical.Length == 0)
+        {
+            return;
+        }
+
+        var planOfCanonical = new int[Catalog.Canonical.Archetypes.Length];
+        for (var c = 0; c < planOfCanonical.Length; c++)
+        {
+            planOfCanonical[c] = Array.FindIndex(Plans, p => p.Name == Catalog.Canonical.Archetypes[c].Name);
+        }
+
+        var grids = new AggregateCounts[canonical.Length];
+        for (var g = 0; g < canonical.Length; g++)
+        {
+            var grid = canonical[g];
+            var cells = grid.Cell / Grid.CellM;
+            if (Math.Abs(cells - Math.Round(cells)) > 1e-9 || Math.Round(cells) < 1)
+            {
+                throw new NotSupportedException(
+                    $"An Aggregate's tile of {grid.Cell} m is not a whole number of the {Grid.CellM} m replication cells: tile counts follow cell changes, so a tile " +
+                    "edge inside a cell would let a move cross it unseen. Declare a multiple of the cell.");
+            }
+
+            var columns = new int[Plans.Length];
+            Array.Fill(columns, -1);
+            for (var j = 0; j < grid.Archetypes.Length; j++)
+            {
+                var plan = planOfCanonical[grid.Archetypes[j]];
+                if (plan < 0 || !observed[plan])
+                {
+                    throw new NotSupportedException(
+                        $"An Aggregate counts '{Catalog.Canonical.Archetypes[grid.Archetypes[j]].Name}', which no profile replicates: its counts come from the " +
+                        "push step's events. Observe the archetype in some profile.");
+                }
+
+                columns[plan] = j;
+            }
+
+            grids[g] = new AggregateCounts(grid.Idx, grid.Origin[0], grid.Origin[1], grid.Origin.Length > 2 ? grid.Origin[2] : 0d, grid.Cell, grid.Dims[0],
+                grid.Dims[1], grid.Dims.Length > 2 ? grid.Dims[2] : 1, columns, grid.Archetypes.Length);
+        }
+
+        Push.ConfigureAggregates(grids);
+        Profiles.BindAggregates((tileM, archetypes) =>
+        {
+            for (var g = 0; g < grids.Length; g++)
+            {
+                if (grids[g].TileM != tileM)
+                {
+                    continue;
+                }
+
+                var same = true;
+                var n = 0;
+                for (var a = 0; a < grids[g].Columns.Length; a++)
+                {
+                    if (grids[g].Columns[a] >= 0)
+                    {
+                        n++;
+                        same &= Array.IndexOf(archetypes, a) >= 0;
+                    }
+                }
+
+                if (same && n == archetypes.Length)
+                {
+                    return g;
+                }
+            }
+
+            return -1;
+        }, NominalTickPeriodSeconds);
+    }
+
+    /// <summary>The declared events' hub, or <see langword="null"/> when no event is declared.</summary>
+    public EventHub Events { get; }
 
     /// <summary>The per-archetype replication state, parallel to <see cref="Plans"/>. Empty on an inactive runtime.</summary>
     public ArchetypeReplicationState[] ReplicationStates => _replicationStates;
@@ -300,6 +483,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     /// <summary>The push path, or <see langword="null"/> when no profile observes anything.</summary>
     internal PushReplication Push { get; private set; }
+
+    /// <summary>The owner routing (11 § 2.2), when an archetype declares owner fields; <see langword="null"/> otherwise.</summary>
+    internal SelfTracker Self { get; private set; }
+
+    /// <summary>The replication grid resolved at <c>Start</c>, or <see langword="null"/> when no profile observes anything.</summary>
+    internal ReplicationGrid Grid { get; private set; }
 
     /// <summary>The send side: what carries a published frame to a link.</summary>
     public SendPump SendPump => _sendPump;
@@ -395,6 +584,54 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// is what turns it into the close code the protocol names, and swallowing it would leave a malformed client connected.
     /// </remarks>
     bool ISubscriptionsHost.RequestPong(SessionId session, uint clientMs) => _sendPump != null && _sendPump.RequestPong(session, clientMs);
+
+    /// <inheritdoc />
+    bool ISubscriptionsHost.RequestKick(SessionId session, ushort code, string reason) => _sendPump != null && _sendPump.RequestKick(session, code, reason);
+
+    /// <inheritdoc />
+    IngressPolicy ISubscriptionsHost.IngressPolicy => _ingressPolicy;
+
+    /// <summary>
+    /// Refuses inbound rails that would not do what they say (11 § 4.2): no budget when clients can send commands, a budget below the largest message a
+    /// session may send (it would be refused forever), and an abuse rule that is off or cannot be converted to the clock.
+    /// </summary>
+    /// <param name="options">The options.</param>
+    /// <param name="commandTypes">The command types the catalog declares, <c>ClientRegion</c> included.</param>
+    internal static void ValidateIngressRails(SubscriptionsOptions options, int commandTypes)
+    {
+        if (commandTypes > 0 && options.IngressBytesPerSecond <= 0)
+        {
+            throw new InvalidOperationException(
+                $"The catalog has {commandTypes} command type(s), so clients can send commands, and SubscriptionsOptions.IngressBytesPerSecond is not set. "
+                + "It is each session's inbound budget and has no default: size it from your commands' rate and size (a player sending 20 small "
+                + "commands a second needs a few KiB/s).");
+        }
+
+        if (options.IngressBytesPerSecond > 0 && options.IngressBytesPerSecond < options.ClientMessageBytes)
+        {
+            throw new InvalidOperationException(
+                $"SubscriptionsOptions.IngressBytesPerSecond ({options.IngressBytesPerSecond}) is below ClientMessageBytes ({options.ClientMessageBytes}): "
+                + "the budget is one second deep, so a message of the largest allowed size would be refused forever. Raise the budget or lower the cap.");
+        }
+
+        if (options.AbuseWindow <= TimeSpan.Zero || options.AbuseWindow > TimeSpan.FromHours(1))
+        {
+            throw new InvalidOperationException($"SubscriptionsOptions.AbuseWindow ({options.AbuseWindow}) must be positive and at most an hour.");
+        }
+
+        if (options.AbuseRefusalsPerWindow <= 0 || options.AbuseWindows <= 0)
+        {
+            throw new InvalidOperationException(
+                $"SubscriptionsOptions.AbuseRefusalsPerWindow ({options.AbuseRefusalsPerWindow}) and AbuseWindows ({options.AbuseWindows}) must be positive: "
+                + "the abuse rule is always on. To make it lenient, raise them.");
+        }
+    }
+
+    /// <inheritdoc />
+    long ISubscriptionsHost.PolicyRefusalsOf(SessionId session) => _ingress?.RowOf(session)?.PolicyRefusals ?? 0;
+
+    /// <inheritdoc />
+    int ISubscriptionsHost.RefuseCommands(SessionId session, ReadOnlySpan<byte> message) => _ingress?.RefuseCommands(session, message) ?? 0;
 
     /// <inheritdoc />
     void ISubscriptionsHost.BindSessionLink(SessionId session, ISubscriptionLink link)
@@ -508,7 +745,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
         Volatile.Write(ref _tickOriginTimestamp, tickOriginTimestamp);
         Volatile.Write(ref _tickPeriodUs, NominalTickPeriodUs * (uint)Math.Max(1, tickMultiplier));
+        _frames?.SetTickState(NominalTickPeriodUs * (uint)Math.Max(1, tickMultiplier), tickMultiplier);
         Volatile.Write(ref _currentTick, (uint)tickNumber);
+
+        // Before any system of this tick emits: what a tick no frame stage encoded left behind is discarded, not delivered later.
+        Events?.OnTickStart((uint)tickNumber);
     }
 
     /// <summary>The replication state of a replicated archetype, or <see langword="null"/> when it is not replicated.</summary>

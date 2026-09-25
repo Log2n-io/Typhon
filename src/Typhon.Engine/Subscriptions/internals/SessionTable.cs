@@ -89,9 +89,18 @@ internal sealed unsafe class SessionTable : IDisposable
     // arrays are keyed by SLOT and the slot outlives its occupant.
     private readonly string[] _sessionKinds;
     private readonly string[] _profileNames;
+
+    // The index of each slot's profile in the compiled profiles, or -1: tick side only, written with the name and read by the frame stage's prologue so it
+    // never hashes a profile name per session per tick. The resolver is bound at Start, when the profiles are compiled.
+    private readonly int[] _profileIndices;
+    private Func<string, int> _profileResolver;
     private readonly string[] _closeReasons;
     private readonly object[] _appData;
     private readonly SessionViewpoint[] _viewpoints;
+
+    // Each slot's run-time Sphere radius (SetRadius), or 0 for its profile's own. Tick side, like the viewpoint; cleared when the slot opens and when its
+    // profile changes, because a radius is valid only within the profile it was checked against.
+    private readonly double[] _radii;
     private readonly SessionLimits[] _declaredLimits;
 
     // Tick-side bookkeeping. Every one of these is driven by delivered events, never by scanning the table: the cost of a tick follows the sessions that
@@ -156,8 +165,11 @@ internal sealed unsafe class SessionTable : IDisposable
         _freeIds = (uint*)(_memory.DataAsPointer + HeaderBytes + rowBytes);
 
         _viewpoints = new SessionViewpoint[_capacity];
+        _radii = new double[_capacity];
         _sessionKinds = new string[_capacity];
         _profileNames = new string[_capacity];
+        _profileIndices = new int[_capacity];
+        Array.Fill(_profileIndices, -1);
         _closeReasons = new string[_capacity];
         _appData = new object[_capacity];
         _declaredLimits = new SessionLimits[_capacity];
@@ -247,7 +259,7 @@ internal sealed unsafe class SessionTable : IDisposable
 
                 // The row is free — nothing else holds this identity, so the exchange cannot lose. It marks the row taken so a release can be told apart from
                 // a double release, and so a lookup on the leased identity answers "not a session yet" rather than reading a half-written row.
-                var previous = Interlocked.Exchange(ref (_rows + leased.Slot)->Gate, (long)candidate | GateLeasedBit);
+                var previous = Interlocked.Exchange(ref (_rows + leased.Slot)->Gate, candidate | GateLeasedBit);
                 Debug.Assert(previous == 0, "a leased slot's gate must have been free");
 
                 session = leased;
@@ -291,7 +303,7 @@ internal sealed unsafe class SessionTable : IDisposable
         try
         {
             var row = _rows + session.Slot;
-            var leased = (long)session.Value | GateLeasedBit;
+            var leased = session.Value | GateLeasedBit;
 
             // One CAS decides it: only the gate value a lease leaves behind may be released, so the second caller of a double release finds the row free and
             // answers false rather than pushing the identity twice — which would hand one slot to two connections at once.
@@ -334,7 +346,7 @@ internal sealed unsafe class SessionTable : IDisposable
         try
         {
             var row = _rows + slot;
-            var leased = (long)session.Value | GateLeasedBit;
+            var leased = session.Value | GateLeasedBit;
             if (Volatile.Read(ref row->Gate) != leased)
             {
                 throw new InvalidOperationException(
@@ -363,9 +375,11 @@ internal sealed unsafe class SessionTable : IDisposable
             row->ClientMessageBytes = Resolve(limits.ClientMessageBytes, _options.ClientMessageBytes);
             row->Controlled = EntityId.Null;
             _viewpoints[session.Slot] = default;
+            _radii[session.Slot] = 0d;
 
             _sessionKinds[slot] = sessionKind;
             _profileNames[slot] = null;
+            _profileIndices[slot] = -1;
             _closeReasons[slot] = null;
             _appData[slot] = admission.AppData;
             _declaredLimits[slot] = limits;
@@ -534,6 +548,29 @@ internal sealed unsafe class SessionTable : IDisposable
     /// <returns>The profile's name.</returns>
     public string ProfileName(SessionId session) => (string)SlotReference(session, _profileNames);
 
+    /// <summary>
+    /// The index of the profile a session is bound to among the compiled profiles, or -1 when it has none, names no declared profile, or no profiles are
+    /// bound yet. Tick side, like <see cref="TryGetViewpoint"/>: a profile is set only from the request log, on the tick.
+    /// </summary>
+    /// <param name="session">The identity; its slot is read without a generation check, as the tick's session enumeration hands out open ones.</param>
+    /// <returns>The index.</returns>
+    public int ProfileIndex(SessionId session) => session.Slot < (uint)_capacity ? _profileIndices[session.Slot] : -1;
+
+    /// <summary>
+    /// Binds the name → index map of the compiled profiles, and resolves the names already set. Once, at <c>Start</c>, before the first tick.
+    /// </summary>
+    /// <param name="resolve">The index of a profile name, or -1 for a name no profile declares.</param>
+    public void BindProfiles(Func<string, int> resolve)
+    {
+        ArgumentNullException.ThrowIfNull(resolve);
+        _profileResolver = resolve;
+        for (var slot = 0; slot < _capacity; slot++)
+        {
+            var name = _profileNames[slot];
+            _profileIndices[slot] = name == null ? -1 : resolve(name);
+        }
+    }
+
     /// <summary>The reason text a close carried, for the <c>KICK</c> the transport sends. <see langword="null"/> when there was none.</summary>
     /// <param name="session">The identity.</param>
     /// <returns>The reason.</returns>
@@ -618,6 +655,42 @@ internal sealed unsafe class SessionTable : IDisposable
     }
 
     /// <summary>
+    /// Sets a session's Sphere radius for this tick on. Tick side, from <see cref="SubscriptionsCommands.SetRadius"/>, which checked it against the profile.
+    /// </summary>
+    /// <param name="session">The identity.</param>
+    /// <param name="radius">The radius, in metres; 0 returns to the profile's own.</param>
+    /// <returns><see langword="false"/> when the session is closing or gone.</returns>
+    public bool SetRadius(SessionId session, double radius)
+    {
+        if (!TryEnter())
+        {
+            return false;
+        }
+
+        _affinity.Enter(nameof(SessionTable), nameof(SetRadius));
+        try
+        {
+            if (!TryGetOpenRow(session, out _))
+            {
+                return false;
+            }
+
+            _radii[session.Slot] = radius;
+            return true;
+        }
+        finally
+        {
+            _affinity.Exit();
+            Exit();
+        }
+    }
+
+    /// <summary>A session's run-time Sphere radius, or 0 for its profile's own. Tick side; the slot is read without a generation check, like the viewpoint.</summary>
+    /// <param name="session">The identity.</param>
+    /// <returns>The radius.</returns>
+    public double Radius(SessionId session) => session.Slot < (uint)_capacity ? _radii[session.Slot] : 0d;
+
+    /// <summary>
     /// Reads a session's viewpoint.
     /// </summary>
     /// <param name="session">The identity.</param>
@@ -625,7 +698,7 @@ internal sealed unsafe class SessionTable : IDisposable
     /// <returns><see langword="false"/> when the session has never been placed, which is what a spatial observer treats as "sees nothing yet".</returns>
     public bool TryGetViewpoint(SessionId session, out Vector3D position)
     {
-        if ((uint)session.Slot >= (uint)_capacity)
+        if (session.Slot >= (uint)_capacity)
         {
             position = default;
             return false;
@@ -747,7 +820,7 @@ internal sealed unsafe class SessionTable : IDisposable
 
                 var next = (observed & ~GateCloseMask)
                     | GateCloseRequestedBit
-                    | ((long)((byte)reason & GateCloseReasonMax) << GateCloseReasonShift)
+                    | (((byte)reason & GateCloseReasonMax) << GateCloseReasonShift)
                     | ((long)code << GateCloseCodeShift);
 
                 if (Interlocked.CompareExchange(ref row->Gate, next, observed) == observed)
@@ -1029,6 +1102,8 @@ internal sealed unsafe class SessionTable : IDisposable
             }
 
             _profileNames[session.Slot] = profileName;
+            _profileIndices[session.Slot] = _profileResolver == null || profileName == null ? -1 : _profileResolver(profileName);
+            _radii[session.Slot] = 0d;
             return true;
         }
         finally
@@ -1036,6 +1111,14 @@ internal sealed unsafe class SessionTable : IDisposable
             Exit();
         }
     }
+
+    private int _controlVersion;
+
+    /// <summary>
+    /// Moves whenever a session's controlled entity may have changed — a <see cref="SetControlled"/> that changed it, or a slot recycled — so the owner
+    /// routing (<see cref="SelfTracker"/>) rebuilds its reverse map only then.
+    /// </summary>
+    public int ControlVersion => Volatile.Read(ref _controlVersion);
 
     /// <summary>Binds a session to the entity it controls. Tick side, from the request log.</summary>
     /// <param name="session">The identity.</param>
@@ -1055,7 +1138,12 @@ internal sealed unsafe class SessionTable : IDisposable
                 return false;
             }
 
-            row->Controlled = entity;
+            if (row->Controlled != entity)
+            {
+                row->Controlled = entity;
+                Interlocked.Increment(ref _controlVersion);
+            }
+
             return true;
         }
         finally
@@ -1063,6 +1151,21 @@ internal sealed unsafe class SessionTable : IDisposable
             Exit();
         }
     }
+
+    /// <summary>The entity a session controls, or <see cref="EntityId.Null"/>. Tick side, like the viewpoint.</summary>
+    /// <param name="session">The identity.</param>
+    /// <returns>The entity.</returns>
+    /// <remarks>
+    /// No gate: it is read once per followed session in the frame prologue, and the gate's counter is shared with the transport threads' sends, so taking it
+    /// here bounced its line on every session. The row's identity is checked with the acquire load <see cref="TryGetRow"/> makes, and <c>Controlled</c> is
+    /// written only on the tick.
+    /// </remarks>
+    public EntityId ControlledOf(SessionId session) => TryGetRow(session, out var row) ? row->Controlled : EntityId.Null;
+
+    /// <summary>A session's outbound byte budget, 0 for none. Tick side, without the gate, as <see cref="ControlledOf"/>: written only on the tick.</summary>
+    /// <param name="session">The identity.</param>
+    /// <returns>The budget in bytes per second.</returns>
+    public int BudgetOf(SessionId session) => TryGetRow(session, out var row) ? row->BytesPerSecond : 0;
 
     /// <summary>Sets a session's outbound byte budget. Tick side, from the request log.</summary>
     /// <param name="session">The identity.</param>
@@ -1191,11 +1294,17 @@ internal sealed unsafe class SessionTable : IDisposable
 
         _sessionKinds[slot] = null;
         _profileNames[slot] = null;
+        _profileIndices[slot] = -1;
         _closeReasons[slot] = null;
         _appData[slot] = null;
         _declaredLimits[slot] = null;
 
-        row->Controlled = EntityId.Null;
+        if (!row->Controlled.IsNull)
+        {
+            row->Controlled = EntityId.Null;
+            Interlocked.Increment(ref _controlVersion);
+        }
+
         Volatile.Write(ref row->State, (int)SessionSlotState.Free);
 
         Push(new SessionId((ushort)slot, generation));
@@ -1373,6 +1482,7 @@ internal sealed unsafe class SessionTable : IDisposable
 
         Array.Clear(_sessionKinds);
         Array.Clear(_profileNames);
+        Array.Fill(_profileIndices, -1);
         Array.Clear(_closeReasons);
         Array.Clear(_appData);
         Array.Clear(_declaredLimits);

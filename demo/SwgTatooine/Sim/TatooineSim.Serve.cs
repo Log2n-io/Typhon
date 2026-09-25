@@ -58,17 +58,32 @@ public sealed partial class TatooineSim
             {
                 CollapseBelowWorkUnits = _config.SubscriptionsCollapseWorkUnits,
                 AllowAutomaticPushDetection = _config.SubscriptionsPushAutomatic,
+
+                // A third of the players' 192 m radius: an 11 x 11 window per session.
+                ReplicationCellM = TatooineReplication.ReplicationCellM,
+
+                // Each session's inbound budget (--ingress-budget): required once clients can send commands, and the god camera's ClientRegion is one.
+                IngressBytesPerSecond = _config.IngressBytesPerSecond,
             },
         });
 
         // Before Start, because the catalog a client negotiates against is compiled there and the declarations are its source.
+        TatooineReplication.PlayerLeaveM = _config.PlayerLeaveM;
+        TatooineReplication.GodRegionMaxEdgeM = _config.GodRegionMaxEdgeM;
+        TatooineReplication.GodNearBudget = _config.GodNearBudget;
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
+        TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
         _runtime.OnTickAborted += (_, outcome)
             => Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}'");
 
         TatooineReplication.Scheduler = _runtime.Scheduler;
         _runtime.Start();
+
+        // The catalog every client negotiates against, by its hash: two builds that print the same one serve the same wire (AC-25 compares the attribute
+        // declarations against the builder ones this way).
+        var catalog = _runtime.SubscriptionsCatalogJson;
+        Console.WriteLine($"  catalog {Typhon.Protocol.CatalogSerializer.HashBytes(catalog.Span):X16}, {catalog.Length} B");
 
         try
         {

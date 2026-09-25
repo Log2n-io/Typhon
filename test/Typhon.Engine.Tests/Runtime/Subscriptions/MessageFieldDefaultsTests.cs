@@ -182,7 +182,13 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
             Resources = new ResourceRegistry(new ResourceRegistryOptions { Name = "MessageFieldDefaultsTests" });
             Allocator = new MemoryAllocator(Resources, new MemoryAllocatorOptions { Name = "MessageFieldDefaultsAllocator" });
 
-            var options = new SubscriptionsOptions { MaxSessions = 16, IngressRingBytes = 4096, IngressPoolBudgetBytes = 1L * 1024 * 1024 };
+            var options = new SubscriptionsOptions
+            {
+                IngressBytesPerSecond = TestIngress.Budget,
+                MaxSessions = 16,
+                IngressRingBytes = 4096,
+                IngressPoolBudgetBytes = 1L * 1024 * 1024,
+            };
 
             Subs = new SubscriptionsRegistry(options);
             Subs.Sessions.Kinds("player");
@@ -515,10 +521,9 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
     [Test]
     public void AnEventDeclaringNothing_CarriesEveryFieldUnderItsRawType()
     {
-        var queue = new EventQueue<DefaultedHit>("Hits", 64);
-        using var harness = new Harness(subs => subs.Event(queue, e => e.RouteToOwner(h => h.Victim)));
+        using var harness = new Harness(subs => subs.Event<DefaultedHit>(e => e.RouteToOwner(h => h.Victim)));
 
-        var declared = harness.Export.Canonical.Events[0];
+        var declared = Array.Find(harness.Export.Canonical.Events, e => e.Name == nameof(DefaultedHit));
         Assert.Multiple(() =>
         {
             Assert.That(FieldNames(declared.Fields), Is.EqualTo(new[] { "Critical", "Mode", "Damage", "Victim" }),
@@ -535,10 +540,9 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
     [Test]
     public void AnEventCanIgnoreAFieldItStillRoutesOn()
     {
-        var queue = new EventQueue<DefaultedHit>("Hits", 64);
-        using var harness = new Harness(subs => subs.Event(queue, e => e.RouteToOwner(h => h.Victim).Ignore(h => h.Mode)));
+        using var harness = new Harness(subs => subs.Event<DefaultedHit>(e => e.RouteToOwner(h => h.Victim).Ignore(h => h.Mode)));
 
-        var declared = harness.Export.Canonical.Events[0];
+        var declared = Array.Find(harness.Export.Canonical.Events, e => e.Name == nameof(DefaultedHit));
         Assert.Multiple(() =>
         {
             Assert.That(FieldNames(declared.Fields), Is.EqualTo(new[] { "Critical", "Damage", "Victim" }));
@@ -575,7 +579,7 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
         {
             subs.Command<AllDefaults>(c => c.Rate(10, 20).Field(m => m.Count, Codec.U8));
             subs.Command<HasScratch>(c => c.Ignore(s => s.Scratch));
-            subs.Event(new EventQueue<DefaultedHit>("Hits", 64), e => e.RouteToOwner(h => h.Victim));
+            subs.Event<DefaultedHit>(e => e.RouteToOwner(h => h.Victim));
         }
     }
 
@@ -617,7 +621,12 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
                         seen.Add(command.Value.Target);
                     }
                 }
-            }), new RuntimeOptions { WorkerCount = 2, BaseTickRate = 200 });
+            }), new RuntimeOptions
+            {
+                WorkerCount = 2,
+                BaseTickRate = 200,
+                Subscriptions = new SubscriptionsOptions { IngressBytesPerSecond = Runtime.TestIngress.Budget },
+            });
 
         runtime.Subscriptions.Sessions.Kinds("player");
         runtime.Subscriptions.Sessions.Admit = static (in AdmissionRequest _) => Admission.Accept(SessionRole.Player);

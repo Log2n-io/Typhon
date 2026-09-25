@@ -10,7 +10,7 @@ namespace Typhon.Engine;
 [PublicAPI]
 public enum ObserverKind
 {
-    /// <summary>Everything, of the listed archetypes. Sessions that hold only this and are fully synced share one encoded frame.</summary>
+    /// <summary>Everything, of the listed archetypes: the whole world, filled cell by cell under the enter budget, then kept by its events.</summary>
     World = 0,
 
     /// <summary>A radius with hysteresis, around a bound entity, the controlled entity, or a fixed point.</summary>
@@ -28,9 +28,8 @@ public enum ObserverKind
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Phase 1 ships <see cref="ObserverKind.World"/> only.</b> The other three are declarable today and refused at <c>Start</c> with the phase that builds
-/// them, which is deliberate: the alternative is an API that grows verbs later, so every application written against it has to be revisited when the verb it
-/// always wanted finally exists. Declaring the full shape now costs a clear error message and buys a public surface that does not move.
+/// <b>Every shape ships</b>: <see cref="ObserverKind.World"/>, <see cref="ObserverKind.Sphere"/> and <see cref="ObserverKind.ClientRegion"/> as a profile's one
+/// entity observer, <see cref="ObserverKind.Aggregate"/> as the tier beside it (09 § 5). The far tier of <see cref="Far"/> is the Aggregate's, and refused.
 /// </para>
 /// <para>
 /// <b>An observer reaches an archetype only if that archetype is spatially indexed.</b> Data with no position — a market, a leaderboard, a player's own
@@ -41,6 +40,7 @@ public enum ObserverKind
 public sealed class ObserverBuilder
 {
     private readonly ObserverDeclaration _observer;
+    private bool _bandsDeclared;
 
     internal ObserverBuilder(ObserverDeclaration observer) => _observer = observer;
 
@@ -61,7 +61,6 @@ public sealed class ObserverBuilder
     public ObserverBuilder Bind(EntityId entity)
     {
         _observer.BoundEntity = entity;
-        _observer.FollowsControlled = false;
         return this;
     }
 
@@ -77,7 +76,6 @@ public sealed class ObserverBuilder
     public ObserverBuilder At(Vector3D position)
     {
         _observer.Placement = position;
-        _observer.FollowsControlled = false;
         return this;
     }
 
@@ -90,10 +88,14 @@ public sealed class ObserverBuilder
     }
 
     /// <summary>
-    /// Caps the entities this observer's near tier sends; beyond it the near radius shrinks and the rest feeds the far tier.
+    /// A ClientRegion's near budget (09 § 7): its cells are delivered nearest the region's centroid first while the entities they hold, counted over the
+    /// observer's archetypes, stay within <paramref name="budget"/>; the cells beyond are not held — a profile's Aggregate covers them. Cells, never single
+    /// entities, are what the budget delivers and takes back, with a deadband: taken back when the count passes 1.1 × budget, more delivered only after it
+    /// has stayed under 0.9 × budget for a second.
     /// </summary>
-    /// <param name="budget">The entity count the near tier is sized for.</param>
+    /// <param name="budget">The entity count the region's delivered cells may hold.</param>
     /// <returns>This builder.</returns>
+    /// <remarks>A Sphere's budget is its session's byte budget (<c>SetBudget</c>); <c>Start</c> refuses a near budget on any other shape.</remarks>
     public ObserverBuilder Near(int budget)
     {
         if (budget <= 0)
@@ -102,6 +104,33 @@ public sealed class ObserverBuilder
         }
 
         _observer.NearBudget = budget;
+        return this;
+    }
+
+    /// <summary>
+    /// Declares a Sphere's distance bands (09 § 9): beyond a fraction of the radius, an entity's updates are sent every N ticks.
+    /// </summary>
+    /// <param name="bands">The bands, innermost first — <c>b =&gt; b.Every(2, beyond: 0.5).Every(4, beyond: 0.75)</c>.</param>
+    /// <returns>This builder.</returns>
+    /// <exception cref="InvalidOperationException">The observer is not a Sphere, or its bands were already declared.</exception>
+    public ObserverBuilder Bands(Action<BandBuilder> bands)
+    {
+        // Declared once, even empty: a second call is a second opinion about the same radius, and silently keeping either would hide one.
+        ArgumentNullException.ThrowIfNull(bands);
+        if (_observer.Kind != ObserverKind.Sphere)
+        {
+            throw new InvalidOperationException($"Distance bands are fractions of a Sphere's radius; a {_observer.Kind} observer has none.");
+        }
+
+        if (_bandsDeclared)
+        {
+            throw new InvalidOperationException("A Sphere's bands are declared once.");
+        }
+
+        _bandsDeclared = true;
+        var builder = new BandBuilder();
+        bands(builder);
+        _observer.Bands = builder.Bands;
         return this;
     }
 
@@ -123,19 +152,6 @@ public sealed class ObserverBuilder
         return this;
     }
 
-    /// <summary>Caps the bytes this observer's records may take in one frame.</summary>
-    /// <param name="bytes">The byte budget.</param>
-    /// <returns>This builder.</returns>
-    public ObserverBuilder Budget(int bytes)
-    {
-        if (bytes <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(bytes), bytes, "An observer budget is a positive byte count.");
-        }
-
-        _observer.ByteBudget = bytes;
-        return this;
-    }
 }
 
 /// <summary>
@@ -157,6 +173,22 @@ public sealed class ObserverDeclaration
     /// <summary>A sphere's leave radius, in metres; 0 when the declaration left the hysteresis band to the engine.</summary>
     public double LeaveRadius { get; internal set; }
 
+    /// <summary>A sphere's distance bands, innermost first (09 § 9); empty when every update is sent every tick.</summary>
+    public IReadOnlyList<DistanceBand> Bands { get; internal set; } = [];
+
+    /// <summary>A sphere's largest run-time radius, in metres (<c>SetRadius</c>); 0 when a session's radius is fixed.</summary>
+    public double MaxRadius { get; internal set; }
+
+    /// <summary>
+    /// The radius a sphere's sessions test against: the band's midpoint <c>(R + L) / 2</c> with a leave radius, the enter radius without (09 § 3).
+    /// </summary>
+    public double EffectiveRadius => LeaveRadius > 0 ? (Radius + LeaveRadius) / 2d : Radius;
+
+    /// <summary>
+    /// The sphere's visibility slack <c>h_p</c> (09 § 2–3): half its band with a leave radius, the anchor slack's mirror <c>R / 48</c> without.
+    /// </summary>
+    public double VisibilitySlack => LeaveRadius > 0 ? (LeaveRadius - Radius) / 2d : Radius / 48d;
+
     /// <summary>A client region's longest accepted edge, in metres.</summary>
     public double MaxEdgeM { get; internal set; }
 
@@ -166,6 +198,9 @@ public sealed class ObserverDeclaration
     /// <summary>An aggregate observer's refresh rate, in hertz.</summary>
     public double RateHz { get; internal set; }
 
+    /// <summary>An aggregate observer's radius around the session's anchor; 0 for every tile.</summary>
+    public double AggregateRadiusM { get; internal set; }
+
     /// <summary>The near tier's entity budget; 0 when none was declared.</summary>
     public int NearBudget { get; internal set; }
 
@@ -174,9 +209,6 @@ public sealed class ObserverDeclaration
 
     /// <summary>The far tier's refresh rate in hertz; 0 when there is no far tier.</summary>
     public double FarMaxHz { get; internal set; }
-
-    /// <summary>The observer's byte budget; 0 when none was declared.</summary>
-    public int ByteBudget { get; internal set; }
 
     /// <summary>The entity a sphere is bound to, or <see cref="EntityId.Null"/> when it is not bound to one.</summary>
     public EntityId BoundEntity { get; internal set; }

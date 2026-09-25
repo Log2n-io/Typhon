@@ -41,6 +41,9 @@ sealed unsafe class ReplicationHarness : IDisposable
     /// <summary>The session table.</summary>
     public SessionTable Sessions => Subscriptions.Sessions;
 
+    /// <summary>The identity allocator every archetype's leases draw on.</summary>
+    public NetIdAllocator NetIds { get; private init; }
+
     /// <summary>
     /// Builds the replication runtime over <paramref name="engine"/> from declarations the caller writes.
     /// </summary>
@@ -48,21 +51,37 @@ sealed unsafe class ReplicationHarness : IDisposable
     /// <param name="declare">Writes the projections and profiles.</param>
     /// <param name="name">A name for the resource registry, so two fixtures do not share one.</param>
     /// <param name="options">Replication options, or <see langword="null"/> for the fixtures' ample defaults.</param>
+    /// <param name="replicationCellM">
+    /// The cell side the defaults declare; zero for <c>ProjectionTestSchema.ReplicationCellFor(0)</c>, the World fixtures' grid. Ignored when
+    /// <paramref name="options"/> is given, which declares its own.
+    /// </param>
     /// <returns>The harness.</returns>
-    public static ReplicationHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null)
+    public static ReplicationHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null,
+        double replicationCellM = 0)
     {
+        if (options != null && replicationCellM > 0)
+        {
+            throw new ArgumentException("options declares its own ReplicationCellM; passing replicationCellM too would be ignored", nameof(replicationCellM));
+        }
+
         var resources = new ResourceRegistry(new ResourceRegistryOptions { Name = name });
         try
         {
             var netIds = new NetIdAllocator("NetIds", resources.Runtime);
-            var declarations = new SubscriptionsRegistry(options ?? new SubscriptionsOptions { MaxSessions = 256, StatePoolBudgetBytes = PoolBudgetBytes });
+            var declarations = new SubscriptionsRegistry(options ?? new SubscriptionsOptions
+            {
+                IngressBytesPerSecond = TestIngress.Budget,
+                MaxSessions = 256,
+                StatePoolBudgetBytes = PoolBudgetBytes,
+                ReplicationCellM = replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(0),
+            });
             declarations.Sessions.Kinds("god");
             declare(declarations);
 
             var subscriptions = new SubscriptionsRuntime(engine, declarations, new RuntimeOptions { BaseTickRate = 10 }, resources.Runtime, netIds,
                 ["Test"]);
 
-            return new ReplicationHarness(engine, resources, declarations, subscriptions);
+            return new ReplicationHarness(engine, resources, declarations, subscriptions) { NetIds = netIds };
         }
         catch
         {

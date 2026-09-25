@@ -82,7 +82,7 @@ dbe.WriteTickFence(tickNumber);  // batches every dirty SingleVersion component 
 
 ## 🔗 Related
 
-- Code: `src/Typhon.Engine/Ecs/internals/DirtyBitmap.cs`, `src/Typhon.Engine/Ecs/internals/DirtyBitmapRing.cs`
+- Code: `src/Typhon.Engine/Ecs/internals/DirtyBitmap.cs`
 - Sub-feature: [Commit Discipline](./storage-mode-committed.md)
 - Sibling: [Durability Modes](../../Durability/durability-modes/README.md) — the separate UoW-level commit-durability spectrum; tick-fence durability here is a distinct, component-level mechanism
 - Parent feature: [Storage Modes](./README.md)

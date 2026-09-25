@@ -56,6 +56,12 @@ public unsafe ref struct EntityRef
     internal int _clusterChunkId;                   // Cluster chunk ID (for dirty tracking: entityIndex = chunkId * 64 + slot)
     internal ArchetypeClusterInfo _clusterLayout;   // Layout info for offset computation
 
+    /// <summary>
+    /// Marks this entity's slot in its cluster's per-tick structure word — the push set replication projects after the fence (ADR-067). The write-by-id
+    /// counterpart of <c>ClusterRef.NotePushed</c>: a command's effect on the entity it names is reached by id, not by walking its cluster.
+    /// </summary>
+    internal readonly void NotePushed() => _engineState?.ClusterState?.NoteStructureSlots(_clusterChunkId, 1UL << _clusterSlotIndex);
+
     internal EntityRef(EntityId id, ArchetypeMetadata archetype, ArchetypeEngineState engineState, EntityAccessor accessor, ushort enabledBits, bool writable)
     {
         _id = id;

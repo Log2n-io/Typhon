@@ -33,6 +33,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     /// <param name="skipPercent">The percentage of ticks on which the session's frames are left undrained.</param>
     [Test]
     [VerifiesRule("SUB-03")]
+    [VerifiesRule("SUB-06")]
     [VerifiesRule("SUB-10")]
     public void AClientsWorldIsTheServersUnderPush(
         [Values(PushDetection.Explicit, PushDetection.Automatic)] PushDetection detection,
@@ -134,8 +135,9 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     {
         // Deterministic projection builds the index, and so folds the far flushes, serially in the frame prologue rather than in their stages.
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7300 + skipPercent, [skipPercent, 0, 30, 0],
-            nameof(PushOracleTests), detection: detection, walkRadius: 3000, deterministicProjection: deterministic);
-        oracle.Push.FarEvery = 4;
+            nameof(PushOracleTests), detection: detection, walkRadius: 3000, deterministicProjection: deterministic, visibilitySlackM: 0, farEvery: 4);
+
+        // h = 0: the drifts this workload makes are what the LOD defers most, and v̂ would remove them as events altogether (09 § 2).
 
         for (var i = 0; i < GateTicks; i++)
         {
@@ -152,6 +154,41 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     }
 
     /// <summary>
+    /// Three declared bands (09 § 9) — every 2 ticks beyond 0.4 R, 4 beyond 0.6 R, 8 beyond 0.8 R: walking sessions still hold exactly their disc with
+    /// the right values once the world is quiet, the updates of every band are deferred and flushed, and entities the anchors' moves bring inward across
+    /// any boundary get their state — with skipped frames, and with v̂ on (the rule's default slack).
+    /// </summary>
+    /// <param name="skipPercent">The percentage of ticks on which each session's frames are left undrained.</param>
+    /// <param name="deterministic">Whether the index and the far flushes are built serially, in the frame prologue.</param>
+    [Test]
+    [VerifiesRule("SUB-19")]
+    public void ThreeBandsConvergeAtEverySkipRate([Values(0, 30, 60)] int skipPercent, [Values(false, true)] bool deterministic)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7600 + skipPercent, [skipPercent, 0, 30, skipPercent],
+            nameof(PushOracleTests), walkRadius: 3000, deterministicProjection: deterministic,
+            bands: b => b.Every(2, beyond: 0.4).Every(4, beyond: 0.6).Every(8, beyond: 0.8));
+        oracle.Workload.WalkStrideM = 1.5f;
+        Assert.That((oracle.Push.FarPhase, oracle.Push.FarWindow), Is.EqualTo((2, 8)), "the fold runs at the innermost period over the outermost's window");
+
+        for (var i = 0; i < GateTicks; i++)
+        {
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"three bands, after {i + 1} ticks at a {skipPercent}% skip rate");
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(oracle.Push.UpdatesDeferred, Is.GreaterThan(20), "the bands deferred nothing, so they were not exercised");
+            Assert.That(oracle.Push.FarFlushes, Is.GreaterThan(20), "the deferred updates were never flushed");
+            Assert.That(oracle.Push.FarCrescentStates, Is.GreaterThan(0), "no entity came inward across a boundary with the anchor's move");
+        });
+    }
+
+    /// <summary>
     /// A far change whose update was deferred still reaches a session that then walks closer to the entity, with no further event from it: the only thing
     /// that brings the entity inside half the radius is the viewer's own move.
     /// </summary>
@@ -159,13 +196,14 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     /// <param name="skipPercent">The percentage of ticks on which half the sessions' frames are left undrained: the flushes then arrive by catch-up.</param>
     [Test]
     [VerifiesRule("SUB-19")]
-    public void ADeferredFarChangeReachesASessionThatWalksCloser([Range(7400, 7409)] int seed, [Values(0, 30)] int skipPercent)
+    public void ADeferredFarChangeReachesASessionThatWalksCloser([Range(7400, 7409)] int seed, [Values(0, 30)] int skipPercent, [Values] bool nested)
     {
+        // Nested: every 2 ticks beyond 0.3 R, every 8 beyond 0.6 R — a viewer's step brings entities from the outer band into the inner one, not near,
+        // and what the outer band withheld (up to 8 ticks of changes) is not in the inner band's flushes (2 ticks).
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed,
-            [skipPercent, 0, skipPercent, 0, skipPercent, 0, skipPercent, 0], nameof(PushOracleTests), detection: PushDetection.Explicit, walkRadius: 3000);
+            [skipPercent, 0, skipPercent, 0, skipPercent, 0, skipPercent, 0], nameof(PushOracleTests), detection: PushDetection.Explicit, walkRadius: 3000,
+            visibilitySlackM: 0, farEvery: 4, bands: nested ? b => b.Every(2, beyond: 0.3).Every(8, beyond: 0.6) : null);
 
-        // A long window, so many far changes are still pending when the sessions start to move — below the log depth, or every flush is a reset.
-        oracle.Push.FarEvery = 6;
 
         for (var i = 0; i < 80; i++)
         {
@@ -189,6 +227,128 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     }
 
     /// <summary>
+    /// A change withheld on the last frame a session received, its flush missed in a skipped frame, and the viewer's move bringing the entity inward on the
+    /// catch-up: the catch-up leaves the gap's flush of an inward entity to the inner crescent, so the crescent must reach back past the gap.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-19")]
+    [VerifiesRule("SUB-03")]
+    public void AChangeWithheldBeforeASkippedFlushReachesASessionThatCameCloser()
+    {
+        const double Radius = 3000;
+        const int Every = 2;
+        const string Profile = "far";
+        var engine = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        using var harness = FrameHarness.Create(engine, subs =>
+        {
+            ProjectionTestSchema.DeclareCreature(subs);
+            subs.Profile(Profile, p => p.Sphere(Radius).Bands(b => b.Every(Every, beyond: 0.5)).Of<ProjCreature>());
+        }, nameof(PushOracleTests), new SubscriptionsOptions
+        {
+            PushShadow = true,
+            MaxSessions = 4,
+            StatePoolBudgetBytes = 64L * 1024 * 1024,
+            FramePoolBudgetBytes = 64L * 1024 * 1024,
+            ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(Radius),
+        });
+
+        var push = harness.Subscriptions.Push;
+
+        // Far at 0.6 R; a near entity whose changes fill the session's two frame slots, so the frame after them is refused.
+        const float FarX = (float)(Radius * 0.6);
+        EntityId entity;
+        EntityId near;
+        using (var tx = engine.CreateQuickTransaction())
+        {
+            var ai = new ProjAi { Template = 1, Mode = ProjAiMode.Wander, Level = 10 };
+            var vitals = new ProjVitals { Health = 10, MaxHealth = 20 };
+            var bounds = BoundsAt(FarX);
+            entity = tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(in bounds), ProjCreature.Ai.Set(in ai), ProjCreature.Vitals.Set(in vitals));
+            bounds = BoundsAt(100f);
+            near = tx.Spawn<ProjCreature>(ProjCreature.Bounds.Set(in bounds), ProjCreature.Ai.Set(in ai), ProjCreature.Vitals.Set(in vitals));
+            tx.Commit();
+        }
+
+        var session = harness.OpenSessions(1, Profile)[0];
+        Assert.That(harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d)), Is.True);
+        var replica = harness.Replica(session);
+        var creature = harness.CatalogPlan.ArchetypeByName(nameof(ProjCreature)).Idx;
+
+        long tick = 0;
+        void Run(bool deliver)
+        {
+            tick++;
+            engine.WriteTickFence(tick);
+            harness.RunTick(tick);
+            if (deliver)
+            {
+                harness.Deliver(session);
+            }
+        }
+
+        for (var i = 0; i < 4; i++)
+        {
+            Run(deliver: true);
+        }
+
+        var netId = NetIdAt(replica, creature, FarX);
+
+        // T0, the change's tick, is not the entity's flush tick; T0 + 1 is, and its frame is refused.
+        var t0 = tick + 2;
+        if (((netId % Every) + ((ulong)t0 % Every)) % Every == 0)
+        {
+            t0++;
+        }
+
+        while (tick < t0 - 2)
+        {
+            Run(deliver: true);
+        }
+
+        WriteLevel(harness, near, 11, null);
+        Run(deliver: false);
+        WriteLevel(harness, near, 12, null);
+        WriteLevel(harness, entity, 4242, null);
+        var deferred = push.UpdatesDeferred;
+        Run(deliver: false);
+        Assert.That(push.UpdatesDeferred, Is.GreaterThan(deferred), "the change was not withheld on its tick, so the case did not run");
+        var catchUps = push.LogCatchUps;
+        Run(deliver: false);
+
+        // Drained; the viewer steps 0.3 R east, which brings the entity inside R/2 — the next frame is the catch-up over the refused one.
+        harness.Deliver(session);
+        Assert.That(harness.Sessions.SetViewpoint(session, new Vector3D(Radius * 0.3, 0d, 0d)), Is.True);
+        for (var i = 0; i < 4; i++)
+        {
+            Run(deliver: true);
+        }
+
+        Assert.That(push.LogCatchUps, Is.GreaterThan(catchUps), "the session was not caught up through the log, so the case did not run");
+        Assert.That(push.ShadowIllegal, Is.Zero, "a record the client could not apply was published");
+        Assert.That(replica.Value(creature, netId, "level"), Is.EqualTo(4242d), "the withheld change was lost between the skipped flush and the crescent");
+    }
+
+    /// <summary>
+    /// Changes in the run's first ticks, under an 8-tick band: an entity whose flush falls before tick 8 carries them — the window's floor is tick 0, not a
+    /// wrapped tick past every stamp — and every client converges.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-19")]
+    public void AChangeInTheFirstTicksReachesAFarSession()
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 7430, [0, 0], nameof(PushOracleTests),
+            walkRadius: 3000, bands: b => b.Every(8, beyond: 0.05));
+        for (var i = 0; i < 5; i++)
+        {
+            oracle.Step();
+        }
+
+        oracle.Quiesce();
+        oracle.AssertConverged("changes of the first ticks, under an 8-tick band");
+        Assert.That(oracle.Push.UpdatesDeferred, Is.GreaterThan(0), "nothing was deferred: the case did not run");
+    }
+
+    /// <summary>
     /// Far flushes delivered through the log's catch-up, with small cells that the workload's moves cross often and most frames skipped, under the shadow
     /// legality check.
     /// </summary>
@@ -204,8 +364,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     {
         // A small radius, so cells are small and the workload's moves cross them often; most frames skipped, so most flushes arrive by catch-up.
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed, [60, 60, 60, 60, 60, 60], nameof(PushOracleTests),
-            detection: PushDetection.Explicit, walkRadius: 400);
-        oracle.Push.FarEvery = 4;
+            detection: PushDetection.Explicit, walkRadius: 400, farEvery: 4);
 
         for (var i = 0; i < 150; i++)
         {
@@ -238,17 +397,17 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         using var harness = FrameHarness.Create(engine, subs =>
         {
             ProjectionTestSchema.DeclareCreature(subs);
-            subs.Profile(Profile, p => p.Sphere(Radius).Of<ProjCreature>());
+            subs.Profile(Profile, p => p.Sphere(Radius).Bands(b => b.Every(Every, beyond: 0.5)).Of<ProjCreature>());
         }, nameof(PushOracleTests), new SubscriptionsOptions
         {
             PushShadow = true,
             MaxSessions = 4,
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
+            ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(Radius),
         });
 
         var push = harness.Subscriptions.Push;
-        push.FarEvery = Every;
 
         // A cell edge past R/2 east of the viewer, with the grid starting at the world's west edge: the entity sits half a metre west of it, far.
         Assert.That(push.CellSize, Is.EqualTo(Radius / 3));
@@ -471,6 +630,95 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     }
 
     /// <summary>
+    /// Creatures that walk steadily leave v̂ behind by up to the slack h (09 § 2), and every session still holds exactly what its disc names in terms of
+    /// v̂: an entity within R − h of the viewpoint is held, one past R + h is not — through walking sessions, teleports, churn and skipped frames.
+    /// </summary>
+    /// <param name="slackM">h in metres; −1 for the rule, R / 48 = 62.5 m at this radius. An int: the test name becomes a database name.</param>
+    /// <param name="skipPercent">The percentage of ticks on which each session's frames are left undrained.</param>
+    /// <remarks>
+    /// The drift and teleport workload never exercises v̂: a drift stays under a centimetre and a teleport moves v̂ with it. A 1.5 m stride per tick — 15 m/s, under the
+    /// declared 20 m/s teleport — is what makes v̂ lag, cross cells late and cross the disc's edge late — the cases the widened cluster margins exist for. At h = 0 every step is an event; at
+    /// h > 0 a walker makes one per h of travel, which the event count shows.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    [VerifiesRule("SUB-20")]
+    public void SteadyWalkersAreHeldWithinTheSlackOfTheirDisc([Values(0, -1, 8)] int slackM, [Values(0, 60)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 9300 + skipPercent, [skipPercent, 0, 30, skipPercent],
+            nameof(PushOracleTests), walkRadius: 3000, visibilitySlackM: slackM < 0 ? double.NaN : slackM);
+        oracle.Workload.WalkStrideM = 1.5f;
+        var expectedSlack = slackM < 0 ? 3000d / 48d : slackM;
+        Assert.That(oracle.CreatureSlackM, Is.EqualTo(expectedSlack), "the slack the creatures were resolved to");
+
+        var required = 0L;
+        var walkerTicks = 0L;
+        var events0 = oracle.Push.Events;
+        for (var i = 0; i < GateTicks; i++)
+        {
+            walkerTicks += oracle.Workload.Creatures.Count;
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"h = {expectedSlack} m, steady walkers, after {i + 1} ticks at a {skipPercent}% skip rate");
+                oracle.AssertWritesSurvived($"h = {expectedSlack} m, steady walkers, after {i + 1} ticks");
+                required += oracle.RequiredAtLastPoint;
+            }
+        }
+
+        var eventsPerWalkerTick = (oracle.Push.Events - events0) / (double)walkerTicks;
+        Assert.Multiple(() =>
+        {
+            Assert.That(required, Is.GreaterThan(200), "the discs held too little for the comparison to mean anything");
+            Assert.That(oracle.Push.Sweeps, Is.GreaterThan(50), "the anchors barely moved, so the crescent sweep was not exercised");
+            if (expectedSlack == 0)
+            {
+                Assert.That(eventsPerWalkerTick, Is.GreaterThan(0.9), "at h = 0 every stride is an event");
+            }
+            else
+            {
+                // A 1.5 m stride moves v̂ once per ⌈h / 1.5⌉ strides: a sixth of the h = 0 count at 8 m, a fortieth at 62.5 m, plus segments and churn.
+                Assert.That(eventsPerWalkerTick, Is.LessThan(expectedSlack > 10 ? 0.15 : 0.5), $"at h = {expectedSlack} m v̂ moves once per h of travel");
+            }
+        });
+    }
+
+    /// <summary>
+    /// Two Sphere profiles of different radii in one runtime, one of them with a leave band (09 § 3–4): even sessions hold the band's disc,
+    /// <c>Sphere(1 500, leave: 1 600)</c> tested at R′ = 1 550 m, odd sessions a 1 000 m disc — each exactly, with steady walkers, walking sessions,
+    /// teleports, churn and skipped frames.
+    /// </summary>
+    /// <param name="skipPercent">The percentage of ticks on which each session's frames are left undrained.</param>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    [VerifiesRule("SUB-20")]
+    public void TwoProfilesAndABandEachHoldTheirOwnDisc([Values(0, 60)] int skipPercent)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 9400 + skipPercent,
+            [skipPercent, skipPercent, 0, 30, skipPercent, 0], nameof(PushOracleTests), walkRadius: 1500, leaveRadius: 1600, secondRadius: 1000);
+        oracle.Workload.WalkStrideM = 1.5f;
+
+        // h_A is the smaller profile's: the band asks for (1 600 − 1 500) / 2 = 50 m, the plain 1 000 m disc for 1 000 / 48.
+        Assert.That(oracle.CreatureSlackM, Is.EqualTo(1000d / 48d).Within(1e-9), "h_A is the smallest over the profiles");
+
+        var required = 0L;
+        for (var i = 0; i < GateTicks; i++)
+        {
+            oracle.Step();
+            if ((i + 1) % CompareEvery == 0)
+            {
+                oracle.Quiesce();
+                oracle.AssertConverged($"two profiles and a band, after {i + 1} ticks at a {skipPercent}% skip rate");
+                oracle.AssertWritesSurvived($"two profiles and a band, after {i + 1} ticks");
+                required += oracle.RequiredAtLastPoint;
+            }
+        }
+
+        Assert.That(required, Is.GreaterThan(200), "the discs held too little for the comparison to mean anything");
+    }
+
+    /// <summary>
     /// The contract explicit detection rests on, shown failing: a system that writes and does not push leaves its clients stale, and the oracle sees it.
     /// </summary>
     /// <remarks>
@@ -536,6 +784,44 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
 
         Assert.That(oracle.Push.ValidatedSlots, Is.GreaterThan(1000), "the validator checked too little to mean anything");
         Assert.That(oracle.Push.ForgottenPushes, Is.Zero, "every write was pushed, so anything the validator reports is a false positive");
+    }
+
+    /// <summary>
+    /// Ticks the track skipped — no session connected, an aborted tick — lose their pushes at the fence; the next tick re-pushes every live entity, so spawns,
+    /// destroys and writes made in the gap still reach the client.
+    /// </summary>
+    /// <param name="skippedTicks">How many consecutive ticks run the fence without the track.</param>
+    [Test]
+    [VerifiesRule("SUB-10")]
+    public void TicksTheTrackSkippedStillReachTheClient([Values(1, 20)] int skippedTicks)
+    {
+        using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 4246 + skippedTicks, [0], nameof(PushOracleTests),
+            detection: PushDetection.Explicit);
+        for (var i = 0; i < 20; i++)
+        {
+            oracle.Step();
+        }
+
+        var destroyed = oracle.Workload.Destroyed;
+        var pushed = oracle.Workload.Pushed;
+        for (var i = 0; i < skippedTicks; i++)
+        {
+            oracle.StepWithoutTrack();
+        }
+
+        oracle.Workload.WriteModeOnEveryCreature();
+        oracle.StepWithoutTrack();
+
+        Assert.That(oracle.Workload.Pushed, Is.GreaterThan(pushed), "the gap pushed nothing, so there was nothing for the fence to lose");
+        if (skippedTicks > 1)
+        {
+            Assert.That(oracle.Workload.Destroyed, Is.GreaterThan(destroyed), "the gap destroyed nothing, so no ghost could have been left behind");
+        }
+
+        oracle.Quiesce();
+        oracle.AssertConverged($"after {skippedTicks + 1} ticks the track did not run");
+        Assert.That(oracle.Push.GapRepushes, Is.EqualTo(1), "the tick after the gap should re-push every live entity once");
+        AssertLookedAtSomething(oracle);
     }
 
     private static void AssertLookedAtSomething(OracleHarness oracle)

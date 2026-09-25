@@ -304,7 +304,7 @@ internal sealed class CellRepairQueue
     /// <para><b>degradation</b> — how far the worst cluster's bound has spread across its cell. Recorded at nomination, where the AABB pass already had it
     /// in registers.</para>
     /// <para><b>tierWeight</b> — §5.6's "query frequency" signal, and the one that changes behaviour most: a region nobody queries never needs tight
-    /// clusters. <c>CellState.Tier</c> is the observer-driven interest tier maintained by <c>SpatialInterestSystem</c>, not a measured query counter —
+    /// clusters. <c>CellState.Tier</c> is the simulation tier game code assigns a cell (<c>SetCellTier</c>), not a measured query counter —
     /// measuring would mean a write on the query READ path, which is a scalability cost paid by every query to serve a heuristic. See
     /// <see cref="TierWeight"/> for why <see cref="SimTier.None"/> is not simply "the lowest tier".</para>
     /// <para><b>clusterCount</b> — §5.6 names <c>CellState.EntityCount</c> for population; this uses the archetype's own cluster count instead, and the
@@ -338,7 +338,7 @@ internal sealed class CellRepairQueue
     /// byte would be exponential in the tier rather than linear, so the index is recovered with
     /// <see cref="BitOperations.TrailingZeroCount(uint)"/> and the weight is <c>1 / (1 + index)</c>: 1, ½, ⅓, ¼.</para>
     /// <para><b><see cref="SimTier.None"/> means "no tier information", NOT "the least interesting cell"</b>, and getting that backwards would have
-    /// disabled the ranking everywhere it is not configured. A world with no <c>SpatialInterestSystem</c> leaves every cell at the grid's default tier,
+    /// disabled the ranking everywhere it is not configured. A world whose game code assigns no tier leaves every cell at the grid's default tier,
     /// which starts as zero — and <c>TrailingZeroCount(0)</c> is 32, so the naive formula would score every cell in such a world at 1/33 and make the
     /// whole ranking a rounding error. Weighted 1.0 instead: absent information discounts nothing, and the score degrades to
     /// <c>degradation x clusterCount x ageFactor</c>, which is exactly what it should be when nobody has said which regions are watched.</para>

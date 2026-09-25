@@ -49,6 +49,18 @@ internal struct FrameCounters
     /// <summary>Frames refused for exceeding the ceiling.</summary>
     public long OversizeSkips;
 
+    /// <summary><c>SELF</c> blocks published (11 § 2).</summary>
+    public long SelfBlocks;
+
+    /// <summary>Acknowledgement records published.</summary>
+    public long AcksWritten;
+
+    /// <summary>Acknowledgements a published frame had no room for (past <see cref="FrameAssembler.MaxAcksPerFrame"/>).</summary>
+    public long AcksOverflowed;
+
+    /// <summary>Published frames whose acknowledgement window reached past the history: rejections of the ticks it no longer held may be lost.</summary>
+    public long AckWindowsLost;
+
     // ── Phase timings, in Stopwatch ticks ───────────────────────────────────────────────────────────────────────────────────────────────────────────
     //
     // Collected only while `FrameAssembler.PhaseTimingEnabled` is set, so the ordinary path pays one static bool read per phase boundary. A sampling profiler
@@ -85,6 +97,30 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
 {
     /// <summary>Distance LOD: far updates withheld by this worker's current gather, added to the shared counter once per gather.</summary>
     internal long Deferred;
+
+    /// <summary>Events (09 § 11): the (tick, event) pairs the current session's frame carries.</summary>
+    internal readonly EventPicks EventPicks = new();
+
+    /// <summary>Aggregates (09 § 8): the rows the current session's <c>AGG</c> block carries, and their tiles, sorted.</summary>
+    internal int[] AggRows = new int[64];
+
+    /// <inheritdoc cref="AggRows"/>
+    internal uint[] AggTiles = new uint[64];
+
+    /// <summary>A ClientRegion session's aggregate region this frame, sorted: the tiles its next AGG measures "newly covered" against.</summary>
+    internal uint[] AggRegion = new uint[64];
+
+    /// <inheritdoc cref="AggRegion"/>
+    internal int AggRegionCount;
+
+    /// <summary>DEBUG (09 § 15): the current session's <c>PUSH_GEOMETRY</c> payload, built to be compared with the last one sent.</summary>
+    internal readonly byte[] DebugGeometry = new byte[PushGeometry.MaxBytes];
+
+    /// <summary>One session's acknowledgements for its next frame (11 § 2.3); past it they are counted as lost.</summary>
+    internal readonly CommandAck[] Acks = new CommandAck[FrameAssembler.MaxAcksPerFrame];
+
+    /// <summary>Cell deliveries and sweeps this worker's current gather skipped as empty, added to the shared counter once per gather.</summary>
+    internal long EmptyCellsSkipped;
 
     private struct RecordList
     {
@@ -352,7 +388,40 @@ internal sealed class SessionFrameState
         BytesPublished = 0;
         StatsTick = tick;
         StatsBytesMark = 0;
+        SelfEntity = EntityId.Null;
+        CommittedProfile = -1;
+        SelfNetId = 0;
+        SelfArchetype = -1;
+        SentSeq = 0;
+        SentSeqValid = false;
+        AckTick = 0;
     }
+
+    /// <summary>
+    /// The controlled entity as of the last published frame, located or not. A session whose controlled entity differs is sent every owner group (SUB-11).
+    /// </summary>
+    public EntityId SelfEntity { get; set; }
+
+    /// <summary>The netId the last published <c>SELF</c> named; 0 when it named none (W17′) — then a release says nothing more.</summary>
+    public uint SelfNetId { get; set; }
+
+    /// <summary>The plan index of <see cref="SelfNetId"/>'s archetype, so an acknowledgement-only <c>SELF</c> names it without locating it again.</summary>
+    public int SelfArchetype { get; set; } = -1;
+
+    /// <summary>The <c>lastSeq</c> the last published <c>SELF</c> carried; meaningful when <see cref="SentSeqValid"/>.</summary>
+    public ushort SentSeq { get; set; }
+
+    /// <summary>Whether a published <c>SELF</c> carried a <c>lastSeq</c> for this session yet.</summary>
+    public bool SentSeqValid { get; set; }
+
+    /// <summary>The tick of the last published frame, up to which the session's acknowledgements were sent (11 § 2.3); 0 before the first.</summary>
+    public uint AckTick { get; set; }
+
+    /// <summary>
+    /// The profile index the last published frame was built against, or -1 for none: what a command's entity reference is judged by (SUB-26). The
+    /// current profile can differ for as long as the switch's RESET frame is not published — ticks, for a lagging session.
+    /// </summary>
+    public int CommittedProfile { get; set; } = -1;
 }
 
 /// <summary>
@@ -381,6 +450,30 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     private readonly SessionFrameState[] _states;
     private readonly int _maxFrameBytes;
     private readonly int _lagBoundTicks;
+
+    /// <summary>The declared events' hub (09 § 11), or <see langword="null"/>; set by the runtime before the first tick.</summary>
+    internal EventHub Events;
+
+    // The tick period in seconds, the budget loop's clock: the nominal one until the runtime publishes the live one, which the overload multiplier stretches.
+    private double _tickSeconds;
+
+    // The overload tick multiplier the tick started with (09 § 10): 1 unless the overload detector stretched the tick.
+    private int _tickMultiplier = 1;
+
+    /// <summary>The tick multiplier the frame stage currently runs under (1 when not overloaded); what a test harness republishes each tick.</summary>
+    internal int TickMultiplier => Math.Max(1, Volatile.Read(ref _tickMultiplier));
+
+    /// <summary>
+    /// The live tick state, from the runtime at each tick's start: the period — a stretched tick sends the same bytes over a longer time — and the overload
+    /// multiplier that stretched it.
+    /// </summary>
+    /// <param name="periodUs">The period, in microseconds.</param>
+    /// <param name="multiplier">The overload tick multiplier, 1 when not overloaded.</param>
+    internal void SetTickState(uint periodUs, int multiplier)
+    {
+        Volatile.Write(ref _tickSeconds, periodUs / 1_000_000d);
+        Volatile.Write(ref _tickMultiplier, Math.Max(1, multiplier));
+    }
     private readonly int _silenceBoundTicks;
     private readonly int _closeBoundTicks;
     private readonly int _degradeBoundTicks;
@@ -452,8 +545,23 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _plans = plans;
         _sessions = sessions;
         _states = new SessionFrameState[options.MaxSessions];
+        _followed = new Vector3D[options.MaxSessions];
+        _followedGeneration = new uint[options.MaxSessions];
+        _followedEntity = new EntityId[options.MaxSessions];
+        _eventsLastTick = new uint[options.MaxSessions];
+        _ackHistory = new AckHistory(CommandTypeBuffers.AckCapacity(options.MaxSessions));
+        _aggLastTick = new uint[options.MaxSessions];
+        _aggGeneration = new ushort[options.MaxSessions];
+        _debugGeneration = new ushort[options.MaxSessions];
+        _debugHash = new ulong[options.MaxSessions];
+        _aggAnchor = new Vector3D[options.MaxSessions];
+        _aggRegion = new uint[options.MaxSessions][];
+        _aggRegionCount = new int[options.MaxSessions];
+        _eventsLastGeneration = new ushort[options.MaxSessions];
+        _followedValid = new bool[options.MaxSessions];
         _encodePlans = BuildEncodePlans(plans, catalog);
         _lagBoundTicks = SkipPolicy.LagBoundTicks(options, tickPeriodUs);
+        _tickSeconds = tickPeriodUs / 1_000_000d;
         _silenceBoundTicks = SkipPolicy.SilenceBoundTicks(options, tickPeriodUs);
 
 
@@ -641,7 +749,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             _prepareTicks += Stopwatch.GetTimestamp() - prepFrom;
         }
 
-        if (_pushSessionCount == 0)
+        if (_pushSessionCount + _eventSessionCount == 0)
         {
             return 0;
         }
@@ -659,7 +767,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             _prologueTicks += Stopwatch.GetTimestamp() - prologueFrom;
         }
 
-        var chunks = Math.Min(workers, _pushSessionCount);
+        var chunks = Math.Min(workers, _pushSessionCount + _eventSessionCount);
         _lastChunkCount = chunks;
         if (_chunkBusy.Length < chunks)
         {
@@ -767,6 +875,10 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         Add(ref _entersEmitted, counters.EntersEmitted);
         Add(ref _leavesEmitted, counters.LeavesEmitted);
         Add(ref _oversizeSkips, counters.OversizeSkips);
+        Add(ref SelfBlocks, counters.SelfBlocks);
+        Add(ref AcksWritten, counters.AcksWritten);
+        Add(ref AcksOverflowed, counters.AcksOverflowed);
+        Add(ref AckWindowsLost, counters.AckWindowsLost);
         Add(ref _gatherTicks, counters.GatherTicks);
         Add(ref _sortTicks, counters.SortTicks);
         Add(ref _encodeTicks, counters.EncodeTicks);
@@ -1099,6 +1211,16 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 at += plan.Groups[g].Section.MaxBodyBytes;
             }
 
+            var ownerGroups = new ArchetypeEncodePlan.SectionWalk[plan.OwnerGroups.Length];
+            var ownerAt = 0;
+            var ownerAll = 0;
+            for (var g = 0; g < plan.OwnerGroups.Length; g++)
+            {
+                ownerGroups[g] = Walk(plan.OwnerFields, plan.OwnerGroups[g].Section, ownerAt);
+                ownerAt += plan.OwnerGroups[g].Section.MaxBodyBytes;
+                ownerAll |= 1 << g;
+            }
+
             var enterPosBytes = moving ? layout.SegmentBytes : layout.EnterPositionBytes;
             encodePlans[i] = new ArchetypeEncodePlan
             {
@@ -1112,6 +1234,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 MotionTickSlot = moving ? 0 : -1,
                 OnEnter = Walk(plan.Fields, plan.OnEnter, 0),
                 Groups = groups,
+                OwnerGroups = ownerGroups,
+                OwnerAllMask = (byte)ownerAll,
+                MaxSelfBytes = 24 + ownerAt,
                 MaxEnterBytes = EntitiesEncoder.MaxGapBytes + enterPosBytes + layout.EnterBodyBytes + plan.MaxStateBodyBytes,
                 MaxSegmentBytes = EntitiesEncoder.MaxGapBytes + layout.SegmentBytes,
                 MaxStateBytes = EntitiesEncoder.MaxGapBytes + 1 + plan.MaxStateBodyBytes,

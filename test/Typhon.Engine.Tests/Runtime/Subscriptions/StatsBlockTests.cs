@@ -34,6 +34,8 @@ class StatsBlockTests : TestBase<StatsBlockTests>
     private const int CreatureCount = 6;
     private const string Profile = "god-world";
     private const string AppMetric = "test.spawns";
+    private const string LabelledMetric = "test.queues";
+    private const string SessionAppMetric = "test.session.slot";
 
     /// <summary>The value the application metric's source returns, so a test can assert its own number came back off the wire.</summary>
     private const double AppMetricValue = 17;
@@ -148,6 +150,29 @@ class StatsBlockTests : TestBase<StatsBlockTests>
             Assert.That(Scalar(client, "typhon.tick.p99"), Is.GreaterThanOrEqualTo(Scalar(client, "typhon.tick.p50")));
             Assert.That(Scalar(client, "typhon.durability.wait.p99"), Is.Zero,
                 "the runtime times its flush only through the profiler's phase wrapper, so this built-in is unsourced and must say zero rather than invent");
+        });
+    }
+
+    /// <summary>
+    /// Application metrics beyond a scalar (09 § 15, D5), decoded end to end: a labelled one arrives as one value per label in their order, and a per-session
+    /// one arrives to each session with that session's own value.
+    /// </summary>
+    [Test]
+    public void ALabelledAndAPerSessionApplicationMetricArriveEndToEnd()
+    {
+        using var world = new StatsWorld(SetupEngine());
+        var first = world.Connect(Capabilities.Stats);
+        var second = world.Connect(Capabilities.Stats);
+        Assert.That(first.AwaitBlock() && second.AwaitBlock(), Is.True, "no STATS block reached a client");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Metric(first, LabelledMetric).Metric.Labels, Is.EqualTo(new[] { "north", "south", "east" }));
+            Assert.That(Row(first, LabelledMetric), Is.EqualTo(new double[] { 1, 2, 3 }), "one value per label, in the labels' order");
+            Assert.That(Scalar(first, SessionAppMetric, session: true), Is.EqualTo(first.Session.Slot + 10), "the first session's own value");
+            Assert.That(Scalar(second, SessionAppMetric, session: true), Is.EqualTo(second.Session.Slot + 10), "the second session's own value");
+            Assert.That(first.Session.Slot, Is.Not.EqualTo(second.Session.Slot), "two sessions, two values");
+            Assert.That(world.Subscriptions.Stats.ApplicationFaults, Is.Zero);
         });
     }
 
@@ -330,12 +355,24 @@ class StatsBlockTests : TestBase<StatsBlockTests>
                         }
                     }
                 });
-            }, new RuntimeOptions { WorkerCount = workerCount, BaseTickRate = tickRateHz });
+            }, new RuntimeOptions
+            {
+                WorkerCount = workerCount,
+                BaseTickRate = tickRateHz,
+                Subscriptions = new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
+            });
 
             _runtime.Subscriptions.Sessions.Kinds("god");
             ProjectionTestSchema.DeclareCreature(_runtime.Subscriptions);
             _runtime.Subscriptions.Profile(Profile, p => p.World().Of<ProjCreature>());
             _runtime.Subscriptions.Metric(AppMetric, "count", Codec.VarUInt, () => AppMetricValue);
+            _runtime.Subscriptions.Metric(LabelledMetric, "count", Codec.VarUInt, ["north", "south", "east"], values =>
+            {
+                values[0] = 1;
+                values[1] = 2;
+                values[2] = 3;
+            });
+            _runtime.Subscriptions.SessionMetric(SessionAppMetric, "count", Codec.VarUInt, session => session.Slot + 10);
             _runtime.Start();
 
             Subscriptions = _runtime.SubscriptionsContextForTest.Subscriptions;

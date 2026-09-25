@@ -214,7 +214,10 @@ sealed class LiveClientTests : TestBase<LiveClientTests>
                 }
             }
         });
-    }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = TickRateHz });
+    }, new RuntimeOptions
+    {
+        WorkerCount = 1, BaseTickRate = TickRateHz, Subscriptions = new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
+    });
 
     private static void Declare(SubscriptionsRegistry subs)
     {

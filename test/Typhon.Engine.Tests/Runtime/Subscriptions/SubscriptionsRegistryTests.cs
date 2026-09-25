@@ -236,8 +236,7 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
         subs.Profile("god-world", p => p.World()
             .Of<SwgCreature>().Of<SwgCityNpc>().Of<SwgPlayer>().Of<SwgCreatureLair>());
 
-        var attacks = new EventQueue<SwgAttack>("Attacks", 64);
-        subs.Event(attacks, e => e
+        subs.Event<SwgAttack>(e => e
             .RouteToKnown(a => a.Target, a => a.Attacker)
             .Entity(a => a.Attacker)
             .Entity(a => a.Target)
@@ -284,7 +283,10 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
 
     private TyphonRuntime CreateRuntime()
     {
-        var options = new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 };
+        var options = new RuntimeOptions
+        {
+            WorkerCount = 1, BaseTickRate = 1000, Subscriptions = new SubscriptionsOptions { IngressBytesPerSecond = TestIngress.Budget },
+        };
         return TyphonRuntime.Create(SetupEngine(), schedule =>
         {
             schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });
@@ -377,7 +379,6 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
             Assert.That(profile.Observers[0].Kind, Is.EqualTo(ObserverKind.World));
             Assert.That(profile.Observers[0].Archetypes, Has.Count.EqualTo(4));
 
-            Assert.That(attack.QueueName, Is.EqualTo("Attacks"));
             Assert.That(attack.Routing, Is.EqualTo(EventRouting.ToKnown));
             Assert.That(attack.RoutingEntityFields, Is.EqualTo(new[] { "Target", "Attacker" }));
             Assert.That(attack.Fields, Has.Count.EqualTo(3));
@@ -484,6 +485,7 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
 
     /// <summary>A client's entity handle holds the archetype in 8 bits, so 255 archetypes may be replicated and the 256th is refused.</summary>
     [Test]
+    [VerifiesRule("SUB-16")]
     public void The256thArchetype_IsRefused()
     {
         var subs = new SubscriptionsRegistry();
@@ -524,72 +526,86 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
         }
     }
 
-    /// <summary>The observer shapes that are still unbuilt are declarable today and refused at <c>Start</c>, naming the shape.</summary>
-    [TestCase(ObserverKind.ClientRegion)]
-    [TestCase(ObserverKind.Aggregate)]
-    public void AnUnbuiltObserver_IsRefusedAtStart(ObserverKind kind)
+    /// <summary>
+    /// What a ClientRegion does not have is refused at <c>Start</c> (09 § 5–7): a centre (Bind, At, AroundControlled name a Sphere's), a near budget on
+    /// another shape (a Sphere's budget is its session's bytes), and the far tier of <c>Far</c>, which is an Aggregate's.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void WhatAShapeDoesNotHaveIsRefusedAtStart([Range(0, 5)] int @case)
     {
         using var runtime = CreateRuntime();
         runtime.Subscriptions.Profile("p", p =>
         {
-            if (kind == ObserverKind.ClientRegion)
+            _ = @case switch
             {
-                p.ClientRegion(maxEdgeM: 4096).Of<SwgCreature>();
-            }
-            else
+                0 => p.ClientRegion(maxEdgeM: 4096).AroundControlled().Of<SwgCreature>(),
+                1 => p.ClientRegion(maxEdgeM: 4096).At(new Vector3D(1, 2, 0)).Of<SwgCreature>(),
+                2 => p.Sphere(192).Near(100).Of<SwgCreature>(),
+                3 => p.ClientRegion(maxEdgeM: 4096).Far(256, 1).Of<SwgCreature>(),
+                4 => p.ClientRegion(maxEdgeM: 4096).Bind(EntityId.FromRaw(0x10001)).Of<SwgCreature>(),
+                _ => p.ClientRegion(maxEdgeM: 4096).Of<SwgCreature>(),
+            };
+            if (@case == 5)
             {
-                p.Aggregate(tileM: 256, rateHz: 1).Of<SwgCreature>();
+                p.Aggregate(512, 1, radiusM: 1000).Of<SwgCreature>();
             }
         });
 
         var ex = Assert.Throws<NotSupportedException>(runtime.Start);
-
-        Assert.That(ex.Message, Does.Contain("later phase"));
-        Assert.That(ex.Message, Does.Contain(kind.ToString()));
+        Assert.That(ex.Message, Does.Contain(@case switch { 0 or 1 or 4 => "only a Sphere has", 2 => "near budget", 3 => "Aggregate", _ => "radius" }));
     }
 
     /// <summary>
-    /// A <c>Sphere</c> that asks to follow an entity is refused, rather than silently centred somewhere the declaration did not name.
+    /// A Sphere centred two ways — bound to an entity and placed at a fixed point — is refused at <c>Start</c> (09 § 6): serving either would be a silent
+    /// substitution of the other.
     /// </summary>
-    /// <remarks>
-    /// The sphere is centred on the session's viewpoint, which an application places each tick. Following an entity means the ENGINE resolving that entity's
-    /// position on the replication track, which is separate work — and a refusal is the only honest answer while it is missing, because the alternative is a
-    /// declaration whose stated centre is quietly ignored.
-    /// </remarks>
     [Test]
     [VerifiesRule("SUB-16")]
-    public void ASphereThatFollowsAnEntityIsRefusedUntilTheEngineSideFollowExists()
+    public void ASphereCentredTwoWaysIsRefused([Values(0, 1, 2)] int order)
     {
         using var runtime = CreateRuntime();
-        runtime.Subscriptions.Profile("p", p => p.Sphere(192, leave: 208).AroundControlled().Of<SwgCreature>());
+        var entity = EntityId.FromRaw(0x10001);
+        runtime.Subscriptions.Profile("p", p =>
+        {
+            var sphere = p.Sphere(192);
+            _ = order switch
+            {
+                0 => sphere.Bind(entity).At(new Vector3D(1, 2, 0)),
+                1 => sphere.AroundControlled().Bind(entity),
+                _ => sphere.Bind(entity).AroundControlled(),
+            };
+            sphere.Of<SwgCreature>();
+        });
 
         var ex = Assert.Throws<NotSupportedException>(runtime.Start);
-        Assert.That(ex.Message, Does.Contain("viewpoint"));
+        Assert.That(ex.Message, Does.Contain("more than one way"), "whichever order the verbs were called in");
     }
 
-    /// <summary>A Sphere's leave radius is declarable and refused at <c>Start</c>: an entity is held within one radius, and Phase 2 builds the band.</summary>
+    /// <summary>
+    /// A band's declaration is refused where it is written (09 § 9): a period other than 2, 4 or 8; a boundary outside (0, 1); a band not slower and
+    /// farther than the one inside it; a fourth band; a NaN boundary; bands on a World observer; bands declared twice, even the first time empty.
+    /// </summary>
     [Test]
-    [VerifiesRule("SUB-16")]
-    public void ASphereLeaveRadiusIsRefusedUntilHysteresisIsBuilt()
+    [VerifiesRule("SUB-19")]
+    public void ABadBandIsRefusedWhereItIsDeclared()
     {
         using var runtime = CreateRuntime();
-        runtime.Subscriptions.Profile("p", p => p.Sphere(192, leave: 208).Of<SwgCreature>());
-
-        var ex = Assert.Throws<NotSupportedException>(runtime.Start);
-        Assert.That(ex.Message, Does.Contain("leave radius"));
-    }
-
-    /// <summary>Two Sphere profiles with different radii are refused: the push index is sized from one radius, and the second would be served at it.</summary>
-    [Test]
-    [VerifiesRule("SUB-16")]
-    public void TwoSphereRadiiAreRefused()
-    {
-        using var runtime = CreateRuntime();
-        runtime.Subscriptions.Profile("near", p => p.Sphere(100).Of<SwgCreature>());
-        runtime.Subscriptions.Profile("far", p => p.Sphere(200).Of<SwgCreature>());
-
-        var ex = Assert.Throws<NotSupportedException>(runtime.Start);
-        Assert.That(ex.Message, Does.Contain("one radius"));
+        Assert.Multiple(() =>
+        {
+            runtime.Subscriptions.Profile("a", p => Assert.Throws<ArgumentOutOfRangeException>(() => p.Sphere(100).Bands(b => b.Every(3, beyond: 0.5))));
+            runtime.Subscriptions.Profile("b", p => Assert.Throws<ArgumentOutOfRangeException>(() => p.Sphere(100).Bands(b => b.Every(2, beyond: 1.0))));
+            runtime.Subscriptions.Profile("c", p => Assert.Throws<ArgumentOutOfRangeException>(
+                () => p.Sphere(100).Bands(b => b.Every(4, beyond: 0.5).Every(2, beyond: 0.7))));
+            var inward = Assert.Throws<ArgumentOutOfRangeException>(() => runtime.Subscriptions.Profile("d",
+                p => p.Sphere(100).Bands(b => b.Every(2, beyond: 0.5).Every(4, beyond: 0.4))));
+            Assert.That(inward.ParamName, Is.EqualTo("beyond"), "the boundary is what is out of order");
+            runtime.Subscriptions.Profile("g", p => Assert.Throws<ArgumentOutOfRangeException>(() => p.Sphere(100).Bands(b => b.Every(2, beyond: double.NaN))));
+            runtime.Subscriptions.Profile("h", p => Assert.Throws<InvalidOperationException>(() => p.Sphere(100).Bands(_ => { }).Bands(b => b.Every(2, 0.5))));
+            runtime.Subscriptions.Profile("e", p => Assert.Throws<InvalidOperationException>(
+                () => p.Sphere(100).Bands(b => b.Every(2, beyond: 0.2).Every(4, beyond: 0.4).Every(8, beyond: 0.6).Every(8, beyond: 0.8))));
+            runtime.Subscriptions.Profile("f", p => Assert.Throws<InvalidOperationException>(() => p.World().Bands(b => b.Every(2, beyond: 0.5))));
+        });
     }
 
     /// <summary>A profile with two observers is refused, even of one shape and one radius: it would be a tier, and Phase 2 builds tiers.</summary>

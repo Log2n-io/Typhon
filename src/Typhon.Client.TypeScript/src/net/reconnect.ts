@@ -27,6 +27,7 @@ export function reconnectRule(code: number): ReconnectRule {
     case CloseCode.GoingAway:
     case CloseCode.InternalError:
     case CloseCode.TryAgainLater:
+    case CloseCode.PolicyViolation:
     case CloseCode.NoAcknowledgement:
     case CloseCode.HelloTimeout:
       return ReconnectRule.Reconnect;

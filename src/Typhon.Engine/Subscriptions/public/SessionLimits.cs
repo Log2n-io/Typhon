@@ -1,10 +1,12 @@
 using JetBrains.Annotations;
+using System;
 
 namespace Typhon.Engine;
 
 /// <summary>
 /// The per-session ceilings an application's admission hook hands back with a role. Every value left at zero means "use the operator's
-/// <see cref="SubscriptionsOptions"/> value", so a limit is stated in exactly one place unless a session genuinely needs a different one.
+/// <see cref="SubscriptionsOptions"/> value", so a limit is stated in exactly one place unless a session genuinely needs a different one — except
+/// <see cref="BytesPerSecond"/>, where zero is no budget.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -20,10 +22,18 @@ namespace Typhon.Engine;
 public sealed record SessionLimits
 {
     /// <summary>
-    /// The outbound byte budget, in bytes per second. Zero means no per-session budget — the frame ceiling and the enter budget still apply. Within a budget
-    /// records are deferred by priority and never dropped, so a small number slows a view down rather than corrupting it.
+    /// The outbound byte budget, in bytes per second. Zero means no per-session budget — the frame ceiling and the enter budget still apply. A Sphere
+    /// session over it is degraded by LOD level (09 § 10): records are deferred and never dropped.
     /// </summary>
-    public int BytesPerSecond { get; init; }
+    public int BytesPerSecond
+    {
+        get => _bytesPerSecond;
+        init => _bytesPerSecond = value >= 0
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(BytesPerSecond), value, "A byte budget is zero (none) or positive, as SetBudget's is.");
+    }
+
+    private readonly int _bytesPerSecond;
 
     /// <summary>
     /// How many observers this session may hold at once. Zero takes <see cref="SubscriptionsOptions.ObserversPerSession"/>. An observer is a query per tick,

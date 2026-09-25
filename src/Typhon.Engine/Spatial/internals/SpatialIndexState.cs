@@ -29,33 +29,15 @@ internal class SpatialIndexState
     /// <summary>Trigger volume system for this spatial index. Null until first <see cref="GetOrCreateTriggerSystem"/> call.</summary>
     public SpatialTriggerSystem TriggerSystem { get; private set; }
 
-    /// <summary>Interest management system for this spatial index. Null until first <see cref="GetOrCreateInterestSystem"/> call.</summary>
-    public SpatialInterestSystem InterestSystem { get; private set; }
-
-    /// <summary>Serialises the two lazy constructions below. Uncontended after first use.</summary>
+    /// <summary>Serialises the lazy construction below. Uncontended after first use.</summary>
     private readonly object _systemsLock = new();
 
-    /// <summary>Get or create the interest management system for this spatial index.</summary>
+    /// <summary>Get or create the trigger system for this spatial index.</summary>
     /// <remarks>
     /// <b>Locked, not <c>??=</c>.</b> Two racing callers each ran the null check, each built a system, and each stored theirs — after which one caller's
     /// observers were registered on an instance nothing else could reach, and its deltas silently stopped arriving. Harmless while the only callers were
     /// tests calling this once; #872 step 13 made it public API, where "get the observer set" is exactly the kind of call two systems make on startup.
     /// </remarks>
-    internal SpatialInterestSystem GetOrCreateInterestSystem(ComponentTable table)
-    {
-        if (InterestSystem != null)
-        {
-            return InterestSystem;
-        }
-
-        lock (_systemsLock)
-        {
-            return InterestSystem ??= new SpatialInterestSystem(table, this);
-        }
-    }
-
-    /// <summary>Get or create the trigger system for this spatial index.</summary>
-    /// <inheritdoc cref="GetOrCreateInterestSystem" path="/remarks"/>
     internal SpatialTriggerSystem GetOrCreateTriggerSystem(ComponentTable table)
     {
         if (TriggerSystem != null)

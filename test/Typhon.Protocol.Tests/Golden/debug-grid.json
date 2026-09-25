@@ -1,0 +1,29 @@
+{
+  "description": "A DEBUG block holding one GRID: a flat 66 \u00D7 33 grid of 250 m cells from (-8192, -4096.5).",
+  "catalog": "catalog-kitchen-sink",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 70000,
+      "flags": 0,
+      "periodUs": 0
+    },
+    {
+      "call": "debug",
+      "subType": 1,
+      "payload": "000000000000c0c0000000008000b0c000000000000000000000000000406f40422101"
+    },
+    {
+      "call": "endTick"
+    }
+  ],
+  "decoded": {
+    "originX": "c0c0000000000000",
+    "originY": "c0b0008000000000",
+    "originZ": "0000000000000000",
+    "cellM": "406f400000000000",
+    "dimX": 66,
+    "dimY": 33,
+    "dimZ": 1
+  }
+}

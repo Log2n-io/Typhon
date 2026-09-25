@@ -2,3 +2,5 @@ dist
 node_modules
 coverage
 package-lock.json
+test/.generated
+bench/.generated

@@ -436,6 +436,11 @@ public sealed partial class TyphonRuntime : IDisposable
             // track metric would report zeros from a ring nothing fills.
             var built = new SubscriptionsRuntime(Engine, _subscriptions, Options, Scheduler, _netIds, SystemNames(), _subscriptionsContext.Telemetry);
             _subscriptionsRuntime = built;
+            if (built.Grid is { } grid)
+            {
+                LogReplicationGrid(grid.CellM, Engine.SpatialGrid.Config.CellSize, grid.DimX, grid.DimY, grid.DimZ, grid.Window, grid.Radius,
+                    grid.Flat ? "flat" : "deep");
+            }
 
             // Published to the stages before a worker exists to read it: Scheduler.Start is what creates them, and starting a thread is itself a barrier.
             _subscriptionsContext.AttachSubscriptions(built);
@@ -1720,7 +1725,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ChunkCount = totalChunks,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
-            Subscriptions = _subscriptionsRuntime?.Commands
+            Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId)
         };
         ctx.DebugValidateWorkerId(Scheduler.WorkerSlotCount, sys.Name);
 
@@ -1851,7 +1856,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ClusterIds = clusterIdArray,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
-            Subscriptions = _subscriptionsRuntime?.Commands,
+            Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks
@@ -1995,7 +2000,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 ClusterIds = clusterIdArray,
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
-                Subscriptions = _subscriptionsRuntime?.Commands,
+                Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
                 WorkerId = workerId,
                 ChunkIndex = chunkIndex,
                 ChunkCount = totalChunks
@@ -2774,7 +2779,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ConsumedQueues = _systemConsumedQueues[sysIdx],
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
-            Subscriptions = _subscriptionsRuntime?.Commands,
+            Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             // Single-invocation system: one chunk, index 0. Left at the default 0 before #860, which made the documented slicing formula
             // (start = ChunkIndex * len / ChunkCount) divide by zero for any non-chunked system that used it.

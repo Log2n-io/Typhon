@@ -45,7 +45,7 @@ export function retainBytes(
  * keeps its last values. Owner values belong to one entity, not to a slot, so they live here rather than in the store.
  */
 export class SelfState {
-  /** The controlled entity's archetype, or `null` before the first `SELF` and after a `RESET`. */
+  /** The controlled entity's archetype, or `null` before the first `SELF`, after a `RESET`, and while the session controls none (W17′). */
   archetype: ArchetypePlan | null = null;
   netId = 0;
   /** The highest command `seq` drained into a tick at or before the latest frame's (W31). */
@@ -66,9 +66,28 @@ export class SelfState {
   /** Per owner field: 1 once a value has been received for the current controlled entity. */
   present: Uint8Array = new Uint8Array(0);
 
-  /** A `SELF` block begins. A different controlled entity starts from no values: SUB-11 then sends every group. */
-  receive(archetype: ArchetypePlan, netId: number, lastSeq: number, ownerMask: number): void {
-    if (this.archetype !== archetype || this.netId !== netId) {
+  /**
+   * A `SELF` block begins. A different controlled entity starts from no values: SUB-11 then sends every group.
+   * `null` is no controlled entity (W17′): the owner state is dropped and only `lastSeq` is kept.
+   */
+  receive(archetype: ArchetypePlan | null, netId: number, lastSeq: number, ownerMask: number): void {
+    if (archetype === null) {
+      // Only when there is something to drop: a spectator is acknowledged every frame it sends commands in.
+      if (this.archetype === null) {
+        this.netId = 0;
+        this.lastSeq = lastSeq;
+        this.ownerMask = 0;
+        this.received = true;
+        this.version++;
+        return;
+      }
+
+      this.archetype = null;
+      this.numbers = [];
+      this.texts = [];
+      this.bytes = [];
+      this.present = new Uint8Array(0);
+    } else if (this.archetype !== archetype || this.netId !== netId) {
       const fields = archetype.ownerFields;
       this.archetype = archetype;
       this.numbers = fields.map((f) => new Float64Array(f.valueKind === ValueKind.Number ? f.components : 0));

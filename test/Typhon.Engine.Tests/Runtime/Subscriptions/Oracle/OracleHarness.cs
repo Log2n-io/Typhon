@@ -37,10 +37,13 @@ namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
 internal sealed unsafe class OracleHarness : IDisposable
 {
     /// <summary>How many ticks of stillness precede a comparison: enough for a skipped session's slots to drain and its union frame to be produced.</summary>
-    public const int QuietTicks = 8;
+    public const int QuietTicks = PushReplication.LogDepth + 2;
 
     /// <summary>The profile every oracle session is bound to.</summary>
     public const string Profile = "oracle-world";
+
+    /// <summary>The second Sphere profile's name, when the oracle declares one (odd sessions).</summary>
+    public const string SecondProfile = "oracle-second";
 
     /// <summary>
     /// How far a moving entity's predicted position may sit from its true one: the declared 5 cm motion tolerance, plus the position quantum and a margin.
@@ -72,13 +75,35 @@ internal sealed unsafe class OracleHarness : IDisposable
 
     // The geometric mode: sessions with a disc smaller than the world, walking and now and then teleporting. Their truth is the disc.
     private readonly double _radius;
+
+    // Each session's R′ — the band's midpoint with a leave radius — and its anchor slack: two profiles give odd sessions another radius (09 § 3–4).
+    private readonly double[] _sessionRadius;
+    private readonly double[] _anchorSlack;
     private readonly bool _walk;
     private readonly Vector3D[] _viewpoints;
     private readonly Random _walker;
 
     private long _tick;
 
-    private OracleHarness(FrameHarness harness, int[] skipPercent, int seed, PushDetection detection, double radius, bool walk)
+    // The region mode (09 § 7): each session's region as the oracle last sent it — a polygon it pans, reshapes and now and then jumps — and its widest
+    // accepted extent. Zero when the profile is not a ClientRegion.
+    private readonly double _regionEdge;
+    private readonly RegionShape[] _shapes = [];
+
+    // Whether the region has a near budget: without one, every cell the hull meets is delivered, and the comparison requires that of the engine.
+    private bool _budgeted;
+
+    private struct RegionShape
+    {
+        public double X;
+        public double Y;
+        public double Radius;
+        public double Angle;
+        public int Sides;
+    }
+
+    private OracleHarness(FrameHarness harness, int[] skipPercent, int seed, PushDetection detection, double radius, bool walk, double leaveRadius = 0,
+        double secondRadius = 0, double regionEdge = 0)
     {
         _harness = harness;
         _skipPercent = skipPercent;
@@ -87,9 +112,20 @@ internal sealed unsafe class OracleHarness : IDisposable
         _walker = new Random(seed ^ 0x5EED);
         _sessions = harness.OpenSessions(skipPercent.Length, Profile);
         _viewpoints = new Vector3D[_sessions.Length];
+        _sessionRadius = new double[_sessions.Length];
+        _anchorSlack = new double[_sessions.Length];
+        var cell = harness.Subscriptions.Push?.CellSize ?? double.PositiveInfinity;
         // A session sees nothing until it is placed.
         for (var i = 0; i < _sessions.Length; i++)
         {
+            var second = secondRadius > 0 && i % 2 == 1;
+            if (second)
+            {
+                Assert.That(harness.Sessions.SetProfile(_sessions[i], SecondProfile), Is.True);
+            }
+
+            _sessionRadius[i] = second ? secondRadius : leaveRadius > 0 ? (radius + leaveRadius) / 2d : radius;
+            _anchorSlack[i] = Math.Min(_sessionRadius[i] / 48d, cell / 2d);
             _viewpoints[i] = walk ? RandomViewpoint() : new Vector3D(0d, 0d, 0d);
             Assert.That(harness.Sessions.SetViewpoint(_sessions[i], _viewpoints[i]), Is.True, "a just-opened session can be placed");
         }
@@ -105,6 +141,84 @@ internal sealed unsafe class OracleHarness : IDisposable
         _creatureIndex = harness.PlanIndex(nameof(ProjCreature));
         _rockIndex = harness.PlanIndex(nameof(ProjRock));
         Workload = new OracleWorkload(harness, seed) { Replicate = detection == PushDetection.Explicit };
+
+        _regionEdge = regionEdge;
+        if (regionEdge > 0)
+        {
+            _shapes = new RegionShape[_sessions.Length];
+            for (var i = 0; i < _sessions.Length; i++)
+            {
+                _shapes[i] = RandomShape();
+                SendRegion(i);
+            }
+        }
+    }
+
+    /// <summary>How many region jumps the oracle made: each is a hull change most of whose cells leave, which resets its session.</summary>
+    public int RegionJumps { get; private set; }
+
+    private RegionShape RandomShape()
+    {
+        var limit = ProjectionTestSchema.WorldExtentM - _regionEdge;
+        return new RegionShape
+        {
+            X = ((_walker.NextDouble() * 2.0) - 1.0) * limit,
+            Y = ((_walker.NextDouble() * 2.0) - 1.0) * limit,
+            // Now and then wider than the profile accepts, which the ingress clamps about its centroid.
+            Radius = _regionEdge * (_walker.Next(10) == 0 ? 0.8 : 0.2 + (0.3 * _walker.NextDouble())),
+            Angle = _walker.NextDouble() * Math.PI * 2.0,
+            Sides = 3 + _walker.Next(6),
+        };
+    }
+
+    /// <summary>The session's polygon as vertices, counter-clockwise.</summary>
+    private static RegionVertex[] Vertices(in RegionShape shape)
+    {
+        var vertices = new RegionVertex[shape.Sides];
+        for (var v = 0; v < shape.Sides; v++)
+        {
+            var a = shape.Angle + (v * Math.PI * 2.0 / shape.Sides);
+            vertices[v] = new RegionVertex { X = shape.X + (Math.Cos(a) * shape.Radius), Y = shape.Y + (Math.Sin(a) * shape.Radius) };
+        }
+
+        return vertices;
+    }
+
+    private void SendRegion(int session) =>
+        Assert.That(_harness.Subscriptions.Ingress.SetRegionForTest(_sessions[session], Vertices(in _shapes[session]), 2), Is.True, "a convex region is taken");
+
+    /// <summary>Moves every session's region: mostly a pan of a fraction of a cell, sometimes a new shape in place, now and then a jump.</summary>
+    private void MoveRegions()
+    {
+        var cell = Push.CellSize;
+        var limit = ProjectionTestSchema.WorldExtentM - _regionEdge;
+        for (var i = 0; i < _sessions.Length; i++)
+        {
+            var roll = _walker.Next(100);
+            ref var shape = ref _shapes[i];
+            if (roll < 2)
+            {
+                shape = RandomShape();
+                RegionJumps++;
+            }
+            else if (roll < 12)
+            {
+                var jumped = RandomShape();
+                (shape.Radius, shape.Angle, shape.Sides) = (jumped.Radius, jumped.Angle, jumped.Sides);
+            }
+            else if (roll < 80)
+            {
+                var angle = _walker.NextDouble() * Math.PI * 2.0;
+                shape.X = Math.Clamp(shape.X + (Math.Cos(angle) * cell * 0.3), -limit, limit);
+                shape.Y = Math.Clamp(shape.Y + (Math.Sin(angle) * cell * 0.3), -limit, limit);
+            }
+            else
+            {
+                continue;
+            }
+
+            SendRegion(i);
+        }
     }
 
     /// <summary>How many entities the most recent <see cref="AssertConverged"/> REQUIRED a session to hold — in geometric mode, the ones well inside a disc.</summary>
@@ -134,7 +248,7 @@ internal sealed unsafe class OracleHarness : IDisposable
             else if (roll < 90)
             {
                 var angle = _walker.NextDouble() * Math.PI * 2.0;
-                var stride = _radius * 0.01;
+                var stride = _sessionRadius[i] * 0.01;
                 _viewpoints[i] = new Vector3D(
                     Math.Clamp(_viewpoints[i].X + (Math.Cos(angle) * stride), -Limit, Limit),
                     Math.Clamp(_viewpoints[i].Y + (Math.Sin(angle) * stride), -Limit, Limit),
@@ -162,6 +276,12 @@ internal sealed unsafe class OracleHarness : IDisposable
 
     /// <summary>The push path.</summary>
     public PushReplication Push => _harness.Subscriptions.Push;
+
+    /// <summary>The creatures' resolved visibility slack h, in metres.</summary>
+    public double CreatureSlackM => _harness.Subscriptions.Plans[_creatureIndex].VisibilitySlackM;
+
+    /// <summary>The frame harness underneath, for what the oracle does not wrap (the frame digest).</summary>
+    public FrameHarness Frames => _harness;
 
     /// <summary>The frame assembler, for the one test that has to break a rule on the production object to prove the oracle can see it.</summary>
     public FrameAssembler Assembler => _harness.Assembler;
@@ -208,22 +328,49 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// <param name="worldObserver">Serve the profile through a <c>World</c> observer instead of a covering disc.</param>
     /// <param name="every">The profile's tick divisor.</param>
     /// <param name="bigWorld">Seed the walking oracle's population even when the sessions do not walk.</param>
-    /// <param name="deterministicProjection">Build the push index serially, in the frame prologue, as reproducible runs do.</param>
+    /// <param name="deterministicProjection">
+    /// Build the push index serially, in the frame prologue — the collapsed shape's path — instead of sorted by the projection and merged by its stage.
+    /// </param>
+    /// <param name="replicationCellM">The replication cell side; zero for <c>ProjectionTestSchema.ReplicationCellFor</c> of the profile's radius.</param>
+    /// <param name="forceDeep">Serve the flat world with the deep implementation, which must agree with the flat one on it (10 § 3.5).</param>
+    /// <param name="visibilitySlackM">The creatures' visibility slack h (09 § 2); <see cref="double.NaN"/> for the rule, R / 48.</param>
+    /// <param name="leaveRadius">The walking disc's leave radius (09 § 3); 0 for none.</param>
+    /// <param name="secondRadius">When positive, a second Sphere profile of this radius, which every odd session is bound to (09 § 4).</param>
+    /// <param name="farEvery">When positive, the first profile's distance band (09 § 9): beyond half the radius, updates every this many ticks.</param>
+    /// <param name="bands">The first profile's distance bands, when several are wanted; overrides <paramref name="farEvery"/>.</param>
+    /// <param name="aggregateCells">When positive, the first profile gains an Aggregate tier (09 § 8) of tiles this many replication cells wide.</param>
+    /// <param name="regionEdgeM">
+    /// When positive, the profile is a ClientRegion accepting regions this wide (09 § 7), and each session sends a polygon it pans, reshapes and jumps; each is
+    /// compared against its own region.
+    /// </param>
+    /// <param name="nearBudget">The ClientRegion's near budget, in entities; 0 for none.</param>
     public static OracleHarness Create(DatabaseEngine engine, int seed, int[] skipPercent, string name, PushDetection detection = PushDetection.Explicit,
-        double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false)
+        double walkRadius = 0, bool worldObserver = false, int every = 1, bool bigWorld = false, bool deterministicProjection = false,
+        double replicationCellM = 0, bool forceDeep = false, double visibilitySlackM = double.NaN, double leaveRadius = 0, double secondRadius = 0,
+        int farEvery = 0, Action<BandBuilder> bands = null, int aggregateCells = 0, double regionEdgeM = 0, int nearBudget = 0)
     {
         ArgumentNullException.ThrowIfNull(skipPercent);
 
         var walk = walkRadius > 0;
+        var region = regionEdgeM > 0;
         var radius = walk ? walkRadius : PushRadiusM;
-        var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every), name,
-            Options(detection == PushDetection.Automatic, deterministicProjection));
+        var cellM = replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(worldObserver && !walk ? 0 : radius);
+        var harness = FrameHarness.Create(engine, subs => Declare(subs, detection, radius, worldObserver && !walk, every, leaveRadius, secondRadius, farEvery, bands,
+                aggregateCells * cellM, regionEdgeM, nearBudget), name,
+            Options(detection == PushDetection.Automatic, deterministicProjection, cellM, forceDeep, visibilitySlackM));
         try
         {
-            var oracle = new OracleHarness(harness, skipPercent, seed, detection, radius, walk);
+            harness.SerialIndex = deterministicProjection;
 
-            // A walking disc covers a few percent of the world, so the world is denser for it to hold anything worth comparing.
-            oracle.Workload.Seed(creatures: walk || bigWorld ? 400 : 24, rocks: walk || bigWorld ? 120 : 8);
+            // A region oracle reissues released identities as the runtime does, so a skipped session meets their reuse inside the log (SUB-06).
+            harness.DrainNetIds = region;
+            var oracle = new OracleHarness(harness, skipPercent, seed, detection, radius, walk, leaveRadius, secondRadius, regionEdgeM)
+            {
+                _budgeted = nearBudget > 0,
+            };
+
+            // A walking disc or a region covers a few percent of the world, so the world is denser for it to hold anything worth comparing.
+            oracle.Workload.Seed(creatures: walk || region || bigWorld ? 400 : 24, rocks: walk || region || bigWorld ? 120 : 8);
 
             // The first tick pushes every live entity.
             oracle._tick = 1;
@@ -248,6 +395,11 @@ internal sealed unsafe class OracleHarness : IDisposable
             Walk();
         }
 
+        if (_regionEdge > 0)
+        {
+            MoveRegions();
+        }
+
         _tick++;
 
         // The ECS fence, which RunTick does not run: a spatial write MARKS an entity, and the cluster change happens here. Without it the workload's
@@ -267,6 +419,27 @@ internal sealed unsafe class OracleHarness : IDisposable
     }
 
     /// <summary>
+    /// Churn and the ECS fence with no track: a tick the gate skipped, as it does while no session is connected or when the tick aborts. The fence still
+    /// drains the tick's structure words, so the track must recover what it never saw.
+    /// </summary>
+    public void StepWithoutTrack()
+    {
+        Workload.Step();
+        _tick++;
+        Engine.WriteTickFence(_tick);
+        _harness.SkipTick(_tick);
+    }
+
+    /// <summary>Churn and a tick whose track stopped after the index merge: its index is never finished and nothing is delivered.</summary>
+    public void StepWithoutIndex()
+    {
+        Workload.Step();
+        _tick++;
+        Engine.WriteTickFence(_tick);
+        _harness.RunTickWithoutIndex(_tick);
+    }
+
+    /// <summary>
     /// One tick with no write at all, the sessions still walking and every frame delivered: what moves is only the viewers. An entity whose last change a
     /// session was never sent is reached by the session's disc, not by an event.
     /// </summary>
@@ -279,7 +452,7 @@ internal sealed unsafe class OracleHarness : IDisposable
         for (var i = 0; i < _sessions.Length; i++)
         {
             var angle = _walker.NextDouble() * Math.PI * 2.0;
-            var stride = _radius * strideOfRadius;
+            var stride = _sessionRadius[i] * strideOfRadius;
             _viewpoints[i] = new Vector3D(
                 Math.Clamp(_viewpoints[i].X + (Math.Cos(angle) * stride), -Limit, Limit),
                 Math.Clamp(_viewpoints[i].Y + (Math.Sin(angle) * stride), -Limit, Limit),
@@ -361,6 +534,7 @@ internal sealed unsafe class OracleHarness : IDisposable
         }
 
         var truth = ServerTruth(divergences);
+        IdentitiesAccountedFor(truth, divergences);
         var before = Compared;
         RequiredAtLastPoint = 0;
 
@@ -392,6 +566,38 @@ internal sealed unsafe class OracleHarness : IDisposable
 
     /// <inheritdoc />
     public void Dispose() => _harness.Dispose();
+
+    /// <summary>
+    /// No identity leaks (SUB-06): at a quiet point every queued release has reached the allocator, so what it counts live is exactly what the leases hold
+    /// unspent plus one per described entity. An identity taken from an entry that vanished and never given back shows as a surplus.
+    /// </summary>
+    private void IdentitiesAccountedFor(Dictionary<int, Dictionary<uint, EntityId>> truth, List<string> divergences)
+    {
+        var held = 0L;
+        foreach (var byNetId in truth.Values)
+        {
+            held += byNetId.Count;
+        }
+
+        foreach (var state in _harness.Subscriptions.ReplicationStates)
+        {
+            held += state?.NetIdLeases.LeasedCount ?? 0;
+        }
+
+        var live = _harness.Replication.NetIds.LiveCount;
+        if (live != held)
+        {
+            divergences.Add($"the allocator counts {live} identities live and {held} are held (leased or naming a live entity): {live - held} leaked");
+        }
+
+        foreach (var state in _harness.Subscriptions.ReplicationStates)
+        {
+            if (state != null && state.OrphanReleaseFaults != 0)
+            {
+                divergences.Add($"{state.OrphanReleaseFaults} orphaned identities were refused by the allocator: already free, or orphaned twice");
+            }
+        }
+    }
 
     /// <summary>
     /// The identities the engine has published, and the entity behind each.
@@ -469,6 +675,12 @@ internal sealed unsafe class OracleHarness : IDisposable
             return;
         }
 
+        if (_regionEdge > 0)
+        {
+            CompareRegion(tx, replica, session, plan, name, expected, divergences);
+            return;
+        }
+
         var held = replica.NetIds(plan);
         // The SET is what the comparison below needs; the LENGTH is asserted first, because collapsing duplicates here would hide a replica holding one
         // identity twice — which is precisely the shape of a missed leave followed by a re-enter, the defect family this oracle exists for.
@@ -507,10 +719,17 @@ internal sealed unsafe class OracleHarness : IDisposable
         List<string> divergences)
     {
         var held = new HashSet<uint>(replica.NetIds(plan));
-        var slack = _radius / 3.0 / 16.0;
-        var margin = slack + MotionToleranceM + 0.01;
-        var inner = _radius - margin;
-        var outer = _radius + margin;
+
+        // The radius the session's known-set was committed at: its own, less any last-resort shrink of the budget loop (09 § 10).
+        var committed = Push.RadiusOf(_sessions[session]);
+        var radius = committed > 0 ? Math.Min(committed, _sessionRadius[session]) : _sessionRadius[session];
+        var slack = _anchorSlack[session];
+
+        // v̂ trails a mover's true position by up to h (09 § 2): held within R − h, dropped past R + h, either between.
+        var visibility = plan == _creatureIndex ? _harness.Subscriptions.Plans[plan].VisibilitySlackM : 0d;
+        var margin = slack + visibility + MotionToleranceM + 0.01;
+        var inner = radius - margin;
+        var outer = radius + margin;
         var viewpoint = _viewpoints[session];
         foreach (var netId in held)
         {
@@ -534,14 +753,78 @@ internal sealed unsafe class OracleHarness : IDisposable
                 if (!holds)
                 {
                     divergences.Add($"session {session}: {name} netId {netId} (entity {entity.RawValue}) is {distance:F2} m from the viewpoint, inside the "
-                        + $"{_radius} m disc, and the client does not hold it");
+                        + $"{radius} m disc, and the client does not hold it");
                     continue;
                 }
             }
             else if (distance > outer && holds)
             {
-                divergences.Add($"session {session}: {name} netId {netId} is {distance:F2} m from the viewpoint, outside the {_radius} m disc, and the client "
+                divergences.Add($"session {session}: {name} netId {netId} is {distance:F2} m from the viewpoint, outside the {radius} m disc, and the client "
                     + "still holds it");
+                continue;
+            }
+
+            if (holds)
+            {
+                Compared++;
+                CompareFields(tx, replica, session, plan, name, netId, entity, divergences);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The region comparison (09 § 7): an entity well inside the session's region, in a cell it was delivered, must be held; one well outside the region must
+    /// not be; one within the margin of its edge may be either — v̂ trails the entity by up to h, and a client's position the entity's by the motion
+    /// tolerance.
+    /// </summary>
+    private void CompareRegion(Transaction tx, SessionReplica replica, int session, int plan, string name, Dictionary<uint, EntityId> expected,
+        List<string> divergences)
+    {
+        var held = new HashSet<uint>(replica.NetIds(plan));
+        var hull = _harness.Subscriptions.Ingress.RowOf(_sessions[session]).Region;
+        var visibility = plan == _creatureIndex ? _harness.Subscriptions.Plans[plan].VisibilitySlackM : 0d;
+        var margin = visibility + MotionToleranceM + 0.01;
+        foreach (var netId in held)
+        {
+            if (!expected.ContainsKey(netId))
+            {
+                divergences.Add($"session {session}: {name} netId {netId} is in the client's world and not in the server's");
+            }
+        }
+
+        foreach (var (netId, entity) in expected)
+        {
+            var reference = tx.Open(entity);
+            var bounds = plan == _creatureIndex ? reference.Read(ProjCreature.Bounds) : reference.Read(ProjRock.Bounds);
+            var x = (bounds.Bounds.MinX + bounds.Bounds.MaxX) * 0.5;
+            var y = (bounds.Bounds.MinY + bounds.Bounds.MaxY) * 0.5;
+            var outside = double.MinValue;
+            for (var p = 0; p < hull.PlaneCount; p++)
+            {
+                var plane = hull.Planes[p];
+                outside = Math.Max(outside, (plane.Nx * x) + (plane.Ny * y) - plane.D);
+            }
+
+            var holds = held.Contains(netId);
+
+            // Without a near budget every cell the hull meets is delivered, so the requirement does not ask the engine which cells it delivered; with one,
+            // only an entity whose every cell within the margin was delivered is required (v̂'s cell may be a neighbour of the true position's).
+            var required = outside < -margin && (!_budgeted || (Push.RegionDelivers(_sessions[session], x - margin, y - margin, 0d)
+                && Push.RegionDelivers(_sessions[session], x + margin, y - margin, 0d) && Push.RegionDelivers(_sessions[session], x - margin, y + margin, 0d)
+                && Push.RegionDelivers(_sessions[session], x + margin, y + margin, 0d)));
+            if (required)
+            {
+                RequiredAtLastPoint++;
+                if (!holds)
+                {
+                    divergences.Add($"session {session}: {name} netId {netId} (entity {entity.RawValue}) is {-outside:F2} m inside the region, in a "
+                        + "delivered cell, and the client does not hold it");
+                    continue;
+                }
+            }
+            else if (outside > margin && holds)
+            {
+                divergences.Add($"session {session}: {name} netId {netId} is {outside:F2} m outside the region and the client still holds it");
                 continue;
             }
 
@@ -652,8 +935,13 @@ internal sealed unsafe class OracleHarness : IDisposable
     /// induces on purpose — the run would still be correct but it would no longer be measuring what it says it measures. The enter budget is left at the
     /// engine's default: deferring enters across ticks is real behaviour that the quiet window is there to absorb, and raising it would hide it.
     /// </remarks>
-    private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection) => new()
+    private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection, double replicationCellM, bool forceDeep,
+        double visibilitySlackM) => new()
     {
+        IngressBytesPerSecond = TestIngress.Budget,
+        ReplicationCellM = replicationCellM,
+        VisibilitySlackMForTest = visibilitySlackM,
+        ForceDeepReplicationForTest = forceDeep,
         AllowAutomaticPushDetection = automatic,
 
         // The push path's legality check: a record the client could not apply — an enter of a held entity, an update or a leave of an unheld one — is a
@@ -666,17 +954,63 @@ internal sealed unsafe class OracleHarness : IDisposable
     };
 
     /// <summary>The projections and the profile the oracle runs against: a disc, or the whole world.</summary>
-    private static void Declare(SubscriptionsRegistry subs, PushDetection detection, double radius, bool world, int every)
+    private static void Declare(SubscriptionsRegistry subs, PushDetection detection, double radius, bool world, int every, double leaveRadius = 0,
+        double secondRadius = 0, int farEvery = 0, Action<BandBuilder> bands = null, double aggregateTileM = 0, double regionEdgeM = 0, int nearBudget = 0)
     {
         ProjectionTestSchema.DeclareCreature(subs);
         ProjectionTestSchema.DeclareRock(subs);
-        if (world)
+        if (regionEdgeM > 0)
         {
-            subs.Profile(Profile, p => p.Detection(detection).Every(every).World().Of<ProjCreature>().Of<ProjRock>());
+            subs.Profile(Profile, p =>
+            {
+                var region = p.Detection(detection).Every(every).ClientRegion(regionEdgeM);
+                if (nearBudget > 0)
+                {
+                    region.Near(nearBudget);
+                }
+
+                region.Of<ProjCreature>().Of<ProjRock>();
+                if (aggregateTileM > 0)
+                {
+                    p.Aggregate(aggregateTileM, rateHz: 10).Of<ProjCreature>();
+                }
+            });
+        }
+        else if (world)
+        {
+            subs.Profile(Profile, p =>
+            {
+                p.Detection(detection).Every(every).World().Of<ProjCreature>().Of<ProjRock>();
+                if (aggregateTileM > 0)
+                {
+                    p.Aggregate(aggregateTileM, rateHz: 10).Of<ProjCreature>().Of<ProjRock>();
+                }
+            });
         }
         else
         {
-            subs.Profile(Profile, p => p.Detection(detection).Every(every).Sphere(radius).Of<ProjCreature>().Of<ProjRock>());
+            subs.Profile(Profile, p =>
+            {
+                var sphere = p.Detection(detection).Every(every).Sphere(radius, leave: leaveRadius);
+                if (bands != null)
+                {
+                    sphere.Bands(bands);
+                }
+                else if (farEvery > 0)
+                {
+                    sphere.Bands(b => b.Every(farEvery, beyond: 0.5));
+                }
+
+                sphere.Of<ProjCreature>().Of<ProjRock>();
+                if (aggregateTileM > 0)
+                {
+                    p.Aggregate(aggregateTileM, rateHz: 10).Of<ProjCreature>();
+                }
+            });
+            if (secondRadius > 0)
+            {
+                subs.Profile(SecondProfile, p => p.Detection(detection).Every(every).Sphere(secondRadius).Of<ProjCreature>().Of<ProjRock>());
+            }
         }
     }
 

@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-09-23 |
+| Last Updated | 2026-09-25 |
 | Domain | Engine-owned replication: per-entity replication state, its storage, and what bounds its cost |
 
 > Invariants that keep replication cost tied to what changed, keep what a session holds exactly what its geometry names, and keep per-entity
@@ -110,6 +110,8 @@
   invariant ∀ tick T: the entities projected are exactly the push set — the slots the application pushed with `Replicate` after a write (ADR-067), plus
     the engine's own pushes: a spawn, a destroy, a `WriteSpatial`, a mutable span over the spatial column (its whole cluster), a migration, and a slot
     whose client is still extrapolating it
+  invariant ∀ tick T the track runs for, following a tick it did not run for (no session connected, an aborted tick, a failed fence): the push set
+    is every live entity — the fence drained the skipped ticks' structure words, so their pushes exist nowhere else
   invariant ∀ pushed entity e: e's projection is recomputed and compared with the copy its entry holds; the comparison, not the push, decides whether
     anything is sent — a redundant push costs an encode and never a byte on the wire
   invariant ∀ projected field f of e: the value compared is f's wire CODE. quantize(read(f)) is computed ONCE per entity per tick, and that
@@ -122,7 +124,7 @@
     being the bytes that are sent
   never compare a group body against a stored copy that was not zero-padded to the section's widest form — the padding is what makes a
     fixed-width comparison of variable-length canonical encodings exact
-  scope: ProjectionPass.ProjectBlock, ProjectionColumnWalk.Quantize, ProjectionColumnWalk.Walk, ProjectionColumnWalk.WalkRatio,
+  scope: ProjectionPass.ProjectBlock, ProjectionPass.ApplyHeadingDeadband, ProjectionColumnWalk.Quantize, ProjectionColumnWalk.Walk, ProjectionColumnWalk.WalkRatio,
     ReplicationHotEntry.GroupTicks, ReplicationHotEntry.PackedState, ReplicationColdEntry.PrevQuantizedPosition,
     SubscriptionsCommands.Replicate, PushReplication.PrepareBlocks, PushReplication.MarkPushed, ArchetypeClusterState.NoteStructureSlots,
     ClusterRef.GetSpan, ClusterRef.WriteSpatial
@@ -139,13 +141,19 @@
   note the POSITION is compared the same way and by the same rule, through the quantized copy in the cold entry, and stamps the motion group's
     tick. What it does not do is fit or emit a motion SEGMENT, which is a separate decision about when a client's extrapolation has drifted far
     enough (design/Subscriptions/02-execution.md § 4).
+  note a HEADING's compare is a deadband in code space (09 § 15): before its group is encoded, a code within the declared tolerance of the one the
+    client holds — kept per heading in the cold entry, and distance taken modulo the angle's full turn — is replaced by the held one, so the body does
+    not change and nothing is sent; past it, the new code is held. The compare is still the encode: the code compared is the code sent. The client's
+    heading trails the entity's by at most the tolerance
   note `PushDetection.Automatic` pushes every live entity of an archetype each tick and lets the comparison find the changes. It is experimental and
     refused unless `SubscriptionsOptions.AllowAutomaticPushDetection` is set (ADR-067 decision 3).
   verified: ProjectionPassTests.AWriteThroughGetSpanIsDetected and ProjectionPassTests.AWriteThroughWriteSpatialIsDetected — the two write
     paths that set no signal, each on a marked slot, each requiring the comparison to have found the change and stamped the group tick. Falsifiability is
     proved by ProjectionPassTests.AChangeNoPassEverLooksAtIsNotDetected, which performs both writes and does NOT run the pass, requiring the entry to be
     untouched — so the verifiers discriminate the comparison from the write. The push set's half: PushOracleTests.AForgottenPushLeavesTheClientStaleAndTheOracleSeesIt
-    (a write with no push is not sent, and the oracle sees it) and PushOracleTests.AClientsWorldIsTheServersUnderPush in both detection modes.
+    (a write with no push is not sent, and the oracle sees it) and PushOracleTests.AClientsWorldIsTheServersUnderPush in both detection modes. The
+    heading note: HeadingTests.AHeadingIsSentOnlyWhenItTurnsPastItsTolerance (1° under 2° sends nothing, 3° sends one record, 0.9° across ±π nothing —
+    red without the deadband).
 
 ---
 
@@ -208,8 +216,15 @@
   never reissue an identity before its quarantine window has passed
   never a Release of an identity that is already free or quarantined (it would thread the list to itself, after which every
     Allocate returns that same identity and LiveCount runs negative)
+  invariant every identity an entry loses is released once: a vacated or reused slot's by the projection (queued in its lease, released at the next
+    tick's BeginProjectTick), an orphan's — a block released with live entries, an entry overwritten by a migration or by the parked drain, a parked entry
+    dropped — by ArchetypeReplicationState.ReleaseOrphaned at the second blocks step after it, the same delay. A tick with no block to project still runs
+    both releases (FlushIdleTick), so a quiet world does not keep released identities live. At a quiet point the allocator's live count is the leases'
+    unspent identities plus one per described entity, and no orphan is refused (OrphanReleaseFaults, an identity already free or orphaned twice)
   scope: NetIdAllocator.Allocate, NetIdAllocator.Release, NetIdAllocator.DrainQuarantine, NetIdAllocator.GenerationOf,
-    ArchetypeReplicationState.NetIds, ReplicationHotEntry.NetId, ReplicationHotEntry.Generation
+    ArchetypeReplicationState.NetIds, ArchetypeReplicationState.Orphaned, ArchetypeReplicationState.ReleaseOrphaned,
+    ArchetypeReplicationState.FlushIdleTick, NetIdLeaseSet.FlushReleases, ReplicationHotEntry.NetId,
+    ReplicationHotEntry.Generation
   on_violation: a session that missed the release sees one identity carry a second entity's data and concludes the
     entity moved rather than that it was replaced — the client's world silently disagrees with the server's, with no
     error on either side. The double-release form is worse: two live entities share an identity, so one of them is
@@ -231,7 +246,11 @@
     audit-rule-coverage.py's UNKNOWN_RULE_ID inspects [VerifiesRule]/[RuleMutant] attributes only.
   verified: NetIdAllocatorTests.ReusingAnIdentityBumpsItsGeneration,
     NetIdAllocatorTests.ReleasingTheSameIdentityTwiceIsRejected,
-    NetIdAllocatorTests.AReleasedIdentityIsHeldForTheSkipWindow
+    NetIdAllocatorTests.AReleasedIdentityIsHeldForTheSkipWindow; the release-once clause at every oracle quiet point (OracleHarness's identity count),
+    e.g. PushOracleTests.AClientsWorldIsTheServersUnderPush — red in every detection mode and skip rate when the orphans' release is dropped, the leak
+    it fixed (4 to 12 identities per point); ClientRegionObserverTests.AnIdentityReusedWhileASessionMissedFramesResetsIt, the
+    push log's side with a quarantine shorter than the log (the harness's one tick): a region session that missed the release and the reissue resets
+    rather than carry a leave and an enter of one identity — red, the client keeping the old entity's fields, when the catch-up's refusal is dropped
 
 ### SUB-09: State follows its entity, and never survives slot reuse `[fatal][silent]`
   invariant ∀ entity e with a replication entry: the hot/cold entry describing e is reachable from e's CURRENT (cluster, slot)
@@ -341,23 +360,48 @@
 ## Module: Observers
 
 ### SUB-16: A session holds exactly what its geometry names, and a session with no region holds nothing `[fatal][silent]`
-  invariant ∀ session s with a Sphere observer of radius r, ∀ tick T after s's fill: s holds entity e iff e's last pushed position lies within r of s's
-    committed anchor AND e's cell is in s's delivered window — no entity outside that is held, and none inside it is left out
+  invariant ∀ session s with a Sphere observer, gathered at radius r — its profile's R′ (the band's midpoint (R + L) / 2 with a leave radius, R
+    without), or the radius SetRadius gave it within [R′, max] — ∀ tick T after s's fill: s holds entity e iff e's v̂ (SUB-20) lies within r of s's
+    committed anchor AND v̂'s cell is in s's delivered window — no entity outside that is held, and none inside it is left out. The distance is 3D;
+    its z terms are 0 in a grid one cell deep and for a 2D-position archetype, which lies on the plane z = 0 (the spatial grid's convention), so
+    a flat world's known-set is the 2D one bit for bit whichever implementation serves it
   invariant ∀ session s with a World observer: s holds every live entity of its archetypes whose cell the delivery cursor has passed
+  invariant ∀ session s with a ClientRegion observer (09 § 7): s holds entity e iff e's v̂ lies in s's committed hull — the convex region it last sent,
+    clamped to its profile's maxEdgeM, as half-spaces — AND v̂'s cell is in s's delivered region window. The hull is the anchor: a new one sweeps the
+    delivered cells whose classification against the two hulls differs (the crescent), takes back the cells it no longer meets, and delivers the cells
+    it newly meets under the enter budget; when more than half the delivered cells fall outside the new hull, the frame resets instead. A session that has
+    sent no region holds nothing, and a session whose committed geometry is another shape's (a profile switch between a region and a Sphere or World)
+    resets
   invariant nothing is stored per (session, entity): what s holds is recomputed from the anchor, the delivered cells and each entity's last pushed
     position, and every event that moves an anchor, moves an entity or delivers a cell emits exactly the enters and leaves that keep it true
   invariant [s has never been placed] → s holds NOTHING. A default position is a legal world position, so "never placed" and "placed at the origin"
     must be distinguishable, and the unplaced session is the one that sees nothing
-  invariant a profile is served through exactly ONE observer, World or Sphere; a leave radius (hysteresis), a second observer, near/far tiers and the
-    other shapes are refused at Start until Phase 2 builds them
-  invariant every Sphere declares the SAME radius (the push index's cells are sized from it), at most 64 archetypes are observed (a session's archetype
-    set is a 64-bit mask), and every observed archetype has a 2D position — each refused at Start rather than served approximately
+  invariant a profile is served through exactly ONE entity observer, World, Sphere or ClientRegion, with at most one Aggregate beside it (09 § 5) —
+    which sends AGG, never entity records, so the entity known-set stays that one observer's; a second entity observer, an aggregate alone, a near
+    budget on any shape but a ClientRegion, the far tier of Far() (an Aggregate's), a centre (Bind, At, AroundControlled) on any shape but a Sphere, and an
+    Aggregate radius beside anything but a Sphere are refused at Start. Profiles may declare different radii, a leave radius and a run-time maximum (09 § 3–4): one window serves them all,
+    sized for the largest radius any session can take, and that radius counts against the window bound at Start
+  invariant a radius change (SetRadius, or a profile change between Sphere radii) is geometry like an anchor move: the next frame sweeps the shell
+    between the two radii and does not reset
+  invariant a session's archetype set is its profile's, as plan indices in 256 bits (ArchetypeSet): every plan index the registry admits (at most 255)
+    has its own bit, so an event reaches s only if s's profile observes that event's archetype, whatever the number of projections declared
+  invariant every observed archetype has a 2D or 3D position — each refused at Start rather than served approximately; a 2D-position archetype is refused in a deep
+    grid whose Z range excludes 0, where its plane would lie outside every cell
+  invariant the replication grid's cell side is DECLARED (SubscriptionsOptions.ReplicationCellM), never derived: a runtime that observes an archetype
+    without one is refused at Start, World-only included; so is a grid past 2²¹ cells on an axis and a window past its bound — the cells a gather
+    pays for, W² ≤ 2 809 and W ≤ 15 in a flat grid (⌈R / c⌉ ≤ 5), W³ ≤ 2 809 in a deep one (W ≤ 13, ⌈R / c⌉ ≤ 4) — and a region window past the same
+    bound, W = ⌈maxEdgeM / c⌉ + 5 per axis (maxEdgeM ≤ 48 c flat, 9 c deep) — each message naming the setting.
+    The grid covers the spatial world's bounds, and a spatial world one cell deep gives a grid one cell deep
   never resolve a declared region shape as though it were another: a profile whose observers have different shapes is a near/far tier, and
     the tiers differ in budget, rate and record kind, so their union is a wrong answer rather than an approximation
-  never centre a region somewhere the declaration did not name — an observer that asked to follow an entity and got the session's viewpoint
-    instead is a silent substitution; refuse it while the follow is unbuilt
-  scope: PushReplication.Gather, PushReplication.GatherWorld, PushReplication.Commit, SubscriptionProfiles.TryGetProfile, SessionTable.SetViewpoint,
-    SessionTable.TryGetViewpoint, SubscriptionsCommands.Place, SubscriptionsRegistry
+  never centre a region somewhere the declaration did not name: a Sphere is centred on the viewpoint Place gives (the default), a fixed point (At), one
+    entity (Bind) or the session's controlled entity (AroundControlled) — an entity's position read after the tick's fence, in the same tick. A followed
+    entity that is gone keeps its sessions at the last position read (counted, BoundLost); a session following nothing yet is nowhere. Two centres
+    declared on one Sphere are refused at Start
+  scope: PushReplication.Gather, PushReplication.GatherWorld, PushReplication.GatherRegion, PushReplication.CommitRegion, PushReplication.Commit,
+    SubscriptionsRuntime.ConfigureRegions, SubscriptionProfiles.TryGetProfile, SubscriptionProfiles.RadiusOf,
+    SubscriptionsCommands.SetRadius, SubscriptionProfiles.SetOf, ArchetypeSet.Contains, SessionTable.ProfileIndex, SessionTable.SetViewpoint,
+    SessionTable.TryGetViewpoint, SubscriptionsCommands.Place, SubscriptionsRegistry, ReplicationGrid.Resolve
   on_violation: silent in both directions. A session that holds too much is told about entities it cannot see — bandwidth, and a client that can see
     through the world; one that holds too little has players who never appear. The unplaced case is quieter still: an application that forgot to place
     its sessions would ship a subtly wrong view around the origin instead of an obviously empty one.
@@ -367,9 +411,40 @@
     the disc rather than a number recorded from a run; SphereObserverTests.TwoSessionsPlacedApartHoldDisjointSets, which discriminates "bounded by the
     radius" from "bounded at all"; SphereObserverTests.AnUnplacedSessionHoldsNothing over a populated origin; SphereObserverTests.AWorldObserverOverTheSameEntitiesHoldsAllOfThem;
     PushOracleTests.WalkingSessionsHoldExactlyWhatTheirDiscNames, where sessions walk and teleport under seeded churn;
-    SubscriptionsRegistryTests.ASphereThatFollowsAnEntityIsRefusedUntilTheEngineSideFollowExists,
-    SubscriptionsRegistryTests.ASphereLeaveRadiusIsRefusedUntilHysteresisIsBuilt, SubscriptionsRegistryTests.TwoSphereRadiiAreRefused,
-    SubscriptionsRegistryTests.AProfileWithTwoObserversIsRefused. The 64-archetype and 2D-position refusals have no test.
+    SubscriptionsRegistryTests.ASphereCentredTwoWaysIsRefused, SphereObserverTests.AControlledSphereFollowsItsEntityInTheSameTick, SphereObserverTests.ASessionWhoseEntityIsDestroyedKeepsItsLastViewpoint, SphereObserverTests.BindAndAtCentreTheSphereWhereTheyName,
+    PushOracleTests.TwoProfilesAndABandEachHoldTheirOwnDisc, ReplicationGridTests.AProfileWhoseRunTimeMaximumPassesTheWindowIsRefusedAtStart,
+    SubscriptionsRegistryTests.AProfileWithTwoObserversIsRefused; ReplicationGridTests.AnUndeclaredCellSideIsRefused,
+    ReplicationGridTests.ARuntimeThatObservesAnArchetypeWithoutACellSideRefusesToStart, ReplicationGridTests.AGridWiderThanTheCellKeyIsRefused,
+    ReplicationGridTests.AWindowPastSixteenCellsIsRefusedAndTheMessageNamesTheSmallestSide, ReplicationGridTests.ADeepWindowPastThirteenCellsIsRefused,
+    ReplicationGridTests.ATwoDimensionalArchetypeIsRefusedInADeepGridWhoseZRangeExcludesZero; PushOracle3DTests.AClientsWorldIsItsSphereInADeepGrid,
+    the same oracle in 3D with 2D walkers on z = 0 beside 3D flyers; PushOracle3DTests.AThirdAxisChangesNothingInAFlatGrid and
+    AThirdAxisChangesNothingInAFlatGridServedDeep, the degeneracy clause; PushFrameDigestTests, every flat run served by both implementations;
+    ArchetypeSetTests.AnArchetypePastPlanIndexSixtyThreeReachesOnlyTheSessionsThatObserveIt, red under a 64-bit set (plan index 70 aliases 6),
+    ArchetypeSetTests.AProfileObservingMoreThanSixtyFourArchetypesServesEveryOne, SubscriptionsRegistryTests.The256thArchetype_IsRefused;
+    the ClientRegion clause: PushRegionTests.EachClientHoldsItsRegionUnderChurnAndMoves (regions panned, reshaped, clamped and jumped under churn and
+    skipped frames, flat and served deep, against true positions and by the shadow oracle on v̂ — dropping the crescent sweep or the old hull's events
+    turns every case red), ClientRegionObserverTests.ARegionHoldsExactlyTheGridPointsInItsHull (the arithmetic count, and a move swept without a reset),
+    PushRegionTests.ASessionThatSentNoRegionHoldsNothing, PushRegionTests.ARegionWiderThanTheWindowBoundIsRefusedAtStart,
+    SubscriptionsRegistryTests.WhatAShapeDoesNotHaveIsRefusedAtStart; in 3D, PushOracle3DTests.AClientsWorldIsItsPolyhedronInADeepGrid (frustums over
+    3D flyers and 2D walkers in a volumetric world, skip 0–90 %, face by face and by the shadow oracle — red when the per-entity test or the cell
+    classification drops z); ClientRegionObserverTests.ASwitchBetweenARegionAndASphereResets, both ways.
+
+### SUB-20: Every geometric test reads v̂, and v̂ moves only by its rule `[fatal][silent]`
+  invariant ∀ observed moving archetype A with slack h_A (09 § 2): each entity e keeps a visibility position v̂ₑ; every geometric test — the push
+    step, the crescent sweep, the cell delivery, the log catch-up, the occupancy and the shadow check — reads v̂ₑ, never the true position
+  invariant v̂ₑ := pₑ (this tick's decoded quantized position) at initialization, on a teleport (the motion epoch changed), and when |pₑ − v̂ₑ| > h_A;
+    otherwise v̂ₑ is unchanged. h_A = 0 is exact: v̂ is the last projected position, and no byte is added to the cold entry
+  invariant h_A ≤ the slack of every Sphere profile observing A — its half band (L − R) / 2, or R / 48 without one (Q1) — and ≤ half a cell, so each
+    profile's bound holds: e is held when its true position is within R′ − h_A of the anchor, and not held past R′ + h_A
+  invariant every cluster proof widens by h_A: a cell's cluster query pads by 1 m + h_A and a pruning test by 1 cm + the position quantum + h_A,
+    because a cluster's box bounds true positions and v̂, quantized, lies up to h_A from them; a margin as wide as a radius proves nothing inside it
+  invariant every move of v̂ makes an event; a mover whose v̂ stays and whose segment and groups did not change makes none
+  scope: ProjectionPass, SubscriptionsRuntime, ReplicationBlockLayout.VisibilityPositionOffsetInColdEntry, PushReplication.AddEvent
+  on_violation: silent. A test that read the true position would disagree with the events the others were fed, and an entity would be entered or left
+    twice or never; a proof that did not widen would skip a cluster holding an entity whose v̂ lies in the cell, which is then never delivered.
+  rationale: the observer already has a slack (the anchor); the entity side had none, so every mover was an event every tick (09 § 2, B10).
+  verified: PushOracleTests.SteadyWalkersAreHeldWithinTheSlackOfTheirDisc at h ∈ {0, R / 48, 8 m} and skip rates 0 and 60 %, with every creature
+    walking 1.5 m a tick; its event count per walker-tick falls with h.
 
 ---
 
@@ -380,6 +455,10 @@
     a KICK carrying the close code reaches s's link, and the link is closed after it — KICK, then close (03 § 3; on TCP, KICK then FIN)
   invariant the KICK is sent by s's own send pump, never by the tick thread: the transport's one promise is at most one send in flight per
     session, and a tick writing to a socket breaks both that and the rule that the tick does no I/O
+  invariant a protocol refusal of an OPEN session (a malformed message, 1002/1007/1009) is sent by that pump too, after what it already owes, and the pump
+    closes the link after it; the connection leaves the link bound for it. Only before the session is open (a refused HELLO) does the receive thread,
+    then the link's only writer, send the KICK itself. The pending KICK carries the link it was decided for, so a slot recycled before the pump runs
+    neither strands it nor redirects it, and a pump that ends on an exception lowers its flag rather than leaving the session unable to send
   invariant [the client itself started the close] → no KICK: the connection unbinds its link before asking the tick to close, and an absent
     link is what tells the pump there is nobody to inform
   invariant ∀ SDK: the close code it reports is the KICK's when one arrived, and the transport's only otherwise — TCP carries no code, so a
@@ -389,13 +468,14 @@
   never leave a transport bound after a terminal close: a socket whose peer has sent FIN still reports itself connected until the next write
     fails, so an SDK that keeps it answers "connected" for a session that ended
   scope: SessionTable.CloseCore, SubscriptionsIngress.BeginTick, SendPump.RequestKick, SendPump.TryKickAsync, SubscriptionConnection.Kick,
-    FrameAssembler.SweepSkipPolicy
+    FrameAssembler.SweepSkipPolicy, SubscriptionConnection.CloseWithKick, SendPump.Claimable, SendPump.PumpAsync
   on_violation: the worst state a client can be in. Everything it can observe says it is connected — the socket is open, no code arrived, no
     error was raised — and no frame will ever come again. It cannot even reconnect, because nothing told it to. It is silent on the server
     too: the close counters move, the session leaves the table, and an application that kicked a player is told it worked.
   rationale: 02 § 6 and 05 § 1 already specify the message and the SDK's response to it; what was missing was any caller. The pump is the
     right sender because it is already the single writer for the slot, so the KICK is simply the last message it sends.
-  verified: BotSwarmSmokeTests.ASilentSessionIsClosedAndItsClientIsTold — a client that never pings, asserting in one place that its frames
+  verified: ClientInputFuzzTests.AnOpenSessionsRefusalIsSentByItsPumpAfterWhatItOwes (the refusal after a PONG, KICK last, no overlapped send), and
+    the fuzzer's every close checked for a KICK first; BotSwarmSmokeTests.ASilentSessionIsClosedAndItsClientIsTold — a client that never pings, asserting in one place that its frames
     stopped, that a close arrived, that the code was 4001 rather than 1001, and that it no longer believes itself connected.
 
 ### SUB-15: A skip run counts back-pressure only, and a mark of "never heard from" is not a tick `[fatal][silent]`
@@ -447,6 +527,10 @@
   invariant skip = union: a session's next frame after missed ticks folds every event of the missed ticks from the push log — an entity's first old
     position, its last new one, and the union of what changed — while every missed tick is still in the log; otherwise the frame is a RESET that
     re-delivers the view cell by cell
+  invariant a session's pending owner mask (SUB-11), the lastSeq its last SELF carried and the tick its acknowledgements were sent up to advance only
+    with a published frame, like its geometry: a skipped frame leaves all three as they were, so its next frame carries the union of the owner groups
+    changed meanwhile and every rejection the acknowledgement history still holds. They record WHICH groups and WHICH ticks, never values — the values
+    are read, current, from the owner entry when SELF is written — so they are not the per-session value memory the next line forbids
   never commit a session's geometry before the frame describing it is published — the commit is the LAST step of assembling a frame, after the encode and
     after the hand-off's release
   never encode a delta, a run-length against a previous frame, or a "changed since you last acked" set: a session that missed K frames must converge on
@@ -454,7 +538,8 @@
   never let a skip — no free frame slot, an exhausted frame pool, a frame above the ceiling, a lagging acknowledgement — be distinguishable from a tick
     that produced nothing: all of them leave the session untouched and are counted
   scope: FrameAssembler.NoteSkip, PushReplication.Commit, PushReplication.NoteNotPublished, PushReplication.CollectLog, PushReplication.EmitLog,
-    SessionFrameState.PendingReset, SessionSendState.TryBeginFrame, SessionSendState.AbandonFrame, SessionSendState.AbandonIdleFrame
+    SessionFrameState.PendingReset, SessionSendState.TryBeginFrame, SessionSendState.AbandonFrame, SessionSendState.AbandonIdleFrame,
+    FrameAssembler.CommitSelf, AckHistory.Collect
   on_violation: the session diverges PERMANENTLY and in silence. Geometry committed for a frame that was never sent makes the session believe its client
     holds entities it was never told about, so no enter is ever sent for them, and leaves are sent for entities the client never had. There is no
     retransmission to fall back on, because there is no per-session value memory to retransmit from. It is the same failure SUB-02's "suppress publish
@@ -470,6 +555,87 @@
     (rate classes replay the log by design) and PushOracleTests.AFarFlushMetFirstAsASecondaryReachesACaughtUpSession (a far flush carried by catch-up).
     Falsifiability is proved by FrameAssemblerTests.ASessionCommittedOnASkippedTickIsDetected, which turns on the push path's own
     `CommitOnSkipForTest` — the one move this rule forbids, applied to the production path — and requires the verifier's assertion to reject it.
+    The owner-state clause: SelfBlockTests.OwnerGroupsChangedWhileSkippedArriveAsTheirUnion (groups changed on skipped ticks arrive together, current;
+    red when a skip clears the pending mask) and SelfBlockTests.LastSeqAndRejectionsReachTheClient (a rejection on a skipped tick still arrives).
+
+### SUB-11: Owner state reaches its controlling session only, every group after a Control change, and the union after a skip `[fatal][silent]`
+  invariant ∀ session s controlling entity e (Control): s's next published frame after a Control change, a RESET or its first frame naming e carries a
+    SELF with every owner group of e; otherwise a SELF carries exactly the owner groups of e that changed since s's last published frame, read current
+    from e's owner entry — and a frame with no changed group and no new lastSeq carries no SELF
+  invariant owner values reach no session that does not control e, and never travel in ENTITIES: the owner section has its own bit space (03 W17), and
+    SELF is the only block whose writer reads the owner entry — the projection compares it and migration copies it, neither sends it
+  invariant a Control change marks every owner group pending, whatever the next frame finds: a flip A → B → A between two published frames sends A's every
+    group, since A's changes during the B ticks were routed to nobody
+  invariant ∀ session s controlling nothing, or whose entity replication cannot locate: a SELF, when one is due, names netId 0 (W17′) — an acknowledgement
+    only — and s is told once, with netId 0, that the entity its last SELF named is no longer its
+  invariant an owner change is routed to its sessions by the projection (SelfTracker.Notice) through a reverse Control map rebuilt only when a controlled
+    entity changed (SessionTable.ControlVersion): the per-tick cost follows owner changes, not sessions (SUB-13)
+  note a change needs a push like any replicated write (ADR-067): the projection compares owner groups only for pushed entities
+  scope: SelfTracker.Notice, SelfTracker.Refresh, SelfTracker.Clear, FrameAssembler.PrepareSelf, FrameAssembler.WriteSelf, FrameAssembler.CommitSelf,
+    EntitiesEncoder.WriteSelf, SessionTable.SetControlled, SessionTable.ControlVersion, ProjectionPass.ProjectBlock
+  on_violation: silent either way. A missing group leaves a client showing an empty wallet after possessing a character until the value happens to
+    change; a group sent to the wrong session shows one player another's private state — credits, inventory, cooldowns.
+  rationale: private state belongs to one entity and one controller; routing its changes by push keeps SELF's cost with the changes, and the pending mask
+    gives a skipped session the union the push log gives its entities.
+  verified: SelfBlockTests.APrivateFieldReachesItsOwnerAndNoOneElse (every group first, then only the changed one; the session beside it never sees a
+    SELF), SelfBlockTests.AControlChangeSendsEveryOwnerGroupOnceAndAReleaseSaysSo (every group of the new entity once though none changes, then netId 0
+    once on release), SelfBlockTests.OwnerGroupsChangedWhileSkippedArriveAsTheirUnion, SelfBlockTests.AControlFlipBetweenTwoFramesStillSendsTheOwnerGroups
+    (red when the frame only compares entities), SelfBlockTests.TwoSessionsControllingOneEntityBothReceiveItsChanges (the reverse map's chain),
+    SelfBlockTests.ADestroyedControlledEntityIsReportedGoneOnce, SelfBlockTests.AResetResendsEveryOwnerGroup,
+    SelfBlockTests.AControlledEntityOutsideTheSessionsGeometryStillSendsItsOwnerState.
+
+### SUB-26: A command's entity reference resolves only to what its session holds `[fatal][silent]`
+  invariant TryResolve(s, netId) = e ⟺ netId is bound to e (the projection binds each identity it assigns and every release unbinds it), e is live in
+    the EntityMap and its replica still carries netId, AND (e is s's controlled entity OR s's COMMITTED geometry holds e: e's archetype is in the set of
+    the profile s's last published frame was built against — not a profile switched to since — and its v̂ passes SUB-16's test against that frame's
+    anchor, radius and delivered cells, or its committed hull and window, or its World cursor)
+  invariant an entity a client learned of only from an event (an attacker beyond its view) does not resolve: events inform, they do not grant reach
+  note the committed geometry is the last PUBLISHED frame's, which the client may not have applied yet: an entity that left in a frame still in flight is
+    refused while the client may still draw it. Judging each command against the frame the client last applied (COMMANDS.clientTick) would need per-session
+    geometry history, which push does not keep; a game treats the refusal as "out of reach". Likewise a session served every few ticks (a rate class,
+    overload) is judged against its last published frame while v̂ is this tick's: near the edge the two differ by those ticks' motion
+  note TryResolveAny keeps the liveness-only answer — bound, live, still that identity — for tools that are not clients (an admin console), under a name
+    that says so
+  scope: SubscriptionsCommands.TryResolve, SubscriptionsCommands.TryResolveAny, FrameAssembler.Holds, PushReplication.HoldsCommitted,
+    PushReplication.TryVisibilityAt, FrameAssembler.IsLive, SessionFrameState.CommittedProfile, NetIdEntityIndex.Bind, NetIdEntityIndex.Unbind,
+    NetIdEntityIndex.Reserve
+  on_violation: silent. A client that names a netId it guessed — or remembered from an event — targets, inspects or trades with an entity behind a wall or
+    across the map: an information leak and a cheat, and no error anywhere.
+  rationale: what a session holds is geometric (SUB-16) and costs nothing to store; the same test, on the committed state, answers "was it shown" with no
+    per-session memory.
+  verified: TryResolveTests.TryResolveAcceptsExactlyWhatTheClientHolds (for a Sphere, a World and a ClientRegion session, TryResolve over every entity
+    equals the replica the session's frames built — red when the geometric test is skipped), TryResolveTests.WhatResolvesFollowsTheViewTheClientWasSent,
+    TryResolveTests.APartialWorldFillAndAnUnobservedArchetypeAreRefused (red when a World session holds everything, and for an archetype outside the
+    set), TryResolveTests.AProfileSwitchResolvesTheOldViewUntilItsFrameIsPublished (red when the current profile is judged),
+    TryResolveTests.ADestroyedEntityIsRefusedBeforeItsIdentityIsReleased, TryResolveTests.TheControlledEntityResolvesAnywhereAndTryResolveAnyIgnoresTheView.
+
+### SUB-27: A command the server refuses is acknowledged, and a session refused for long enough is closed `[fatal][silent]`
+  invariant every command a well-formed COMMANDS message carries is either framed into the tick or answered with an ACK — over the session's inbound
+    budget (the whole message: every command RATE_LIMITED), over its type's rate (RATE_LIMITED), a role that may not send it (FORBIDDEN), the
+    declaration's pre-check (REJECTED), a region the hull builder refuses (REGION_INVALID) — and its seq settles lastSeq either way
+  invariant a session places at most RefusalAcksPerTick transport-side refusals in a tick's shared ACK log, and the log holds that share for every
+    session up to 2 048 (CommandTypeBuffers.AckCapacity): past its share a refusal settles through lastSeq alone and is counted (RefusalAcksCapped),
+    so no session's refusals crowd out another's; nothing else is unanswered but what the session's own ring overflowed, which is counted too
+  invariant the inbound budget (SubscriptionsOptions.IngressBytesPerSecond) is required whenever the catalog has commands, and at least
+    ClientMessageBytes — both refused at Start; every open-session message is charged, only a COMMANDS message is refused (a PING, a BYE and a
+    protocol error are never delayed), and the bucket is exact (bytes × clock ticks, no fraction lost)
+  invariant a session whose refused commands — over budget, per command, plus the ingress's rate and role refusals — pass AbuseRefusalsPerWindow in
+    AbuseWindows adjacent windows is closed with 1008, its KICK sent by its pump (SUB-14); a single abusive window, a gap of two windows or more,
+    a window at the threshold, or a client that stopped sending, is not; a pre-check or region refusal is a game outcome and is not counted
+  invariant the abuse rule is always on: AbuseWindow in (0, 1 h], AbuseRefusalsPerWindow and AbuseWindows positive, or Start refuses
+  scope: SubscriptionConnection.HandleOpen, SubscriptionConnection.CheckAbuse, SubscriptionsIngress.RefuseCommands, SubscriptionsIngress.Publish,
+    SubscriptionsIngress.RefusalAcksPerTick, IngressCommandSink.Refuse, CommandTypeBuffers.AckCapacity, IngressPolicy,
+    SubscriptionsRuntime.ValidateIngressRails, SubscriptionsOptions.IngressBytesPerSecond
+  on_violation: silent. A command dropped with no answer leaves a predicting client waiting on it forever, or replaying it into a divergence; one
+    session's refusals filling the shared log silently drop everyone else's; a client refused forever keeps a transport thread decoding for nothing,
+    and one flooding without a budget has no bound at all.
+  verified: IngressHardeningTests.AMessageOverTheBudgetIsRefusedWholeAndAcknowledged (every refused command acknowledged, lastSeq settling all, the
+    session beside it untouched), IngressHardeningTests.RoleAndPrecheckRefusalsAreAcknowledged, IngressHardeningTests
+    .OneSessionsRefusalsCannotCrowdOutAnothersAcknowledgements, IngressHardeningTests.SustainedRefusalsCloseTheSessionWith1008 (closed at the third
+    window, not before; a single abusive window then calm stays open), IngressHardeningTests.RailsThatWouldNotHoldAreRefusedAtStart,
+    IngressRailsTests (the test's clock: EverythingIsChargedAndOnlyCommandsAreRefused, ARefillInFractionalStepsLosesNothing,
+    OverBudgetAByeAndAProtocolErrorStillClose, AbuseCountsCommandsFromBothSidesAndClosesAfterTheRun, AGapOrACalmWindowBreaksTheRun);
+    SelfBlockTests.LastSeqAndRejectionsReachTheClient for the rate and application paths.
 
 ---
 
@@ -589,10 +755,16 @@
   invariant ∀ push archetype, ∀ live slot s: cold LastEventTick(s) = the tick of the latest PushEvent recorded for the entity in s
   invariant ∀ change to an entity's projected state or motion in tick T: a PushEvent for it is recorded in T, and it names the block and slot the
     entity is in at the end of T — an arrival by migration included, even when no byte changed
-  invariant the far flush of an entity at its phase tick p ((netId mod N + p mod N) mod N = 0) carries every group whose stamp is in (p − N, p]
+  invariant distance bands (09 § 9) are declared per Sphere profile — at most three, periods N ∈ {2, 4, 8} growing outward — and folded once: at the
+    smallest declared period's phase ticks, over the largest's window. For a session holding an entity in band b before and not nearer after, the entity's
+    update is sent only at its flush tick for b, p with ((netId mod N_b + p mod N_b) mod N_b = 0), and carries every group whose stamp is in (p − N_b, p]
+  invariant an entity a session's anchor or radius brings inward across any band's boundary, with no event since the session's last frame, gets every
+    group stamped in its old band's last N ticks before that frame, gap included (the inner crescent); a catch-up's flush-only replay never speaks for
+    such an entity. A window's floor is max(p − N, 0)
   never write a push slot's LastEventTick anywhere but PushReplication.AddEvent — not for a slot the change gate skipped, not on a dormant path
   never drop an arrival's event as a byte-identical no-op
-  scope: PushReplication.AddEvent, PushReplication.FoldFarChunk, PushReplication.FarSweepCell, PushReplication.CollectLog, ProjectionPass.ProjectBlock,
+  scope: PushReplication.AddEvent, PushReplication.FoldFarChunk, PushReplication.FarSweepCell, PushReplication.CollectLog, PushReplication.ConfigureFar,
+    BandBuilder.Every, ProjectionPass.ProjectBlock,
     ReplicationBlockLayout.LastEventTickOffsetInColdEntry, PushEvent.Arrived, PushEvent.FarFlush
   on_violation: the distance LOD's far-flush fold picks an entity's latest event by that stamp, and the sweep, the cell delivery and the log's catch-up
     read it as "the push step owns this entity from that tick on". A stamp moved without an event makes the fold skip the entity, so a change a far
@@ -602,6 +774,149 @@
     entity itself — its group stamps say what, the log's events say where, and this stamp ties the two to one event.
   note the field was the watched-set pipeline's "watched last tick"; that pipeline is gone, and the field now means only this.
   verified: PushOracleTests.ADeferredFarChangeReachesASessionThatWalksCloser, PushOracleTests.DeferredFarUpdatesStillConverge,
-    PushOracleTests.FarFlushesConvergeThroughCatchUpWithSmallCells, PushOracleTests.AFarFlushMetFirstAsASecondaryReachesACaughtUpSession — oracle runs
-    with the shadow legality check on. Falsifiability: removing the
-    far-flush fold's in-place flag, its flush entries or the inner-crescent sweep each turns ADeferredFarChangeReachesASessionThatWalksCloser red.
+    PushOracleTests.FarFlushesConvergeThroughCatchUpWithSmallCells, PushOracleTests.AFarFlushMetFirstAsASecondaryReachesACaughtUpSession,
+    PushOracleTests.ThreeBandsConvergeAtEverySkipRate, PushOracleTests.AChangeWithheldBeforeASkippedFlushReachesASessionThatCameCloser,
+    PushOracleTests.AChangeInTheFirstTicksReachesAFarSession, SubscriptionsRegistryTests.ABadBandIsRefusedWhereItIsDeclared — oracle runs with the
+    shadow legality check on. Falsifiability: removing the far-flush fold's
+    in-place flag, its flush entries or the inner-crescent sweep each turns ADeferredFarChangeReachesASessionThatWalksCloser red; its nested-bands case
+    goes red when the inner crescent serves only entities that become near. The inner crescent's window reaching back past a catch-up's gap, and a
+    flush window's floor wrap-safe in the first ticks, each turn their scripted test red when removed.
+
+### SUB-21: An event reaches exactly the sessions its route names, once, in emission order `[fatal][silent]`
+  invariant an event emitted in tick T (SubscriptionsCommands.Emit) is encoded once, after T's projection, into T's event log slot; the bytes are the
+    catalog plan's field encoding (FieldCodec), identical for every session, and an EntityId field is the entity's netId, 0 when it has none
+  invariant a session's frame carries the events routed to it in every tick after its last committed frame (the current tick alone before its first),
+    each once, in emission order (worker slot, then call order); Broadcast routes to every session, ToOwner to the session whose Control is the named
+    entity when the frame is built, ToSession to the session EmitTo names; Near and ToKnown to every session that sees the event's point, or a named
+    entity's v̂ — its v̂ before this tick too, when this tick moved it to another cell (was ∨ is) — against its committed or pending geometry (inside the sphere with the point's cell delivered — SUB-16's test; a World session: the cell
+    delivered), and Near with a radius only within it of the session's viewpoint
+  invariant an entity destroyed in the event's tick still resolves, from the projection's release, to the netId and v̂ it had
+  invariant an event of a tick the log no longer holds is counted, not sent: the frame opens its EVENTS block with the built-in EventsLost (index 0)
+    carrying that count over the last EventHub.SummaryDepth ticks — a lower bound beyond. Broadcast and ToSession are counted exactly; ToOwner against
+    the session's Control, and Near and ToKnown against its geometry, when the frame is built (a session that moved or changed Control during the gap is
+    counted as it is now). Events take at most half a frame: past it, they are counted rather than sent
+  invariant a session bound to no profile has no view: Broadcast and ToSession reach it in frames of events alone, caught up from the log like any
+    session's; the other routes never do. Emissions of a tick no frame stage encoded (no session, no push replication, an aborted tick)
+    are discarded at the next tick's start, not delivered later
+  invariant a value its codec cannot carry drops that one event, counted in EventHub.Rejected; the tick path does not throw
+  never keep per-session event state: the log and its summary are per tick
+  scope: EventHub, EventHub.Emit, EventHub.EmitTo, EventHub.EncodeTick, EventHub.Collect, EventHub.Write, SubscriptionsCommands.Emit,
+    SubscriptionsCommands.EmitTo, BuiltInEvents, PushReplication.SeesPoint, PushReplication.WorldSeesPoint, NetIdLeaseSet.Depart, FrameAssembler.AssemblePush
+  on_violation: a client acts on an event that was not its own, twice, out of order, or never learns that it missed one — silently.
+  rationale: events are best effort but never ambiguous: the log makes a skipped session's union exact while the log lasts, and the loss count says
+    how much it missed after.
+  verified: EventDeliveryTests.EveryEventReachesExactlyItsSessionsAtEverySkipRate (random broadcast and owner events, skip 0–90 %: once each, in order,
+    received + lost = routed; Near and ToKnown included), EventDeliveryTests.AnEventReachesItsSessionsWithItsValues,
+    EventDeliveryTests.EveryCodecShapeRoundTripsAndABadValueDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
+    EventDeliveryTests.WorldSessionsLateSessionsAndWorkerOrder, EventDeliveryTests.AKnownEventReachesASessionTheEntityLeftThisTick,
+    EventDeliveryTests.ASessionWithNoProfileHearsBroadcastsAndItsOwnEvents. Falsifiability: filing only the current v̂ turns the leaving-entity case red; a frame that carries only its own tick's events turns the
+    30–90 % cases red; a loss count of 0 turns the 60 and 90 % cases red; dropping the dedupe turns the oracle and the dedupe case red.
+
+### SUB-22: A session's LOD level defers updates and never loses one `[fatal][silent]`
+  invariant a session's LOD level ℓ ∈ 0..3 commits with its frame (SUB-03); the frame is gathered with the committed level's bands before (what every
+    held-back change was scheduled by) and the target level's after. At ℓ every declared band's period is min(N · 2^ℓ, 8) at the same boundary, and a
+    profile with none has one beyond R′/2, every 2^ℓ ticks; the enter budget is max(1, (EnterBudgetPerFrame >> target level) / tick multiplier). A
+    World session has no level: its frames return it to 0
+  invariant overload: while the tick multiplier is above 1, every Sphere session's target level is its budget level + 1 (at most 3) and every profile
+    is served at min(2 · divisor, 4); both follow the multiplier the tick started with and fall back with it
+  invariant the radius shrinks only at ℓ = 3 and still over the budget, a sixteenth of the session's own radius per second, never below half of it;
+    under the lower mark it grows back a step per 3 s before any level falls, when the rate scaled to the grown disc (ball) stays under the mark. A shrink is a radius
+    change (a shell sweep of leaves) and commits with the frame
+  invariant after a level falls from ℓ to ℓ′ < ℓ, for LogDepth ticks a band's flush carries every group stamped in its period at ℓ, not ℓ′: the first
+    flush on the shorter schedule reaches back to the last one on the longer
+  invariant the fold's phase divides every period in use and its window covers every flush's history: while any committed level is above zero, the
+    phase is at most 2^(lowest such level) and the window is min(LogDepth, max(declared longest period, 1) · 2^(highest such level)); while no level is, but one fell in the last LogDepth ticks and a band is still
+    in use (phase > 1), the window is LogDepth. The census may count too many sessions — a closed one, until the recount every RecountEvery ticks — but
+    never too few
+  invariant the budget loop raises the level after the bytes/s EWMA has been over the session's budget for 1 s, lowers it after 3 s under 0.7 of it,
+    and returns a session with no budget to level 0. It reads the link: a frame published counts its bytes and a frame with nothing to say counts 0,
+    over the live tick period; a frame refused (degraded, lagging, no slot, oversize, no pool) is not fed — congestion is not quiet
+  never drop a record for a budget: a deferred change reaches the session at the entity's next flush for its committed level, or by the inner crescent;
+    the only eviction is the bounded last-resort radius
+  scope: PushReplication.Pace, PushReplication.ResolveFar, PushReplication.CommitLevel, PushReplication.RecountLevels, LodBands.AtLevel,
+    FrameAssembler.ExecutePushSessions
+  on_violation: a flush that does not reach back far enough after a fall, or a fold phase that misses a session's flush ticks, leaves a client with a
+    stale group until the entity changes it again — silently.
+  rationale: push keeps no per-(session, entity) record of what was sent; a level is only a change of schedule, so everything it withholds must be
+    recoverable from the entity's group stamps and the log, as the declared bands' are (SUB-19).
+  verified: PushLodLevelTests.LevelChangesConvergeAtEverySkipRate (levels moved at random, both ways, several steps at once, banded and bandless,
+    skip 0–60 %) and LevelChangesConvergeOnTheDeepImplementation, PushLodLevelTests.ABudgetRaisesTheLevelAndRemovingItLowersIt (end to end through
+    SetBudget, and the fold it implies), PushLodLevelTests.TheBudgetLoopRisesAfterASecondOverAndFallsAfterThreeUnder (the loop's timing, cadence and
+    an elapsed-ticks step), PushLodLevelTests.AClosedSessionAtALevelReleasesTheFold (the census and the fold's window),
+    PushLodLevelTests.ARadiusTheBudgetShrinksConverges (the last resort, never below R′/2), PushLodLevelTests.AnOverloadedTickRaisesEveryLevelAndHalvesTheRate
+    (the overload step and rate). Falsifiability: a fold window sized from the lowest level turns the bandless level cases red; dropping the fall's widening turns
+    LevelChangesConvergeAtEverySkipRate(0, banded) red; a fold phase blind to the levels turns the bandless cases and ABudget… red; no inner crescent
+    on a band that went turns LevelChangesConvergeAtEverySkipRate(0, bandless) and ABudget… red. The refused-frame clause and the World reset have no
+    test.
+
+### SUB-23: A near budget delivers and takes back whole cells, nearest the region's centroid first `[fatal][silent]`
+  invariant ∀ ClientRegion session s with near budget n (09 § 7): its estimate — the entities of its archetypes in its delivered cells, from the per-cell
+    counts (SUB-24) — is an upper bound on what it holds; the cells its hull meets are delivered nearest the hull's centroid first, by Chebyshev ring,
+    while the estimate plus the next cell's count stays within n — the first cell past the prefix ends the walk even when it is one this frame took back;
+    past 1.1 n, the farthest delivered cells are taken back at once (a sweep of leaves)
+    until the estimate is within n; a new hull first takes back the delivered cells past its own ring order's prefix within n, so a pan holds the cells
+    around its new centroid; with the hull unchanged and the last fill complete, more is delivered only after the estimate has stayed under 0.9 n for a
+    second (the deadband, F5). The estimate and the deadband's clock commit with the frame (SUB-03)
+  invariant VIEW_COMPLETE means every cell the budget admits is delivered: a fill the near budget stopped is complete, one the enter budget stopped is not
+  never deliver or take back part of a cell, and never evict a single entity for the budget: what s holds is always known(s, e) of SUB-16 over its
+    delivered cells
+  scope: PushReplication.GatherRegion, PushReplication.HeldCount, PushReplication.TakeBackPastThePrefix, PushReplication.NearCounts,
+    SubscriptionProfiles.NearOf, SubscriptionProfiles.BindNearCounts
+  on_violation: a budget that splits cells holds entities no geometry names, and one without the deadband delivers and takes back the same cell as
+    counts wobble around n — a client that sees entities flicker at the edge of its view.
+  rationale: push keeps no per-(session, entity) state, so a budget can act only on what the geometry names — whole cells; an upper-bound estimate makes
+    it err toward fewer entities, never more (09 § 7, prior art F2 and F5).
+  verified: ClientRegionObserverTests.ANearBudgetDeliversWholeCellsNearestTheCentroid (within n and short of it by less than a cell, the estimate exact,
+    no cell half held, nothing nearer undelivered, a static scene changing nothing for 3 s), ClientRegionObserverTests.MoreIsDeliveredOnlyAfterASecondUnderNinetyPercent
+    (red without the deadband's second), ClientRegionObserverTests.PastTenPercentOverTheFarthestCellsAreTakenBack,
+    ClientRegionObserverTests.APannedRegionHoldsTheCellsNearestItsNewCentroid (red without the prefix's take-back),
+    PushRegionTests.ABudgetedRegionHoldsWholeCellsAndItsAggregateTheRest (churn, moves and skips: at most 1.1 n and within the estimate at every quiet
+    point, the shadow oracle exact), and its 3D form PushOracle3DTests.ABudgetedPolyhedronHoldsWholeCellsAndItsAggregateTheRest.
+
+### SUB-24: The occupancy counts exactly the entities whose last pushed position lies in each cell `[fatal][silent]`
+  invariant after every index, ∀ cell: occupancy(cell) = the live, identified entries of observed archetypes whose last pushed position lies in cell,
+    and a cell with none has no entry
+  invariant every tick the track runs is indexed, sessions bound to a profile or not: the tick's cell changes are the occupancy's only input
+  invariant a tick whose changes the occupancy missed — one the track did not run for, or one it ran but never finished indexing — is followed by a
+    recount at the next index's finish, after that tick's projection: only then do the blocks describe the fence's carried and parked entries
+  invariant the aggregate grids (09 § 8) take the same deltas per archetype and tile: after every index, ∀ grid, tile, counted archetype a: count = the
+    live, identified entries of a whose last pushed position lies in the tile; a recount of the occupancy recounts them. A tile is a whole number of
+    replication cells over the same origin — a move within a cell never crosses a tile edge — and a grid counts only archetypes push replication serves
+  invariant a session's AGG block carries, on its aggregate tick (at most the declared rate, staggered by slot), the tiles of its region (every tile,
+    or those meeting the declared radius around its anchor) that changed since its last AGG or that the region newly covers; the first, or one after a
+    reset, sets RESET and carries every non-empty tile. Counts are absolute, so a skipped session's next AGG is the union. A ClientRegion session's
+    region is its hull less the cells its near tier delivered — the tiles with a cell inside the hull's cell box that meets the hull and was not
+    delivered, a deep grid's tiles always with their z extent — and "newly covers" is measured against its region at its last AGG, kept with it; a tile
+    that left the region is sent as zero, since the client knows its hull but not which cells were delivered
+  invariant the near budgets' per-cell counts (SUB-23) take the same deltas, one map per distinct archetype set a budgeted profile observes: after every
+    index, ∀ cell: count = the live, identified entries of the set's archetypes whose last pushed position lies in the cell; recounted with the occupancy
+  never skip a cell delivery or a sweep on a cell whose count is not zero
+  scope: ReplicationOccupancy, PushReplication.MergeChunk, PushReplication.FinishIndex, PushReplication.Recount, PushReplication.PrepareBlocks,
+    PushReplication.DeliverCell, PushReplication.SweepCell, FrameAssembler.BeginPushTick, AggregateCounts, PushReplication.RecountAggregates,
+    PushReplication.RegionAggregates, FrameAssembler.SelectRegionAggregateRows
+  on_violation: an under-count skips a cell that holds entities — a session never receives them until they move, silently. An over-count only costs
+    a query.
+  rationale: the empty-cell skip is what makes a sparse or 3D fill cheap; it is sound only because every change of cell makes an event (SUB-19).
+  verified: PushIndexTests.TheOccupancyEqualsARecountUnderChurn, PushIndexTests.ASkippedTickIsFollowedByARecount,
+    PushIndexTests.AnUnindexedTickIsFollowedByARecount, PushIndexTests.ATickWithNoBoundSessionIsStillIndexed,
+    ReplicationOccupancyTests (the map against a dictionary), PushAggregateTests.TheCountsEqualARecountUnderChurn (World and Sphere, skip 0 and 60 %),
+    PushAggregateTests.TheClientsCountsAreTheServers, PushRegionTests.ABudgetedRegionHoldsWholeCellsAndItsAggregateTheRest (the near counts and the
+    tiles against a recount at every quiet point; a region's aggregate tile for tile against a region derived in the test — red when "newly covers" or
+    the zero rows are dropped), PushOracle3DTests.ABudgetedPolyhedronHoldsWholeCellsAndItsAggregateTheRest (also an aggregate one tile as tall as the
+    world — red when its z extent is taken as the grid's). Falsifiability: PushIndexTests.AnOccupancyThatKeepsMoversInTheCellTheyLeftIsCaught runs the
+    mutant that drops a secondary's decrement; dropping it from the aggregate deltas turns TheCountsEqualARecountUnderChurn red.
+
+### SUB-25: The push index holds this tick's events in cell order and touches only occupied cells `[perf][silent]`
+  invariant ∀ tick T, the index (= T's log slot) holds every event of T once under its primary cell and once more under the cell a mover left, cells
+    ascending by packed key, a cell's primaries before its secondaries; its row table names every occupied row's first cell
+  invariant building and reading the index costs O(events + occupied cells + rows read): no per-tick structure is sized by, cleared over or walked
+    across the replication grid's cell count, so an empty world indexes nothing whatever its cell side (10 § 2.3, SUB-13's precedent)
+  never let a read path insert into the index or the row table
+  scope: PushReplication.SortRun, PushReplication.MergeChunk, PushReplication.FinishIndex, PushReplication.Gather, PushReplication.CollectLog
+  on_violation: silent and slow. A dense index pays for every cell of the world every tick with nothing to index — the reason a 3D or a fine grid was
+    unaffordable — and a misfiled event is an entity a session never hears about.
+  rationale: 3D cubes the cell count; only a structure that follows events keeps replication's cost independent of the grid.
+  verified: PushIndexTests.TheIndexHoldsExactlyTheCellsTheEventsName and PushIndexTests.ConcurrentMergeChunksBuildTheSameIndexShape — the index as a
+    multiset of (identity, cell, secondary) against the runs' raw events; PushIndexTests.AnEmptyWorldIndexesNothingWhateverTheGrid.
+    Falsifiability: PushIndexTests.AnIndexThatMisfilesSecondariesIsCaught. The cost clause is timed by the explicit
+    PushIndexTests.AnEmptyWorldCostsTheSameWhateverTheCellSide, not in the gate; the never clause has no test.

@@ -96,6 +96,8 @@ export const AckReason = {
   RateLimited: 1,
   Rejected: 2,
   RegionInvalid: 3,
+  /** The session's role may not send this command type (the catalog's `roles`). */
+  Forbidden: 4,
   FirstApplicationReason: 128,
 } as const;
 
@@ -107,6 +109,8 @@ export const CloseCode = {
   ProtocolError: 1002,
   /** A bad index, length, count, UTF-8 sequence or an over-cap field. */
   MalformedPayload: 1007,
+  /** Sustained abuse: well-formed messages, refused for too long — over budget, over rate, the wrong role. Reconnect with backoff. */
+  PolicyViolation: 1008,
   MessageTooBig: 1009,
   InternalError: 1011,
   TryAgainLater: 1013,
@@ -121,6 +125,13 @@ export const CloseCode = {
   ClientRefusedTheStream: 4004,
   FirstApplicationCode: 4100,
   LastApplicationCode: 4999,
+} as const;
+
+/** The events the engine declares itself, at reserved indices 0–15 (W27). */
+export const BuiltInEvent = {
+  EventsLost: 'EventsLost',
+  EventsLostIdx: 0,
+  eventsLostCountField: 'count',
 } as const;
 
 /** The built-in commands (W27, W28), at reserved indices that never move. */

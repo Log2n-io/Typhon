@@ -9,7 +9,7 @@ import type {
   CatalogPosition,
 } from './catalog.js';
 import { codecKindOf, CodecKind, isListElement, isPacked } from './codec-kinds.js';
-import { BuiltInCommand, ProtocolConstants } from './constants.js';
+import { BuiltInCommand, BuiltInEvent, ProtocolConstants } from './constants.js';
 import { pow2, quantStep } from './math.js';
 import { encodeUtf8 } from './utf8.js';
 
@@ -59,6 +59,11 @@ function reservedCommandIdx(name: string): number {
     : name === BuiltInCommand.SubscribeRequest
       ? BuiltInCommand.SubscribeRequestIdx
       : -1;
+}
+
+/** The reserved index of a built-in event, or −1. */
+function reservedEventIdx(name: string): number {
+  return name === BuiltInEvent.EventsLost ? BuiltInEvent.EventsLostIdx : -1;
 }
 
 /** The reserved index of a built-in metric, or −1. */
@@ -168,15 +173,12 @@ export function checkCanonical(c: Catalog, problems: string[]): void {
     }
   });
 
-  c.events.forEach((e, i) => {
-    if (e.idx !== ProtocolConstants.firstAppEventIdx + i || (i > 0 && !(c.events[i - 1]!.name < e.name))) {
-      fail(`event '${e.name}' is not at its ordinal index`);
-    }
-
+  checkReservedOrder(c.events, reservedEventIdx, ProtocolConstants.firstAppEventIdx, 'event', fail);
+  for (const e of c.events) {
     if (!fieldsInLayoutOrder(e.fields, [])) {
       fail(`event '${e.name}' fields are not in wire order`);
     }
-  });
+  }
 
   checkReservedOrder(c.commands, reservedCommandIdx, ProtocolConstants.firstAppCommandIdx, 'command', fail);
   for (const cmd of c.commands) {
@@ -312,9 +314,10 @@ function hasClientRegionShape(cmd: CatalogCommand): boolean {
     cmd.rate?.perSec === 5 &&
     cmd.rate.burst === 5 &&
     vertices?.t === 'list' &&
-    vertices.minCount === 3 &&
+    // A flat world's region is a polygon (pos2, 3–16 points), a deep world's a polyhedron (pos3, 4–16).
+    ((vertices.of?.t === 'pos2' && vertices.minCount === 3) ||
+      (vertices.of?.t === 'pos3' && vertices.minCount === 4)) &&
     vertices.maxCount === 16 &&
-    vertices.of?.t === 'pos2' &&
     field(BuiltInCommand.regionAltitudeField)?.t === 'f16' &&
     field(BuiltInCommand.regionBudgetField)?.t === 'u16' &&
     cmd.fields.every((f) => f.group === undefined && f.onEnter !== true && f.enum === undefined)

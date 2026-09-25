@@ -137,17 +137,7 @@ public static class FieldCodec
             {
                 var f = section.Fields[i];
                 var v = Require(values(f), f).Numbers[0];
-                uint code;
-                if (f.Kind == CodecKind.Bool)
-                {
-                    code = v != 0 ? 1u : 0u;
-                }
-                else
-                {
-                    code = ToUnsignedInteger(v, (1UL << f.BitCount) - 1, f);
-                }
-
-                WritePackedBits(pack, f.BitOffset, f.BitCount, code);
+                WritePackedBits(pack, f.BitOffset, f.BitCount, PackedCode(f, v));
             }
 
             writer.WriteBytes(pack);
@@ -196,6 +186,14 @@ public static class FieldCodec
             }
         }
     }
+
+    /// <summary>The code a packed field (<c>bool</c>, <c>bits</c>) stores for <paramref name="value"/>.</summary>
+    /// <param name="field">A packed field.</param>
+    /// <param name="value">Its value.</param>
+    /// <returns>The code, <see cref="FieldPlan.BitCount"/> bits wide.</returns>
+    /// <exception cref="ArgumentException">A <c>bits</c> value that is not an integer in its range.</exception>
+    public static uint PackedCode(FieldPlan field, double value) =>
+        field.Kind == CodecKind.Bool ? (value != 0 ? 1u : 0u) : ToUnsignedInteger(value, (1UL << field.BitCount) - 1, field);
 
     /// <summary>Decodes one numeric value of <paramref name="field"/> into <paramref name="destination"/>.</summary>
     /// <param name="reader">The reader.</param>

@@ -1,10 +1,16 @@
 using JetBrains.Annotations;
 using System;
+using System.Linq;
 using System.Collections.Generic;
 using System.Linq.Expressions;
 using Typhon.Protocol;
 
 namespace Typhon.Engine;
+
+/// <summary>Fills a labelled metric's values, one per label in the declared order (09 § 15, D5).</summary>
+/// <param name="values">As many values as the metric has labels, zeroed; a value left unwritten is sent as zero.</param>
+[PublicAPI]
+public delegate void MetricValuesSource(Span<double> values);
 
 /// <summary>
 /// What a metric measures.
@@ -109,6 +115,41 @@ public sealed class SubscriptionsRegistry
         => DeclareArchetype<TArchetype>(configure, isStatic: true);
 
     /// <summary>
+    /// Declares an archetype from its replication attributes (design/Subscriptions/11 § 5): <c>[Replicated]</c> on the archetype, <c>[Motion]</c> or
+    /// <c>[Position]</c> on a <c>Comp&lt;T&gt;</c> field, <c>[Replicate]</c>, <c>[OnEnter]</c>, <c>[Owner]</c>, <c>[Fraction]</c>, <c>[Heading]</c> on its
+    /// components' fields. The source generator compiles them into the builder calls <see cref="Archetype{TArchetype}(Action{ArchetypeProjectionBuilder})"/>
+    /// would take; calling that overload instead replaces the attributes entirely, which is how a deployment overrides them.
+    /// </summary>
+    /// <typeparam name="TArchetype">
+    /// A <c>[Replicated]</c> archetype: the generator implements <see cref="IReplicatedArchetype"/> on it, so an archetype without the attribute — or an
+    /// assembly the generator does not run in — does not compile here.
+    /// </typeparam>
+    /// <returns>This registry.</returns>
+    public SubscriptionsRegistry Archetype<TArchetype>() where TArchetype : Archetype<TArchetype>, IReplicatedArchetype
+        => DeclareArchetype<TArchetype>(static a => TArchetype.DeclareReplication(a), TArchetype.ReplicatedStatic);
+
+    /// <summary>The fields a command or event type's attributes declare, or <see langword="null"/> — read once per declaration, without reflection.</summary>
+    /// <exception cref="InvalidOperationException">
+    /// The type carries <c>[ReplicatedMessage]</c> and the generator never ran on its assembly: its attributes would silently be ignored.
+    /// </exception>
+    private static MessageFieldDeclaration[] AttributedFieldsOf<T>() where T : unmanaged
+    {
+        if (default(T) is IReplicatedMessage message)
+        {
+            return message.ReplicatedFields();
+        }
+
+        if (typeof(T).IsDefined(typeof(ReplicatedMessageAttribute), inherit: false))
+        {
+            throw new InvalidOperationException(
+                $"'{typeof(T).Name}' is [ReplicatedMessage] but does not implement IReplicatedMessage: the Typhon source generator did not run on its " +
+                "assembly, so its codec attributes would be ignored. Reference the generator (Typhon.Generators.Consumer) from that project.");
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Declares a named set of observers a session can be bound to.
     /// </summary>
     /// <param name="name">The profile's name.</param>
@@ -174,16 +215,18 @@ public sealed class SubscriptionsRegistry
     }
 
     /// <summary>
-    /// Declares that an event queue's events reach clients, and how.
+    /// Declares an event type clients receive, and how it is routed. Systems send one with <see cref="SubscriptionsCommands.Emit{T}"/>.
     /// </summary>
-    /// <typeparam name="T">The event type.</typeparam>
-    /// <param name="queue">The queue systems produce into. Replication becomes its single consumer.</param>
+    /// <typeparam name="T">The event type: an unmanaged, blittable struct.</typeparam>
     /// <param name="configure">Declares routing and fields.</param>
     /// <returns>This registry.</returns>
-    public SubscriptionsRegistry Event<T>(EventQueue<T> queue, Action<EventBuilder<T>> configure) where T : unmanaged
+    /// <remarks>
+    /// <b>Emitted, not drained (09 § 11, Q3).</b> An event a client sees is emitted explicitly, as state is pushed (ADR-067): an application that also
+    /// applies its events keeps its own <see cref="EventQueue{T}"/> for the simulation and emits what clients should see.
+    /// </remarks>
+    public SubscriptionsRegistry Event<T>(Action<EventBuilder<T>> configure) where T : unmanaged
     {
         ThrowIfFrozen();
-        ArgumentNullException.ThrowIfNull(queue);
         ArgumentNullException.ThrowIfNull(configure);
 
         SubscriptionsNames.RefuseReservedName(typeof(T).Name, "An event");
@@ -195,7 +238,7 @@ public sealed class SubscriptionsRegistry
             }
         }
 
-        var declaration = new EventDeclaration(queue.Name, typeof(T), _events.Count);
+        var declaration = new EventDeclaration(typeof(T), _events.Count, System.Runtime.CompilerServices.Unsafe.SizeOf<T>(), AttributedFieldsOf<T>());
         configure(new EventBuilder<T>(declaration));
 
         // Here, and not at Start: a field defaults to its raw type, and the types that have no default — a 64-bit integer, a double — can only be answered by
@@ -225,7 +268,7 @@ public sealed class SubscriptionsRegistry
             }
         }
 
-        var declaration = new CommandDeclaration(typeof(T), _commands.Count);
+        var declaration = new CommandDeclaration(typeof(T), _commands.Count, AttributedFieldsOf<T>());
         configure(new CommandBuilder<T>(declaration));
 
         // Here, and not at Start: a field defaults to its raw type, and the types that have no default — a 64-bit integer, a double — can only be answered by
@@ -258,6 +301,60 @@ public sealed class SubscriptionsRegistry
     {
         ThrowIfFrozen();
         ArgumentNullException.ThrowIfNull(source);
+        CheckMetric(name, unit, codec);
+        _metrics.Add(new MetricDeclaration(name, unit, codec, kind, labels, source, _metrics.Count));
+        return this;
+    }
+
+    /// <summary>
+    /// Declares a labelled application metric (09 § 15, D5): one value per label, all read by one call per emission — not one per label, not one per
+    /// session.
+    /// </summary>
+    /// <param name="name">The metric's name. The <c>typhon.</c> prefix is reserved for the engine's own.</param>
+    /// <param name="unit">Its unit.</param>
+    /// <param name="codec">How each value travels.</param>
+    /// <param name="labels">The labels, at least one, distinct: the order the values are written in.</param>
+    /// <param name="source">Fills the values, one per label in <paramref name="labels"/>' order; a value it leaves unwritten is zero.</param>
+    /// <param name="kind">Gauge or counter.</param>
+    /// <returns>This registry.</returns>
+    public SubscriptionsRegistry Metric(string name, string unit, Codec codec, string[] labels, MetricValuesSource source,
+        MetricKind kind = MetricKind.Gauge)
+    {
+        ThrowIfFrozen();
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(labels);
+        CheckMetric(name, unit, codec);
+        if (labels.Length == 0 || labels.Distinct(StringComparer.Ordinal).Count() != labels.Length || labels.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new ArgumentException($"Metric '{name}' needs at least one label, each named and distinct: a value is addressed by its label.",
+                nameof(labels));
+        }
+
+        _metrics.Add(new MetricDeclaration(name, unit, codec, kind, labels, null, _metrics.Count) { ValuesSource = source });
+        return this;
+    }
+
+    /// <summary>
+    /// Declares a per-session application metric (09 § 15, D5): a value for each session that asked for statistics, read once per such session per
+    /// emission — a second, on the tick every block is sent.
+    /// </summary>
+    /// <param name="name">The metric's name. The <c>typhon.</c> prefix is reserved for the engine's own.</param>
+    /// <param name="unit">Its unit.</param>
+    /// <param name="codec">How the value travels.</param>
+    /// <param name="source">Reads the session's value. It runs on a frame worker, concurrently for different sessions: it must not write shared state.</param>
+    /// <param name="kind">Gauge or counter.</param>
+    /// <returns>This registry.</returns>
+    public SubscriptionsRegistry SessionMetric(string name, string unit, Codec codec, Func<SessionId, double> source, MetricKind kind = MetricKind.Gauge)
+    {
+        ThrowIfFrozen();
+        ArgumentNullException.ThrowIfNull(source);
+        CheckMetric(name, unit, codec);
+        _metrics.Add(new MetricDeclaration(name, unit, codec, kind, null, null, _metrics.Count) { SessionSource = source });
+        return this;
+    }
+
+    private void CheckMetric(string name, string unit, Codec codec)
+    {
         if (string.IsNullOrWhiteSpace(name))
         {
             throw new ArgumentException("A metric needs a name.", nameof(name));
@@ -287,9 +384,6 @@ public sealed class SubscriptionsRegistry
                 throw new InvalidOperationException($"Metric '{name}' is already declared.");
             }
         }
-
-        _metrics.Add(new MetricDeclaration(name, unit, codec, kind, labels, source, _metrics.Count));
-        return this;
     }
 
     /// <summary>
@@ -337,84 +431,77 @@ public sealed class SubscriptionsRegistry
 
     private void RefuseUnbuiltShapes()
     {
-        foreach (var archetype in _archetypes)
-        {
-            RefuseHeadings(archetype);
-        }
-
         foreach (var profile in _profiles)
         {
             foreach (var observer in profile.Observers)
             {
-                if (observer.Kind is not (ObserverKind.World or ObserverKind.Sphere))
+                if (observer.Kind == ObserverKind.Sphere
+                    && (observer.BoundEntity != EntityId.Null ? 1 : 0) + (observer.FollowsControlled ? 1 : 0) + (observer.Placement.HasValue ? 1 : 0) > 1)
                 {
+                    // Bind, AroundControlled and At each name where the sphere is centred; two of them name two places, and serving either would be a
+                    // silent substitution.
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a {observer.Kind} observer, which a later phase builds. World and Sphere ship; the other " +
-                        "shapes are declarable now so the API does not grow verbs later.");
+                        $"Profile '{profile.Name}' declares a Sphere centred in more than one way (Bind, AroundControlled, At). Declare one.");
                 }
 
-                if (observer.Kind == ObserverKind.Sphere && (observer.BoundEntity != EntityId.Null || observer.FollowsControlled))
+                if (observer.Kind != ObserverKind.Sphere
+                    && (observer.BoundEntity != EntityId.Null || observer.FollowsControlled || observer.Placement.HasValue))
                 {
-                    // The sphere is centred on the session's viewpoint, which the application places on the tick. Following an entity means the ENGINE
-                    // resolving that entity's position on the replication track, which is a different piece of work; refusing it is better than silently
-                    // centring the sphere somewhere the declaration did not ask for.
+                    // A World has no centre and a ClientRegion's is the client's; serving either without the centre it names would be a silent substitution.
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a Sphere that follows an entity. Centre it with the session's viewpoint instead — an "
-                        + "application system calls Place(session, position) each tick — until the engine-side follow is built.");
+                        $"Profile '{profile.Name}' centres a {observer.Kind} observer (Bind, AroundControlled or At), which only a Sphere has.");
                 }
 
-                if (observer.NearBudget != 0 || observer.FarTileM != 0)
+                if (observer.NearBudget != 0 && observer.Kind != ObserverKind.ClientRegion)
                 {
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares near/far tiers, which Phase 2 builds together with the observers that need them.");
+                        $"Profile '{profile.Name}' declares a near budget on a {observer.Kind} observer. A near budget caps a ClientRegion's delivered cells " +
+                        "(09 § 7); a Sphere's session takes a byte budget (SetBudget).");
                 }
 
-                if (observer.Kind == ObserverKind.Sphere && observer.LeaveRadius != 0)
+                if (observer.FarTileM != 0)
                 {
-                    // An entity is held while it is within the radius of the session's anchor: one radius, no band. Ignoring a declared band would make the
-                    // declaration say something the engine does not do.
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a Sphere with a leave radius. Hysteresis is Phase 2 work; declare the enter radius alone "
-                        + "until then.");
+                        $"Profile '{profile.Name}' declares a far tier with Far(tileM, maxHz). The far tier is an Aggregate beside the entity observer: " +
+                        "p.Aggregate(tileM, rateHz).Of<A>().");
                 }
+
             }
 
-            if (profile.Observers.Count > 1)
+            // Tiers (09 § 5): one entity observer, and at most one Aggregate beside it.
+            var entityObservers = 0;
+            var aggregates = 0;
+            foreach (var observer in profile.Observers)
+            {
+                entityObservers += observer.Kind is ObserverKind.World or ObserverKind.Sphere or ObserverKind.ClientRegion ? 1 : 0;
+                aggregates += observer.Kind == ObserverKind.Aggregate ? 1 : 0;
+            }
+
+            if (entityObservers > 1 || aggregates > 1)
             {
                 throw new NotSupportedException(
-                    $"Profile '{profile.Name}' declares {profile.Observers.Count} observers. A profile is served through exactly one World or Sphere observer "
-                    + "until Phase 2 builds the tiers that give several a meaning.");
+                    $"Profile '{profile.Name}' declares {entityObservers} entity observers and {aggregates} aggregates. A profile is served through exactly " +
+                    "one World, Sphere or ClientRegion observer, with at most one Aggregate beside it.");
             }
-        }
 
-        // One radius for every Sphere: the push index's cells are sized from it, so a second radius would be served at the first's without a word.
-        var radius = 0d;
-        var observed = new HashSet<Type>();
-        foreach (var profile in _profiles)
-        {
             foreach (var observer in profile.Observers)
             {
-                observed.UnionWith(observer.Archetypes);
-                if (observer.Kind != ObserverKind.Sphere)
+                if (observer.Kind == ObserverKind.Aggregate && observer.AggregateRadiusM > 0
+                    && !profile.Observers.Any(o => o.Kind == ObserverKind.Sphere))
                 {
-                    continue;
-                }
-
-                if (radius != 0d && observer.Radius != radius)
-                {
+                    // A World's aggregate covers every tile and a ClientRegion's its hull: a radius would be dropped, silently.
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a Sphere of {observer.Radius} m where another profile declares {radius} m. Every Sphere shares one "
-                        + "radius until the push index is sized per profile.");
+                        $"Profile '{profile.Name}' declares an Aggregate radius beside a World or ClientRegion. Only a Sphere's aggregate has a radius; a " +
+                        "World's covers every tile and a ClientRegion's its hull.");
                 }
-
-                radius = observer.Radius;
             }
-        }
 
-        if (observed.Count > 64)
-        {
-            throw new NotSupportedException(
-                $"The profiles observe {observed.Count} archetypes. A session's archetype set is a 64-bit mask, so at most 64 can be observed.");
+            if (aggregates > 0 && entityObservers == 0)
+            {
+                throw new NotSupportedException(
+                    $"Profile '{profile.Name}' declares an Aggregate alone. An aggregate is a tier beside the profile's World, Sphere or ClientRegion " +
+                    "observer.");
+            }
         }
 
         if (_sources.Count > 0)
@@ -422,19 +509,6 @@ public sealed class SubscriptionsRegistry
             throw new NotSupportedException(
                 $"Source '{_sources[0].Name}' is declared, and shared sources are Phase 4 work. Until then, data a client needs and a position cannot reach " +
                 "travels as owner fields on the entity that owns it.");
-        }
-    }
-
-    private static void RefuseHeadings(ArchetypeProjection archetype)
-    {
-        foreach (var field in archetype.Fields)
-        {
-            if (field.IsHeading)
-            {
-                throw new NotSupportedException(
-                    $"Archetype '{archetype.Name}' declares the heading '{field.Name}', which Phase 2 builds. A moving entity needs none: its heading " +
-                    "follows from the velocity the client already has.");
-            }
         }
     }
 
@@ -543,6 +617,15 @@ public sealed class MetricDeclaration
 
     /// <summary>The order this metric was declared in. Not the wire index, which starts above the engine's reserved range.</summary>
     public int Index { get; }
+
+    /// <summary>A labelled metric's reader, which fills one value per label; <see langword="null"/> for the other shapes.</summary>
+    public MetricValuesSource ValuesSource { get; internal init; }
+
+    /// <summary>A per-session metric's reader; <see langword="null"/> for a server-scope one.</summary>
+    public Func<SessionId, double> SessionSource { get; internal init; }
+
+    /// <summary>Whether the metric has a value per session rather than one for the server.</summary>
+    public bool PerSession => SessionSource != null;
 
     /// <summary>Reads the current value.</summary>
     internal Func<double> Source { get; }
@@ -670,7 +753,7 @@ internal static class SubscriptionsNames
                 $"{what} named '{name}' uses the reserved '{ProtocolConstants.BuiltInMetricPrefix}' prefix, which belongs to the engine's own declarations.");
         }
 
-        if (BuiltInCommands.ReservedIdx(name) >= 0)
+        if (BuiltInCommands.ReservedIdx(name) >= 0 || BuiltInEvents.ReservedIdx(name) >= 0)
         {
             throw new InvalidOperationException($"{what} named '{name}' collides with a built-in the engine declares itself.");
         }

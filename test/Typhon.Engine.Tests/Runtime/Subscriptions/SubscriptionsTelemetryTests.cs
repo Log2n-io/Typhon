@@ -248,7 +248,10 @@ sealed class SubscriptionsTelemetryTests : TestBase<SubscriptionsTelemetryTests>
                 }
             }
         });
-    }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = TickRateHz });
+    }, new RuntimeOptions
+    {
+        WorkerCount = 2, BaseTickRate = TickRateHz, Subscriptions = new SubscriptionsOptions { ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0) },
+    });
 
     private static ISubscriptionAcceptor StartTransport(TyphonRuntime runtime)
     {

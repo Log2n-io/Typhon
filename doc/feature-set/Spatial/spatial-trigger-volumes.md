@@ -71,7 +71,6 @@ triggers.DestroyRegion(zone);
 - Source: [src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/SpatialTriggerSystem.cs) (region storage, the occupant diff, frequency gating)
 - Source: [src/Typhon.Engine/Spatial/public/SpatialRegionHandle.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialRegionHandle.cs), [src/Typhon.Engine/Spatial/public/SpatialTriggerResult.cs](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/public/SpatialTriggerResult.cs)
 - Related catalog entry: [Spatial Category Filtering](./spatial-category-filtering.md), [Cluster Spatial Queries](./cluster-spatial-queries.md) (the walk each evaluation runs)
-- Related catalog entry: [Interest Management (Delta Spatial Queries)](./spatial-interest-management.md) — the sibling system on the same index, reached the same way
 
 <!-- Deep dive: claude/design/Spatial/SpatialIndex/08-game-features.md (Feature F3 — Trigger Volumes: algorithm, frequency budget) -->
 <!-- Rules: rules/spatial.md (Module: Trigger Volumes — TV-01 event completeness and entity-id occupancy, TV-02 frequency contract; IM-04 for the public entry point) -->

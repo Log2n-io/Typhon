@@ -51,6 +51,28 @@ internal sealed class SessionIngress
     /// <summary>Commands refused on the transport thread — past the rate, refused by role, or failing the pre-check. Transport-thread owned.</summary>
     public long RefusedCommands;
 
+    /// <summary>
+    /// Commands refused for ignoring the catalog's declared limits — past a command's rate, or sent by a role that may not — which the abuse rule counts
+    /// (SUB-27). A pre-check refusal or an invalid region is not in it: those are game outcomes or client bugs, not a client ignoring its limits.
+    /// Transport-thread owned.
+    /// </summary>
+    public long PolicyRefusals;
+
+    /// <summary>Whole <c>COMMANDS</c> messages refused over the session's inbound budget. Transport-thread owned.</summary>
+    public long OverBudgetMessages;
+
+    /// <summary>The tick <see cref="RefusalAcksThisTick"/> counts for. Tick owned.</summary>
+    public long RefusalAckTick = long.MinValue;
+
+    /// <summary>Transport-side refusals placed in the tick's acknowledgement log this tick. Tick owned.</summary>
+    public int RefusalAcksThisTick;
+
+    /// <summary>
+    /// Transport-side refusals past <see cref="SubscriptionsIngress.RefusalAcksPerTick"/> in one tick: settled by <c>lastSeq</c>, not acknowledged, so one
+    /// session cannot take the whole shared log from the others. Tick owned.
+    /// </summary>
+    public long RefusalAcksCapped;
+
     /// <summary>Commands the ring had no room for. Transport-thread owned.</summary>
     public long DroppedCommands;
 
@@ -134,6 +156,13 @@ internal sealed class SubscriptionsIngress : IDisposable
 {
     /// <summary>A record whose wire index is this one is not a command but a rejection the transport side decided.</summary>
     internal const ushort AckRecordMarker = 0xFFFF;
+
+    /// <summary>
+    /// The transport-side refusals (rate, role, budget, pre-check, region) one session may place in a tick's shared acknowledgement log. The log is sized
+    /// to hold this many for every session (<see cref="CommandTypeBuffers.AckCapacity"/>), so no session's refusals can crowd out another's. An honest client
+    /// is refused a handful of commands a tick at most; past this share the rest settle through <c>lastSeq</c> and are counted.
+    /// </summary>
+    internal const int RefusalAcksPerTick = 8;
 
     /// <summary>
     /// The per-archetype replication states, for diagnostics only. Set by the runtime once both exist, so <see cref="SubscriptionsCommands"/> can report
@@ -271,6 +300,10 @@ internal sealed class SubscriptionsIngress : IDisposable
         var row = RowFor(session);
         if (row == null)
         {
+            // No ring to frame into (the pool is exhausted, or the session is going away) — but a malformed message is still malformed: validated, so it
+            // still closes with 1007.
+            var validating = new RefusingSink(null);
+            CommandsMessage.Read(message, Commands.Plan, ref validating);
             return;
         }
 
@@ -292,6 +325,70 @@ internal sealed class SubscriptionsIngress : IDisposable
         var sink = new IngressCommandSink(this, row, role, payload, vertices);
         CommandsMessage.Read(message, Commands.Plan, ref sink);
         sink.Flush();
+    }
+
+    /// <summary>
+    /// A whole <c>COMMANDS</c> message over its session's inbound budget: each command answered with a <c>RATE_LIMITED</c> <c>ACK</c>, none framed. Validated
+    /// like any other — a malformed message throws <see cref="WireFormatException"/> here too — so it is decoded, twice (the validating pass, then this one):
+    /// the budget bounds what reaches the tick, and the abuse rule is what bounds the decoding.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="message">The whole message.</param>
+    /// <returns>The commands the message carried, each one a refusal for the abuse rule.</returns>
+    public int RefuseCommands(SessionId session, ReadOnlySpan<byte> message)
+    {
+        var row = RowFor(session);
+        var sink = new RefusingSink(row);
+        CommandsMessage.Read(message, Commands.Plan, ref sink);
+        if (row != null)
+        {
+            row.OverBudgetMessages++;
+        }
+
+        return sink.Count;
+    }
+
+    /// <summary>Answers every command of a refused message with a <c>RATE_LIMITED</c> <c>ACK</c>, counts them, and reads nothing else.</summary>
+    private struct RefusingSink : ICommandSink
+    {
+        private readonly SessionIngress _row;
+
+        public RefusingSink(SessionIngress row)
+        {
+            _row = row;
+            Count = 0;
+        }
+
+        /// <summary>Commands seen.</summary>
+        public int Count { get; private set; }
+
+        public void Command(MessagePlan type, ushort seq, uint clientTick)
+        {
+            Count++;
+            if (_row == null)
+            {
+                return;
+            }
+
+            Span<byte> reason = [AckReasons.RateLimited];
+            Publish(_row, AckRecordMarker, seq, clientTick, reason);
+        }
+
+        public void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
+        {
+        }
+
+        public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
+        {
+        }
+
+        public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes)
+        {
+        }
+
+        public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
+        {
+        }
     }
 
     /// <summary>Frames one decoded command into the session's ring.</summary>
@@ -501,7 +598,24 @@ internal sealed class SubscriptionsIngress : IDisposable
 
         if (wireIdx == AckRecordMarker)
         {
-            Buffers.Acks.Add(row.Session, seq, body.Length > 0 ? body[0] : AckReasons.Rejected);
+            // Each session's share of the shared log (SUB-27): past it, the refusal settles through lastSeq alone and is counted, so a session flooding
+            // refusals cannot drop another session's acknowledgements.
+            if (row.RefusalAckTick != Buffers.Tick)
+            {
+                row.RefusalAckTick = Buffers.Tick;
+                row.RefusalAcksThisTick = 0;
+            }
+
+            if (row.RefusalAcksThisTick < RefusalAcksPerTick)
+            {
+                row.RefusalAcksThisTick++;
+                Buffers.Acks.Add(row.Session, seq, body.Length > 0 ? body[0] : AckReasons.Rejected);
+            }
+            else
+            {
+                row.RefusalAcksCapped++;
+            }
+
             NoteSeq(row, seq);
             return;
         }
@@ -532,9 +646,40 @@ internal sealed class SubscriptionsIngress : IDisposable
             return;
         }
 
+        if (!TakeRegion(row, ref region))
+        {
+            // The ingress hull accepted it and the clamp scales it uniformly, so this is a hostile or corrupted record, refused like one.
+            Buffers.Acks.Add(row.Session, seq, AckReasons.RegionInvalid);
+        }
+    }
+
+    // Clamped to the session's profile and turned into half-spaces, then the session's region: what the frame stage reads (09 § 7).
+    private bool TakeRegion(SessionIngress row, ref ClientRegionCommand region)
+    {
         region.ClampToMaxEdge(MaxEdgeOf(row.Session));
+        if (!region.BuildPlanes())
+        {
+            return false;
+        }
+
         row.Region = region;
         row.HasRegion = true;
+        return true;
+    }
+
+    /// <summary>
+    /// Tests only: gives a session a region as a drained <c>ClientRegion</c> command would — the hull of the vertices, clamped by its profile, as
+    /// half-spaces — without a client, a ring record or a drain. The row is the tick's (SUB-05): call it between ticks only.
+    /// </summary>
+    internal bool SetRegionForTest(SessionId session, ReadOnlySpan<RegionVertex> vertices, int dims)
+    {
+        var row = RowFor(session);
+        if (row == null || ConvexHull.Build(vertices, dims, 0f, 0, out var region) != ClientRegionOutcome.Accepted)
+        {
+            return false;
+        }
+
+        return TakeRegion(row, ref region);
     }
 
     /// <summary>The longest edge the session's profile accepts for a client region, or zero when it declares none.</summary>
@@ -660,6 +805,7 @@ internal ref struct IngressCommandSink : ICommandSink
     private ushort _seq;
     private uint _clientTick;
     private int _vertexCount;
+    private int _vertexDims;
     private float _altitudeM;
     private ushort _budgetKiBps;
     private bool _open;
@@ -688,12 +834,15 @@ internal ref struct IngressCommandSink : ICommandSink
         _seq = seq;
         _clientTick = clientTick;
         _vertexCount = 0;
+        _vertexDims = 2;
         _altitudeM = 0;
         _budgetKiBps = 0;
         _open = _current != null;
 
         if (_current == null)
         {
+            // A type the catalog declares and the registry did not bind: never expected, and still answered — every refused command is (SUB-27).
+            Refuse(AckReasons.Rejected);
             return;
         }
 
@@ -702,18 +851,27 @@ internal ref struct IngressCommandSink : ICommandSink
         if (!_current.AllowsRole(_role))
         {
             // Refused, not fatal: a spectator sending a player's command is a client that has not read the catalog's roles, which is not a protocol violation.
-            _row.RefusedCommands++;
+            _row.PolicyRefusals++;
             _open = false;
+            Refuse(AckReasons.Forbidden);
             return;
         }
 
         if (!_row.TryTakeToken(_current.WireIdx, _current.RatePerSecond, _current.RateBurst, Stopwatch.GetTimestamp()))
         {
-            _row.RefusedCommands++;
+            _row.PolicyRefusals++;
             _open = false;
-            Span<byte> reason = [AckReasons.RateLimited];
-            SubscriptionsIngress.Publish(_row, SubscriptionsIngress.AckRecordMarker, seq, clientTick, reason);
+            Refuse(AckReasons.RateLimited);
         }
+    }
+
+    /// <summary>Answers the command being decoded with a refusal <c>ACK</c> and counts it.</summary>
+    /// <param name="reasonCode">An <see cref="AckReasons"/> code.</param>
+    private void Refuse(byte reasonCode)
+    {
+        _row.RefusedCommands++;
+        Span<byte> reason = [reasonCode];
+        SubscriptionsIngress.Publish(_row, SubscriptionsIngress.AckRecordMarker, _seq, _clientTick, reason);
     }
 
     /// <inheritdoc />
@@ -764,10 +922,13 @@ internal ref struct IngressCommandSink : ICommandSink
             return;
         }
 
+        // The codec's axes are the world's (10 § 6): a pos2 vertex is (x, y) on the plane z = 0, a pos3 vertex (x, y, z).
+        _vertexDims = field.Components == 3 ? 3 : 2;
         _vertexCount = Math.Min(count, BuiltInCommands.MaxRegionVertices);
         for (var i = 0; i < _vertexCount; i++)
         {
-            _vertices[i] = new RegionVertex { X = components[i * 2], Z = components[(i * 2) + 1] };
+            var at = i * _vertexDims;
+            _vertices[i] = new RegionVertex { X = components[at], Y = components[at + 1], Z = _vertexDims == 3 ? components[at + 2] : 0d };
         }
     }
 
@@ -790,7 +951,8 @@ internal ref struct IngressCommandSink : ICommandSink
 
         if (_current.PrecheckAdapter != null && !_current.PrecheckAdapter(_current.Precheck, _payload[.._current.PayloadSize]))
         {
-            _row.RefusedCommands++;
+            // The application's own verdict, answered as the application's rejection would be.
+            Refuse(AckReasons.Rejected);
             return;
         }
 
@@ -801,11 +963,9 @@ internal ref struct IngressCommandSink : ICommandSink
     {
         // The hull is taken here, on the transport thread: it needs no engine state, and a footprint that cannot become a polygon must never reach the tick.
         // The profile's edge clamp is the tick's, because the profile is session state the transport side does not own (SUB-05).
-        if (ConvexHull.Build(_vertices[.._vertexCount], _altitudeM, _budgetKiBps, out var region) != ClientRegionOutcome.Accepted)
+        if (ConvexHull.Build(_vertices[.._vertexCount], _vertexDims, _altitudeM, _budgetKiBps, out var region) != ClientRegionOutcome.Accepted)
         {
-            _row.RefusedCommands++;
-            Span<byte> reason = [AckReasons.RegionInvalid];
-            SubscriptionsIngress.Publish(_row, SubscriptionsIngress.AckRecordMarker, _seq, _clientTick, reason);
+            Refuse(AckReasons.RegionInvalid);
             return;
         }
 

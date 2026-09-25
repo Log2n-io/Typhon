@@ -145,8 +145,8 @@ export class RecordingSink implements TickSink, CommandSink {
     this.log.push({ call: 'event', type: type.name, idx: type.idx });
   }
 
-  self(archetype: ArchetypePlan, netId: number, lastSeq: number, ownerMask: number): void {
-    this.log.push({ call: 'self', archetype: archetype.name, netId, lastSeq, ownerMask });
+  self(archetype: ArchetypePlan | null, netId: number, lastSeq: number, ownerMask: number): void {
+    this.log.push({ call: 'self', archetype: archetype?.name ?? null, netId, lastSeq, ownerMask });
   }
 
   ack(seq: number, reason: number): void {

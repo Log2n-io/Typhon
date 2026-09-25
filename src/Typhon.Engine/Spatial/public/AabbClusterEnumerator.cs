@@ -583,6 +583,60 @@ public unsafe ref struct AabbClusterEnumerator
     }
 
     /// <summary>
+    /// <see cref="MoveNextClusterUnopened(out int, out double, out double, out double, out double)"/> with the Z bounds too, which the cluster AABBs
+    /// already store: what a volumetric caller prunes on. A 2D archetype's Z bounds are whatever its AABBs hold, so its caller supplies its own.
+    /// </summary>
+    public bool MoveNextClusterUnopened(out int chunkId, out double minX, out double minY, out double minZ, out double maxX, out double maxY,
+        out double maxZ)
+    {
+        ThrowIfRentStale();
+        _noOpen = true;
+        _currentOccupancyBits = 0UL;
+        _decidedHits = 0UL;
+        bool advanced;
+        try
+        {
+            advanced = NextCluster();
+        }
+        finally
+        {
+            // Reset whatever happened: a throw inside the walk would otherwise leave every later MoveNext in unopened mode, silently yielding nothing.
+            _noOpen = false;
+        }
+
+        if (!advanced)
+        {
+            ReleaseRentAfterDrain();
+            chunkId = -1;
+            minX = minY = minZ = maxX = maxY = maxZ = 0d;
+            return false;
+        }
+
+        chunkId = _currentClusterChunkId;
+        minX = double.NegativeInfinity;
+        minY = double.NegativeInfinity;
+        minZ = double.NegativeInfinity;
+        maxX = double.PositiveInfinity;
+        maxY = double.PositiveInfinity;
+        maxZ = double.PositiveInfinity;
+        var aabbs = Volatile.Read(ref _state.ClusterAabbs);
+        var cellMap = Volatile.Read(ref _state.ClusterCellMap);
+        if (aabbs != null && cellMap != null && (uint)chunkId < (uint)aabbs.Length && (uint)chunkId < (uint)cellMap.Length)
+        {
+            ref readonly var box = ref aabbs[chunkId];
+            _grid.CellOrigin(cellMap[chunkId], out var originX, out var originY, out var originZ);
+            minX = ClusterSpatialAabb.ToWorldExact(box.MinX, originX);
+            minY = ClusterSpatialAabb.ToWorldExact(box.MinY, originY);
+            maxX = ClusterSpatialAabb.ToWorldExact(box.MaxX, originX);
+            maxY = ClusterSpatialAabb.ToWorldExact(box.MaxY, originY);
+            minZ = ClusterSpatialAabb.ToWorldExact(box.MinZ, originZ);
+            maxZ = ClusterSpatialAabb.ToWorldExact(box.MaxZ, originZ);
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Adds a cluster's occupancy, read by the caller from its own copy, to the query's candidate tally — which the unopened walk cannot count itself and
     /// which feeds the maintenance budget (SO-02).
     /// </summary>

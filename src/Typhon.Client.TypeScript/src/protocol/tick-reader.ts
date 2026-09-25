@@ -10,6 +10,7 @@ import { BlockType, MessageType, SourceStatus, TickFlags } from './constants.js'
 import { malformed, protocolError } from './errors.js';
 import { readNumber, readSection, type FieldSink } from './field-codec.js';
 import { WireReader } from './reader.js';
+import type { ArchetypeStore } from '../store/archetype-store.js';
 
 /**
  * Receives a decoded `TICK`, block by block, in stream order (C# `ITickSink`). Field values arrive through the
@@ -42,8 +43,11 @@ export interface TickSink extends FieldSink {
   leave(netId: number): void;
   /** An event: its fields follow. */
   event(type: MessagePlan): void;
-  /** The `SELF` block: the owner groups in `ownerMask` follow. */
-  self(archetype: ArchetypePlan, netId: number, lastSeq: number, ownerMask: number): void;
+  /**
+   * The `SELF` block: the owner groups in `ownerMask` follow. `archetype` is `null` and `netId` 0 when the session
+   * controls no entity (W17′): an acknowledgement only, which also tells the client to drop the owner state it holds.
+   */
+  self(archetype: ArchetypePlan | null, netId: number, lastSeq: number, ownerMask: number): void;
   /** A command rejection. */
   ack(seq: number, reason: number): void;
   /** A source lifecycle entry; `code` is 0 unless `status` is {@link SourceStatus.Error}. */
@@ -61,6 +65,40 @@ export interface TickSink extends FieldSink {
   /** A block of a type this library does not know, skipped. */
   unknownBlock(blockType: number): void;
   endTick(): void;
+}
+
+/**
+ * What a generated `ENTITIES` decoder (05-sdks § 2, `typhon-codegen`) writes into: the record bookkeeping of a store
+ * that applies frames, so the generated code only turns bytes into column values. Implemented by `FrameApplier`.
+ *
+ * Every method keeps the interpreter's semantics exactly — the anomalies it counts and the records it ignores — because
+ * the two paths must leave the same store for the same bytes.
+ */
+export interface EntitiesTarget {
+  /** The store of archetype `idx`. Its columns are replaced when it grows: re-read them when its `version` changes. */
+  archetypeStore(idx: number): ArchetypeStore;
+  /** An enter; the slot its fields go to, or −1 when the enter is an anomaly and its fields are discarded. */
+  enterSlot(netId: number, position: Float64Array, velocity: Float64Array, t0: Uint32Array, epoch: number): number;
+  /** A motion segment. */
+  segmentAt(netId: number, position: Float64Array, velocity: Float64Array, t0: Uint32Array, epoch: number): void;
+  /** A state record; the slot its groups' fields go to, or −1 when it is an anomaly. */
+  stateSlot(netId: number, groupMask: number): number;
+  /** A leave, applied last in the frame. */
+  leave(netId: number): void;
+}
+
+/**
+ * A generated decoder for one archetype's `ENTITIES` block, after its archetype index: every record, straight into the
+ * target's columns. {@link TickReader} still reads the block's framing and checks it is the archetype's only one.
+ */
+export type EntitiesDecoder = (r: WireReader, tick: number, target: EntitiesTarget) => void;
+
+/** The generated decoders a `typhon-codegen` module exports, and the catalog they were generated from. */
+export interface GeneratedDecoders {
+  /** The catalog's hash as 16 lower-case hex digits, compared with the server's at connect. */
+  readonly catalogHash: string;
+  /** By archetype index: that archetype's `ENTITIES` decoder, or `null` to leave it to the interpreter. */
+  readonly entities: readonly (EntitiesDecoder | null)[];
 }
 
 /** Block selection for {@link TickReader.read}: one bit per block type. */
@@ -107,9 +145,17 @@ export class TickReader {
   /** Per archetype: the {@link reads} count of the message whose `ENTITIES` block for it was last read. */
   private readonly entitiesSeenAt: Uint32Array;
   private reads = 0;
+  private readonly generated: readonly (EntitiesDecoder | null)[] | null;
+  private readonly target: EntitiesTarget | null;
 
-  constructor(plan: CatalogPlan) {
+  /**
+   * With `generated` and its `target`, an archetype's `ENTITIES` block is decoded by its generated decoder straight into
+   * the target, and the sink only sees {@link TickSink.beginEntities}; without, by the interpreter through the sink.
+   */
+  constructor(plan: CatalogPlan, generated?: { decoders: GeneratedDecoders; target: EntitiesTarget }) {
     this.plan = plan;
+    this.generated = generated?.decoders.entities ?? null;
+    this.target = generated?.target ?? null;
     // Views sized once per archetype, over two shared buffers: a sink sees exactly the values of this record, and a
     // record allocates nothing.
     const position = new Float64Array(3);
@@ -246,13 +292,18 @@ export class TickReader {
     const v = this.velocities[archetype.idx]!;
     const sections = archetype.groupSections;
     sink.beginEntities(archetype);
+    const generated = this.generated?.[archetype.idx];
+    if (generated != null) {
+      generated(r, tick, this.target!);
+      return;
+    }
 
     const t0 = this.t0;
 
     // ── enters ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     for (let runs = r.varu(); runs > 0; runs--) {
       let prev = -1;
-      for (let n = this.runLength(); n > 0; n--) {
+      for (let n = runLength(r); n > 0; n--) {
         prev = nextNetId(r, prev);
         t0[0] = 0;
         let epoch = 0;
@@ -281,12 +332,12 @@ export class TickReader {
     // ── segments ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     const segmentRuns = r.varu();
     if (segmentRuns > 0 && (position === null || !position.moving)) {
-      throw malformed(`archetype '${archetype.name}' does not move but its block carries segment(s)`);
+      throw segmentsOfAStill(archetype.name);
     }
 
     for (let runs = segmentRuns; runs > 0; runs--) {
       let prev = -1;
-      for (let n = this.runLength(); n > 0; n--) {
+      for (let n = runLength(r); n > 0; n--) {
         prev = nextNetId(r, prev);
         readNumber(r, position!.pos, tick, p, 0);
         if (position!.vel !== null) {
@@ -303,11 +354,11 @@ export class TickReader {
     const groupCount = archetype.groups.length;
     for (let runs = r.varu(); runs > 0; runs--) {
       let prev = -1;
-      for (let n = this.runLength(); n > 0; n--) {
+      for (let n = runLength(r); n > 0; n--) {
         prev = nextNetId(r, prev);
         const mask = r.u8();
         if (mask === 0 || mask >> groupCount !== 0) {
-          throw malformed(`state record mask 0x${mask.toString(16)} is invalid for ${groupCount} group(s)`);
+          throw invalidStateMask(mask, groupCount);
         }
 
         sink.state(prev, mask);
@@ -322,34 +373,35 @@ export class TickReader {
     // ── leaves ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     for (let runs = r.varu(); runs > 0; runs--) {
       let prev = -1;
-      for (let n = this.runLength(); n > 0; n--) {
+      for (let n = runLength(r); n > 0; n--) {
         prev = nextNetId(r, prev);
         sink.leave(prev);
       }
     }
   }
 
-  /**
-   * One sub-list run's record count, which the grammar forbids to be zero.
-   *
-   * A canonical encoding has no empty run: a sub-list with nothing to say spends one `varu` zero on its RUN count and stops. Admitting an empty run
-   * would give two byte strings for one frame, and would let a hostile stream spend a megabyte of run counts on no records at all.
-   */
-  private runLength(): number {
-    const n = this.r.varu();
-    if (n === 0) {
-      throw malformed('an ENTITIES sub-list run carries no record');
-    }
-
-    return n;
-  }
-
   private readSelf(tick: number, sink: TickSink): void {
     const r = this.r;
-    const archetype = this.plan.archetype(r.varu());
+    const archetypeIdx = r.varu();
     const netId = r.varu();
     const lastSeq = r.u16();
     const mask = r.u8();
+
+    // netId 0 is never an entity: it is "no controlled entity" (W17′), an acknowledgement only, so it names no
+    // archetype and carries no group.
+    if (netId === 0) {
+      if (archetypeIdx !== 0 || mask !== 0) {
+        throw malformed(
+          `SELF with no controlled entity must name archetype 0 and no owner group ` +
+            `(archetype ${archetypeIdx}, mask 0x${mask.toString(16)})`,
+        );
+      }
+
+      sink.self(null, 0, lastSeq, 0);
+      return;
+    }
+
+    const archetype = this.plan.archetype(archetypeIdx);
     const groupCount = archetype.ownerGroups.length;
     if (mask >> groupCount !== 0) {
       throw malformed(`SELF owner mask 0x${mask.toString(16)} is invalid for ${groupCount} owner group(s)`);
@@ -403,8 +455,34 @@ export class TickReader {
   }
 }
 
+/**
+ * One sub-list run's record count, which the grammar forbids to be zero. Shared with generated decoders, so both paths
+ * refuse the same bytes with the same error.
+ *
+ * A canonical encoding has no empty run: a sub-list with nothing to say spends one `varu` zero on its RUN count and stops. Admitting an empty run
+ * would give two byte strings for one frame, and would let a hostile stream spend a megabyte of run counts on no records at all.
+ */
+export function runLength(r: WireReader): number {
+  const n = r.varu();
+  if (n === 0) {
+    throw malformed('an ENTITIES sub-list run carries no record');
+  }
+
+  return n;
+}
+
+/** The error for segments in the block of an archetype that does not move. */
+export function segmentsOfAStill(archetype: string): Error {
+  return malformed(`archetype '${archetype}' does not move but its block carries segment(s)`);
+}
+
+/** The error for a state record mask that is zero or names a group the archetype does not have. */
+export function invalidStateMask(mask: number, groupCount: number): Error {
+  return malformed(`state record mask 0x${mask.toString(16)} is invalid for ${groupCount} group(s)`);
+}
+
 /** netIds in a list are ascending: each is the previous plus one plus a `varu` gap, starting from −1. */
-function nextNetId(r: WireReader, prev: number): number {
+export function nextNetId(r: WireReader, prev: number): number {
   const next = prev + 1 + r.varu();
   if (next > 0xffffffff) {
     throw malformed('netId gap overflows 32 bits');

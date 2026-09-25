@@ -64,6 +64,7 @@ public sealed class ReconnectPolicy
         CloseCodes.GoingAway => ReconnectDecision.Retry,
         CloseCodes.InternalError => ReconnectDecision.Retry,
         CloseCodes.TryAgainLater => ReconnectDecision.Retry,
+        CloseCodes.PolicyViolation => ReconnectDecision.Retry,
         CloseCodes.NoAcknowledgement => ReconnectDecision.Retry,
         CloseCodes.HelloTimeout => ReconnectDecision.Retry,
         CloseCodes.ProtocolError => ReconnectDecision.Stop,

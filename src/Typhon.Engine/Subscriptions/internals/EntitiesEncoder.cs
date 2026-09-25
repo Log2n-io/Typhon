@@ -76,6 +76,15 @@ internal sealed unsafe class ArchetypeEncodePlan
     /// <summary>Each change group's section, measured out of the hot entry's packed state.</summary>
     public SectionWalk[] Groups { get; init; }
 
+    /// <summary>Each owner group's section, measured out of the slot's owner entry (W17); empty when the archetype declares none.</summary>
+    public SectionWalk[] OwnerGroups { get; init; } = [];
+
+    /// <summary>Every owner group's bit: what SUB-11 sends after a <c>Control</c> change or a <c>RESET</c>.</summary>
+    public byte OwnerAllMask { get; init; }
+
+    /// <summary>The largest <c>SELF</c> block this archetype can need, header included.</summary>
+    public int MaxSelfBytes { get; init; }
+
     /// <summary>The largest number of bytes one enter record of this archetype can occupy, gap included.</summary>
     public int MaxEnterBytes { get; init; }
 
@@ -96,6 +105,12 @@ internal sealed unsafe class ArchetypeEncodePlan
     /// <param name="slot">The slot.</param>
     /// <returns>The entry's first byte.</returns>
     public byte* Cold(nint block, int slot) => (byte*)block + Layout.ColdOffset + (slot * Layout.ColdStride);
+
+    /// <summary>The address of one slot's owner entry inside <paramref name="block"/>; meaningful only when the archetype declares owner fields.</summary>
+    /// <param name="block">The replication block.</param>
+    /// <param name="slot">The slot.</param>
+    /// <returns>The entry's first byte.</returns>
+    public byte* Owner(nint block, int slot) => (byte*)block + Layout.OwnerOffset + (slot * Layout.OwnerEntrySize);
 
     /// <summary>
     /// The real length of a stored section body, which is at most <see cref="SectionWalk.MaxBytes"/> and is exactly it whenever no field is variable-length.
@@ -323,6 +338,53 @@ internal static unsafe class EntitiesEncoder
         w.WriteVaru(1);
         w.WriteVaru((uint)count);
     }
+
+    /// <summary>
+    /// Writes a <c>SELF</c> block for a controlled entity (03 § 8, W17): its owner groups in <paramref name="mask"/>, copied from its owner entry — the
+    /// values the projection last compared, current as of this tick.
+    /// </summary>
+    /// <param name="w">The writer.</param>
+    /// <param name="plan">The entity's archetype.</param>
+    /// <param name="netId">The entity.</param>
+    /// <param name="lastSeq">The session's highest drained command sequence.</param>
+    /// <param name="mask">The owner groups carried.</param>
+    /// <param name="owner">The slot's owner entry.</param>
+    public static void WriteSelf(ref WireWriter w, ArchetypeEncodePlan plan, uint netId, ushort lastSeq, byte mask, byte* owner)
+    {
+        var mark = TickWriter.BeginBlock(ref w, BlockTypes.Self);
+        w.WriteVaru((uint)plan.WireIndex);
+        w.WriteVaru(netId);
+        w.WriteU16(lastSeq);
+        w.WriteU8(mask);
+        for (var g = 0; g < plan.OwnerGroups.Length; g++)
+        {
+            if ((mask & (1 << g)) != 0)
+            {
+                WriteSection(ref w, plan.OwnerGroups[g], owner);
+            }
+        }
+
+        TickWriter.EndBlock(ref w, mark);
+    }
+
+    /// <summary>Writes an <c>ACKS</c> block (03 § 8): <c>varu n | (u16 seq | u8 reason)*</c>.</summary>
+    /// <param name="w">The writer.</param>
+    /// <param name="acks">The session's rejections, oldest first.</param>
+    public static void WriteAcks(ref WireWriter w, ReadOnlySpan<CommandAck> acks)
+    {
+        var mark = TickWriter.BeginBlock(ref w, BlockTypes.Acks);
+        w.WriteVaru((uint)acks.Length);
+        foreach (ref readonly var ack in acks)
+        {
+            w.WriteU16(ack.Seq);
+            w.WriteU8(ack.Reason);
+        }
+
+        TickWriter.EndBlock(ref w, mark);
+    }
+
+    /// <summary>The largest <c>ACKS</c> block <paramref name="count"/> records need.</summary>
+    public static int MaxAcksBytes(int count) => 16 + (count * 3);
 
     private static void WriteSection(ref WireWriter w, in ArchetypeEncodePlan.SectionWalk walk, byte* region)
     {

@@ -19,7 +19,7 @@ import { CATALOG_HASH, FakeSocket, FakeTimers, kickMessage, resumeToken, welcome
 
 describe('reconnectRule', () => {
   it('follows the close-code table', () => {
-    for (const code of [1001, 1011, 1013, 4001, 4002]) {
+    for (const code of [1001, 1008, 1011, 1013, 4001, 4002]) {
       expect(reconnectRule(code), `${code}`).toBe(ReconnectRule.Reconnect);
     }
 

@@ -1,0 +1,283 @@
+using NUnit.Framework;
+using Typhon.Schema.Definition;
+
+namespace Typhon.Engine.Tests.Runtime.Subscriptions.Oracle;
+
+/// <summary>
+/// The deep implementation against the truth (<c>claude/design/Subscriptions/10-phase15-3d-groundwork.md</c> § 10, 1.5.2): the 3D oracle, the radius
+/// shell, and the degeneracy of a flat world.
+/// </summary>
+[TestFixture]
+[NonParallelizable]
+class PushOracle3DTests : TestBase<PushOracle3DTests>
+{
+    /// <summary>
+    /// A 2 km cube at c = 64 m (32³ cells, windows of 11³): 3D flyers that drift, climb and teleport across clusters, 2D walkers on the plane z = 0 in the
+    /// same world, statics; sessions that walk and climb in 3D and teleport, at skip rates from 0 to 90 %. Every quiet point, every replica is its sphere.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void AClientsWorldIsItsSphereInADeepGrid()
+    {
+        using var oracle = VolumeOracle.Create(ProjectionTestSchema.SetupEngine(ServiceProvider, volumetric: true), volumetric: true, seed: 3301,
+            [0, 30, 60, 90], nameof(PushOracle3DTests), radius: 192, cellM: 64);
+        Assert.That(oracle.Push.Deep, Is.True, "a volumetric world is served by the deep implementation");
+
+        long compared = 0, required = 0;
+        for (var point = 0; point < 5; point++)
+        {
+            for (var i = 0; i < 40; i++)
+            {
+                oracle.Step();
+            }
+
+            oracle.Quiesce();
+            oracle.AssertConverged($"deep grid, point {point}");
+            compared += oracle.ComparedAtLastPoint;
+            required += oracle.RequiredAtLastPoint;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(required, Is.GreaterThan(50), "the spheres held too little for the comparison to prove anything");
+            Assert.That(compared, Is.GreaterThanOrEqualTo(required));
+            Assert.That(oracle.Teleports, Is.GreaterThan(10), "no flyer changed cluster by teleport");
+            Assert.That(oracle.Climbs, Is.GreaterThan(10), "no flyer climbed");
+            Assert.That(oracle.Destroyed, Is.GreaterThan(5), "nothing was destroyed");
+            Assert.That(oracle.ViewpointTeleports, Is.GreaterThan(2), "no session teleported");
+            Assert.That(oracle.Push.ShadowIllegal, Is.Zero);
+            Assert.That(oracle.Push.VerifyOccupancy(), Is.Zero, "the occupancy disagrees with a recount");
+        });
+    }
+
+    /// <summary>
+    /// The ClientRegion observer in a deep grid (09 § 7): frustums of eight corners, panned, reshaped, clamped and jumped in 3D over 3D flyers, 2D walkers on
+    /// the plane z = 0 and statics, at skip rates from 0 to 90 %. Every quiet point, every replica is its polyhedron — against true positions, face by face,
+    /// and by the shadow oracle against the known-set on v̂.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void AClientsWorldIsItsPolyhedronInADeepGrid()
+    {
+        using var oracle = VolumeOracle.Create(ProjectionTestSchema.SetupEngine(ServiceProvider, volumetric: true), volumetric: true, seed: 3401,
+            [0, 30, 60, 90], nameof(PushOracle3DTests), radius: 0, cellM: 64, flyers: 400, walkers: 200, spanM: 400, regionEdgeM: 9 * 64);
+        Assert.That(oracle.Push.Deep, Is.True, "a volumetric world is served by the deep implementation");
+
+        long required = 0;
+        for (var point = 0; point < 4; point++)
+        {
+            for (var i = 0; i < 40; i++)
+            {
+                oracle.Step();
+            }
+
+            oracle.Quiesce();
+            oracle.AssertConverged($"deep region, point {point}");
+            required += oracle.RequiredAtLastPoint;
+        }
+
+        var push = oracle.Push;
+        Assert.Multiple(() =>
+        {
+            Assert.That(required, Is.GreaterThan(100), "the polyhedra held too little for the comparison to prove anything");
+            Assert.That(push.ShadowIllegal, Is.Zero);
+            Assert.That(push.ShadowMissing, Is.Zero, "an entity in a hull and a delivered cell that its client did not hold");
+            Assert.That(push.ShadowExtra, Is.Zero, "an entity its client held outside its hull or delivered cells");
+            Assert.That(push.ShadowChecks, Is.GreaterThan(0), "the shadow oracle never ran");
+            Assert.That(oracle.Climbs, Is.GreaterThan(10), "no flyer climbed");
+            Assert.That(push.RegionResets, Is.GreaterThan(0), "no region change reset its session");
+            Assert.That(push.VerifyOccupancy(), Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// A near budget and an aggregate in a deep grid (09 § 7–8, SUB-23): at every quiet point each client holds at most 1.1 × budget and no more than the
+    /// estimate, the shadow oracle is exact, the per-cell and per-tile counts equal a recount, and the aggregate holds the server's count for every tile of
+    /// its region — the polyhedron less the cells the near tier delivered.
+    /// </summary>
+    /// <param name="aggregateCells">The aggregate's tile in cells: 2, or 32 — one tile as tall as the world, the aggregate grid one tile deep.</param>
+    [Test]
+    [VerifiesRule("SUB-23")]
+    public void ABudgetedPolyhedronHoldsWholeCellsAndItsAggregateTheRest([Values(2, 32)] int aggregateCells)
+    {
+        const int budget = 15;
+        using var oracle = VolumeOracle.Create(ProjectionTestSchema.SetupEngine(ServiceProvider, volumetric: true), volumetric: true, seed: 3402,
+            [0, 60], nameof(PushOracle3DTests), radius: 0, cellM: 64, flyers: 400, walkers: 200, spanM: 400, regionEdgeM: 9 * 64, nearBudget: budget,
+            aggregateCells: aggregateCells);
+        var push = oracle.Push;
+        var grid = push.Aggregates[0];
+        var flyer = oracle.Frames.PlanIndex(nameof(ProjFlyer));
+        long aggregated = 0, bound = 0;
+        for (var point = 0; point < 4; point++)
+        {
+            for (var i = 0; i < 40; i++)
+            {
+                oracle.Step();
+            }
+
+            oracle.Quiesce();
+            oracle.AssertConverged($"deep budgeted region, point {point}");
+            Assert.That(push.AggregateDifferencesForTest(), Is.Zero, "the per-cell and per-tile counts equal a recount");
+            for (var s = 0; s < oracle.Sessions.Length; s++)
+            {
+                var session = oracle.Sessions[s];
+                var held = oracle.HeldCount(s, nameof(ProjFlyer)) + oracle.HeldCount(s, nameof(ProjCreature)) + oracle.HeldCount(s, nameof(ProjRock));
+                bound += held > budget * 9 / 10 ? 1 : 0;
+                Assert.That(held, Is.LessThanOrEqualTo(budget * 11 / 10).And.LessThanOrEqualTo(push.RegionHeldOf(session)), $"session {s}, point {point}");
+
+                aggregated += RegionAggregateCheck.Assert(push, session, oracle.Frames.Subscriptions.Ingress.RowOf(session).Region, grid,
+                    oracle.Frames.Replica(session).Store.Aggregates[grid.GridIdx], flyer, deep: true, $"session {s}, point {point}");
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(push.ShadowIllegal, Is.Zero);
+            Assert.That(push.ShadowMissing, Is.Zero);
+            Assert.That(push.ShadowExtra, Is.Zero);
+            Assert.That(push.ShadowChecks, Is.GreaterThan(0));
+            Assert.That(bound, Is.GreaterThan(0), "no session came near its budget: the case did not run");
+            Assert.That(aggregated, Is.GreaterThan(20), "the aggregate regions counted almost nothing");
+        });
+    }
+
+    /// <summary>
+    /// An entity beyond the world's Z bound (spatial accepts it with a warning) decodes onto the top edge — its codec clamps it — and so lies in the top
+    /// cell. The top cell's cluster query is open upward and the pruning clamps the cluster's box into the world, so a session within reach of the
+    /// decoded position holds it: here 26 m below it, and 174 m below it, where the raw box (276 m away) would have pruned it.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void AnEntityBeyondTheWorldsZBoundIsHeldAtTheEdge()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider, volumetric: true);
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            subs.Archetype<ProjFlyer>(a => a
+                .Motion(ProjFlyer.Bounds, m => m.Tolerance(0.05).Teleport(ProjectionTestSchema.MaxSpeedMps))
+                .Field(ProjFlyer.Ai, x => x.Level, Codec.U16, name: "level"));
+            subs.Profile("fly", p => p.Sphere(192).Of<ProjFlyer>());
+        }, nameof(AnEntityBeyondTheWorldsZBoundIsHeldAtTheEdge), replicationCellM: 64);
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            var above = new ProjBounds3
+            {
+                Bounds = new AABB3F { MinX = -0.5f, MinY = -0.5f, MinZ = 1099.5f, MaxX = 0.5f, MaxY = 0.5f, MaxZ = 1100.5f }, Speed = 1f,
+            };
+            var ai = new ProjAi { Level = 3 };
+            tx.Spawn<ProjFlyer>(ProjFlyer.Bounds.Set(in above), ProjFlyer.Ai.Set(in ai));
+            tx.Commit();
+        }
+
+        // Placed only once the entity has gone quiet, so the cell delivery finds it rather than its first tick's event.
+        var sessions = harness.OpenSessions(2, "fly");
+        for (var tick = 1; tick <= 6; tick++)
+        {
+            if (tick == 4)
+            {
+                harness.Sessions.SetViewpoint(sessions[0], new Vector3D(0, 0, 998));
+                harness.Sessions.SetViewpoint(sessions[1], new Vector3D(0, 0, 850));
+            }
+
+            dbe.WriteTickFence(tick);
+            harness.RunTick(tick);
+            harness.Deliver(sessions[0]);
+            harness.Deliver(sessions[1]);
+        }
+
+        var flyer = harness.CatalogPlan.ArchetypeByName(nameof(ProjFlyer)).Idx;
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Replica(sessions[0]).NetIds(flyer), Has.Length.EqualTo(1), "26 m from the decoded position");
+            Assert.That(harness.Replica(sessions[1]).NetIds(flyer), Has.Length.EqualTo(1), "174 m from the decoded position, 276 m from the raw one");
+        });
+    }
+
+    /// <summary>
+    /// 10 § 5's shell, through 09 § 4's <c>SetRadius</c>: a session of a <c>Sphere(192, max: 1 500)</c> profile goes 192 → 1 500 → 192 m while it walks. Each change sweeps the shell between the two spheres —
+    /// enters on the way out, leaves on the way in — and never resets. The window is sized for 1 500 m, the largest radius: ⌈R / c⌉ ≤ 4 deep.
+    /// </summary>
+    [Test]
+    [Property("CacheSize", 64 * 1024 * 1024)]
+    public void TheRadiusShellSweepsWithoutAResetInADeepGrid()
+    {
+        using var oracle = VolumeOracle.Create(ProjectionTestSchema.SetupEngine(ServiceProvider, volumetric: true), volumetric: true, seed: 3302, [0, 0],
+            nameof(PushOracle3DTests), radius: 1500, cellM: 375, flyers: 400, walkers: 200, startRadius: 192);
+        Shell(oracle);
+    }
+
+    /// <summary>The same shell in a flat grid: ⌈R / c⌉ ≤ 5.</summary>
+    [Test]
+    [Property("CacheSize", 64 * 1024 * 1024)]
+    public void TheRadiusShellSweepsWithoutAResetInAFlatGrid()
+    {
+        using var oracle = VolumeOracle.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), volumetric: false, seed: 3302, [0, 0],
+            nameof(PushOracle3DTests), radius: 1500, cellM: 300, flyers: 600, walkers: 300, rocks: 120, spanM: 2500, startRadius: 192);
+        Shell(oracle);
+    }
+
+    private static void Shell(VolumeOracle oracle)
+    {
+        foreach (var radius in new[] { 192.0, 1500.0, 192.0 })
+        {
+            for (var s = 0; s < oracle.Sessions.Length; s++)
+            {
+                oracle.SetRadius(s, radius);
+            }
+
+            var resets = oracle.Push.Resets;
+            for (var i = 0; i < 20; i++)
+            {
+                oracle.Step(teleports: false);
+            }
+
+            oracle.Quiesce();
+            oracle.AssertConverged($"radius {radius}");
+            Assert.That(oracle.RequiredAtLastPoint, Is.GreaterThan(0), $"radius {radius}: the spheres held nothing");
+            Assert.That(oracle.Push.Resets, Is.EqualTo(resets), $"radius {radius}: a radius change reset a session");
+        }
+    }
+
+    /// <summary>
+    /// 10 § 3.4's degeneracy: in a flat grid a flyer (<c>pos3</c>, at an altitude the flat world spans) and a walker (<c>pos2</c>) spawned at the same
+    /// plane coordinates and moved by the same plane steps are held by exactly the same sessions at every quiet point — the third axis changes nothing
+    /// where the grid has none. For both implementations.
+    /// </summary>
+    [Test]
+    [Property("CacheSize", 64 * 1024 * 1024)]
+    [VerifiesRule("SUB-16")]
+    public void AThirdAxisChangesNothingInAFlatGrid() => Degenerate(deepImplementation: false);
+
+    /// <summary>The same, served by the deep implementation forced onto the flat grid.</summary>
+    [Test]
+    [Property("CacheSize", 64 * 1024 * 1024)]
+    [VerifiesRule("SUB-16")]
+    public void AThirdAxisChangesNothingInAFlatGridServedDeep() => Degenerate(deepImplementation: true);
+
+    private void Degenerate(bool deepImplementation)
+    {
+        using var oracle = VolumeOracle.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), volumetric: false, seed: 3303, [0, 50, 0],
+            nameof(PushOracle3DTests), radius: 400, cellM: 150, forceDeep: deepImplementation, flyers: 500, walkers: 500, spanM: 1500);
+        Assert.That(oracle.Push.Deep, Is.EqualTo(deepImplementation));
+        var held = 0;
+        for (var point = 0; point < 4; point++)
+        {
+            for (var i = 0; i < 30; i++)
+            {
+                oracle.Step();
+            }
+
+            oracle.Quiesce();
+            oracle.AssertConverged($"degeneracy point {point}");
+            var sets = oracle.HeldMoversBySpawnOrder();
+            for (var s = 0; s < sets.Count; s++)
+            {
+                Assert.That(sets[s].Flyers, Is.EqualTo(sets[s].Walkers), $"point {point}, session {s}: pos3 and pos2 movers held differently");
+                held += sets[s].Walkers.Count;
+            }
+        }
+
+        Assert.That(held, Is.GreaterThan(40), "the sessions held too few movers for the comparison to prove anything");
+    }
+}

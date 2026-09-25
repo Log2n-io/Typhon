@@ -138,6 +138,12 @@ internal readonly struct CompiledField
     /// <summary>Whether the field lives in its section's leading bit pack: a <c>bits</c> or a <c>bool</c> (W12).</summary>
     public bool Packed { get; init; }
 
+    /// <summary>A heading's index among the archetype's headings, plus one: its held code is at that index in the cold entry (09 § 15); 0 for none.</summary>
+    public int HeadingPlusOne { get; init; }
+
+    /// <summary>A heading's tolerance in codes of its angle: a turn of at most this many codes from the held one sends nothing.</summary>
+    public uint HeadingToleranceCodes { get; init; }
+
     /// <summary>For a packed field, its first bit within its section's pack.</summary>
     public int BitOffset { get; init; }
 
@@ -349,8 +355,17 @@ internal sealed class CompiledProjectionPlan
     /// <summary>The position, or <see langword="null"/> when the archetype declared none.</summary>
     public CompiledPosition Position { get; init; }
 
-    /// <summary>The block layout: the hot, cold and owner entry offsets a block of this archetype is carved into.</summary>
+    /// <summary>
+    /// The block layout: the hot, cold and owner entry offsets a block of this archetype is carved into — with v̂'s bytes in the cold entry when the
+    /// archetype's visibility slack is above zero (<see cref="VisibilitySlackM"/>).
+    /// </summary>
     public ReplicationBlockLayout BlockLayout { get; init; }
+
+    /// <summary>
+    /// The archetype's visibility slack <c>h_A</c> in metres (09 § 2): v̂ moves to the entity's position only when that position is more than this far
+    /// from it. Zero is exact — v̂ is the last projected position, every tick. Resolved by the compiler from the profiles that observe the archetype.
+    /// </summary>
+    public double VisibilitySlackM { get; init; }
 
     /// <summary>Bytes one owner entry reserves — the owner sections' bodies — or <c>0</c> when the archetype declares none.</summary>
     public int OwnerEntrySize { get; init; }

@@ -1,3 +1,4 @@
+using Typhon.Protocol;
 using Typhon.Schema.Definition;
 
 namespace SwgTatooine;
@@ -26,8 +27,10 @@ namespace SwgTatooine;
 /// than their position, so the spatial layer never hears from them.</para>
 /// </remarks>
 [Archetype(1, "Static world objects", ClusterDurability = ClusterDurability.Checkpoint)]
+[Replicated]
 public partial class WorldObject : Archetype<WorldObject>
 {
+    [Position]
     public static readonly Comp<StructurePlacement> Bounds = Register<StructurePlacement>();
     public static readonly Comp<Structure> Struct = Register<Structure>();
 }
@@ -37,8 +40,10 @@ public partial class WorldObject : Archetype<WorldObject>
 /// — a live count and a respawn timer — so it is walked every tick by the spawn system.
 /// </summary>
 [Archetype(1, "Creature lairs", ClusterDurability = ClusterDurability.Checkpoint)]
+[Replicated]
 public partial class CreatureLair : Archetype<CreatureLair>
 {
+    [Position]
     public static readonly Comp<LairPlacement> Bounds = Register<LairPlacement>();
     public static readonly Comp<Lair> Spawner = Register<Lair>();
     public static readonly Comp<LairVitals> Vitals = Register<LairVitals>();
@@ -49,8 +54,10 @@ public partial class CreatureLair : Archetype<CreatureLair>
 /// Moves on the AI cadence, which is slower than the tick, and is the bulk of the moving population.
 /// </summary>
 [Archetype(1, "Creatures and hostile NPCs", ClusterDurability = ClusterDurability.Checkpoint)]
+[Replicated]
 public partial class Creature : Archetype<Creature>
 {
+    [Motion(ToleranceM = 0.05, TeleportMps = TatooineReplication.MaxSpeedMps)]
     public static readonly Comp<CreaturePlacement> Bounds = Register<CreaturePlacement>();
     public static readonly Comp<CreatureMotion> Move = Register<CreatureMotion>();
     public static readonly Comp<CreatureVitals> Vitals = Register<CreatureVitals>();
@@ -66,8 +73,10 @@ public partial class Creature : Archetype<Creature>
 /// clumped, almost-static entity set, which is a distinct load shape from either the buildings or the creatures.
 /// </summary>
 [Archetype(1, "City NPCs", ClusterDurability = ClusterDurability.Checkpoint)]
+[Replicated]
 public partial class CityNpc : Archetype<CityNpc>
 {
+    [Motion(ToleranceM = 0.05, TeleportMps = TatooineReplication.MaxSpeedMps)]
     public static readonly Comp<NpcPlacement> Bounds = Register<NpcPlacement>();
     public static readonly Comp<NpcMotion> Move = Register<NpcMotion>();
     public static readonly Comp<NpcBrain> Ai = Register<NpcBrain>();
@@ -86,8 +95,10 @@ public partial class CityNpc : Archetype<CityNpc>
 /// the inventory lives on the player rather than in a table of its own.
 /// </remarks>
 [Archetype(1, "Players", ClusterDurability = ClusterDurability.Checkpoint)]
+[Replicated]
 public partial class Player : Archetype<Player>
 {
+    [Motion(TeleportMps = TatooineReplication.MaxSpeedMps)]
     public static readonly Comp<PlayerPlacement> Bounds = Register<PlayerPlacement>();
     public static readonly Comp<PlayerMotion> Move = Register<PlayerMotion>();
     public static readonly Comp<PlayerVitals> Vitals = Register<PlayerVitals>();

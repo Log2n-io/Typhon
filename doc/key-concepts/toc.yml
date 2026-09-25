@@ -44,8 +44,6 @@
       href: query.md
     - name: View
       href: view.md
-    - name: Subscription
-      href: subscription.md
 - name: Systems & the runtime
   items:
     - name: Tick
@@ -62,6 +60,22 @@
       href: overload-management.md
     - name: Spatial tiers & adaptive dispatch
       href: spatial-tiers.md
+- name: Remote clients (Subscriptions)
+  items:
+    - name: Subscription
+      href: subscription.md
+    - name: Projection
+      href: projection.md
+    - name: Replication profile
+      href: replication-profile.md
+    - name: Replication session
+      href: replication-session.md
+    - name: Client command
+      href: client-command.md
+    - name: Replication event
+      href: replication-event.md
+    - name: Replication catalog
+      href: replication-catalog.md
 - name: Reliability & operations
   items:
     - name: Errors & failures

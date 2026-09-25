@@ -6,7 +6,7 @@ description: 'Querying is the read side of Typhon''s ECS data model. Application
 
 # 09 — Querying
 
-**Code:** [`src/Typhon.Engine/Querying/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Querying) (+ a short tour of [`src/Typhon.Engine/Subscriptions/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Subscriptions) in §8)
+**Code:** [`src/Typhon.Engine/Querying/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Querying) 
 
 Querying is the read side of Typhon's ECS data model. Application code asks "give me the entities matching these constraints"; the engine turns that into an execution plan, scans the smallest possible amount of state, and streams matching primary keys into a caller-owned container. On top of that one-shot pipeline sits a **view system** — long-lived, incrementally maintained sets of entity IDs that get push-notified by writers and report `Added` / `Removed` / `Modified` deltas back to the consumer.
 
@@ -411,20 +411,8 @@ A transaction can `Spawn` an entity and then immediately query — the query mus
 
 ## 8. Subscriptions — pushing state to external clients
 
-**Code:** [`src/Typhon.Engine/Subscriptions/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Subscriptions)
-
-Subscriptions are how Typhon ships engine state to external clients — game clients, browsers, observer processes — and how those clients send typed commands back into the tick. The application declares what each archetype exposes and which profile a session follows, and says what it changed (`Replicate`); the engine does change detection, quantized encoding, per-session visibility, sessions and backpressure, in parallel on the worker pool. Clients decode against a catalog rather than C# type layouts, so renaming a type is not a wire break.
-
-**Replication is pushed** (ADR-067). The pieces:
-
-- **The push set** — the slots systems marked with `Replicate`, plus the engine's own pushes (spawn, destroy, `WriteSpatial`, migration), recorded in the fence's per-cluster structure words.
-- **The Engine-Subscriptions track** — a built-in track between the tick fence and the flush. Compute runs after the fence, publish after the flush, skippable only together (rule `SUB-02`). Its stages project the pushed entities (compare quantized values, encode once), bucket the changes by cell, and gather each session's frame from the cells around it.
-- **A geometric known-set** — a session holds the entities within its radius of its anchor, in the cells delivered to it; nothing is stored per (session, entity). A lagging session is caught up from an 8-tick push log.
-- **Replication state blocks** — native per-cluster storage beside the clusters for every entity of an observed archetype, with a directory keyed by cluster chunk id and hooks in the fence's migration step and at the drain.
-- **Network identities** — one global netId space; a released id is quarantined for the skip window, so no frame carries both an identity's leave and its re-enter.
-- **Ingress rings** — per-session SPSC command rings over native memory, carved from a slab pool; a full ring drops and counts rather than blocking the transport thread.
-
-The view machinery documented in §5 above is unchanged; replication does not read views today (shared View sources are a later phase). For the design see `claude/design/Subscriptions/`; for feature status, [feature-set/Subscriptions](../feature-set/Subscriptions/README.md).
+Replication to remote clients has its own chapter: **[15-subscriptions](15-subscriptions.md)**. It does not read views: it is built from
+declared projections and answered from geometry, so the view machinery in §5 is unaffected by it.
 
 
 ---

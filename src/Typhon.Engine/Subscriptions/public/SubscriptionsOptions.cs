@@ -203,6 +203,30 @@ public sealed class SubscriptionsOptions
     public int ObserversPerSession { get; init; } = 4;
 
     /// <summary>
+    /// The replication grid's cell side, in world units. <b>Required</b> whenever a profile observes an archetype; no default, and the runtime refuses to
+    /// start without it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Replication tracks what each session has been given cell by cell over this grid, which covers the spatial world's bounds
+    /// (<see cref="SpatialGridConfig.WorldMin"/>, <see cref="SpatialGridConfig.WorldMax"/>). It is a separate value from the spatial
+    /// <see cref="SpatialGridConfig.CellSize"/>: the spatial cells cluster entities for queries, these cells bound what a session is sent.
+    /// </para>
+    /// <para>
+    /// <b>It is load-bearing for the whole subsystem's cost, which is why it is declared rather than derived.</b> For an observer of radius <c>R</c>, each
+    /// session keeps a window of <c>W = 2⌈R / c⌉ + 5</c> cells per axis and reads that many cells every tick it moves, so a small side multiplies the
+    /// per-session work by <c>(R / c)²</c>. A large side makes each cell coarser, so the band a moving session is sent when it enters a cell grows with it.
+    /// The usual choice is about a third of the largest <see cref="ProfileBuilder.Sphere"/> radius: <c>R / c = 3</c> gives an 11 × 11 window. Profiles of
+    /// different radii share this one grid, so it is sized for the set of them, not for any one.
+    /// </para>
+    /// <para>
+    /// Refused at start: absent or not positive; a grid wider than 2²¹ cells on an axis; a window wider than 16 cells (<c>⌈R / c⌉ &gt; 5</c> for the largest
+    /// radius), the limit of the current window storage. The resolved grid is logged when the runtime starts.
+    /// </para>
+    /// </remarks>
+    public double ReplicationCellM { get; init; }
+
+    /// <summary>
     /// The largest frame the engine will send, in bytes. Default: 256 KiB.
     /// </summary>
     /// <remarks>
@@ -221,6 +245,34 @@ public sealed class SubscriptionsOptions
     /// being disconnected. The first message is the exception and has its own, larger protocol constant, because an authentication token has to fit in it.
     /// </remarks>
     public int ClientMessageBytes { get; init; } = 1024;
+
+    /// <summary>
+    /// Each session's inbound budget, bytes per second, across every message it sends once open. <b>Required when the catalog has commands</b> — the
+    /// application's own or the built-in <c>ClientRegion</c> — and at least <see cref="ClientMessageBytes"/>: <c>Start</c> refuses either. No default: it is
+    /// the one rail between a single client and the tick, and what it should be depends on the application's commands, not on the engine.
+    /// </summary>
+    /// <remarks>
+    /// A token bucket per connection, one second deep. Every message is charged; only a <c>COMMANDS</c> message is refused — whole, each of its commands
+    /// answered with a <c>RATE_LIMITED</c> <c>ACK</c> so the client's <c>lastSeq</c> still settles them. It is still decoded to find them, so the budget
+    /// bounds what reaches the tick and the abuse rule (<see cref="AbuseRefusalsPerWindow"/>) bounds the decoding. A <c>PING</c>, a <c>BYE</c> and a
+    /// protocol error are never delayed (design/Subscriptions/11 § 4.2).
+    /// </remarks>
+    public int IngressBytesPerSecond { get; init; }
+
+    /// <summary>The window sustained abuse is measured in. Default: one second.</summary>
+    public TimeSpan AbuseWindow { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Refused commands in one <see cref="AbuseWindow"/> — over the inbound budget, over a command's rate, sent by a role that may not — past which the
+    /// window counts as abusive. Default: 64.
+    /// </summary>
+    public int AbuseRefusalsPerWindow { get; init; } = 64;
+
+    /// <summary>
+    /// Consecutive abusive windows after which the session is closed with 1008 (policy violation) rather than refused forever. Default: 3. A client over
+    /// its limits for a moment is refused and recovers; one that keeps sending what is refused is closed, and its SDK reconnects with backoff.
+    /// </summary>
+    public int AbuseWindows { get; init; } = 3;
 
     /// <summary>
     /// Below this much replication work — <c>connected sessions × projected blocks</c> — the pipeline runs as one dispatched system with no internal
@@ -262,6 +314,18 @@ public sealed class SubscriptionsOptions
     /// with <c>TYPHON_PUSH_SHADOW=1</c>.
     /// </summary>
     internal bool PushShadow { get; init; }
+
+    /// <summary>
+    /// Tests only: serve a flat world with the deep implementation (10 § 3.5, L6), which must agree with the flat one on it — what the degeneracy tests
+    /// run.
+    /// </summary>
+    internal bool ForceDeepReplicationForTest { get; init; }
+
+    /// <summary>
+    /// Tests and measurements only: the visibility slack <c>h</c>, in metres, of every moving observed archetype, in place of the rule (09 § 2, Q1: the
+    /// smallest <c>R / 48</c> over the Sphere profiles observing it). <see cref="double.NaN"/> applies the rule; 0 is exact.
+    /// </summary>
+    internal double VisibilitySlackMForTest { get; init; } = double.NaN;
 
     /// <summary>
     /// Whether a profile may declare <see cref="PushDetection.Automatic"/> (ADR-067). Off: replication is explicit — a system that writes a

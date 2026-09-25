@@ -26,6 +26,9 @@ public enum EventRouting
 
     /// <summary>Every session.</summary>
     Broadcast = 4,
+
+    /// <summary>The one session the emitter names (<see cref="SubscriptionsCommands.EmitTo{T}"/>).</summary>
+    ToSession = 5,
 }
 
 /// <summary>
@@ -72,6 +75,9 @@ public sealed partial class EventBuilder<T> where T : unmanaged
         _event.SetRouting(EventRouting.Near);
         _event.RoutingRadiusM = radiusM;
         _event.RoutingPoint = point;
+
+        // Built here, where T is known: the encoder holds the payload's bytes, not a T, and reads the point through this without boxing.
+        _event.RoutingPointReader = payload => point(System.Runtime.InteropServices.MemoryMarshal.Read<T>(payload));
         return this;
     }
 
@@ -105,6 +111,14 @@ public sealed partial class EventBuilder<T> where T : unmanaged
     {
         _event.SetRouting(EventRouting.ToOwner);
         _event.AddRoutingEntity(SubscriptionsNames.SelectorField(entity, "RouteToOwner"));
+        return this;
+    }
+
+    /// <summary>Routes the event to the one session the emitter names, with <see cref="SubscriptionsCommands.EmitTo{T}"/>: a reply, a private notice.</summary>
+    /// <returns>This builder.</returns>
+    public EventBuilder<T> RouteToSession()
+    {
+        _event.SetRouting(EventRouting.ToSession);
         return this;
     }
 
@@ -190,16 +204,20 @@ public sealed class EventDeclaration
     private ProjectedField[] _fields;
     private Dictionary<string, Type> _enumTypes;
 
-    internal EventDeclaration(string queueName, Type eventType, int index)
+    internal EventDeclaration(Type eventType, int index, int payloadSize, MessageFieldDeclaration[] attributed = null)
     {
-        QueueName = queueName;
         EventType = eventType;
         Name = eventType.Name;
         Index = index;
+        PayloadSize = payloadSize;
+        Attributed = attributed;
     }
 
-    /// <summary>The event queue this declaration consumes.</summary>
-    public string QueueName { get; }
+    /// <summary>The fields the event's attributes declare (<see cref="IReplicatedMessage"/>), or <see langword="null"/>.</summary>
+    internal MessageFieldDeclaration[] Attributed { get; }
+
+    /// <summary>The event struct's size in memory, which an emission copies.</summary>
+    internal int PayloadSize { get; }
 
     /// <summary>The event's CLR type.</summary>
     public Type EventType { get; }
@@ -237,6 +255,9 @@ public sealed class EventDeclaration
 
     /// <summary>Reads the event's world position, for <see cref="EventRouting.Near"/>.</summary>
     internal Delegate RoutingPoint { get; set; }
+
+    /// <summary>The same, over the event's bytes: what the encoder calls.</summary>
+    internal EventPointReader RoutingPointReader { get; set; }
 
     /// <summary>The CLR enum a defaulted field's value set comes from, or <see langword="null"/>. An overridden field carries its own on the codec.</summary>
     internal IReadOnlyDictionary<string, Type> DefaultEnumTypes
@@ -289,5 +310,6 @@ public sealed class EventDeclaration
     /// <summary>Materializes the field set at the end of the declaring call, so a field with no default codec is refused where it was written.</summary>
     internal void CompleteDeclaration() => Complete();
 
-    private ProjectedField[] Complete() => _fields ??= MessageContract.Complete(EventType, "Event", Name, _overrides, _ignored, out _enumTypes);
+    private ProjectedField[] Complete()
+        => _fields ??= MessageContract.Complete(EventType, "Event", Name, _overrides, _ignored, Attributed, out _enumTypes);
 }

@@ -64,8 +64,10 @@ internal static class ProjectionCompiler
     /// not the raw <c>BaseTickRate / MinTickRateHz</c> ratio, which the ladder caps.
     /// </param>
     /// <returns>One plan per declared archetype, in declaration order.</returns>
+    /// <param name="replicationCellM">The replication cell side; the visibility slack is capped at half of it. Zero or less: no cap.</param>
+    /// <param name="visibilitySlackOverrideM">Tests only: every Sphere-observed moving archetype's slack; <see cref="double.NaN"/> applies the rule.</param>
     public static CompiledProjectionPlan[] Compile(SubscriptionsRegistry registry, DatabaseEngine engine, double nominalTickPeriodSeconds,
-        int largestTickMultiplier)
+        int largestTickMultiplier, double replicationCellM = 0, double visibilitySlackOverrideM = double.NaN)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(engine);
@@ -84,7 +86,8 @@ internal static class ProjectionCompiler
         var plans = new CompiledProjectionPlan[registry.Archetypes.Count];
         for (var i = 0; i < plans.Length; i++)
         {
-            plans[i] = CompileArchetype(registry.Archetypes[i], engine, nominalTickPeriodSeconds, largestTickMultiplier);
+            var slack = VisibilitySlackOf(registry, registry.Archetypes[i].ArchetypeType, replicationCellM, visibilitySlackOverrideM);
+            plans[i] = CompileArchetype(registry.Archetypes[i], engine, nominalTickPeriodSeconds, largestTickMultiplier, slack);
         }
 
         return plans;
@@ -141,8 +144,53 @@ internal static class ProjectionCompiler
             $"{WireMath.SymmetricLimit(32)}. Lower the threshold, or widen the position quantum by shrinking the world.");
     }
 
+    /// <summary>
+    /// An archetype's visibility slack <c>h_A</c> (09 § 2–3): the smallest slack over the Sphere profiles observing it — a profile's half band, or its
+    /// <c>R / 48</c> without one — capped at half a cell, as the anchor slack is, so a cell query's padding stays under a cell. An archetype no Sphere
+    /// observes stays exact: nothing tests it against a radius.
+    /// </summary>
+    private static double VisibilitySlackOf(SubscriptionsRegistry registry, Type archetype, double cellM, double overrideM)
+    {
+        var slack = double.PositiveInfinity;
+        foreach (var profile in registry.Profiles)
+        {
+            foreach (var observer in profile.Observers)
+            {
+                if (observer.Kind != ObserverKind.Sphere)
+                {
+                    continue;
+                }
+
+                foreach (var type in observer.Archetypes)
+                {
+                    if (type == archetype)
+                    {
+                        slack = Math.Min(slack, observer.VisibilitySlack);
+                    }
+                }
+            }
+        }
+
+        if (!double.IsFinite(slack))
+        {
+            return 0d;
+        }
+
+        if (double.IsFinite(overrideM))
+        {
+            slack = overrideM;
+        }
+
+        if (cellM > 0 && double.IsFinite(cellM))
+        {
+            slack = Math.Min(slack, cellM / 2d);
+        }
+
+        return slack > 0 ? slack : 0d;
+    }
+
     private static CompiledProjectionPlan CompileArchetype(ArchetypeProjection projection, DatabaseEngine engine, double nominalTickPeriodSeconds,
-        int largestTickMultiplier)
+        int largestTickMultiplier, double visibilitySlackM)
     {
         var meta = ResolveArchetype(projection);
         var layout = meta.ClusterLayout;
@@ -218,8 +266,21 @@ internal static class ProjectionCompiler
         // after it was projected would have neither, and the frame stage would have to re-encode from the columns per session. Written once when an entry
         // is initialized; see ReplicationBlockLayout.EnterBytes for why it is in the cold entry and why it usually costs nothing.
         var enterPositionBytes = position != null && !moving ? position.Dims * (position.Pos.Bits / 8) : 0;
+        var headings = 0;
+        foreach (var field in fields)
+        {
+            headings = Math.Max(headings, field.HeadingPlusOne);
+        }
+
         var blockLayout = ReplicationBlockLayout.ForArchetype(layout.ClusterSize, moving ? position.SegmentBytes : 0, stateBodyBytes, quantizedPositionBytes,
-            runStartBytes, ownerEntrySize, enterPositionBytes, onEnter.MaxBodyBytes);
+            runStartBytes, ownerEntrySize, enterPositionBytes, onEnter.MaxBodyBytes, headingBytes: 4 * headings);
+
+        // v̂ (09 § 2) gets bytes of its own only for a mover with a slack; at zero it is the previous position.
+        var slack = moving ? visibilitySlackM : 0d;
+        if (slack > 0)
+        {
+            blockLayout = blockLayout.WithVisibilityPosition();
+        }
 
         return new CompiledProjectionPlan
         {
@@ -237,6 +298,7 @@ internal static class ProjectionCompiler
             OwnerGroups = ownerGroups,
             Position = position,
             BlockLayout = blockLayout,
+            VisibilitySlackM = slack,
             OwnerEntrySize = ownerEntrySize,
             MaxStateBodyBytes = stateBodyBytes,
             TickSlotCount = motionTickSlots + groupNames.Length,
@@ -284,6 +346,16 @@ internal static class ProjectionCompiler
             compiled[i] = CompileField(projection, field, meta, layout, engine, fieldSection, i, ref packBits);
         }
 
+        // Each heading gets its index among the archetype's headings, in wire order: where its held code lives in the cold entry (09 § 15).
+        var heading = 0;
+        for (var i = 0; i < compiled.Length; i++)
+        {
+            if (compiled[i].HeadingPlusOne > 0)
+            {
+                compiled[i] = compiled[i] with { HeadingPlusOne = ++heading };
+            }
+        }
+
         return compiled;
     }
 
@@ -308,8 +380,29 @@ internal static class ProjectionCompiler
         packBits += bitCount;
 
         var (codeMin, codeMax) = IntegerRange(codec);
+        var headingTolerance = 0u;
+        if (field.IsHeading)
+        {
+            if (!double.IsFinite(field.HeadingToleranceDeg) || field.HeadingToleranceDeg <= 0 || field.HeadingToleranceDeg >= 180)
+            {
+                throw new InvalidOperationException(
+                    $"Archetype '{projection.Name}' declares the heading '{field.Name}' with a tolerance of {field.HeadingToleranceDeg}°. A heading is sent when it " +
+                    "turns past its tolerance, which must be above 0° and below 180°.");
+            }
+
+            if (codec.Kind != CodecKind.Angle || field.Owner || field.OnEnter)
+            {
+                throw new InvalidOperationException($"Heading '{field.Name}' of archetype '{projection.Name}' must be a public, grouped angle field.");
+            }
+
+            // The deadband in code space: a turn of the tolerance is this many codes of the angle's 2^bits per full turn.
+            headingTolerance = (uint)Math.Floor(field.HeadingToleranceDeg / 360d * Math.Pow(2, codec.Bits));
+        }
+
         return new CompiledField
         {
+            HeadingPlusOne = field.IsHeading ? 1 : 0,
+            HeadingToleranceCodes = headingTolerance,
             Name = field.Name,
             ComponentSlot = slot,
             ComponentOffsetInCluster = layout.ComponentOffset(slot),

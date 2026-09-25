@@ -90,6 +90,11 @@ public static class CommandLine
             c.WorkerParkAfterUs = Int(args, "--sched-park-us", 0);
         }
         c.DormancyTicks = Int(args, "--dormancy", 0);
+        c.SessionBudgetBytesPerSecond = Int(args, "--session-budget", 0);
+        c.IngressBytesPerSecond = Int(args, "--ingress-budget", c.IngressBytesPerSecond);
+        c.PlayerLeaveM = Dbl(args, "--player-leave", 0d);
+        c.GodRegionMaxEdgeM = Dbl(args, "--god-region", 0d);
+        c.GodNearBudget = Int(args, "--god-near", c.GodNearBudget);
         c.SubscriptionsPhaseTiming = Array.IndexOf(args, "--subs-phases") >= 0;
         c.IdleCreatureFraction = Math.Clamp(Dbl(args, "--idle-creatures", 0d), 0d, 1d);
 

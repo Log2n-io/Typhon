@@ -190,6 +190,10 @@ export function writeSelfBlock(
   ownerMask: number,
   values: FieldValues,
 ): void {
+  if (netId === 0) {
+    throw new RangeError('netId 0 is no controlled entity; write it with writeSelfNoneBlock');
+  }
+
   const groupCount = archetype.ownerGroups.length;
   if (!(Number.isInteger(ownerMask) && ownerMask >= 0 && ownerMask < 2 ** groupCount)) {
     throw new RangeError(`owner mask 0x${ownerMask.toString(16)} is invalid for ${groupCount} owner group(s)`);
@@ -206,6 +210,16 @@ export function writeSelfBlock(
     }
   }
 
+  endBlock(w, mark);
+}
+
+/** A `SELF` block for a session that controls no entity (W17′): `lastSeq` only. */
+export function writeSelfNoneBlock(w: WireWriter, lastSeq: number): void {
+  const mark = beginBlock(w, BlockType.Self);
+  w.varu(0);
+  w.varu(0);
+  w.u16(uintInRange(lastSeq, 0xffff, 'lastSeq'));
+  w.u8(0);
   endBlock(w, mark);
 }
 

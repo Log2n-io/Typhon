@@ -56,7 +56,8 @@ class SessionChurnLeakTests : TestBase<SessionChurnLeakTests>
         var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
         Populate(dbe);
 
-        using var harness = FrameHarness.Create(dbe, Declare, nameof(TenThousandConnectDisconnectCyclesLeakNothing));
+        using var harness = FrameHarness.Create(dbe, Declare, nameof(TenThousandConnectDisconnectCyclesLeakNothing),
+            replicationCellM: ProjectionTestSchema.ReplicationCellFor(2000));
         harness.RunTick(1);
 
         // One warm-up cycle, which is also what proves the measurement is not vacuous: a run that never leases an identity would return to a

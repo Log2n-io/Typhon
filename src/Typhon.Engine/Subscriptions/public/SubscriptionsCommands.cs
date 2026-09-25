@@ -209,7 +209,7 @@ public readonly struct CommandBatch<T> where T : unmanaged
 
                 _remaining--;
                 _index++;
-                _current = CommandBatch<T>.Read(_buffer, _onlySegment, _index);
+                _current = Read(_buffer, _onlySegment, _index);
                 return true;
             }
 
@@ -218,7 +218,7 @@ public readonly struct CommandBatch<T> where T : unmanaged
                 _index++;
                 if (_index < _buffer.CountIn(_segment))
                 {
-                    _current = CommandBatch<T>.Read(_buffer, _segment, _index);
+                    _current = Read(_buffer, _segment, _index);
                     return true;
                 }
 
@@ -252,11 +252,61 @@ public readonly struct CommandBatch<T> where T : unmanaged
 public sealed class SubscriptionsCommands
 {
     private readonly SubscriptionsIngress _ingress;
+    private readonly EventHub _events;
+    private readonly int _slot;
 
-    internal SubscriptionsCommands(SubscriptionsIngress ingress)
+    internal SubscriptionsCommands(SubscriptionsIngress ingress, EventHub events = null, int slot = 0)
     {
         ArgumentNullException.ThrowIfNull(ingress);
         _ingress = ingress;
+        _events = events;
+        _slot = slot;
+    }
+
+    /// <summary>
+    /// Sends an event to the clients its declaration routes it to (09 § 11). Encoded once, after this tick's projection, and the same bytes reach every
+    /// session it matches; a session that misses frames receives it with its next one while the event log holds the tick, and is told how many it lost after.
+    /// </summary>
+    /// <typeparam name="T">A type declared with <see cref="SubscriptionsRegistry.Event{T}"/>.</typeparam>
+    /// <param name="evt">The event; copied.</param>
+    /// <exception cref="InvalidOperationException"><typeparamref name="T"/> is not a declared event.</exception>
+    /// <remarks>
+    /// <para>
+    /// Each worker records into its own buffer; call it on the thread the <c>ctx</c> was handed to. A view kept past its tick or shared with other threads
+    /// stays correct — each buffer is gated — but its events land in another worker's order. A tick's events travel in worker order, then call order, which
+    /// is not the order the systems ran in across workers.
+    /// </para>
+    /// <para>
+    /// An <see cref="EntityId"/> field travels as the entity's netId — 0, "unknown", for an entity the client could not know. A session bound to no profile
+    /// hears broadcasts and its own <see cref="EmitTo{T}"/>, in frames of events alone; the routes that need a view never reach it.
+    /// </para>
+    /// </remarks>
+    public void Emit<T>(in T evt) where T : unmanaged
+    {
+        if (_events == null)
+        {
+            throw new InvalidOperationException($"'{typeof(T).Name}' is not a declared event: declare it with Subscriptions.Event<{typeof(T).Name}>(…).");
+        }
+
+        _events.Emit(_slot, in evt);
+    }
+
+    /// <summary>
+    /// Sends an event to one session: an event type declared with <see cref="EventBuilder{T}.RouteToSession"/> (09 § 11). To a session that is closed or
+    /// unknown, it reaches nobody.
+    /// </summary>
+    /// <typeparam name="T">A type declared with <see cref="SubscriptionsRegistry.Event{T}"/> and routed to a session.</typeparam>
+    /// <param name="session">The session.</param>
+    /// <param name="evt">The event; copied.</param>
+    /// <exception cref="InvalidOperationException"><typeparamref name="T"/> is not a declared event routed to a session.</exception>
+    public void EmitTo<T>(SessionId session, in T evt) where T : unmanaged
+    {
+        if (_events == null)
+        {
+            throw new InvalidOperationException($"'{typeof(T).Name}' is not a declared event: declare it with Subscriptions.Event<{typeof(T).Name}>(…).");
+        }
+
+        _events.EmitTo(_slot, session, in evt);
     }
 
     /// <summary>
@@ -320,6 +370,64 @@ public sealed class SubscriptionsCommands
     public bool Place(SessionId session, Vector3D position) => _ingress.Sessions.SetViewpoint(session, position);
 
     /// <summary>
+    /// Changes a session's Sphere radius from this tick on, within the range its profile declares — <c>Sphere(r, max: m)</c> (09 § 4).
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="radius">
+    /// The radius, in metres: between the profile's own (its band's midpoint when it declares a leave radius) and its declared maximum. 0 returns to the
+    /// profile's own.
+    /// </param>
+    /// <returns><see langword="false"/> when the session is closing or gone.</returns>
+    /// <exception cref="InvalidOperationException">No profile is applied to the session yet, or its profile is not a Sphere.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The radius is outside the profile's declared range.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>A player boarding an aircraft.</b> The change is geometry like an anchor move: the next frame sweeps the shell between the two radii — enters when
+    /// it grows, leaves when it shrinks — with no reset, so the client keeps everything it already holds.
+    /// </para>
+    /// <para>
+    /// <b>It applies now, like <see cref="Place"/>,</b> and holds until the session's profile changes, which returns it to the new profile's own radius.
+    /// It is checked against the profile applied NOW: a profile requested through <see cref="Session"/> is applied by the next tick's prologue, so a
+    /// radius for that profile is set from the next tick on.
+    /// </para>
+    /// <para>
+    /// <b>The radius is the one sessions test</b> — the band's midpoint <c>(R + L) / 2</c> when the profile declares a leave radius — the same space as
+    /// <c>max:</c>.
+    /// </para>
+    /// </remarks>
+    public bool SetRadius(SessionId session, double radius)
+    {
+        var sessions = _ingress.Sessions;
+        if (!sessions.IsOpen(session))
+        {
+            return false;
+        }
+
+        var profiles = _ingress.Frames?.Profiles;
+        var profile = sessions.ProfileIndex(session);
+        if (profiles == null || profile < 0)
+        {
+            throw new InvalidOperationException(
+                "SetRadius needs the session's profile applied first; a profile requested this tick is applied by the next tick's prologue.");
+        }
+
+        if (profiles.RadiusOf(profile) <= 0)
+        {
+            throw new InvalidOperationException($"SetRadius applies to a Sphere profile; the session's profile '{profiles.NameOf(profile)}' is not one.");
+        }
+
+        var own = profiles.RadiusOf(profile);
+        var max = profiles.MaxRadiusOf(profile);
+        if (radius != 0 && (!double.IsFinite(radius) || radius < own || radius > max))
+        {
+            throw new ArgumentOutOfRangeException(nameof(radius), radius,
+                $"Profile '{profiles.NameOf(profile)}' lets a session's radius range over [{own}, {max}] m; declare Sphere(..., max: ...) to widen it.");
+        }
+
+        return _ingress.Sessions.SetRadius(session, radius == own ? 0d : radius);
+    }
+
+    /// <summary>
     /// Tells the engine that the entity in <paramref name="slot"/> of <paramref name="cluster"/> changed something a client sees (ADR-067: replication is
     /// explicit).
     /// </summary>
@@ -353,6 +461,17 @@ public sealed class SubscriptionsCommands
             cluster.NotePushed(slots);
         }
     }
+
+    /// <summary>
+    /// <see cref="Replicate{TArchetype}(in ClusterRef{TArchetype}, int)"/> for an entity reached by id rather than by walking its cluster — the target of a
+    /// command, resolved with <see cref="TryResolve"/> and opened with <c>OpenMut</c>.
+    /// </summary>
+    /// <param name="entity">The entity the system wrote.</param>
+    /// <remarks>
+    /// The same mark, in the same per-cluster word: one interlocked OR, duplicates free. Call it after the write, as with the cluster form; a no-op for an
+    /// archetype no profile observes.
+    /// </remarks>
+    public void Replicate(in EntityRef entity) => entity.NotePushed();
 
     /// <summary>Every session that is open right now, for an application that has to touch all of them — placing their observers, most of it.</summary>
     public OpenSessionView OpenSessions => new(_ingress.Sessions);
@@ -419,10 +538,10 @@ public sealed class SubscriptionsCommands
     {
         get
         {
-            var count = Volatile.Read(ref Internals.SubscriptionsExecSystemBase.EpochEnterCount);
+            var count = Volatile.Read(ref SubscriptionsExecSystemBase.EpochEnterCount);
             return count == 0
                 ? default
-                : (Volatile.Read(ref Internals.SubscriptionsExecSystemBase.EpochEnterTicks) * 1_000_000d / System.Diagnostics.Stopwatch.Frequency / count, count);
+                : (Volatile.Read(ref SubscriptionsExecSystemBase.EpochEnterTicks) * 1_000_000d / System.Diagnostics.Stopwatch.Frequency / count, count);
         }
     }
 
@@ -437,15 +556,15 @@ public sealed class SubscriptionsCommands
     {
         get
         {
-            var n = Volatile.Read(ref Internals.SubscriptionsProjectExecSystem.PrologueCount);
+            var n = Volatile.Read(ref SubscriptionsProjectExecSystem.PrologueCount);
             if (n == 0)
             {
                 return default;
             }
 
             var k = 1000d / System.Diagnostics.Stopwatch.Frequency / n;
-            return (Internals.SubscriptionsProjectExecSystem.PrologueCreateTicks * k, Internals.SubscriptionsProjectExecSystem.PrologueDrainTicks * k,
-                Internals.SubscriptionsProjectExecSystem.PrologueGatherTicks * k, Volatile.Read(ref Internals.SubscriptionsProjectExecSystem.ProjectBusyTicks) * k);
+            return (SubscriptionsProjectExecSystem.PrologueCreateTicks * k, SubscriptionsProjectExecSystem.PrologueDrainTicks * k,
+                SubscriptionsProjectExecSystem.PrologueGatherTicks * k, Volatile.Read(ref SubscriptionsProjectExecSystem.ProjectBusyTicks) * k);
         }
     }
 
@@ -540,27 +659,68 @@ public sealed class SubscriptionsCommands
     public bool Reject(SessionId session, ushort seq, byte reasonCode) => _ingress.Buffers.Acks.Add(session, seq, reasonCode);
 
     /// <summary>
-    /// Resolves an entity reference a client sent — a <c>netId</c> on the wire — back to the entity it names.
+    /// Resolves an entity reference a client sent — a <c>netId</c> on the wire — back to the entity it names, if the session holds it (SUB-26).
     /// </summary>
     /// <param name="session">The session that sent the reference.</param>
     /// <param name="netId">The network identity, as the command carried it.</param>
     /// <param name="entity">The entity.</param>
-    /// <returns><see langword="false"/> when nothing live holds that identity, or the session is gone.</returns>
+    /// <returns>
+    /// <see langword="false"/> when nothing live holds that identity, the session is gone, or the session does not hold the entity: it is neither the
+    /// session's controlled entity nor inside the geometry its client was last told about.
+    /// </returns>
     /// <remarks>
+    /// <para>
+    /// <b>A client can only name what it was shown</b> (01 § 7). What a session holds is geometric (SUB-16), so this is the geometric test against the
+    /// session's committed geometry — the anchor, radius and delivered cells of its last published frame, or its committed hull, or its World cursor — on the
+    /// entity's v̂. An entity that left the view this tick is still accepted: the client saw it when it sent the command. One that it learned of only from an
+    /// event (an attacker beyond its view) is refused — events inform, they do not grant reach.
+    /// </para>
     /// <para>
     /// <b>An unknown identity is not an error.</b> A client may name an entity that has since left, or one it was never shown; the answer is "no", and the
     /// system decides what that means. Treating it as malformed input would let one stale reference close a connection.
     /// </para>
     /// <para>
-    /// <b>The "was shown" half of this check is not built.</b> 01-model § 7 requires that a client can only target what it was shown. What a session holds is
-    /// geometric (SUB-16), so the check is a distance and a delivered-cell test against the session's anchor, and it is not made here: today the identity
-    /// must merely be live and bound, so a client that guesses a valid netId is not refused for it. The gap is stated rather than hidden.
+    /// Costs an EntityMap probe through freshly opened chunk accessors and a geometric test, ≈ 1–2 µs: call it for the commands that name entities, not per
+    /// entity per tick. It is committed-state accurate: a session served every few ticks (a rate class, overload) is judged against its last published frame,
+    /// while the entity's v̂ is this tick's — near the edge the two can disagree by the motion of those ticks.
     /// </para>
     /// </remarks>
     public bool TryResolve(SessionId session, uint netId, out EntityId entity)
     {
         entity = EntityId.Null;
-        return _ingress.Sessions.IsOpen(session) && _ingress.NetIds.TryGet(netId, out entity);
+        if (!_ingress.Sessions.IsOpen(session) || !_ingress.NetIds.TryGet(netId, out var candidate))
+        {
+            return false;
+        }
+
+        var frames = _ingress.Frames;
+        if (frames == null || !frames.Holds(session, netId, candidate))
+        {
+            return false;
+        }
+
+        entity = candidate;
+        return true;
+    }
+
+    /// <summary>
+    /// Resolves a <c>netId</c> to the live entity that holds it, whatever the session holds — for tools that are not clients (an admin console, a replay).
+    /// A client's command goes through <see cref="TryResolve"/>, which refuses what its client was never shown.
+    /// </summary>
+    /// <param name="session">The session that sent the reference.</param>
+    /// <param name="netId">The network identity.</param>
+    /// <param name="entity">The entity.</param>
+    /// <returns><see langword="false"/> when nothing live holds that identity, or the session is gone.</returns>
+    public bool TryResolveAny(SessionId session, uint netId, out EntityId entity)
+    {
+        entity = EntityId.Null;
+        if (!_ingress.Sessions.IsOpen(session) || !_ingress.NetIds.TryGet(netId, out var candidate) || _ingress.Frames?.IsLive(netId, candidate) != true)
+        {
+            return false;
+        }
+
+        entity = candidate;
+        return true;
     }
 
     /// <summary>

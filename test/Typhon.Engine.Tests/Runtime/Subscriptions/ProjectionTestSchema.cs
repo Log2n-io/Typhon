@@ -1,3 +1,4 @@
+using Typhon.Protocol;
 using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Numerics;
@@ -57,16 +58,20 @@ struct ProjBounds3
 struct ProjAi
 {
     [Field]
+    [OnEnter(CodecKind.U8, Name = "template")]
     public byte Template;
 
     [Field]
+    [Replicate(CodecKind.Bits, Bits = 3, Name = "mode")]
     public ProjAiMode Mode;
 
     /// <summary>A flag, stored as a byte rather than a <c>bool</c>: a reflection-measured <c>bool</c> offset is refused outright (SCHEMA-07).</summary>
     [Field]
+    [Replicate(CodecKind.Bool, Name = "alerted")]
     public byte Alerted;
 
     [Field]
+    [Replicate(CodecKind.U16, Name = "level", Group = "vitals")]
     public ushort Level;
 
     /// <summary>Written every tick by the simulation and replicated by nobody — the noise a projection exists to filter.</summary>
@@ -79,6 +84,7 @@ struct ProjAi
 struct ProjVitals
 {
     [Field]
+    [Fraction(nameof(MaxHealth), Bits = 8, Name = "hp", Group = "vitals")]
     public int Health;
 
     [Field]
@@ -90,23 +96,32 @@ struct ProjVitals
 struct ProjWallet
 {
     [Field]
+    [Owner(CodecKind.Varu, Name = "credits", Saturate = true)]
     public long Credits;
 
     [Field]
+    [Owner(CodecKind.Varu, Name = "items", Group = "bag")]
     public int ItemCount;
 }
 
+// ProjCreature and ProjPlayer are also declared by their attributes (design/Subscriptions/11 § 5): subs.Archetype<T>() must compile to exactly what
+// DeclareCreature and DeclarePlayer write by hand (ReplicationAttributeTests). ProjRock shares ProjAi but names its Template "kind" — per-archetype variation
+// is what the builder is for, so it stays on the builder.
 [Archetype]
+[Replicated]
 partial class ProjCreature : Archetype<ProjCreature>
 {
+    [Motion(ToleranceM = 0.05, TeleportMps = ProjectionTestSchema.MaxSpeedMps)]
     public static readonly Comp<ProjBounds> Bounds = Register<ProjBounds>();
     public static readonly Comp<ProjAi> Ai = Register<ProjAi>();
     public static readonly Comp<ProjVitals> Vitals = Register<ProjVitals>();
 }
 
 [Archetype]
+[Replicated]
 partial class ProjPlayer : Archetype<ProjPlayer>
 {
+    [Motion(TeleportMps = ProjectionTestSchema.MaxSpeedMps)]
     public static readonly Comp<ProjBounds> Bounds = Register<ProjBounds>();
     public static readonly Comp<ProjVitals> Vitals = Register<ProjVitals>();
     public static readonly Comp<ProjWallet> Wallet = Register<ProjWallet>();
@@ -144,6 +159,14 @@ static class ProjectionTestSchema
     /// <summary>The position quantum that follows from <see cref="WorldExtentM"/> at 24 bits per axis: 2⁻¹⁰ m.</summary>
     public const double PositionStepM = 1.0 / 1024.0;
 
+    /// <summary>
+    /// The replication cell side the fixtures declare for a Sphere radius: a third of it, the 11 × 11 window. For <paramref name="radius"/> zero (World
+    /// profiles only), a 48th of the world's width, so a World fixture's delivery walks the grid it was written against.
+    /// </summary>
+    /// <param name="radius">The largest Sphere radius the fixture declares, or zero.</param>
+    /// <returns>The side, for <see cref="SubscriptionsOptions.ReplicationCellM"/>.</returns>
+    public static double ReplicationCellFor(double radius) => radius > 0 ? radius / 3d : 2d * WorldExtentM / 48d;
+
     /// <summary>The cube the volumetric grid spans: +/-1 024 m on all three axes, so every axis shares one quantum.</summary>
     public const double VolumeExtentM = 1024.0;
 
@@ -157,15 +180,8 @@ static class ProjectionTestSchema
     /// archetype's motion, and the 3D case would read as an accident.
     /// </param>
     /// <returns>The engine, with its components registered and its grid configured.</returns>
-    public static DatabaseEngine SetupEngine(IServiceProvider services, bool volumetric = false)
-    {
-        var dbe = services.GetRequiredService<DatabaseEngine>();
-        dbe.RegisterComponentFromAccessor<ProjBounds>();
-        dbe.RegisterComponentFromAccessor<ProjBounds3>();
-        dbe.RegisterComponentFromAccessor<ProjAi>();
-        dbe.RegisterComponentFromAccessor<ProjVitals>();
-        dbe.RegisterComponentFromAccessor<ProjWallet>();
-        dbe.ConfigureSpatialGrid(volumetric
+    public static DatabaseEngine SetupEngine(IServiceProvider services, bool volumetric = false) =>
+        SetupEngine(services, volumetric
             ? new SpatialGridConfig(
                 worldMin: new Vector3D(-VolumeExtentM, -VolumeExtentM, -VolumeExtentM),
                 worldMax: new Vector3D(VolumeExtentM, VolumeExtentM, VolumeExtentM),
@@ -174,6 +190,17 @@ static class ProjectionTestSchema
                 worldMin: new Vector2(-WorldExtentM, -WorldExtentM),
                 worldMax: new Vector2(WorldExtentM, WorldExtentM),
                 cellSize: 256f));
+
+    /// <summary>The same engine over a spatial world of the caller's choosing.</summary>
+    public static DatabaseEngine SetupEngine(IServiceProvider services, SpatialGridConfig spatial)
+    {
+        var dbe = services.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<ProjBounds>();
+        dbe.RegisterComponentFromAccessor<ProjBounds3>();
+        dbe.RegisterComponentFromAccessor<ProjAi>();
+        dbe.RegisterComponentFromAccessor<ProjVitals>();
+        dbe.RegisterComponentFromAccessor<ProjWallet>();
+        dbe.ConfigureSpatialGrid(spatial);
         dbe.InitializeArchetypes();
         return dbe;
     }

@@ -16,9 +16,9 @@ A practical, read-as-you-go guide to **building on** Typhon. It's task-oriented:
 
 ## 🐍 What Typhon is 🐍
 
-An **in-process, real-time ACID database** with an **ECS** (Entity-Component-System) data model. You define **components** (plain `struct`s), group them into **archetypes** (the shape of an entity), **spawn** entities, **query** them, and run **systems** over them on a **tick**. It ships as a .NET library — one `DatabaseEngine` per process, no server, no network.
+An **in-process, real-time ACID database** with an **ECS** (Entity-Component-System) data model. You define **components** (plain `struct`s), group them into **archetypes** (the shape of an entity), **spawn** entities, **query** them, and run **systems** over them on a **tick**. It ships as a .NET library — one `DatabaseEngine` per process, no database server to run. When remote clients need to see the world, the engine serves them itself ([ch.7](07-subscriptions.md)).
 
-**What it isn't:** not SQL, not a key-value store, not networked, no built-in replication. It exists to squeeze maximum throughput out of a single machine for simulation-style and game-server-style workloads.
+**What it isn't:** not SQL, not a key-value store, not a networked database, no database replication or clustering (serving live world state to game clients *is* built in — that's [ch.7](07-subscriptions.md), not replication between servers). It exists to squeeze maximum throughput out of a single machine for simulation-style and game-server-style workloads.
 
 > 💾 **Not RAM-bound.** Unlike an in-memory ECS (Unity DOTS, Bevy, EnTT…), Typhon's persistent data lives in a memory-mapped, **paged store on disk** — the database can be **far larger than the RAM hosting it**. Only the hot working set (a page cache you size) stays resident, the same way SQL Server or SQLite works. ECS ergonomics, database-grade storage.
 
@@ -56,6 +56,7 @@ Read **chapter 1** to get productive. Come back for the rest when the moment arr
 | **4** | [Querying & views](04-querying.md) | find entities, build reactive views, subscribe to changes |
 | **5** | [Systems & the tick loop](05-systems.md) | run logic over your data every tick, in parallel |
 | **6** | [Operating & going deeper](06-operating.md) | observe, set resource budgets, handle errors, find the deep docs |
+| **7** | [Serving remote clients](07-subscriptions.md) | show your world to browsers, game clients and bots, and take their commands back into the tick |
 | **★** | [Embedding without the runtime](embedding-without-the-runtime.md) | drive the engine from your own loop — and the one call you must not forget |
 | **★** | [Isolation & durability cheat sheet](isolation-durability-cheatsheet.md) | reassure yourself about a guarantee — the one-page reference to keep open (not a chapter; visit any time) |
 

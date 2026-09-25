@@ -56,6 +56,7 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
             StatePoolBudgetBytes = 64L * 1024 * 1024,
             FramePoolBudgetBytes = 64L * 1024 * 1024,
             EnterBudgetPerFrame = enterBudget,
+            ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0),
         };
 
     private FrameHarness Create(SubscriptionsOptions options = null)
@@ -366,6 +367,66 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
         Assert.Multiple(() =>
         {
             Assert.That(state.SlotsProjected, Is.EqualTo(2), "the two pushed slots, and not the other ten of the cluster");
+            Assert.That(frame, Is.Not.Null);
+            Assert.That(frame.States.Count, Is.EqualTo(2), "and the two changes reached the client");
+        });
+    }
+
+    /// <summary>
+    /// SUB-10 — an entity written by id (a command's target) and pushed through <c>Replicate(in EntityRef)</c> is projected and reaches the client; the same
+    /// write without the push is not projected.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-10")]
+    public void AnEntityWrittenByIdIsPushedThroughItsRef()
+    {
+        using var harness = Create();
+        SpawnCreatures(harness, 12);
+        harness.RunTick(1);
+        var session = harness.OpenSessions(1, Profile)[0];
+        harness.RunTick(2);
+        harness.Deliver(session);
+
+        var ids = new EntityId[3];
+        using (var tx = harness.Engine.CreateQuickTransaction())
+        {
+            var accessor = tx.For<ProjCreature>();
+            foreach (var cluster in accessor.GetClusterEnumerator())
+            {
+                ids[0] = cluster.GetEntityId(2);
+                ids[1] = cluster.GetEntityId(5);
+                ids[2] = cluster.GetEntityId(7);
+                break;
+            }
+
+            accessor.Dispose();
+        }
+
+        var state = harness.Subscriptions.ReplicationStates[harness.PlanIndex(nameof(ProjCreature))];
+        state.ResetProjectionCounters();
+        using (var tx = harness.Engine.CreateQuickTransaction())
+        {
+            for (var i = 0; i < ids.Length; i++)
+            {
+                var entity = tx.OpenMut(ids[i]);
+                entity.Write(ProjCreature.Ai).Level = 555;
+
+                // The third is written and not pushed: explicit replication sends nothing for it.
+                if (i < 2)
+                {
+                    harness.Subscriptions.Commands.Replicate(in entity);
+                }
+            }
+
+            tx.Commit();
+        }
+
+        harness.RunTick(3);
+        var frame = harness.Read(session);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(state.SlotsProjected, Is.EqualTo(2), "the two pushed entities, not the third written without a push");
             Assert.That(frame, Is.Not.Null);
             Assert.That(frame.States.Count, Is.EqualTo(2), "and the two changes reached the client");
         });

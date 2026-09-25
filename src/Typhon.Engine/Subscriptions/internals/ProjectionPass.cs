@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -159,9 +160,13 @@ internal static unsafe class ProjectionPass
             {
                 if (push != null)
                 {
-                    EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId);
+                    EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId, leases, hot->Entity);
                 }
 
+                // A controlled entity that leaves is news to its session: every owner group pending, so its next frame fails to locate it and says netId 0.
+                state.Self?.Notice(hot->Entity, -1);
+
+                state.EntityIndex?.Unbind(hot->NetId);
                 leases.Release(worker, hot->NetId);
                 released++;
             }
@@ -194,9 +199,13 @@ internal static unsafe class ProjectionPass
                 {
                     if (push != null)
                     {
-                        EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId);
+                        EmitPushLeave(push, pushIndex, worker, block, blockBytes, layout, slot, hot->NetId, leases, hot->Entity);
                     }
 
+                    // A controlled entity that leaves is news to its session: every owner group pending, so its next frame fails to locate it and says netId 0.
+                    state.Self?.Notice(hot->Entity, -1);
+
+                    state.EntityIndex?.Unbind(hot->NetId);
                     leases.Release(worker, hot->NetId);
                     released++;
                 }
@@ -247,6 +256,12 @@ internal static unsafe class ProjectionPass
 
         var position = plan.Position;
         var positionBytes = layout.PrevPositionBytes;
+
+        // v̂ (09 § 2, SUB-20): kept apart from the previous position only when the archetype's slack is above zero. It moves to the entity's position at
+        // an initialization, on a teleport, or when the position is more than h_A from it; otherwise the geometry keeps reading where it was.
+        var ownVisibility = push != null && layout.VisibilityPositionBytes > 0;
+        var slack = plan.VisibilitySlackM;
+        var slackSquared = slack * slack;
 
         // A pointer as well as a span over the same stack bytes: the position is quantized through the span and read by the motion rule through the pointer,
         // and taking the pointer here rather than per slot is what keeps a `fixed` region off the per-entity path.
@@ -308,6 +323,7 @@ internal static unsafe class ProjectionPass
 
                 hot->Entity = EntityId.FromRaw(entityIds[slot]);
                 hot->Flags = FlagInitializedThisTick;
+                state.EntityIndex?.Bind(hot->NetId, hot->Entity);
             }
             else
             {
@@ -315,7 +331,7 @@ internal static unsafe class ProjectionPass
             }
 
             // Where the entity was when last projected, and where it is now — the decoded wire positions.
-            float pushOldX = 0f, pushOldY = 0f, pushNewX = 0f, pushNewY = 0f;
+            float pushOldX = 0f, pushOldY = 0f, pushOldZ = 0f, pushNewX = 0f, pushNewY = 0f, pushNewZ = 0f;
             var pushFlags = (byte)0;
 
             // ── Position: quantized, compared, stored; then the motion rule decides whether it becomes a SEGMENT (P1-10) ──────────────────────────────────
@@ -323,18 +339,20 @@ internal static unsafe class ProjectionPass
             {
                 QuantizePosition(position, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
                 var stored = coldBytes + layout.PrevPositionOffsetInColdEntry;
+                var visibility = coldBytes + layout.VisibilityPositionOffsetInColdEntry;
                 if (push != null)
                 {
                     if (!initialize)
                     {
-                        push.Decode(pushIndex, stored, out pushOldX, out pushOldY);
+                        push.Decode(pushIndex, visibility, out pushOldX, out pushOldY, out pushOldZ);
                         pushFlags |= PushEvent.HasOld;
                     }
 
-                    push.Decode(pushIndex, quantizedBuffer, out pushNewX, out pushNewY);
+                    push.Decode(pushIndex, quantizedBuffer, out pushNewX, out pushNewY, out pushNewZ);
                     pushFlags |= PushEvent.HasNew;
                 }
                 var moved = initialize || !new ReadOnlySpan<byte>(stored, positionBytes).SequenceEqual(quantizedPosition[..positionBytes]);
+                var epochBefore = ownVisibility && motion.Enabled ? hotBytes[motion.SegmentOffset + motion.SegmentEpochOffset] : (byte)0;
 
                 // BEFORE the previous position is overwritten, because the rule's teleport and run-departure tests are about this tick's STEP, which only
                 // exists while both positions are still there. The rule owns the whole of the hot entry's segment region and the motion tick in
@@ -347,6 +365,25 @@ internal static unsafe class ProjectionPass
                 {
                     quantizedPosition[..positionBytes].CopyTo(new Span<byte>(stored, positionBytes));
                     hot->Flags |= FlagPositionChanged;
+                }
+
+                if (ownVisibility)
+                {
+                    var dx = pushNewX - pushOldX;
+                    var dy = pushNewY - pushOldY;
+                    var dz = pushNewZ - pushOldZ;
+                    var teleported = motion.Enabled && hotBytes[motion.SegmentOffset + motion.SegmentEpochOffset] != epochBefore;
+                    if (initialize || teleported || (dx * dx) + (dy * dy) + (dz * dz) > slackSquared)
+                    {
+                        quantizedPosition[..positionBytes].CopyTo(new Span<byte>(visibility, positionBytes));
+                    }
+                    else
+                    {
+                        // v̂ stays: the event carries it on both sides, so it is dropped unless a segment or a group made it one.
+                        pushNewX = pushOldX;
+                        pushNewY = pushOldY;
+                        pushNewZ = pushOldZ;
+                    }
                 }
 
                 // A client dead-reckons a mover until told it stopped, so a slot still extrapolating is pushed by the engine next tick —
@@ -365,17 +402,24 @@ internal static unsafe class ProjectionPass
                 quantizedPosition[..staticBytes].CopyTo(new Span<byte>(coldBytes + layout.EnterPositionOffsetInColdEntry, staticBytes));
                 if (push != null)
                 {
-                    push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY);
+                    push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY, out pushNewZ);
                     pushFlags |= PushEvent.HasNew;
                 }
             }
             else if (push != null && position != null && layout.EnterPositionBytes > 0)
             {
                 // A static entity pushed again is where it always was.
-                push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY);
+                push.Decode(pushIndex, coldBytes + layout.EnterPositionOffsetInColdEntry, out pushNewX, out pushNewY, out pushNewZ);
                 pushOldX = pushNewX;
                 pushOldY = pushNewY;
+                pushOldZ = pushNewZ;
                 pushFlags |= PushEvent.HasOld | PushEvent.HasNew;
+            }
+
+            // ── Headings: the deadband, before the groups compare (09 § 15) ────────────────────────────────────────────────────────────────────────────────
+            if (layout.HeadingBytes > 0)
+            {
+                ApplyHeadingDeadband(fields, codes, slot, coldBytes + layout.HeadingOffsetInColdEntry, initialize);
             }
 
             // ── Groups: encode, compare, stamp ──────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -387,6 +431,11 @@ internal static unsafe class ProjectionPass
                 var ownerChanged = EncodeAndCompare(plan.OwnerGroups, ownerFields, fields.Length, codes, slot, pack, ownerScratch,
                     blockBytes + layout.OwnerOffset + (slot * layout.OwnerEntrySize), ownerLength, ownerOffset, hot, tick, initialize, stampTicks: false);
                 hot->Flags |= (ushort)(ownerChanged << OwnerChangedMaskShift);
+                if (ownerChanged != 0)
+                {
+                    // To the sessions that control this entity, as a pending mask their next published frame's SELF carries (11 § 2.2).
+                    state.Self?.Notice(hot->Entity, ownerChanged);
+                }
             }
 
             if (push != null)
@@ -398,7 +447,7 @@ internal static unsafe class ProjectionPass
                     pushFlags |= PushEvent.Arrived;
                 }
 
-                push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushNewX, pushNewY);
+                push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushOldZ, pushNewX, pushNewY, pushNewZ);
             }
 
             // ── The enter cache ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -457,6 +506,39 @@ internal static unsafe class ProjectionPass
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static byte* StoreFor(ArchetypeClusterInfo clusterLayout, byte* transientBase, byte* clusterBase, byte componentSlot) =>
         transientBase != null && (clusterLayout.TransientSlotMask & (1 << componentSlot)) != 0 ? transientBase : clusterBase;
+
+    /// <summary>
+    /// A heading's deadband in code space (09 § 15, SUB-10): a new code within the tolerance of the one the client holds is replaced by the held one, so the
+    /// group body the comparison sees is unchanged and nothing is sent; past it, the new code becomes the held one. The distance is taken modulo the angle's
+    /// full turn, so the wrap at ±π is no special case — and the compare is still the encode: what is compared is what would be sent.
+    /// </summary>
+    private static void ApplyHeadingDeadband(CompiledField[] fields, uint* codes, int slot, byte* held, bool initialize)
+    {
+        for (var i = 0; i < fields.Length; i++)
+        {
+            ref readonly var field = ref fields[i];
+            if (field.HeadingPlusOne == 0)
+            {
+                continue;
+            }
+
+            var code = codes + (i * MaxSlots) + slot;
+            var kept = (uint*)(held + (4 * (field.HeadingPlusOne - 1)));
+            if (!initialize)
+            {
+                var mask = field.CodecBits >= 32 ? uint.MaxValue : (1u << field.CodecBits) - 1;
+                var diff = (*code - *kept) & mask;
+                var distance = Math.Min(diff, (mask - diff) + 1);
+                if (distance <= field.HeadingToleranceCodes)
+                {
+                    *code = *kept;
+                    continue;
+                }
+            }
+
+            *kept = *code;
+        }
+    }
 
     // ── Sections ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -625,12 +707,17 @@ internal static unsafe class ProjectionPass
         }
     }
 
-    /// <summary>A slot whose identity ends here — destroyed, or displaced by a reuse — leaves every session that holds it.</summary>
+    /// <summary>
+    /// A slot whose identity ends here — destroyed, or displaced by a reuse — leaves every session that holds it; its identity and last position are kept
+    /// for the tick's events, which may still name it (09 § 11: "X killed Y").
+    /// </summary>
     private static void EmitPushLeave(PushReplication push, int archetype, int worker, ReplicationBlockHeader* block, byte* blockBytes,
-        in ReplicationBlockLayout layout, int slot, uint netId)
+        in ReplicationBlockLayout layout, int slot, uint netId, NetIdLeaseSet leases, EntityId entity)
     {
-        push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + push.PositionOffset(archetype), out var x, out var y);
-        push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, 0f, 0f);
+        push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + push.PositionOffset(archetype), out var x, out var y,
+            out var z);
+        push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, z, 0f, 0f, 0f);
+        leases.Depart(worker, entity, netId, x, y, z);
     }
 
     // ── Entry helpers ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -734,6 +821,47 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         public int ReleasedCapacity;
         public int Demand;
         public int Starved;
+        public DepartedEntity* Departed;
+        public int DepartedCount;
+        public int DepartedCapacity;
+    }
+
+    /// <summary>An identity released this tick with the entity it named and its last position: an event of the tick may still name it (09 § 11).</summary>
+    public struct DepartedEntity
+    {
+        public EntityId Entity;
+        public uint NetId;
+        public float X;
+        public float Y;
+        public float Z;
+    }
+
+    /// <summary>Records, from <paramref name="worker"/>'s chunk, the entity whose identity it released and where it was last.</summary>
+    public void Depart(int worker, EntityId entity, uint netId, float x, float y, float z)
+    {
+        ref var lease = ref _leases[worker];
+        if (lease.DepartedCount == lease.DepartedCapacity)
+        {
+            var capacity = lease.DepartedCapacity == 0 ? 16 : lease.DepartedCapacity * 2;
+            lease.Departed = (DepartedEntity*)NativeMemory.Realloc(lease.Departed, (nuint)capacity * (nuint)sizeof(DepartedEntity));
+            lease.DepartedCapacity = capacity;
+        }
+
+        lease.Departed[lease.DepartedCount++] = new DepartedEntity { Entity = entity, NetId = netId, X = x, Y = y, Z = z };
+    }
+
+    /// <summary>This tick's departed entities, every worker's: read serially, in the frame prologue, before the next tick's <see cref="BeginTick"/>.</summary>
+    public void CollectDeparted(Dictionary<long, DepartedEntity> into)
+    {
+        for (var i = 0; i < _count; i++)
+        {
+            ref var lease = ref _leases[i];
+            for (var k = 0; k < lease.DepartedCount; k++)
+            {
+                var d = lease.Departed[k];
+                into[(long)d.Entity.RawValue] = d;
+            }
+        }
     }
 
     private Lease* _leases;
@@ -836,6 +964,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
             }
 
             lease.ReleasedCount = 0;
+            lease.DepartedCount = 0;
 
             var wanted = i < workers ? Math.Clamp(Math.Max(2 * (lease.Demand + lease.Starved), cold), MinLease, MaxLease) : 0;
             while (lease.Count > wanted)
@@ -855,6 +984,27 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
 
             lease.Demand = 0;
             lease.Starved = 0;
+        }
+    }
+
+    /// <summary>
+    /// A tick with no block to project: last tick's queued releases reach the allocator and its departed entities are forgotten, as <see cref="BeginTick"/>
+    /// would, with the leases themselves left as they are — so a quiet world does not keep released identities live until something is pushed again.
+    /// </summary>
+    public void FlushReleases(NetIdAllocator allocator)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(allocator);
+        for (var i = 0; i < _count; i++)
+        {
+            ref var lease = ref _leases[i];
+            for (var r = 0; r < lease.ReleasedCount; r++)
+            {
+                allocator.Release(lease.Released[r]);
+            }
+
+            lease.ReleasedCount = 0;
+            lease.DepartedCount = 0;
         }
     }
 
@@ -942,6 +1092,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         {
             NativeMemory.Free(_leases[i].Ids);
             NativeMemory.Free(_leases[i].Released);
+            NativeMemory.Free(_leases[i].Departed);
         }
 
         NativeMemory.Free(_leases);

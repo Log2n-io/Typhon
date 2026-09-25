@@ -441,7 +441,11 @@ class CollapsePathTests : TestBase<CollapsePathTests>
         WorkerCount = workerCount,
         BaseTickRate = TickRateHz,
         // Byte-exact comparisons across runs and shapes: the projection must map blocks to chunks the same way every time.
-        Subscriptions = new SubscriptionsOptions { CollapseBelowWorkUnits = collapseWorkUnits, DeterministicProjection = true },
+        Subscriptions = new SubscriptionsOptions
+        {
+            CollapseBelowWorkUnits = collapseWorkUnits, DeterministicProjection = true,
+            ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0),
+        },
     });
 
     private static void Declare(SubscriptionsRegistry subs)

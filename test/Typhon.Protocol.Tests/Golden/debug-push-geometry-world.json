@@ -1,0 +1,25 @@
+{
+  "description": "A World session\u0027s PUSH_GEOMETRY: its cursor, as a little-endian u64.",
+  "catalog": "catalog-kitchen-sink",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 70000,
+      "flags": 0,
+      "periodUs": 0
+    },
+    {
+      "call": "debug",
+      "subType": 128,
+      "payload": "01002000000001000000"
+    },
+    {
+      "call": "endTick"
+    }
+  ],
+  "decoded": {
+    "shape": "World",
+    "flags": 0,
+    "cursor": "0000000100000020"
+  }
+}

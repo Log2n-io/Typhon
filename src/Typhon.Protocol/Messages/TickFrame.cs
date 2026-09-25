@@ -123,9 +123,13 @@ public interface ITickSink : IFieldSink
     /// <param name="type">The event type.</param>
     void Event(MessagePlan type);
 
-    /// <summary>The <c>SELF</c> block: the owner groups in <paramref name="ownerMask"/> follow through the field members.</summary>
-    /// <param name="archetype">The controlled entity's archetype.</param>
-    /// <param name="netId">The controlled entity.</param>
+    /// <summary>
+    /// The <c>SELF</c> block: the owner groups in <paramref name="ownerMask"/> follow through the field members. <paramref name="archetype"/> is
+    /// <see langword="null"/> and <paramref name="netId"/> 0 when the session controls no entity (W17′): an acknowledgement only, which also tells the
+    /// client to drop the owner state it holds.
+    /// </summary>
+    /// <param name="archetype">The controlled entity's archetype, or <see langword="null"/> when it controls none (W17′).</param>
+    /// <param name="netId">The controlled entity, or 0 for none.</param>
     /// <param name="lastSeq">The highest command sequence drained into a tick at or before this frame's.</param>
     /// <param name="ownerMask">Bit i set when owner group i is carried.</param>
     void Self(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask);
@@ -447,10 +451,25 @@ public static class TickReader
     private static void ReadSelf<TSink>(ref WireReader r, CatalogPlan plan, uint tick, ref TSink sink)
         where TSink : ITickSink, allows ref struct
     {
-        var archetype = plan.Archetype(r.ReadVaruAtMost(int.MaxValue, "archetype index"));
+        var archetypeIdx = r.ReadVaruAtMost(int.MaxValue, "archetype index");
         var netId = r.ReadVaru();
         var lastSeq = r.ReadU16();
         var mask = r.ReadU8();
+
+        // netId 0 is never an entity: it is "no controlled entity" (W17′), an acknowledgement only, so it names no archetype and carries no group.
+        if (netId == 0)
+        {
+            if (archetypeIdx != 0 || mask != 0)
+            {
+                throw WireFormatException.Malformed(
+                    $"SELF with no controlled entity must name archetype 0 and no owner group (archetype {archetypeIdx}, mask 0x{mask:x2})");
+            }
+
+            sink.Self(null, 0, lastSeq, 0);
+            return;
+        }
+
+        var archetype = plan.Archetype(archetypeIdx);
         var groupCount = archetype.OwnerGroups.Length;
         if ((mask >> groupCount) != 0)
         {
@@ -770,6 +789,19 @@ public static class TickWriter
         EndBlock(ref w, mark);
     }
 
+    /// <summary>Writes a <c>SELF</c> block for a session that controls no entity: <paramref name="lastSeq"/> only (W17′).</summary>
+    /// <param name="w">The writer.</param>
+    /// <param name="lastSeq">The highest drained command sequence.</param>
+    public static void WriteSelfNone(ref WireWriter w, ushort lastSeq)
+    {
+        var mark = BeginBlock(ref w, BlockTypes.Self);
+        w.WriteVaru(0);
+        w.WriteVaru(0);
+        w.WriteU16(lastSeq);
+        w.WriteU8(0);
+        EndBlock(ref w, mark);
+    }
+
     /// <summary>Writes a <c>SELF</c> block.</summary>
     /// <param name="w">The writer.</param>
     /// <param name="archetype">The controlled entity's archetype.</param>
@@ -779,6 +811,11 @@ public static class TickWriter
     /// <param name="values">Their fields' values.</param>
     public static void WriteSelf(ref WireWriter w, ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask, RecordValues values)
     {
+        if (netId == 0)
+        {
+            throw new ArgumentException("netId 0 is no controlled entity; write it with WriteSelfNone", nameof(netId));
+        }
+
         if ((ownerMask >> archetype.OwnerGroups.Length) != 0)
         {
             throw new ArgumentException($"owner mask 0x{ownerMask:x2} is invalid for {archetype.OwnerGroups.Length} owner group(s)");

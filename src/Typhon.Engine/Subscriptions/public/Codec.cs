@@ -265,6 +265,100 @@ public readonly struct Codec : IEquatable<Codec>
         return new Codec(new CatalogCodec { Kind = CodecKind.Bytes, N = n });
     }
 
+    /// <summary>
+    /// The codec a replication attribute declares for a field of type <typeparamref name="TField"/> (design/Subscriptions/11 § 5): <paramref name="kind"/>
+    /// through the factory of that name, validated as that factory validates it, or — for <see cref="CodecKind.Unknown"/> — the codec the type travels
+    /// under by default, the one an undeclared command or event field takes. The generator emits it; an application writes the named factory.
+    /// </summary>
+    /// <typeparam name="TField">The field's type: an enum carries its names on <see cref="CodecKind.Bits"/> and on a default.</typeparam>
+    /// <param name="kind">The codec.</param>
+    /// <param name="bits">Bits, for the kinds that take them; 0 only where the kind has a default width (a position).</param>
+    /// <param name="min">A <c>Quant</c>'s lower bound.</param>
+    /// <param name="max">A <c>Quant</c>'s upper bound.</param>
+    /// <param name="scale">A <c>Vec2/3</c>'s step.</param>
+    /// <param name="maxBytes">A <c>Str</c> or <c>Blob</c>'s cap, or the length of <c>Bytes</c>.</param>
+    /// <param name="saturate">Whether the codec clamps out-of-range values (<see cref="Saturate"/>).</param>
+    /// <returns>The codec.</returns>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public static Codec Declared<TField>(CodecKind kind, int bits = 0, double min = 0, double max = 0, double scale = 0, int maxBytes = 0,
+        bool saturate = false)
+    {
+        var codec = Declared(typeof(TField), kind, bits, min, max, scale, maxBytes);
+        return saturate ? codec.Saturate() : codec;
+    }
+
+    /// <summary>The non-generic core of <see cref="Declared{TField}"/>, for a message field known only by its <see cref="Type"/>.</summary>
+    internal static Codec Declared(Type fieldType, CodecKind kind, int bits, double min, double max, double scale, int maxBytes)
+    {
+        switch (kind)
+        {
+            case CodecKind.Unknown:
+                var byType = MessageContract.DefaultCodec(fieldType, out var enumType);
+                if (!byType.IsDeclared)
+                {
+                    throw new ArgumentException(
+                        $"A {fieldType.Name} field has no default codec — a 64-bit integer, a double or a struct must say how it travels (01 § 2): name a " +
+                        "CodecKind in its attribute.", nameof(kind));
+                }
+
+                return enumType == null ? byType : new Codec(byType._catalog, enumType, false);
+            case CodecKind.Bool: return Bool;
+            case CodecKind.U8: return U8;
+            case CodecKind.I8: return I8;
+            case CodecKind.U16: return U16;
+            case CodecKind.I16: return I16;
+            case CodecKind.U32: return U32;
+            case CodecKind.I32: return I32;
+            case CodecKind.Varu: return VarUInt;
+            case CodecKind.Vari: return VarInt;
+            case CodecKind.F32: return F32;
+            case CodecKind.F16: return F16;
+            case CodecKind.EntityRef: return EntityRef;
+            case CodecKind.TickLo: return TickLo;
+            case CodecKind.Quat3: return Quat3;
+            case CodecKind.Pos2: return bits == 0 ? Pos2 : new Codec(new CatalogCodec { Kind = CodecKind.Pos2, Bits = CheckedBits(kind, bits) });
+            case CodecKind.Pos3: return bits == 0 ? Pos3 : new Codec(new CatalogCodec { Kind = CodecKind.Pos3, Bits = CheckedBits(kind, bits) });
+            case CodecKind.Quant: return Quant(min, max, RequiredBits(kind, bits));
+            case CodecKind.Unorm: return Unorm(RequiredBits(kind, bits));
+            case CodecKind.Snorm: return Snorm(RequiredBits(kind, bits));
+            case CodecKind.Angle: return Angle(RequiredBits(kind, bits));
+            case CodecKind.Vec2: return Vec2(scale, RequiredBits(kind, bits));
+            case CodecKind.Vec3: return Vec3(scale, RequiredBits(kind, bits));
+            case CodecKind.Str: return Str(maxBytes);
+            case CodecKind.Blob: return Blob(maxBytes);
+            case CodecKind.Bytes: return Bytes(maxBytes);
+            case CodecKind.Bits:
+                var packed = Bits(RequiredBits(kind, bits));
+                if (!fieldType.IsEnum)
+                {
+                    return packed;
+                }
+
+                var names = System.Enum.GetNames(fieldType).Length;
+                if (names > 1 << bits)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(bits), bits,
+                        $"CodecKind.Bits with {bits} bit(s) indexes {1 << bits} values and '{fieldType.Name}' has {names} names (W13). It needs " +
+                        $"{BitsNeededFor(names)} bits.");
+                }
+
+                return new Codec(packed._catalog, fieldType, false);
+            default:
+                throw new NotSupportedException(
+                    $"CodecKind.{kind} cannot be declared by an attribute: it needs arguments one cannot carry (a list's element codec) or exists only " +
+                    "inside a position. Declare the field in the builder call.");
+        }
+    }
+
+    private static int RequiredBits(CodecKind kind, int bits)
+        => bits != 0 ? bits : throw new ArgumentException($"CodecKind.{kind} needs its width: set Bits on the attribute.", nameof(bits));
+
+    private static int CheckedBits(CodecKind kind, int bits)
+    {
+        CheckQuantizingBits(bits, nameof(bits));
+        return bits;
+    }
+
     /// <summary>A counted sequence of <paramref name="of"/>: a <c>varu</c> count, then that many elements.</summary>
     /// <param name="of">The element codec.</param>
     /// <param name="minCount">The fewest elements accepted.</param>

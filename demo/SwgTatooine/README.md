@@ -302,6 +302,6 @@ These are deliberate, and each one is a thing the workload does *not* currently 
 - **`Awareness` counts hits by default.** A real interest system builds each player's list and diffs it against last
   tick's to send enter/leave. Writing hits out costs about 2.8 ns each, which at `--pop 64`'s 49.1 million hits a tick
   would dominate everything measured here — so the numbers above are for a caller that counts. `--awareness-api fill`
-  writes into a scratch buffer and throws it away; the engine's own `SpatialInterestSystem` produces real deltas and this
-  demo does not use it yet.
+  writes into a scratch buffer and throws it away. The engine's interest management is the subscriptions' push replication,
+  which the demo's clients are served by.
 - **The inventory is written at spawn and never again**, so the WAL carries no per-tick traffic from it.

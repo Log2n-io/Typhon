@@ -234,7 +234,6 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
         var es = dbe._archetypeStates[meta.ArchetypeId];
         Assert.That(es.ClusterState, Is.Not.Null);
         Assert.That(es.ClusterState.SpatialSlot.HasSpatialIndex, Is.True, "Cluster spatial slot should be configured");
-        Assert.That(es.ClusterState.ClusterDirtyRing, Is.Not.Null, "Per-archetype DirtyBitmapRing should exist");
     }
 
     // ═══════════════════════════════════════════════════════════════════════

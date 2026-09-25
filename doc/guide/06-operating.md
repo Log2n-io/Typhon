@@ -171,6 +171,7 @@ This guide is the *task-oriented* layer. When you need struct layouts, algorithm
 You can now declare a data model, choose the right storage mode per component, write and read it transactionally, query it (one-shot and reactive), run systems over it every tick in parallel, and operate the result. That's the whole arc — from your first spawned entity to a real-time engine you can observe and tune.
 
 Where to go from here:
+- **Serve it** — show the world to browsers, game clients and bots with [ch.7](07-subscriptions.md).
 - **Build something** — the loop from [ch.1](01-first-app.md) is a real, runnable starting point; grow it.
 - **Go deep** when you hit a wall — the **map** in §4 points at the exact reference chapter.
 

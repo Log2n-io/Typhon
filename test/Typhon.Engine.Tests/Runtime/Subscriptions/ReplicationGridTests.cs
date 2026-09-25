@@ -1,0 +1,163 @@
+using NUnit.Framework;
+using System;
+using System.Numerics;
+
+namespace Typhon.Engine.Tests.Runtime;
+
+/// <summary>
+/// The replication grid (design/Subscriptions/10 § 3): its cell side is declared, never derived, and everything else follows from it and the spatial world.
+/// </summary>
+[TestFixture]
+[NonParallelizable]
+class ReplicationGridTests : TestBase<ReplicationGridTests>
+{
+    private static SpatialGridConfig Flat16Km() => SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(16_000, 16_000), 256);
+
+    [Test]
+    public void TheSwgGeometryResolvesToTheElevenCellWindow()
+    {
+        var grid = ReplicationGrid.Resolve(64, Flat16Km(), 192);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(grid.CellM, Is.EqualTo(64));
+            Assert.That((grid.DimX, grid.DimY, grid.DimZ), Is.EqualTo((250, 250, 1)));
+            Assert.That((grid.OriginX, grid.OriginY), Is.EqualTo((0d, 0d)));
+            Assert.That((grid.Half, grid.Window), Is.EqualTo((5, 11)));
+            Assert.That(grid.AnchorSlack, Is.EqualTo(4d));
+            Assert.That(grid.Flat, Is.True);
+        });
+    }
+
+    [Test]
+    public void AFlatSpatialWorldGivesAGridOneCellDeepWhateverTheCellSide()
+    {
+        // The flat world's Z extent is one spatial cell (256 m); a 16 m replication cell would otherwise make it 17 cells deep and give it an altitude.
+        var grid = ReplicationGrid.Resolve(16, Flat16Km(), 48);
+
+        Assert.That(grid.DimZ, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void AVolumetricSpatialWorldGivesADeepGrid()
+    {
+        var spatial = new SpatialGridConfig(new Vector3D(-1024, -1024, -1024), new Vector3D(1024, 1024, 1024), 128);
+
+        var grid = ReplicationGrid.Resolve(64, spatial, 192);
+
+        Assert.That((grid.DimX, grid.DimY, grid.DimZ, grid.Flat), Is.EqualTo((32, 32, 32, false)));
+    }
+
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void AnUndeclaredCellSideIsRefused([Values(0, 1, 2, 3)] int which)
+    {
+        var cellM = which switch { 0 => 0d, 1 => -1d, 2 => double.NaN, _ => double.PositiveInfinity };
+        var ex = Assert.Throws<InvalidOperationException>(() => ReplicationGrid.Resolve(cellM, Flat16Km(), 192));
+
+        Assert.That(ex!.Message, Does.Contain("ReplicationCellM"));
+    }
+
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void AGridWiderThanTheCellKeyIsRefused()
+    {
+        // 16 km at 5 mm is 3.2 M cells per axis, past the 2²¹ a key addresses.
+        var ex = Assert.Throws<InvalidOperationException>(() => ReplicationGrid.Resolve(0.005, Flat16Km(), 0));
+
+        Assert.That(ex!.Message, Does.Contain("ReplicationCellM").And.Contain("2097152"));
+    }
+
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void AWindowPastSixteenCellsIsRefusedAndTheMessageNamesTheSmallestSide()
+    {
+        // ⌈192 / 30⌉ = 7: a window of 19 cells.
+        var ex = Assert.Throws<InvalidOperationException>(() => ReplicationGrid.Resolve(30, Flat16Km(), 192));
+
+        Assert.That(ex!.Message, Does.Contain("ReplicationCellM").And.Contain("19 cells").And.Contain("38.4"));
+        Assert.That(ReplicationGrid.Resolve(38.4, Flat16Km(), 192).Window, Is.EqualTo(15), "the side the message names is accepted");
+    }
+
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void ADeepWindowPastThirteenCellsIsRefused()
+    {
+        // ⌈192 / 45⌉ = 5: a window of 15 cells, 15³ = 3 375 cells past the 2 809 a session may pay for. The flat grid takes the same side.
+        var spatial = new SpatialGridConfig(new Vector3D(-1024, -1024, -1024), new Vector3D(1024, 1024, 1024), 128);
+        var ex = Assert.Throws<InvalidOperationException>(() => ReplicationGrid.Resolve(45, spatial, 192));
+
+        Assert.That(ex!.Message, Does.Contain("ReplicationCellM").And.Contain("15 cells").And.Contain("13 in a deep grid").And.Contain("48"));
+        Assert.That(ReplicationGrid.Resolve(48, spatial, 192).Window, Is.EqualTo(13), "the side the message names is accepted");
+        Assert.That(ReplicationGrid.Resolve(45, Flat16Km(), 192).Window, Is.EqualTo(15), "a flat grid takes the same side");
+    }
+
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void ATwoDimensionalArchetypeIsRefusedInADeepGridWhoseZRangeExcludesZero()
+    {
+        // A 2D position lies on the plane z = 0 (10 § 3.4); this world's Z runs from 100 m up, so the plane is outside every cell.
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider,
+            new SpatialGridConfig(new Vector3D(-1024, -1024, 100), new Vector3D(1024, 1024, 1124), 256));
+
+        var ex = Assert.Throws<NotSupportedException>(() =>
+        {
+            using var harness = ReplicationHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("p", p => p.Sphere(192).Of<ProjCreature>());
+            }, "ZRange", new SubscriptionsOptions { MaxSessions = 16, ReplicationCellM = 64 });
+        });
+
+        Assert.That(ex!.Message, Does.Contain(nameof(ProjCreature)).And.Contain("z = 0"));
+    }
+
+    [Test]
+    public void AWorldOnlyGridHasTheSmallestWindowAndNoSlack()
+    {
+        var grid = ReplicationGrid.Resolve(64, Flat16Km(), 0);
+
+        Assert.That((grid.Radius, grid.Half, grid.Window, grid.AnchorSlack), Is.EqualTo((0d, 2, 5, 0d)));
+    }
+
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void ARuntimeThatObservesAnArchetypeWithoutACellSideRefusesToStart([Values] bool world)
+    {
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var harness = ReplicationHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("p", p => (world ? p.World() : p.Sphere(192)).Of<ProjCreature>());
+            }, "GridRefusal", new SubscriptionsOptions { MaxSessions = 16 });
+        });
+
+        Assert.That(ex!.Message, Does.Contain("ReplicationCellM"));
+    }
+
+    /// <summary>
+    /// A profile's run-time maximum counts against the window bound at <c>Start</c> (09 § 4): <c>Sphere(192, max: 1 500)</c> at a 64 m cell needs a window
+    /// of 2⌈1 500 / 64⌉ + 5 = 53 cells, past the flat grid's 15, and the message names the setting and the radius.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-16")]
+    public void AProfileWhoseRunTimeMaximumPassesTheWindowIsRefusedAtStart()
+    {
+        using var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+        {
+            using var harness = ReplicationHarness.Create(dbe, subs =>
+            {
+                ProjectionTestSchema.DeclareCreature(subs);
+                subs.Profile("near", p => p.Sphere(128).Of<ProjCreature>());
+                subs.Profile("flying", p => p.Sphere(192, max: 1500).Of<ProjCreature>());
+            }, "MaxRefusal", new SubscriptionsOptions { MaxSessions = 16, ReplicationCellM = 64 });
+        });
+
+        Assert.That(ex!.Message, Does.Contain("ReplicationCellM").And.Contain("1500").And.Contain("max:"));
+    }
+}
