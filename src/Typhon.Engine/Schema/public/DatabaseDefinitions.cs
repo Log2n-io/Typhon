@@ -231,6 +231,7 @@ public class DatabaseDefinitions
             var ia = fieldInfo.GetCustomAttribute<IndexAttribute>();
             var fka = fieldInfo.GetCustomAttribute<ForeignKeyAttribute>();
             var spa = fieldInfo.GetCustomAttribute<SpatialIndexAttribute>();
+            var rka = fieldInfo.GetCustomAttribute<RealmKeyAttribute>();
 
             fields.Add(new ComponentFieldSpec(
                 fa?.Name ?? fieldInfo.Name,
@@ -244,6 +245,7 @@ public class DatabaseDefinitions
                 spatialCellSize: spa?.CellSize ?? 0f,
                 spatialMode: spa?.Mode ?? SpatialMode.Dynamic,
                 spatialCategory: spa?.Category ?? uint.MaxValue,
+                isRealmKey: rka != null,
                 hasIndex: ia != null,
                 indexAllowMultiple: ia?.AllowMultiple ?? false));
         }
@@ -343,6 +345,16 @@ public class DatabaseDefinitions
                 field.SpatialFieldType = MapToSpatialFieldType(field.Type);
             }
 
+            // Realm key (Typhon Realms): a ushort naming the entity's realm, beside the spatial field.
+            if (f.IsRealmKey)
+            {
+                if (fieldType != FieldType.UShort)
+                {
+                    throw new InvalidOperationException($"[RealmKey] on field '{f.Name}' requires type ushort, but found {fieldType}.");
+                }
+                field.IsRealmKey = true;
+            }
+
             // Index processing
             if (f.HasIndex)
             {
@@ -369,6 +381,25 @@ public class DatabaseDefinitions
             if (spatialCount > 0 && spec.StorageMode == StorageMode.Transient)
             {
                 throw new InvalidOperationException($"[SpatialIndex] is not supported on Transient component '{spec.Name}'.");
+            }
+
+            int realmKeyCount = 0;
+            foreach (var kvp in compDef.FieldsByName)
+            {
+                if (kvp.Value.IsRealmKey)
+                {
+                    realmKeyCount++;
+                }
+            }
+            if (realmKeyCount > 1)
+            {
+                throw new InvalidOperationException($"Component '{spec.Name}' has {realmKeyCount} [RealmKey] fields, but at most one is allowed.");
+            }
+            if (realmKeyCount == 1 && spatialCount == 0)
+            {
+                throw new InvalidOperationException(
+                    $"Component '{spec.Name}' has a [RealmKey] field but no [SpatialIndex] field: the realm key names the frame of the spatial field "
+                    + "beside it, so both belong to the same component.");
             }
         }
 

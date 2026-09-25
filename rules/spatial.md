@@ -498,6 +498,27 @@
 
 ---
 
+### SQ-08: A spatial query answers in exactly one realm `[fatal][silent]`
+  invariant every spatial query names ONE realm r (EcsQuery.InRealm, ClusterSpatialQuery(engine, realm); realm 0
+    when unnamed) and walks only realm r's grid: ∀ hit h: ClusterRealmMap[h.ClusterChunkId] == r. Two realms
+    share coordinates and, with the same geometry, cell keys — a query keyed by cell alone would answer with
+    another world's entities, plausibly and wrongly
+  invariant an entity is placed in the realm its [RealmKey] names (realm 0 without one), in THAT realm's grid and
+    cell geometry; the batch spawn sort orders by (archetype, realm, cell), never by cell alone
+  invariant a realm that is not registered is an application error at the call (spawn, query), never an empty
+    answer. A registered realm the archetype has no cluster in answers empty
+  never resolve a query's grid from Realm0Grid on a path that takes a realm
+  scope: EcsQuery`1.InRealm, EcsQuery`1.ExecuteSpatial, ClusterSpatialQueryExtensions.ClusterSpatialQuery,
+    DatabaseEngine.RealmGridForQuery, DatabaseEngine.RealmGridForEntry, ArchetypeClusterState.SpatialOf
+  verified: RealmKeyTests.EveryQueryShape_AnswersOnlyItsRealm_BruteForceOracle — one population, coordinate for
+    coordinate, in three realms (two sharing a cell geometry); AABB, radius, batched radius, ray, frustum, kNN and
+    the EcsQuery predicates, each against a brute-force answer or the other realms' identical answer
+  on_violation:
+    a query returns another realm's entities: interior NPCs answer an overworld aggro query, silently
+  requires: SQ-01
+
+---
+
 ## Module: Fat AABB Updates
 
 > 🔴 **RETIRED by #872 step 13, kept as a record of what the rules used to constrain.** `SF-01` and `SF-02`

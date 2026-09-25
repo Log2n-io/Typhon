@@ -9729,6 +9729,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 FieldOffset = clusterFieldOffset,
                 FieldInfo = fi,
                 Descriptor = descriptor,
+                RealmKeyOffset = table.Definition.RealmKeyField?.OffsetInComponentStorage ?? -1,
             };
             break; // Only one spatial field per archetype
         }
@@ -9959,6 +9960,22 @@ internal struct ClusterSpatialSlot
 
     /// <summary>Node layout descriptor.</summary>
     public SpatialNodeDescriptor Descriptor;
+
+    /// <summary>
+    /// Byte offset of the <c>[RealmKey]</c> <see cref="ushort"/> within the spatial component (no ComponentOverhead), or <c>-1</c> when the archetype
+    /// has none and lives in realm 0. Same component as the spatial field, so the key sits in the row the placement already reads.
+    /// </summary>
+    /// <remarks>Stored plus one, so the default slot — every non-spatial archetype's — reads "no realm key" rather than "a key at offset 0".</remarks>
+    public int RealmKeyOffset
+    {
+        readonly get => _realmKeyOffsetPlusOne - 1;
+        init => _realmKeyOffsetPlusOne = value + 1;
+    }
+
+    private int _realmKeyOffsetPlusOne;
+
+    /// <summary>True when the archetype names its realm per entity.</summary>
+    public readonly bool HasRealmKey => RealmKeyOffset >= 0;
 }
 
 /// <summary>

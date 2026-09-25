@@ -887,6 +887,58 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     [PublicAPI]
     public RealmRegistry Realms => _realmRegistry ??= new RealmRegistry(this);
 
+    /// <summary>True when the archetype's spatial component carries a <c>[RealmKey]</c> field.</summary>
+    private static bool ArchetypeHasRealmKey(ComponentTable[] slotToTable)
+    {
+        foreach (var table in slotToTable)
+        {
+            if (table?.SpatialIndex != null)
+            {
+                return table.Definition.RealmKeyField != null;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The grid of realm <paramref name="realm"/> for an entity of archetype <paramref name="archetypeId"/> entering it. Throws when the realm is not
+    /// registered or cannot hold the archetype — at the call, in application code (decision D-2: validated paths throw, the fence never does).
+    /// </summary>
+    internal SpatialGrid RealmGridForEntry(ushort realm, int archetypeId, string archetypeName)
+    {
+        var r = _realms?.TryGet(realm);
+        if (r == null)
+        {
+            throw new InvalidOperationException(
+                $"Realm {realm} is not registered: an entity of '{archetypeName}' cannot be placed in it. Register the realm (Realms.Register) first.");
+        }
+
+        if (!r.IsCompatible(archetypeId))
+        {
+            throw new InvalidOperationException($"Realm {realm} cannot hold '{archetypeName}': {r.IncompatibilityOf(archetypeId)}");
+        }
+
+        return r.Grid;
+    }
+
+    /// <summary>
+    /// The grid a spatial query in realm <paramref name="realm"/> walks. Throws when the realm is not registered: a query naming a realm that does not
+    /// exist is an application error, never an empty answer. An archetype with no cluster in a registered realm answers empty.
+    /// </summary>
+    internal SpatialGrid RealmGridForQuery(RealmId realm)
+    {
+        var r = realm.IsNone ? null : _realms?.TryGet(realm.Value);
+        if (r == null)
+        {
+            throw new InvalidOperationException(
+                $"Realm {realm.Value} is not registered: a spatial query must name a registered realm (realm 0 unless ConfigureSpatialGrid or "
+                + "Realms.Register created it).");
+        }
+
+        return r.Grid;
+    }
+
     /// <summary>The realm count <see cref="ConfigureRealms"/> set (1 when it was never called).</summary>
     internal int ConfiguredMaxRealms => _maxRealms;
 
@@ -3811,7 +3863,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     // Issue #230 Phase 3 Option B: ConfigureSpatialGrid() is REQUIRED for cluster spatial archetypes. The pre-Option-B fallback to the legacy
                     // per-entity R-Tree is gone; the per-cell cluster index is the single source of truth. Surface misconfiguration at engine startup rather
                     // than at the first spawn, when the user can still do something about it.
-                    if (Realm0Grid == null)
+                    // Realms: an archetype WITHOUT a realm key lives in realm 0, which must therefore exist; a realm-keyed one needs realms, not realm 0.
+                    var realmKeyed = ArchetypeHasRealmKey(slotToTable);
+                    if (realmKeyed ? _realms == null : Realm0Grid == null)
                     {
                         throw new InvalidOperationException(
                             $"Archetype '{meta.ArchetypeType?.Name ?? meta.ArchetypeId.ToString()}' declares a [SpatialIndex] field and is cluster-eligible, " +
@@ -3831,7 +3885,26 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                                 // #919 AC-9. Separate from the type check above because it asks a different question: not "can the grid decode this
                                 // field?" but "can this field's own precision address the world the game configured?". It runs HERE rather than in
                                 // ConfigureSpatialGrid because it needs both halves — the grid is configured before any archetype is known.
-                                SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType, in Realm0Grid.Config, archName);
+                                if (!realmKeyed)
+                                {
+                                    SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType, in Realm0Grid.Config, archName);
+                                }
+                                else
+                                {
+                                    // A realm-keyed archetype need not fit EVERY realm (f32 creatures never enter the f64 galaxy): the check is per realm, and
+                                    // an incompatible realm refuses the archetype's entities at entry (spawn, teleport) with this same message.
+                                    foreach (var realm in _realms.Registered)
+                                    {
+                                        try
+                                        {
+                                            SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType, in realm.GridConfig, archName);
+                                        }
+                                        catch (InvalidOperationException e)
+                                        {
+                                            realm.MarkIncompatible(meta.ArchetypeId, e.Message);
+                                        }
+                                    }
+                                }
                             }
                         }
 

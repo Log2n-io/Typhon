@@ -107,6 +107,9 @@ public class DBComponentDefinition
     /// <summary>Reference to the field with <c>[SpatialIndex]</c>, or null if none.</summary>
     public Field SpatialField { get; private set; }
 
+    /// <summary>The component's realm-key field (<c>[RealmKey]</c>), or null when it has none — then its entities live in realm 0.</summary>
+    public Field RealmKeyField { get; private set; }
+
     /// <summary>
     /// A single field of a component: its identity, type, byte offset within the component storage, and any index / spatial / foreign-key metadata.
     /// </summary>
@@ -192,6 +195,9 @@ public class DBComponentDefinition
 
         /// <summary>Archetype-level category bitmask for spatial broadphase filtering, from <see cref="SpatialIndexAttribute.Category"/>. Defaults to <see cref="uint.MaxValue"/>.</summary>
         public uint SpatialCategory { get; set; } = uint.MaxValue;
+
+        /// <summary>True when the field is the component's realm key (<c>[RealmKey]</c>), a <see cref="ushort"/> naming the entity's realm.</summary>
+        public bool IsRealmKey { get; set; }
 
         /// <summary>True when the field is a foreign key (<c>[ForeignKey]</c>) referencing another component's entities.</summary>
         public bool IsForeignKey { get; set; }
@@ -313,6 +319,11 @@ public class DBComponentDefinition
             if (field.HasSpatialIndex)
             {
                 SpatialField = field;
+            }
+
+            if (field.IsRealmKey)
+            {
+                RealmKeyField = field;
             }
 
             if (lastField == null || lastField.OffsetInComponentStorage < field.OffsetInComponentStorage)

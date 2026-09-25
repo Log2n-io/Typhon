@@ -649,6 +649,13 @@ public unsafe partial class Transaction
 
         var engineState = _dbe._archetypeStates[meta.ArchetypeId];
 
+        // Realms: a realm-keyed archetype's spawn names its realm in the spatial component. Validated HERE, at the call and before anything is staged —
+        // an unregistered or incompatible realm throws in application code (D-2), never at commit and never at the fence.
+        if (engineState.ClusterState is { SpatialSlot.HasRealmKey: true } keyedState)
+        {
+            ValidateSpawnRealm(meta, keyedState, values);
+        }
+
         // Generate unique EntityKey
         long entityKey = Interlocked.Increment(ref engineState.NextEntityKey);
         var entityId = new EntityId(entityKey, _dbe.RoutingIdOf(meta));
@@ -722,6 +729,32 @@ public unsafe partial class Transaction
 
         CheckEpochRefresh();
         return entityId;
+    }
+
+    /// <summary>The realm a spawn's values name, validated against the registered realms: throws for an unregistered or incompatible realm.</summary>
+    private void ValidateSpawnRealm(ArchetypeMetadata meta, ArchetypeClusterState clusterState, ReadOnlySpan<ComponentValue> values)
+    {
+        ref readonly var ss = ref clusterState.SpatialSlot;
+        var spatialType = meta._slotToComponentType[ss.Slot];
+        for (var v = 0; v < values.Length; v++)
+        {
+            if (!meta.TryGetSlot(values[v].ComponentTypeId, out var slot) || slot != ss.Slot)
+            {
+                continue;
+            }
+
+            // A span over the value, not a pointer: values can be backed by a managed array. The payload starts 12 bytes into a ComponentValue.
+            var payload = MemoryMarshal.CreateReadOnlySpan(ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in values[v])), 12),
+                values[v].DataSize);
+            if (payload.Length < ss.RealmKeyOffset + sizeof(ushort))
+            {
+                return;
+            }
+
+            var realm = MemoryMarshal.Read<ushort>(payload.Slice(ss.RealmKeyOffset));
+            _dbe.RealmGridForEntry(realm, meta.ArchetypeId, meta.ArchetypeType?.Name ?? spatialType?.Name ?? meta.ArchetypeId.ToString());
+            return;
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1846,6 +1879,11 @@ public unsafe partial class Transaction
         // Issue #229 Phase 1+2: cached spatial-slot fields used by the spawn hot path to route through ClaimSlotInCell without chasing pointers per entity.
         // Populated once per archetype switch in SetupSpawnAccessors. SpatialSlotIndexCached == -1 means either not spatial or no grid configured.
         public SpatialGrid SpatialGridCached;
+        // Realms: offset of the [RealmKey] in the spatial component (-1: the archetype lives in realm 0), and the last realm resolved with its grid —
+        // one realm-table load per realm change, none per entity in a single-realm batch.
+        public int RealmKeyOffsetCached;
+        public int LastSpawnRealm;
+        public SpatialGrid LastSpawnRealmGrid;
         public int SpatialSlotIndexCached;
         public int SpatialComponentOverheadCached;
         public int SpatialFieldOffsetCached;
@@ -1909,7 +1947,10 @@ public unsafe partial class Transaction
 
         // Step 15 (D4): a batch of spatial spawns is placed in per-cell Morton order, so a bulk load is born at the packing bound instead of at ~100 %
         // of every cell it touches. The list itself is left alone — _spawnedEntityIndex maps ids into it — and only the visiting order changes.
-        var sortThreshold = _dbe.Realm0Grid != null ? _dbe.Realm0Grid.Config.BatchSpawnSortThreshold : 0;
+        // The threshold is a batch property, not a per-entity one: realm 0's, or the first registered realm's in a world made only of named realms.
+        var realms = _dbe.RealmTable;
+        var sortRealm = realms == null ? null : realms.Default ?? (realms.Registered.Length > 0 ? realms.Registered[0] : null);
+        var sortThreshold = sortRealm != null ? sortRealm.GridConfig.BatchSpawnSortThreshold : 0;
         var spawnOrder = sortThreshold > 0 && _spawnedEntities.Count >= sortThreshold ? BuildSpatialSpawnOrder() : null;
 
         try
@@ -1960,6 +2001,7 @@ public unsafe partial class Transaction
                     // once per archetype switch (see SetupSpawnAccessors) so this hot branch is a single field read.
                     int spatialSlotIdx = ctx.SpatialSlotIndexCached;
                     bool useCellClaim = spatialSlotIdx >= 0;
+                    SpatialGrid spawnGrid = null;
                     var rankedSpawn = false;
                     int computedCellKey = -1;
                     float spawnPx = 0f;
@@ -1991,8 +2033,22 @@ public unsafe partial class Transaction
                             }
                             spatialSrcAddr = SpawnArena.Resolve(spatialStage);
                         }
+                        // Realms: the entity's realm (its [RealmKey], validated at Spawn) names the grid it is placed in; realm 0 without a key.
+                        spawnGrid = ctx.SpatialGridCached;
+                        if (ctx.RealmKeyOffsetCached >= 0)
+                        {
+                            var realm = *(ushort*)(spatialSrcAddr + ctx.SpatialComponentOverheadCached + ctx.RealmKeyOffsetCached);
+                            if (realm != ctx.LastSpawnRealm)
+                            {
+                                ctx.LastSpawnRealm = realm;
+                                ctx.LastSpawnRealmGrid = _dbe.RealmTable.Get(realm).Grid;
+                            }
+
+                            spawnGrid = ctx.LastSpawnRealmGrid;
+                        }
+
                         byte* spatialFieldPtr = spatialSrcAddr + ctx.SpatialComponentOverheadCached + ctx.SpatialFieldOffsetCached;
-                        computedCellKey = ctx.SpatialGridCached.WorldToCellKeyFromSpatialField(spatialFieldPtr, ctx.SpatialFieldTypeCached);
+                        computedCellKey = spawnGrid.WorldToCellKeyFromSpatialField(spatialFieldPtr, ctx.SpatialFieldTypeCached);
 
                         // The same field, read once more for its centre and rebased into the cell's frame (C15): the claim ranks the cell's clusters by
                         // how far each stored bound grows to admit it. Cheap — the field is in the line WorldToCellKeyFromSpatialField just read.
@@ -2000,11 +2056,11 @@ public unsafe partial class Transaction
                         // would let it join an older open cluster whose box happens to be nearer and mix the sorted runs (measured: fill clusters
                         // spanning the cell with the cap on). The ranked overload is for spawns that arrive one at a time or in small batches.
                         rankedSpawn = spawnOrder == null
-                            && (ctx.SpatialGridCached.Config.LeastEnlargementPlacement || ctx.SpatialGridCached.Config.GrowthCapPlacement);
+                            && (spawnGrid.Config.LeastEnlargementPlacement || spawnGrid.Config.GrowthCapPlacement);
                         if (rankedSpawn)
                         {
                             SpatialGrid.ReadSpatialCenter3D(spatialFieldPtr, ctx.SpatialFieldTypeCached, out var worldX, out var worldY, out var worldZ);
-                            ctx.SpatialGridCached.CellOrigin(computedCellKey, out var originX, out var originY, out var originZ);
+                            spawnGrid.CellOrigin(computedCellKey, out var originX, out var originY, out var originZ);
                             spawnPx = (float)(worldX - originX);
                             spawnPy = (float)(worldY - originY);
                             spawnPz = (float)(worldZ - originZ);
@@ -2018,8 +2074,8 @@ public unsafe partial class Transaction
                         {
                             (clusterChunkId, slotIdx) = rankedSpawn
                                 ? ctx.ClusterState.ClaimSlotInCell(computedCellKey, spawnPx, spawnPy, spawnPz, ref ctx.ClusterAccessor, _changeSet,
-                                    ctx.SpatialGridCached, TSN)
-                                : ctx.ClusterState.ClaimSlotInCell(computedCellKey, ref ctx.ClusterAccessor, _changeSet, ctx.SpatialGridCached, TSN);
+                                    spawnGrid, TSN)
+                                : ctx.ClusterState.ClaimSlotInCell(computedCellKey, ref ctx.ClusterAccessor, _changeSet, spawnGrid, TSN);
                         }
                         else
                         {
@@ -2038,8 +2094,8 @@ public unsafe partial class Transaction
                         {
                             (clusterChunkId, slotIdx) = rankedSpawn
                                 ? ctx.ClusterState.ClaimSlotInCell(computedCellKey, spawnPx, spawnPy, spawnPz, ref ctx.ClusterTransientAccessor,
-                                    ctx.SpatialGridCached, TSN)
-                                : ctx.ClusterState.ClaimSlotInCell(computedCellKey, ref ctx.ClusterTransientAccessor, ctx.SpatialGridCached, TSN);
+                                    spawnGrid, TSN)
+                                : ctx.ClusterState.ClaimSlotInCell(computedCellKey, ref ctx.ClusterTransientAccessor, spawnGrid, TSN);
                         }
                         else
                         {
@@ -2211,12 +2267,12 @@ public unsafe partial class Transaction
                                 if (cellKey >= 0)
                                 {
                                     // The realm the cluster is in (Realms SP-3): its grid is the frame of this cell key.
-                                    var spawnGrid = ctx.ClusterState.SpatialOfCluster(clusterChunkId).Grid;
-                                    spawnGrid.CellOrigin(cellKey, out cellOriginX, out cellOriginY, out cellOriginZ);
+                                    var clusterGrid = ctx.ClusterState.SpatialOfCluster(clusterChunkId).Grid;
+                                    clusterGrid.CellOrigin(cellKey, out cellOriginX, out cellOriginY, out cellOriginZ);
 
                                     // Before the index widen below, which is what makes the entity queryable: every query must already reach as far past
                                     // this cell as the entity does (SQ-01). Between fences a spawn is the only thing that can push that reach out.
-                                    ctx.ClusterState.RaiseClusterReachForSpawn(spawnGrid, cellKey, cellOriginX, cellOriginY, cellOriginZ, spawnSpatialCoords, is3D);
+                                    ctx.ClusterState.RaiseClusterReachForSpawn(clusterGrid, cellKey, cellOriginX, cellOriginY, cellOriginZ, spawnSpatialCoords, is3D);
                                 }
 
                                 // Stamped: a concurrent grow of ClusterAabbs copies the array, and a widen into the old one after the copy read this entry
@@ -2373,13 +2429,13 @@ public unsafe partial class Transaction
         var runKeys = ArrayPool<ulong>.Shared.Rent(count);
         try
         {
-            var grid = _dbe.Realm0Grid;
+            var realm0Grid = _dbe.Realm0Grid;
             var lastArchId = -1;
             var spatialSlot = -1;
             var componentOverhead = 0;
             var fieldOffset = 0;
+            var realmKeyOffset = -1;
             var fieldType = SpatialFieldType.AABB2F;
-            var inverseCellSize = grid != null ? grid.Config.InverseCellSize : 0f;
 
             for (var i = 0; i < count; i++)
             {
@@ -2392,7 +2448,7 @@ public unsafe partial class Transaction
                     var meta = _dbe.GetMetaByRouting((ushort)archId);
                     var engineState = meta != null && meta.IsClusterEligible ? _dbe._archetypeStates[meta.ArchetypeId] : null;
                     ArchetypeClusterState clusterState = engineState?.ClusterState;
-                    if (grid != null && clusterState != null && clusterState.SpatialSlot.HasSpatialIndex)
+                    if (clusterState != null && clusterState.SpatialSlot.HasSpatialIndex && (realm0Grid != null || clusterState.SpatialSlot.HasRealmKey))
                     {
                         ref readonly var ss = ref clusterState.SpatialSlot;
                         var table = engineState.SlotToComponentTable[ss.Slot];
@@ -2401,6 +2457,7 @@ public unsafe partial class Transaction
                             spatialSlot = ss.Slot;
                             componentOverhead = table.ComponentOverhead;
                             fieldOffset = ss.FieldOffset;
+                            realmKeyOffset = ss.RealmKeyOffset;
                             fieldType = ss.FieldInfo.FieldType;
                         }
                     }
@@ -2408,21 +2465,32 @@ public unsafe partial class Transaction
 
                 order[i] = i;
                 var cellKey = 0;
+                ushort realm = 0;
                 var mortonKey = 0UL;
                 if (spatialSlot >= 0)
                 {
                     var stage = entry.Stage[spatialSlot];
                     if (stage != 0)
                     {
-                        var fieldPtr = SpawnArena.Resolve(stage) + componentOverhead + fieldOffset;
-                        SpatialGrid.ReadSpatialCenter3D(fieldPtr, fieldType, out var x, out var y, out var z);
-                        cellKey = grid!.WorldToCellKey(x, y, z);
+                        var row = SpawnArena.Resolve(stage) + componentOverhead;
+                        // Each entity in its own realm's grid: two realms share cell keys, and a cell size is per realm (Realms C1).
+                        var grid = realm0Grid;
+                        if (realmKeyOffset >= 0)
+                        {
+                            realm = *(ushort*)(row + realmKeyOffset);
+                            grid = _dbe.RealmTable.Get(realm).Grid;
+                        }
+
+                        SpatialGrid.ReadSpatialCenter3D(row + fieldOffset, fieldType, out var x, out var y, out var z);
+                        cellKey = grid.WorldToCellKey(x, y, z);
                         grid.CellOrigin(cellKey, out var ox, out var oy, out var oz);
-                        mortonKey = ArchetypeClusterState.EncodeIntraCellMorton((float)(x - ox), (float)(y - oy), (float)(z - oz), (float)inverseCellSize);
+                        mortonKey = ArchetypeClusterState.EncodeIntraCellMorton((float)(x - ox), (float)(y - oy), (float)(z - oz),
+                            (float)grid.Config.InverseCellSize);
                     }
                 }
 
-                primary[i] = ((ulong)(uint)archId << 32) | (uint)cellKey;
+                // (archetype, realm, cell): runs never mix two realms' cells, which share keys.
+                primary[i] = ((ulong)(ushort)archId << 48) | ((ulong)realm << 32) | (uint)cellKey;
                 morton[i] = mortonKey;
             }
 
@@ -2647,7 +2715,11 @@ public unsafe partial class Transaction
             // Issue #229 Phase 1+2: cache spatial-cell routing info once per archetype. The hot spawn path reads SpatialSlotIndexCached once per entity to
             // decide between ClaimSlot and ClaimSlotInCell — no per-entity pointer chasing through EngineState → table → overhead.
             ctx.SpatialGridCached = _dbe.Realm0Grid;
-            if (ctx.SpatialGridCached != null && ctx.ClusterState.SpatialSlot.HasSpatialIndex)
+            ctx.RealmKeyOffsetCached = ctx.ClusterState.SpatialSlot.RealmKeyOffset;
+            ctx.LastSpawnRealm = -1;
+            ctx.LastSpawnRealmGrid = null;
+            var realmKeyed = ctx.ClusterState.SpatialSlot.HasSpatialIndex && ctx.ClusterState.SpatialSlot.HasRealmKey;
+            if ((ctx.SpatialGridCached != null || realmKeyed) && ctx.ClusterState.SpatialSlot.HasSpatialIndex)
             {
                 ref readonly var ss = ref ctx.ClusterState.SpatialSlot;
                 ctx.SpatialSlotIndexCached = ss.Slot;
@@ -2977,13 +3049,15 @@ public unsafe partial class Transaction
 
                         // Issue #230 Phase 3 Option B: the per-archetype R-Tree remove call is gone; ReleaseSlot below handles per-cell index cleanup
                         // via FinaliseEmptyClusterCellState when the source cluster becomes empty.
+                        // The cell bookkeeping is the cluster's realm's (Realms C1): an entity destroyed in realm 3 frees a slot in realm 3's cell.
+                        var releaseGrid = destroyClusterState.SpatialOfCluster(clusterChunkId).Grid;
                         if (hasClusterAccessor)
                         {
-                            destroyClusterState.ReleaseSlot(ref clusterAccessor, clusterChunkId, slotIndex, _changeSet, _dbe.Realm0Grid);
+                            destroyClusterState.ReleaseSlot(ref clusterAccessor, clusterChunkId, slotIndex, _changeSet, releaseGrid);
                         }
                         else if (hasDestroyTransientClusterAccessor)
                         {
-                            destroyClusterState.ReleaseSlot(ref destroyTransientClusterAccessor, clusterChunkId, slotIndex, _dbe.Realm0Grid);
+                            destroyClusterState.ReleaseSlot(ref destroyTransientClusterAccessor, clusterChunkId, slotIndex, releaseGrid);
                         }
                     }
 

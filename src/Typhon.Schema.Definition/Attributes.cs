@@ -202,6 +202,18 @@ public enum SpatialMode : byte
     Static = 1,
 }
 
+/// <summary>
+/// Marks the <see cref="ushort"/> field that names the realm an entity is in (Typhon Realms). It lives in the same component as the
+/// <see cref="SpatialIndexAttribute"/> field: the realm is the frame the spatial field's coordinates are expressed in. An archetype without one lives in
+/// realm 0. Writing the field through <c>WriteSpatial</c> (or <c>Transaction.Teleport</c>) moves the entity to that realm at the next tick fence.
+/// </summary>
+/// <remarks>At most one per component; the field's type must be <see cref="ushort"/>; not on a Transient component (the spatial field cannot be).</remarks>
+[AttributeUsage(AttributeTargets.Field)]
+[PublicAPI]
+public sealed class RealmKeyAttribute : Attribute
+{
+}
+
 /// <summary>Marks a spatial (AABB or bounding-sphere) component field for R-Tree indexing, enabling range and nearest-neighbor queries over its bounds.</summary>
 [AttributeUsage(AttributeTargets.Field)]
 [PublicAPI]

@@ -114,6 +114,9 @@ public readonly struct ComponentFieldSpec
     /// <summary>Archetype-level category bitmask for spatial broadphase filtering (from <see cref="SpatialIndexAttribute.Category"/>). Meaningful when <see cref="HasSpatialIndex"/>.</summary>
     public uint SpatialCategory { get; }
 
+    /// <summary>True when the field is the component's realm key (<see cref="RealmKeyAttribute"/>): a <see cref="ushort"/> naming the entity's realm.</summary>
+    public bool IsRealmKey { get; }
+
     /// <summary>Creates a component field spec. Only <paramref name="name"/>, <paramref name="dotNetType"/>, and <paramref name="offset"/> are required; the remaining metadata defaults to "absent".</summary>
     /// <param name="name">Field name (see <see cref="Name"/>).</param>
     /// <param name="dotNetType">Backing CLR type (see <see cref="DotNetType"/>).</param>
@@ -130,6 +133,7 @@ public readonly struct ComponentFieldSpec
     /// <param name="spatialCellSize">Spatial cell size (see <see cref="SpatialCellSize"/>).</param>
     /// <param name="spatialMode">Spatial mode (see <see cref="SpatialMode"/>).</param>
     /// <param name="spatialCategory">Spatial category bitmask (see <see cref="SpatialCategory"/>).</param>
+    /// <param name="isRealmKey">Realm-key flag (see <see cref="IsRealmKey"/>).</param>
     public ComponentFieldSpec(
         string name,
         Type dotNetType,
@@ -145,7 +149,8 @@ public readonly struct ComponentFieldSpec
         bool hasSpatialIndex = false,
         float spatialCellSize = 0f,
         SpatialMode spatialMode = SpatialMode.Dynamic,
-        uint spatialCategory = uint.MaxValue)
+        uint spatialCategory = uint.MaxValue,
+        bool isRealmKey = false)
     {
         Name = name;
         DotNetType = dotNetType;
@@ -162,5 +167,6 @@ public readonly struct ComponentFieldSpec
         SpatialCellSize = spatialCellSize;
         SpatialMode = spatialMode;
         SpatialCategory = spatialCategory;
+        IsRealmKey = isRealmKey;
     }
 }

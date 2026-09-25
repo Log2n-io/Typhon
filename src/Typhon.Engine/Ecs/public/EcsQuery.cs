@@ -82,6 +82,8 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // Spatial query predicate (at most one per query)
     private ComponentTable _spatialTable;
     private SpatialQueryType _spatialQueryType;
+    // The realm the spatial predicate is evaluated in (Realms C1): realm 0 unless InRealm named another.
+    private RealmId _spatialRealm;
     // Inline query parameters: meaning depends on _spatialQueryType
     // AABB: [min0..max0..] in [0]..[5]. Radius: center in [0]..[2], radius in [3]. Ray: origin in [0]..[2], dir in [3]..[5], maxDist in [6].
     // Frustum: the bounding box of the frustum in [0]..[5], same layout as AABB; the planes themselves live in _frustumPlanes.
@@ -560,6 +562,17 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
                 "Only one spatial predicate is allowed per query (WhereNearby / WhereInAABB / WhereRay / WhereFrustum). "
                 + "Run separate queries for multiple regions.");
         }
+    }
+
+    /// <summary>
+    /// Evaluates the query's spatial predicate (<c>WhereNearby</c> / <c>WhereInAABB</c> / <c>WhereRay</c> / <c>WhereFrustum</c>) in realm
+    /// <paramref name="realm"/>: only that realm's entities match, whatever their coordinates. Realm 0 when never called. The realm must be registered;
+    /// the check runs when the query executes.
+    /// </summary>
+    public EcsQuery<TArchetype> InRealm(RealmId realm)
+    {
+        _spatialRealm = realm;
+        return this;
     }
 
     /// <summary>Filter by radius (sphere) around a center point. Component <typeparamref name="T"/> must have <c>[SpatialIndex]</c>.</summary>
@@ -2466,7 +2479,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // The SpatialGrid is guaranteed non-null for cluster spatial archetypes (enforced at DatabaseEngine.InitializeArchetypes).
         if (state.ClusterArchetypes != null)
         {
-            var grid = _tx.DBE.Realm0Grid;
+            var grid = _tx.DBE.RealmGridForQuery(_spatialRealm);
 
             // MVCC born/died gate, the same one the SoA scan applies (04-data.md "Isolation guarantees").
             //

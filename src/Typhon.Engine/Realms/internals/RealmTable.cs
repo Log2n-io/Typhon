@@ -27,6 +27,34 @@ internal sealed class Realm
 
     /// <summary>The grid's configuration: geometry and every per-realm spatial knob.</summary>
     internal ref readonly SpatialGridConfig GridConfig => ref Grid.Config;
+
+    // Realm-keyed archetypes whose spatial field cannot address this realm's world (#919 AC-9 per realm), one bit per archetype id. Written at open,
+    // read-only afterwards; an entity of such an archetype is refused entry here (spawn, teleport) with the reason recorded below.
+    private ulong[] _incompatible = [];
+    private readonly System.Collections.Generic.Dictionary<int, string> _incompatibleReason = [];
+
+    /// <summary>Records that <paramref name="archetypeId"/> cannot live in this realm, and why. Open time only.</summary>
+    internal void MarkIncompatible(int archetypeId, string reason)
+    {
+        var word = archetypeId >> 6;
+        if (word >= _incompatible.Length)
+        {
+            Array.Resize(ref _incompatible, word + 1);
+        }
+
+        _incompatible[word] |= 1UL << (archetypeId & 63);
+        _incompatibleReason[archetypeId] = reason;
+    }
+
+    /// <summary>True when an entity of <paramref name="archetypeId"/> may enter this realm.</summary>
+    internal bool IsCompatible(int archetypeId)
+    {
+        var word = archetypeId >> 6;
+        return word >= _incompatible.Length || (_incompatible[word] & (1UL << (archetypeId & 63))) == 0;
+    }
+
+    /// <summary>Why <paramref name="archetypeId"/> cannot enter this realm (the extent check's message), or null.</summary>
+    internal string IncompatibilityOf(int archetypeId) => _incompatibleReason.TryGetValue(archetypeId, out var reason) ? reason : null;
 }
 
 /// <summary>
