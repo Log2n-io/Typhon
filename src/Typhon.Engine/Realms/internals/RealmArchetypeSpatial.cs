@@ -69,6 +69,6 @@ internal sealed class RealmArchetypeSpatial
         Owner = owner;
         Realm = realm;
         Grid = grid;
-        CellClusterPool = new CellClusterPool(grid.CellCount);
+        CellClusterPool = CellClusterPool.ForGrid(grid);
     }
 }

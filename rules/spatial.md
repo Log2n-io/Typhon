@@ -742,12 +742,17 @@
     creation order, so nothing may cache a key across either
   invariant creation is monotonic: a cell, once created, is never removed or renumbered while the grid
     lives (step 8 ships no destruction path; §3.5's windowed sweep is deferred)
+  invariant the block directory has two forms chosen once from the world's extent (Realms SP-4): a DENSE int[]
+    directory (one entry per block, -1 = absent) for a world of at most DenseBlockDirectoryMax blocks, the packed-key
+    hash map above it. Both publish a block the same way — its cell array and count first, the directory entry last
+    with a release store, under _creationLock — and both answer every read identically, absent included
   scope: SpatialGrid.ComputeCellKey, SpatialGrid.TryGetCellKey, SpatialGrid.TryGetNeighbourCellKey,
-    SpatialGrid.CellKeyToCoords, SpatialGrid.ResetCellState, VdbBlockKey.Pack
+    SpatialGrid.CellKeyToCoords, SpatialGrid.ResetCellState, VdbBlockKey.Pack, SpatialGrid.TryGetBlock
   verified: VdbSpatialGridTests (AC82_NeighbourAcrossAnAbsentBlockBoundary_IsAbsentThenAppears carries the
     attribute; ResetCellState_InvalidatesTheBlockCacheOnEveryThread and AC84_RebuildFromTheSamePopulation
     cover the stability and monotonicity clauses). VdbBlockKeyTests covers the packing clause but carries no
-    attribute of its own — the packing is reached through every one of these.
+    attribute of its own — the packing is reached through every one of these. RealmFootprintTests.BlockDirectory_ReadPathsDoNotCreate_AndNeighboursResolveAcrossAbsentBlocks
+    runs the absent, neighbour and reset clauses against both directory forms.
   on_violation:
     a remembered "absent" that later has a cell → query misses every cluster in it → SQ-01 false negative
     a block key that truncates an axis → two regions alias one block → each query returns the other's clusters

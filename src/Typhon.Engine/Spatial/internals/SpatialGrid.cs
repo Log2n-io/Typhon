@@ -51,18 +51,30 @@ internal sealed unsafe class SpatialGrid
     private readonly int _logBlockZ;
     private readonly int _blockCellCount;
 
-    // ── Root: packed block coords -> block id ──────────────────────────────
-    // Lock-free reads (per-stripe OLC); every write happens under _creationLock, so the map's own write path is never contended. Deliberately not disposed:
-    // its Dispose only nulls managed references, so letting the GC reclaim the POH arrays along with the grid is correct and saves making SpatialGrid
-    // IDisposable — a change that would reach every construction site including a dozen tests.
-    private readonly ConcurrentHashMap<long, int> _blockMap = new(256);
+    // ── Root: block coords -> block id ─────────────────────────────────────
+    // Two forms, chosen once from the configured extent (Realms SP-4). A world of at most DenseBlockDirectoryMax blocks keeps a DENSE directory — one int
+    // per block, -1 = absent, published with a release store under _creationLock — which costs 4 B per block of the world and resolves in one load; that is
+    // every interior, dungeon and planet-at-tens-of-metres realm, where the hash map's ~25 KB of stripes would dominate the realm's whole footprint.
+    // A larger world keeps the packed-key hash map: lock-free reads (per-stripe OLC), every write under _creationLock, so the map's own write path is
+    // never contended. Deliberately not disposed: its Dispose only nulls managed references, so letting the GC reclaim the POH arrays along with the grid is
+    // correct and saves making SpatialGrid IDisposable — a change that would reach every construction site including a dozen tests.
+    private const int DenseBlockDirectoryMax = 16384;
+    private readonly int[] _denseBlocks;
+    private readonly int _denseBlocksX;
+    private readonly int _denseBlocksY;
+    private readonly ConcurrentHashMap<long, int> _blockMap;
 
     // ── Blocks: blockId -> int[_blockCellCount] of cell slots, -1 = absent ──
-    private int[][] _blocks = new int[16][];
+    private readonly int _initialBlockSlots;
+    private int[][] _blocks;
     private int _blockCount;
 
     // ── Cell pool: chunked, so a `ref CellState` handed out earlier stays valid forever (MD-02) ──
-    private CellState[][] _cellChunks = new CellState[16][];
+    // Chunk 0 is sized to the world when the whole world fits in it (a one-cell interior holds one 64 B CellState, not 256): every key is below the
+    // world's cell count, so no key can index past it and the shift/mask addressing stays exact.
+    private readonly int _firstCellChunkSize;
+    private readonly int _initialCellChunkSlots;
+    private CellState[][] _cellChunks;
     private int _cellCount;
 
     /// <summary>Guards every structural change: appending a block, appending a cell chunk, and claiming a cell slot.</summary>
@@ -122,6 +134,26 @@ internal sealed unsafe class SpatialGrid
         _logBlockY = BitOperations.Log2((uint)_blockDimY);
         _logBlockZ = BitOperations.Log2((uint)_blockDimZ);
         _blockCellCount = _blockDimX * _blockDimY * _blockDimZ;
+
+        _denseBlocksX = (config.GridWidth + _blockDimX - 1) >> _logBlockX;
+        _denseBlocksY = (config.GridHeight + _blockDimY - 1) >> _logBlockY;
+        var denseBlocksZ = (config.GridDepth + _blockDimZ - 1) >> _logBlockZ;
+        long totalBlocks = (long)_denseBlocksX * _denseBlocksY * denseBlocksZ;
+        if (totalBlocks <= DenseBlockDirectoryMax)
+        {
+            _denseBlocks = new int[totalBlocks];
+            Array.Fill(_denseBlocks, -1);
+        }
+        else
+        {
+            _blockMap = new ConcurrentHashMap<long, int>(256);
+        }
+
+        _initialBlockSlots = (int)Math.Clamp(totalBlocks, 1, 16);
+        _blocks = new int[_initialBlockSlots][];
+        _firstCellChunkSize = config.CellCount < CellChunkSize ? (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(1, config.CellCount)) : CellChunkSize;
+        _initialCellChunkSlots = (int)Math.Clamp((config.CellCount + (long)CellChunkMask) >> CellChunkShift, 1, 16);
+        _cellChunks = new CellState[_initialCellChunkSlots][];
 
         WorldToCellCoords(0f, 0f, 0f, out _, out _, out FlatPlaneZ);
     }
@@ -347,7 +379,7 @@ internal sealed unsafe class SpatialGrid
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private int ResolveBlock(int cellX, int cellY, int cellZ, bool create)
     {
-        long key = VdbBlockKey.Pack(cellX >> _logBlockX, cellY >> _logBlockY, cellZ >> _logBlockZ);
+        long key = BlockKey(cellX >> _logBlockX, cellY >> _logBlockY, cellZ >> _logBlockZ);
 
         int epoch = Volatile.Read(ref _structureEpoch);
         if (ReferenceEquals(_lastBlockGrid, this) && _lastBlockEpoch == epoch && _lastBlockKey == key)
@@ -355,7 +387,7 @@ internal sealed unsafe class SpatialGrid
             return _lastBlockId;
         }
 
-        if (_blockMap.TryGetValue(key, out int blockId))
+        if (TryGetBlock(key, out int blockId))
         {
             CacheBlock(epoch, key, blockId);
             return blockId;
@@ -373,6 +405,25 @@ internal sealed unsafe class SpatialGrid
         return created;
     }
 
+    /// <summary>A block's key in the directory in use: its dense index, or the packed coordinates the hash map is keyed by.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private long BlockKey(int blockX, int blockY, int blockZ) =>
+        _denseBlocks != null ? ((long)blockZ * _denseBlocksY + blockY) * _denseBlocksX + blockX : VdbBlockKey.Pack(blockX, blockY, blockZ);
+
+    /// <summary>The block id under <paramref name="key"/>, when that block exists. Lock-free; the acquire pairs with <see cref="CreateBlock"/>'s release.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private bool TryGetBlock(long key, out int blockId)
+    {
+        var dense = _denseBlocks;
+        if (dense != null)
+        {
+            blockId = Volatile.Read(ref dense[key]);
+            return blockId >= 0;
+        }
+
+        return _blockMap.TryGetValue(key, out blockId);
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void CacheBlock(int epoch, long key, int blockId)
     {
@@ -388,7 +439,7 @@ internal sealed unsafe class SpatialGrid
         lock (_creationLock)
         {
             // Re-check: another thread may have created it between the lock-free probe and here.
-            if (_blockMap.TryGetValue(key, out int existing))
+            if (TryGetBlock(key, out int existing))
             {
                 return existing;
             }
@@ -411,7 +462,15 @@ internal sealed unsafe class SpatialGrid
             // release; the Volatile.Read of _blocks in the resolve path is the matching acquire.
             Volatile.Write(ref _blocks, blocks);
             Volatile.Write(ref _blockCount, blockId + 1);
-            _blockMap.TryAdd(key, blockId);
+            if (_denseBlocks != null)
+            {
+                Volatile.Write(ref _denseBlocks[key], blockId);
+            }
+            else
+            {
+                _blockMap.TryAdd(key, blockId);
+            }
+
             return blockId;
         }
     }
@@ -439,7 +498,7 @@ internal sealed unsafe class SpatialGrid
                 chunks = grown;
             }
 
-            chunks[chunkIndex] ??= new CellState[CellChunkSize];
+            chunks[chunkIndex] ??= new CellState[chunkIndex == 0 ? _firstCellChunkSize : CellChunkSize];
             Volatile.Write(ref _cellChunks, chunks);
 
             ref var cell = ref chunks[chunkIndex][slot & CellChunkMask];
@@ -867,10 +926,18 @@ internal sealed unsafe class SpatialGrid
     {
         lock (_creationLock)
         {
-            _blockMap.Clear();
-            Volatile.Write(ref _blocks, new int[16][]);
+            if (_denseBlocks != null)
+            {
+                Array.Fill(_denseBlocks, -1);
+            }
+            else
+            {
+                _blockMap.Clear();
+            }
+
+            Volatile.Write(ref _blocks, new int[_initialBlockSlots][]);
             Volatile.Write(ref _blockCount, 0);
-            Volatile.Write(ref _cellChunks, new CellState[16][]);
+            Volatile.Write(ref _cellChunks, new CellState[_initialCellChunkSlots][]);
             Volatile.Write(ref _cellCount, 0);
 
             // Invalidates EVERY thread's cached block id, not only this one's — see _structureEpoch. Released after the new structure is in place, so a
@@ -996,7 +1063,7 @@ internal sealed unsafe class SpatialGrid
             {
                 for (int bx = cellMinX >> _logBlockX; bx <= cellMaxX >> _logBlockX; bx++)
                 {
-                    if (!_blockMap.TryGetValue(VdbBlockKey.Pack(bx, by, bz), out int blockId))
+                    if (!TryGetBlock(BlockKey(bx, by, bz), out int blockId))
                     {
                         continue;
                     }

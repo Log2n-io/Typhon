@@ -3000,7 +3000,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             if (rs != null)
             {
-                rs.CellClusterPool = new CellClusterPool(rs.Grid.CellCount);
+                rs.CellClusterPool = CellClusterPool.ForGrid(rs.Grid);
             }
         }
     }

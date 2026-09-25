@@ -36,7 +36,10 @@ internal sealed class Realm
 internal sealed class RealmTable
 {
     private readonly Realm[] _byId;
-    private Realm[] _registered = [];
+    // Dense, in registration order, grown by doubling (never copied per registration: thousands of realms would make that quadratic). A reader takes the
+    // count first and the array second; the writer publishes the array first and the count second, so the array is never older than the count.
+    private Realm[] _registered = new Realm[4];
+    private int _registeredCount;
     private readonly Lock _writeLock = new();
 
     internal RealmTable(int maxRealms)
@@ -56,8 +59,15 @@ internal sealed class RealmTable
     /// <summary>Realm 0, or null while it is not registered.</summary>
     internal Realm Default => Volatile.Read(ref _byId[0]);
 
-    /// <summary>The registered realms, densely, in registration order. A snapshot: registration replaces the array, never mutates it.</summary>
-    internal ReadOnlySpan<Realm> Registered => Volatile.Read(ref _registered);
+    /// <summary>The registered realms, densely, in registration order — a consistent snapshot: entries are only ever appended.</summary>
+    internal ReadOnlySpan<Realm> Registered
+    {
+        get
+        {
+            var count = Volatile.Read(ref _registeredCount);
+            return Volatile.Read(ref _registered).AsSpan(0, count);
+        }
+    }
 
     /// <summary>True when <paramref name="id"/> names a registered realm.</summary>
     internal bool IsRegistered(ushort id) => id < _byId.Length && Volatile.Read(ref _byId[id]) != null;
@@ -94,11 +104,17 @@ internal sealed class RealmTable
             realm = new Realm(id, grid);
 
             var registered = _registered;
-            var grown = new Realm[registered.Length + 1];
-            registered.CopyTo(grown, 0);
-            grown[^1] = realm;
+            if (_registeredCount == registered.Length)
+            {
+                var grown = new Realm[registered.Length * 2];
+                registered.CopyTo(grown, 0);
+                registered = grown;
+            }
+
+            registered[_registeredCount] = realm;
             Volatile.Write(ref _byId[id.Value], realm);
-            Volatile.Write(ref _registered, grown);
+            Volatile.Write(ref _registered, registered);
+            Volatile.Write(ref _registeredCount, _registeredCount + 1);
         }
 
         return realm;

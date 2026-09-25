@@ -58,6 +58,10 @@ internal sealed class CellClusterPool
     private int _tail;
 
     /// <summary>Start index of each cell's segment inside <see cref="_pool"/>. <c>-1</c> when the cell has no segment allocated yet. Indexed by cell key.</summary>
+    // Side-array chunk 0's length and the outer arrays' initial length (Realms SP-4): the whole world's cell count when it fits in one chunk, so a
+    // one-cell interior's pool holds four 1-int arrays rather than four 256-int ones. Every key is below that count, so no key indexes past chunk 0.
+    private readonly int _firstChunkLength;
+
     private int[][] _cellHeads = new int[4][];
 
     /// <summary>Number of cluster chunk IDs currently stored in each cell's segment. Indexed by cell key.</summary>
@@ -89,8 +93,25 @@ internal sealed class CellClusterPool
     /// arrays are now CHUNKED rather than resized, because a resize hands a concurrent writer on another cell a stale array and silently loses its update.
     /// A chunk, once allocated, is never moved.
     /// </remarks>
-    public CellClusterPool(int initialCellCapacity = 0, int initialPoolCapacity = 256)
+    public CellClusterPool(int initialCellCapacity = 0, int initialPoolCapacity = 256) : this(initialCellCapacity, initialPoolCapacity, 0)
     {
+    }
+
+    /// <summary>
+    /// A pool for a grid of at most <paramref name="maxCellCount"/> cells (0 = unbounded). Below one chunk, chunk 0 and the pool start at the world's
+    /// size — a realm's structures are sized from its config (Realms SP-4).
+    /// </summary>
+    internal CellClusterPool(int initialCellCapacity, int initialPoolCapacity, int maxCellCount)
+    {
+        _firstChunkLength = maxCellCount is > 0 and < CellChunkSize ? (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)maxCellCount) : CellChunkSize;
+        if (_firstChunkLength < CellChunkSize)
+        {
+            _cellHeads = new int[1][];
+            _cellCounts = new int[1][];
+            _cellCapacities = new int[1][];
+            _cellScanCursor = new int[1][];
+        }
+
         _pool = new int[Math.Max(initialPoolCapacity, 16)];
         _tail = 0;
         if (initialCellCapacity > 0)
@@ -131,11 +152,12 @@ internal sealed class CellClusterPool
 
         if (_cellHeads[chunk] == null)
         {
-            var newHeads = new int[CellChunkSize];
+            var length = chunk == 0 ? _firstChunkLength : CellChunkSize;
+            var newHeads = new int[length];
             Array.Fill(newHeads, -1);
-            _cellCounts[chunk] = new int[CellChunkSize];
-            _cellCapacities[chunk] = new int[CellChunkSize];
-            _cellScanCursor[chunk] = new int[CellChunkSize];
+            _cellCounts[chunk] = new int[length];
+            _cellCapacities[chunk] = new int[length];
+            _cellScanCursor[chunk] = new int[length];
 
             // Published LAST, and this is the whole release edge: HasCell tests `_cellHeads[chunk] != null` as its "this chunk is usable" signal, so the
             // three siblings and the -1 fill must already be in place when it turns non-null. Its acquire is HasCell's Volatile.Read of the same element.
@@ -174,6 +196,15 @@ internal sealed class CellClusterPool
         throw new InvalidOperationException(
             $"CellClusterPool.{site} ran concurrently with a structural mutation already in flight on thread {priorThreadId} (this is thread "
             + $"{Environment.CurrentManagedThreadId}). The pool is single-writer by contract — see its class remarks for who is supposed to serialise it.");
+
+    /// <summary>A pool sized for <paramref name="grid"/>: its existing cells, and — for a world smaller than one chunk — the world's cell count.</summary>
+    internal static CellClusterPool ForGrid(SpatialGrid grid)
+    {
+        var maxCells = grid.Config.CellCount;
+        // Pool ints: a few cluster ids per cell to start, doubling on demand; the 256-int default is for large worlds.
+        var poolCapacity = maxCells < CellChunkSize ? Math.Max(16, maxCells * 4) : 256;
+        return new CellClusterPool(grid.CellCount, poolCapacity, maxCells);
+    }
 
     private static int[][] Grow(int[][] outer, int newLength)
     {
