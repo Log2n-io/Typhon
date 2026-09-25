@@ -27,7 +27,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p test && tsc --noEmit -p bin && tsc --noEmit -p bench",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p test && npm run build && tsc --noEmit -p bin && tsc --noEmit -p bench",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

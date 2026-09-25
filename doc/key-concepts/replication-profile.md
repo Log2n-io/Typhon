@@ -47,4 +47,4 @@ detail level before it ever drops state.
 
 - **Narrative:** [Guide ch.7 §2 — profiles](xref:guide-subscriptions)
 - **Feature detail:** [Profiles & observers](xref:feature-subscriptions-profiles-observers)
-- **Internals:** [Technical overview 15 § 3 — the cell algorithm, and why it scales](xref:overview-subscriptions#3-the-cell-algorithm-who-receives-what)
+- **Internals:** [Technical overview 15 § 3 — the cell algorithm, and why it scales](../in-depth-overview/15-subscriptions.md#3-the-cell-algorithm-who-receives-what)

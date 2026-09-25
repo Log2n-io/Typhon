@@ -66,5 +66,5 @@ ctx.Subscriptions.Replicate(in target);
 ## 🔗 Related
 
 - [Projections & codecs](projections-codecs.md) — what is compared and encoded
-- Internals: [the cell algorithm, and why it scales](xref:overview-subscriptions#3-the-cell-algorithm-who-receives-what)
+- Internals: [the cell algorithm, and why it scales](../../in-depth-overview/15-subscriptions.md#3-the-cell-algorithm-who-receives-what)
 - Concept: [Subscription](xref:concept-subscription) · [Tick fence](xref:concept-tick-fence)

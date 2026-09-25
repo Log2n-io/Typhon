@@ -45,4 +45,4 @@ commands, with `1008`. Every close is announced with a `KICK` carrying the reaso
 
 - **Narrative:** [Guide ch.7 §3 — sessions](xref:guide-subscriptions)
 - **Feature detail:** [Sessions & admission](xref:feature-subscriptions-sessions-admission)
-- **Internals:** [Technical overview 15 § 3 — what a session holds, and why it is cheap](xref:overview-subscriptions#3-the-cell-algorithm-who-receives-what)
+- **Internals:** [Technical overview 15 § 3 — what a session holds, and why it is cheap](../in-depth-overview/15-subscriptions.md#3-the-cell-algorithm-who-receives-what)

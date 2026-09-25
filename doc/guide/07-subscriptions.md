@@ -186,7 +186,7 @@ once, for everyone. Each session then reads only the cells around it and keeps j
 has this cell been sent to me yet? An entity is held when it is within the radius and its cell has been sent. No list of what each client
 holds is kept, so a session's cost follows what changed near it, never the size of the world or how much it sees. That is why 1 000
 players over 270 k entities cost the demo about 2 ms a tick. The full algorithm, with diagrams, is in
-[Technical overview ch.15 § 3](xref:overview-subscriptions#3-the-cell-algorithm-who-receives-what).
+[Technical overview ch.15 § 3](../in-depth-overview/15-subscriptions.md#3-the-cell-algorithm-who-receives-what).
 
 ---
 

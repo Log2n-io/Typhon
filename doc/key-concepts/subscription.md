@@ -56,4 +56,4 @@ connection, never against C# layouts, so a browser is as much a client as a .NET
 - **Narrative:** [Guide ch.7 — serving remote clients](xref:guide-subscriptions)
 - **Feature detail:** [Subscriptions](xref:feature-subscriptions-index)
 - **Internals:** [Technical overview 15 — Subscriptions](xref:overview-subscriptions)
-- **The algorithm:** [who receives what, and why it scales](xref:overview-subscriptions#3-the-cell-algorithm-who-receives-what)
+- **The algorithm:** [who receives what, and why it scales](../in-depth-overview/15-subscriptions.md#3-the-cell-algorithm-who-receives-what)

@@ -77,5 +77,5 @@ subs.Profile("tool", p => p.World().Of<Creature>().Of<Player>());
 ## 🔗 Related
 
 - Concept: [Replication profile](xref:concept-replication-profile)
-- Internals: [the cell algorithm, and why it scales](xref:overview-subscriptions#3-the-cell-algorithm-who-receives-what)
+- Internals: [the cell algorithm, and why it scales](../../in-depth-overview/15-subscriptions.md#3-the-cell-algorithm-who-receives-what)
 - [Sessions & admission](sessions-admission.md) — binding a session to a profile
