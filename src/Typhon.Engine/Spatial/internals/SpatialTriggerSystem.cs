@@ -223,7 +223,12 @@ internal sealed class SpatialTriggerSystem
             var guard = EpochGuard.Enter(_table.DBE.EpochManager);
             try
             {
-                CollectClusterOccupants(_table.DBE.RealmTable.Get(config.Realm).Grid, queryCoords, coordCount, config.CategoryMask, current);
+                // TryGet: this runs on the tick path, which must never throw — a region whose realm is gone sees nothing.
+                var regionGrid = _table.DBE.RealmTable?.TryGet(config.Realm)?.Grid;
+                if (regionGrid != null)
+                {
+                    CollectClusterOccupants(regionGrid, queryCoords, coordCount, config.CategoryMask, current);
+                }
             }
             finally
             {

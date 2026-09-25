@@ -48,6 +48,12 @@ public sealed class RealmConfig
     /// <summary>Refuses a configuration whose load-bearing values are missing or out of range. No value is clamped.</summary>
     internal void Validate(RealmId id)
     {
+        if (!(Grid.CellSize > 0d) || Grid.CellCount <= 0)
+        {
+            throw new ArgumentException($"Realm {id.Value}: Grid is not a configured grid (cell size {Grid.CellSize}). Build it with SpatialGridConfig.",
+                nameof(Grid));
+        }
+
         if (!Enum.IsDefined(WhenUnobserved))
         {
             throw new ArgumentOutOfRangeException(nameof(WhenUnobserved), WhenUnobserved, $"Realm {id.Value}: unknown unobserved policy.");

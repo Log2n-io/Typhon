@@ -75,6 +75,33 @@ struct RealmKeyTwice
     public ushort Other;
 }
 
+[Component("Typhon.Test.Realm.Indexed", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct RealmKeyIndexed
+{
+    [Field]
+    [SpatialIndex]
+    public AABB2F Bounds;
+
+    [Field]
+    [RealmKey]
+    [Index(AllowMultiple = true)]
+    public ushort Realm;
+}
+
+[Component("Typhon.Test.Realm.Versioned", 1, StorageMode = StorageMode.Versioned)]
+[StructLayout(LayoutKind.Sequential)]
+struct RealmKeyVersioned
+{
+    [Field]
+    [SpatialIndex]
+    public AABB2F Bounds;
+
+    [Field]
+    [RealmKey]
+    public ushort Realm;
+}
+
 /// <summary>
 /// Realms C1b: an archetype names each entity's realm with a <c>[RealmKey]</c> <see cref="ushort"/> beside its spatial field; the entity is placed in that
 /// realm's grid, and every spatial query runs in exactly one realm — whatever the coordinates, another realm's entities never answer.
@@ -136,6 +163,16 @@ class RealmKeyTests : TestBase<RealmKeyTests>
         var ex = Assert.Throws<InvalidOperationException>(() => Engine().RegisterComponentFromAccessor<RealmKeyTwice>());
         Assert.That(ex.Message, Does.Contain("at most one"));
     }
+
+    [Test]
+    public void RealmKey_WithAnIndex_Refused() =>
+        Assert.That(Assert.Throws<InvalidOperationException>(() => Engine().RegisterComponentFromAccessor<RealmKeyIndexed>()).Message,
+            Does.Contain("cannot also carry [Index]"));
+
+    [Test]
+    public void RealmKey_OnAVersionedComponent_Refused() =>
+        Assert.That(Assert.Throws<InvalidOperationException>(() => Engine().RegisterComponentFromAccessor<RealmKeyVersioned>()).Message,
+            Does.Contain("Versioned"));
 
     [Test]
     public void GeneratedAndReflectedSchemas_AgreeOnTheRealmKey()

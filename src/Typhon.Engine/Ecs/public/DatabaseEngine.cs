@@ -51,6 +51,10 @@ public struct FieldR1
     /// <summary><c>true</c> when the field's index permits multiple entries per key (multi-value index).</summary>
     public bool IndexAllowMultiple;
 
+    /// <summary>True when the field is its component's <c>[RealmKey]</c> (Realms C2). Persisted so removing or moving the key is a breaking schema change:
+    /// the realm is what places every entity, and losing it silently would merge every realm's clusters into realm 0. Occupies what was padding.</summary>
+    public bool IsRealmKey;
+
     /// <summary>Element count when the field is a fixed-length array; 0 for scalar fields (see <see cref="IsArray"/>).</summary>
     public int ArrayLength;
 
@@ -991,8 +995,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             _persistedRealms[id] = (chunkId, row);
         }
 
-        MMF.SaveBootstrap(cs);
+        // The pages first, the bootstrap key last: SaveBootstrap fsyncs the meta slot at once, so saving it first would leave, across a crash, a key that
+        // points at a table never written. The meta flip is the commit point.
         cs.SaveChanges();
+        MMF.SaveBootstrap();
     }
 
     /// <summary>The catalog row of realm <paramref name="id"/>: its identity fields.</summary>
@@ -1026,7 +1032,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// Test hook: rewrites catalog entry <paramref name="id"/> to claim id <paramref name="newId"/> instead — the shape of a catalog that lost an
     /// entry, which a reopen must refuse rather than open with that realm's clusters unfiled (RLM-01).
     /// </summary>
-    internal void RenumberRealmCatalogEntryForTest(ushort id, int newId)
+    internal void RenumberRealmCatalogEntryForTest(ushort id, ushort newId)
     {
         var (chunkId, row) = _persistedRealms[id];
         row.Id = newId;
@@ -2321,6 +2327,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     IsStatic = field.IsStatic,
                     HasIndex = field.HasIndex,
                     IndexAllowMultiple = field.IndexAllowMultiple,
+                    IsRealmKey = field.IsRealmKey,
                     OffsetInComponentStorage = field.OffsetInComponentStorage,
                     SizeInComponentStorage = field.SizeInComponentStorage,
                 };
@@ -2451,6 +2458,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     IsStatic = field.IsStatic,
                     HasIndex = field.HasIndex,
                     IndexAllowMultiple = field.IndexAllowMultiple,
+                    IsRealmKey = field.IsRealmKey,
                     OffsetInComponentStorage = field.OffsetInComponentStorage,
                     SizeInComponentStorage = field.SizeInComponentStorage,
                 };
@@ -2645,7 +2653,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 if (realmSeg.IsChunkAllocated(chunkId) && SystemCrud.Read(_realmsTable, chunkId, out RealmR1 realm, EpochManager))
                 {
-                    _persistedRealms[(ushort)realm.Id] = (chunkId, realm);
+                    // Realm 0 keeps its own record, and None (0xFFFF) is no realm: an id outside [1, 65 535) or a duplicate is a corrupt catalog, which
+                    // would otherwise silently give a realm another's identity.
+                    if (realm.Id <= 0 || realm.Id >= RealmId.MaxCount || !_persistedRealms.TryAdd((ushort)realm.Id, (chunkId, realm)))
+                    {
+                        throw new InvalidOperationException(
+                            $"The realm catalog is corrupt: row {chunkId} names realm {realm.Id}, which is out of range or already catalogued.");
+                    }
                 }
             }
         }
@@ -3520,6 +3534,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // the grid and fully initialize the cluster-spatial archetypes — otherwise their cluster / entity-map segments stay unattributed in introspection.
         // Realms (C1): realm 0 comes from ConfigureSpatialGrid, from a Realms.Register(0, …), or — for a generic opener — from the persisted realm-0
         // record; every other realm from its registration. The table is sized by ConfigureRealms (one realm without it).
+        // A fresh table on every call: a repeat InitializeArchetypes (#790) rebuilds realms from the registry and the catalog, as it rebuilt the grid.
+        _realms = null;
         var pendingRealms = MergeRealmCatalog(_realmRegistry?.Pending, out var realmsToPersist);
         RealmConfig realm0 = null;
         if (_pendingGridConfig.HasValue)
@@ -3541,11 +3557,6 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     _realms.Register(new RealmId(id), new SpatialGrid(config.Grid), config);
                 }
             }
-        }
-
-        if (realmsToPersist != null)
-        {
-            PersistRealmCatalogEntries(realmsToPersist);
         }
 
         if (realm0 != null)
@@ -4077,12 +4088,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                                 {
                                     // A realm-keyed archetype need not fit EVERY realm (f32 creatures never enter the f64 galaxy): the check is per realm, and
                                     // an incompatible realm refuses the archetype's entities at entry (spawn, teleport) with this same message.
+                                    var keyFieldType = spatialTable.SpatialIndex.FieldInfo.FieldType;
                                     foreach (var realm in _realms.Registered)
                                     {
+                                        // No exception on the common path: only a realm the field cannot address runs the throwing check, for its message.
+                                        if (SpatialGrid.IsWorldExtentAddressable(keyFieldType, in realm.GridConfig))
+                                        {
+                                            continue;
+                                        }
+
                                         try
                                         {
-                                            SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType,
-                                                in realm.GridConfig, archName);
+                                            SpatialGrid.ValidateWorldExtentForFieldType(keyFieldType, in realm.GridConfig, archName);
                                         }
                                         catch (InvalidOperationException e)
                                         {
@@ -4244,6 +4261,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             ArchetypeRegistry.RegisterLiveEngine();
             _registeredWithRegistry = true;
+        }
+
+        // The realm catalog's new entries, once every archetype has been validated against the realms (Realms D-1): an open that throws above leaves no
+        // identity behind to refuse the corrected configuration next time. Before the WAL replay, which names no realm registered this session.
+        if (realmsToPersist != null)
+        {
+            PersistRealmCatalogEntries(realmsToPersist);
         }
 
         // WAL v2 crash recovery (P1.2): replay committed records that postdate the last checkpoint, now that archetypes,

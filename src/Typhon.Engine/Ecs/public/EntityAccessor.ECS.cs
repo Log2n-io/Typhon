@@ -184,13 +184,29 @@ public unsafe partial class EntityAccessor
         }
 
         state.ValidateRealmEntry(realm.Value);
+        var copy = value;   // on the stack: the centre is read through a pointer, which may never address managed memory
+        SpatialGrid.ReadSpatialCenter3D((byte*)&copy + state.SpatialSlot.FieldOffset, state.SpatialSlot.FieldInfo.FieldType, out var x, out var y,
+            out var z);
+        if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))
+        {
+            throw new InvalidOperationException($"Teleport to a non-finite position ({x}, {y}, {z}) cannot be placed in any grid.");
+        }
+
         ref var stored = ref mut.Write(spatial);
         stored = value;
         Unsafe.WriteUnaligned(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref stored), state.SpatialSlot.RealmKeyOffset), realm.Value);
 
-        // The dirty scan finds this write; a barrier-only archetype's fence runs none, so the slot is flagged as the barrier would flag it.
+        // An entity spawned in this transaction has no cluster yet: its placement reads the staged key at commit, and there is nothing to flag.
+        if (mut._ref._isOwnSpawn)
+        {
+            return;
+        }
+
+        // The dirty scan finds this write; a barrier-only archetype's fence runs none, so the slot is flagged as the barrier would flag it. On a Versioned
+        // or Commit-discipline write the value lands at commit: commit before the next fence, or the fence finds the old key and drops this flag.
         state.FlagShrinkAxes(mut._ref._clusterChunkId, 0x3F);
         state.FlagMigration(mut._ref._clusterChunkId, 1UL << mut._ref._clusterSlotIndex, -1);
+        state.MigrationHint++;
         state.SetClusterProcessBit(mut._ref._clusterChunkId);
     }
 

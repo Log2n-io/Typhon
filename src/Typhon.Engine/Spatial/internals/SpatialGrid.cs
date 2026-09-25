@@ -227,7 +227,9 @@ internal sealed unsafe class SpatialGrid
         _tierVersion++;
         if (_engineTierVersion != null)
         {
-            _engineTierVersion.Value++;
+            // Interlocked: realms' tiers may be assigned in parallel (per-realm policy), and a lost update could collapse two bumps into a value a
+            // reader has already stamped.
+            Interlocked.Increment(ref _engineTierVersion.Value);
         }
     }
 
@@ -915,6 +917,13 @@ internal sealed unsafe class SpatialGrid
         ThrowIfAxisTooCoarse(config.WorldMin.Y, config.WorldMax.Y, config.CellSize, 'Y', fieldType, archetypeName);
         ThrowIfAxisTooCoarse(config.WorldMin.Z, config.WorldMax.Z, config.CellSize, 'Z', fieldType, archetypeName);
     }
+
+    /// <summary>The non-throwing form of <see cref="ValidateWorldExtentForFieldType"/>: true when every axis is addressable by the field's tier.</summary>
+    internal static bool IsWorldExtentAddressable(SpatialFieldType fieldType, in SpatialGridConfig config) =>
+        fieldType.IsF64()
+        || (AxisIsResolvableInF32(config.WorldMin.X, config.WorldMax.X, config.CellSize, out _)
+            && AxisIsResolvableInF32(config.WorldMin.Y, config.WorldMax.Y, config.CellSize, out _)
+            && AxisIsResolvableInF32(config.WorldMin.Z, config.WorldMax.Z, config.CellSize, out _));
 
     /// <summary>
     /// Can an f32 world coordinate still name its cell on this axis? Internal so a test can drive it against the property it stands for.

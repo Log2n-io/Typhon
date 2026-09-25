@@ -534,7 +534,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
 
         // Realms C4: a slot that changes realm leaves the batch's frame. Rare, so the whole call then takes the single writes, which handle it — the
         // batch's shared bound and crossing test assume one frame for every slot.
-        if (spatialSlot.HasRealmKey && AnySlotChangesRealm(column, spatialSlot.RealmKeyOffset, slots, newValues))
+        if (spatialSlot.HasRealmKey && AnySlotLeavesClusterRealm(spatialSlot.RealmKeyOffset, slots, newValues))
         {
             for (var rest = slots; rest != 0; rest &= rest - 1)
             {
@@ -587,21 +587,21 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     /// </summary>
     private bool WriteSpatialRealmChange<T>(int slotIndex, byte* slotBytes, int realmKeyOffset, in T newValue) where T : unmanaged
     {
+        // Against the CLUSTER's realm, not the key the slot holds: a second write this tick that keeps an already-changed key is still another realm's
+        // frame, and must not grow this cluster's bound or be tested for a crossing in this cluster's grid. The cluster's realm is the ordinary path —
+        // which also serves a change undone within the tick, whose flag the fence drops once it finds the entity home.
         var newRealm = Unsafe.ReadUnaligned<ushort>(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref Unsafe.AsRef(in newValue)), realmKeyOffset));
-        if (newRealm == *(ushort*)(slotBytes + realmKeyOffset))
-        {
-            return false;
-        }
-
-        _state.ValidateRealmEntry(newRealm);
-
-        // Back to the cluster's own realm (a change and its undo in one tick): an ordinary write in this frame, which grows the bound to cover it. The
-        // earlier write's flag stays, and the fence drops it once it finds the entity home.
         if (newRealm == _state.ClusterRealmMap[_chunkId])
         {
             return false;
         }
 
+        if (newRealm != *(ushort*)(slotBytes + realmKeyOffset))
+        {
+            _state.ValidateRealmEntry(newRealm);
+        }
+
+        ThrowIfNonFiniteCentre(in newValue);
         *(T*)slotBytes = newValue;
         // The entity leaves this cluster: every axis may shrink, which the fence's recompute decides.
         _state.FlagShrinkAxes(_chunkId, 0x3F);
@@ -611,20 +611,37 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         return true;
     }
 
-    /// <summary>True when a value of <paramref name="newValues"/> names another realm than its slot holds.</summary>
-    private static bool AnySlotChangesRealm<T>(byte* column, int realmKeyOffset, ulong slots, scoped ReadOnlySpan<T> newValues) where T : unmanaged
+    /// <summary>True when a value of <paramref name="newValues"/> names another realm than the cluster's — the batch then takes single writes.</summary>
+    private bool AnySlotLeavesClusterRealm<T>(int realmKeyOffset, ulong slots, scoped ReadOnlySpan<T> newValues) where T : unmanaged
     {
+        var clusterRealm = _state.ClusterRealmMap[_chunkId];
         for (var rest = slots; rest != 0; rest &= rest - 1)
         {
             var i = BitOperations.TrailingZeroCount(rest);
             var newRealm = Unsafe.ReadUnaligned<ushort>(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref Unsafe.AsRef(in newValues[i])), realmKeyOffset));
-            if (newRealm != *(ushort*)(column + i * sizeof(T) + realmKeyOffset))
+            if (newRealm != clusterRealm)
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Refuses a realm change to a non-finite position, at the call: the fence would have to place it in the new realm's grid, which cannot hold it
+    /// (the ordinary path's crossing test throws the same way, from the same grid call).
+    /// </summary>
+    internal void ThrowIfNonFiniteCentre<T>(in T newValue) where T : unmanaged
+    {
+        ref readonly var ss = ref _state.SpatialSlot;
+        // A copy on the stack: newValue may live in a managed array, and a pointer is taken only over the stack (never pin managed memory).
+        var copy = newValue;
+        SpatialGrid.ReadSpatialCenter3D((byte*)&copy + ss.FieldOffset, ss.FieldInfo.FieldType, out var x, out var y, out var z);
+        if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))
+        {
+            throw new InvalidOperationException($"A realm change to a non-finite position ({x}, {y}, {z}) cannot be placed in any grid.");
+        }
     }
 
     /// <summary>AABB3F specialization of <c>WriteSpatial</c> — the 3D tier #914 exists for.</summary>

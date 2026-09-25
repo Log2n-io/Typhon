@@ -135,7 +135,27 @@ class RealmCatalogTests : TestBase<RealmCatalogTests>
     {
         CreateThreeRealms();
 
-        // Corrupt the catalog: realm 2's entry now claims to be realm 1 again — realm 2 is gone from it while its clusters remain.
+        // Corrupt the catalog: realm 2's entry now names realm 5 — realm 2 is gone from it while its clusters remain.
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<RealmPos>();
+            dbe.InitializeArchetypes();
+            dbe.RenumberRealmCatalogEntryForTest(2, 5);
+        }
+
+        using var reopen = ServiceProvider.CreateScope();
+        using var engine = reopen.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        engine.RegisterComponentFromAccessor<RealmPos>();
+        var ex = Assert.Throws<InvalidOperationException>(() => engine.InitializeArchetypes());
+        Assert.That(ex.Message, Does.Contain("realm 2").And.Contain("not registered"));
+    }
+
+    [Test]
+    [CancelAfter(30_000)]
+    public void CatalogWithADuplicateRealmId_IsRefusedAsCorrupt()
+    {
+        CreateThreeRealms();
         using (var scope = ServiceProvider.CreateScope())
         {
             using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
@@ -144,10 +164,46 @@ class RealmCatalogTests : TestBase<RealmCatalogTests>
             dbe.RenumberRealmCatalogEntryForTest(2, 1);
         }
 
+        // Refused as the system tables load — at engine construction, before anything could file a cluster with the wrong identity.
+        using var reopen = ServiceProvider.CreateScope();
+        var ex = Assert.Catch<Exception>(() => reopen.ServiceProvider.GetRequiredService<DatabaseEngine>());
+        Assert.That(ex.ToString(), Does.Contain("catalog is corrupt"), "realm 1 must not silently take realm 2's identity");
+    }
+
+    [Test]
+    [CancelAfter(30_000)]
+    public void AnOpenThatFails_LeavesNoCatalogIdentityBehind()
+    {
+        // Session 1 fails its open (an unkeyed spatial archetype without realm 0), after registering realm 2 with a wrong cell size.
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+            dbe.RegisterComponentFromAccessor<RealmPos>();
+            dbe.RegisterComponentFromAccessor<Typhon.Engine.Tests.Runtime.TierPos>();
+            dbe.ConfigureRealms(3);
+            dbe.Realms.Register(new RealmId(2), Realm(20));
+            Assert.Catch<Exception>(() => dbe.InitializeArchetypes());
+        }
+
+        // Session 2 corrects it: nothing from the failed open refuses the new identity.
         using var reopen = ServiceProvider.CreateScope();
         using var engine = reopen.ServiceProvider.GetRequiredService<DatabaseEngine>();
         engine.RegisterComponentFromAccessor<RealmPos>();
-        var ex = Assert.Throws<InvalidOperationException>(() => engine.InitializeArchetypes());
-        Assert.That(ex.Message, Does.Contain("realm 2").And.Contain("not registered"));
+        engine.ConfigureRealms(3);
+        engine.Realms.Register(new RealmId(2), Realm(25));
+        Assert.DoesNotThrow(() => engine.InitializeArchetypes());
+        Assert.That(engine.RealmTable.Get(2).GridConfig.CellSize, Is.EqualTo(25d));
+    }
+
+    [Test]
+    public void RealmConfig_WithADefaultGrid_IsRefused()
+    {
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.ConfigureRealms(2);
+        Assert.Throws<ArgumentException>(() => dbe.Realms.Register(new RealmId(1), new RealmConfig
+        {
+            Grid = default, WhenUnobserved = RealmUnobserved.Simulate, UnobservedTickDivisor = 1,
+        }));
     }
 }

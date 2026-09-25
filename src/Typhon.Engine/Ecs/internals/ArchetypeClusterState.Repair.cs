@@ -1106,8 +1106,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
 
         EnsureClusterCellMapCapacity(newChunkId + 1);
+        ClusterRealmMap[newChunkId] = grid.Realm.Value;   // realm first, as at every claim
         ClusterCellMap[newChunkId] = cellKey;
-        ClusterRealmMap[newChunkId] = grid.Realm.Value;
         rs.CellClusterPool.AddCluster(cellKey, newChunkId);
 
         ref var cell = ref grid.GetCell(cellKey);

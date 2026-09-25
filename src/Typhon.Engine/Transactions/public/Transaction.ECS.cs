@@ -145,6 +145,12 @@ public unsafe partial class Transaction
         public fixed int Stage[16];
         /// <summary>Per-slot compRevFirstChunkIds for Versioned components (used at commit for EntityRecord).</summary>
         public fixed int Rev[16];
+
+        /// <summary>
+        /// The realm validated at Spawn for a realm-keyed archetype (Realms C1). The staged key can still be rewritten in place before commit (an own-spawn
+        /// write); placement falls back to this one when that key is not a valid realm (D-2).
+        /// </summary>
+        public ushort SpawnRealm;
     }
 
     /// <summary>
@@ -409,6 +415,13 @@ public unsafe partial class Transaction
         var engineState = _dbe._archetypeStates[meta.ArchetypeId];
         int count = ids.Length;
 
+        // Realms: the batch shares one value set, so one validation covers every entity, before any key is allocated (D-2: throw at the call).
+        ushort spawnRealm = 0;
+        if (engineState.ClusterState is { SpatialSlot.HasRealmKey: true } keyedState)
+        {
+            spawnRealm = ValidateSpawnRealm(meta, keyedState, sharedValues);
+        }
+
         // Allocate N entity keys in one atomic operation
         long baseKey = Interlocked.Add(ref engineState.NextEntityKey, count) - count + 1;
 
@@ -428,7 +441,7 @@ public unsafe partial class Transaction
             var entityId = new EntityId(baseKey + n, _dbe.RoutingIdOf(meta));
             ids[n] = entityId;
 
-            var entry = new SpawnEntry { Id = entityId, EnabledBits = 0 };
+            var entry = new SpawnEntry { Id = entityId, EnabledBits = 0, SpawnRealm = spawnRealm };
 
             for (int slot = 0; slot < meta.ComponentCount; slot++)
             {
@@ -651,9 +664,10 @@ public unsafe partial class Transaction
 
         // Realms: a realm-keyed archetype's spawn names its realm in the spatial component. Validated HERE, at the call and before anything is staged —
         // an unregistered or incompatible realm throws in application code (D-2), never at commit and never at the fence.
+        ushort spawnRealm = 0;
         if (engineState.ClusterState is { SpatialSlot.HasRealmKey: true } keyedState)
         {
-            ValidateSpawnRealm(meta, keyedState, values);
+            spawnRealm = ValidateSpawnRealm(meta, keyedState, values);
         }
 
         // Generate unique EntityKey
@@ -671,7 +685,7 @@ public unsafe partial class Transaction
             }
         }
 
-        var entry = new SpawnEntry { Id = entityId, EnabledBits = 0 };
+        var entry = new SpawnEntry { Id = entityId, EnabledBits = 0, SpawnRealm = spawnRealm };
 
         for (int slot = 0; slot < meta.ComponentCount; slot++)
         {
@@ -731,8 +745,11 @@ public unsafe partial class Transaction
         return entityId;
     }
 
-    /// <summary>The realm a spawn's values name, validated against the registered realms: throws for an unregistered or incompatible realm.</summary>
-    private void ValidateSpawnRealm(ArchetypeMetadata meta, ArchetypeClusterState clusterState, ReadOnlySpan<ComponentValue> values)
+    /// <summary>
+    /// The realm a spawn's values name, validated against the registered realms: throws for an unregistered or incompatible realm. Realm 0 when the
+    /// spawn supplies no spatial component (placement refuses that anyway).
+    /// </summary>
+    private ushort ValidateSpawnRealm(ArchetypeMetadata meta, ArchetypeClusterState clusterState, ReadOnlySpan<ComponentValue> values)
     {
         ref readonly var ss = ref clusterState.SpatialSlot;
         var spatialType = meta._slotToComponentType[ss.Slot];
@@ -748,13 +765,17 @@ public unsafe partial class Transaction
                 values[v].DataSize);
             if (payload.Length < ss.RealmKeyOffset + sizeof(ushort))
             {
-                return;
+                throw new InvalidOperationException(
+                    $"The spatial component value supplied to spawn '{meta.ArchetypeType?.Name}' holds {payload.Length} bytes; its realm key is at byte "
+                    + $"{ss.RealmKeyOffset}.");
             }
 
             var realm = MemoryMarshal.Read<ushort>(payload.Slice(ss.RealmKeyOffset));
             _dbe.RealmGridForEntry(realm, meta.ArchetypeId, meta.ArchetypeType?.Name ?? spatialType?.Name ?? meta.ArchetypeId.ToString());
-            return;
+            return realm;
         }
+
+        return 0;
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -2037,9 +2058,19 @@ public unsafe partial class Transaction
                         spawnGrid = ctx.SpatialGridCached;
                         if (ctx.RealmKeyOffsetCached >= 0)
                         {
-                            var realm = *(ushort*)(spatialSrcAddr + ctx.SpatialComponentOverheadCached + ctx.RealmKeyOffsetCached);
+                            var key = (ushort*)(spatialSrcAddr + ctx.SpatialComponentOverheadCached + ctx.RealmKeyOffsetCached);
+                            var realm = *key;
                             if (realm != ctx.LastSpawnRealm)
                             {
+                                // The staged key can have been rewritten in place since Spawn validated it (a write to an own spawn). An invalid one is
+                                // placed in the validated realm and the key corrected, counted — the commit never throws for it (D-2).
+                                if (!ctx.ClusterState.IsValidRealmForEntity(realm))
+                                {
+                                    realm = entry.SpawnRealm;
+                                    *key = realm;
+                                    Interlocked.Increment(ref ctx.ClusterState.LastTickRealmKeyReverts);
+                                }
+
                                 ctx.LastSpawnRealm = realm;
                                 ctx.LastSpawnRealmGrid = _dbe.RealmTable.Get(realm).Grid;
                             }
@@ -2437,6 +2468,8 @@ public unsafe partial class Transaction
             var fieldOffset = 0;
             var realmKeyOffset = -1;
             var fieldType = SpatialFieldType.AABB2F;
+            var orderRealm = -1;
+            SpatialGrid orderGrid = null;
 
             for (var i = 0; i < count; i++)
             {
@@ -2479,7 +2512,23 @@ public unsafe partial class Transaction
                         if (realmKeyOffset >= 0)
                         {
                             realm = *(ushort*)(row + realmKeyOffset);
-                            grid = _dbe.RealmTable.Get(realm).Grid;
+                            if (realm != orderRealm)
+                            {
+                                // An invalid staged key sorts where FinalizeSpawns will place it: in the realm Spawn validated.
+                                var valid = _dbe._archetypeStates[archId]?.ClusterState?.IsValidRealmForEntity(realm) ?? false;
+                                orderRealm = valid ? realm : -1;
+                                orderGrid = valid ? _dbe.RealmTable.Get(realm).Grid : null;
+                            }
+
+                            if (orderGrid == null)
+                            {
+                                realm = entry.SpawnRealm;
+                                grid = _dbe.RealmTable.Get(realm).Grid;
+                            }
+                            else
+                            {
+                                grid = orderGrid;
+                            }
                         }
 
                         SpatialGrid.ReadSpatialCenter3D(row + fieldOffset, fieldType, out var x, out var y, out var z);

@@ -31,7 +31,7 @@ internal sealed class Realm
     // Realm-keyed archetypes whose spatial field cannot address this realm's world (#919 AC-9 per realm), one bit per archetype id. Written at open,
     // read-only afterwards; an entity of such an archetype is refused entry here (spawn, teleport) with the reason recorded below.
     private ulong[] _incompatible = [];
-    private readonly System.Collections.Generic.Dictionary<int, string> _incompatibleReason = [];
+    private System.Collections.Generic.Dictionary<int, string> _incompatibleReason;
 
     /// <summary>Records that <paramref name="archetypeId"/> cannot live in this realm, and why. Open time only.</summary>
     internal void MarkIncompatible(int archetypeId, string reason)
@@ -43,7 +43,7 @@ internal sealed class Realm
         }
 
         _incompatible[word] |= 1UL << (archetypeId & 63);
-        _incompatibleReason[archetypeId] = reason;
+        (_incompatibleReason ??= [])[archetypeId] = reason;
     }
 
     /// <summary>True when an entity of <paramref name="archetypeId"/> may enter this realm.</summary>
@@ -54,7 +54,8 @@ internal sealed class Realm
     }
 
     /// <summary>Why <paramref name="archetypeId"/> cannot enter this realm (the extent check's message), or null.</summary>
-    internal string IncompatibilityOf(int archetypeId) => _incompatibleReason.TryGetValue(archetypeId, out var reason) ? reason : null;
+    internal string IncompatibilityOf(int archetypeId) =>
+        _incompatibleReason != null && _incompatibleReason.TryGetValue(archetypeId, out var reason) ? reason : null;
 }
 
 /// <summary>
@@ -112,8 +113,33 @@ internal sealed class RealmTable
                 return realm0;
             }
 
-            var registered = Registered;
-            return registered.Length > 0 ? registered[0] : null;
+            // The LOWEST registered id, not the first registered: registration order comes from a dictionary, and the primary realm supplies the
+            // archetype-level budgets — it must not depend on enumeration order.
+            Realm lowest = null;
+            foreach (var realm in Registered)
+            {
+                if (lowest == null || realm.Id.Value < lowest.Id.Value)
+                {
+                    lowest = realm;
+                }
+            }
+
+            return lowest;
+        }
+    }
+
+    /// <summary>The highest registered realm id (0 when none): per-archetype realm tables are sized to it, not to <see cref="MaxRealms"/>.</summary>
+    internal int HighestRegisteredId
+    {
+        get
+        {
+            var highest = 0;
+            foreach (var realm in Registered)
+            {
+                highest = Math.Max(highest, realm.Id.Value);
+            }
+
+            return highest;
         }
     }
 

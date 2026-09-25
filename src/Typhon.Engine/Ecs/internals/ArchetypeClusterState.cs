@@ -2984,12 +2984,11 @@ internal sealed unsafe partial class ArchetypeClusterState
 
     /// <summary>Realm 0's spatial state (<c>RealmSpatial[0]</c>), or null for a non-spatial archetype. Test-facing; engine code says <see cref="Realm0Spatial"/>.</summary>
     [Obsolete(Realm0Shortcut, DiagnosticId = "TYRLM001")]
-    internal RealmArchetypeSpatial DefaultRealmSpatial => _realm0Spatial;
+    internal RealmArchetypeSpatial DefaultRealmSpatial => Realm0Spatial;
 
     /// <summary>Realm 0's spatial state, named as such at the engine sites that are single-realm until the multi-realm steps (see the Realms plan).</summary>
-    internal RealmArchetypeSpatial Realm0Spatial => _realm0Spatial;
+    internal RealmArchetypeSpatial Realm0Spatial => RealmSpatial is { Length: > 0 } byRealm ? Volatile.Read(ref byRealm[0]) : null;
 
-    private RealmArchetypeSpatial _realm0Spatial;
 
     /// <summary>
     /// The message of the realm-0 forwarding properties' <c>TYRLM001</c>: engine code must name the realm it works in, or a second realm silently reads
@@ -3121,6 +3120,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal void ValidateRealmEntry(ushort realm)
     {
+        if (SpatialSlot.FieldInfo.Mode != SpatialMode.Dynamic)
+        {
+            // A Static archetype's fence runs no detector, so a realm change would be flagged and never moved — the entity hidden from every realm (RM-04).
+            throw new InvalidOperationException($"Archetype {ArchetypeId} is Static: its entities cannot change realm (a realm change is a move).");
+        }
+
         var r = _realmTable?.TryGet(realm);
         if (r == null)
         {
@@ -3156,6 +3161,9 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         *key = clusterRealm;
         Interlocked.Increment(ref LastTickRealmKeyReverts);
+        // Both halves of durability: the page is modified (the fence's Prep accessor has no change set, so without this the checkpoint would never
+        // write it and an eviction would reload the invalid key — PS-10), and the slot is dirty so the fence's WAL carries the correction.
+        NoteClusterPageModified(chunkId);
         SetDirty(chunkId, slotIndex, ss.Slot);
         return clusterRealm;
     }
@@ -3215,6 +3223,11 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         LastTickRealmChanges = 0;
         LastTickRealmKeyReverts = 0;
+        if (_realmChanges.Count == 0)
+        {
+            return;   // every tick without a realm change: no lock (fence-serial here, no Migrate slice is appending)
+        }
+
         lock (_realmChanges)
         {
             _realmChanges.Clear();
@@ -4037,8 +4050,8 @@ internal sealed unsafe partial class ArchetypeClusterState
             // order rests on CellClusterPool.AddCluster's release store of the cell's count, which this store precedes — not on the latch.
             Volatile.Write(ref *(ulong*)accessor.GetChunkAddress(newChunkId, true), 1UL); // no fold — see FreshClusterStaysUnknown
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
+            ClusterRealmMap[newChunkId] = grid.Realm.Value;   // realm first: a reader bounding by the cell map finds the realm it is in
             ClusterCellMap[newChunkId] = cellKey;
-            ClusterRealmMap[newChunkId] = grid.Realm.Value;
             // Into the cell's per-cell index with an empty box BEFORE the pool publishes it — see AddClusterToPerCellIndexLocked for the two races
             // that letting the first spawner do it left open. The reset of a reused chunk id's stale box moves here for the same reason.
             EnsureClusterAabbsCapacityLocked(newChunkId + 1);
@@ -4332,8 +4345,8 @@ internal sealed unsafe partial class ArchetypeClusterState
             Volatile.Write(ref *(ulong*)accessor.GetChunkAddress(newChunkId, true), 1UL); // no fold — see FreshClusterStaysUnknown
             // ...Locked: we already hold _finalizeLock and AccessControlSmall is not reentrant.
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
+            ClusterRealmMap[newChunkId] = grid.Realm.Value;   // realm first: a reader bounding by the cell map finds the realm it is in
             ClusterCellMap[newChunkId] = cellKey;
-            ClusterRealmMap[newChunkId] = grid.Realm.Value;
             // Into the cell's per-cell index with an empty box BEFORE the pool publishes it — see AddClusterToPerCellIndexLocked for the two races
             // that letting the first spawner do it left open. The reset of a reused chunk id's stale box moves here for the same reason.
             EnsureClusterAabbsCapacityLocked(newChunkId + 1);
@@ -4549,8 +4562,8 @@ internal sealed unsafe partial class ArchetypeClusterState
             Volatile.Write(ref *(ulong*)accessor.GetChunkAddress(newChunkId, true), 1UL); // no fold — see FreshClusterStaysUnknown
             // ...Locked: we already hold _finalizeLock and AccessControlSmall is not reentrant.
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
+            ClusterRealmMap[newChunkId] = grid.Realm.Value;   // realm first: a reader bounding by the cell map finds the realm it is in
             ClusterCellMap[newChunkId] = cellKey;
-            ClusterRealmMap[newChunkId] = grid.Realm.Value;
             // Into the cell's per-cell index with an empty box BEFORE the pool publishes it — see AddClusterToPerCellIndexLocked for the two races
             // that letting the first spawner do it left open. The reset of a reused chunk id's stale box moves here for the same reason.
             EnsureClusterAabbsCapacityLocked(newChunkId + 1);
@@ -4660,8 +4673,8 @@ internal sealed unsafe partial class ArchetypeClusterState
             Volatile.Write(ref *(ulong*)accessor.GetChunkAddress(newChunkId, true), 1UL); // no fold — see FreshClusterStaysUnknown
             // ...Locked: we already hold _finalizeLock and AccessControlSmall is not reentrant.
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
+            ClusterRealmMap[newChunkId] = grid.Realm.Value;   // realm first: a reader bounding by the cell map finds the realm it is in
             ClusterCellMap[newChunkId] = cellKey;
-            ClusterRealmMap[newChunkId] = grid.Realm.Value;
             // Into the cell's per-cell index with an empty box BEFORE the pool publishes it — see AddClusterToPerCellIndexLocked for the two races
             // that letting the first spawner do it left open. The reset of a reused chunk id's stale box moves here for the same reason.
             EnsureClusterAabbsCapacityLocked(newChunkId + 1);
@@ -4741,8 +4754,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var fieldPtr = clusterBase + componentOffset + firstSlot * compStride + ss.FieldOffset;
                 var cellKey = grid.WorldToCellKeyFromSpatialField(fieldPtr, fieldType);
 
+                ClusterRealmMap[chunkId] = grid.Realm.Value;   // realm first, as at every claim
                 ClusterCellMap[chunkId] = cellKey;
-                ClusterRealmMap[chunkId] = grid.Realm.Value;
                 rs.CellClusterPool.AddCluster(cellKey, chunkId);
                 ref var cell = ref grid.GetCell(cellKey);
                 cell.ClusterCount++;
@@ -5100,6 +5113,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             {
                 var slot = BitOperations.TrailingZeroCount(rest);
                 *(ushort*)(component + slot * stride + ss.RealmKeyOffset) = clusterRealm;
+                NoteClusterPageModified(chunkId);   // this accessor has no change set: the page must be marked for the checkpoint (PS-10)
                 SetDirty(chunkId, slot, ss.Slot);
                 LastRebuildRealmKeyReverts++;
             }
@@ -5313,7 +5327,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                 {
                     throw new InvalidOperationException(
                         $"Archetype {ArchetypeId}: cluster {chunkId} holds entities of realm {m.Realm}, which is not registered "
-                        + "(or cannot hold the archetype). Register every realm the database holds (Realms.Register) before InitializeArchetypes.");
+                        + "(or cannot hold the archetype), and no entity of the cluster names a realm that is. Register every realm the database holds "
+                        + "(Realms.Register) before InitializeArchetypes; to recover from a stray key, register that realm id, open, and move the entity.");
                 }
 
                 reduceRealm = m.Realm;
@@ -10203,12 +10218,16 @@ internal sealed unsafe partial class ArchetypeClusterState
             // Realms: the per-cell state lives in each realm's RealmArchetypeSpatial, indexed by realm id and created when the archetype first has a
             // cluster in that realm (GetOrCreateRealmSpatial). Realm 0's, when realm 0 exists, eagerly: every single-world path reaches it.
             _realmTable = realms;
-            RealmSpatial = new RealmArchetypeSpatial[realms.MaxRealms];
+            // Indexed by realm id, sized to the highest REGISTERED id rather than MaxRealms: 8 B per slot per spatial archetype is 512 KB (LOH) at
+            // 65 535, for ids that hold nothing. Registration is at open only today; run-time registration (RT-7) grows it.
+            RealmSpatial = new RealmArchetypeSpatial[realms.HighestRegisteredId + 1];
             _presentRealmSpatial = new RealmArchetypeSpatial[4];
             _presentRealmCount = 0;
-            if (realms.TryGet(RealmId.Default.Value) != null)
+            // Realm 0's eagerly only for an UNKEYED archetype, which lives nowhere else: a keyed one gets it on its first cluster there, like any realm —
+            // an eager realm-0 state it never uses would make every second realm take the multi-realm reach pass and allocate a pool for nothing.
+            if (realms.TryGet(RealmId.Default.Value) != null && !SpatialSlot.HasRealmKey)
             {
-                _realm0Spatial = GetOrCreateRealmSpatial(RealmId.Default.Value);
+                GetOrCreateRealmSpatial(RealmId.Default.Value);
             }
 
             // Issue #233: allocate dormancy arrays for spatial archetypes. Non-spatial archetypes leave SleepStates null (zero overhead).

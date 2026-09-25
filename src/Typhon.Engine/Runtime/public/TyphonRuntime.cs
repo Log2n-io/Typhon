@@ -2026,9 +2026,10 @@ public sealed partial class TyphonRuntime : IDisposable
         int redCount = 0, blackCount = 0;
         var redBuf = _checkerboardRedIds[sysIdx];
         var blackBuf = _checkerboardBlackIds[sysIdx];
-        // Realm map first: it is published before the cell map, so it is at least as long as the cell map read after it.
-        var realmMap = cs.ClusterRealmMap;
-        var cellMap = cs.ClusterCellMap;
+        // The realm map is published before the cell map, so read the cell map FIRST: a realm map read after it is at least as long. Both are also
+        // bounded below, since srcIds predates both reads.
+        var cellMap = System.Threading.Volatile.Read(ref cs.ClusterCellMap);
+        var realmMap = System.Threading.Volatile.Read(ref cs.ClusterRealmMap);
         var realmSpatial = cs.RealmSpatial;
         var gridRealm = -1;
         SpatialGrid grid = null;
@@ -2036,7 +2037,7 @@ public sealed partial class TyphonRuntime : IDisposable
         for (int i = 0; i < srcCount; i++)
         {
             int chunkId = srcIds[i];
-            int cellKey = (chunkId < cellMap.Length) ? cellMap[chunkId] : -1;
+            int cellKey = (uint)chunkId < (uint)cellMap.Length && (uint)chunkId < (uint)realmMap.Length ? cellMap[chunkId] : -1;
             if (cellKey >= 0)
             {
                 // Each cluster coloured in its OWN realm's grid (Realms C1). Two realms never share a neighbour, so CB-01 (no two adjacent cells one

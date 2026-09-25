@@ -352,6 +352,11 @@ public class DatabaseDefinitions
                 {
                     throw new InvalidOperationException($"[RealmKey] on field '{f.Name}' requires type ushort, but found {fieldType}.");
                 }
+                if (f.HasIndex)
+                {
+                    // The fence's revert (D-2) rewrites the key without an index shadow: the B+Tree would keep the invalid value.
+                    throw new InvalidOperationException($"[RealmKey] field '{f.Name}' cannot also carry [Index].");
+                }
                 field.IsRealmKey = true;
             }
 
@@ -394,6 +399,12 @@ public class DatabaseDefinitions
             if (realmKeyCount > 1)
             {
                 throw new InvalidOperationException($"Component '{spec.Name}' has {realmKeyCount} [RealmKey] fields, but at most one is allowed.");
+            }
+            if (realmKeyCount == 1 && spec.StorageMode == StorageMode.Versioned)
+            {
+                // A fence or rebuild revert (D-2) rewrites the cluster slot, the HEAD a Versioned component re-derives from its chain on the next open.
+                throw new InvalidOperationException(
+                    $"[RealmKey] is not supported on Versioned component '{spec.Name}' (yet): use SingleVersion for the realm-keyed spatial component.");
             }
             if (realmKeyCount == 1 && spatialCount == 0)
             {

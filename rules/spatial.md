@@ -2237,7 +2237,11 @@
     exactly when its clusters are filed
   invariant at open, a catalog realm the application did not register is registered from the catalog (a generic opener rebuilds every realm);
     a registration whose identity differs from the catalog's is refused — the identity decides which cell every entity of the realm is in
-  invariant a cluster whose realm is neither registered nor catalogued refuses the open, naming the realm; it is never filed elsewhere
+  invariant a cluster NONE of whose entities names a realm that is registered (or catalogued) refuses the open, naming the realm — it is never filed
+    elsewhere; the refusal is recoverable (register that id, open, move the entity). A single entity with an invalid key in a cluster whose other keys
+    are valid is a stray write, reverted (RM-05/RM-06), not a lost realm
+  invariant the catalog is written only after the open has validated every archetype (a failed open leaves no identity behind), pages before the
+    bootstrap key (the meta flip is the commit point); a duplicate or out-of-range row refuses the load as corruption
   never let an open proceed with a realm's clusters unfiled: every spatial query of that realm would answer empty, silently
   scope: DatabaseEngine.MergeRealmCatalog, DatabaseEngine.PersistRealmCatalogEntries, ArchetypeClusterState.RebuildSpatialStateFromData, RealmR1
   verified: RealmCatalogTests (a generic opener reconstructs every realm; a differing identity is refused; a catalog that lost realm 2 refuses
@@ -2258,8 +2262,10 @@
   invariant a slot whose [RealmKey] differs from its cluster's realm at the fence is filed as a crossing into (key, the new realm's cell for its
     position) — never absorbed by the band, never refused by the throttle (it is a CellCrossing); after the fence every occupied slot's key is its
     cluster's realm (CC-02 per realm)
-  invariant the write that changes the key (WriteSpatial, OpenMut, Teleport) never grows the source cluster's box with the new coordinates — they
-    are another realm's frame (CA-01 holds: the box still covers where the entity was); a change undone within the tick is an ordinary write
+  invariant a write whose key is not the CLUSTER's realm (WriteSpatial, OpenMut, Teleport — a first change or any later write this tick) never grows
+    the source cluster's box with the new coordinates — they are another realm's frame (CA-01 holds: the box still covers where the entity was); a
+    write back to the cluster's realm is an ordinary write. A realm change is validated (registered, compatible, finite position) before any store,
+    and refused on a Static archetype, whose fence runs no detector
   invariant ExecuteMigrations claims in the destination realm's grid, releases in the source cluster's, and records one RealmChange per move
   scope: ClusterRef.WriteSpatial, EntityAccessor.Teleport, DatabaseEngine.DrainPreFlaggedMigrations, DatabaseEngine.DetectClusterMigrationsRange,
     DatabaseEngine.ExecuteMigrations, ArchetypeClusterState.RecordRealmChange
@@ -2279,7 +2285,8 @@
 
 ### RM-05: An invalid realm key is reverted at the fence, never thrown there `[fatal]`
   invariant validated paths (Spawn, WriteSpatial, Teleport) throw at the call for an unregistered or incompatible realm; a raw write (OpenMut's ref,
-    GetSpan) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the slot dirty (the WAL carries it), counts
+    GetSpan, or an in-place write into a pending spawn) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the page
+    modified (the checkpoint writes it) and the slot dirty (the WAL carries it), counts
     LastTickRealmKeyReverts — and never throws (a throw would leave migrations and WAL publication half done). Decision D-2
   scope: ArchetypeClusterState.ResolveSlotRealmAtFence, ArchetypeClusterState.ValidateRealmEntry
   verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown,

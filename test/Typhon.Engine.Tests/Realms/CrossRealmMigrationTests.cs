@@ -260,4 +260,64 @@ class CrossRealmMigrationTests : TestBase<CrossRealmMigrationTests>
         dbe.WriteTickFence(2);
         Assert.That(HomeOf(dbe, id).realm, Is.EqualTo(2));
     }
+
+    [Test]
+    public void ASecondWriteInTheNewRealm_StillDoesNotGrowTheSourceBox()
+    {
+        using var dbe = TwoRealms();
+        var id = SpawnOne(dbe, At(5, 5, 0));
+        var cs = StateOf(dbe);
+        var chunk = HomeOf(dbe, id).chunk;
+        var before = cs.ClusterAabbs[chunk];
+        WriteSpatialOf(dbe, id, At(95, 95, 2));
+        WriteSpatialOf(dbe, id, At(90, 90, 2));   // the key already reads 2: still another realm's frame for this cluster
+        Assert.That(cs.ClusterAabbs[chunk], Is.EqualTo(before));
+        dbe.WriteTickFence(2);
+        Assert.That(HomeOf(dbe, id).realm, Is.EqualTo(2));
+        Assert.That(Count(dbe, 2, new AABB2F { MinX = 89, MinY = 89, MaxX = 91, MaxY = 91 }), Is.EqualTo(1));
+    }
+
+    [Test]
+    public void RealmChange_ToANonFinitePosition_Throws_AtTheCall()
+    {
+        using var dbe = TwoRealms();
+        var id = SpawnOne(dbe, At(5, 5, 0));
+        Assert.Throws<InvalidOperationException>(() => WriteSpatialOf(dbe, id, At(float.NaN, 5, 2)));
+        using var tx = dbe.CreateQuickTransaction();
+        Assert.Throws<InvalidOperationException>(() => tx.Teleport(id, RealmUnit.Pos, new RealmId(2), At(float.PositiveInfinity, 1, 2)));
+    }
+
+    [Test]
+    public void Teleport_OfAnEntitySpawnedInTheSameTransaction_PlacesItInTheNewRealm()
+    {
+        using var dbe = TwoRealms();
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<RealmUnit>(RealmUnit.Pos.Set(At(5, 5, 0)));
+            tx.Teleport(id, RealmUnit.Pos, new RealmId(2), At(40, 40, 0));
+            tx.Commit();
+        }
+
+        Assert.That(HomeOf(dbe, id).realm, Is.EqualTo(2), "placed in realm 2 at commit — no fence needed, no phantom flag on cluster 0");
+    }
+
+    [Test]
+    public void AnInvalidKeyWrittenIntoAPendingSpawn_IsPlacedInTheValidatedRealm()
+    {
+        using var dbe = TwoRealms();
+        var cs = StateOf(dbe);
+        EntityId id;
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            id = tx.Spawn<RealmUnit>(RealmUnit.Pos.Set(At(5, 5, 2)));
+            ref var pos = ref tx.OpenMut(id).Write(RealmUnit.Pos);
+            pos.Realm = 1;   // unregistered, written in place into the staged spawn
+            Assert.DoesNotThrow(() => tx.Commit());
+        }
+
+        Assert.That(HomeOf(dbe, id).realm, Is.EqualTo(2));
+        using var rtx = dbe.CreateQuickTransaction();
+        Assert.That(rtx.Open(id).Read(RealmUnit.Pos).Realm, Is.EqualTo(2), "the key is corrected to the realm it was placed in");
+    }
 }

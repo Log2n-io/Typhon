@@ -30,7 +30,7 @@ public sealed class TyphonOptions
     private readonly List<Action<DatabaseEngineOptions>> _engine = [];
     private readonly List<Action<DatabaseEngine>> _componentRegistrations = [];
     private SpatialGridConfig? _spatialGrid;
-    private int _maxRealms;
+    private int? _maxRealms;
     private readonly List<(RealmId Id, RealmConfig Config)> _realms = [];
     private readonly List<(int Revision, Action<Transaction> Step)> _seedSteps = [];
 
@@ -217,9 +217,9 @@ public sealed class TyphonOptions
     /// <c>InitializeArchetypes</c> — the engine builds the grid + per-archetype spatial state during that call.</summary>
     internal void ApplySpatialGridConfig(DatabaseEngine engine)
     {
-        if (_maxRealms != 0)
+        if (_maxRealms.HasValue)
         {
-            engine.ConfigureRealms(_maxRealms);
+            engine.ConfigureRealms(_maxRealms.Value);   // refuses an out-of-range count, 0 included (RLM-02)
         }
 
         if (_spatialGrid.HasValue)
