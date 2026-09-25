@@ -3039,7 +3039,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             var margin = _pruneMargin[arch];
             double bz0 = 0, bz1 = 0;
             QueryBox(cx, cy, cz, hasZ, _queryPad[arch], out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
-            using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
+            // Realm 0 until replication gets its realm (Realms F1 / R4.3): a session sees one realm, and today there is one.
+            using var e = cs.QueryAabb(cs.DefaultRealmSpatial.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))
@@ -3494,7 +3495,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             var hasZ = TEvent.Deep && _hasZ[a];
             double bz0 = 0, bz1 = 0;
             QueryBox(cx, cy, cz, hasZ, _queryPad[a], out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
-            using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
+            // Realm 0 until replication gets its realm (Realms F1 / R4.3): a session sees one realm, and today there is one.
+            using var e = cs.QueryAabb(cs.DefaultRealmSpatial.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))
@@ -3585,7 +3587,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             var hasZ = TEvent.Deep && _hasZ[arch];
             double bz0 = 0, bz1 = 0;
             QueryBox(cx, cy, cz, hasZ, _queryPad[arch], out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
-            using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
+            // Realm 0 until replication gets its realm (Realms F1 / R4.3): a session sees one realm, and today there is one.
+            using var e = cs.QueryAabb(cs.DefaultRealmSpatial.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))

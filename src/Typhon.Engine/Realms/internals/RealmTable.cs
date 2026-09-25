@@ -80,13 +80,18 @@ internal sealed class RealmTable
                 $"Realm {id.Value} is out of range: this engine is configured for {_byId.Length} realm(s).");
         }
 
-        var realm = new Realm(id, grid);
+        ArgumentNullException.ThrowIfNull(grid);
+        Realm realm;
         lock (_writeLock)
         {
             if (_byId[id.Value] != null)
             {
                 throw new InvalidOperationException($"Realm {id.Value} is already registered.");
             }
+
+            // Before the release stores below: a reader that finds the realm finds its grid already naming it.
+            grid.Realm = id;
+            realm = new Realm(id, grid);
 
             var registered = _registered;
             var grown = new Realm[registered.Length + 1];

@@ -773,7 +773,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         var start = Volatile.Read(ref _state.ClusterAabbs)![_chunkId];
         float runMinX = start.MinX, runMinY = start.MinY, runMinZ = start.MinZ, runMaxX = start.MaxX, runMaxY = start.MaxY, runMaxZ = start.MaxZ;
 
-        var grid = _state.Grid;
+        var grid = _state.SpatialOfCluster(_chunkId).Grid;
         ref readonly var cfg = ref grid.Config;
         var cellSize = (float)cfg.CellSize;
         var hyster = cellSize * cfg.MigrationHysteresisRatio;
@@ -1056,7 +1056,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         originY = 0f;
         originZ = 0f;
 
-        var grid = _state?.Grid;
+        var grid = _state?.SpatialOfCluster(_chunkId).Grid;
         var clusterCellMap = _state?.ClusterCellMap;
         if (grid != null && clusterCellMap != null && (uint)_chunkId < (uint)clusterCellMap.Length)
         {
@@ -1091,7 +1091,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         // The cell key and origin are PASSED IN rather than re-derived. The caller resolved both to convert the entity's bounds into the cluster's frame,
         // and this method used to repeat all of it — two array loads, a bounds check, CellKeyToCoords (itself two dependent loads into the cell's CellState)
         // and three multiplies — per entity per tick, inlined into the AntHill simulation barrier.
-        var grid = _state.Grid;
+        var grid = _state.SpatialOfCluster(_chunkId).Grid;
 
         ref readonly var cfg = ref grid.Config;
 

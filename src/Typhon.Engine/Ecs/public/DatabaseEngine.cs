@@ -4046,7 +4046,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         var start = Stopwatch.GetTimestamp();
         using var guard = EpochGuard.Enter(EpochManager);
-        SpatialGrid.ResetCellState();
+        foreach (var realm in _realms.Registered)
+        {
+            realm.Grid.ResetCellState();
+        }
+
         foreach (var es in _archetypeStates)
         {
             var clusterState = es?.ClusterState;
@@ -4055,7 +4059,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                 continue;
             }
 
-            clusterState.CellClusterPool = new CellClusterPool(SpatialGrid.CellCount);
+            clusterState.ResetRealmCellPools();
+            // Realm 0's grid: the rebuild walks every cluster of the archetype, and SP-5 files each in its own realm.
             clusterState.RebuildSpatialStateFromData(SpatialGrid, EpochManager);
         }
 

@@ -736,7 +736,7 @@ public partial class DatabaseEngine
         outlierBuffer.Clear();
         // Worker-local deferral buffer for promoted cells, same shape and lifetime as the outlier buffer above and merged the same way. Only when this
         // archetype actually has a promoted cell — the overwhelmingly common case is none.
-        var promotedBuffer = clusterState.PromotedCellCount > 0 ? ArchetypeClusterState.PromotedScratch ??= [] : null;
+        var promotedBuffer = clusterState.HasPromotedCells ? ArchetypeClusterState.PromotedScratch ??= [] : null;
         promotedBuffer?.Clear();
         // Worker-local repair nominations (#872 step 12), merged the same way as the outlier buffer above — but held PER WORKER rather than allocated per
         // slice. With ReclusterBudgetMs at its default of 1.0 this path is live out of the box, so a fresh List per slice per tick is a real per-tick

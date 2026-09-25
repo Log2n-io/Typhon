@@ -54,8 +54,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     public int QueryNearest(SpatialGrid grid, double centerX, double centerY, double centerZ, int k, Span<(long entityId, double distSq)> results,
         out int clustersOpened, uint categoryMask = uint.MaxValue)
     {
+        var rs = SpatialOf(grid);
         clustersOpened = 0;
-        if (k <= 0 || results.Length == 0 || !SpatialSlot.HasSpatialIndex || PerCellIndex == null || ClusterSegment == null || ClusterAabbs == null)
+        if (k <= 0 || results.Length == 0 || !SpatialSlot.HasSpatialIndex || rs.PerCellIndex == null || ClusterSegment == null || ClusterAabbs == null)
         {
             return 0;
         }
@@ -80,8 +81,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         // the rings cannot be trusted to collect them in time. Skipped when a ring reaches their home cell. Only CURRENT entries are named: one whose chunk
         // id was freed and reused elsewhere is left to the rings, which see it like any other. Reach and set are read once, so the whole search uses
         // one consistent pair.
-        double reach = Volatile.Read(ref DefaultRealmSpatial.ClusterReach);
-        var escaped = Volatile.Read(ref DefaultRealmSpatial.EscapedClusters);
+        double reach = Volatile.Read(ref rs.ClusterReach);
+        var escaped = Volatile.Read(ref rs.EscapedClusters);
         Span<int> named = stackalloc int[EscapedClusterSet.Capacity];
         int namedCount = 0;
         for (int e = 0; e < escaped.Count; e++)
@@ -149,6 +150,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     private void CollectRingCandidates(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D, double px, double py, 
         double pz, uint categoryMask, scoped ReadOnlySpan<int> skip, ref KnnCandidateHeap heap)
     {
+        var rs = SpatialOf(grid);
         int zLo = is3D ? originCellZ - ring : originCellZ;
         int zHi = is3D ? originCellZ + ring : originCellZ;
 
@@ -171,12 +173,12 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                     // TryGetCellKey, never ComputeCellKey — a kNN sweep crosses mostly empty space, and resolving-with-create would materialise a cell for
                     // every coordinate it touches.
-                    if (!grid.TryGetCellKey(cx, cy, cz, out int cellKey) || cellKey >= PerCellIndex.Length)
+                    if (!grid.TryGetCellKey(cx, cy, cz, out int cellKey) || cellKey >= rs.PerCellIndex.Length)
                     {
                         continue;
                     }
 
-                    var slot = PerCellIndex[cellKey];
+                    var slot = rs.PerCellIndex[cellKey];
                     if (slot == null)
                     {
                         continue;

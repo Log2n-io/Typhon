@@ -189,6 +189,8 @@ internal static unsafe class ClusterRadiusBatch
     {
         private readonly ArchetypeClusterState _state;
         private readonly SpatialGrid _grid;
+        // The queried realm's per-cell state (Realms SP-3), resolved once from the grid.
+        private readonly RealmArchetypeSpatial _rs;
         private readonly ClusterFieldLayout _layout;
         private readonly uint _categoryMask;
         private readonly EscapedClusterSet _escaped;
@@ -233,8 +235,9 @@ internal static unsafe class ClusterRadiusBatch
             _z = grid.FlatPlaneZ;
 
             // Read once, as a single query reads them at construction: every member walks with one reach and one set of names.
-            var reach = (double)Volatile.Read(ref state.DefaultRealmSpatial.ClusterReach);
-            _escaped = Volatile.Read(ref state.DefaultRealmSpatial.EscapedClusters);
+            _rs = state.SpatialOf(grid);
+            var reach = (double)Volatile.Read(ref _rs.ClusterReach);
+            _escaped = Volatile.Read(ref _rs.EscapedClusters);
 
             int uy0 = int.MaxValue, uy1 = int.MinValue;
             for (int j = 0; j < members.Length; j++)
@@ -350,7 +353,7 @@ internal static unsafe class ClusterRadiusBatch
                 return;
             }
 
-            var perCell = _state.PerCellIndex;
+            var perCell = _rs.PerCellIndex;
             if (perCell == null || cellKey >= perCell.Length)
             {
                 return;

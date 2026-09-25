@@ -56,6 +56,14 @@ internal sealed class RealmArchetypeSpatial
     /// <summary>Cells currently served by a tree, counted. See <see cref="ArchetypeClusterState.PromotedCellCount"/>.</summary>
     internal int PromotedCellCount;
 
+    /// <summary>
+    /// The state of no realm: no grid, no pool, no index, zero reach, no escapes. What <see cref="ArchetypeClusterState.SpatialOf"/> returns for a
+    /// non-spatial archetype or a missing grid, so a caller's null tests on the members read exactly as they did on the fields. Never populated.
+    /// </summary>
+    internal static readonly RealmArchetypeSpatial None = new();
+
+    private RealmArchetypeSpatial() => Realm = RealmId.None;
+
     internal RealmArchetypeSpatial(ArchetypeClusterState owner, RealmId realm, SpatialGrid grid)
     {
         Owner = owner;

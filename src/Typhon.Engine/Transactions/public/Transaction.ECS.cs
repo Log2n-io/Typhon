@@ -2210,11 +2210,13 @@ public unsafe partial class Transaction
                                 double cellOriginX = 0d, cellOriginY = 0d, cellOriginZ = 0d;
                                 if (cellKey >= 0)
                                 {
-                                    ctx.ClusterState.Grid.CellOrigin(cellKey, out cellOriginX, out cellOriginY, out cellOriginZ);
+                                    // The realm the cluster is in (Realms SP-3): its grid is the frame of this cell key.
+                                    var spawnGrid = ctx.ClusterState.SpatialOfCluster(clusterChunkId).Grid;
+                                    spawnGrid.CellOrigin(cellKey, out cellOriginX, out cellOriginY, out cellOriginZ);
 
                                     // Before the index widen below, which is what makes the entity queryable: every query must already reach as far past
                                     // this cell as the entity does (SQ-01). Between fences a spawn is the only thing that can push that reach out.
-                                    ctx.ClusterState.RaiseClusterReachForSpawn(cellKey, cellOriginX, cellOriginY, cellOriginZ, spawnSpatialCoords, is3D);
+                                    ctx.ClusterState.RaiseClusterReachForSpawn(spawnGrid, cellKey, cellOriginX, cellOriginY, cellOriginZ, spawnSpatialCoords, is3D);
                                 }
 
                                 // Stamped: a concurrent grow of ClusterAabbs copies the array, and a widen into the old one after the copy read this entry

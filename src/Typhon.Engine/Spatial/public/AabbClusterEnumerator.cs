@@ -43,6 +43,8 @@ public unsafe ref struct AabbClusterEnumerator
 {
     private readonly ArchetypeClusterState _state;
     private readonly SpatialGrid _grid;
+    // The queried realm's per-cell state (Realms SP-3), resolved once from the grid: each realm owns its grid.
+    private readonly RealmArchetypeSpatial _rs;
 
     // The query's box, and its sphere for a radius query, in WORLD f64 (#914, SQ-06) — see QueryGeometry. For a 2D query the caller passes ±Infinity on Z,
     // so the Z overlap test trivially passes against 2D cluster storage. The caller builds a radius query's box as the sphere's enclosing box, so the cell
@@ -187,8 +189,9 @@ public unsafe ref struct AabbClusterEnumerator
         //
         // The low side is stepped down one double below the widened value. A box is a closed interval, so a box ending exactly on a cell boundary still
         // touches a query starting there — and the floor would otherwise map that boundary to the next cell up and skip the box's own cell.
-        var overhang = (double)Volatile.Read(ref state.DefaultRealmSpatial.ClusterReach);
-        _escaped = Volatile.Read(ref state.DefaultRealmSpatial.EscapedClusters);
+        _rs = state.SpatialOf(grid);
+        var overhang = (double)Volatile.Read(ref _rs.ClusterReach);
+        _escaped = Volatile.Read(ref _rs.EscapedClusters);
         grid.WorldToCellRange(Math.BitDecrement(minX - overhang), Math.BitDecrement(minY - overhang), Math.BitDecrement(minZ - overhang),
             maxX + overhang, maxY + overhang, maxZ + overhang,
             out _cellMinX, out _cellMinY, out _cellMinZ, out _cellMaxX, out _cellMaxY, out _cellMaxZ);
@@ -1306,11 +1309,11 @@ public unsafe ref struct AabbClusterEnumerator
                         // every coordinate it sweeps — turning the broadphase into the thing that fills a sparse grid in.
                         bool exists = _grid.TryGetCellKey(_currentCellX, _currentCellY, _currentCellZ, out int cellKey);
                         _currentCellX++;
-                        if (!exists || _state.PerCellIndex == null || cellKey >= _state.PerCellIndex.Length)
+                        if (!exists || _rs.PerCellIndex == null || cellKey >= _rs.PerCellIndex.Length)
                         {
                             continue;
                         }
-                        var slot = _state.PerCellIndex[cellKey];
+                        var slot = _rs.PerCellIndex[cellKey];
                         if (slot == null)
                         {
                             continue;

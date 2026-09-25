@@ -243,10 +243,11 @@ public partial class DatabaseEngine
         var compOffset = layout.ComponentOffset(ss.Slot);
         var fieldType = ss.FieldInfo.FieldType;
         var is3D = fieldType.Is3D();
-        var grid = clusterState.Grid;
-        ref readonly var cfg = ref grid.Config;
-        var cellSize = cfg.CellSize;
-        var hysteresisMargin = cellSize * cfg.MigrationHysteresisRatio;
+        // The frame of the realm the current cluster is in (Realms SP-3), re-resolved only when that realm changes — never with one realm.
+        RealmArchetypeSpatial realmSpatial = null;
+        SpatialGrid grid = null;
+        SpatialGridConfig cfg = default;
+        double cellSize = 0, hysteresisMargin = 0;
         var staleDropped = 0;
         var jumps = 0;
         var clamped = 0;
@@ -272,6 +273,16 @@ public partial class DatabaseEngine
                 if (slotMask == 0)
                 {
                     continue;
+                }
+
+                var clusterRealm = clusterState.SpatialOfCluster(chunkId);
+                if (!ReferenceEquals(clusterRealm, realmSpatial))
+                {
+                    realmSpatial = clusterRealm;
+                    grid = realmSpatial.Grid;
+                    cfg = grid.Config;
+                    cellSize = cfg.CellSize;
+                    hysteresisMargin = cellSize * cfg.MigrationHysteresisRatio;
                 }
 
                 var currentCellKey = clusterState.ClusterCellMap[chunkId];

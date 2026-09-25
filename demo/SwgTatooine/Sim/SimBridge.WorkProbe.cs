@@ -46,7 +46,7 @@ public sealed partial class SimBridge
         // The engine grows the cell range by ClusterReach (SQ-01): a cluster is filed by its entities' centres, so its box can reach that far into the
         // next cell. Mirrored here, and the halves only that growth reaches are counted on their own. The few outliers the engine visits by name
         // (EscapedClusters) are not mirrored: at most 16, and only where a query overlaps one.
-        double overhang = Volatile.Read(ref cs.ClusterReach);
+        double overhang = Volatile.Read(ref cs.DefaultRealmSpatial.ClusterReach);
         grid.WorldToCellRange(minX - overhang, minY - overhang, 0d, maxX + overhang, maxY + overhang, 0d,
             out var x0, out var y0, out _, out var x1, out var y1, out _);
         grid.WorldToCellRange(minX, minY, 0d, maxX, maxY, 0d, out var ownX0, out var ownY0, out _, out var ownX1, out var ownY1, out _);

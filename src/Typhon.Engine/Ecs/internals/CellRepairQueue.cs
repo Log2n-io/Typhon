@@ -316,7 +316,7 @@ internal sealed class CellRepairQueue
     /// </remarks>
     private float Score(int cellKey, in Candidate candidate, SpatialGrid grid, ArchetypeClusterState state, long tickNumber)
     {
-        var pool = state.CellClusterPool;
+        var pool = state.SpatialOf(grid).CellClusterPool;
         var clusters = pool != null ? pool.GetClusters(cellKey) : default;
         if (clusters.Length < 2)
         {

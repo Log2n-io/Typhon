@@ -375,6 +375,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal int PlanCellRepairs(SpatialGrid grid, ref ChunkAccessor<PersistentStore> accessor, long tickNumber, double remainingBudgetNs,
         out double budgetUsedMs)
     {
+        var rs = SpatialOf(grid);
         budgetUsedMs = 0d;
         LastTickRepairedEntityCount = 0;
         LastTickRepairUnitCount = 0;
@@ -426,7 +427,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             return 0;
         }
 
-        if (grid == null || ClusterSegment == null || CellClusterPool == null || ClusterCellMap == null || ClusterAabbs == null)
+        if (grid == null || ClusterSegment == null || rs.CellClusterPool == null || ClusterCellMap == null || ClusterAabbs == null)
         {
             AccrueQueueMaintenance(queue, maintenanceStart);
             return 0;
@@ -608,7 +609,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     private int RepairOneCell(int cellKey, SpatialGrid grid, ref ChunkAccessor<PersistentStore> accessor, long tickNumber, double estimateNsPerEntity,
         bool valveAvailable, ref double remainingNs)
     {
-        var clusters = CellClusterPool.GetClusters(cellKey);
+        var rs = SpatialOf(grid);
+        var clusters = rs.CellClusterPool.GetClusters(cellKey);
         if (clusters.Length < 2)
         {
             // A single cluster is already its own optimal packing — a sort cannot improve a partition of one. Dropped from the queue rather than left to
@@ -1096,6 +1098,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     private int AllocateEmptyClusterForCell(int cellKey, SpatialGrid grid, ref ChunkAccessor<PersistentStore> accessor)
     {
+        var rs = SpatialOf(grid);
         var newChunkId = AllocateNewCluster(null);
         if (newChunkId < 0)
         {
@@ -1104,7 +1107,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         EnsureClusterCellMapCapacity(newChunkId + 1);
         ClusterCellMap[newChunkId] = cellKey;
-        CellClusterPool.AddCluster(cellKey, newChunkId);
+        rs.CellClusterPool.AddCluster(cellKey, newChunkId);
 
         ref var cell = ref grid.GetCell(cellKey);
         Interlocked.Increment(ref cell.ClusterCount);

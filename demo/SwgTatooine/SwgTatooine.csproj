@@ -13,6 +13,8 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>default</LangVersion>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Realm 0's forwarding properties on ArchetypeClusterState (Realms SP-3) are fine outside the engine. -->
+    <NoWarn>$(NoWarn);TYRLM001</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Typhon.Engine\Typhon.Engine.csproj" />

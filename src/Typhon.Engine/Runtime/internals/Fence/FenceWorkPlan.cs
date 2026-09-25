@@ -547,7 +547,7 @@ internal sealed class FenceWorkPlan
                 continue;
             }
 
-            if (state.PerCellIndex == null || state.ClusterCellMap == null)
+            if (state.DefaultRealmSpatial?.PerCellIndex == null || state.ClusterCellMap == null)
             {
                 continue;
             }

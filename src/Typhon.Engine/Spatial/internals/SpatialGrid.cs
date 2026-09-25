@@ -153,6 +153,13 @@ internal sealed unsafe class SpatialGrid
 
     public ref readonly SpatialGridConfig Config => ref _config;
 
+    /// <summary>
+    /// The realm this grid belongs to (Realms SP-3). Every realm owns its own grid, so the grid's identity names the realm: an archetype resolves its
+    /// per-realm spatial state from it in one load (<see cref="ArchetypeClusterState.SpatialOf"/>). Set once, by <see cref="RealmTable.Register"/>,
+    /// before the grid is published; a standalone grid (tests) is realm 0.
+    /// </summary>
+    internal RealmId Realm { get; set; }
+
     /// <summary>Number of cells that actually exist. Grows as cells are first touched; never shrinks, because step 8 has no destruction path.</summary>
     public int CellCount => Volatile.Read(ref _cellCount);
 
