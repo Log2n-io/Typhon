@@ -37,7 +37,7 @@ the filter as naming them, and a 2-term category filter qualifies where the gate
 305-term one does not. Reusing the gate's plan keeps nightly and gate selection
 identical by construction instead of by two mechanisms that have to agree.
 """
-import argparse, json, os, subprocess, sys, time
+import argparse, json, os, re, subprocess, sys, time
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 
@@ -159,10 +159,78 @@ def cmd_plan(k, trx_paths):
         raise SystemExit(1)
     print(f"\nPARTITION OK: all {len(pairs)} tests matched by exactly one shard.")
     print(f"est wall (max shard) = {max(load):.1f}s  vs serial sum {sum(load):.1f}s")
-    json.dump([{"filter": f, "classes": (bins[i] if i else ["<catch-all>"])}
-               for i, f in enumerate(filters)],
-              open(SHARDS_JSON, "w"), indent=1)
+    write_plan([{"filter": f, "classes": (bins[i] if i else ["<catch-all>"])} for i, f in enumerate(filters)])
     print(f"wrote {SHARDS_JSON}")
+
+LF = chr(10)
+
+def write_plan(shards):
+    """The committed format — 2-space indent, LF, trailing newline — whatever the OS, so a sync or a re-plan diffs only what changed."""
+    with open(SHARDS_JSON, "w", encoding="utf-8", newline=LF) as fh:
+        json.dump(shards, fh, indent=2)
+        fh.write(LF)
+
+_INCLUDED = re.compile(r"FullyQualifiedName~([\w.]+)\.")
+_EXCLUDED = re.compile(r"\(FullyQualifiedName!~([\w.]+)\.\)")
+
+def plan_problems(shards):
+    """
+    Everything that makes a plan's filters disagree with its class lists (empty == consistent).
+
+    WHY (#1046): a shard's `filter` is what runs, its `classes` list is what the plan says it runs, and shard 0's filter is
+    the NEGATIVE complement of every other shard's list. `cmd_plan` writes all three together, but `shards.json` is also
+    edited by hand (#1004 added six Subscriptions classes to shard 4's list and filter without excluding them from shard 0),
+    and nothing checked the result: those six classes ran twice, concurrently, in two shard processes, and collided on one
+    temp database. `shard_integrity` cannot see this — every named class did execute, just twice.
+    """
+    problems = []
+    if not shards or shards[0].get("classes") != ["<catch-all>"]:
+        return ["shard 0 is not the catch-all (its classes must be [\"<catch-all>\"])"]
+
+    owner = {}
+    for i, s in enumerate(shards[1:], 1):
+        classes = s.get("classes", [])
+        for c in classes:
+            if c in owner:
+                problems.append(f"{c} is listed in shard {owner[c]} and shard {i}")
+            else:
+                owner[c] = i
+        base, _, _ = s.get("filter", "").partition("&(FullyQualifiedName~")
+        runs = set(_INCLUDED.findall(s.get("filter", "")))
+        if base != _excluded(("Sensitive",)):
+            problems.append(f"shard {i}: its filter's category exclusion is not the gate's ({_excluded(('Sensitive',))})")
+        for c in sorted(runs - set(classes)):
+            problems.append(f"shard {i}: its filter runs {c}, which its classes list does not name")
+        for c in sorted(set(classes) - runs):
+            problems.append(f"shard {i}: its classes list names {c}, which its filter does not run")
+
+    catchall = shards[0].get("filter", "")
+    if not catchall.startswith(_excluded(("Sensitive",))):
+        problems.append(f"shard 0: its filter's category exclusion is not the gate's ({_excluded(('Sensitive',))})")
+    excluded = set(_EXCLUDED.findall(catchall))
+    for c in sorted(set(owner) - excluded):
+        problems.append(f"shard 0 does not exclude {c} (listed in shard {owner[c]}), so it runs twice")
+    for c in sorted(excluded - set(owner)):
+        problems.append(f"shard 0 excludes {c}, which no other shard lists, so it runs nowhere")
+    return problems
+
+def cmd_sync():
+    """Rewrites every shard's filter from its classes list, keeping the partition as it is. The way to hand-edit the plan:
+    move a class between `classes` lists, then sync, instead of editing filters (#1046)."""
+    shards = json.load(open(SHARDS_JSON))
+    elsewhere = [c for s in shards[1:] for c in s["classes"]]
+    shards[0]["filter"] = catchall_filter(elsewhere)
+    for s in shards[1:]:
+        s["filter"] = positive_filter(s["classes"])
+    problems = plan_problems(shards)
+    if problems:
+        print("[shard] cannot sync — the classes lists themselves are inconsistent:")
+        for p in problems:
+            print(f"  {p}")
+        return 1
+    write_plan(shards)
+    print(f"[shard] synced {len(shards)} filters from their classes lists -> {SHARDS_JSON}")
+    return 0
 
 # ── run (CI) ────────────────────────────────────────────────────────────────
 
@@ -233,6 +301,15 @@ def shard_integrity(shards, trx_paths):
 
 def cmd_run(results_dir):
     shards = json.load(open(SHARDS_JSON))
+    # Before spending a minute of shards on it: a plan whose filters disagree with its lists runs some classes twice or not
+    # at all, and neither shows up as a failure (#1046).
+    problems = plan_problems(shards)
+    if problems:
+        print(f"[shard] PLAN INCONSISTENT (BLOCKING) — {len(problems)} problem(s) in {SHARDS_JSON}; fix the classes lists, then "
+              "`python3 bench/aws/shard.py sync`:", flush=True)
+        for p in problems:
+            print(f"  {p}", flush=True)
+        return 1
     os.makedirs(results_dir, exist_ok=True)
     # Default = every shard at once (the gate). SHARD_CONCURRENCY caps it without touching the PLAN, so a
     # core-poor runner slows down instead of silently testing a different set.
@@ -397,10 +474,20 @@ if __name__ == "__main__":
     # SENSITIVE_FILTER warns about: the one filter in the run that ignores GATE_EXCLUDED is how an excluded test gets
     # back in. Exposing the string keeps ONE definition rather than a second copy that drifts.
     sub.add_parser("filter")
+    sub.add_parser("sync")    # rewrite every filter from its classes list (the way to hand-edit the plan)
+    sub.add_parser("check")   # the plan-consistency check alone, as cmd_run applies it
 
     a = ap.parse_args()
     if a.cmd == "filter":
         print(_excluded())
+    elif a.cmd == "sync":
+        sys.exit(cmd_sync())
+    elif a.cmd == "check":
+        problems = plan_problems(json.load(open(SHARDS_JSON)))
+        for p in problems:
+            print(p)
+        print(f"[shard] plan {'INCONSISTENT' if problems else 'consistent'}: {SHARDS_JSON}")
+        sys.exit(1 if problems else 0)
     elif a.cmd == "plan":
         cmd_plan(a.k, a.trx)
     elif a.cmd == "retry":
