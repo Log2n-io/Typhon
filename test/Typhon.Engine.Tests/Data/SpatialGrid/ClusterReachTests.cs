@@ -710,16 +710,22 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         set.ChunkIds[0] = 5;
         set.HomeCellKeys[0] = 3;
         var map = new int[8];
+        var realms = new ushort[8];
+        var realm0 = RealmId.Default;
         Assert.Multiple(() =>
         {
             map[5] = 3;
-            Assert.That(set.IsCurrent(0, map), Is.True, "still filed where it was named");
+            Assert.That(set.IsCurrent(0, map, realms, realm0), Is.True, "still filed where it was named");
+            realms[5] = 2;
+            Assert.That(set.IsCurrent(0, map, realms, realm0), Is.False,
+                "reused in ANOTHER REALM's cell of the same key (Realms C1): opening it would answer with another world's entities");
+            realms[5] = 0;
             map[5] = -1;
-            Assert.That(set.IsCurrent(0, map), Is.False, "freed");
+            Assert.That(set.IsCurrent(0, map, realms, realm0), Is.False, "freed");
             map[5] = 4;
-            Assert.That(set.IsCurrent(0, map), Is.False, "reused in another cell: opening it would report that cluster's entities twice");
-            Assert.That(set.IsCurrent(0, new int[4]), Is.False, "beyond the map");
-            Assert.That(set.IsCurrent(0, null), Is.False, "no map");
+            Assert.That(set.IsCurrent(0, map, realms, realm0), Is.False, "reused in another cell: opening it would report that cluster's entities twice");
+            Assert.That(set.IsCurrent(0, new int[4], realms, realm0), Is.False, "beyond the map");
+            Assert.That(set.IsCurrent(0, null, realms, realm0), Is.False, "no map");
         });
     }
 }

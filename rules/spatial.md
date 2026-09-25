@@ -168,7 +168,8 @@
     not yet migrated — then cost every later query of the archetype ~50x its cells for the rest of the process, SWG Tatooine's whole-run slow
     mode and its x128 multi-second ticks; and the out-of-world half of edge-cell boxes widened every Creature query by ~930 m from tick 0
   invariant a named cluster whose chunk id was freed and reused in another cell is skipped (EscapedClusterSet.IsCurrent) — opened, it would
-    report the reused cluster's entities a second time
+    report the reused cluster's entities a second time. "Another cell" includes the same key in ANOTHER REALM (Realms C1): IsCurrent tests the
+    realm map too, or a query would answer with another world's entities (SQ-08)
   scope: SpatialRTree.Query.cs (all enumerators), CountInAABB, AabbClusterEnumerator, ArchetypeClusterState.QueryRay,
     ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest, ArchetypeClusterState.CoveredRadiusSq,
     ArchetypeClusterState.ClusterReach, ArchetypeClusterState.EscapedClusters, ArchetypeClusterState.RefreshClusterReach,
@@ -912,7 +913,7 @@
     AnyCluster (-1). It is computed a whole phase before the drain, so between the two the pinned cluster can
     fill up, or be drained and freed and its chunk id reallocated to a DIFFERENT cell
   invariant the claim must therefore validate identity, not bounds:
-    TryClaimPinnedSlot requires ClusterCellMap[pin] == the request's DestCellKey before claiming
+    TryClaimPinnedSlot requires ClusterCellMap[pin] == the request's DestCellKey AND ClusterRealmMap[pin] == its DestRealm before claiming
     on failure it falls back to the first-fit ClaimSlotInCell — it must NOT refuse the migration, which would
       strand the entity in a cluster it no longer belongs to
   invariant a pinned claim is a FOURTH success site for CellState.EntityCount. TryClaimSlotInCluster
@@ -1832,8 +1833,11 @@
         array just as well as the pre-size does
     structurally unreachable, and so deliberately unverified: the Finalize-slice gate on a null list. Branch 1
       returns before Finalize's emit, so FinalizeSliceable is never set for an archetype without a change list
-  invariant the drain prefix is sorted by DestCellKey (OrderDrainAndMeasureArrivals) in Prep's serial tail,
-    before Migrate dispatches, so each worker slice owns disjoint dst cells
+  invariant the drain prefix is sorted by the destination cell's IDENTITY, (DestRealm, DestCellKey) — MigrationRequest.DestCellIdentity —
+    (OrderDrainAndMeasureArrivals) in Prep's serial tail, before Migrate dispatches, and sliced on the same identity, so each worker slice owns
+    disjoint dst cells. A cell key alone names one cell in every realm (Realms C1); with one realm the realm half is zero and costs no radix pass
+  invariant every destination realm's state exists and its per-cell index covers its grid before Migrate dispatches
+    (PreSizeMigrationBuffers → PreSizeDestinationRealms): a Migrate slice may neither create a realm's state nor grow its index
   invariant PendingMigrationCount = 0 reset happens once per fence in FinalizeArchetypeFence
     AFTER all Migrate-phase slices complete, never inside ExecuteMigrationsSlice
   scope: DatabaseEngine.ExecuteMigrations, DatabaseEngine.FinalizeArchetypeFence,

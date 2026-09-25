@@ -123,7 +123,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     || !RayHitsBox(originX, originY, originZ, dirX, dirY, dirZ, maxDistance, escaped.MinX[e], escaped.MinY[e],
                         is3D ? escaped.MinZ[e] : double.NegativeInfinity, escaped.MaxX[e], escaped.MaxY[e],
                         is3D ? escaped.MaxZ[e] : double.PositiveInfinity, out _)
-                    || !escaped.IsCurrent(e, ClusterCellMap))
+                    || !escaped.IsCurrent(e, ClusterCellMap, ClusterRealmMap, rs.Realm))
                 {
                     continue;
                 }

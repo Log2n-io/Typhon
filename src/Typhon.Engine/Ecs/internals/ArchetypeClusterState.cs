@@ -668,11 +668,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     /// <param name="upperBound">Worst-case maximum cluster chunk ID + 1 that this fence tick could touch. Typically, <c>PrimarySegmentCapacity +
     /// PendingMigrationCount</c> — one new cluster per migration in the worst case.</param>
-    /// <param name="cellUpperBound">Worst-case maximum cell key + 1. <see cref="PerCellIndex"/> is the one shared array a worker indexes by CELL rather than
-    /// by cluster, and it was the one this pre-size did not cover — leaving <c>AddClusterToPerCellIndex</c> as the last site that could reallocate a shared
-    /// array from a Migrate slice. Cell keys are pool slots handed out when a cell is first occupied, and the Migrate phase occupies no cell that crossing
-    /// detection has not already created in Prep, so the grid's current cell count bounds it.</param>
-    internal void PreSizeMigrationBuffers(int upperBound, int cellUpperBound = 0)
+    /// <remarks>
+    /// <b>Every destination realm too (Realms C1).</b> Each realm the queue names has its state created here (a Migrate slice may not —
+    /// <see cref="GetOrCreateRealmSpatial"/>) and its per-cell index sized to twice its grid's cell count plus slack. The per-cell index is the one shared
+    /// array a worker indexes by CELL rather than by cluster, so without this <c>AddClusterToPerCellIndex</c> would be the last site able to reallocate a
+    /// shared array from a Migrate slice. Cell keys are pool slots handed out when a cell is first occupied, and the Migrate phase occupies no cell that
+    /// crossing detection has not already created in Prep, so each grid's current cell count bounds its keys.
+    /// </remarks>
+    internal void PreSizeMigrationBuffers(int upperBound)
     {
         LastPreSizeUpperBound = upperBound;
         Debug.Assert(!InPrepSlice, "a Prep slice must not grow the per-cluster arrays another slice is reading (#886)");
@@ -724,11 +727,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         EnsureClusterCellMapCapacity(upperBound);
         EnsureClusterWriteBookkeepingCapacity(upperBound);
 
-        if (cellUpperBound > 0)
-        {
-            // Realm 0's grid bounds the cell keys today; SP-5 pre-sizes every destination realm's index (PreSizeMigrationBuffers per DestRealm).
-            EnsurePerCellIndexCapacity(Realm0Spatial, cellUpperBound);
-        }
+        PreSizeDestinationRealms();
 
         // Deferred-drain list sized to PendingMigrationCount (each migration drains at most one source slot, so the cluster-drain count cannot exceed migration
         // count). _drainedCount is zeroed by Prep.
@@ -736,6 +735,34 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (_drainedClusterIds == null || _drainedClusterIds.Length < drainCap)
         {
             _drainedClusterIds = new int[Math.Max(drainCap, (_drainedClusterIds?.Length ?? 0) * 2)];
+        }
+    }
+
+    /// <summary>
+    /// Creates, and sizes the per-cell index of, every realm this tick's queue moves an entity into. Serial (Prep tail). The queue is sorted by realm
+    /// first, so a realm's requests are one run and the scan tests one ushort per request; with one realm it touches one state.
+    /// </summary>
+    private void PreSizeDestinationRealms()
+    {
+        var pending = PendingMigrations;
+        var count = PendingMigrationCount;
+        if (!SpatialSlot.HasSpatialIndex || pending == null || count <= 0)
+        {
+            return;
+        }
+
+        var lastRealm = -1;
+        for (var i = 0; i < count; i++)
+        {
+            var realm = pending[i].DestRealm;
+            if (realm == lastRealm)
+            {
+                continue;
+            }
+
+            lastRealm = realm;
+            var rs = GetOrCreateRealmSpatial(realm);
+            EnsurePerCellIndexCapacity(rs, 2 * rs.Grid.CellCount + 64);
         }
     }
 
@@ -779,7 +806,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var largest = 0;
         var cells = 0;
         var run = 0;
-        var runCell = 0;
+        var runCell = 0L;
         for (var i = 0; i < count; i++)
         {
             ref readonly var request = ref PendingMigrations[i];
@@ -788,9 +815,9 @@ internal sealed unsafe partial class ArchetypeClusterState
                 continue;
             }
 
-            if (run == 0 || request.DestCellKey != runCell)
+            if (run == 0 || request.DestCellIdentity != runCell)
             {
-                runCell = request.DestCellKey;
+                runCell = request.DestCellIdentity;
                 run = 0;
                 cells++;
             }
@@ -846,7 +873,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     private readonly struct DestCellKeyOf : IRadixKey<MigrationRequest>
     {
-        public static ulong Key(in MigrationRequest item) => RadixSort.SignedKey(item.DestCellKey);
+        public static ulong Key(in MigrationRequest item) => ((ulong)item.DestRealm << 32) | RadixSort.SignedKey(item.DestCellKey);
     }
 
     /// <summary>
@@ -1006,7 +1033,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// re-occupied it. Skip the finalize.
     /// </para>
     /// </summary>
-    internal void DrainPendingClusterFinalizations(SpatialGrid grid)
+    /// <remarks>Each cluster is finalised in its own realm's cell state (<see cref="SpatialOfCluster"/>).</remarks>
+    internal void DrainPendingClusterFinalizations()
     {
         var count = _drainedCount;
         if (count == 0)
@@ -1034,7 +1062,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 continue; // Claim re-filled this cluster after the drain — keep alive
             }
 
-            FinaliseEmptyClusterCellState(grid, chunkId);
+            FinaliseEmptyClusterCellState(SpatialOfCluster(chunkId).Grid, chunkId);
             RemoveFromActiveList(chunkId);
             RetireClusterId(chunkId);   // the id is about to be recyclable — clears every side table that must not outlive it
             ClusterSegment?.FreeChunk(chunkId);
@@ -3053,6 +3081,23 @@ internal sealed unsafe partial class ArchetypeClusterState
     private RealmArchetypeSpatial[] _presentRealmSpatial = [];
     private int _presentRealmCount;
 
+    /// <summary>True when any realm this archetype lives in has a per-cell cluster index — the whole-archetype form of <c>rs.PerCellIndex != null</c>.</summary>
+    internal bool HasAnyPerCellIndex
+    {
+        get
+        {
+            foreach (var rs in PresentRealmSpatial)
+            {
+                if (rs.PerCellIndex != null)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+    }
+
     /// <summary>The realms this archetype has spatial state in, in creation order. A consistent snapshot: entries are only appended.</summary>
     internal ReadOnlySpan<RealmArchetypeSpatial> PresentRealmSpatial
     {
@@ -3900,7 +3945,11 @@ internal sealed unsafe partial class ArchetypeClusterState
             return false;   // AnyCluster — not a pin, so nothing to reject
         }
 
-        if (cellMap == null || (uint)preferredClusterChunkId >= (uint)cellMap.Length || cellMap[preferredClusterChunkId] != cellKey)
+        // The realm too (Realms C1): a pinned chunk freed and recycled into ANOTHER realm's cell of the same key passes the cell test. The realm map is
+        // published before the cell map, so it is at least as long as the one just read.
+        var realmMap = Volatile.Read(ref ClusterRealmMap);
+        if (cellMap == null || (uint)preferredClusterChunkId >= (uint)cellMap.Length || cellMap[preferredClusterChunkId] != cellKey
+            || realmMap[preferredClusterChunkId] != grid.Realm.Value)
         {
             // Wave-2 K5. Rare by design (a stale pin), so an Interlocked increment on the rejection path costs nothing on the tick that matters.
             Interlocked.Increment(ref LastTickPinsRejected);
@@ -4812,7 +4861,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 }
                 else
                 {
-                    EnqueueMigration(new MigrationRequest(chunkId, slot, destCellKey));
+                    EnqueueMigration(new MigrationRequest(chunkId, slot, grid.Realm.Value, destCellKey));
                 }
             }
 
@@ -6165,13 +6214,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </para>
     /// </summary>
     /// <remarks>
-    /// <paramref name="grid"/> lost its <c>null</c> default in #872 step 9: C15 cell-relative bounds cannot be computed without a cell origin, so every
-    /// recompute now dereferences the grid unconditionally. Leaving the default in place would have kept a null-argument overload compiling at call sites
-    /// that no longer have a valid meaning.
+    /// <paramref name="primaryGrid"/> is the engine's primary realm's grid (<see cref="RealmTable.Primary"/>): its configuration decides whether repair
+    /// nominates, and repair runs in that realm only (Realms C1, §12). Every per-cluster quantity — cell origin, extents, targets — is the cluster's own
+    /// realm's, resolved inside the slice.
     /// </remarks>
-    internal void RecomputeDirtyClusterAabbs(long[] dirtyBits, ref ChunkAccessor<PersistentStore> accessor, SpatialGrid grid)
+    internal void RecomputeDirtyClusterAabbs(long[] dirtyBits, ref ChunkAccessor<PersistentStore> accessor, SpatialGrid primaryGrid)
     {
-        var rs = SpatialOf(grid);
         // Still unread, and now deliberately so rather than by omission. The gate this parameter used to drive lives in RecomputeDirtyClusterAabbsSlice
         // (ClusterNeedsAabbRecompute), which reads FenceDirtyBits off the state — the same array every caller passes here — because the PARALLEL path
         // dispatches the slice directly and never comes through this wrapper. Threading it as an argument as well would give the two paths two sources of
@@ -6193,7 +6241,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             return;
         }
 
-        if (rs.PerCellIndex == null || ClusterCellMap == null)
+        if (!HasAnyPerCellIndex || ClusterCellMap == null)
         {
             return;
         }
@@ -6217,10 +6265,10 @@ internal sealed unsafe partial class ArchetypeClusterState
                 // nominations unread at a zero budget, so the serial fence would nominate every degraded cluster every tick and then rent a ChunkAccessor,
                 // copy the list into scratch and clear it, all to return at the budget check. That is the configuration the four step-10 fixtures now run in,
                 // so the cost would have landed on exactly the measurements it must not perturb.
-                var repairNominationBuffer = grid != null && grid.Config.ReclusterBudgetMs > 0f ? RepairNominations : null;
+                var repairNominationBuffer = primaryGrid != null && primaryGrid.Config.ReclusterBudgetMs > 0f ? RepairNominations : null;
                 // No deferral buffer on the serial path: it is already the single writer, so a promoted cell's tree can be written directly and the drain
                 // below has nothing to do. Passing null is what selects that — see the divert in the slice.
-                RecomputeDirtyClusterAabbsSlice(0, totalWork, ref accessor, grid, null, outlierBuffer, repairNominationBuffer, out var aabbsChanged,
+                RecomputeDirtyClusterAabbsSlice(0, totalWork, ref accessor, primaryGrid, null, outlierBuffer, repairNominationBuffer, out var aabbsChanged,
                     out var slotsScanned, out var outlierGuardFires, out var clustersScanned, out var driftersDetected, out var driftAbsorbed,
                     out var driftersUnplaced, out var driftGatedClusters, out var driftSuppressedByDensity, out var driftersUnplacedNoCandidate,
                     out var driftersSpilled, out var tightness);
@@ -6263,7 +6311,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <b>Thread-safety</b>: writes only to per-cluster slots (<see cref="ClusterAabbs"/>[chunkId]) and per-cell index slots
     /// (<c>PerCellIndex[cellKey].DynamicIndex.UpdateAt(indexSlot, ...)</c>). Different clusters always have different <c>indexSlot</c>s even within the same
     /// cell, so SoA writes don't collide. The rare <see cref="FlagOutliersForMigration"/> path (extent-guard fire) serializes
-    /// <see cref="EnqueueMigration(int, int, int)"/> internally via <c>_finalizeLock</c>.
+    /// <see cref="EnqueueMigration(int, int, ushort, int)"/> internally via <c>_finalizeLock</c>.
     /// </para>
     /// <para>
     /// <b>PRECONDITION — caller must hold the tick fence barrier (CA-01, issue #573).</b> The AABB write below is a <i>blind store</i>
@@ -6274,13 +6322,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// crash. Whoever relaxes this barrier must first convert the store to a grow-merge (union with <c>stored</c>, handling the shrink path explicitly).
     /// </para>
     /// </summary>
-    internal void RecomputeDirtyClusterAabbsSlice(int sliceStart, int sliceCount, ref ChunkAccessor<PersistentStore> accessor, SpatialGrid grid,
+    internal void RecomputeDirtyClusterAabbsSlice(int sliceStart, int sliceCount, ref ChunkAccessor<PersistentStore> accessor, SpatialGrid primaryGrid,
         List<PromotedAabbApply> promotedApplyBuffer, List<MigrationRequest> outlierBuffer, List<RepairNomination> repairNominationBuffer, out int aabbsChanged,
         out int slotsScanned, out int outlierGuardFires, out int clustersScanned, out int driftersDetected, out int driftAbsorbed, out int driftersUnplaced,
         out int driftGatedClusters, out int driftSuppressedByDensity, out int driftersUnplacedNoCandidate, out int driftersSpilled,
         out ClusterTightnessSample tightness)
     {
-        var rs = SpatialOf(grid);
         aabbsChanged = 0;
         slotsScanned = 0;
         outlierGuardFires = 0;
@@ -6309,7 +6356,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             return;
         }
 
-        if (rs.PerCellIndex == null || ClusterCellMap == null)
+        if (!HasAnyPerCellIndex || ClusterCellMap == null)
         {
             return;
         }
@@ -6319,34 +6366,18 @@ internal sealed unsafe partial class ArchetypeClusterState
             return;
         }
 
-        var maxExtent = 0f;
-        var cellSize = 0f;
-        var inverseCellSize = 0f;
-        var outlierGuardActive = grid != null && (cellSize = (float)grid.Config.CellSize) > 0f;
-        var driftTargetExtent = 0f;
-        // #872 step 12 (P7). A THIRD threshold, deliberately not one of the two above. The design proposes reusing the outlier guard's cellSize x 1.2, but
-        // that check exists to catch a cluster whose bound has escaped its own cell — which only happens when it holds entities that should have migrated
-        // out. A cluster whose entities all belong to its cell tops out near 1.05 x cellSize (the hysteresis margin), so 1.2 is unreachable for the
-        // intra-cell degradation repair exists to fix, and AC-12.1's own "AABBs at ~90 % of the cell" sits below it. See ClusterRepairExtentRatio.
-        var repairExtent = 0f;
-        if (outlierGuardActive)
-        {
-            maxExtent = cellSize * 1.2f;
-            driftTargetExtent = cellSize * grid.Config.ClusterTargetExtentRatio;
-            repairExtent = repairNominationBuffer != null ? cellSize * grid.Config.ClusterRepairExtentRatio : 0f;
-            // Hoisted for the nomination's degradation ratio (#872 step 11). One reciprocal per slice against one division per nominated cluster, on a
-            // path whose whole justification is that the per-cluster test is three compares.
-            inverseCellSize = cellSize > 0f ? 1f / cellSize : 0f;
-        }
-
-        // Step 14 (D1). The two extents above are the FLOORS; the operative target is a function of the cell's population, resolved once per cell
-        // change rather than per cluster — clusters of one cell are adjacent in both branches' iteration order often enough that the cache hits far more
-        // than it misses, and a miss is one CellState load, one root and a handful of multiplies. `flat` is a property of the field, not of the cluster:
-        // every cluster of this archetype packs in the same number of dimensions.
-        var targets = new CellTargetResolver(grid, rs.CellClusterPool, cellSize, driftTargetExtent, repairExtent, BitOperations.PopCount(Layout.FullMask),
-            SpatialSlot.HasSpatialIndex && SpatialSlot.FieldInfo.FieldType is SpatialFieldType.AABB2F or SpatialFieldType.BSphere2F or SpatialFieldType.AABB2D
-                or SpatialFieldType.BSphere2D,
-            DriftTargetBoost);
+        // Everything derived from a grid — extents, the nomination cap, the cell-target resolver — is the CLUSTER's realm's, loaded when the realm changes
+        // from one cluster to the next (Realms C1): a cell key, a cell size and a packing bound all belong to one realm's grid. With one realm the frame
+        // loads once, on the first cluster. Step 14 (D1): the extents are the FLOORS; the operative target is a function of the cell's population, which
+        // the resolver resolves once per cell change. Repair nominates in the primary realm only (§12 C1c).
+        var clusterRealmMap = ClusterRealmMap;
+        var frameRealm = -1;
+        var f = default(AabbRealmFrame);
+        var targets = default(CellTargetResolver);
+        var slotCapacity = BitOperations.PopCount(Layout.FullMask);
+        var flatField = SpatialSlot.HasSpatialIndex && SpatialSlot.FieldInfo.FieldType is SpatialFieldType.AABB2F or SpatialFieldType.BSphere2F
+            or SpatialFieldType.AABB2D or SpatialFieldType.BSphere2D;
+        var repairRealm = repairNominationBuffer != null && primaryGrid != null ? primaryGrid.Realm.Value : -1;
 
         // Hoisted out of the per-cluster loop, which is the whole point of taking it as a parameter (D1). 64 slots is the cluster capacity ceiling and
         // three axes are cached, so this is 768 bytes on the slice worker's stack, reused for every cluster the slice touches. Allocating it per cluster
@@ -6356,9 +6387,6 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Per-WORKER, not per-slice — see _candidateScratch. Reused across ticks, so the steady state allocates nothing.
         var candidateScratch = CandidateScratch ??= new List<RelocationCandidate>(64);
 
-        // Hoisted for the same reason as the extents above: one division per SLICE against one per cluster. Zero means "no limit" — see
-        // ComputeDriftNominationCap, which is also where the 43:1 measurement that motivates it is recorded.
-        var driftNominationCap = grid != null ? ComputeDriftNominationCap(in grid.Config) : 0;
 
         if (SpatialBarrierOnly && ClusterProcessBitmap != null)
         {
@@ -6398,7 +6426,22 @@ internal sealed unsafe partial class ArchetypeClusterState
                         continue;
                     }
 
-                    var slot = rs.PerCellIndex[cellKey];
+                    var clusterRealm = clusterRealmMap[chunkId];
+                    if (clusterRealm != frameRealm)
+                    {
+                        frameRealm = clusterRealm;
+                        f = LoadAabbRealmFrame(RealmSpatial[clusterRealm], clusterRealm == repairRealm);
+                        targets = new CellTargetResolver(f.Grid, f.Rs.CellClusterPool, f.CellSize, f.DriftTargetExtent, f.RepairExtent, slotCapacity,
+                            flatField, DriftTargetBoost);
+                    }
+
+                    var perCellIndex = f.Rs.PerCellIndex;
+                    if (perCellIndex == null)
+                    {
+                        continue;
+                    }
+
+                    var slot = perCellIndex[cellKey];
                     // DynamicClusterCount, not DynamicIndex != null: a promoted cell has no linear index at all, so testing the field skips the recompute
                     // for exactly the cells the tree was introduced to serve. Silent — the fence simply stops updating those clusters' bounds, and CA-01
                     // decays from there.
@@ -6415,7 +6458,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     ClusterSpatialAabb fresh;
                     if (shrinkMask != 0)
                     {
-                        grid.CellOrigin(cellKey, out var shrinkOriginX, out var shrinkOriginY, out var shrinkOriginZ);
+                        f.Grid.CellOrigin(cellKey, out var shrinkOriginX, out var shrinkOriginY, out var shrinkOriginZ);
                         fresh = RecomputeClusterAabb(chunkId, ref accessor, shrinkOriginX, shrinkOriginY, shrinkOriginZ, out var clusterSlots);
                         slotsScanned += clusterSlots;
                         if (float.IsPositiveInfinity(fresh.MinX))
@@ -6476,8 +6519,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                     // Both extents come from `fresh`, which is already in registers, so the decision to walk is three float
                     // compares. Only a cluster that has actually spread pays for the walk, which is what makes §5.2's
                     // "you can afford to LOOK at everything" true of clusters rather than only of entities.
-                    var guardFires = outlierGuardActive &&
-                                     ((fresh.MaxX - fresh.MinX) > maxExtent || (fresh.MaxY - fresh.MinY) > maxExtent || (fresh.MaxZ - fresh.MinZ) > maxExtent);
+                    var guardFires = f.OutlierGuardActive &&
+                                     ((fresh.MaxX - fresh.MinX) > f.MaxExtent || (fresh.MaxY - fresh.MinY) > f.MaxExtent || (fresh.MaxZ - fresh.MinZ) > f.MaxExtent);
 
                     // Step 14: the gates are the CELL's, resolved from its population (D1), and a cluster repair will re-sort is not one relocation is
                     // asked to nudge (D2) — greedy least-enlargement has no gradient once every box in the cell is wide, and was measured making tightness
@@ -6492,17 +6535,17 @@ internal sealed unsafe partial class ArchetypeClusterState
                     var driftGated = (!repairGated || targets.ConstantMode) && targets.DriftExtent > 0f && maxAxisExtent > targets.DriftExtent;
 
                     clustersScanned++;
-                    tightness.Note(outlierGuardActive, maxAxisExtent, inverseCellSize, targets.PackingBound);
+                    tightness.Note(f.OutlierGuardActive, maxAxisExtent, f.InverseCellSize, targets.PackingBound);
                     if (repairGated)
                     {
-                        repairNominationBuffer.Add(new RepairNomination(cellKey, maxAxisExtent * inverseCellSize));
+                        repairNominationBuffer.Add(new RepairNomination(cellKey, maxAxisExtent * f.InverseCellSize));
                     }
 
                     if (driftGated)
                     {
                         driftGatedClusters++;
                     }
-                    else if (!repairGated && driftTargetExtent > 0f && maxAxisExtent > driftTargetExtent)
+                    else if (!repairGated && f.DriftTargetExtent > 0f && maxAxisExtent > f.DriftTargetExtent)
                     {
                         driftSuppressedByDensity++;
                     }
@@ -6517,13 +6560,13 @@ internal sealed unsafe partial class ArchetypeClusterState
                     if (guardFires)
                     {
                         outlierGuardFires++;
-                        guardClaimed = FlagOutliersForMigration(chunkId, cellKey, grid, in centres, outlierBuffer);
+                        guardClaimed = FlagOutliersForMigration(chunkId, cellKey, f.Grid, in centres, outlierBuffer);
                     }
 
-                    if (driftGated && !DriftNominationBudgetSpent(driftNominationCap))
+                    if (driftGated && !DriftNominationBudgetSpent(f.DriftNominationCap))
                     {
                         var beforeDrift = outlierBuffer.Count;
-                        DetectDriftersInCluster(chunkId, cellKey, in fresh, grid, ref accessor, in centres, guardClaimed, outlierBuffer,
+                        DetectDriftersInCluster(chunkId, cellKey, in fresh, f.Grid, ref accessor, in centres, guardClaimed, outlierBuffer,
                             candidateScratch, targets.DriftExtent, ref driftersDetected, ref driftAbsorbed, ref driftersUnplaced,
                             ref driftersUnplacedNoCandidate, ref driftersSpilled);
                         NoteDriftNominations(outlierBuffer.Count - beforeDrift);
@@ -6560,7 +6603,22 @@ internal sealed unsafe partial class ArchetypeClusterState
                     continue;
                 }
 
-                var slot = rs.PerCellIndex[cellKey];
+                var clusterRealm = clusterRealmMap[chunkId];
+                if (clusterRealm != frameRealm)
+                {
+                    frameRealm = clusterRealm;
+                    f = LoadAabbRealmFrame(RealmSpatial[clusterRealm], clusterRealm == repairRealm);
+                    targets = new CellTargetResolver(f.Grid, f.Rs.CellClusterPool, f.CellSize, f.DriftTargetExtent, f.RepairExtent, slotCapacity,
+                        flatField, DriftTargetBoost);
+                }
+
+                var perCellIndex = f.Rs.PerCellIndex;
+                if (perCellIndex == null)
+                {
+                    continue;
+                }
+
+                var slot = perCellIndex[cellKey];
                 // See the sliced path above: a promoted cell has no DynamicIndex, and testing the field would skip it.
                 if (slot == null || slot.DynamicClusterCount == 0)
                 {
@@ -6593,7 +6651,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 ClusterSpatialAabb fresh;
                 if (ClusterNeedsAabbRecompute(chunkId))
                 {
-                    grid.CellOrigin(cellKey, out var dirtyOriginX, out var dirtyOriginY, out var dirtyOriginZ);
+                    f.Grid.CellOrigin(cellKey, out var dirtyOriginX, out var dirtyOriginY, out var dirtyOriginZ);
                     fresh = RecomputeClusterAabb(chunkId, ref accessor, dirtyOriginX, dirtyOriginY, dirtyOriginZ, out var clusterSlots);
                     slotsScanned += clusterSlots;
                 }
@@ -6659,7 +6717,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     var repairMaxExtent = MaxAxisExtent(in fresh);
                     if (repairMaxExtent > targets.RepairExtent)
                     {
-                        repairNominationBuffer.Add(new RepairNomination(cellKey, repairMaxExtent * inverseCellSize));
+                        repairNominationBuffer.Add(new RepairNomination(cellKey, repairMaxExtent * f.InverseCellSize));
                     }
                 }
 
@@ -6694,19 +6752,19 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                 // See the bitmap branch above — one gather, same gating, same reason. The repair nomination for this branch sits before the
                 // process-bit skip above, so `targets` has already been resolved for this cell by the time this runs.
-                var guardFires = outlierGuardActive && ((fresh.MaxX - fresh.MinX) > maxExtent
-                                                        || (fresh.MaxY - fresh.MinY) > maxExtent
-                                                        || (fresh.MaxZ - fresh.MinZ) > maxExtent);
+                var guardFires = f.OutlierGuardActive && ((fresh.MaxX - fresh.MinX) > f.MaxExtent
+                                                        || (fresh.MaxY - fresh.MinY) > f.MaxExtent
+                                                        || (fresh.MaxZ - fresh.MinZ) > f.MaxExtent);
                 var activeMaxAxisExtent = MaxAxisExtent(in fresh);
                 var activeRepairGated = targets.RepairExtent > 0f && activeMaxAxisExtent > targets.RepairExtent;
                 var driftGated = (!activeRepairGated || targets.ConstantMode) && targets.DriftExtent > 0f && activeMaxAxisExtent > targets.DriftExtent;
                 clustersScanned++;
-                tightness.Note(outlierGuardActive, activeMaxAxisExtent, inverseCellSize, targets.PackingBound);
+                tightness.Note(f.OutlierGuardActive, activeMaxAxisExtent, f.InverseCellSize, targets.PackingBound);
                 if (driftGated)
                 {
                     driftGatedClusters++;
                 }
-                else if (!activeRepairGated && driftTargetExtent > 0f && activeMaxAxisExtent > driftTargetExtent)
+                else if (!activeRepairGated && f.DriftTargetExtent > 0f && activeMaxAxisExtent > f.DriftTargetExtent)
                 {
                     driftSuppressedByDensity++;
                 }
@@ -6721,13 +6779,13 @@ internal sealed unsafe partial class ArchetypeClusterState
                 if (guardFires)
                 {
                     outlierGuardFires++;
-                    guardClaimed = FlagOutliersForMigration(chunkId, cellKey, grid, in centres, outlierBuffer);
+                    guardClaimed = FlagOutliersForMigration(chunkId, cellKey, f.Grid, in centres, outlierBuffer);
                 }
 
-                if (driftGated && !DriftNominationBudgetSpent(driftNominationCap))
+                if (driftGated && !DriftNominationBudgetSpent(f.DriftNominationCap))
                 {
                     var beforeDrift = outlierBuffer.Count;
-                    DetectDriftersInCluster(chunkId, cellKey, in fresh, grid, ref accessor, in centres, guardClaimed, outlierBuffer,
+                    DetectDriftersInCluster(chunkId, cellKey, in fresh, f.Grid, ref accessor, in centres, guardClaimed, outlierBuffer,
                         candidateScratch, targets.DriftExtent, ref driftersDetected, ref driftAbsorbed, ref driftersUnplaced,
                         ref driftersUnplacedNoCandidate, ref driftersSpilled);
                     NoteDriftNominations(outlierBuffer.Count - beforeDrift);
@@ -6919,18 +6977,24 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void RefreshClusterReach()
     {
-        // A non-spatial archetype has no realm state to refresh.
-        foreach (var realmSpatial in PresentRealmSpatial)
+        // A non-spatial archetype has no realm state to refresh. One realm — every single-world database — keeps the single-realm pass and its stack
+        // scratch; several share ONE walk of the cluster array (Realms C1), since a pass per realm would multiply this per-tick cost by the realm count.
+        var present = PresentRealmSpatial;
+        if (present.Length == 1)
         {
-            if (realmSpatial != null)
-            {
-                RefreshClusterReachIn(realmSpatial);
-            }
+            RefreshClusterReachIn(present[0]);
+        }
+        else if (present.Length > 1)
+        {
+            RefreshClusterReachAcrossRealms(present);
         }
     }
 
     /// <inheritdoc cref="RefreshClusterReach"/>
-    /// <remarks>One realm's pass. Walks every cluster of the archetype: SP-5 skips the clusters of other realms (their cell keys name other grids).</remarks>
+    /// <remarks>
+    /// The single-realm pass: walks every cluster of the archetype without reading its realm, which is sound only while <paramref name="rs"/> is the
+    /// archetype's ONLY realm — every cluster is then in it. <see cref="RefreshClusterReachAcrossRealms"/> is the general form.
+    /// </remarks>
     private void RefreshClusterReachIn(RealmArchetypeSpatial rs)
     {
         var grid = rs.Grid;
@@ -6987,6 +7051,91 @@ internal sealed unsafe partial class ArchetypeClusterState
         // (EW-01), so this ordering is belt and braces rather than the guarantee.
         PublishEscapedClusters(rs, grid, aabbs, topId[..named], topCell[..named], is3D);
         Volatile.Write(ref rs.ClusterReach, RoundReachUp(reach));
+    }
+
+    /// <summary>
+    /// <see cref="RefreshClusterReachIn"/> for an archetype in several realms, in ONE walk of the cluster array: each cluster is scored against its own
+    /// realm's cell size and edges, into its own realm's kept set (<see cref="RealmArchetypeSpatial.ReachScan"/>), and each realm then folds and publishes
+    /// its own reach. The scratch is per realm state and reused across ticks, so the steady state allocates nothing.
+    /// </summary>
+    private void RefreshClusterReachAcrossRealms(ReadOnlySpan<RealmArchetypeSpatial> present)
+    {
+        var aabbs = ClusterAabbs;
+        var cellMap = ClusterCellMap;
+        var realmMap = Volatile.Read(ref ClusterRealmMap);
+        var usable = aabbs != null && cellMap != null && realmMap != null && SpatialSlot.HasSpatialIndex;
+        foreach (var rs in present)
+        {
+            var scan = rs.ReachScratch ??= new RealmArchetypeSpatial.ReachScan();
+            scan.Valid = usable && rs.Grid != null && rs.PerCellIndex != null;
+            scan.Kept = 0;
+            scan.Admit = 0d;
+            scan.Cell = scan.Valid ? rs.Grid.Config.CellSize : 0d;
+            RejectBounds(scan.Cell, 0d, out scan.Lo, out scan.Hi);
+        }
+
+        if (usable)
+        {
+            bool is3D = SpatialSlot.FieldInfo.FieldType.Is3D();
+            var byRealm = RealmSpatial;
+            RealmArchetypeSpatial.ReachScan scan = null;
+            SpatialGrid grid = null;
+            var scanRealm = -1;
+            int count = Math.Min(aabbs.Length, Math.Min(cellMap.Length, realmMap.Length));
+            for (int id = 0; id < count; id++)
+            {
+                var realm = realmMap[id];
+                if (realm != scanRealm)
+                {
+                    scanRealm = realm;
+                    var rs = byRealm[realm];
+                    scan = rs?.ReachScratch;
+                    grid = rs?.Grid;
+                }
+
+                if (scan == null || !scan.Valid)
+                {
+                    continue;
+                }
+
+                // The single-realm pass's reject, against this realm's bounds.
+                ref readonly var b = ref aabbs[id];
+                if (b.MinX >= scan.Lo && b.MaxX <= scan.Hi && b.MinY >= scan.Lo && b.MaxY <= scan.Hi
+                    && (!is3D || (b.MinZ >= scan.Lo && b.MaxZ <= scan.Hi)))
+                {
+                    continue;
+                }
+
+                int cellKey = cellMap[id];
+                if (cellKey < 0)
+                {
+                    continue;
+                }
+
+                CellReachFrame(grid, cellKey, out double loX, out double hiX, out double loY, out double hiY, out double loZ, out double hiZ);
+                double r = BoxReach(b.MinX, b.MinY, b.MinZ, b.MaxX, b.MaxY, b.MaxZ, is3D, scan.Cell, loX, hiX, loY, hiY, loZ, hiZ);
+                if (r > scan.Admit)
+                {
+                    KeepLargest(scan.TopReach, scan.TopId, scan.TopCell, ref scan.Kept, ref scan.Admit, r, id, cellKey);
+                    RejectBounds(scan.Cell, scan.Admit, out scan.Lo, out scan.Hi);
+                }
+            }
+        }
+
+        foreach (var rs in present)
+        {
+            var scan = rs.ReachScratch;
+            if (!scan.Valid)
+            {
+                Volatile.Write(ref rs.EscapedClusters, EscapedClusterSet.Empty);
+                Volatile.Write(ref rs.ClusterReach, 0f);
+                continue;
+            }
+
+            double reach = FoldReach(scan.TopReach, scan.Kept, scan.Cell * rs.Grid.Config.MigrationHysteresisRatio, out int named);
+            PublishEscapedClusters(rs, rs.Grid, aabbs, scan.TopId.AsSpan(0, named), scan.TopCell.AsSpan(0, named), SpatialSlot.FieldInfo.FieldType.Is3D());
+            Volatile.Write(ref rs.ClusterReach, RoundReachUp(reach));
+        }
     }
 
     /// <summary>
@@ -7069,7 +7218,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     {
                         ref readonly var b = ref aabbs[id];
                         double r = BoxReach(b.MinX, b.MinY, b.MinZ, b.MaxX, b.MaxY, b.MaxZ, is3D, cell, loX, hiX, loY, hiY, loZ, hiZ);
-                        if (!CoveredByReachOrName(r, reach, escaped, id, cellKey, ref violation))
+                        if (!CoveredByReachOrName(r, reach, escaped, rs.Realm, id, cellKey, ref violation))
                         {
                             return false;
                         }
@@ -7083,7 +7232,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 {
                     double r = BoxReach(linear.MinX[i], linear.MinY[i], linear.MinZ[i], linear.MaxX[i], linear.MaxY[i], linear.MaxZ[i], is3D, cell, loX, hiX,
                         loY, hiY, loZ, hiZ);
-                    if (!CoveredByReachOrName(r, reach, escaped, linear.ClusterIds[i], cellKey, ref violation))
+                    if (!CoveredByReachOrName(r, reach, escaped, rs.Realm, linear.ClusterIds[i], cellKey, ref violation))
                     {
                         return false;
                     }
@@ -7094,7 +7243,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         return true;
     }
 
-    private bool CoveredByReachOrName(double overhang, double reach, EscapedClusterSet escaped, int id, int cellKey, ref string violation)
+    private bool CoveredByReachOrName(double overhang, double reach, EscapedClusterSet escaped, RealmId realm, int id, int cellKey,
+        ref string violation)
     {
         if (overhang <= reach)
         {
@@ -7103,7 +7253,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         for (int e = 0; e < escaped.Count; e++)
         {
-            if (escaped.ChunkIds[e] == id && escaped.IsCurrent(e, ClusterCellMap))
+            if (escaped.ChunkIds[e] == id && escaped.IsCurrent(e, ClusterCellMap, ClusterRealmMap, realm))
             {
                 return true;
             }
@@ -7422,6 +7572,50 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Per-slice memo of the two gate extents for the cell being scanned (step 14). Resolves on a cell change only; both branches of the AABB refresh
     /// visit a cell's clusters in runs, so the common case is a compare against the cached key.
     /// </summary>
+    /// <summary>
+    /// Everything the AABB refresh derives from ONE realm's grid (Realms C1), loaded by <see cref="LoadAabbRealmFrame"/> when a slice meets a cluster of
+    /// another realm than the last. A local of the slice, never shared across workers.
+    /// </summary>
+    private struct AabbRealmFrame
+    {
+        public RealmArchetypeSpatial Rs;
+        public SpatialGrid Grid;
+        public bool OutlierGuardActive;
+        public float CellSize;
+        public float InverseCellSize;
+        public float MaxExtent;
+        public float DriftTargetExtent;
+
+        // #872 step 12 (P7). A THIRD threshold, deliberately not one of the two above. The design proposes reusing the outlier guard's cellSize x 1.2, but
+        // that check exists to catch a cluster whose bound has escaped its own cell — which only happens when it holds entities that should have migrated
+        // out. A cluster whose entities all belong to its cell tops out near 1.05 x cellSize (the hysteresis margin), so 1.2 is unreachable for the
+        // intra-cell degradation repair exists to fix, and AC-12.1's own "AABBs at ~90 % of the cell" sits below it. See ClusterRepairExtentRatio.
+        public float RepairExtent;
+
+        // One division per frame load against one per cluster. Zero means "no limit" — see ComputeDriftNominationCap, which is also where the 43:1
+        // measurement that motivates it is recorded.
+        public int DriftNominationCap;
+    }
+
+    /// <summary>The AABB refresh's quantities for <paramref name="rs"/>'s grid. <paramref name="nominateRepairs"/> false leaves the repair extent at zero.</summary>
+    private AabbRealmFrame LoadAabbRealmFrame(RealmArchetypeSpatial rs, bool nominateRepairs)
+    {
+        var grid = rs.Grid;
+        var frame = new AabbRealmFrame { Rs = rs, Grid = grid };
+        frame.OutlierGuardActive = grid != null && (frame.CellSize = (float)grid.Config.CellSize) > 0f;
+        if (frame.OutlierGuardActive)
+        {
+            frame.MaxExtent = frame.CellSize * 1.2f;
+            frame.DriftTargetExtent = frame.CellSize * grid.Config.ClusterTargetExtentRatio;
+            frame.RepairExtent = nominateRepairs ? frame.CellSize * grid.Config.ClusterRepairExtentRatio : 0f;
+            // For the nomination's degradation ratio (#872 step 11): one reciprocal per frame against one division per nominated cluster.
+            frame.InverseCellSize = 1f / frame.CellSize;
+        }
+
+        frame.DriftNominationCap = grid != null ? ComputeDriftNominationCap(in grid.Config) : 0;
+        return frame;
+    }
+
     private struct CellTargetResolver
     {
         private readonly SpatialGrid _grid;
@@ -7783,7 +7977,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 {
                     // Worker-local buffer: caller bulk-appends under _finalizeLock once at slice end. Avoids per-entity lock acquisition (review D-2).
                     // For serial callers (RecomputeDirtyClusterAabbs whole-archetype wrapper), the buffer is appended without contention.
-                    outlierBuffer.Add(new MigrationRequest(clusterChunkId, slotIndex, newCellKey));
+                    outlierBuffer.Add(new MigrationRequest(clusterChunkId, slotIndex, grid.Realm.Value, newCellKey));
                     claimed |= 1UL << slotIndex;
                     var (toX, toY, toZ) = grid.CellKeyToCoords(newCellKey);
                     jumps += SpatialGrid.IsJump(cellX, cellY, cellZ, toX, toY, toZ) ? 1 : 0;
@@ -8766,14 +8960,14 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// with thousands of migrations the array doubles ~10-12 times total (initial 16 -> 32K).
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal void EnqueueMigration(int sourceClusterChunkId, int sourceSlotIndex, int destCellKey) =>
-        EnqueueMigration(new MigrationRequest(sourceClusterChunkId, sourceSlotIndex, destCellKey));
+    internal void EnqueueMigration(int sourceClusterChunkId, int sourceSlotIndex, ushort destRealm, int destCellKey) =>
+        EnqueueMigration(new MigrationRequest(sourceClusterChunkId, sourceSlotIndex, destRealm, destCellKey));
 
     /// <summary>
     /// Append a fully-formed request — the overload the #872 step-12 repair planner uses, since a repair pins both the destination cluster and the
     /// destination slot and so cannot express itself as a cell key.
     /// </summary>
-    /// <inheritdoc cref="EnqueueMigration(int, int, int)"/>
+    /// <inheritdoc cref="EnqueueMigration(int, int, ushort, int)"/>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void EnqueueMigration(in MigrationRequest request)
     {

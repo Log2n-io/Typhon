@@ -828,11 +828,11 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
         {
             // Rebuilt identically each time: three relocations, two crossings, interleaved so a partition that overwrites in place loses some of them.
             state.PendingMigrationCount = 0;
-            state.EnqueueMigration(new MigrationRequest(10, 1, 0, 11, MigrationRequest.AnySlot, MigrationKind.Relocation));
-            state.EnqueueMigration(new MigrationRequest(10, 2, 5));
-            state.EnqueueMigration(new MigrationRequest(12, 3, 0, 13, MigrationRequest.AnySlot, MigrationKind.Relocation));
-            state.EnqueueMigration(new MigrationRequest(12, 4, 6));
-            state.EnqueueMigration(new MigrationRequest(14, 5, 0, 15, MigrationRequest.AnySlot, MigrationKind.Relocation));
+            state.EnqueueMigration(new MigrationRequest(10, 1, 0, 0, 11, MigrationRequest.AnySlot, MigrationKind.Relocation));
+            state.EnqueueMigration(new MigrationRequest(10, 2, 0, 5));
+            state.EnqueueMigration(new MigrationRequest(12, 3, 0, 0, 13, MigrationRequest.AnySlot, MigrationKind.Relocation));
+            state.EnqueueMigration(new MigrationRequest(12, 4, 0, 6));
+            state.EnqueueMigration(new MigrationRequest(14, 5, 0, 0, 15, MigrationRequest.AnySlot, MigrationKind.Relocation));
 
             state.ApplyMigrationThrottle(dbe.SpatialGrid);
             var admitted = Snapshot(state);

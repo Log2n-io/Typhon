@@ -576,7 +576,7 @@ internal static unsafe class ClusterRadiusBatch
                     }
                 }
 
-                if (need != 0UL && escaped.IsCurrent(i, _state.ClusterCellMap))
+                if (need != 0UL && escaped.IsCurrent(i, _state.ClusterCellMap, _state.ClusterRealmMap, _rs.Realm))
                 {
                     Open(escaped.ChunkIds[i], need, ref drain);
                 }

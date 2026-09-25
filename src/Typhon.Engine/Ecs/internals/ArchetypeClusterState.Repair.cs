@@ -1002,7 +1002,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         for (var i = 0; i < count; i++)
         {
             var source = entries[i].SourceLocation;
-            EnqueueMigration(new MigrationRequest((int)(source / MaxSlotsPerCluster), (int)(source % MaxSlotsPerCluster), cellKey,
+            EnqueueMigration(new MigrationRequest((int)(source / MaxSlotsPerCluster), (int)(source % MaxSlotsPerCluster), grid.Realm.Value, cellKey,
                 destinations[i / capacity], i % capacity, MigrationKind.Repair));
         }
 

@@ -480,8 +480,10 @@ internal sealed class FenceWorkPlan
                 if (idealEnd < pendingCount)
                 {
                     // Advance to the first index whose destCellKey differs from idealEnd-1's.
-                    var boundaryKey = pending[idealEnd - 1].DestCellKey;
-                    while (end < pendingCount && pending[end].DestCellKey == boundaryKey)
+                    // The cell's identity, realm included (Realms C1): the prefix is sorted on it, two realms' cells can share a key, and the drain's
+                    // fresh-cluster reuse is keyed on it — a boundary on the key alone could split one realm's cell run across two workers.
+                    var boundaryKey = pending[idealEnd - 1].DestCellIdentity;
+                    while (end < pendingCount && pending[end].DestCellIdentity == boundaryKey)
                     {
                         end++;
                     }
@@ -547,7 +549,7 @@ internal sealed class FenceWorkPlan
                 continue;
             }
 
-            if (state.Realm0Spatial?.PerCellIndex == null || state.ClusterCellMap == null)
+            if (!state.HasAnyPerCellIndex || state.ClusterCellMap == null)
             {
                 continue;
             }

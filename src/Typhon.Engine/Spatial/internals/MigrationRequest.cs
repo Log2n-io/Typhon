@@ -67,6 +67,9 @@ internal readonly struct MigrationRequest
     /// <summary>Bits of <see cref="_sourceSlotAndKind"/> holding the slot index. A cluster holds at most 64 slots, so six bits is the whole range.</summary>
     private const int SlotMask = 0x3F;
 
+    /// <summary>Bit position of the 16-bit destination realm inside <see cref="_sourceSlotAndKind"/> (bits 6-21).</summary>
+    private const int RealmShift = 6;
+
     /// <summary>Bit position of the two-bit <see cref="MigrationKind"/> inside <see cref="_sourceSlotAndKind"/>.</summary>
     private const int KindShift = 30;
 
@@ -74,7 +77,7 @@ internal readonly struct MigrationRequest
     public readonly int SourceClusterChunkId;
 
     /// <summary>
-    /// The source slot in bits 0-5 and the <see cref="MigrationKind"/> in bits 30-31.
+    /// The source slot in bits 0-5, the destination realm in bits 6-21 and the <see cref="MigrationKind"/> in bits 30-31.
     /// </summary>
     /// <remarks>
     /// Packed rather than given its own field because a cluster's capacity is 64 slots (<c>ArchetypeClusterInfo.FullMask</c>), so 26 of this int's bits
@@ -83,7 +86,7 @@ internal readonly struct MigrationRequest
     /// </remarks>
     private readonly int _sourceSlotAndKind;
 
-    /// <summary>Target cell key the entity should land in after migration.</summary>
+    /// <summary>Target cell key the entity should land in after migration — a key of <see cref="DestRealm"/>'s grid.</summary>
     public readonly int DestCellKey;
 
     /// <summary>
@@ -129,7 +132,12 @@ internal readonly struct MigrationRequest
     /// </remarks>
     public readonly int DestSlotIndex;
 
-    public MigrationRequest(int sourceClusterChunkId, int sourceSlotIndex, int destCellKey, int destClusterChunkId = AnyCluster,
+    /// <remarks>
+    /// <paramref name="destRealm"/> has no default on purpose (Realms C1): two realms share cell keys, so a producer that forgot it would file a move into
+    /// another world's cell — silently, since the key is valid there too. Every producer today passes its source cluster's realm; C4's teleport passes
+    /// another.
+    /// </remarks>
+    public MigrationRequest(int sourceClusterChunkId, int sourceSlotIndex, ushort destRealm, int destCellKey, int destClusterChunkId = AnyCluster,
         int destSlotIndex = AnySlot, MigrationKind kind = MigrationKind.CellCrossing)
     {
         // Both fields are MASKED into place below, so an out-of-range argument does not throw — it silently becomes a different, valid-looking value. A
@@ -140,7 +148,7 @@ internal readonly struct MigrationRequest
         Debug.Assert((uint)kind <= 3u, $"MigrationKind {kind} does not fit the two bits reserved for it");
 
         SourceClusterChunkId = sourceClusterChunkId;
-        _sourceSlotAndKind = (sourceSlotIndex & SlotMask) | ((int)kind << KindShift);
+        _sourceSlotAndKind = (sourceSlotIndex & SlotMask) | (destRealm << RealmShift) | ((int)kind << KindShift);
         DestCellKey = destCellKey;
         DestClusterChunkId = destClusterChunkId;
         DestSlotIndex = destSlotIndex;
@@ -151,4 +159,13 @@ internal readonly struct MigrationRequest
 
     /// <summary>Why this request exists, and therefore whether the step-11 throttle may refuse it.</summary>
     public MigrationKind Kind => (MigrationKind)((uint)_sourceSlotAndKind >> KindShift);
+
+    /// <summary>The realm whose grid <see cref="DestCellKey"/> is a key of.</summary>
+    public ushort DestRealm => (ushort)(_sourceSlotAndKind >> RealmShift);
+
+    /// <summary>
+    /// The destination cell's identity across realms: <c>(realm &lt;&lt; 32) | cellKey</c>. What the drain sorts on and the slice planner carves on — a cell
+    /// key alone names one cell in EACH realm. With one realm the high half is zero, so the radix sort skips it and the order is the cell key's.
+    /// </summary>
+    public long DestCellIdentity => ((long)DestRealm << 32) | (uint)DestCellKey;
 }

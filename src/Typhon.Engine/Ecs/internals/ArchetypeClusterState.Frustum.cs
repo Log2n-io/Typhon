@@ -158,7 +158,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 }
 
                 if (SpatialGeometry.ClassifyAABBAgainstPlanes(box, planes, planeCount, dim) == SpatialGeometry.FrustumOutside
-                    || !escaped.IsCurrent(e, ClusterCellMap))
+                    || !escaped.IsCurrent(e, ClusterCellMap, ClusterRealmMap, rs.Realm))
                 {
                     continue;
                 }

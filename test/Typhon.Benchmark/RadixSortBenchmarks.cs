@@ -55,7 +55,7 @@ public class RadixSortBenchmarks
         _reqPristine = new MigrationRequest[N];
         for (var i = 0; i < N; i++)
         {
-            _reqPristine[i] = new MigrationRequest(sourceClusterChunkId: i, sourceSlotIndex: i & 63, destCellKey: rng.Next(cells),
+            _reqPristine[i] = new MigrationRequest(sourceClusterChunkId: i, sourceSlotIndex: i & 63, destRealm: 0, destCellKey: rng.Next(cells),
                 destClusterChunkId: rng.Next(1 << 16));
         }
 

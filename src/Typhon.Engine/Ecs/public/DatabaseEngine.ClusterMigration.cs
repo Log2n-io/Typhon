@@ -318,7 +318,7 @@ public partial class DatabaseEngine
                     jumps += SpatialGrid.IsJump(cx, cy, cz, dx, dy, dz) ? 1 : 0;
                     clamped += grid.IsClampedPoint(posX, posY, posZ, is3D) ? 1 : 0;
                     TyphonEvent.EmitSpatialClusterMigrationDetect(archetypeId, chunkId, currentCellKey, destCellKey);
-                    clusterState.EnqueueMigration(chunkId, slotIndex, destCellKey);
+                    clusterState.EnqueueMigration(chunkId, slotIndex, grid.Realm.Value, destCellKey);
                     TyphonEvent.EmitSpatialClusterMigrationQueue(archetypeId, chunkId,
                         (ushort)Math.Min(clusterState.PendingMigrationCount, ushort.MaxValue));
                 }
@@ -430,16 +430,16 @@ public partial class DatabaseEngine
             var compSlot = ss.Slot;
             var compSize = layout.ComponentSize(compSlot);
             var compOffset = layout.ComponentOffset(compSlot);
-            var grid = Realm0Grid;
             var clusterCellMap = clusterState.ClusterCellMap;
+            var clusterRealmMap = clusterState.ClusterRealmMap;
             var fieldType = ss.FieldInfo.FieldType;
             var is3D = fieldType.Is3D();
-            ref readonly var cfg = ref grid.Config;
-            var cellSize = cfg.CellSize;
-            var worldMinX = cfg.WorldMin.X;
-            var worldMinY = cfg.WorldMin.Y;
-            var worldMinZ = cfg.WorldMin.Z;
-            var hysteresisMargin = cellSize * cfg.MigrationHysteresisRatio;
+
+            // The cluster's realm's grid, reloaded only when the realm changes from one dirty cluster to the next (Realms C1): a cell key is a key of ONE
+            // realm's grid, so the exit test and the destination key must both be that grid's. With one realm this loads once.
+            var frameRealm = -1;
+            SpatialGrid grid = null;
+            double cellSize = 0d, worldMinX = 0d, worldMinY = 0d, worldMinZ = 0d, hysteresisMargin = 0d;
 
             var end = Math.Min(dirtyBits.Length, firstWord + wordCount);
             for (var wordIdx = firstWord; wordIdx < end; wordIdx++)
@@ -464,6 +464,19 @@ public partial class DatabaseEngine
                 if (currentCellKey < 0)
                 {
                     continue;
+                }
+
+                var clusterRealm = clusterRealmMap[clusterChunkId];
+                if (clusterRealm != frameRealm)
+                {
+                    frameRealm = clusterRealm;
+                    grid = clusterState.RealmSpatial[clusterRealm].Grid;
+                    ref readonly var cfg = ref grid.Config;
+                    cellSize = cfg.CellSize;
+                    worldMinX = cfg.WorldMin.X;
+                    worldMinY = cfg.WorldMin.Y;
+                    worldMinZ = cfg.WorldMin.Z;
+                    hysteresisMargin = cellSize * cfg.MigrationHysteresisRatio;
                 }
 
                 var (cx, cy, cz) = grid.CellKeyToCoords(currentCellKey);
@@ -507,11 +520,11 @@ public partial class DatabaseEngine
                             TyphonEvent.EmitSpatialClusterMigrationDetect(archetypeId, clusterChunkId, currentCellKey, newCellKey);
                             if (sink != null)
                             {
-                                sink.Add(new MigrationRequest(clusterChunkId, slotIndex, newCellKey));
+                                sink.Add(new MigrationRequest(clusterChunkId, slotIndex, grid.Realm.Value, newCellKey));
                             }
                             else
                             {
-                                clusterState.EnqueueMigration(clusterChunkId, slotIndex, newCellKey);
+                                clusterState.EnqueueMigration(clusterChunkId, slotIndex, grid.Realm.Value, newCellKey);
                             }
 
                             TyphonEvent.EmitSpatialClusterMigrationQueue(archetypeId, clusterChunkId,
@@ -817,7 +830,10 @@ public partial class DatabaseEngine
         var relocationCount = 0;
         var repairCount = 0;
 
-        var grid = Realm0Grid;
+        // The destination realm's grid, reloaded when a request names another realm (Realms C1). The prefix is sorted by (realm, cell), so a slice
+        // switches realm at most once per realm it holds; with one realm this loads once.
+        var gridRealm = -1;
+        SpatialGrid grid = null;
         var transientMask = layout.TransientSlotMask;
         ref var ss = ref clusterState.SpatialSlot;
         var spatialCompSlot = ss.Slot;
@@ -878,6 +894,15 @@ public partial class DatabaseEngine
                 var srcChunkId = req.SourceClusterChunkId;
                 var srcSlot = req.SourceSlotIndex;
                 var destCellKey = req.DestCellKey;
+                if (req.DestRealm != gridRealm)
+                {
+                    // The destination realm's state was created by the Prep tail's pre-size (a Migrate slice may not create it — MD-02). The fresh-cluster
+                    // pair is a cell key of the realm it was allocated in: another realm's cell can carry the same key.
+                    gridRealm = req.DestRealm;
+                    grid = clusterState.RealmSpatial[gridRealm].Grid;
+                    freshCell = -1;
+                    freshCluster = -1;
+                }
 
                 switch (req.Kind)
                 {
@@ -1157,7 +1182,7 @@ public partial class DatabaseEngine
                         var dstCellKey = clusterState.ClusterCellMap[dstChunkId];
                         if (dstCellKey >= 0)
                         {
-                            Realm0Grid.CellOrigin(dstCellKey, out double dstOriginX, out double dstOriginY, out double dstOriginZ);
+                            grid.CellOrigin(dstCellKey, out double dstOriginX, out double dstOriginY, out double dstOriginZ);
                             if (ss.FieldInfo.FieldType.Is3D())
                             {
                                 dstClusterAabb.Union3F(
@@ -1249,13 +1274,15 @@ public partial class DatabaseEngine
                 // 10. Release the source slot. Clears occupancy, EnabledBits, EntityId, decrements cell.EntityCount. If the cluster becomes empty, the
                 // finalize-and-free is DEFERRED to FinalizeArchetypeFence (review C-1) — freeing here would race with a concurrent ClaimSlotInCell that may
                 // have just CAS-claimed a slot.
+                // The SOURCE cluster's realm: the same as the destination's for every move today, another for a realm change (C4).
+                var srcGrid = clusterState.SpatialOfCluster(srcChunkId).Grid;
                 if (hasClusterAccessor)
                 {
-                    clusterState.ReleaseSlot(ref clusterAccessor, srcChunkId, srcSlot, changeSet, grid, true);
+                    clusterState.ReleaseSlot(ref clusterAccessor, srcChunkId, srcSlot, changeSet, srcGrid, true);
                 }
                 else
                 {
-                    clusterState.ReleaseSlot(ref transientClusterAccessor, srcChunkId, srcSlot, grid, true);
+                    clusterState.ReleaseSlot(ref transientClusterAccessor, srcChunkId, srcSlot, srcGrid, true);
                 }
 
                 // 10b. The source cluster just lost an entity, so its AABB may be too large — flag a full recompute for this tick's refresh pass (#872

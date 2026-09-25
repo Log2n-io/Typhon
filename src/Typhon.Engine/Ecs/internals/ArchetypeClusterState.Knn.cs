@@ -87,7 +87,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         int namedCount = 0;
         for (int e = 0; e < escaped.Count; e++)
         {
-            if (!escaped.IsCurrent(e, ClusterCellMap))
+            if (!escaped.IsCurrent(e, ClusterCellMap, ClusterRealmMap, rs.Realm))
             {
                 continue;
             }

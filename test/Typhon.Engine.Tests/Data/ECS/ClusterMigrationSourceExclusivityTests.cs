@@ -90,10 +90,10 @@ class ClusterMigrationSourceExclusivityTests : TestBase<ClusterMigrationSourceEx
         // Cluster 7 slot 3 is claimed by a crossing; the relocation for the same slot must not survive. The other two are controls: a relocation on a
         // different slot of the same cluster, and one on the same slot index of a different cluster.
         state.PendingMigrationCount = 0;
-        state.EnqueueMigration(new MigrationRequest(7, 3, 42));
-        state.EnqueueMigration(new MigrationRequest(7, 3, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
-        state.EnqueueMigration(new MigrationRequest(7, 4, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
-        state.EnqueueMigration(new MigrationRequest(9, 3, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
+        state.EnqueueMigration(new MigrationRequest(7, 3, 0, 42));
+        state.EnqueueMigration(new MigrationRequest(7, 3, 0, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
+        state.EnqueueMigration(new MigrationRequest(7, 4, 0, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
+        state.EnqueueMigration(new MigrationRequest(9, 3, 0, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
 
         state.ApplyMigrationThrottle(dbe.SpatialGrid);
 
@@ -133,8 +133,8 @@ class ClusterMigrationSourceExclusivityTests : TestBase<ClusterMigrationSourceEx
         var state = ClusterStateOf(dbe);
 
         state.PendingMigrationCount = 0;
-        state.EnqueueMigration(new MigrationRequest(7, 3, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
-        state.EnqueueMigration(new MigrationRequest(8, 3, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
+        state.EnqueueMigration(new MigrationRequest(7, 3, 0, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
+        state.EnqueueMigration(new MigrationRequest(8, 3, 0, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
 
         state.ApplyMigrationThrottle(dbe.SpatialGrid);
 

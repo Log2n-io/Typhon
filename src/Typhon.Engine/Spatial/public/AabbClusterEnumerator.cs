@@ -1389,7 +1389,7 @@ public unsafe ref struct AabbClusterEnumerator
 
             // Cheapest rejection first: most named clusters are nowhere near a given query.
             if (!escaped.Reaches(i, in _query, _cellMinX, _cellMinY, _cellMinZ, _cellMaxX, _cellMaxY, _cellMaxZ)
-                || !CategoryAdmits(escaped.CategoryMasks[i], _categoryMask) || !escaped.IsCurrent(i, _state.ClusterCellMap))
+                || !CategoryAdmits(escaped.CategoryMasks[i], _categoryMask) || !escaped.IsCurrent(i, _state.ClusterCellMap, _state.ClusterRealmMap, _rs.Realm))
             {
                 continue;
             }

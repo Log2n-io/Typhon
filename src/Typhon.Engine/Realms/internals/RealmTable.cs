@@ -91,6 +91,26 @@ internal sealed class RealmTable
     /// <summary>Realm 0, or null while it is not registered.</summary>
     internal Realm Default => Volatile.Read(ref _byId[0]);
 
+    /// <summary>
+    /// The primary realm: realm 0 when registered, otherwise the first registered one. Its grid's configuration carries the engine's ARCHETYPE-level
+    /// spatial knobs — maintenance budgets, the migration cost model, repair — which are per archetype, not per realm, until per-realm maintenance
+    /// scheduling lands (Realms D). Null when no realm is registered.
+    /// </summary>
+    internal Realm Primary
+    {
+        get
+        {
+            var realm0 = Default;
+            if (realm0 != null)
+            {
+                return realm0;
+            }
+
+            var registered = Registered;
+            return registered.Length > 0 ? registered[0] : null;
+        }
+    }
+
     /// <summary>The registered realms, densely, in registration order — a consistent snapshot: entries are only ever appended.</summary>
     internal ReadOnlySpan<Realm> Registered
     {

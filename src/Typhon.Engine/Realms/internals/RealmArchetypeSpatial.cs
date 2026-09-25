@@ -8,8 +8,8 @@ namespace Typhon.Engine.Internals;
 /// chunk id is unique across realms while a cell key is not (claude/design/Realms/01-spatial-ecs.md §1.3).
 /// </summary>
 /// <remarks>
-/// The repair queue and the maintenance budget deliberately do NOT live here: they stay per archetype, their candidates keyed by (realm, cell), so the
-/// total budget does not multiply with the realm count (decision D-6).
+/// The repair queue and the maintenance budget deliberately do NOT live here: they stay per archetype, so the total budget does not multiply with the
+/// realm count (decision D-6). Until the queue's candidates are keyed by (realm, cell), repair runs in the primary realm only (Realms C1, §12).
 /// </remarks>
 internal sealed class RealmArchetypeSpatial
 {
@@ -55,6 +55,26 @@ internal sealed class RealmArchetypeSpatial
 
     /// <summary>Cells currently served by a tree, counted. See <see cref="ArchetypeClusterState.PromotedCellCount"/>.</summary>
     internal int PromotedCellCount;
+
+    /// <summary>
+    /// This realm's share of the multi-realm reach walk (<c>ArchetypeClusterState.RefreshClusterReachAcrossRealms</c>): its kept overhangs and reject
+    /// bounds while one pass scores every realm's clusters. Allocated the first time the archetype is in two realms at once; reused every tick after.
+    /// </summary>
+    internal ReachScan ReachScratch;
+
+    /// <summary>A realm's running state in the multi-realm reach walk. Fence-only, one archetype at a time.</summary>
+    internal sealed class ReachScan
+    {
+        internal readonly double[] TopReach = new double[EscapedClusterSet.Capacity + 1];
+        internal readonly int[] TopId = new int[EscapedClusterSet.Capacity + 1];
+        internal readonly int[] TopCell = new int[EscapedClusterSet.Capacity + 1];
+        internal int Kept;
+        internal double Admit;
+        internal double Cell;
+        internal float Lo;
+        internal float Hi;
+        internal bool Valid;
+    }
 
     /// <summary>
     /// The state of no realm: no grid, no pool, no index, zero reach, no escapes. What <see cref="ArchetypeClusterState.SpatialOf"/> returns for a

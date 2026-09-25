@@ -322,7 +322,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                 destCluster = MigrationRequest.FreshCluster;
             }
 
-            driftBuffer.Add(new MigrationRequest(clusterChunkId, slotIndex, cellKey, destCluster, MigrationRequest.AnySlot, MigrationKind.Relocation));
+            driftBuffer.Add(new MigrationRequest(clusterChunkId, slotIndex, grid.Realm.Value, cellKey, destCluster, MigrationRequest.AnySlot,
+                MigrationKind.Relocation));
         }
     }
 

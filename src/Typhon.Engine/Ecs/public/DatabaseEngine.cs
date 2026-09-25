@@ -958,6 +958,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     internal SpatialGrid Realm0Grid => _realms?.Default?.Grid;
 
+    /// <summary>
+    /// The primary realm's grid (<see cref="RealmTable.Primary"/>) — the one whose configuration carries archetype-level spatial knobs (budgets, cost
+    /// model, repair). Not a substitute for a cluster's own realm: per-cluster work resolves <c>SpatialOfCluster</c>.
+    /// </summary>
+    internal SpatialGrid PrimaryGrid => _realms?.Primary?.Grid;
+
     /// <summary>The engine's realm table, or <c>null</c> before <see cref="InitializeArchetypes"/> or when no realm was configured.</summary>
     internal RealmTable RealmTable => _realms;
 
