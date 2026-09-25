@@ -123,20 +123,9 @@ If all prior sub-issues are checked (or there are none before this one), skip si
 **Project item lookup:** Read `.claude/skills/_helpers.md` Section 2 for the robust patterns.
 
 ```bash
-# Step 1: Find the item ID by piping directly to Python (no temp files)
-gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
-import json, sys
-items = json.load(sys.stdin)['items']
-for item in items:
-    if item.get('content', {}).get('number') == int(sys.argv[1]):
-        print(item['id'])
-        sys.exit(0)
-print('NOT_FOUND')
-" <sub_issue_number>
+# Step 1: Resolve the board item by ADDING it — idempotent, returns the existing item's id, never truncated (see _helpers.md rule 5)
+gh project item-add 1 --owner Log2n-io --url https://github.com/Log2n-io/Typhon/issues/<sub_issue_number> --format json --jq .id
 
-# Step 1b: If NOT_FOUND, add the sub-issue to the project board first
-# gh project item-add 1 --owner Log2n-io --url https://github.com/Log2n-io/Typhon/issues/<sub_issue_number>
-# Then re-run step 1
 
 # Step 2: Update status to In Progress (using the item ID from step 1)
 gh project item-edit --project-id PVT_kwDOEcGj5M4Bb-8P --id <item_id> \
@@ -184,11 +173,8 @@ If no parent can be detected and the user doesn't provide one:
 - Report that no parent was found
 
 ### Sub-issue not on project board
-If the project item lookup returns NOT_FOUND:
-- **Add the sub-issue to the project board** with `gh project item-add 1 --owner Log2n-io --url <issue_url>`
-- Re-fetch the project data and find the new item ID
-- Then update its status to In Progress as normal
-- Report that the sub-issue was added to the board
+Nothing special: the lookup is `gh project item-add … --format json --jq .id`, which adds the item when missing and returns its id either way
+(`_helpers.md` rule 5). Report that the sub-issue was added to the board if it was not there before.
 
 ### Design doc not in expected format
 If the design doc doesn't have a `**Status:**` line:

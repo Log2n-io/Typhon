@@ -94,15 +94,8 @@ gh project item-add 1 --owner Log2n-io --url <issue_url>
 **Robust patterns:** see `.claude/skills/_helpers.md` Section 2.
 
 ```bash
-gh project item-list 1 --owner Log2n-io --limit 500 --format json 2>&1 | python3 -c "
-import json, sys
-items = json.load(sys.stdin)['items']
-for item in items:
-    if item.get('content', {}).get('number') == int(sys.argv[1]):
-        print(item['id'])
-        sys.exit(0)
-print('NOT_FOUND')
-" <issue_number>
+# Resolve the board item by ADDING it — idempotent, returns the existing item's id, never truncated (see _helpers.md rule 5)
+gh project item-add 1 --owner Log2n-io --url https://github.com/Log2n-io/Typhon/issues/<issue_number> --format json --jq .id
 ```
 
 ### Step 5: Set the project Status

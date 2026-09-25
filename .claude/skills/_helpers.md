@@ -93,43 +93,42 @@ This project runs on **Windows** with Claude Code's bash shell. Two things break
 1. **Temp file paths** — `$SCRATCHPAD`, `/tmp/`, and Windows `C:\` paths have cross-environment issues. **Always pipe `gh` output directly to Python**.
 2. **Python encoding** — Python on Windows defaults to `cp1252`. **Always set `PYTHONUTF8=1`** when Python writes to files.
 
+> 🔴 **The board is bigger than any list limit — never find an item by listing it.** On 2026-09-25 the board held **504** items and
+> `gh project item-list --limit 500` returned 500: the four newest issues were silently absent (no error, no warning). An earlier
+> `--limit 200` hid #246 the same way. Raising the limit only postpones the next silent miss. CI hit the same wall at 100 items and
+> fixed it the same way (#1000): **resolve an issue's item by adding it.**
+
 ### Pattern 1: Find a Project Item ID by Issue Number
 
-This is the most common operation — given issue #N, find its project item ID for status updates.
+`gh project item-add` is **idempotent**: on an issue already on the board it adds nothing and returns the existing item's id. One call,
+no listing, no truncation, and a missing item is added instead of reported NOT_FOUND.
 
 ```bash
-# Pipe directly to Python — no temp file needed. Always use --limit 500 (default is 30).
-gh project item-list 1 --owner Log2n-io --limit 500 --format json 2>&1 | python3 -c "
-import json, sys
-items = json.load(sys.stdin)['items']
-for item in items:
-    if item.get('content', {}).get('number') == int(sys.argv[1]):
-        print(item['id'])
-        sys.exit(0)
-print('NOT_FOUND')
-" <ISSUE_NUMBER>
+gh project item-add 1 --owner Log2n-io --url https://github.com/Log2n-io/Typhon/issues/<ISSUE_NUMBER> --format json --jq .id
 ```
 
-### Pattern 2: Find Item ID and Current Status
+### Pattern 2: Find an Item's Current Status
+
+Read it from the issue side (GraphQL `projectItems`), not by listing the board:
 
 ```bash
-gh project item-list 1 --owner Log2n-io --limit 500 --format json 2>&1 | python3 -c "
-import json, sys
-items = json.load(sys.stdin)['items']
-for item in items:
-    if item.get('content', {}).get('number') == int(sys.argv[1]):
-        print(f'{item[\"id\"]}|{item.get(\"status\", \"unknown\")}')
-        sys.exit(0)
-print('NOT_FOUND|unknown')
-" <ISSUE_NUMBER>
+MSYS_NO_PATHCONV=1 gh api graphql -f query='{ repository(owner:"Log2n-io",name:"Typhon"){ issue(number:<ISSUE_NUMBER>){
+  projectItems(first:5){ nodes{ id project{ number } fieldValueByName(name:"Status"){ ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } }' \
+  --jq '.data.repository.issue.projectItems.nodes[] | select(.project.number==1) | "\(.id)|\(.fieldValueByName.name)"'
 ```
 
-### Pattern 3: List Items by Status
+### Pattern 3: List Items by Status (whole-board scans only)
+
+Listing is only for questions about the whole board (Todo list, In Progress list). Fetch **all** of it and **prove** nothing was cut:
+`--limit 100000` (gh pages through), then compare the count with `totalCount`.
 
 ```bash
-gh project item-list 1 --owner Log2n-io --limit 500 --format json 2>&1 | python3 -c "
+TOTAL=$(gh project view 1 --owner Log2n-io --format json --jq '.items.totalCount')
+gh project item-list 1 --owner Log2n-io --limit 100000 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
+if len(items) < int(sys.argv[2]):
+    sys.exit(f'TRUNCATED: {len(items)} of {sys.argv[2]} items — do not trust this listing')
 statuses = sys.argv[1].split(',')
 for item in items:
     if item.get('status') in statuses:
@@ -139,7 +138,7 @@ for item in items:
         p = item.get('priority', '?')
         a = item.get('area', '?')
         print(f'#{n} | {s} | {p} | {a} | {t}')
-" "Todo,In Progress"
+" "Todo,In Progress" "$TOTAL"
 ```
 
 ### Pattern 4: Update Project Item Status
@@ -163,9 +162,11 @@ Status option IDs:
 2. **`gh` CLI only for project board** — `gh project item-list`, `gh project item-edit`, `gh project item-add`, `gh project field-list` have no MCP equivalent
 3. **Always pipe `gh project` output directly to Python** — temp file paths break across bash/Python/Windows boundaries
 4. **NEVER use `grep` on JSON** — it's brittle to formatting changes. Use Python's `json` module
-5. **Always use `--limit 500`** on `gh project item-list` — the default limit is 30, which misses items on larger boards
-6. **Always check for `NOT_FOUND`** in the output before proceeding
-7. **If NOT_FOUND and the issue should be on the board**, add it with `gh project item-add 1 --owner Log2n-io --url <issue_url>`, then re-fetch the project data and retry the lookup
+5. **🔴 Never find an item by listing the board.** Resolve an issue's item with the idempotent `gh project item-add … --format json --jq .id`
+   (Pattern 1); read its status from the issue (Pattern 2). The board outgrows every `--limit` and `item-list` truncates **silently** (504 items vs
+   `--limit 500`, 2026-09-25). Whole-board scans use `--limit 100000` **and** check the count against `totalCount` (Pattern 3)
+6. **A whole-board scan that returns fewer items than `totalCount` is wrong** — stop, never act on it
+7. **NOT_FOUND no longer exists for single items** — `item-add` adds the missing item and returns its id
 8. **Always use `PYTHONUTF8=1`** when Python writes to files — Windows defaults to cp1252, which breaks on Unicode
 9. **NEVER use relative paths in GitHub issue bodies** — GitHub renders issue bodies outside the repo context (e.g., on the project board), so relative links like `[text](claude/foo.md)` resolve to 404s. Always use absolute URLs:
    - **Files:** `https://github.com/Log2n-io/Typhon/blob/main/<path>` (e.g., `https://github.com/Log2n-io/Typhon/blob/main/claude/overview/10-errors.md`)

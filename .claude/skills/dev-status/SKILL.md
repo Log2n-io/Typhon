@@ -40,7 +40,7 @@ The legacy **Phase** field was retired in the org-board migration. Group active 
 
 Query items where Status = "In Progress". **Always pipe `gh project item-list` directly to Python** (see `.claude/skills/_helpers.md` Section 2):
 ```bash
-gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
+gh project item-list 1 --owner Log2n-io --limit 100000 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
 for item in items:
@@ -112,6 +112,6 @@ Suggested: [Pick up #XX or continue #YY]
 
 ## Implementation
 
-Use `gh project item-list 1 --owner Log2n-io --limit 200 --format json` piped to Python to get all project items, then filter and format the output.
+Use `gh project item-list 1 --owner Log2n-io --limit 100000 --format json` piped to Python to get all project items, then filter and format the output.
 
 For activity checks on individual issues, use `mcp__GitHub__get_issue` to get the `updated_at` field.

@@ -53,7 +53,7 @@ Examples:
 Fetch Todo items from the project. **Always pipe `gh project item-list` directly to Python** (see `.claude/skills/_helpers.md` Section 2):
 
 ```bash
-gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
+gh project item-list 1 --owner Log2n-io --limit 100000 --format json 2>&1 | python3 -c "
 import json, sys
 items = json.load(sys.stdin)['items']
 for item in items:
@@ -405,16 +405,8 @@ Get the project item ID and update Status to "Todo".
 **Project item lookup:** Read `.claude/skills/_helpers.md` Section 2 for the robust patterns.
 
 ```bash
-# Step 1: Find the item ID by piping directly to Python (no temp files)
-gh project item-list 1 --owner Log2n-io --limit 200 --format json 2>&1 | python3 -c "
-import json, sys
-items = json.load(sys.stdin)['items']
-for item in items:
-    if item.get('content', {}).get('number') == int(sys.argv[1]):
-        print(item['id'])
-        sys.exit(0)
-print('NOT_FOUND')
-" <issue_number>
+# Step 1: Resolve the board item by ADDING it — idempotent, returns the existing item's id, never truncated (see _helpers.md rule 5)
+gh project item-add 1 --owner Log2n-io --url https://github.com/Log2n-io/Typhon/issues/<issue_number> --format json --jq .id
 
 # Step 2: Update status field (using the item ID from step 1)
 gh project item-edit --project-id PVT_kwDOEcGj5M4Bb-8P --id <item_id> \
