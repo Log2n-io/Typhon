@@ -63,6 +63,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     // would read the same value for the whole tick and place every round trip at the tick boundary.
     private long _tickOriginTimestamp;
     private uint _currentTick;
+    private IngressPolicy _ingressPolicy;
     private uint _tickPeriodUs;
 
     // COMMANDS messages that arrived well-formed and in state with nowhere to go. P1-05 turns this into a write into the session's ingress ring.
@@ -162,8 +163,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                     {
                         throw new NotSupportedException(
                             $"Archetype '{Plans[a].Name}' declares owner fields but no position. Owner state is served through the push path, which locates "
-                            + "a controlled entity by its position (11 § 2.4); owner data with no place in the world is a shared or keyed source's, which Phase 4 "
-                            + "builds. Declare a Position or Motion, or move the fields to the positioned entity the session controls.");
+                            + "a controlled entity by its position (11 § 2.4); owner data with no place in the world is a shared or keyed source's, "
+                            + "which Phase 4 builds. Declare a Position or Motion, or move the fields to the positioned entity the session controls.");
                     }
 
                     observed[a] = true;
@@ -218,6 +219,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // reading of the declarations; the ring pool is created here because a ring's lifetime is a session's, and sessions live in the table above it.
             CatalogPlan = CatalogPlan.Compile(Catalog.Canonical);
             CommandTypes = CommandRegistry.Build(registry, CatalogPlan);
+
+            // The inbound rails (11 § 4.2). The budget is required once clients can send commands — the application's or ClientRegion — because it is the one
+            // bound between a single client and the transport threads' decode work, and only the application knows what its commands cost.
+            ValidateIngressRails(Options, CommandTypes.Count);
+            _ingressPolicy = new IngressPolicy(Options.IngressBytesPerSecond, (long)(Options.AbuseWindow.TotalSeconds * Stopwatch.Frequency),
+                Options.AbuseRefusalsPerWindow, Options.AbuseWindows);
             _ingressRings = new IngressRingPool("Subscriptions.IngressRings", parent, engine.MemoryAllocator, Options);
             _ingress = new SubscriptionsIngress(_sessions, registry, CommandTypes, new CommandTypeBuffers(CommandTypes, Options.MaxSessions), _ingressRings,
                 Options.MaxSessions, _sendPump);
@@ -580,6 +587,51 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     /// <inheritdoc />
     bool ISubscriptionsHost.RequestKick(SessionId session, ushort code, string reason) => _sendPump != null && _sendPump.RequestKick(session, code, reason);
+
+    /// <inheritdoc />
+    IngressPolicy ISubscriptionsHost.IngressPolicy => _ingressPolicy;
+
+    /// <summary>
+    /// Refuses inbound rails that would not do what they say (11 § 4.2): no budget when clients can send commands, a budget below the largest message a
+    /// session may send (it would be refused forever), and an abuse rule that is off or cannot be converted to the clock.
+    /// </summary>
+    /// <param name="options">The options.</param>
+    /// <param name="commandTypes">The command types the catalog declares, <c>ClientRegion</c> included.</param>
+    internal static void ValidateIngressRails(SubscriptionsOptions options, int commandTypes)
+    {
+        if (commandTypes > 0 && options.IngressBytesPerSecond <= 0)
+        {
+            throw new InvalidOperationException(
+                $"The catalog has {commandTypes} command type(s), so clients can send commands, and SubscriptionsOptions.IngressBytesPerSecond is not set. "
+                + "It is each session's inbound budget and has no default: size it from your commands' rate and size (a player sending 20 small "
+                + "commands a second needs a few KiB/s).");
+        }
+
+        if (options.IngressBytesPerSecond > 0 && options.IngressBytesPerSecond < options.ClientMessageBytes)
+        {
+            throw new InvalidOperationException(
+                $"SubscriptionsOptions.IngressBytesPerSecond ({options.IngressBytesPerSecond}) is below ClientMessageBytes ({options.ClientMessageBytes}): "
+                + "the budget is one second deep, so a message of the largest allowed size would be refused forever. Raise the budget or lower the cap.");
+        }
+
+        if (options.AbuseWindow <= TimeSpan.Zero || options.AbuseWindow > TimeSpan.FromHours(1))
+        {
+            throw new InvalidOperationException($"SubscriptionsOptions.AbuseWindow ({options.AbuseWindow}) must be positive and at most an hour.");
+        }
+
+        if (options.AbuseRefusalsPerWindow <= 0 || options.AbuseWindows <= 0)
+        {
+            throw new InvalidOperationException(
+                $"SubscriptionsOptions.AbuseRefusalsPerWindow ({options.AbuseRefusalsPerWindow}) and AbuseWindows ({options.AbuseWindows}) must be positive: "
+                + "the abuse rule is always on. To make it lenient, raise them.");
+        }
+    }
+
+    /// <inheritdoc />
+    long ISubscriptionsHost.PolicyRefusalsOf(SessionId session) => _ingress?.RowOf(session)?.PolicyRefusals ?? 0;
+
+    /// <inheritdoc />
+    int ISubscriptionsHost.RefuseCommands(SessionId session, ReadOnlySpan<byte> message) => _ingress?.RefuseCommands(session, message) ?? 0;
 
     /// <inheritdoc />
     void ISubscriptionsHost.BindSessionLink(SessionId session, ISubscriptionLink link)

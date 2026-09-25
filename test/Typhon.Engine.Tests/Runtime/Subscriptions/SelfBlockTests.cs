@@ -36,6 +36,7 @@ unsafe class SelfBlockTests : TestBase<SelfBlockTests>
             subs.Command<SelfStep>(c => c.Roles(SessionRole.Spectator, SessionRole.Player).Field(m => m.Step, Codec.VarUInt));
         }, name, new SubscriptionsOptions
         {
+            IngressBytesPerSecond = TestIngress.Budget,
             MaxSessions = 8, ReplicationCellM = ProjectionTestSchema.ReplicationCellFor(0), AllowAutomaticPushDetection = true,
         });
         harness.RunFence = true;
@@ -189,6 +190,7 @@ unsafe class SelfBlockTests : TestBase<SelfBlockTests>
             subs.Profile("near", p => p.Detection(PushDetection.Automatic).Sphere(30).Of<ProjPlayer>());
         }, nameof(AControlledEntityOutsideTheSessionsGeometryStillSendsItsOwnerState), new SubscriptionsOptions
         {
+            IngressBytesPerSecond = TestIngress.Budget,
             MaxSessions = 4, ReplicationCellM = cellM, AllowAutomaticPushDetection = true,
         });
         harness.RunFence = true;

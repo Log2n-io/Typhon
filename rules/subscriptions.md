@@ -609,6 +609,34 @@
     set), TryResolveTests.AProfileSwitchResolvesTheOldViewUntilItsFrameIsPublished (red when the current profile is judged),
     TryResolveTests.ADestroyedEntityIsRefusedBeforeItsIdentityIsReleased, TryResolveTests.TheControlledEntityResolvesAnywhereAndTryResolveAnyIgnoresTheView.
 
+### SUB-27: A command the server refuses is acknowledged, and a session refused for long enough is closed `[fatal][silent]`
+  invariant every command a well-formed COMMANDS message carries is either framed into the tick or answered with an ACK — over the session's inbound
+    budget (the whole message: every command RATE_LIMITED), over its type's rate (RATE_LIMITED), a role that may not send it (FORBIDDEN), the
+    declaration's pre-check (REJECTED), a region the hull builder refuses (REGION_INVALID) — and its seq settles lastSeq either way
+  invariant a session places at most RefusalAcksPerTick transport-side refusals in a tick's shared ACK log, and the log holds that share for every
+    session up to 2 048 (CommandTypeBuffers.AckCapacity): past its share a refusal settles through lastSeq alone and is counted (RefusalAcksCapped),
+    so no session's refusals crowd out another's; nothing else is unanswered but what the session's own ring overflowed, which is counted too
+  invariant the inbound budget (SubscriptionsOptions.IngressBytesPerSecond) is required whenever the catalog has commands, and at least
+    ClientMessageBytes — both refused at Start; every open-session message is charged, only a COMMANDS message is refused (a PING, a BYE and a
+    protocol error are never delayed), and the bucket is exact (bytes × clock ticks, no fraction lost)
+  invariant a session whose refused commands — over budget, per command, plus the ingress's rate and role refusals — pass AbuseRefusalsPerWindow in
+    AbuseWindows adjacent windows is closed with 1008, its KICK sent by its pump (SUB-14); a single abusive window, a gap of two windows or more,
+    a window at the threshold, or a client that stopped sending, is not; a pre-check or region refusal is a game outcome and is not counted
+  invariant the abuse rule is always on: AbuseWindow in (0, 1 h], AbuseRefusalsPerWindow and AbuseWindows positive, or Start refuses
+  scope: SubscriptionConnection.HandleOpen, SubscriptionConnection.CheckAbuse, SubscriptionsIngress.RefuseCommands, SubscriptionsIngress.Publish,
+    SubscriptionsIngress.RefusalAcksPerTick, IngressCommandSink.Refuse, CommandTypeBuffers.AckCapacity, IngressPolicy,
+    SubscriptionsRuntime.ValidateIngressRails, SubscriptionsOptions.IngressBytesPerSecond
+  on_violation: silent. A command dropped with no answer leaves a predicting client waiting on it forever, or replaying it into a divergence; one
+    session's refusals filling the shared log silently drop everyone else's; a client refused forever keeps a transport thread decoding for nothing,
+    and one flooding without a budget has no bound at all.
+  verified: IngressHardeningTests.AMessageOverTheBudgetIsRefusedWholeAndAcknowledged (every refused command acknowledged, lastSeq settling all, the
+    session beside it untouched), IngressHardeningTests.RoleAndPrecheckRefusalsAreAcknowledged, IngressHardeningTests
+    .OneSessionsRefusalsCannotCrowdOutAnothersAcknowledgements, IngressHardeningTests.SustainedRefusalsCloseTheSessionWith1008 (closed at the third
+    window, not before; a single abusive window then calm stays open), IngressHardeningTests.RailsThatWouldNotHoldAreRefusedAtStart,
+    IngressRailsTests (the test's clock: EverythingIsChargedAndOnlyCommandsAreRefused, ARefillInFractionalStepsLosesNothing,
+    OverBudgetAByeAndAProtocolErrorStillClose, AbuseCountsCommandsFromBothSidesAndClosesAfterTheRun, AGapOrACalmWindowBreaksTheRun);
+    SelfBlockTests.LastSeqAndRejectionsReachTheClient for the rate and application paths.
+
 ---
 
 ## Module: Ingress and Frame Hand-off

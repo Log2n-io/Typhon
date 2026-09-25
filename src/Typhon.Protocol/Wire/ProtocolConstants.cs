@@ -84,6 +84,12 @@ public static class CloseCodes
     /// <summary>A payload that is inconsistent with its type: a bad index, length, UTF-8 sequence or an over-cap field.</summary>
     public const ushort MalformedPayload = 1007;
 
+    /// <summary>
+    /// Policy violation: a session whose messages keep being refused — over its inbound budget, over a command's rate, sent by a role that may not — for a
+    /// sustained period is closed rather than refused forever. Reconnectable, with backoff: its messages were well-formed, only too many.
+    /// </summary>
+    public const ushort PolicyViolation = 1008;
+
     /// <summary>A message above its size limit, detected before decoding.</summary>
     public const ushort MessageTooBig = 1009;
 

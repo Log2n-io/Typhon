@@ -269,6 +269,26 @@ internal sealed class FakeSubscriptionsHost : ISubscriptionsHost
     /// </summary>
     public bool RequestKick(SessionId session, ushort code, string reason) => false;
 
+    /// <summary>No inbound rails unless a test sets them.</summary>
+    public IngressPolicy IngressPolicy { get; set; }
+
+    /// <summary>What the ingress would report as policy refusals (rate, role), set by a test.</summary>
+    public long PolicyRefusals { get; set; }
+
+    /// <summary><c>COMMANDS</c> messages refused over budget, whole.</summary>
+    public int RefusedMessages { get; private set; }
+
+    /// <summary>How many commands each refused message is reported to carry.</summary>
+    public int CommandsPerRefusedMessage { get; set; } = 1;
+
+    public long PolicyRefusalsOf(SessionId session) => PolicyRefusals;
+
+    public int RefuseCommands(SessionId session, ReadOnlySpan<byte> message)
+    {
+        RefusedMessages++;
+        return CommandsPerRefusedMessage;
+    }
+
     public bool RequestPong(SessionId session, uint clientMs)
     {
         if (!BoundLinks.TryGetValue(session, out var link) || link == null)

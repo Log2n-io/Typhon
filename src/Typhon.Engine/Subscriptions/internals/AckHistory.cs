@@ -21,7 +21,9 @@ internal sealed class AckHistory
     private readonly Slot[] _slots = new Slot[PushReplication.LogDepth];
     private ulong[] _keys = [];
 
-    /// <summary>Creates the history, sized for <paramref name="capacity"/> rejections a tick — the ack log's own ceiling — so a storm allocates nothing.</summary>
+    /// <summary>
+    /// Creates the history, sized for <paramref name="capacity"/> rejections a tick — the ack log's own ceiling — so a storm allocates nothing.
+    /// </summary>
     /// <param name="capacity">The most rejections one tick can record.</param>
     public AckHistory(int capacity)
     {
@@ -39,7 +41,9 @@ internal sealed class AckHistory
     /// <summary>The last tick that recorded any acknowledgement; a session whose last frame is newer has nothing to collect.</summary>
     public uint LastTickWithAcks { get; private set; }
 
-    /// <summary>Records <paramref name="tick"/>'s rejections, sorted by session, in the slot the tick <see cref="PushReplication.LogDepth"/> ago held.</summary>
+    /// <summary>
+    /// Records <paramref name="tick"/>'s rejections, sorted by session, in the slot the tick <see cref="PushReplication.LogDepth"/> ago held.
+    /// </summary>
     /// <param name="tick">The tick.</param>
     /// <param name="acks">Its rejections, in any order.</param>
     public void Record(uint tick, ReadOnlySpan<CommandAck> acks)

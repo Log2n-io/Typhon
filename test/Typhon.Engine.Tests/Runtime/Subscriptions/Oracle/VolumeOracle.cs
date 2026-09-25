@@ -253,6 +253,7 @@ internal sealed unsafe class VolumeOracle : IDisposable
     {
         var options = new SubscriptionsOptions
         {
+            IngressBytesPerSecond = TestIngress.Budget,
             ReplicationCellM = cellM,
             PushShadow = true,
             ForceDeepReplicationForTest = forceDeep,

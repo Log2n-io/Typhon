@@ -242,6 +242,12 @@ public sealed class SimConfig
     /// <summary>Each player session's outbound byte budget, bytes per second (<c>--session-budget</c>); 0 for none. Drives the per-session LOD level.</summary>
     public int SessionBudgetBytesPerSecond;
 
+    /// <summary>
+    /// <c>--ingress-budget B</c>: each session's inbound budget, bytes per second. 16 KiB/s: a god camera's region every few frames and a player's
+    /// commands, with room to spare — the demo's own sizing of a rail the engine will not default.
+    /// </summary>
+    public int IngressBytesPerSecond = 16 * 1024;
+
     /// <summary><c>--player-leave M</c>: the players' leave radius, metres; 0 (the default) for none. The Phase 2 criteria run at 192/208 m.</summary>
     public double PlayerLeaveM;
 

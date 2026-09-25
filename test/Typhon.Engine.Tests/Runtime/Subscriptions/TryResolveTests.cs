@@ -50,7 +50,13 @@ unsafe class TryResolveTests : TestBase<TryResolveTests>
             subs.Profile("world", p => p.World().Of<ProjCreature>());
             subs.Profile("region", p => p.ClientRegion(1000).Of<ProjCreature>());
             subs.Profile("rocks", p => p.World().Of<ProjRock>());
-        }, name, new SubscriptionsOptions { MaxSessions = 8, EnterBudgetPerFrame = enterBudget, ReplicationCellM = CellM });
+        }, name, new SubscriptionsOptions
+        {
+            IngressBytesPerSecond = TestIngress.Budget,
+            MaxSessions = 8,
+            EnterBudgetPerFrame = enterBudget,
+            ReplicationCellM = CellM,
+        });
         harness.RunFence = true;
         _tick = 0;
         return harness;

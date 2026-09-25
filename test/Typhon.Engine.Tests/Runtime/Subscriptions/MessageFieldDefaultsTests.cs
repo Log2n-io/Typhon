@@ -182,7 +182,13 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
             Resources = new ResourceRegistry(new ResourceRegistryOptions { Name = "MessageFieldDefaultsTests" });
             Allocator = new MemoryAllocator(Resources, new MemoryAllocatorOptions { Name = "MessageFieldDefaultsAllocator" });
 
-            var options = new SubscriptionsOptions { MaxSessions = 16, IngressRingBytes = 4096, IngressPoolBudgetBytes = 1L * 1024 * 1024 };
+            var options = new SubscriptionsOptions
+            {
+                IngressBytesPerSecond = TestIngress.Budget,
+                MaxSessions = 16,
+                IngressRingBytes = 4096,
+                IngressPoolBudgetBytes = 1L * 1024 * 1024,
+            };
 
             Subs = new SubscriptionsRegistry(options);
             Subs.Sessions.Kinds("player");
@@ -615,7 +621,12 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
                         seen.Add(command.Value.Target);
                     }
                 }
-            }), new RuntimeOptions { WorkerCount = 2, BaseTickRate = 200 });
+            }), new RuntimeOptions
+            {
+                WorkerCount = 2,
+                BaseTickRate = 200,
+                Subscriptions = new SubscriptionsOptions { IngressBytesPerSecond = Runtime.TestIngress.Budget },
+            });
 
         runtime.Subscriptions.Sessions.Kinds("player");
         runtime.Subscriptions.Sessions.Admit = static (in AdmissionRequest _) => Admission.Accept(SessionRole.Player);

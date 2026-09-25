@@ -283,7 +283,10 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
 
     private TyphonRuntime CreateRuntime()
     {
-        var options = new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 };
+        var options = new RuntimeOptions
+        {
+            WorkerCount = 1, BaseTickRate = 1000, Subscriptions = new SubscriptionsOptions { IngressBytesPerSecond = TestIngress.Budget },
+        };
         return TyphonRuntime.Create(SetupEngine(), schedule =>
         {
             schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => { });

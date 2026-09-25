@@ -40,7 +40,13 @@ class ClientRegionCommandTests : TestBase<ClientRegionCommandTests>
             Registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "ClientRegionCommandTests" });
             Allocator = new MemoryAllocator(Registry, new MemoryAllocatorOptions { Name = "ClientRegionAllocator" });
 
-            var options = new SubscriptionsOptions { MaxSessions = 32, IngressRingBytes = 4096, IngressPoolBudgetBytes = 1L * 1024 * 1024 };
+            var options = new SubscriptionsOptions
+            {
+                IngressBytesPerSecond = TestIngress.Budget,
+                MaxSessions = 32,
+                IngressRingBytes = 4096,
+                IngressPoolBudgetBytes = 1L * 1024 * 1024,
+            };
 
             Subs = new SubscriptionsRegistry(options);
             Subs.Sessions.Kinds("god");

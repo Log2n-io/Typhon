@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Protocol;
@@ -107,6 +108,25 @@ internal interface ISubscriptionsHost
     /// <returns><see langword="false"/> when no pump owns the session's link — the connection then writes the KICK itself.</returns>
     bool RequestKick(SessionId session, ushort code, string reason);
 
+    /// <summary>The inbound budget and the abuse rule every open session is held to (design/Subscriptions/11 § 4.2); all zero for none.</summary>
+    IngressPolicy IngressPolicy { get; }
+
+    /// <summary>Commands the ingress has refused for a session so far for ignoring its declared limits — over a command's rate, or the wrong role — which
+    /// the abuse rule counts.</summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The count.</returns>
+    long PolicyRefusalsOf(SessionId session);
+
+    /// <summary>
+    /// Refuses a whole <c>COMMANDS</c> message that is over the session's inbound budget: each command is answered with a <c>RATE_LIMITED</c> <c>ACK</c>,
+    /// so the client's <c>lastSeq</c> still settles it, and none is framed. May throw <see cref="WireFormatException"/> — a malformed message is malformed
+    /// whether or not it was also over budget.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="message">The whole message.</param>
+    /// <returns>The commands it carried.</returns>
+    int RefuseCommands(SessionId session, ReadOnlySpan<byte> message);
+
     /// <summary>
     /// Hands a validated <c>COMMANDS</c> message to ingress.
     /// </summary>
@@ -124,6 +144,23 @@ internal interface ISubscriptionsHost
     /// </para>
     /// </remarks>
     void OnCommands(SessionId session, ReadOnlySpan<byte> message);
+}
+
+/// <summary>
+/// The inbound rails every open session is held to (design/Subscriptions/11 § 4.2): a byte budget, and the rule that closes a session whose messages keep
+/// being refused.
+/// </summary>
+/// <param name="BytesPerSecond">The inbound budget, bytes per second; 0 for none.</param>
+/// <param name="WindowTicks">The abuse window, in <see cref="Stopwatch"/> ticks; 0 for no abuse rule.</param>
+/// <param name="RefusalsPerWindow">Refusals past which a window counts as abusive.</param>
+/// <param name="Windows">Consecutive abusive windows after which the session is closed with 1008.</param>
+internal readonly record struct IngressPolicy(int BytesPerSecond, long WindowTicks, int RefusalsPerWindow, int Windows)
+{
+    /// <summary>Whether there is an inbound budget.</summary>
+    public bool Budgeted => BytesPerSecond > 0;
+
+    /// <summary>Whether sustained refusals close a session.</summary>
+    public bool Watched => WindowTicks > 0 && RefusalsPerWindow > 0 && Windows > 0;
 }
 
 /// <summary>Where a connection is in the protocol.</summary>
@@ -191,6 +228,16 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
     private SubscriptionConnectionState _state;
     private SessionId _session;
     private int _clientMessageBytes;
+
+    // The inbound rails (11 § 4.2), held by the receive side alone: every field below is read and written under _gate, on whatever thread the link calls
+    // OnMessage from, and never from the tick.
+    private IngressPolicy _policy;
+    private long _budget;
+    private long _budgetStamp;
+    private long _windowStart;
+    private long _windowRefusals;
+    private long _hostRefusedMark;
+    private int _abusiveWindows;
     private Capabilities _capsGranted;
     private ushort _closeCode;
     private ushort _clientByeCode;
@@ -467,6 +514,9 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
 
         var row = _host.SessionTable.Row(session);
         _clientMessageBytes = row.ClientMessageBytes;
+        _policy = _host.IngressPolicy;
+        _budget = BudgetDepth;
+        _budgetStamp = _windowStart = Now();
         _capsGranted = GrantCaps(hello.Caps, row.Flags);
 
         // Before the WELCOME, so a session cannot be served a frame for a tick between the client being told it has STATS and the producer knowing it.
@@ -559,7 +609,82 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
 
     // ── the open session ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// The clock the inbound rails read, as <see cref="Stopwatch"/> timestamps; <see langword="null"/> for <see cref="Stopwatch.GetTimestamp"/>. Set by a
+    /// test before the <c>HELLO</c>, so the budget and the abuse windows can be driven exactly.
+    /// </summary>
+    internal Func<long> Clock { get; set; }
+
+    private long Now() => Clock?.Invoke() ?? Stopwatch.GetTimestamp();
+
+    // The bucket is kept in bytes × Stopwatch.Frequency: a refill is elapsed × rate with no division and no fractional byte lost, and its depth — one
+    // second of budget — is BytesPerSecond × Frequency, below 2^63 for any int rate at a nanosecond clock.
+    private long BudgetDepth => _policy.BytesPerSecond * Stopwatch.Frequency;
+
     private void HandleOpen(ReadOnlySpan<byte> message)
+    {
+        var now = Now();
+        if (_policy.Budgeted)
+        {
+            var elapsed = Math.Min(now - _budgetStamp, Stopwatch.Frequency);
+            _budget = Math.Min(BudgetDepth, _budget + (Math.Max(0, elapsed) * _policy.BytesPerSecond));
+            _budgetStamp = now;
+
+            var cost = message.Length * Stopwatch.Frequency;
+            if (message[0] == MessageTypes.Commands && _budget < cost)
+            {
+                // Refused whole and answered: each command gets a RATE_LIMITED ACK, so the client's prediction settles it rather than waiting forever, and
+                // each counts towards the abuse rule — per command, as the ingress counts its own refusals.
+                _windowRefusals += _host.RefuseCommands(_session, message);
+                CheckAbuse(now);
+                return;
+            }
+
+            // Every other message is charged and never refused: a PING keeps the session's acknowledgement alive, a BYE is a client leaving, and anything
+            // else is a protocol error that must close now rather than wait for the budget.
+            _budget = Math.Max(0, _budget - cost);
+        }
+
+        HandleWithinBudget(message);
+        CheckAbuse(now);
+    }
+
+    /// <summary>
+    /// Closes a session whose commands keep being refused: past <see cref="IngressPolicy.RefusalsPerWindow"/> refused commands — this connection's
+    /// over-budget ones and the ingress's rate and role ones — in <see cref="IngressPolicy.Windows"/> consecutive windows, it is closed with 1008 rather than
+    /// refused forever. Evaluated as messages arrive: a client that has stopped sending is not abusing anything.
+    /// </summary>
+    /// <param name="now">The rails' clock.</param>
+    private void CheckAbuse(long now)
+    {
+        if (!_policy.Watched || _state != SubscriptionConnectionState.Open)
+        {
+            return;
+        }
+
+        var elapsed = now - _windowStart;
+        if (elapsed < _policy.WindowTicks)
+        {
+            return;
+        }
+
+        var hostRefused = _host.PolicyRefusalsOf(_session);
+        var refusals = _windowRefusals + (hostRefused - _hostRefusedMark);
+        _hostRefusedMark = hostRefused;
+        _windowRefusals = 0;
+        _windowStart = now;
+
+        // Consecutive means adjacent: a window that ended long ago with nothing after it breaks the run.
+        var abusive = refusals > _policy.RefusalsPerWindow;
+        _abusiveWindows = abusive ? (elapsed < 2 * _policy.WindowTicks ? _abusiveWindows + 1 : 1) : 0;
+        if (_abusiveWindows >= _policy.Windows)
+        {
+            CloseWithKick(CloseCodes.PolicyViolation,
+                $"sustained abuse: over {_policy.RefusalsPerWindow} refused commands a window for {_policy.Windows} windows", SessionCloseReason.Abusive);
+        }
+    }
+
+    private void HandleWithinBudget(ReadOnlySpan<byte> message)
     {
         switch (message[0])
         {

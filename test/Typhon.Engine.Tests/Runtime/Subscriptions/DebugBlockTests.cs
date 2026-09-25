@@ -146,6 +146,7 @@ unsafe class DebugBlockTests : TestBase<DebugBlockTests>
             });
         }, nameof(ADebuggingRegionSessionIsShownItsHullAndItsWindow), new SubscriptionsOptions
         {
+            IngressBytesPerSecond = TestIngress.Budget,
             MaxSessions = 4, EnterBudgetPerFrame = 4096, ReplicationCellM = RegionCellM,
         });
         harness.RunFence = true;

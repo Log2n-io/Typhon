@@ -247,6 +247,34 @@ public sealed class SubscriptionsOptions
     public int ClientMessageBytes { get; init; } = 1024;
 
     /// <summary>
+    /// Each session's inbound budget, bytes per second, across every message it sends once open. <b>Required when the catalog has commands</b> — the
+    /// application's own or the built-in <c>ClientRegion</c> — and at least <see cref="ClientMessageBytes"/>: <c>Start</c> refuses either. No default: it is
+    /// the one rail between a single client and the tick, and what it should be depends on the application's commands, not on the engine.
+    /// </summary>
+    /// <remarks>
+    /// A token bucket per connection, one second deep. Every message is charged; only a <c>COMMANDS</c> message is refused — whole, each of its commands
+    /// answered with a <c>RATE_LIMITED</c> <c>ACK</c> so the client's <c>lastSeq</c> still settles them. It is still decoded to find them, so the budget
+    /// bounds what reaches the tick and the abuse rule (<see cref="AbuseRefusalsPerWindow"/>) bounds the decoding. A <c>PING</c>, a <c>BYE</c> and a
+    /// protocol error are never delayed (design/Subscriptions/11 § 4.2).
+    /// </remarks>
+    public int IngressBytesPerSecond { get; init; }
+
+    /// <summary>The window sustained abuse is measured in. Default: one second.</summary>
+    public TimeSpan AbuseWindow { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// Refused commands in one <see cref="AbuseWindow"/> — over the inbound budget, over a command's rate, sent by a role that may not — past which the
+    /// window counts as abusive. Default: 64.
+    /// </summary>
+    public int AbuseRefusalsPerWindow { get; init; } = 64;
+
+    /// <summary>
+    /// Consecutive abusive windows after which the session is closed with 1008 (policy violation) rather than refused forever. Default: 3. A client over
+    /// its limits for a moment is refused and recovers; one that keeps sending what is refused is closed, and its SDK reconnects with backoff.
+    /// </summary>
+    public int AbuseWindows { get; init; } = 3;
+
+    /// <summary>
     /// Below this much replication work — <c>connected sessions × projected blocks</c> — the pipeline runs as one dispatched system with no internal
     /// barriers instead of as several. <b>Default: 0, which means never: the staged pipeline always runs.</b>
     /// </summary>

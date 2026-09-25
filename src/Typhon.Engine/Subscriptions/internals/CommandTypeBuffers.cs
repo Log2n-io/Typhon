@@ -318,10 +318,14 @@ internal sealed class CommandTypeBuffers
     /// <summary>This tick's rejections.</summary>
     public CommandAckLog Acks { get; }
 
-    /// <summary>The most rejections one tick can record: the ack log's ceiling, which the acknowledgement history is sized to.</summary>
+    /// <summary>
+    /// The most rejections one tick can record: the ack log's ceiling, which the acknowledgement history is sized to. Room for every session's share of
+    /// transport-side refusals (<see cref="SubscriptionsIngress.RefusalAcksPerTick"/>) up to 2 048 sessions, so below that no session's refusals can
+    /// crowd out another's; the application's own rejections share what is left.
+    /// </summary>
     /// <param name="maxSessions">The session table's width.</param>
     /// <returns>The capacity.</returns>
-    public static int AckCapacity(int maxSessions) => Math.Clamp(maxSessions, 64, 16384);
+    public static int AckCapacity(int maxSessions) => (int)Math.Clamp((long)maxSessions * SubscriptionsIngress.RefusalAcksPerTick, 64, 16384);
 
     /// <summary>The tick the buffers currently describe.</summary>
     public long Tick { get; private set; } = long.MinValue;

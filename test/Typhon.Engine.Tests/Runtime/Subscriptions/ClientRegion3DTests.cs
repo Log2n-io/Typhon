@@ -182,6 +182,7 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
             Allocator = new MemoryAllocator(Registry, new MemoryAllocatorOptions { Name = "ClientRegion3DAllocator" });
             var options = new SubscriptionsOptions
             {
+                IngressBytesPerSecond = TestIngress.Budget,
                 MaxSessions = 32, IngressRingBytes = 4096, IngressPoolBudgetBytes = 1L * 1024 * 1024, ReplicationCellM = replicationCellM,
             };
             Subs = new SubscriptionsRegistry(options);

@@ -938,6 +938,7 @@ internal sealed unsafe class OracleHarness : IDisposable
     private static SubscriptionsOptions Options(bool automatic, bool deterministicProjection, double replicationCellM, bool forceDeep,
         double visibilitySlackM) => new()
     {
+        IngressBytesPerSecond = TestIngress.Budget,
         ReplicationCellM = replicationCellM,
         VisibilitySlackMForTest = visibilitySlackM,
         ForceDeepReplicationForTest = forceDeep,

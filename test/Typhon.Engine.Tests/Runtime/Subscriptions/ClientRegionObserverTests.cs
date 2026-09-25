@@ -67,7 +67,13 @@ unsafe class ClientRegionObserverTests : TestBase<ClientRegionObserverTests>
 
                 region.Of<ProjCreature>();
             });
-        }, name, new SubscriptionsOptions { MaxSessions = 16, EnterBudgetPerFrame = 4096, ReplicationCellM = CellM });
+        }, name, new SubscriptionsOptions
+        {
+            IngressBytesPerSecond = TestIngress.Budget,
+            MaxSessions = 16,
+            EnterBudgetPerFrame = 4096,
+            ReplicationCellM = CellM,
+        });
         harness.RunFence = true;
         _tick = 0;
         return harness;
@@ -175,7 +181,13 @@ unsafe class ClientRegionObserverTests : TestBase<ClientRegionObserverTests>
             ProjectionTestSchema.DeclareCreature(subs);
             subs.Profile("god", p => p.ClientRegion(MaxEdgeM).Of<ProjCreature>());
             subs.Profile("near", p => p.Sphere(100).Of<ProjCreature>());
-        }, nameof(ASwitchBetweenARegionAndASphereResets), new SubscriptionsOptions { MaxSessions = 16, EnterBudgetPerFrame = 4096, ReplicationCellM = CellM });
+        }, nameof(ASwitchBetweenARegionAndASphereResets), new SubscriptionsOptions
+        {
+            IngressBytesPerSecond = TestIngress.Budget,
+            MaxSessions = 16,
+            EnterBudgetPerFrame = 4096,
+            ReplicationCellM = CellM,
+        });
         harness.RunFence = true;
         _tick = 0;
         var session = harness.OpenSessions(1, "god")[0];

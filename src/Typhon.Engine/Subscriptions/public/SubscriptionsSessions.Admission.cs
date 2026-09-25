@@ -151,6 +151,11 @@ public enum SessionCloseReason : byte
 
     /// <summary>The engine faulted while serving this session.</summary>
     InternalError = 7,
+
+    /// <summary>
+    /// The session's messages kept being refused — over its inbound budget, over a command's rate, the wrong role — for a sustained period (1008).
+    /// </summary>
+    Abusive = 8,
 }
 
 /// <summary>

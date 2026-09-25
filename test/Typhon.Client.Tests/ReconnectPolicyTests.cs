@@ -21,6 +21,7 @@ sealed class ReconnectPolicyTests
     [TestCase(CloseCodes.GoingAway)]
     [TestCase(CloseCodes.InternalError)]
     [TestCase(CloseCodes.TryAgainLater)]
+    [TestCase(CloseCodes.PolicyViolation)]
     [TestCase(CloseCodes.NoAcknowledgement)]
     [TestCase(CloseCodes.HelloTimeout)]
     public void TransientClosesReconnect(ushort code) =>

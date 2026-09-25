@@ -108,7 +108,13 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
                 .Field(m => m.X, Codec.Quant(-8192, 8192, 24))
                 .Field(m => m.Z, Codec.Quant(-8192, 8192, 24))
                 .Field(m => m.Speed, Codec.U16));
-        }, name, new SubscriptionsOptions { MaxSessions = 64, EnterBudgetPerFrame = 256, ReplicationCellM = CellM });
+        }, name, new SubscriptionsOptions
+        {
+            IngressBytesPerSecond = TestIngress.Budget,
+            MaxSessions = 64,
+            EnterBudgetPerFrame = 256,
+            ReplicationCellM = CellM,
+        });
         harness.RunFence = true;
         harness.RunIngress = true;
         _tick = 0;
@@ -340,7 +346,9 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
         public SubscriptionConnection Connection;
         public InProcessLink Link;
 
-        /// <summary>How often this client's messages are mutated: most clients are nearly well-behaved, so sessions live long enough to reach deep states.</summary>
+        /// <summary>
+        /// How often this client's messages are mutated: most clients are nearly well-behaved, so sessions live long enough to reach deep states.
+        /// </summary>
         public int MutatePercent;
     }
 
@@ -351,7 +359,7 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
         using var harness = Harness(dbe, $"{nameof(ClientInputFuzzTests)}_{seed}");
         var rng = new Random(seed);
         var host = (ISubscriptionsHost)harness.Subscriptions;
-        var templates = new Templates(harness.CatalogPlan, rng, new SubscriptionsOptions().ClientMessageBytes);
+        var templates = new Templates(harness.CatalogPlan, rng, new SubscriptionsOptions { IngressBytesPerSecond = TestIngress.Budget }.ClientMessageBytes);
         var info = new LinkInfo { Transport = "fuzz", SubProtocol = ProtocolConstants.WebSocketSubprotocol };
         var clients = new List<Client>();
         var closes = new Dictionary<ushort, int>();
@@ -402,8 +410,8 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
                 }
 
                 var pump = harness.Subscriptions.SendPump;
-                Assert.That(client.Link.IsClosed, Is.True, $"seed {seed}, message {m}: the refusal's close never reached the link (kicks sent {pump.KicksSent}, "
-                    + $"send failures {pump.SendFailures}, active pumps {pump.ActivePumps}, link pending {client.Link.PendingCount}, slot "
+                Assert.That(client.Link.IsClosed, Is.True, $"seed {seed}, message {m}: the refusal's close never reached the link "
+                    + $"(kicks sent {pump.KicksSent}, send failures {pump.SendFailures}, active pumps {pump.ActivePumps}, link pending {client.Link.PendingCount}, slot "
                     + $"{pump.SlotStateForTest(client.Connection.Session.Slot)}, code {client.Connection.CloseCode}, pump faults {pump.PumpFaults}: "
                     + $"{pump.LastPumpFault})");
             }
@@ -423,7 +431,8 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
             Assert.That(valid, Is.False, $"seed {seed}, message {m}: a well-formed message closed its connection with {code}: {Convert.ToHexString(message)}");
             // Before admission, a HELLO the application refuses (an undeclared kind: 4003) is closed with the admission's code rather than the protocol's.
             var hello = m < 0 && code is >= 4000 and <= 4999;
-            Assert.That(hello || MalformedCloseCodes.Contains(code), Is.True, $"seed {seed}, message {m}: close code {code} for {Convert.ToHexString(message)}");
+            Assert.That(hello || MalformedCloseCodes.Contains(code), Is.True,
+                $"seed {seed}, message {m}: close code {code} for {Convert.ToHexString(message)}");
             Assert.That(client.Link.CloseCount, Is.EqualTo(1), $"seed {seed}, message {m}: closed more than once");
             byte[] last = null;
             while (client.Link.TryTake(out var sent, 0))
@@ -471,7 +480,8 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
                 }
 
                 connection.OnMessage(hello);
-                Assert.That(connection.State, Is.EqualTo(SubscriptionConnectionState.Open), $"seed {seed}: a valid HELLO was not admitted (close {link.CloseCode})");
+                Assert.That(connection.State, Is.EqualTo(SubscriptionConnectionState.Open),
+                    $"seed {seed}: a valid HELLO was not admitted (close {link.CloseCode})");
                 return client;
             }
         }

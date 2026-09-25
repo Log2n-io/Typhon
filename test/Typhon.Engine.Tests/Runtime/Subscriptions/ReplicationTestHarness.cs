@@ -70,6 +70,7 @@ sealed unsafe class ReplicationHarness : IDisposable
             var netIds = new NetIdAllocator("NetIds", resources.Runtime);
             var declarations = new SubscriptionsRegistry(options ?? new SubscriptionsOptions
             {
+                IngressBytesPerSecond = TestIngress.Budget,
                 MaxSessions = 256,
                 StatePoolBudgetBytes = PoolBudgetBytes,
                 ReplicationCellM = replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(0),

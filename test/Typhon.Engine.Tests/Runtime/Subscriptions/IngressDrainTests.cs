@@ -64,6 +64,7 @@ class IngressDrainTests : TestBase<IngressDrainTests>
 
             var options = new SubscriptionsOptions
             {
+                IngressBytesPerSecond = TestIngress.Budget,
                 MaxSessions = maxSessions,
                 IngressRingBytes = ringBytes,
                 IngressPoolBudgetBytes = 8L * 1024 * 1024,
@@ -669,7 +670,12 @@ class IngressDrainTests : TestBase<IngressDrainTests>
                         seen.Add(command.Value.Shot);
                     }
                 }
-            }), new RuntimeOptions { WorkerCount = 2, BaseTickRate = 200 });
+            }), new RuntimeOptions
+            {
+                WorkerCount = 2,
+                BaseTickRate = 200,
+                Subscriptions = new SubscriptionsOptions { IngressBytesPerSecond = Runtime.TestIngress.Budget },
+            });
 
         runtime.Subscriptions.Sessions.Kinds("player");
         runtime.Subscriptions.Sessions.Admit = static (in AdmissionRequest _) => Admission.Accept(SessionRole.Player);

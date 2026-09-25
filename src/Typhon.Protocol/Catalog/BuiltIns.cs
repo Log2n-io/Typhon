@@ -240,6 +240,9 @@ public static class AckReasons
     /// <summary>A <c>ClientRegion</c> whose convex hull has fewer than three points or no area; the previous region is kept.</summary>
     public const byte RegionInvalid = 3;
 
+    /// <summary>The session's role may not send this command type (the catalog's <c>roles</c>).</summary>
+    public const byte Forbidden = 4;
+
     /// <summary>The first application-defined reason code.</summary>
     public const byte FirstApplicationReason = 128;
 }

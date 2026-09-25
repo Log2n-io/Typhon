@@ -61,6 +61,9 @@ public sealed partial class TatooineSim
 
                 // A third of the players' 192 m radius: an 11 x 11 window per session.
                 ReplicationCellM = TatooineReplication.ReplicationCellM,
+
+                // Each session's inbound budget (--ingress-budget): required once clients can send commands, and the god camera's ClientRegion is one.
+                IngressBytesPerSecond = _config.IngressBytesPerSecond,
             },
         });
 
