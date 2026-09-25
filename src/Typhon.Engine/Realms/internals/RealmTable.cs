@@ -14,15 +14,19 @@ internal sealed class Realm
     /// <summary>The realm's own grid: its bounds, cell size and depth. Never shared with another realm.</summary>
     internal readonly SpatialGrid Grid;
 
-    internal Realm(RealmId id, SpatialGrid grid)
+    /// <summary>The registered configuration: the grid's identity and the policy when unobserved. Null only for a table built in a unit test.</summary>
+    internal readonly RealmConfig Config;
+
+    internal Realm(RealmId id, SpatialGrid grid, RealmConfig config)
     {
         ArgumentNullException.ThrowIfNull(grid);
         Id = id;
         Grid = grid;
+        Config = config;
     }
 
     /// <summary>The grid's configuration: geometry and every per-realm spatial knob.</summary>
-    internal ref readonly SpatialGridConfig Config => ref Grid.Config;
+    internal ref readonly SpatialGridConfig GridConfig => ref Grid.Config;
 }
 
 /// <summary>
@@ -82,7 +86,7 @@ internal sealed class RealmTable
             : $"Realm {id} is out of range: this engine is configured for {_byId.Length} realm(s).");
 
     /// <summary>Registers realm <paramref name="id"/> over <paramref name="grid"/>. Refuses an id out of range and one already registered.</summary>
-    internal Realm Register(RealmId id, SpatialGrid grid)
+    internal Realm Register(RealmId id, SpatialGrid grid, RealmConfig config = null)
     {
         if (id.Value >= _byId.Length)
         {
@@ -102,7 +106,7 @@ internal sealed class RealmTable
             // Before the release stores below: a reader that finds the realm finds its grid already naming it. Refused, and nothing mutated, when the
             // grid already belongs to a realm.
             grid.BindToRealm(id);
-            realm = new Realm(id, grid);
+            realm = new Realm(id, grid, config);
 
             var registered = _registered;
             if (_registeredCount == registered.Length)

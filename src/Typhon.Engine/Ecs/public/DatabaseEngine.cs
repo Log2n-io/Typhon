@@ -779,6 +779,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     // The engine's realms (Realms SP-1). Null until InitializeArchetypes builds it; with a single-world configuration it holds realm 0 only.
     private RealmTable _realms;
     private SpatialGridConfig? _pendingGridConfig;
+    private int _maxRealms = 1;
+    private bool _maxRealmsConfigured;
+    private RealmRegistry _realmRegistry;
 
     /// <summary>
     /// CPU-to-span ratio of the previous fence's migration phases (Migrate + IndexMassUpdate + EntityMapUpdate). <c>1</c> until the parallel runtime
@@ -847,8 +850,48 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             throw new InvalidOperationException("ConfigureSpatialGrid was already called. Configuration cannot be changed after the first call.");
         }
+        if (_realmRegistry != null && _realmRegistry.Pending.ContainsKey(RealmId.Default.Value))
+        {
+            throw new InvalidOperationException("Realm 0 was already registered through Realms.Register; ConfigureSpatialGrid would configure it twice.");
+        }
         _pendingGridConfig = config;
     }
+
+    /// <summary>
+    /// Sizes the engine's realm table: realm ids are <c>[0, maxRealms)</c>. Must be called before <see cref="InitializeArchetypes"/> and before any
+    /// <see cref="RealmRegistry.Register"/> of a realm other than 0. Without it the engine hosts one realm — the single-world form.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxRealms"/> is not in <c>[1, 65 535]</c> (0xFFFF is <see cref="RealmId.None"/>).</exception>
+    [PublicAPI]
+    public void ConfigureRealms(int maxRealms)
+    {
+        if (_realms != null)
+        {
+            throw new InvalidOperationException("ConfigureRealms must be called before InitializeArchetypes. The realm table has already been built.");
+        }
+        if (_maxRealmsConfigured)
+        {
+            throw new InvalidOperationException("ConfigureRealms was already called.");
+        }
+        if (maxRealms < 1 || maxRealms > RealmId.MaxCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxRealms), maxRealms,
+                $"The realm count must be between 1 and {RealmId.MaxCount} ({RealmId.NoneValue} is reserved for RealmId.None). No value is clamped.");
+        }
+
+        _maxRealms = maxRealms;
+        _maxRealmsConfigured = true;
+    }
+
+    /// <summary>The engine's realms: <see cref="RealmRegistry.Register"/> before <see cref="InitializeArchetypes"/>, and what is registered.</summary>
+    [PublicAPI]
+    public RealmRegistry Realms => _realmRegistry ??= new RealmRegistry(this);
+
+    /// <summary>The realm count <see cref="ConfigureRealms"/> set (1 when it was never called).</summary>
+    internal int ConfiguredMaxRealms => _maxRealms;
+
+    /// <summary>True while <see cref="ConfigureSpatialGrid"/>'s realm-0 configuration waits for <see cref="InitializeArchetypes"/>.</summary>
+    internal bool HasPendingRealm0Grid => _pendingGridConfig.HasValue;
 
     /// <summary>
     /// Realm 0's spatial grid — the single world of an application that never names a realm — or <c>null</c> if no grid was configured. Set by
@@ -863,8 +906,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     internal SpatialGrid Realm0Grid => _realms?.Default?.Grid;
 
-    /// <summary>The engine's realms, or <c>null</c> before <see cref="InitializeArchetypes"/> or when no grid was configured.</summary>
-    internal RealmTable Realms => _realms;
+    /// <summary>The engine's realm table, or <c>null</c> before <see cref="InitializeArchetypes"/> or when no realm was configured.</summary>
+    internal RealmTable RealmTable => _realms;
 
     /// <summary>
     /// Mark a single entity slot as dirty in the cluster dirty bitmap. Call from game systems that use the direct
@@ -3244,12 +3287,35 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Construct the engine-wide spatial grid. A grid is only required when at least one cluster-eligible archetype has a spatial component (checked
         // per-archetype below). The config is persisted so a generic opener (e.g. the Workbench) that never calls ConfigureSpatialGrid can still reconstruct
         // the grid and fully initialize the cluster-spatial archetypes — otherwise their cluster / entity-map segments stay unattributed in introspection.
+        // Realms (C1): realm 0 comes from ConfigureSpatialGrid, from a Realms.Register(0, …), or — for a generic opener — from the persisted realm-0
+        // record; every other realm from its registration. The table is sized by ConfigureRealms (one realm without it).
+        var pendingRealms = _realmRegistry?.Pending;
+        RealmConfig realm0 = null;
         if (_pendingGridConfig.HasValue)
         {
-            var gridConfig = _pendingGridConfig.Value;
-            // The single-world form: ConfigureSpatialGrid configures realm 0 of a one-realm table (Realms SP-1).
-            _realms = new RealmTable(1);
-            _realms.Register(RealmId.Default, new SpatialGrid(gridConfig));
+            realm0 = RealmConfig.SimulatedAlways(_pendingGridConfig.Value);
+        }
+        else if (pendingRealms != null && pendingRealms.TryGetValue(RealmId.Default.Value, out var registered0))
+        {
+            realm0 = registered0;
+        }
+
+        if (realm0 != null || pendingRealms is { Count: > 0 })
+        {
+            _realms = new RealmTable(_maxRealms);
+            foreach (var (id, config) in pendingRealms ?? new Dictionary<ushort, RealmConfig>())
+            {
+                if (id != RealmId.Default.Value)
+                {
+                    _realms.Register(new RealmId(id), new SpatialGrid(config.Grid), config);
+                }
+            }
+        }
+
+        if (realm0 != null)
+        {
+            var gridConfig = realm0.Grid;
+            _realms.Register(RealmId.Default, new SpatialGrid(gridConfig), realm0);
             _pendingGridConfig = null;
 
             // Rewrite whenever the stored record is absent OR the wrong width. A pre-#872 database holds a six-value record; an app that calls
@@ -3263,8 +3329,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
         else if (TryLoadSpatialGridConfig(out var persistedGridConfig))
         {
-            _realms = new RealmTable(1);
-            _realms.Register(RealmId.Default, new SpatialGrid(persistedGridConfig));
+            _realms ??= new RealmTable(_maxRealms);
+            _realms.Register(RealmId.Default, new SpatialGrid(persistedGridConfig), RealmConfig.SimulatedAlways(persistedGridConfig));
         }
 
         // Ensure ArchetypeR1 is registered in this session. On a new database CreateSystemSchemaR1 already registered it; on reopen LoadSystemSchemaR1 stops
@@ -3781,7 +3847,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // Issue #230 Phase 3 Option B: no per-archetype R-Tree + back-pointer CBS segments to allocate or load. The per-cell cluster index
                         // is transient and is rebuilt from cluster data at startup by RebuildCellState + RebuildClusterAabbs below.
                         // Issue #229 Q10: InitializeSpatial now also allocates this archetype's own CellClusterPool sized to the grid's cell count.
-                        clusterState.InitializeSpatial(slotToTable, Realm0Grid, meta.ArchetypeId);
+                        clusterState.InitializeSpatial(slotToTable, _realms, meta.ArchetypeId);
 
                         // Register with the per-table spatial state, which the trigger system reads
                         for (var slot = 0; slot < meta.ComponentCount; slot++)

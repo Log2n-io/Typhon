@@ -60,10 +60,10 @@ class RealmTableTests : TestBase<RealmTableTests>
         dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(100, 100), 10f));
         dbe.InitializeArchetypes();
 
-        Assert.That(dbe.Realms, Is.Not.Null);
-        Assert.That(dbe.Realms.Default, Is.Not.Null);
-        Assert.That(dbe.SpatialGrid, Is.SameAs(dbe.Realms.Default.Grid), "the single-world grid is realm 0's");
-        Assert.That(dbe.Realms.Registered.Length, Is.EqualTo(1));
+        Assert.That(dbe.RealmTable, Is.Not.Null);
+        Assert.That(dbe.RealmTable.Default, Is.Not.Null);
+        Assert.That(dbe.SpatialGrid, Is.SameAs(dbe.RealmTable.Default.Grid), "the single-world grid is realm 0's");
+        Assert.That(dbe.RealmTable.Registered.Length, Is.EqualTo(1));
     }
 
     [Test]

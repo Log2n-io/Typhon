@@ -2994,7 +2994,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         get
         {
-            foreach (var rs in RealmSpatial ?? [])
+            foreach (var rs in PresentRealmSpatial)
             {
                 if (rs != null && Volatile.Read(ref rs.PromotedCellCount) > 0)
                 {
@@ -3012,7 +3012,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal void ResetRealmCellPools()
     {
-        foreach (var rs in RealmSpatial ?? [])
+        foreach (var rs in PresentRealmSpatial)
         {
             if (rs != null)
             {
@@ -3021,9 +3021,100 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
     }
 
-    /// <summary>The spatial state of the realm cluster <paramref name="chunkId"/> is in. Realm 0 until SP-5 gives every cluster a realm.</summary>
+    /// <summary>
+    /// The spatial state of the realm cluster <paramref name="chunkId"/> is in (<see cref="ClusterRealmMap"/>), or <see cref="RealmArchetypeSpatial.None"/>
+    /// for a non-spatial archetype. A cluster's realm is set when it is given its cell and never changes until it is freed (Realms C1).
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal RealmArchetypeSpatial SpatialOfCluster(int chunkId) => Realm0Spatial ?? RealmArchetypeSpatial.None;
+    internal RealmArchetypeSpatial SpatialOfCluster(int chunkId)
+    {
+        var byRealm = RealmSpatial;
+        if (byRealm == null)
+        {
+            return RealmArchetypeSpatial.None;
+        }
+
+        var map = Volatile.Read(ref ClusterRealmMap);
+        var realm = map != null && (uint)chunkId < (uint)map.Length ? map[chunkId] : RealmId.Default.Value;
+        return byRealm[realm] ?? RealmArchetypeSpatial.None;
+    }
+
+    /// <summary>
+    /// Per-cluster realm, parallel to <see cref="ClusterCellMap"/> (Realms C1): the realm whose grid <c>ClusterCellMap[chunkId]</c> is a key of. Grown with
+    /// the cell map (same length, published before it), written where a cluster is given its cell, before the cluster is published.
+    /// </summary>
+    internal ushort[] ClusterRealmMap;
+
+    // The engine's realms, to create an archetype's state in a realm lazily. Set by InitializeSpatial.
+    private RealmTable _realmTable;
+
+    // The realms this archetype has state in, densely, for whole-archetype passes: never walk RealmSpatial, which is sized to MaxRealms (up to 65 535).
+    // Appended under _finalizeLock, grown by doubling; readers take the count, then the array — the writer publishes the array, then the count.
+    private RealmArchetypeSpatial[] _presentRealmSpatial = [];
+    private int _presentRealmCount;
+
+    /// <summary>The realms this archetype has spatial state in, in creation order. A consistent snapshot: entries are only appended.</summary>
+    internal ReadOnlySpan<RealmArchetypeSpatial> PresentRealmSpatial
+    {
+        get
+        {
+            var count = Volatile.Read(ref _presentRealmCount);
+            return Volatile.Read(ref _presentRealmSpatial).AsSpan(0, count);
+        }
+    }
+
+    /// <summary>
+    /// This archetype's state in <paramref name="realm"/>, created on first use (a registered realm only). Takes <c>_finalizeLock</c>, so it must run
+    /// outside the fence's parallel slices: the Migrate phase's destination realms are created by its serial tail beforehand (MD-02).
+    /// </summary>
+    internal RealmArchetypeSpatial GetOrCreateRealmSpatial(ushort realm)
+    {
+        var existing = Volatile.Read(ref RealmSpatial[realm]);
+        if (existing != null)
+        {
+            return existing;
+        }
+
+        ThrowIfGrowingInsideMigrateSlice(nameof(RealmSpatial), realm + 1, 0);
+        ref var ctx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Enter(ref ctx);
+        try
+        {
+            return GetOrCreateRealmSpatialLocked(realm);
+        }
+        finally
+        {
+            _finalizeLock.Exit();
+        }
+    }
+
+    /// <summary>The body of <see cref="GetOrCreateRealmSpatial"/>, for a caller already holding <c>_finalizeLock</c>.</summary>
+    internal RealmArchetypeSpatial GetOrCreateRealmSpatialLocked(ushort realm)
+    {
+        AssertFinalizeLockHeld(nameof(GetOrCreateRealmSpatialLocked));
+        var existing = RealmSpatial[realm];
+        if (existing != null)
+        {
+            return existing;
+        }
+
+        var registered = _realmTable.Get(realm);
+        var created = new RealmArchetypeSpatial(this, registered.Id, registered.Grid);
+        var present = _presentRealmSpatial;
+        if (_presentRealmCount == present.Length)
+        {
+            var grown = new RealmArchetypeSpatial[Math.Max(4, present.Length * 2)];
+            present.CopyTo(grown, 0);
+            present = grown;
+        }
+
+        present[_presentRealmCount] = created;
+        // Release order: the state itself before either index into it; the dense array before its count.
+        Volatile.Write(ref RealmSpatial[realm], created);
+        Volatile.Write(ref _presentRealmSpatial, present);
+        Volatile.Write(ref _presentRealmCount, _presentRealmCount + 1);
+        return created;
+    }
 
     // ═══════════════════════════════════════════════════════════════════════
     // Issue #231: Tier dispatch state. The version counter is bumped whenever
@@ -3685,6 +3776,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, int preferredClusterChunkId, int preferredSlotIndex,
         ref ChunkAccessor<PersistentStore> accessor, ChangeSet changeSet, SpatialGrid grid, long bornTsn)
     {
+        if (grid != null)
+        {
+            // Realms C1: a claim may be the archetype's first in this realm — create its state here, outside any latch.
+            GetOrCreateRealmSpatial(grid.Realm.Value);
+        }
+
         if (TryClaimPinnedSlot(cellKey, preferredClusterChunkId, preferredSlotIndex, ref accessor, grid, bornTsn, out var pinnedSlot))
         {
             return (preferredClusterChunkId, pinnedSlot);
@@ -3697,6 +3794,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, int preferredClusterChunkId, int preferredSlotIndex,
         ref ChunkAccessor<TransientStore> accessor, SpatialGrid grid, long bornTsn)
     {
+        if (grid != null)
+        {
+            // Realms C1: a claim may be the archetype's first in this realm — create its state here, outside any latch.
+            GetOrCreateRealmSpatial(grid.Realm.Value);
+        }
+
         if (TryClaimPinnedSlot(cellKey, preferredClusterChunkId, preferredSlotIndex, ref accessor, grid, bornTsn, out var pinnedSlot))
         {
             return (preferredClusterChunkId, pinnedSlot);
@@ -3749,6 +3852,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             Volatile.Write(ref *(ulong*)accessor.GetChunkAddress(newChunkId, true), 1UL); // no fold — see FreshClusterStaysUnknown
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
             ClusterCellMap[newChunkId] = cellKey;
+            ClusterRealmMap[newChunkId] = grid.Realm.Value;
             // Into the cell's per-cell index with an empty box BEFORE the pool publishes it — see AddClusterToPerCellIndexLocked for the two races
             // that letting the first spawner do it left open. The reset of a reused chunk id's stale box moves here for the same reason.
             EnsureClusterAabbsCapacityLocked(newChunkId + 1);
@@ -4039,6 +4143,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // ...Locked: we already hold _finalizeLock and AccessControlSmall is not reentrant.
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
             ClusterCellMap[newChunkId] = cellKey;
+            ClusterRealmMap[newChunkId] = grid.Realm.Value;
             // Into the cell's per-cell index with an empty box BEFORE the pool publishes it — see AddClusterToPerCellIndexLocked for the two races
             // that letting the first spawner do it left open. The reset of a reused chunk id's stale box moves here for the same reason.
             EnsureClusterAabbsCapacityLocked(newChunkId + 1);
@@ -4065,6 +4170,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, float px, float py, float pz, ref ChunkAccessor<PersistentStore> accessor,
         ChangeSet changeSet, SpatialGrid grid, long bornTsn)
     {
+        if (grid != null)
+        {
+            // Realms C1: a claim may be the archetype's first in this realm — create its state here, outside any latch.
+            GetOrCreateRealmSpatial(grid.Realm.Value);
+        }
+
         if (TryClaimPlaced(cellKey, px, py, pz, ref accessor, changeSet, grid, bornTsn, out var clusterChunkId, out var slotIndex))
         {
             Interlocked.Increment(ref grid.GetCell(cellKey).EntityCount);
@@ -4078,6 +4189,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, float px, float py, float pz, ref ChunkAccessor<TransientStore> accessor,
         SpatialGrid grid, long bornTsn)
     {
+        if (grid != null)
+        {
+            // Realms C1: a claim may be the archetype's first in this realm — create its state here, outside any latch.
+            GetOrCreateRealmSpatial(grid.Realm.Value);
+        }
+
         if (TryClaimPlaced(cellKey, px, py, pz, ref accessor, null, grid, bornTsn, out var clusterChunkId, out var slotIndex))
         {
             Interlocked.Increment(ref grid.GetCell(cellKey).EntityCount);
@@ -4094,6 +4211,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, int preferredClusterChunkId, int preferredSlotIndex, float px, float py, float pz,
         ref ChunkAccessor<PersistentStore> accessor, ChangeSet changeSet, SpatialGrid grid, long bornTsn)
     {
+        if (grid != null)
+        {
+            // Realms C1: a claim may be the archetype's first in this realm — create its state here, outside any latch.
+            GetOrCreateRealmSpatial(grid.Realm.Value);
+        }
+
         if (TryClaimPinnedSlot(cellKey, preferredClusterChunkId, preferredSlotIndex, ref accessor, grid, bornTsn, out var pinnedSlot))
         {
             return (preferredClusterChunkId, pinnedSlot);
@@ -4106,6 +4229,12 @@ internal sealed unsafe partial class ArchetypeClusterState
     public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, int preferredClusterChunkId, int preferredSlotIndex, float px, float py, float pz,
         ref ChunkAccessor<TransientStore> accessor, SpatialGrid grid, long bornTsn)
     {
+        if (grid != null)
+        {
+            // Realms C1: a claim may be the archetype's first in this realm — create its state here, outside any latch.
+            GetOrCreateRealmSpatial(grid.Realm.Value);
+        }
+
         if (TryClaimPinnedSlot(cellKey, preferredClusterChunkId, preferredSlotIndex, ref accessor, grid, bornTsn, out var pinnedSlot))
         {
             return (preferredClusterChunkId, pinnedSlot);
@@ -4136,7 +4265,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         SpatialGrid grid,
         long bornTsn)
     {
-        var rs = SpatialOf(grid);
+        var rs = grid == null ? RealmArchetypeSpatial.None : GetOrCreateRealmSpatial(grid.Realm.Value);
         ref var cell = ref grid.GetCell(cellKey);
         var clusters = rs.CellClusterPool.GetClusters(cellKey);
 
@@ -4231,6 +4360,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // ...Locked: we already hold _finalizeLock and AccessControlSmall is not reentrant.
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
             ClusterCellMap[newChunkId] = cellKey;
+            ClusterRealmMap[newChunkId] = grid.Realm.Value;
             // Into the cell's per-cell index with an empty box BEFORE the pool publishes it — see AddClusterToPerCellIndexLocked for the two races
             // that letting the first spawner do it left open. The reset of a reused chunk id's stale box moves here for the same reason.
             EnsureClusterAabbsCapacityLocked(newChunkId + 1);
@@ -4262,7 +4392,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     public (int clusterChunkId, int slotIndex) ClaimSlotInCell(int cellKey, ref ChunkAccessor<TransientStore> accessor, SpatialGrid grid, long bornTsn)
     {
-        var rs = SpatialOf(grid);
+        var rs = grid == null ? RealmArchetypeSpatial.None : GetOrCreateRealmSpatial(grid.Realm.Value);
         ref var cell = ref grid.GetCell(cellKey);
         var clusters = rs.CellClusterPool.GetClusters(cellKey);
 
@@ -4341,6 +4471,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // ...Locked: we already hold _finalizeLock and AccessControlSmall is not reentrant.
             EnsureClusterCellMapCapacityLocked(newChunkId + 1);
             ClusterCellMap[newChunkId] = cellKey;
+            ClusterRealmMap[newChunkId] = grid.Realm.Value;
             // Into the cell's per-cell index with an empty box BEFORE the pool publishes it — see AddClusterToPerCellIndexLocked for the two races
             // that letting the first spawner do it left open. The reset of a reused chunk id's stale box moves here for the same reason.
             EnsureClusterAabbsCapacityLocked(newChunkId + 1);
@@ -4384,7 +4515,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void RebuildCellState(SpatialGrid grid)
     {
-        var rs = SpatialOf(grid);
+        var rs = grid == null ? RealmArchetypeSpatial.None : GetOrCreateRealmSpatial(grid.Realm.Value);
         if (grid == null || !SpatialSlot.HasSpatialIndex || ClusterSegment == null)
         {
             return;
@@ -4421,6 +4552,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 var cellKey = grid.WorldToCellKeyFromSpatialField(fieldPtr, fieldType);
 
                 ClusterCellMap[chunkId] = cellKey;
+                ClusterRealmMap[chunkId] = grid.Realm.Value;
                 rs.CellClusterPool.AddCluster(cellKey, chunkId);
                 ref var cell = ref grid.GetCell(cellKey);
                 cell.ClusterCount++;
@@ -4726,7 +4858,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     public void RebuildSpatialStateFromData(SpatialGrid grid, EpochManager epochManager, int maxWorkers = 0)
     {
-        var rs = SpatialOf(grid);
+        var rs = grid == null ? RealmArchetypeSpatial.None : GetOrCreateRealmSpatial(grid.Realm.Value);
         if (grid == null || !SpatialSlot.HasSpatialIndex || ClusterSegment == null)
         {
             return;
@@ -4860,6 +4992,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             var cellKey = grid.ComputeCellKey(m.CellX, m.CellY, m.CellZ);
 
             ClusterCellMap[chunkId] = cellKey;
+            ClusterRealmMap[chunkId] = grid.Realm.Value;
             rs.CellClusterPool.AddCluster(cellKey, chunkId);
             ref var cell = ref grid.GetCell(cellKey);
             cell.ClusterCount++;
@@ -4946,6 +5079,8 @@ internal sealed unsafe partial class ArchetypeClusterState
             var initial = Math.Max(16, requiredLength);
             var seeded = new int[initial];
             Array.Fill(seeded, -1);
+            // The realm map first (realm 0 = the zero seed): a reader that bounds a chunk id by the cell map may then index the realm map with it.
+            Volatile.Write(ref ClusterRealmMap, new ushort[initial]);
             Volatile.Write(ref ClusterCellMap, seeded);
             return;
         }
@@ -4967,6 +5102,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         var grown = new int[newLen];
         Array.Copy(ClusterCellMap, grown, oldLen);
         Array.Fill(grown, -1, oldLen, newLen - oldLen);
+        var grownRealms = new ushort[newLen];
+        if (ClusterRealmMap != null)
+        {
+            Array.Copy(ClusterRealmMap, grownRealms, Math.Min(oldLen, ClusterRealmMap.Length));
+        }
+
+        // Realm map first, same reason as the seeding above.
+        Volatile.Write(ref ClusterRealmMap, grownRealms);
         Volatile.Write(ref ClusterCellMap, grown);
     }
 
@@ -6777,7 +6920,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void RefreshClusterReach()
     {
         // A non-spatial archetype has no realm state to refresh.
-        foreach (var realmSpatial in RealmSpatial ?? [])
+        foreach (var realmSpatial in PresentRealmSpatial)
         {
             if (realmSpatial != null)
             {
@@ -6881,7 +7024,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal bool ReachCoversIndex(out string violation)
     {
         violation = null;
-        foreach (var realmSpatial in RealmSpatial ?? [])
+        foreach (var realmSpatial in PresentRealmSpatial)
         {
             if (realmSpatial != null && !ReachCoversIndexIn(realmSpatial, out violation))
             {
@@ -8038,7 +8181,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void EvaluateCellTreeTightnessTransitions()
     {
-        foreach (var realmSpatial in RealmSpatial ?? [])
+        foreach (var realmSpatial in PresentRealmSpatial)
         {
             if (realmSpatial != null)
             {
@@ -8205,7 +8348,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal void RefitPromotedCellTrees()
     {
-        foreach (var realmSpatial in RealmSpatial ?? [])
+        foreach (var realmSpatial in PresentRealmSpatial)
         {
             if (realmSpatial != null)
             {
@@ -8530,7 +8673,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     private void RebindCellTreeBackPointers()
     {
-        foreach (var realmSpatial in RealmSpatial ?? [])
+        foreach (var realmSpatial in PresentRealmSpatial)
         {
             if (realmSpatial != null)
             {
@@ -9535,13 +9678,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// by spawn/migration hooks (or rebuilt from cluster data by <see cref="RebuildCellState"/> + <see cref="RebuildClusterAabbs"/> on reopen).
     /// </summary>
     /// <param name="slotToTable">Component tables indexed by slot (used to find the spatial field).</param>
-    /// <param name="grid">The engine's configured spatial grid. Used to size the per-archetype <see cref="CellClusterPool"/> so its per-cell arrays cover
-    /// every valid cell key. Under Q10 the pool is per-archetype — each cluster-spatial archetype sharing the grid gets its own instance sized to the
-    /// grid's cell count.</param>
+    /// <param name="realms">The engine's realms. The archetype's per-realm state (one <see cref="RealmArchetypeSpatial"/> each, its own cluster pool
+    /// and per-cell index — Q10's per-archetype pool, now per realm too) is created in a realm when the archetype first has a cluster there.</param>
     /// <param name="archetypeId">Numeric id of this archetype, stored into <see cref="ArchetypeId"/>; keys this archetype's per-cell cluster claims within the
     /// shared grid so scans only walk its own clusters. Defaults to 0.</param>
-    public void InitializeSpatial(ComponentTable[] slotToTable, SpatialGrid grid, int archetypeId = 0)
+    public void InitializeSpatial(ComponentTable[] slotToTable, RealmTable realms, int archetypeId = 0)
     {
+        ArgumentNullException.ThrowIfNull(realms);
         ArchetypeId = archetypeId;
 
         for (var slot = 0; slot < slotToTable.Length; slot++)
@@ -9563,9 +9706,16 @@ internal sealed unsafe partial class ArchetypeClusterState
 
             // Issue #229 Q10: allocate this archetype's own CellClusterPool. Other cluster-spatial archetypes sharing the same grid each get their own
             // instance, so claim-list scans at spawn time only walk clusters of the current archetype.
-            // Realms SP-2: the per-cell state lives in the realm's RealmArchetypeSpatial; one realm (0) today.
-            _realm0Spatial = new RealmArchetypeSpatial(this, RealmId.Default, grid);
-            RealmSpatial = [_realm0Spatial];
+            // Realms: the per-cell state lives in each realm's RealmArchetypeSpatial, indexed by realm id and created when the archetype first has a
+            // cluster in that realm (GetOrCreateRealmSpatial). Realm 0's, when realm 0 exists, eagerly: every single-world path reaches it.
+            _realmTable = realms;
+            RealmSpatial = new RealmArchetypeSpatial[realms.MaxRealms];
+            _presentRealmSpatial = new RealmArchetypeSpatial[4];
+            _presentRealmCount = 0;
+            if (realms.TryGet(RealmId.Default.Value) != null)
+            {
+                _realm0Spatial = GetOrCreateRealmSpatial(RealmId.Default.Value);
+            }
 
             // Issue #233: allocate dormancy arrays for spatial archetypes. Non-spatial archetypes leave SleepStates null (zero overhead).
             var capacity = Math.Max(16, PrimarySegmentCapacity);
