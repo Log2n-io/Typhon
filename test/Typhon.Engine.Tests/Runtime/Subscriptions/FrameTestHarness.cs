@@ -176,10 +176,17 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="tick">The tick number, which must advance.</param>
     /// <param name="workers">Worker-pool width for the frame stage; the projection runs as one chunk.</param>
     /// <remarks>Ticks must be consecutive: a gap is a missed tick to the push log, and a session that seems to have missed one is caught up or reset.</remarks>
+    // The tick driver's publication: what a connection stamps a PING with, so a live client is heard from on this tick (SUB-15's silence sweep). The
+    // multiplier is the frame stage's current one, so a test that set an overload keeps it.
+    private void PublishTick(long tick) =>
+        Subscriptions.PublishTickState(tick, System.Diagnostics.Stopwatch.GetTimestamp(), Assembler.TickMultiplier);
+
     public void RunTick(long tick, int workers = 1)
     {
         Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
         Tick = tick;
+
+        PublishTick(tick);
         if (RunIngress)
         {
             DrainIngress(tick);
@@ -214,6 +221,7 @@ sealed unsafe class FrameHarness : IDisposable
     {
         Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
         Tick = tick;
+        PublishTick(tick);
         if (RunFence)
         {
             Engine.WriteTickFence(tick);
@@ -229,6 +237,7 @@ sealed unsafe class FrameHarness : IDisposable
     {
         Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
         Tick = tick;
+        PublishTick(tick);
         if (RunFence)
         {
             Engine.WriteTickFence(tick);
@@ -245,6 +254,7 @@ sealed unsafe class FrameHarness : IDisposable
     {
         Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
         Tick = tick;
+        PublishTick(tick);
         if (RunFence)
         {
             Engine.WriteTickFence(tick);

@@ -98,6 +98,16 @@ internal interface ISubscriptionsHost
     bool RequestPong(SessionId session, uint clientMs);
 
     /// <summary>
+    /// Hands a protocol refusal's <c>KICK</c> to the session's send pump — the link's only writer once the session is open — which sends it after whatever
+    /// it is sending and then closes the link (SUB-14's order, KICK then close).
+    /// </summary>
+    /// <param name="session">The session being refused.</param>
+    /// <param name="code">The close code.</param>
+    /// <param name="reason">Why.</param>
+    /// <returns><see langword="false"/> when no pump owns the session's link — the connection then writes the KICK itself.</returns>
+    bool RequestKick(SessionId session, ushort code, string reason);
+
+    /// <summary>
     /// Hands a validated <c>COMMANDS</c> message to ingress.
     /// </summary>
     /// <param name="session">Whose commands they are.</param>
@@ -591,6 +601,24 @@ internal sealed class SubscriptionConnection : ISubscriptionConnection, IDisposa
 
     private void CloseWithKick(ushort code, string reason, SessionCloseReason sessionReason)
     {
+        // Once the session is open the send pump owns the link: a KICK written from here could overlap a frame or a PONG the pump is writing, which a
+        // WebSocket refuses outright and which breaks the one-send-in-flight guarantee every link relies on. The pump sends it after its current write, then
+        // closes the link. Before the session is open (a HELLO refusal), this thread is the link's only writer and sends it itself.
+        if (_state == SubscriptionConnectionState.Open && _host.RequestKick(_session, code, reason))
+        {
+            // The link stays bound: the pump takes it atomically when it sends the KICK, then closes it — exactly a tick-decided close's path (SUB-14).
+            // Unbinding it here, as a client-started close does, would leave the pump no link to tell.
+            StopHelloTimer();
+            _state = SubscriptionConnectionState.Closed;
+            _closeCode = code;
+            if (_session.IsValid)
+            {
+                _host.SessionTable.RequestClose(_session, sessionReason, code);
+            }
+
+            return;
+        }
+
         var kick = new KickMessage(code, reason ?? string.Empty);
         var buffer = NativeFrameMemoryManager.Allocate(KickBytes);
         var length = 0;

@@ -120,6 +120,18 @@ internal sealed class SendPump : IDisposable
     /// <summary>Sessions the tick closed that were told so with a <c>KICK</c> before their link was closed.</summary>
     public long KicksSent => Volatile.Read(ref _kicksSent);
 
+    private long _pumpFaults;
+
+    /// <summary>Pumps that ended on an exception — each one would have left its session unable to send, had its flag not been lowered.</summary>
+    public long PumpFaults => Volatile.Read(ref _pumpFaults);
+
+    /// <summary>The last exception a pump ended on, for diagnosis.</summary>
+    public Exception LastPumpFault { get; private set; }
+
+    /// <summary>Tests only: whether a slot's pump flag is up, a KICK is pending, and the slot has a link.</summary>
+    internal (bool Pumping, bool KickPending, bool Linked) SlotStateForTest(int slot) =>
+        (Volatile.Read(ref _pumping[slot]) != 0, Volatile.Read(ref _kicks[slot]) != null, Volatile.Read(ref _links[slot]) != null);
+
     /// <summary><c>PONG</c> answers handed to a link and completed.</summary>
     public long PongsSent => Volatile.Read(ref _pongsSent);
 
@@ -243,15 +255,17 @@ internal sealed class SendPump : IDisposable
             return false;
         }
 
-        if (Volatile.Read(ref _links[session.Slot]) == null)
+        var link = Volatile.Read(ref _links[session.Slot]);
+        if (link == null)
         {
             // A close the CLIENT started, or a link that has already gone: the connection unbinds before it asks the tick to close, so an absent link here
             // means the peer already knows. There is nobody to tell.
             return false;
         }
 
-        // Release, so the pump woken below sees the code and the reason, not just the reference.
-        Volatile.Write(ref _kicks[session.Slot], new PendingKick(session, code, reason));
+        // Release, so the pump woken below sees the code, the reason and the link, not just the reference. The link is captured here, so the KICK reaches
+        // the connection it was decided for even if the slot is recycled before the pump runs.
+        Volatile.Write(ref _kicks[session.Slot], new PendingKick(session, code, reason, link));
         Wake(session);
         return true;
     }
@@ -389,6 +403,7 @@ internal sealed class SendPump : IDisposable
             Interlocked.Increment(ref _pumpStarts);
         }
 
+        var exitedNormally = false;
         try
         {
             while (true)
@@ -410,12 +425,26 @@ internal sealed class SendPump : IDisposable
 
                 if (!Claimable(slot) || Interlocked.CompareExchange(ref _pumping[slot], 1, 0) != 0)
                 {
+                    exitedNormally = true;
                     return;
                 }
             }
         }
+        catch (Exception e)
+        {
+            // Nothing below expects to throw, and a pump is a pool work item nobody observes: counted and kept, so it is visible rather than lost.
+            Interlocked.Increment(ref _pumpFaults);
+            LastPumpFault = e;
+        }
         finally
         {
+            if (!exitedNormally)
+            {
+                // The flag would otherwise stay up with no pump behind it, and every later Wake for the slot would find it taken and do nothing: the session's
+                // frames, PONGs and KICK stranded for good. Lowered, the next wake starts a pump again.
+                Volatile.Write(ref _pumping[slot], 0);
+            }
+
             Interlocked.Decrement(ref _activePumps);
         }
     }
@@ -432,12 +461,24 @@ internal sealed class SendPump : IDisposable
     /// </remarks>
     private unsafe bool Claimable(int slot)
     {
-        if (IsDisposed || Volatile.Read(ref _links[slot]) == null)
+        if (IsDisposed)
         {
             return false;
         }
 
-        if (Volatile.Read(ref _kicks[slot]) != null || Volatile.Read(ref _pongs[slot]) != 0)
+        // A pending KICK first: it carries its own link, so a slot whose link the close has already detached still owes it — checking the slot's link
+        // first stranded it, the pump clearing its flag and leaving with the KICK unsent.
+        if (Volatile.Read(ref _kicks[slot]) != null)
+        {
+            return true;
+        }
+
+        if (Volatile.Read(ref _links[slot]) == null)
+        {
+            return false;
+        }
+
+        if (Volatile.Read(ref _pongs[slot]) != 0)
         {
             return true;
         }
@@ -658,16 +699,16 @@ internal sealed class SendPump : IDisposable
             return;
         }
 
-        var link = Volatile.Read(ref _links[slot]);
-        if (link == null || _sessions.IdAt(slot) != kick.Session)
+        // The link the KICK was decided for, captured with it: unbound from the slot if the slot still holds it — never a link the slot's next occupant has
+        // attached — and told whatever the slot has become since. Checking the slot's identity instead dropped a refusal whose session the tick had
+        // already closed and recycled before this pump ran, leaving its client with neither a KICK nor a close.
+        var link = kick.Link;
+        if (link == null)
         {
             return;
         }
 
-        if (Interlocked.CompareExchange(ref _links[slot], null, link) != link)
-        {
-            return;
-        }
+        Interlocked.CompareExchange(ref _links[slot], null, link);
 
         var reason = KickMessage.TruncateUtf8(kick.Reason ?? string.Empty, ProtocolConstants.KickReasonMaxBytes);
         var buffer = NativeFrameMemoryManager.Allocate(KickBytes);
@@ -790,9 +831,10 @@ internal sealed class SendPump : IDisposable
 /// <param name="Session">Whose close it is, so a recycled slot cannot inherit it.</param>
 /// <param name="Code">The close code.</param>
 /// <param name="Reason">Why, untruncated; the encoder cuts it at a code-point boundary.</param>
+/// <param name="Link">The link the close was decided for: the KICK goes to it even if the slot is recycled before the pump runs.</param>
 /// <remarks>
 /// A record rather than three slot-indexed arrays because the three values must become visible together — a pump that saw a new code beside the previous
 /// close's reason would tell a client something neither the tick nor the protocol ever said. One reference published with a release says all three at once,
 /// and a close is rare enough that the allocation is not worth avoiding.
 /// </remarks>
-internal sealed record PendingKick(SessionId Session, ushort Code, string Reason);
+internal sealed record PendingKick(SessionId Session, ushort Code, string Reason, ISubscriptionLink Link);

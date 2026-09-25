@@ -2,6 +2,7 @@ using NUnit.Framework;
 using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
@@ -122,6 +123,63 @@ class TcpTransportTests : TestBase<TcpTransportTests>
             Assert.That(connection.Closes, Is.EqualTo(1));
             Assert.That(connection.Messages, Is.Empty, "there was no message: zero is a framing error, not an empty one");
         });
+    }
+
+    /// <summary>
+    /// AC-17's framing half: 200 peers write random bytes — with and without the preamble, random length prefixes, truncated bodies, abrupt closes — and the
+    /// transport survives all of them: a well-behaved client connecting afterwards is still adopted and its message still arrives whole.
+    /// </summary>
+    [Test]
+    public void RandomFramingNeverStopsTheTransport()
+    {
+        var acceptor = new RecordingAcceptor();
+        var endpoint = StartTransport(acceptor);
+        var rng = new Random(20250925);
+        for (var i = 0; i < 200; i++)
+        {
+            using var peer = new TestClient(endpoint, TimeoutMs);
+            var body = new byte[rng.Next(0, 96)];
+            rng.NextBytes(body);
+            var preamble = rng.Next(3) != 0;
+            var framing = rng.Next(4);
+            try
+            {
+                if (preamble)
+                {
+                    peer.Send(ProtocolConstants.TcpPreamble);
+                }
+
+                switch (framing)
+                {
+                    case 0:
+                        peer.SendLength((uint)rng.Next());
+                        break;
+                    case 1:
+                        peer.SendLength((uint)(body.Length + rng.Next(1, 64)));
+                        break;
+                    case 2:
+                        peer.SendLength((uint)body.Length);
+                        break;
+                }
+
+                peer.Send(body);
+            }
+            catch (SocketException)
+            {
+                // The server already closed this peer — a missing preamble or an oversize length is refused after four bytes — and its reset can arrive
+                // before the rest is written. That is the transport doing its job, not a failure.
+            }
+        }
+
+        using var client = Connect(endpoint);
+        client.Send(ProtocolConstants.TcpPreamble);
+        Assert.That(client.ReadExactly(4), Is.EqualTo(ProtocolConstants.TcpPreamble.ToArray()), "the transport still answers a preamble");
+        var ping = ClientMessages.Ping(0x5EED, 70);
+        client.SendFramed(ping);
+
+        // Some peers' connections are adopted late, so the well-behaved one is found by what it received, not by being the last.
+        Assert.That(SpinWait.SpinUntil(() => acceptor.All.Any(c => c.Messages.Any(m => m.AsSpan().SequenceEqual(ping))), TimeoutMs), Is.True,
+            "the transport stopped delivering whole messages");
     }
 
     /// <summary>
@@ -706,6 +764,11 @@ class TcpTransportTests : TestBase<TcpTransportTests>
         public ISubscriptionConnection Accept(ISubscriptionLink link, in LinkInfo info)
         {
             var connection = new RecordingConnection();
+            lock (_all)
+            {
+                _all.Add(connection);
+            }
+
             LastConnection = connection;
             LastLink = link;
             LastInfo = info;
@@ -715,6 +778,20 @@ class TcpTransportTests : TestBase<TcpTransportTests>
         }
 
         public bool WaitForAccept(int timeoutMs) => _accepted.Wait(timeoutMs);
+
+        private readonly List<RecordingConnection> _all = [];
+
+        /// <summary>Every connection adopted so far.</summary>
+        public RecordingConnection[] All
+        {
+            get
+            {
+                lock (_all)
+                {
+                    return [.. _all];
+                }
+            }
+        }
     }
 
     /// <summary>The engine's side of one connection, recording what the transport delivered and when it stopped.</summary>

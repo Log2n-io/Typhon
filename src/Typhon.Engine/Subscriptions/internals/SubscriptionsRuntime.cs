@@ -579,6 +579,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     bool ISubscriptionsHost.RequestPong(SessionId session, uint clientMs) => _sendPump != null && _sendPump.RequestPong(session, clientMs);
 
     /// <inheritdoc />
+    bool ISubscriptionsHost.RequestKick(SessionId session, ushort code, string reason) => _sendPump != null && _sendPump.RequestKick(session, code, reason);
+
+    /// <inheritdoc />
     void ISubscriptionsHost.BindSessionLink(SessionId session, ISubscriptionLink link)
     {
         if (link == null)

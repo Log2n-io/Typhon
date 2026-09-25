@@ -263,6 +263,12 @@ internal sealed class FakeSubscriptionsHost : ISubscriptionsHost
 
     /// <inheritdoc />
     /// <remarks>Refused, as the runtime refuses it, when the session has no bound link.</remarks>
+    /// <summary>
+    /// No send pump here: the connection writes a refusal's KICK itself, which is what the handshake tests read synchronously. A host with a pump
+    /// (the runtime) takes it instead, so the KICK never overlaps the pump's own writes.
+    /// </summary>
+    public bool RequestKick(SessionId session, ushort code, string reason) => false;
+
     public bool RequestPong(SessionId session, uint clientMs)
     {
         if (!BoundLinks.TryGetValue(session, out var link) || link == null)

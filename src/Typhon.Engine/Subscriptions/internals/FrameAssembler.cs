@@ -460,6 +460,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     // The overload tick multiplier the tick started with (09 § 10): 1 unless the overload detector stretched the tick.
     private int _tickMultiplier = 1;
 
+    /// <summary>The tick multiplier the frame stage currently runs under (1 when not overloaded); what a test harness republishes each tick.</summary>
+    internal int TickMultiplier => Math.Max(1, Volatile.Read(ref _tickMultiplier));
+
     /// <summary>
     /// The live tick state, from the runtime at each tick's start: the period — a stretched tick sends the same bytes over a longer time — and the overload
     /// multiplier that stretched it.

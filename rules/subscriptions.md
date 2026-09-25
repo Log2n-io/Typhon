@@ -455,6 +455,10 @@
     a KICK carrying the close code reaches s's link, and the link is closed after it — KICK, then close (03 § 3; on TCP, KICK then FIN)
   invariant the KICK is sent by s's own send pump, never by the tick thread: the transport's one promise is at most one send in flight per
     session, and a tick writing to a socket breaks both that and the rule that the tick does no I/O
+  invariant a protocol refusal of an OPEN session (a malformed message, 1002/1007/1009) is sent by that pump too, after what it already owes, and the pump
+    closes the link after it; the connection leaves the link bound for it. Only before the session is open (a refused HELLO) does the receive thread,
+    then the link's only writer, send the KICK itself. The pending KICK carries the link it was decided for, so a slot recycled before the pump runs
+    neither strands it nor redirects it, and a pump that ends on an exception lowers its flag rather than leaving the session unable to send
   invariant [the client itself started the close] → no KICK: the connection unbinds its link before asking the tick to close, and an absent
     link is what tells the pump there is nobody to inform
   invariant ∀ SDK: the close code it reports is the KICK's when one arrived, and the transport's only otherwise — TCP carries no code, so a
@@ -464,13 +468,14 @@
   never leave a transport bound after a terminal close: a socket whose peer has sent FIN still reports itself connected until the next write
     fails, so an SDK that keeps it answers "connected" for a session that ended
   scope: SessionTable.CloseCore, SubscriptionsIngress.BeginTick, SendPump.RequestKick, SendPump.TryKickAsync, SubscriptionConnection.Kick,
-    FrameAssembler.SweepSkipPolicy
+    FrameAssembler.SweepSkipPolicy, SubscriptionConnection.CloseWithKick, SendPump.Claimable, SendPump.PumpAsync
   on_violation: the worst state a client can be in. Everything it can observe says it is connected — the socket is open, no code arrived, no
     error was raised — and no frame will ever come again. It cannot even reconnect, because nothing told it to. It is silent on the server
     too: the close counters move, the session leaves the table, and an application that kicked a player is told it worked.
   rationale: 02 § 6 and 05 § 1 already specify the message and the SDK's response to it; what was missing was any caller. The pump is the
     right sender because it is already the single writer for the slot, so the KICK is simply the last message it sends.
-  verified: BotSwarmSmokeTests.ASilentSessionIsClosedAndItsClientIsTold — a client that never pings, asserting in one place that its frames
+  verified: ClientInputFuzzTests.AnOpenSessionsRefusalIsSentByItsPumpAfterWhatItOwes (the refusal after a PONG, KICK last, no overlapped send), and
+    the fuzzer's every close checked for a KICK first; BotSwarmSmokeTests.ASilentSessionIsClosedAndItsClientIsTold — a client that never pings, asserting in one place that its frames
     stopped, that a close arrived, that the code was 4001 rather than 1001, and that it no longer believes itself connected.
 
 ### SUB-15: A skip run counts back-pressure only, and a mark of "never heard from" is not a tick `[fatal][silent]`
