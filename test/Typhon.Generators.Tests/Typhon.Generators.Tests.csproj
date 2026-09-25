@@ -18,6 +18,8 @@
   <ItemGroup>
     <!-- Reference the generator as a normal assembly reference so tests can instantiate the generator type directly. -->
     <ProjectReference Include="..\..\src\Typhon.Generators\Typhon.Generators.csproj" />
+    <!-- The real replication attributes and CodecKind (engine-free), so ReplicationGeneratorTests read what an application writes. -->
+    <ProjectReference Include="..\..\src\Typhon.Protocol\Typhon.Protocol.csproj" />
   </ItemGroup>
 
 </Project>

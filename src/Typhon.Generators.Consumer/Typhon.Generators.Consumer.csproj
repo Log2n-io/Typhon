@@ -19,7 +19,7 @@
     The CONSUMER-facing generator, shipped inside the `Typhon` package (#427).
 
     Single source of truth: ArchetypeAccessorGenerator lives in Typhon.Generators (used by the engine's own
-    build); this project links ONLY that one file so the packaged analyzer assembly contains nothing else.
+    build); this project links ONLY that file and ReplicationGenerator so the packaged analyzer assembly contains nothing else.
     The engine-only generators (SourceLocationGenerator, TraceEventGenerator) are deliberately excluded —
     TraceEventGenerator emits its attribute definitions via RegisterPostInitializationOutput, which runs before
     the compilation exists and therefore cannot be gated by assembly name; bundling it would leak engine-internal
@@ -27,6 +27,8 @@
   -->
   <ItemGroup>
     <Compile Include="..\Typhon.Generators\ArchetypeAccessorGenerator.cs" Link="ArchetypeAccessorGenerator.cs" />
+    <!-- Replication by attributes (design/Subscriptions/11 § 5): consumer-facing too — an application's [Replicated] archetypes and [ReplicatedMessage] types. -->
+    <Compile Include="..\Typhon.Generators\ReplicationGenerator.cs" Link="ReplicationGenerator.cs" />
   </ItemGroup>
 
 </Project>

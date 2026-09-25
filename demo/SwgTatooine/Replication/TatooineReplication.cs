@@ -57,7 +57,7 @@ public static class TatooineReplication
     /// It sizes the motion codec: the teleport threshold is what separates "it moved" from "it was put somewhere else", and the velocity width is derived from
     /// it together with the tick period. Declaring it too high wastes a bit per segment; too low turns a sprint into a teleport.
     /// </remarks>
-    private const double MaxSpeedMps = 12.0;
+    internal const double MaxSpeedMps = 12.0;
 
     private static SubscriptionsCommands _pushCommands;
 
@@ -97,35 +97,15 @@ public static class TatooineReplication
 
         subs.Sessions.Kinds(GodKind, PlayerKind);
 
-        subs.Archetype<Creature>(a => a
-            .Motion(Creature.Bounds, m => m.Tolerance(0.05).Teleport(MaxSpeedMps))
-            .OnEnter(Creature.Ai, x => x.AggroRadius, Codec.F16, name: "aggro")
-            .Field(Creature.Ai, x => x.Mode, Codec.U8, name: "mode")
-            .Fraction(Creature.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals"));
-
-        subs.Archetype<CityNpc>(a => a
-            .Motion(CityNpc.Bounds, m => m.Tolerance(0.05).Teleport(MaxSpeedMps))
-            .Field(CityNpc.Ai, x => x.Mode, Codec.U8, name: "mode"));
-
-        // Everyone sees a player's health as an 8-bit bar; the player alone sees the exact number and its mission waypoint, in SELF (11 § 2) — SWG's own
-        // HAM display and quest marker.
-        subs.Archetype<Player>(a => a
-            .Motion(Player.Bounds, m => m.Teleport(MaxSpeedMps))
-            .Field(Player.State, s => s.Activity, Codec.U8, name: "activity")
-            .Fraction(Player.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals")
-            .Owner(o => o
-                .Field(Player.Vitals, v => v.Health, Codec.VarUInt, name: "health")
-                .Field(Player.State, s => s.MissionX, Codec.F32, name: "missionX", group: "mission")
-                .Field(Player.State, s => s.MissionZ, Codec.F32, name: "missionZ", group: "mission")));
-
-        subs.Archetype<CreatureLair>(a => a
-            .Position(CreatureLair.Bounds)
-            .OnEnter(CreatureLair.Spawner, l => l.CreatureTemplate, Codec.U16, name: "template"));
-
-        subs.Archetype<WorldObject>(a => a
-            .Position(WorldObject.Bounds)
-            .OnEnter(WorldObject.Struct, s => s.Kind, Codec.U8, name: "kind")
-            .OnEnter(WorldObject.Struct, s => s.OwnerRegion, Codec.I16, name: "region"));
+        // What each archetype replicates is declared on the data — [Replicated] on the archetype, [Motion] / [Position] on its placement, [Replicate],
+        // [OnEnter], [Fraction] and [Owner] on its components' fields (Ecs/Archetypes.cs, Ecs/Components.cs; design/Subscriptions/11 § 5). Everyone sees a
+        // player's health as an 8-bit bar; the player alone sees the exact number and its mission waypoint, in SELF (11 § 2) — SWG's own HAM display and
+        // quest marker. A builder call, subs.Archetype<T>(a => …), would replace an archetype's attributes for a deployment that wants otherwise.
+        subs.Archetype<Creature>();
+        subs.Archetype<CityNpc>();
+        subs.Archetype<Player>();
+        subs.Archetype<CreatureLair>();
+        subs.Archetype<WorldObject>();
 
         // The god camera through a World observer, the players through a disc with no band: the anchor's slack is its hysteresis for observer motion
         // (push-model.md § 4.5).

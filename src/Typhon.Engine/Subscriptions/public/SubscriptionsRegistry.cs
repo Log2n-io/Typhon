@@ -115,6 +115,41 @@ public sealed class SubscriptionsRegistry
         => DeclareArchetype<TArchetype>(configure, isStatic: true);
 
     /// <summary>
+    /// Declares an archetype from its replication attributes (design/Subscriptions/11 § 5): <c>[Replicated]</c> on the archetype, <c>[Motion]</c> or
+    /// <c>[Position]</c> on a <c>Comp&lt;T&gt;</c> field, <c>[Replicate]</c>, <c>[OnEnter]</c>, <c>[Owner]</c>, <c>[Fraction]</c>, <c>[Heading]</c> on its
+    /// components' fields. The source generator compiles them into the builder calls <see cref="Archetype{TArchetype}(Action{ArchetypeProjectionBuilder})"/>
+    /// would take; calling that overload instead replaces the attributes entirely, which is how a deployment overrides them.
+    /// </summary>
+    /// <typeparam name="TArchetype">
+    /// A <c>[Replicated]</c> archetype: the generator implements <see cref="IReplicatedArchetype"/> on it, so an archetype without the attribute — or an
+    /// assembly the generator does not run in — does not compile here.
+    /// </typeparam>
+    /// <returns>This registry.</returns>
+    public SubscriptionsRegistry Archetype<TArchetype>() where TArchetype : Archetype<TArchetype>, IReplicatedArchetype
+        => DeclareArchetype<TArchetype>(static a => TArchetype.DeclareReplication(a), TArchetype.ReplicatedStatic);
+
+    /// <summary>The fields a command or event type's attributes declare, or <see langword="null"/> — read once per declaration, without reflection.</summary>
+    /// <exception cref="InvalidOperationException">
+    /// The type carries <c>[ReplicatedMessage]</c> and the generator never ran on its assembly: its attributes would silently be ignored.
+    /// </exception>
+    private static MessageFieldDeclaration[] AttributedFieldsOf<T>() where T : unmanaged
+    {
+        if (default(T) is IReplicatedMessage message)
+        {
+            return message.ReplicatedFields();
+        }
+
+        if (typeof(T).IsDefined(typeof(ReplicatedMessageAttribute), inherit: false))
+        {
+            throw new InvalidOperationException(
+                $"'{typeof(T).Name}' is [ReplicatedMessage] but does not implement IReplicatedMessage: the Typhon source generator did not run on its " +
+                "assembly, so its codec attributes would be ignored. Reference the generator (Typhon.Generators.Consumer) from that project.");
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Declares a named set of observers a session can be bound to.
     /// </summary>
     /// <param name="name">The profile's name.</param>
@@ -203,7 +238,7 @@ public sealed class SubscriptionsRegistry
             }
         }
 
-        var declaration = new EventDeclaration(typeof(T), _events.Count, System.Runtime.CompilerServices.Unsafe.SizeOf<T>());
+        var declaration = new EventDeclaration(typeof(T), _events.Count, System.Runtime.CompilerServices.Unsafe.SizeOf<T>(), AttributedFieldsOf<T>());
         configure(new EventBuilder<T>(declaration));
 
         // Here, and not at Start: a field defaults to its raw type, and the types that have no default — a 64-bit integer, a double — can only be answered by
@@ -233,7 +268,7 @@ public sealed class SubscriptionsRegistry
             }
         }
 
-        var declaration = new CommandDeclaration(typeof(T), _commands.Count);
+        var declaration = new CommandDeclaration(typeof(T), _commands.Count, AttributedFieldsOf<T>());
         configure(new CommandBuilder<T>(declaration));
 
         // Here, and not at Start: a field defaults to its raw type, and the types that have no default — a 64-bit integer, a double — can only be answered by

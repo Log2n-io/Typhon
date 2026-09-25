@@ -204,13 +204,17 @@ public sealed class EventDeclaration
     private ProjectedField[] _fields;
     private Dictionary<string, Type> _enumTypes;
 
-    internal EventDeclaration(Type eventType, int index, int payloadSize)
+    internal EventDeclaration(Type eventType, int index, int payloadSize, MessageFieldDeclaration[] attributed = null)
     {
         EventType = eventType;
         Name = eventType.Name;
         Index = index;
         PayloadSize = payloadSize;
+        Attributed = attributed;
     }
+
+    /// <summary>The fields the event's attributes declare (<see cref="IReplicatedMessage"/>), or <see langword="null"/>.</summary>
+    internal MessageFieldDeclaration[] Attributed { get; }
 
     /// <summary>The event struct's size in memory, which an emission copies.</summary>
     internal int PayloadSize { get; }
@@ -306,5 +310,6 @@ public sealed class EventDeclaration
     /// <summary>Materializes the field set at the end of the declaring call, so a field with no default codec is refused where it was written.</summary>
     internal void CompleteDeclaration() => Complete();
 
-    private ProjectedField[] Complete() => _fields ??= MessageContract.Complete(EventType, "Event", Name, _overrides, _ignored, out _enumTypes);
+    private ProjectedField[] Complete()
+        => _fields ??= MessageContract.Complete(EventType, "Event", Name, _overrides, _ignored, Attributed, out _enumTypes);
 }

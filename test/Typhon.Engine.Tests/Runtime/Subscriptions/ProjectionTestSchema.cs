@@ -1,3 +1,4 @@
+using Typhon.Protocol;
 using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Numerics;
@@ -57,16 +58,20 @@ struct ProjBounds3
 struct ProjAi
 {
     [Field]
+    [OnEnter(CodecKind.U8, Name = "template")]
     public byte Template;
 
     [Field]
+    [Replicate(CodecKind.Bits, Bits = 3, Name = "mode")]
     public ProjAiMode Mode;
 
     /// <summary>A flag, stored as a byte rather than a <c>bool</c>: a reflection-measured <c>bool</c> offset is refused outright (SCHEMA-07).</summary>
     [Field]
+    [Replicate(CodecKind.Bool, Name = "alerted")]
     public byte Alerted;
 
     [Field]
+    [Replicate(CodecKind.U16, Name = "level", Group = "vitals")]
     public ushort Level;
 
     /// <summary>Written every tick by the simulation and replicated by nobody — the noise a projection exists to filter.</summary>
@@ -79,6 +84,7 @@ struct ProjAi
 struct ProjVitals
 {
     [Field]
+    [Fraction(nameof(MaxHealth), Bits = 8, Name = "hp", Group = "vitals")]
     public int Health;
 
     [Field]
@@ -90,23 +96,32 @@ struct ProjVitals
 struct ProjWallet
 {
     [Field]
+    [Owner(CodecKind.Varu, Name = "credits", Saturate = true)]
     public long Credits;
 
     [Field]
+    [Owner(CodecKind.Varu, Name = "items", Group = "bag")]
     public int ItemCount;
 }
 
+// ProjCreature and ProjPlayer are also declared by their attributes (design/Subscriptions/11 § 5): subs.Archetype<T>() must compile to exactly what
+// DeclareCreature and DeclarePlayer write by hand (ReplicationAttributeTests). ProjRock shares ProjAi but names its Template "kind" — per-archetype variation
+// is what the builder is for, so it stays on the builder.
 [Archetype]
+[Replicated]
 partial class ProjCreature : Archetype<ProjCreature>
 {
+    [Motion(ToleranceM = 0.05, TeleportMps = ProjectionTestSchema.MaxSpeedMps)]
     public static readonly Comp<ProjBounds> Bounds = Register<ProjBounds>();
     public static readonly Comp<ProjAi> Ai = Register<ProjAi>();
     public static readonly Comp<ProjVitals> Vitals = Register<ProjVitals>();
 }
 
 [Archetype]
+[Replicated]
 partial class ProjPlayer : Archetype<ProjPlayer>
 {
+    [Motion(TeleportMps = ProjectionTestSchema.MaxSpeedMps)]
     public static readonly Comp<ProjBounds> Bounds = Register<ProjBounds>();
     public static readonly Comp<ProjVitals> Vitals = Register<ProjVitals>();
     public static readonly Comp<ProjWallet> Wallet = Register<ProjWallet>();

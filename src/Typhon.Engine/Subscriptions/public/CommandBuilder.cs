@@ -192,12 +192,16 @@ public sealed class CommandDeclaration
     private ProjectedField[] _fields;
     private Dictionary<string, Type> _enumTypes;
 
-    internal CommandDeclaration(Type commandType, int index)
+    internal CommandDeclaration(Type commandType, int index, MessageFieldDeclaration[] attributed = null)
     {
         CommandType = commandType;
         Name = commandType.Name;
         Index = index;
+        Attributed = attributed;
     }
+
+    /// <summary>The fields the command's attributes declare (<see cref="IReplicatedMessage"/>), or <see langword="null"/>.</summary>
+    internal MessageFieldDeclaration[] Attributed { get; }
 
     /// <summary>The command's CLR type.</summary>
     public Type CommandType { get; }
@@ -303,7 +307,8 @@ public sealed class CommandDeclaration
     /// <summary>Materializes the field set at the end of the declaring call, so a field with no default codec is refused where it was written.</summary>
     internal void CompleteDeclaration() => Complete();
 
-    private ProjectedField[] Complete() => _fields ??= MessageContract.Complete(CommandType, "Command", Name, _overrides, _ignored, out _enumTypes);
+    private ProjectedField[] Complete()
+        => _fields ??= MessageContract.Complete(CommandType, "Command", Name, _overrides, _ignored, Attributed, out _enumTypes);
 }
 
 /// <summary>
@@ -403,11 +408,15 @@ internal static class MessageContract
     /// <param name="name">The declaration's name.</param>
     /// <param name="declared">The overrides, in declaration order.</param>
     /// <param name="ignored">The source fields kept off the wire.</param>
+    /// <param name="attributed">
+    /// The fields the type's attributes declare (design/Subscriptions/11 § 5), or <see langword="null"/>: between the builder's overrides, which win, and
+    /// the type defaults, which they replace.
+    /// </param>
     /// <param name="enumTypes">Filled with the CLR enum behind each defaulted enum field, keyed by wire name; empty when there is none.</param>
     /// <returns>The complete set.</returns>
     /// <exception cref="InvalidOperationException">A field has no default codec and the declaration neither gave it one nor ignored it.</exception>
     internal static ProjectedField[] Complete(Type messageType, string what, string name, List<ProjectedField> declared, HashSet<string> ignored,
-        out Dictionary<string, Type> enumTypes)
+        MessageFieldDeclaration[] attributed, out Dictionary<string, Type> enumTypes)
     {
         enumTypes = new Dictionary<string, Type>(StringComparer.Ordinal);
 
@@ -437,28 +446,61 @@ internal static class MessageContract
         foreach (var source in remaining)
         {
             var member = members[source];
-            var codec = DefaultCodec(member.FieldType, out var enumType);
-            if (!codec.IsDeclared)
+            var wire = source;
+            Codec codec;
+            Type enumType = null;
+            if (TryAttributed(attributed, source, out var declaration))
             {
-                throw Undeclarable(what, name, messageType, member);
+                // The attribute's codec, through the same factory a builder call uses: an invalid one throws here, naming the field.
+                try
+                {
+                    codec = Codec.Declared(member.FieldType, declaration.Kind, declaration.Bits, declaration.Min, declaration.Max, declaration.Scale,
+                        declaration.MaxBytes);
+                    if (declaration.Saturate)
+                    {
+                        codec = codec.Saturate();
+                    }
+                }
+                catch (Exception e) when (e is ArgumentException or NotSupportedException)
+                {
+                    throw new InvalidOperationException($"{what} '{name}' field '{messageType.Name}.{source}': its attribute declares {e.Message}", e);
+                }
+
+                // The same narrowing rule a builder Field call enforces: no 64-bit integer reaches the wire unless the declaration clamps it.
+                if ((member.FieldType == typeof(long) || member.FieldType == typeof(ulong)) && !codec.Saturating)
+                {
+                    throw new InvalidOperationException(
+                        $"{what} '{name}' field '{messageType.Name}.{source}' reads a 64-bit integer, and no 64-bit integer reaches the wire: set " +
+                        "Saturate = true on its attribute, so the clamp is a decision rather than a truncation nobody sees.");
+                }
+
+                wire = string.IsNullOrEmpty(declaration.Name) ? source : declaration.Name;
+            }
+            else
+            {
+                codec = DefaultCodec(member.FieldType, out enumType);
+                if (!codec.IsDeclared)
+                {
+                    throw Undeclarable(what, name, messageType, member);
+                }
             }
 
-            SubscriptionsNames.RefuseReservedName(source, "A field");
-            if (!wireNames.Add(source))
+            SubscriptionsNames.RefuseReservedName(wire, "A field");
+            if (!wireNames.Add(wire))
             {
                 throw new InvalidOperationException(
-                    $"{what} '{name}' renames a field to '{source}', which is already the name of '{messageType.Name}.{source}'. Two fields cannot share a " +
-                    "wire name; rename the override, or ignore the field it collides with.");
+                    $"{what} '{name}' renames a field to '{wire}', which is already the name of another of '{messageType.Name}''s fields. Two fields cannot " +
+                    "share a wire name; rename one, or ignore the field it collides with.");
             }
 
             if (enumType != null)
             {
-                enumTypes[source] = enumType;
+                enumTypes[wire] = enumType;
             }
 
             complete.Add(new ProjectedField
             {
-                Name = source,
+                Name = wire,
                 ComponentName = messageType.Name,
                 SourceFieldName = source,
                 Codec = codec,
@@ -466,6 +508,21 @@ internal static class MessageContract
         }
 
         return complete.ToArray();
+    }
+
+    private static bool TryAttributed(MessageFieldDeclaration[] attributed, string source, out MessageFieldDeclaration declaration)
+    {
+        foreach (var candidate in attributed ?? [])
+        {
+            if (string.Equals(candidate.Field, source, StringComparison.Ordinal))
+            {
+                declaration = candidate;
+                return true;
+            }
+        }
+
+        declaration = default;
+        return false;
     }
 
     /// <summary>

@@ -80,6 +80,11 @@ public sealed partial class TatooineSim
         TatooineReplication.Scheduler = _runtime.Scheduler;
         _runtime.Start();
 
+        // The catalog every client negotiates against, by its hash: two builds that print the same one serve the same wire (AC-25 compares the attribute
+        // declarations against the builder ones this way).
+        var catalog = _runtime.SubscriptionsCatalogJson;
+        Console.WriteLine($"  catalog {Typhon.Protocol.CatalogSerializer.HashBytes(catalog.Span):X16}, {catalog.Length} B");
+
         try
         {
             await TatooineHost.ServeAsync(_runtime, port, clientRoot).ConfigureAwait(false);
