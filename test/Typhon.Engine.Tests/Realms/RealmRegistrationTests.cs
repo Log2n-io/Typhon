@@ -81,7 +81,10 @@ class RealmRegistrationTests : TestBase<RealmRegistrationTests>
         Assert.That(table.Get(2).Grid.Realm, Is.EqualTo(new RealmId(2)));
         Assert.That(table.Get(2).Config.WhenUnobserved, Is.EqualTo(RealmUnobserved.Sleep));
         Assert.That(table.IsRegistered(1), Is.False);
-        Assert.Throws<InvalidOperationException>(() => dbe.Realms.Register(new RealmId(1), Sleeping(Interior())), "after InitializeArchetypes");
+        // Realms D5: a running engine registers at once; a duplicate is still refused.
+        dbe.Realms.Register(new RealmId(1), Sleeping(Interior()));
+        Assert.That(table.IsRegistered(1), Is.True, "run-time registration (Realms D5)");
+        Assert.Throws<InvalidOperationException>(() => dbe.Realms.Register(new RealmId(2), Sleeping(Interior())), "a duplicate");
     }
 
     [Test]

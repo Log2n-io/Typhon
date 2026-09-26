@@ -96,6 +96,9 @@ public partial class DatabaseEngine
         // Cluster tick fence: serialize dirty cluster-backed entity data to WAL
         WriteClusterTickFence(tickNumber, ref highestLSN, changeSet);
 
+        // Realms D5: a Closing realm this fence emptied goes now.
+        RemoveEmptyClosingRealms();
+
         if (highestLSN > 0)
         {
             Interlocked.Exchange(ref _lastTickFenceLSN, highestLSN);

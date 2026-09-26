@@ -991,7 +991,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         foreach (var id in ids)
         {
             var row = RowOf(id, _realms.Get(id).GridConfig);
-            var chunkId = SystemCrud.Create(_realmsTable, ref row, EpochManager, cs);
+            int chunkId;
+            if (_retiredRealmRows != null && _retiredRealmRows.Remove(id, out var retired))
+            {
+                // A retired id registered again (Realms D5): its row, next incarnation.
+                row.Generation = retired.Row.Generation + 1;
+                chunkId = retired.ChunkId;
+                SystemCrud.Update(_realmsTable, chunkId, ref row, EpochManager, cs);
+            }
+            else
+            {
+                chunkId = SystemCrud.Create(_realmsTable, ref row, EpochManager, cs);
+            }
+
             _persistedRealms[id] = (chunkId, row);
         }
 
@@ -1066,6 +1078,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             throw new InvalidOperationException(
                 $"Realm {realm} is not registered: an entity of '{archetypeName}' cannot be placed in it. Register the realm (Realms.Register) first.");
+        }
+
+        if (r.Closing)
+        {
+            throw new InvalidOperationException($"Realm {realm} is closing (unregistered): an entity of '{archetypeName}' cannot be placed in it.");
         }
 
         if (!r.IsCompatible(archetypeId))
@@ -2653,12 +2670,24 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             {
                 if (realmSeg.IsChunkAllocated(chunkId) && SystemCrud.Read(_realmsTable, chunkId, out RealmR1 realm, EpochManager))
                 {
+                    // A retired row names no realm (Realms D5): its id is free, and a later registration reuses the row.
+                    if (realm.State == RealmR1.StateRetired && realm.Id > 0 && realm.Id < RealmId.MaxCount)
+                    {
+                        (_retiredRealmRows ??= [])[(ushort)realm.Id] = (chunkId, realm);
+                        continue;
+                    }
+
                     // Realm 0 keeps its own record, and None (0xFFFF) is no realm: an id outside [1, 65 535) or a duplicate is a corrupt catalog, which
                     // would otherwise silently give a realm another's identity.
                     if (realm.Id <= 0 || realm.Id >= RealmId.MaxCount || !_persistedRealms.TryAdd((ushort)realm.Id, (chunkId, realm)))
                     {
                         throw new InvalidOperationException(
                             $"The realm catalog is corrupt: row {chunkId} names realm {realm.Id}, which is out of range or already catalogued.");
+                    }
+
+                    if (realm.State == RealmR1.StateClosing)
+                    {
+                        (_closingRealmsAtOpen ??= []).Add((ushort)realm.Id);
                     }
                 }
             }
@@ -4282,6 +4311,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // EntityMaps, and the page cache are online — the correct place, unlike the never-wired in-ctor WalRecovery(dbe:null)
         // that runs before component metadata exists (TXW-1). No-op on a clean reopen (the WAL window is empty).
         RunWalV2Recovery();
+
+        // Realms D5: a realm closing when the engine last stopped is retired now if recovery left it empty, and stays closing otherwise (RLM-06).
+        ResolveClosingRealmsAtOpen();
 
         // Recovery is now complete — restore the configured CRC verification mode (deferred to RecoveryOnly at open on the crash path, see
         // InitializeCheckpointManager) so normal operation gets on-load corruption detection again.

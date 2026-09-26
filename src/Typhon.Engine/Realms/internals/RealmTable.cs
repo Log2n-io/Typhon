@@ -17,6 +17,9 @@ internal sealed class Realm
     /// <summary>The registered configuration: the grid's identity and the policy when unobserved. Null only for a table built in a unit test.</summary>
     internal readonly RealmConfig Config;
 
+    /// <summary>Unregistered and waiting to be empty (Realms D5): entries refused, removed at the first fence that finds it holding no cluster.</summary>
+    internal volatile bool Closing;
+
     internal Realm(RealmId id, SpatialGrid grid, RealmConfig config)
     {
         ArgumentNullException.ThrowIfNull(grid);
@@ -108,6 +111,65 @@ internal sealed class RealmTable
     /// <summary>Registered realms that are not runnable this tick (<see cref="RealmRunState.Dormant"/>). Zero ⇒ nothing is filtered anywhere (RLM-04).</summary>
     internal int NonRunnableCount { get; private set; }
 
+    /// <summary>Registered realms that are Closing (Realms D5): the fence checks them for removal only while this is non-zero.</summary>
+    internal int ClosingCount { get; private set; }
+
+    /// <summary>Marks realm <paramref name="id"/> Closing: entries refused from now on, removal once empty. Idempotent.</summary>
+    internal void MarkClosing(ushort id)
+    {
+        var realm = Get(id);
+        lock (_writeLock)
+        {
+            if (realm.Closing)
+            {
+                return;
+            }
+
+            realm.Closing = true;
+            _state[id] = RealmRunState.Closing;
+            _divisor[id] = 1;
+            ClosingCount++;
+            PolicyEpoch++;
+        }
+    }
+
+    /// <summary>
+    /// Removes realm <paramref name="id"/> from the table (Realms D5). The caller has dropped every archetype's state for it. The dense list is rebuilt
+    /// copy-on-write: a reader's snapshot never holds a null (the count shrinks first, so a reader pairing the new count with the old array misses at
+    /// most the last entry for that one read).
+    /// </summary>
+    internal void Remove(ushort id)
+    {
+        var realm = Get(id);
+        lock (_writeLock)
+        {
+            var old = _registered;
+            var grown = new Realm[Math.Max(4, old.Length)];
+            var n = 0;
+            for (var i = 0; i < _registeredCount; i++)
+            {
+                if (!ReferenceEquals(old[i], realm))
+                {
+                    grown[n++] = old[i];
+                }
+            }
+
+            if (realm.Closing)
+            {
+                ClosingCount--;
+            }
+
+            Volatile.Write(ref _byId[id], null);
+            Volatile.Write(ref _registeredCount, n);
+            Volatile.Write(ref _registered, grown);
+            _state[id] = RealmRunState.Dormant;
+            _observers[id] = 0;
+            _unobservedTicks[id] = 0;
+            _wakeRequested[id] = 0;
+            PolicyEpoch++;
+        }
+    }
+
     /// <summary>Runnable realms simulated at a divisor above 1 this tick. Zero ⇒ no system strides (RLM-05).</summary>
     internal int DividedCount { get; private set; }
 
@@ -171,6 +233,11 @@ internal sealed class RealmTable
         {
             var id = realm.Id.Value;
             var config = realm.Config;
+            if (realm.Closing)
+            {
+                continue;   // Closing is final until removal: runnable, full rate, for its remaining entities
+            }
+
             RealmRunState next;
             ushort divisor;
             if (Volatile.Read(ref _observers[id]) > 0)
@@ -311,7 +378,9 @@ internal sealed class RealmTable
             : $"Realm {id} is out of range: this engine is configured for {_byId.Length} realm(s).");
 
     /// <summary>Registers realm <paramref name="id"/> over <paramref name="grid"/>. Refuses an id out of range and one already registered.</summary>
-    internal Realm Register(RealmId id, SpatialGrid grid, RealmConfig config = null)
+    /// <remarks><c>beforePublish</c> runs on the complete realm before any reader can find it — a run-time registration marks its incompatible archetypes
+    /// there, so no entity enters before the marks exist.</remarks>
+    internal Realm Register(RealmId id, SpatialGrid grid, RealmConfig config = null, Action<Realm> beforePublish = null)
     {
         if (id.Value >= _byId.Length)
         {
@@ -332,6 +401,7 @@ internal sealed class RealmTable
             // grid already belongs to a realm.
             grid.BindToRealm(id, TierVersionCounter);
             realm = new Realm(id, grid, config);
+            beforePublish?.Invoke(realm);
 
             var registered = _registered;
             if (_registeredCount == registered.Length)

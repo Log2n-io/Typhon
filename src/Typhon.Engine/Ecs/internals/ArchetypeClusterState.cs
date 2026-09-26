@@ -3132,6 +3132,11 @@ internal sealed unsafe partial class ArchetypeClusterState
             throw new InvalidOperationException($"Realm {realm} is not registered: an entity of archetype {ArchetypeId} cannot enter it.");
         }
 
+        if (r.Closing)
+        {
+            throw new InvalidOperationException($"Realm {realm} is closing (unregistered): no entity may enter it.");
+        }
+
         if (!r.IsCompatible(ArchetypeId))
         {
             throw new InvalidOperationException($"Realm {realm} cannot hold archetype {ArchetypeId}: {r.IncompatibilityOf(ArchetypeId)}");
@@ -3139,7 +3144,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>True when an entity of this archetype may be in realm <paramref name="realm"/>: registered, and able to hold it.</summary>
-    internal bool IsValidRealmForEntity(ushort realm) => _realmTable?.TryGet(realm) is { } r && r.IsCompatible(ArchetypeId);
+    /// <remarks>A Closing realm is not: an entity already in it stays (the fence compares against the cluster's realm first), none may enter.</remarks>
+    internal bool IsValidRealmForEntity(ushort realm) => _realmTable?.TryGet(realm) is { Closing: false } r && r.IsCompatible(ArchetypeId);
 
     /// <summary>The grid of registered realm <paramref name="realm"/>.</summary>
     internal SpatialGrid GridOfRealm(ushort realm) => _realmTable.Get(realm).Grid;
@@ -3328,13 +3334,81 @@ internal sealed unsafe partial class ArchetypeClusterState
         }
     }
 
-    /// <summary>The realms this archetype has spatial state in, in creation order. A consistent snapshot: entries are only appended.</summary>
+    /// <summary>The realms this archetype has spatial state in, in creation order. A snapshot: appended in place, rebuilt copy-on-write when a removed
+    /// realm's state is dropped (Realms D5, fence-serial).</summary>
     internal ReadOnlySpan<RealmArchetypeSpatial> PresentRealmSpatial
     {
         get
         {
             var count = Volatile.Read(ref _presentRealmCount);
             return Volatile.Read(ref _presentRealmSpatial).AsSpan(0, count);
+        }
+    }
+
+    /// <summary>
+    /// Grows the per-realm table to hold ids below <paramref name="count"/> (Realms D5, a run-time registration). Before the realm is published, so a
+    /// reader that finds the realm finds its slot; the old array stays valid for readers that loaded it.
+    /// </summary>
+    internal void EnsureRealmSpatialCapacity(int count)
+    {
+        if (RealmSpatial == null || RealmSpatial.Length >= count)
+        {
+            return;
+        }
+
+        ref var ctx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Enter(ref ctx);
+        try
+        {
+            var current = RealmSpatial;
+            if (current.Length >= count)
+            {
+                return;
+            }
+
+            var grown = new RealmArchetypeSpatial[Math.Max(count, current.Length * 2)];
+            current.CopyTo(grown, 0);
+            Volatile.Write(ref RealmSpatial, grown);
+        }
+        finally
+        {
+            _finalizeLock.Exit();
+        }
+    }
+
+    /// <summary>
+    /// Forgets this archetype's state in realm <paramref name="realm"/> (Realms D5, a removed realm). Fence-serial or at open; the realm holds no cluster
+    /// of this archetype. The dense present list is rebuilt copy-on-write.
+    /// </summary>
+    internal void DropRealmSpatial(ushort realm)
+    {
+        if (RealmSpatial == null || realm >= RealmSpatial.Length || RealmSpatial[realm] == null)
+        {
+            return;
+        }
+
+        ref var ctx = ref Unsafe.NullRef<WaitContext>();
+        _finalizeLock.Enter(ref ctx);
+        try
+        {
+            var dropped = RealmSpatial[realm];
+            var present = new RealmArchetypeSpatial[Math.Max(4, _presentRealmSpatial.Length)];
+            var n = 0;
+            for (var i = 0; i < _presentRealmCount; i++)
+            {
+                if (!ReferenceEquals(_presentRealmSpatial[i], dropped))
+                {
+                    present[n++] = _presentRealmSpatial[i];
+                }
+            }
+
+            Volatile.Write(ref RealmSpatial[realm], null);
+            Volatile.Write(ref _presentRealmCount, n);
+            Volatile.Write(ref _presentRealmSpatial, present);
+        }
+        finally
+        {
+            _finalizeLock.Exit();
         }
     }
 

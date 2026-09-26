@@ -52,4 +52,17 @@ public struct RealmR1
 
     /// <summary>The cell-crossing hysteresis band, as a fraction of the cell (part of CC-02's contract, hence of identity).</summary>
     public float MigrationHysteresisRatio;
+
+    /// <summary>Lifecycle state (Realms D5): <see cref="StateLive"/>, <see cref="StateClosing"/> (unregistered, not yet proven empty) or
+    /// <see cref="StateRetired"/> (empty at an open; the id is free and a later registration reuses this row).</summary>
+    public int State;
+
+    /// <summary>A registered realm.</summary>
+    public const int StateLive = 0;
+
+    /// <summary>Unregistered; reopened as Closing until an open finds it empty after recovery.</summary>
+    public const int StateClosing = 1;
+
+    /// <summary>Retired: its id may be registered again.</summary>
+    public const int StateRetired = 2;
 }

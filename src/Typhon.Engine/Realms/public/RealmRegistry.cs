@@ -30,9 +30,9 @@ public sealed class RealmRegistry
         ArgumentNullException.ThrowIfNull(config);
         if (_engine.RealmTable != null)
         {
-            throw new InvalidOperationException(
-                $"Realm {id.Value} registered after InitializeArchetypes. Realms are registered at open for now; run-time registration comes with the realm "
-                + "lifecycle (instances).");
+            // Realms D5: a running engine registers at once — grid built, per-archetype tables grown, catalog row written, then published.
+            _engine.RegisterRealmAtRuntime(id, config);
+            return;
         }
 
         if (id.Value >= _engine.ConfiguredMaxRealms)
@@ -72,6 +72,27 @@ public sealed class RealmRegistry
         var table = OpenTable();
         _ = table.Get(id.Value);
         table.RequestWake(id.Value);
+    }
+
+    /// <summary>
+    /// Unregisters realm <paramref name="id"/> on a running engine (Realms D5): it is <see cref="RealmRunState.Closing"/> from now on — no entity may
+    /// enter it — and is removed at the first fence that finds it empty. Empty it with <see cref="DestroyContents"/>. Its id may be registered again only
+    /// after a later open (RLM-06). The primary realm cannot be unregistered.
+    /// </summary>
+    public void Unregister(RealmId id)
+    {
+        _ = OpenTable();
+        _engine.UnregisterRealm(id);
+    }
+
+    /// <summary>
+    /// Destroys every entity in realm <paramref name="id"/> through <paramref name="tx"/>, on the ordinary destroy path. Returns how many. Commit the
+    /// transaction; the next fence frees the realm's clusters (and removes a Closing realm once nothing is left).
+    /// </summary>
+    public int DestroyContents(RealmId id, Transaction tx)
+    {
+        _ = OpenTable();
+        return _engine.DestroyRealmContents(id, tx);
     }
 
     /// <summary>What realm <paramref name="id"/> is doing this tick, as its policy decided at tick start.</summary>

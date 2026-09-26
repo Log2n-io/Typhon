@@ -2697,6 +2697,9 @@ public sealed partial class TyphonRuntime : IDisposable
         _subscriptionsContext.NoteFence();
         scheduler.DispatchDeferredTracks();
 
+        // Realms D5: a Closing realm this fence emptied goes now — still inside EW-01's window, after every fence phase.
+        Engine.RemoveEmptyClosingRealms();
+
         ctx.HighestArchetypeLsn = _fenceFinalizeExec.HighestLsn;
         long overall = Math.Max(ctx.HighestTableLsn, ctx.HighestArchetypeLsn);
         if (overall > 0)

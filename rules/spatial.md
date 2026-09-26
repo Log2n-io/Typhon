@@ -2369,3 +2369,20 @@
     Full and observed realms every run; per-realm delta time)
   on_violation: a planet's creatures integrated twice in some windows and never in others, or at the wrong delta time — visible as jumps
 
+### RLM-06: A realm leaves only empty, and its id returns only after an open proves it empty `[fatal][silent]`
+  invariant a run-time Register grows every archetype's per-realm table and marks the archetypes the realm cannot hold BEFORE publishing it, then
+    writes its catalog row synchronously (RLM-01) — no entity can enter a half-built realm
+  invariant Unregister marks the catalog row Closing synchronously, then the realm: from then on no entity may enter it (spawn and teleport throw; a
+    raw key write naming it is reverted at the fence, D-2); entities already in it stay and still answer its queries
+  invariant the first fence that finds a Closing realm holding no cluster removes it: every archetype's state for it, then its table slot
+  invariant an id unregistered this session is not registrable again in it; an open whose recovery leaves a Closing realm empty retires its row (the
+    id is then free, and a registration reuses the row at the next generation); one that finds entities keeps it Closing
+  never remove a realm that holds a cluster, and never free its id on the strength of in-memory state alone: a crash before the destroys are
+    checkpointed leaves their entities in the data pages, and a realm id reused by then would receive them on replay
+  scope: DatabaseEngine.RegisterRealmAtRuntime, DatabaseEngine.UnregisterRealm, DatabaseEngine.RemoveEmptyClosingRealms,
+    DatabaseEngine.ResolveClosingRealmsAtOpen, RealmTable.MarkClosing, RealmTable.Remove, ArchetypeClusterState.EnsureRealmSpatialCapacity
+  verified: RealmLifecycleTests (a run-time realm reopens from the catalog; a closing realm refuses entries and keeps its entities; an emptied one is
+    removed with its state and its id quarantined until an open retires it; a crash after unregistering never resurrects it — skipping the
+    synchronous Closing mark, or the entry refusal, fails them, run by hand 2026-09-26)
+  on_violation: entities of a realm the application destroyed reappear in a new realm on the same id, or a realm vanishes with entities in it
+
