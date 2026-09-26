@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -147,12 +148,25 @@ internal static unsafe class ProjectionPass
         // A push-served archetype is projected only where pushed, and every slot projected here becomes one event the frame stage fans out.
         // The replication of the block's realm (R4.1): a block describes one cluster, and a cluster is in one realm from its claim to its drain. The hub
         // only ever pushes blocks of realms it serves.
-        var push = state.Push?.Hub?.For(block->Realm) ?? state.Push;
+        var realm = block->Realm;
+        var push = state.Push;
+        var hub = push?.Hub;
+        if (hub != null)
+        {
+            push = hub.For(realm);
+            if (push == null)
+            {
+                // Never listed (PrepareBlocks routes by realm): projecting it into another realm's replication would break SUB-28 and SUB-30 silently.
+                Debug.Assert(false, $"block of unserved realm {realm} was listed for projection");
+                return;
+            }
+        }
+
         var pushIndex = state.PushArchetypeIndex;
 
         // The frame of the block's realm (R4.2, SUB-30): a block describes one cluster, and a cluster is in one realm from its claim to its drain, so the
-        // frame is hoisted per block. A block of a realm replication does not serve is never pushed (PrepareBlocks); the fallback is realm 0's own.
-        var frame = push?.CodecsFor(block->Realm)?.ByPlan[pushIndex] ?? plan.Position?.Frame;
+        // frame is hoisted per block.
+        var frame = push?.CodecsFor(realm)?.ByPlan[pushIndex] ?? plan.Position?.Frame;
 
         // ── 1. Slots that stopped being occupied give their identities back ─────────────────────────────────────────────────────────────────────────────
         var released = 0;
@@ -319,7 +333,7 @@ internal static unsafe class ProjectionPass
                         // demand — initializes it. Deferring an entity by a tick is the only failure available here that neither allocates on a worker nor
                         // hands two entities one identity; it is counted so a lease that is chronically too small is visible rather than inferred.
                         state.NoteNetIdStarvation();
-                        push?.Hub.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                        hub?.Repush(pushIndex, block->ChunkId, 1UL << slot);
                         continue;
                     }
 
@@ -396,7 +410,7 @@ internal static unsafe class ProjectionPass
                 // the one push a developer cannot be asked to make, because nothing the application writes marks a stop.
                 if (push != null && motion.Enabled && MotionTracker.IsExtrapolating(in motion, hotBytes))
                 {
-                    push.Hub.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                    hub.Repush(pushIndex, block->ChunkId, 1UL << slot);
                 }
             }
             else if (position != null && initialize && layout.EnterPositionBytes > 0)

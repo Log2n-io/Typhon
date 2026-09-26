@@ -218,6 +218,11 @@ export class TyphonSource implements DataSource {
       onEvent: (event) => {
         this.onEvent(event);
       },
+      // The server drops the region it held on a realm change: the sender forgets it and the camera's goes out again.
+      onRealmChanged: () => {
+        this.region?.realmChanged();
+        this.sendRegion();
+      },
     });
     this.attack = plan.eventByName('Attack');
     this.commands = new CommandQueue({ plan });
@@ -329,11 +334,13 @@ export class TyphonSource implements DataSource {
     }
 
     const { x, z, radius } = pending;
-    this.region.setRegion(
-      [x - radius, z - radius, x + radius, z - radius, x + radius, z + radius, x - radius, z + radius],
-      this.options.altitudeM ?? radius,
-      this.options.budgetKiBps ?? 256,
-    );
+    const quad = [x - radius, z - radius, x + radius, z - radius, x + radius, z + radius, x - radius, z + radius];
+    // A deep realm takes a polyhedron: the quad as a box, radius deep on each side of the ground plane.
+    const vertices =
+      this.region.dims === 3
+        ? [-radius, radius].flatMap((y) => [0, 2, 4, 6].flatMap((i) => [quad[i], quad[i + 1], y]))
+        : quad;
+    this.region.setRegion(vertices, this.options.altitudeM ?? radius, this.options.budgetKiBps ?? 256);
   }
 
   private wireBytesPerSec(): number {

@@ -165,6 +165,11 @@ public sealed class RealmFrame : IEquatable<RealmFrame>
                 throw WireFormatException.Malformed("REALM(NONE) sets another flag");
             }
 
+            if (realmId != NoRealm || generation != 0)
+            {
+                throw WireFormatException.Malformed($"REALM(NONE) names realm {realmId} generation {generation}; NONE is {NoRealm}, generation 0");
+            }
+
             return null;
         }
 
@@ -279,6 +284,13 @@ public sealed class RealmFrame : IEquatable<RealmFrame>
             if (!double.IsFinite(min[i]) || !double.IsFinite(max[i]) || min[i] >= max[i])
             {
                 return $"REALM bounds on axis {i} are not a finite min < max ({min[i]}, {max[i]})";
+            }
+
+            // The quantum must be a positive finite number: an extent past the f64 range makes it infinite, a subnormal one zero.
+            var step = (max[i] - min[i]) / WireMath.Pow2(bits);
+            if (!double.IsFinite(step) || step <= 0)
+            {
+                return $"REALM bounds on axis {i} give no usable {bits}-bit quantum ({min[i]}, {max[i]})";
             }
         }
 

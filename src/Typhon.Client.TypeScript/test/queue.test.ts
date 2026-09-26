@@ -156,4 +156,13 @@ describe('CommandQueue', () => {
     queue.clear();
     expect(queue.flush(1, () => undefined)).toBe(0);
   });
+
+  it('with no realm, drops the commands carrying a realm-framed field and sends the others', () => {
+    const queue = new CommandQueue({ plan });
+    queue.enqueue(region, regionValues(0));
+    queue.enqueue(steer, steerValues(3));
+    const messages: Uint8Array[] = [];
+    expect(queue.flush(12, (m) => messages.push(m.slice()), null)).toBe(1);
+    expect([decode(messages).types, queue.droppedWithoutRealm, queue.pendingCount]).toEqual([['Steer'], 1, 0]);
+  });
 });

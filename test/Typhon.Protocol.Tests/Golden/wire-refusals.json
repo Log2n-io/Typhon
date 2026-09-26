@@ -310,6 +310,31 @@
       "closeCode": 1007
     },
     {
+      "name": "realm-nan-bound",
+      "kind": "tick",
+      "hex": "0270110100020943030007000201eeffc000180000000000007040000000000000f87f000000000000c0c000000000000050c0000000000000c040000000000000c0400000000000005040",
+      "closeCode": 1007
+    },
+    {
+      "name": "realm-extent-overflows",
+      "kind": "tick",
+      "hex": "0270110100020943030007000201eeffc000180000000000007040ffffffffffffefff000000000000c0c000000000000050c0ffffffffffffef7f000000000000c0400000000000005040",
+      "closeCode": 1007
+    },
+    {
+      "name": "realm-none-naming-a-realm",
+      "kind": "tick",
+      "hex": "02701101000209050300000001",
+      "closeCode": 1007
+    },
+    {
+      "name": "debug-geometry-without-realm",
+      "kind": "tick",
+      "hex": "02701101000006028000",
+      "closeCode": 1002,
+      "held": false
+    },
+    {
       "name": "positioned-entities-without-realm",
       "kind": "tick",
       "hex": "02701101000001050000000000",

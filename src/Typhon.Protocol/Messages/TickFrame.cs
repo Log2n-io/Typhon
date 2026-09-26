@@ -82,7 +82,8 @@ public enum TickBlocks
 }
 
 /// <summary>
-/// Receives a decoded <c>TICK</c>, block by block, in stream order — the blocks <see cref="TickReader.Read{TSink}"/> was asked for. Field values arrive
+/// Receives a decoded <c>TICK</c>, block by block, in stream order — the blocks
+/// <see cref="TickReader.Read{TSink}(ReadOnlySpan{byte}, CatalogPlan, ref RealmFrame, ref TSink, TickBlocks)"/> was asked for. Field values arrive
 /// through the <see cref="IFieldSink"/> members between the record call that opened them and the next record call.
 /// </summary>
 public interface ITickSink : IFieldSink
@@ -258,6 +259,16 @@ public static class TickReader
             first = false;
             if ((blocks & (type == BlockTypes.Events ? TickBlocks.Events : TickBlocks.AllButEvents)) == 0)
             {
+                // A REALM is adopted by every pass, reaching the sink or not: the blocks this pass reads decode over it (SUB-30).
+                if (type == BlockTypes.Realm)
+                {
+                    frame = ReadRealm(ref block, plan);
+                    if (!block.IsAtEnd)
+                    {
+                        throw WireFormatException.Malformed($"block 0x{type:x2}: {block.Remaining} unread byte(s) after the declared content");
+                    }
+                }
+
                 continue;
             }
 
@@ -286,6 +297,13 @@ public static class TickReader
                     while (!block.IsAtEnd)
                     {
                         var subType = block.ReadU8();
+
+                        // Push geometry is in realm metres (12-realms § 5.2): no realm, no geometry.
+                        if (subType == DebugSubTypes.PushGeometry && frame == null)
+                        {
+                            throw WireFormatException.Protocol("a DEBUG push geometry while the session holds no realm");
+                        }
+
                         sink.Debug(subType, block.ReadBytes(block.ReadVaruAtMost(block.Remaining, "DEBUG sub-block length")));
                     }
 
@@ -336,7 +354,12 @@ public static class TickReader
         var frame = RealmFrame.Read(ref r, plan.RealmKinds.Length);
 
         // An AGG grid over this frame must stay within the cell bound a store allocates for (W28): refused with the frame, before any AGG of it.
-        foreach (var grid in frame == null ? [] : plan.Grids)
+        if (frame == null)
+        {
+            return null;
+        }
+
+        foreach (var grid in plan.Grids)
         {
             if (frame.AggregateCellCount(grid.TileCells) > CatalogValidator.MaxGridCells)
             {
@@ -562,12 +585,14 @@ public static class TickReader
 
         var grid = plan.Grids[gridIdx];
         var flags = r.ReadU8();
-        sink.BeginAggregate(grid, (flags & 1) != 0);
-        // The grid's dimensions are the frame's (typhon.3, 12-realms § 5.3): no realm, no grid.
+
+        // The grid's dimensions are the frame's (typhon.3, 12-realms § 5.3): no realm, no grid — refused before the sink hears of the block.
         if (frame == null)
         {
             throw WireFormatException.Protocol($"an AGG block for grid {gridIdx} while the session holds no realm");
         }
+
+        sink.BeginAggregate(grid, (flags & 1) != 0);
 
         var cellCount = frame.AggregateCellCount(grid.TileCells);
 

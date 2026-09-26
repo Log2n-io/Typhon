@@ -147,8 +147,10 @@ public class GoldenDebugTests
 
     private static JsonObject Expectation(string description, byte[] bytes, JsonObject decoded)
     {
+        // Push geometry is in realm metres: decoded by a session holding a realm (12-realms § 5.2).
         var sink = new RecordingSink();
-        TickReader.Read(bytes, Plan, ref sink);
+        var frame = CatalogSamples.KitchenFrame;
+        TickReader.Read(bytes, Plan, ref frame, ref sink);
         return new JsonObject
         {
             ["description"] = description,

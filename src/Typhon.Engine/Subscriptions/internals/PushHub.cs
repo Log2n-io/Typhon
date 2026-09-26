@@ -51,6 +51,9 @@ internal sealed unsafe class PushHub
     // The pass the collector is in: every live entity (for the realms that need it this tick), or the structure words and repushes (for the others).
     private bool _everythingPass;
 
+    // One served realm (0) and no realm map for the archetype being collected: every chunk is realm 0's, and routing is skipped.
+    private bool _single;
+
     // ── The forgotten-push validator (explicit detection) ──
     //
     // A few clusters of each explicit archetype are projected whole every tick, round-robin. A slot among them that the application did not push and
@@ -205,6 +208,7 @@ internal sealed unsafe class PushHub
 
             // On an engine with more than one realm, a chunk's realm routes it: one load. One realm: no map, and every chunk is realm 0's.
             _realmMap = (cs.RealmTableOrNull?.RegisteredCount ?? 1) > 1 ? Volatile.Read(ref cs.ClusterRealmMap) : null;
+            _single = _realmMap == null && active.Length == 1 && ReferenceEquals(active[0], For(RealmId.Default.Value));
             var slotMask = state.Layout.SlotCount >= 64 ? ulong.MaxValue : (1UL << state.Layout.SlotCount) - 1;
             var structureAll = Volatile.Read(ref cs.StructureTick) == tick && cs.StructureCoversAll;
 
@@ -265,7 +269,7 @@ internal sealed unsafe class PushHub
                 var w = (ulong)repush[c];
                 if (w != 0UL)
                 {
-                    AddPush(a, c, w & slotMask);
+                    AddPush(a, c, w & slotMask, anyPass: true);
                     repush[c] = 0;
                 }
             }
@@ -309,6 +313,15 @@ internal sealed unsafe class PushHub
         {
             var cursor = _validateCursor[a]++ % active;
             var chunk = ids[cursor];
+
+            // Only a chunk of a served realm in its partial pass: an unserved realm's is never pushed, and an everything realm's is pushed whole, so
+            // either would count every slot of it as forgotten.
+            var replication = _single ? null : ReplicationOf(chunk);
+            if (!_single && (replication == null || replication.EverythingThisTick[a]))
+            {
+                continue;
+            }
+
             var pushed = ((uint)chunk < (uint)words.Length ? (ulong)words[chunk] : 0UL) | ((uint)chunk < (uint)repush.Length ? (ulong)repush[chunk] : 0UL);
             var unpushed = slotMask & ~pushed;
             if (unpushed == 0UL || !_validating[a].TryAdd(chunk, unpushed))
@@ -346,7 +359,17 @@ internal sealed unsafe class PushHub
         }
     }
 
-    private void AddPush(int a, int chunk, ulong mask)
+    // The replication of a chunk's realm, or null when that realm is not served here: one load of the cluster → realm map.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private PushReplication ReplicationOf(int chunk)
+    {
+        var map = _realmMap;
+        return For(map != null && (uint)chunk < (uint)map.Length ? map[chunk] : RealmId.Default.Value);
+    }
+
+    // anyPass: the repush list — slots the projection itself asked for again; the chunk is taken in whichever pass its realm runs, because an everything
+    // pass walks only the active list and a chunk that left it still owes the projection that gives its identities back.
+    private void AddPush(int a, int chunk, ulong mask, bool anyPass = false)
     {
         if (mask == 0UL || chunk < 0)
         {
@@ -354,13 +377,15 @@ internal sealed unsafe class PushHub
         }
 
         // Routed by the chunk's realm: a realm not served here is never pushed. In the everything pass only the realms that asked for it take the chunk,
-        // and in the partial pass only the others — each chunk is collected once, whichever realm it is in.
-        var map = _realmMap;
-        var realm = map != null && (uint)chunk < (uint)map.Length ? map[chunk] : RealmId.Default.Value;
-        var replication = For(realm);
-        if (replication == null || replication.EverythingThisTick[a] != _everythingPass)
+        // in the partial pass only the others — each chunk is collected once, whichever realm it is in. One realm and no map: the passes are exclusive by
+        // construction (every chunk is realm 0's), so nothing needs routing.
+        if (!_single)
         {
-            return;
+            var replication = ReplicationOf(chunk);
+            if (replication == null || (!anyPass && replication.EverythingThisTick[a] != _everythingPass))
+            {
+                return;
+            }
         }
 
         var n = _pushCount[a];

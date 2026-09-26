@@ -194,6 +194,26 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
                 // The engine-wide collector (R4.1), serving realm 0's replication; the stages below loop over its served realms as they are added.
                 Hub = new PushHub(_replicationStates, observed, automatic, Push);
+
+                // SUB-30: what the projection quantizes with (the plans' frames) and what every RESET tells a client (the REALM block) are two computations
+                // from the same grid; they must agree to the bit.
+                for (var a = 0; a < Plans.Length; a++)
+                {
+                    var own = Plans[a].Position?.Frame;
+                    if (own == null || Realm0Frame == null)
+                    {
+                        continue;
+                    }
+
+                    for (var axis = 0; axis < own.Dims; axis++)
+                    {
+                        if (own.Bits != Realm0Frame.PositionBits || own.Min[axis] != Realm0Frame.Min[axis] || own.Step[axis] != Realm0Frame.Step[axis])
+                        {
+                            throw new InvalidOperationException(
+                                $"Plan {a}'s position frame and realm 0's REALM block disagree on axis {axis}: a client would decode other places (SUB-30).");
+                        }
+                    }
+                }
                 for (var a = 0; a < observed.Length; a++)
                 {
                     if (observed[a])
@@ -252,6 +272,21 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             if (Events != null)
             {
                 Events.Realm = Realm0Frame;
+
+                // A position field is realm-framed (SUB-30): with no spatial world there is no frame to encode it over, and every emission would be
+                // rejected on the tick. Refused here instead.
+                for (var i = 0; Realm0Frame == null && i < registry.Events.Count; i++)
+                {
+                    var body = CatalogPlan.EventByName(registry.Events[i].Name)?.Body;
+                    foreach (var field in body?.Fields ?? [])
+                    {
+                        if (field.Kind is CodecKind.Pos2 or CodecKind.Pos3)
+                        {
+                            throw new NotSupportedException(
+                                $"Event '{registry.Events[i].Name}' carries position '{field.Name}', which needs a spatial world: configure a spatial grid.");
+                        }
+                    }
+                }
             }
 
             _frames!.Events = Events;
@@ -433,18 +468,32 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             }
 
             // Laid over the served realm's frame (typhon.3, 12-realms § 5.3): the same origin and dimensions a client derives from the REALM block.
-            var frame = Realm0Frame;
+            var frame = Realm0Frame ?? throw new NotSupportedException("An Aggregate needs a spatial world: configure a spatial grid.");
             var tiles = grid.TileCells;
+
+            // A client refuses a grid past the catalog's cell limit when it reads the REALM (1007): refused here, at Start, not on every session's first
+            // frame.
+            if (frame.AggregateCellCount(tiles) > CatalogValidator.MaxGridCells)
+            {
+                throw new NotSupportedException(
+                    $"Aggregate grid {grid.Idx}: tiles of {tiles} cells of {frame.CellM} m over this world make {frame.AggregateCellCount(tiles)} tiles, " +
+                    $"above the {CatalogValidator.MaxGridCells} a client accepts. Declare a larger tile.");
+            }
+
             grids[g] = new AggregateCounts(grid.Idx, frame.Min[0], frame.Min[1], frame.Min[2], tiles * frame.CellM, frame.AggregateDim(0, tiles),
                 frame.AggregateDim(1, tiles), frame.AggregateDim(2, tiles), columns, grid.Archetypes.Length);
         }
 
         Push.ConfigureAggregates(grids);
+        // Matched by the tile in cells, as the catalog built it: the metres the grid stores are cells × cellM, which need not equal the declared tile
+        // bit for bit (0.3 m over 0.1 m cells is 3 cells, stored as 0.30000000000000004 m).
+        var cellM = Realm0Frame.CellM;
         Profiles.BindAggregates((tileM, archetypes) =>
         {
+            var tileCells = (long)Math.Round(tileM / cellM);
             for (var g = 0; g < grids.Length; g++)
             {
-                if (grids[g].TileM != tileM)
+                if (canonical[g].TileCells != tileCells)
                 {
                     continue;
                 }

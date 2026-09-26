@@ -57,7 +57,8 @@ export class AggregateGrid {
 
   /**
    * Lays the grid over a new realm's geometry (`typhon.3`: a grid's origin and dimensions are the realm frame's): every
-   * count is dropped, and {@link version} moves so a renderer re-reads it.
+   * count is dropped, and {@link version} moves so a renderer re-reads it. The buffers are kept when the cell count is
+   * unchanged — every `RESET` carries a `REALM`, and a grid of 2²⁴ cells is not reallocated for one.
    */
   reframe(schema: GridSchema): void {
     const cells = cellsOf(schema);
@@ -66,11 +67,17 @@ export class AggregateGrid {
     }
 
     this.schema = schema;
+    if (this.allocated && cells === this.cellCount) {
+      this.counts.fill(0);
+      this.stamps.fill(0);
+    } else {
+      this.counts = EMPTY;
+      this.changed = EMPTY;
+      this.stamps = EMPTY;
+      this.allocated = false;
+    }
+
     this.cellCount = cells;
-    this.counts = EMPTY;
-    this.changed = EMPTY;
-    this.stamps = EMPTY;
-    this.allocated = false;
     this.changedCount = 0;
     this.wasReset = true;
     this.version++;

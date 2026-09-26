@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Typhon.Protocol;
 
@@ -98,6 +99,7 @@ internal readonly struct MotionPolicy
         Linear = position.Linear && position.Vel != null;
         VelBits = Linear ? position.Vel.Bits : 0;
         VelBytes = Linear ? position.Vel.Bits / 8 : 0;
+        Debug.Assert(!Linear || position.Vel.UnitExp.HasValue, "the compiler gives every linear motion's velocity codec its unit (D-3)");
         VelUnitExp = Linear ? position.Vel.UnitExp ?? 0 : 0;
         VelocityDeclared = position.VelocityIsDeclared;
         VelocityComponentSize = position.VelocityComponentSize;

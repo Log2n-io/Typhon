@@ -610,7 +610,10 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>An entry vanished with no projection to see it go: every session holding it is told it left, and its identity goes back to the allocator.</summary>
     private void Orphaned(ReplicationBlockHeader* block, byte* cold, uint netId, int cause)
     {
-        Push.Orphan(PushArchetypeIndex, block, cold, Layout, netId, cause);
+        // Filed in the replication of the realm the entry was last described in; a realm nobody serves holds no session to tell. A parked drop has no
+        // block, and until entries cross realms (R4.5) a parked entry is realm 0's.
+        var push = block == null || Push.Hub == null ? Push : Push.Hub.For(block->Realm);
+        push?.Orphan(PushArchetypeIndex, block, cold, Layout, netId, cause);
         lock (_orphanedLock)
         {
             _orphaned.Add(netId);

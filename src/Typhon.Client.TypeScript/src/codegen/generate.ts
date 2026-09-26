@@ -188,7 +188,10 @@ class Generator {
       sections.some((section) => section.fields.some((f) => f.valueKind !== ValueKind.Skipped));
     // A position decodes over the session's realm frame (typhon.3, SUB-30): its width and bounds are read once per block,
     // never baked in, so one module serves every realm and every width.
-    const positioned = position !== null;
+    // A pos-coded field in a section decodes over the same frame, even on an archetype with no position of its own.
+    const isPos = (f: { kind: CodecKind }): boolean => f.kind === CodecKind.Pos2 || f.kind === CodecKind.Pos3;
+    const positioned =
+      position !== null || [a.onEnter, ...a.groupSections].some((section) => section.fields.some(isPos));
     this.usesRealm ||= positioned;
     emit(
       0,

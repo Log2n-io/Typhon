@@ -75,6 +75,13 @@ public class GoldenRefusalTests
         Tick(cases, "realm-kind-out-of-range", [.. reset, .. RealmWith(realm, 5, 0x03)]);
         Tick(cases, "realm-reserved-flag", [.. reset, .. RealmWith(realm, 4, 0x06)]);
         Tick(cases, "realm-cell-zero", [.. reset, .. RealmWith(realm, 11, 0, 0, 0, 0, 0, 0, 0, 0)]);
+        Tick(cases, "realm-nan-bound", [.. reset, .. RealmWith(realm, 19, 0, 0, 0, 0, 0, 0, 0xF8, 0x7F)]);
+        // −f64.Max … +f64.Max: each finite, but the extent is not, so no quantum exists.
+        Tick(cases, "realm-extent-overflows", [.. reset, .. RealmWith(RealmWith(realm, 19, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEF, 0xFF), 43,
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xEF, 0x7F)]);
+        // REALM(NONE) is id 0xFFFF, generation 0: one that names realm 3 is two answers in one block.
+        Tick(cases, "realm-none-naming-a-realm", [.. reset, BlockTypes.Realm, 0x05, 0x03, 0x00, 0x00, 0x00, 0x01]);
+        Tick(cases, "debug-geometry-without-realm", Block(BlockTypes.Debug, DebugSubTypes.PushGeometry, 0x00), CloseCodes.ProtocolError, held: false);
         Tick(cases, "positioned-entities-without-realm", Block(BlockTypes.Entities, beacon, 0x00, 0x00, 0x00, 0x00), CloseCodes.ProtocolError, held: false);
         Tick(cases, "aggregate-without-realm", Block(BlockTypes.Agg, 0x00, 0x00, 0x00), CloseCodes.ProtocolError, held: false);
 

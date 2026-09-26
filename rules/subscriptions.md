@@ -641,11 +641,11 @@
 ### SUB-30: A realm-framed value is encoded and decoded with exactly one realm's frame `[fatal][silent]`
   invariant a position (pos2/pos3: ENTITIES records, event and command fields, a region's vertices) and an AGG cell index are quantized over the
     frame of the realm they belong to — its bounds, its width (REALM.posBits), its replication cell — never over the catalog, which carries the
-    codec's kind alone (typhon.3, 12-realms § 5.1); realm 0's frame is built in the same computation as its replication's, so its bytes are the
-    single-realm ones
+    codec's kind alone (typhon.3, 12-realms § 5.1); realm 0's REALM block and its replication's frames are built from the same grid and checked
+    equal at Start, so its bytes are the single-realm ones; a REALM whose quantum is not a positive finite number on some axis is refused
   invariant a session receives its frame before any value framed by it: its first published frame is a RESET whose first block is REALM, retried until
-    one is published; a REALM travels only as the first block of a RESET frame; a decoder refuses a positioned ENTITIES, an AGG or a position field
-    while it holds no realm (1002), and a REALM elsewhere or out of range (1007)
+    one is published; a REALM travels only as the first block of a RESET frame, and every decoding pass adopts it; a decoder refuses a positioned
+    ENTITIES, an AGG, a DEBUG push geometry or a position field while it holds no realm (1002), and a REALM elsewhere or out of range (1007)
   invariant a command's realm-framed field travels at RealmFrame.CommandPositionBits (32) over the realm's bounds, so the transport parses it without
     reading the session's realm (SUB-05); until sessions are placed in realms it decodes with the served realm's frame
   invariant a velocity is realm-independent: its unit is 2^unitExp metres per tick, derived from the archetype's tolerance and MaxAge (W5)
@@ -654,9 +654,10 @@
   on_violation: silent. A value encoded over one frame and decoded over another is a wrong position a client renders without error; a catalog that
     carried bounds could describe one realm only, and every other realm's positions would decode into it.
   verified: RealmReplicationTests.RealmFramedQuantizationEqualsTheCatalogCodecForRealmZero (realm 0's frame is the codec's; another realm's frame
-    gives other codes for the same place), FrameAssemblerTests.AProfileSwitchResetsTheView (a new session's first frame is a RESET),
+    gives other codes for the same place), RealmReplicationTests.ASessionsFirstPublishedFrameIsAResetWhoseFirstBlockIsItsRealm,
     EntitiesEncodingTests.TheProducedBytesDecodeIntoTheClientsReplica (the replica decodes the engine's stream over the REALM it was sent);
-    protocol goldens tick-realm, tick-realm-none and wire-refusals (realm-without-reset, realm-not-first, positioned-entities-without-realm …),
+    protocol goldens tick-realm, tick-realm-none and wire-refusals (realm-without-reset, realm-not-first, positioned-entities-without-realm,
+    realm-extent-overflows, debug-geometry-without-realm …),
     decoded bit for bit by both SDKs.
 
 ---

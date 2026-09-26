@@ -92,11 +92,40 @@ function sender(
     plan,
     send: (type, values) => sent.push({ type, values }),
     now: () => now.ms,
+    realm: () => FLAT,
     ...options,
   });
 }
 
 describe('RegionSender', () => {
+  it('waits for a realm, and sends the same footprint again after a realm change (the server dropped it)', () => {
+    const plan = catalogPlan();
+    const sent: Sent[] = [];
+    const now = { ms: 0 };
+    let realm: RealmFrame | null = null;
+    const region = sender(plan, sent, now, { realm: () => realm });
+
+    // No realm: nothing to frame the vertices over, so the region waits.
+    expect(region.setRegion(quad(0, 0, 100), 50, 256)).toBe(false);
+    expect([sent.length, region.isPending]).toEqual([0, true]);
+    realm = FLAT;
+    expect(region.poll()).toBe(true);
+    expect(sent).toHaveLength(1);
+
+    // The same footprint is not worth its bytes — until the realm changes and the server forgets it.
+    now.ms = 10_000;
+    expect(region.setRegion(quad(0, 0, 100), 50, 256)).toBe(false);
+    region.realmChanged();
+    expect(region.poll()).toBe(true);
+    expect(sent).toHaveLength(2);
+
+    // Into a deep realm, a flat footprint is dropped rather than sent as a degenerate polyhedron.
+    now.ms = 20_000;
+    realm = DEEP;
+    region.realmChanged();
+    expect([region.poll(), region.isPending, sent.length]).toEqual([false, false, 2]);
+  });
+
   it('sends the first region, and one the camera barely moved for it does not', () => {
     const plan = catalogPlan();
     const sent: Sent[] = [];
@@ -201,6 +230,7 @@ describe('RegionSender', () => {
         return seq++;
       },
       now: () => now.ms,
+      realm: () => FLAT,
       onRejected: (s) => rejected.push(s),
       moveThreshold: 1,
     });

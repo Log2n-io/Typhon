@@ -624,8 +624,13 @@ describe('FrameApplier', () => {
 
   it('a REALM re-lays the aggregate grids over its frame and fires onRealmChanged once, before the records it frames', () => {
     const changes: [number | null, number | null][] = [];
-    const applier = new FrameApplier(plan, {
-      onRealmChanged: (previous, current) => changes.push([previous?.realmId ?? null, current?.realmId ?? null]),
+    // What the store held when each change fired: after the reset, before any record of the new realm.
+    const heldAtChange: number[] = [];
+    const applier: FrameApplier = new FrameApplier(plan, {
+      onRealmChanged: (previous, current) => {
+        changes.push([previous?.realmId ?? null, current?.realmId ?? null]);
+        heldAtChange.push(applier.world.entityCount);
+      },
     });
     const small = new RealmFrame(4, 1, 0, 7, 16, 64, false, [0, 0, 0], [1024, 512, 64]);
     const realmFrame = (tick: number, realm: RealmFrame | null): Uint8Array =>
@@ -661,6 +666,7 @@ describe('FrameApplier', () => {
       null,
       0,
     ]);
+    expect(heldAtChange).toEqual([0, 0]);
   });
 
   it('applies AGG to a three-axis grid, laid over a deep realm, whose counts exist only once a block arrived', () => {

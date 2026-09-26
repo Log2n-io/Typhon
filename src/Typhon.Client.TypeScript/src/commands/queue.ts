@@ -73,6 +73,7 @@ export class CommandQueue {
   private seq: number;
   private dropped = 0;
   private coalesced = 0;
+  private unframed = 0;
 
   constructor(options: CommandQueueOptions) {
     this.plan = options.plan;
@@ -94,6 +95,14 @@ export class CommandQueue {
   /** Pending commands a newer one of the same `latest` type replaced. */
   get coalescedCount(): number {
     return this.coalesced;
+  }
+
+  /**
+   * Pending commands a flush dropped because they carry a realm-framed field and the session held no realm: there is no
+   * frame to encode them over, and the server would refuse them anyway (SUB-30).
+   */
+  get droppedWithoutRealm(): number {
+    return this.unframed;
   }
 
   /** The sequence number the next accepted command will carry. */
@@ -144,6 +153,10 @@ export class CommandQueue {
    */
   flush(clientTick: number, send: (message: Uint8Array) => void, frame: RealmFrame | null = null): number {
     const pending = this.pending;
+    if (frame === null) {
+      this.dropUnframed();
+    }
+
     if (pending.length === 0) {
       return 0;
     }
@@ -180,6 +193,23 @@ export class CommandQueue {
   /** Drops the pending commands without sending them (a disconnect: their seqs are never acknowledged). */
   clear(): void {
     this.pending.length = 0;
+  }
+
+  // With no realm, a command carrying a realm-framed field cannot be encoded: it is dropped (counted) and the others go.
+  private dropUnframed(): void {
+    const pending = this.pending;
+    let kept = 0;
+    for (const entry of pending) {
+      try {
+        this.measuring.reset();
+        writeSection(this.measuring, entry.type.body, entry.values, true, null);
+        pending[kept++] = entry;
+      } catch {
+        this.unframed++;
+      }
+    }
+
+    pending.length = kept;
   }
 
   private headerBytes(count: number): number {

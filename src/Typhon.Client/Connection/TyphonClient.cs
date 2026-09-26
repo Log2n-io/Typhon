@@ -199,10 +199,12 @@ public sealed class TyphonClient : IAsyncDisposable
             return 0;
         }
 
-        var seq = unchecked(++_commandSeq);
+        // The seq is spent only once the command encodes: one that cannot (a realm-framed field while the session holds no realm) leaves no gap.
+        var seq = unchecked((ushort)(_commandSeq + 1));
         var tick = LastAppliedTick;
         var frame = Store?.Realm;
         var message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(plan, seq, values)], frame));
+        _commandSeq = seq;
         await transport.SendAsync(message, ct).ConfigureAwait(false);
         return seq;
     }

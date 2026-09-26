@@ -204,9 +204,34 @@ export class RegionSender {
     return this.poll();
   }
 
-  /** Sends the waiting region once the rate allows it. Returns whether one went out. */
+  /**
+   * The session changed realm (`FrameApplier` `onRealmChanged`): the server dropped the region it held, so the last one
+   * sent is forgotten and the desired one goes out again. A region given in the other dimensionality is dropped — the
+   * caller sets the new realm's.
+   */
+  realmChanged(): void {
+    this.sentVertices = new Float64Array(0);
+    this.sentAltitude = Number.NaN;
+    this.sentBudget = -1;
+    this.pendingSeq = -1;
+    if (this.desired.length === 0 || this.desiredDims !== this.dims) {
+      this.desired = new Float64Array(0);
+      this.waiting = false;
+      return;
+    }
+
+    this.waiting = true;
+  }
+
+  /** Sends the waiting region once the rate allows it and the session is in a realm. Returns whether one went out. */
   poll(nowMs: number = this.now()): boolean {
-    if (!this.waiting || nowMs - this.lastSentMs < this.minIntervalMs) {
+    if (!this.waiting || nowMs - this.lastSentMs < this.minIntervalMs || this.realm() === null) {
+      return false;
+    }
+
+    // Given in another dimensionality than the realm's (set before its REALM arrived): never sent as a degenerate hull.
+    if (this.desiredDims !== this.dims) {
+      this.waiting = false;
       return false;
     }
 

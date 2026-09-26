@@ -1203,10 +1203,14 @@ internal abstract unsafe partial class PushReplication
     }
 
     /// <summary>After the hub marked the push set: this realm's projection bookkeeping for the tick.</summary>
+    // The hub's validator runs this tick: read once per tick here rather than through the hub per event.
+    private protected bool _validating;
+
     internal void BeginMark(int workers, bool countInProject)
     {
         // The parallel index (BeginParallelIndex): the projection's chunks sort their own events as they finish.
         _countInProject = countInProject && ParallelIndex;
+        _validating = Hub.ValidateClustersPerTick > 0;
         _indexedTick = uint.MaxValue;
         ResetWorkers(workers);
     }

@@ -25,8 +25,9 @@ internal sealed unsafe partial class FrameAssembler
     /// <summary>The served realm's frame, which every <c>RESET</c> frame carries as its first block (<c>typhon.3</c>); set by the runtime.</summary>
     internal RealmFrame Realm;
 
-    // A REALM block at its largest: type, length, u16 id, u16 generation, flags, varu kind, u32 tag, u8 bits, f64 cell, six f64 bounds.
-    private const int RealmBlockBound = 1 + 2 + 2 + 2 + 1 + 5 + 4 + 1 + 8 + (6 * 8);
+    // A REALM block at its largest: type, the length prefix BeginLengthPrefixed reserves (5), u16 id, u16 generation, flags, varu kind, u32 tag,
+    // u8 bits, f64 cell, six f64 bounds.
+    private const int RealmBlockBound = 1 + 5 + 2 + 2 + 1 + 5 + 4 + 1 + 8 + (6 * 8);
 
     /// <summary>The declared profiles, which name each session's observer.</summary>
     internal SubscriptionProfiles Profiles;
@@ -431,7 +432,10 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         var reset = state.PendingReset;
-        PrepareSelf(session, state, reset, scratch, ref locator, out var self);
+
+        // A session's first published frame is a RESET carrying its REALM (typhon.3) — decided before SELF, which sends every owner group on a RESET.
+        var first = !state.RealmSent && Realm != null;
+        PrepareSelf(session, state, reset || first, scratch, ref locator, out var self);
         if (count == 0 && !reset && !self.Write && self.Acks == 0)
         {
             _eventsLastTick[slot] = (uint)_tick;
@@ -440,9 +444,9 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        // A session's first published frame is a RESET carrying its REALM (typhon.3), and only once it has something to say: a frame for the REALM alone
-        // would be one more frame whose presence depends on when the session connected. Nothing was published before it, so the store it clears is empty.
-        reset |= !state.RealmSent && Realm != null;
+        // ... and only once it has something to say: a frame for the REALM alone would be one more frame whose presence depends on when the session
+        // connected. Nothing was published before it, so the store it clears is empty.
+        reset |= first;
 
         var send = SendStateOf(slot);
         if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick) || SkipPolicy.AcknowledgementLag(send->ProducedTick, send->AckedTick) > _lagBoundTicks
@@ -845,7 +849,9 @@ internal sealed unsafe partial class FrameAssembler
         var debugWrite = debugGrid || debugGeometry > 0;
 
         // SELF and ACKS (11 § 2): the controlled entity's owner groups changed since the last published frame, lastSeq, and the rejections since then.
-        PrepareSelf(session, state, reset, scratch, ref follow, out var self);
+        // The first-frame RESET (below) decided before SELF, which sends every owner group on a RESET.
+        var first = !reset && !state.RealmSent && Realm != null;
+        PrepareSelf(session, state, reset || first, scratch, ref follow, out var self);
         if (records == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite && !self.Write && self.Acks == 0)
         {
             // Nothing to say. The anchor may still have moved and a cell with nothing in it may have been delivered; neither changes what the client holds,
@@ -867,7 +873,7 @@ internal sealed unsafe partial class FrameAssembler
         // A session's first published frame is a RESET carrying its REALM (typhon.3), and only once it has something to say: a frame for the REALM alone
         // would be one more frame whose presence depends on when the session connected. Nothing was published before it, so the store it clears is empty
         // and nothing gathered above assumed otherwise — it is not a view reset, and is not counted as one.
-        if (!reset && !state.RealmSent && Realm != null)
+        if (first)
         {
             reset = true;
             flags |= TickFlags.Reset;

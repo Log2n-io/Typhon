@@ -201,4 +201,55 @@ unsafe class RealmReplicationTests : TestBase<RealmReplicationTests>
             Assert.That(harness.NetIdOf(ids[1]), Is.Not.Zero);
         });
     }
+
+    [Test]
+    [VerifiesRule("SUB-30")]
+    public void ASessionsFirstPublishedFrameIsAResetWhoseFirstBlockIsItsRealm()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var session = harness.OpenSessions(1, Profile)[0];
+
+        Spawn(dbe, 0, 2);
+        harness.RunTick(1);
+        var log = harness.Read(session);
+        Assert.Multiple(() =>
+        {
+            Assert.That(log, Is.Not.Null);
+            Assert.That(log.Flags & TickFlags.Reset, Is.EqualTo(TickFlags.Reset), "the first published frame is a RESET");
+            Assert.That(log.Calls[1], Is.EqualTo("realm 0"), "whose first block is the session's REALM");
+            Assert.That(harness.StateOf(session).RealmSent, Is.True);
+        });
+
+        // Later frames carry no REALM and no RESET.
+        Spawn(dbe, 0, 1);
+        harness.RunTick(2);
+        var next = harness.Read(session);
+        Assert.That(next == null || ((next.Flags & TickFlags.Reset) == 0 && !next.Calls.Contains("realm 0")), Is.True);
+    }
+
+    [Test]
+    public void TheValidatorChecksOnlyClustersOfServedRealms()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var hub = harness.Subscriptions.Hub;
+        hub.ValidateClustersPerTick = 64;
+        var session = harness.OpenSessions(1, Profile)[0];
+
+        // Only realm 1 — not served — has clusters: a validator walking them would count slots it can never push, and forgotten pushes it never saw.
+        Spawn(dbe, 1, 3);
+        Run(harness, session, 6);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(hub.ValidatedSlots, Is.Zero, "no cluster of an unserved realm is validated");
+            Assert.That(hub.ForgottenPushes, Is.Zero);
+        });
+
+        // A served realm's clusters still are.
+        Spawn(dbe, 0, 3);
+        Run(harness, session, 6);
+        Assert.That(hub.ValidatedSlots, Is.GreaterThan(0), "realm 0's clusters are validated");
+    }
 }

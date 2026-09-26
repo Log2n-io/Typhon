@@ -6,6 +6,7 @@ import {
   type MessagePlan,
   type MetricPlan,
 } from './catalog.js';
+import { CodecKind } from './codec-kinds.js';
 import { BlockType, MessageType, ProtocolConstants, SourceStatus, TickFlags } from './constants.js';
 import { malformed, protocolError } from './errors.js';
 import { readNumber, readSection, type FieldSink } from './field-codec.js';
@@ -108,6 +109,9 @@ export interface GeneratedDecoders {
 }
 
 /** Block selection for {@link TickReader.read}: one bit per block type. */
+/** The `DEBUG` sub-block whose payload is push geometry, in realm metres (09 § 15). */
+const DEBUG_PUSH_GEOMETRY = 0x80;
+
 export const BlockMask = {
   Entities: 1 << BlockType.Entities,
   Events: 1 << BlockType.Events,
@@ -153,6 +157,8 @@ export class TickReader {
   private readonly entitiesSeenAt: Uint32Array;
   private reads = 0;
   private readonly generated: readonly (EntitiesDecoder | null)[] | null;
+  /** Per archetype: a section field is realm-framed (`pos2`/`pos3`), so a generated decoder needs the frame. */
+  private readonly framedFields: readonly boolean[];
   private readonly target: EntitiesTarget | null;
 
   /**
@@ -178,6 +184,11 @@ export class TickReader {
     this.positions = plan.archetypes.map((a) => (a.position === null ? empty : position.subarray(0, a.position.dims)));
     this.velocities = plan.archetypes.map((a) =>
       a.position === null || a.position.vel === null ? empty : velocity.subarray(0, a.position.dims),
+    );
+    this.framedFields = plan.archetypes.map((a) =>
+      [a.onEnter, ...a.groupSections].some((section) =>
+        section.fields.some((f) => f.kind === CodecKind.Pos2 || f.kind === CodecKind.Pos3),
+      ),
     );
     this.entitiesSeenAt = new Uint32Array(plan.archetypes.length);
   }
@@ -227,7 +238,18 @@ export class TickReader {
 
       first = false;
       if ((blocks & blockBit(type)) === 0) {
-        r.skip(length);
+        // A REALM is adopted by every pass, reaching the sink or not: the blocks this pass reads decode over it (SUB-30).
+        if (type === BlockType.Realm) {
+          const skipped = r.pushLimit(length);
+          this.realm = this.readRealm();
+          const trailing = r.popLimit(skipped);
+          if (trailing !== 0) {
+            throw malformed(`block 0x${type.toString(16)}: ${trailing} unread byte(s) after its content`);
+          }
+        } else {
+          r.skip(length);
+        }
+
         continue;
       }
 
@@ -261,6 +283,11 @@ export class TickReader {
         case BlockType.Debug:
           while (r.remaining > 0) {
             const subType = r.u8();
+            // Push geometry is in realm metres (12-realms § 5.2): no realm, no geometry.
+            if (subType === DEBUG_PUSH_GEOMETRY && this.realm === null) {
+              throw protocolError('a DEBUG push geometry while the session holds no realm');
+            }
+
             const size = r.varuAtMost(r.remaining, 'DEBUG sub-block length');
             sink.debug(subType, r.bytes, r.take(size), size);
           }
@@ -344,6 +371,13 @@ export class TickReader {
     sink.beginEntities(archetype);
     const generated = this.generated?.[archetype.idx];
     if (generated != null) {
+      // The interpreter refuses at the first framed field; a generated decoder reads the frame up front.
+      if (frame === null && this.framedFields[archetype.idx]!) {
+        throw protocolError(
+          `an ENTITIES block for '${archetype.name}', whose sections hold positions, while the session holds no realm`,
+        );
+      }
+
       generated(r, tick, this.target!, frame!);
       return;
     }

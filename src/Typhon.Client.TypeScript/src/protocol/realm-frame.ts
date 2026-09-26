@@ -130,7 +130,7 @@ export class RealmFrame {
     }
 
     for (let i = 0; i < 3; i++) {
-      if (!Object.is(this.min[i], other.min[i]) || !Object.is(this.max[i], other.max[i])) {
+      if (this.min[i] !== other.min[i] || this.max[i] !== other.max[i]) {
         return false;
       }
     }
@@ -141,7 +141,7 @@ export class RealmFrame {
       this.kindIdx === other.kindIdx &&
       this.appTag === other.appTag &&
       this.positionBits === other.positionBits &&
-      Object.is(this.cellM, other.cellM) &&
+      this.cellM === other.cellM &&
       this.deep === other.deep
     );
   }
@@ -158,6 +158,12 @@ export class RealmFrame {
     if ((flags & FLAG_NONE) !== 0) {
       if (flags !== FLAG_NONE) {
         throw malformed('REALM(NONE) sets another flag');
+      }
+
+      if (realmId !== NO_REALM || generation !== 0) {
+        throw malformed(
+          `REALM(NONE) names realm ${realmId} generation ${generation}; NONE is ${NO_REALM}, generation 0`,
+        );
       }
 
       return null;
@@ -179,6 +185,10 @@ export class RealmFrame {
 
   /** Encodes this frame as a `REALM` block's content. */
   write(w: WireWriter): void {
+    if (this.realmId >>> 16 !== 0 || this.generation >>> 16 !== 0) {
+      throw new RangeError(`realm ${this.realmId} generation ${this.generation}: both are u16`);
+    }
+
     w.u16(this.realmId);
     w.u16(this.generation);
     w.u8(this.deep ? FLAG_DEEP : 0);
@@ -237,6 +247,12 @@ function frameProblem(
     const hi = max[i]!;
     if (!(Number.isFinite(lo) && Number.isFinite(hi) && lo < hi)) {
       return `REALM bounds on axis ${i} are not a finite min < max (${lo}, ${hi})`;
+    }
+
+    // The quantum must be a positive finite number: an extent past the f64 range makes it infinite, a subnormal one zero.
+    const step = (hi - lo) / 2 ** bits;
+    if (!(Number.isFinite(step) && step > 0)) {
+      return `REALM bounds on axis ${i} give no usable ${bits}-bit quantum (${lo}, ${hi})`;
     }
   }
 
