@@ -463,6 +463,12 @@ public sealed class SubscriptionsCommands
             {
                 throw new InvalidOperationException($"{realm} is closing: nothing enters a realm being unregistered (RLM-06).");
             }
+
+            if (realm.Value != RealmId.Default.Value && target.Config?.Replication == null)
+            {
+                throw new InvalidOperationException(
+                    $"{realm} declares no replication (RealmConfig.Replication): no session may be in it (12-realms § 2.1).");
+            }
         }
 
         CheckNotAnchored(session);

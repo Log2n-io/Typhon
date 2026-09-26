@@ -134,7 +134,21 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames);
 
             // The served realm's frame (typhon.3): what every position a session of it receives, and every position it sends, is quantized over.
-            Realm0Frame = BuildRealm0Frame(engine, Options);
+            // Every registered realm's kind must be declared (12-realms § 2.7): a kind nobody declared picks no variant.
+            var kinds = Catalog.Canonical.RealmKinds ?? [""];
+            var registered = engine.RealmTable != null ? engine.RealmTable.Registered : [];
+            foreach (var realm in registered)
+            {
+                var kind = realm.Config?.Replication?.Kind;
+                if (kind != null && Array.IndexOf(kinds, kind) < 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Realm {realm.Id.Value} is of kind '{kind}', which Subscriptions.RealmKinds does not declare (12-realms § 2.7).");
+                }
+            }
+
+            Realm0Frame = BuildRealm0Frame(engine, Options, Math.Max(0, Array.IndexOf(kinds,
+                engine.RealmTable?.TryGet(RealmId.Default.Value)?.Config?.Replication?.Kind ?? "")));
 
             _sessions = new SessionTable("Subscriptions.Sessions", parent, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
 
@@ -142,7 +156,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
             // Built after the session table, whose rows name each session's profile. It resolves every profile to plan indices here, so the tick path never
             // looks an archetype up by Type.
-            Profiles = new SubscriptionProfiles(Plans, registry, _sessions);
+            Profiles = new SubscriptionProfiles(Plans, registry, _sessions, Catalog.Canonical.RealmKinds);
 
             // S2b (P1-13b). It owns the frame pool and the per-slot hand-off counters, so a frame's whole lifetime — gathered, encoded, published, released —
             // lives behind one field here rather than spread across the tick-scoped context.
@@ -536,26 +550,32 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     public RealmFrame Realm0Frame { get; }
 
     /// <summary>Realm 0's frame: its grid's bounds, the replication cell, the default width, flat when the replication grid is one cell deep.</summary>
-    internal static RealmFrame BuildRealm0Frame(DatabaseEngine engine, SubscriptionsOptions options) => BuildRealmFrame(engine, options, RealmId.Default.Value);
+    internal static RealmFrame BuildRealm0Frame(DatabaseEngine engine, SubscriptionsOptions options, int kindIdx = 0) =>
+        BuildRealmFrame(engine, options, RealmId.Default.Value, kindIdx);
 
     /// <summary>
-    /// The frame a <c>REALM</c> block carries for <paramref name="realm"/>: its grid's bounds, the replication cell and the default position width. Every
-    /// realm takes <see cref="SubscriptionsOptions.ReplicationCellM"/> until realms declare their own replication (R4.3b).
+    /// The frame a <c>REALM</c> block carries for <paramref name="realm"/> (12-realms § 2.1): its grid's bounds and its replication's cell, position width
+    /// and tag. Realm 0 is replicated over <see cref="SubscriptionsOptions.ReplicationCellM"/> — the grid its replication was built on — whatever its
+    /// config says; its kind and tag are the config's.
     /// </summary>
-    internal static RealmFrame BuildRealmFrame(DatabaseEngine engine, SubscriptionsOptions options, ushort realm)
+    internal static RealmFrame BuildRealmFrame(DatabaseEngine engine, SubscriptionsOptions options, ushort realm, int kindIdx)
     {
-        var spatial = realm == RealmId.Default.Value ? engine.Realm0Grid : engine.RealmTable?.TryGet(realm)?.Grid;
+        var entry = engine.RealmTable?.TryGet(realm);
+        var spatial = realm == RealmId.Default.Value ? engine.Realm0Grid : entry?.Grid;
         if (spatial == null)
         {
             return null;
         }
 
+        var replication = entry?.Config?.Replication;
+
         ref readonly var config = ref spatial.Config;
-        var cellM = options.ReplicationCellM > 0 ? options.ReplicationCellM : config.CellSize;
+        var cellM = realm != RealmId.Default.Value && replication != null ? replication.CellM
+            : options.ReplicationCellM > 0 ? options.ReplicationCellM : config.CellSize;
         var generation = engine.PersistedRealmCatalog != null && engine.PersistedRealmCatalog.TryGetValue(realm, out var row)
             ? (ushort)row.Row.Generation
             : (ushort)0;
-        return new RealmFrame(realm, generation, kindIdx: 0, appTag: 0, Codec.DefaultPositionBits, cellM,
+        return new RealmFrame(realm, generation, kindIdx, replication?.AppTag ?? 0, replication?.PositionBits ?? Codec.DefaultPositionBits, cellM,
             deep: !ReplicationGrid.IsFlat(config, cellM), [config.WorldMin.X, config.WorldMin.Y, config.WorldMin.Z],
             [config.WorldMax.X, config.WorldMax.Y, config.WorldMax.Z]);
     }

@@ -85,13 +85,20 @@ internal sealed class SubscriptionProfiles
     private readonly SessionTable _sessions;
     private readonly int _planCount;
 
-    /// <summary>Resolves every declared profile against the compiled plans.</summary>
+    // Variants by realm kind (12-realms § 1.4): per declared profile and canonical kind index, the compiled profile serving it — the profile itself, one of
+    // its variants (compiled after every declared profile), or -1 for a kind it excludes.
+    private readonly int[] _variantOf;
+    private readonly string[] _realmKinds;
+    private readonly int _declaredCount;
+
+    /// <summary>Resolves every declared profile, and every variant of one, against the compiled plans.</summary>
     /// <param name="plans">The compiled plans.</param>
     /// <param name="registry">The declarations.</param>
     /// <param name="sessions">The session table, which names the profile each session is bound to.</param>
+    /// <param name="realmKinds">The realm kinds in canonical order — what a <c>REALM</c> block's kind index indexes; <c>[""]</c> when none are declared.</param>
     /// <exception cref="InvalidOperationException">An observer names an archetype with no projection, or a sphere has no positive radius.</exception>
     /// <exception cref="NotSupportedException">A profile declares an observer shape, or a number of observers, that is not built.</exception>
-    public SubscriptionProfiles(CompiledProjectionPlan[] plans, SubscriptionsRegistry registry, SessionTable sessions)
+    public SubscriptionProfiles(CompiledProjectionPlan[] plans, SubscriptionsRegistry registry, SessionTable sessions, string[] realmKinds = null)
     {
         ArgumentNullException.ThrowIfNull(plans);
         ArgumentNullException.ThrowIfNull(registry);
@@ -99,118 +106,173 @@ internal sealed class SubscriptionProfiles
 
         _sessions = sessions;
         _planCount = plans.Length;
-        _profiles = new CompiledProfile[registry.Profiles.Count];
-        _sets = new ArchetypeSet[registry.Profiles.Count];
-        var indices = new List<int>();
-        for (var p = 0; p < registry.Profiles.Count; p++)
+        _realmKinds = realmKinds is { Length: > 0 } ? realmKinds : [""];
+        var declared = registry.Profiles;
+        _declaredCount = declared.Count;
+        var total = declared.Count;
+        foreach (var declaration in declared)
         {
-            var declaration = registry.Profiles[p];
+            total += declaration.Variants.Count;
+        }
+
+        _profiles = new CompiledProfile[total];
+        _sets = new ArchetypeSet[total];
+        _variantOf = new int[declared.Count * _realmKinds.Length];
+        var next = declared.Count;
+        for (var p = 0; p < declared.Count; p++)
+        {
+            var declaration = declared[p];
             _byName[declaration.Name] = p;
-            if (declaration.Observers.Count == 0)
+            _profiles[p] = Compile(plans, declaration, declaration, p);
+            for (var k = 0; k < _realmKinds.Length; k++)
             {
-                // A profile that observes nothing serves its sessions nothing; TryGetProfile reports it as not served.
-                _profiles[p] = new CompiledProfile { Name = declaration.Name, ArchetypeIndices = [], TickDivisor = declaration.TickDivisor };
-                continue;
+                _variantOf[(p * _realmKinds.Length) + k] = p;
             }
 
-            ObserverDeclaration observer = null;
-            ObserverDeclaration aggregate = null;
-            foreach (var o in declaration.Observers)
+            foreach (var (kind, variant) in declaration.Variants)
             {
-                if (o.Kind == ObserverKind.Aggregate)
-                {
-                    if (aggregate != null)
-                    {
-                        // The registry refuses this at Start; a registry built directly, unfrozen, reaches here.
-                        throw new NotSupportedException(
-                            $"Profile '{declaration.Name}' declares two aggregates; a profile holds at most one Aggregate beside its World, Sphere or " +
-                            "ClientRegion.");
-                    }
-
-                    aggregate = o;
-                }
-                else
-                {
-                    if (observer != null)
-                    {
-                        // The registry refuses this at Start; a registry built directly, unfrozen, reaches here.
-                        throw new NotSupportedException(
-                            $"Profile '{declaration.Name}' declares two entity observers; a profile is served through exactly one World, Sphere or " +
-                            "ClientRegion.");
-                    }
-
-                    observer = o;
-                }
+                var v = next++;
+                _profiles[v] = Compile(plans, variant, declaration, v);
+                _variantOf[(p * _realmKinds.Length) + DeclaredKind(declaration, kind)] = v;
             }
 
-            if (observer == null)
+            foreach (var kind in declaration.Excluded)
             {
-                throw new NotSupportedException(
-                    $"Profile '{declaration.Name}' declares an Aggregate alone; an aggregate is a tier beside a World, Sphere or ClientRegion.");
+                _variantOf[(p * _realmKinds.Length) + DeclaredKind(declaration, kind)] = -1;
             }
-
-            if (observer.Kind == ObserverKind.Sphere && (!double.IsFinite(observer.Radius) || observer.Radius <= 0))
-            {
-                throw new InvalidOperationException(
-                    $"Profile '{declaration.Name}' declares a Sphere observer with radius {observer.Radius}. A sphere needs a positive radius.");
-            }
-
-            indices.Clear();
-            foreach (var archetype in observer.Archetypes)
-            {
-                var index = IndexOfArchetype(plans, archetype);
-                if (index < 0)
-                {
-                    throw new InvalidOperationException(
-                        $"Profile '{declaration.Name}' observes '{archetype.Name}', which declares no projection. An observer reaches an archetype through its "
-                        + "projection, so declare one with subs.Archetype<" + archetype.Name + ">(...) or drop it from the profile.");
-                }
-
-                if (index >= ArchetypeSet.Capacity)
-                {
-                    // The registry refuses a 256th archetype before a plan exists; a registry built directly reaches here.
-                    throw new NotSupportedException(
-                        $"Profile '{declaration.Name}' observes '{archetype.Name}' at plan index {index}. A profile's archetype set holds plan indices below "
-                        + $"{ArchetypeSet.Capacity}.");
-                }
-
-                if (!indices.Contains(index))
-                {
-                    indices.Add(index);
-                    _sets[p].Add(index);
-                }
-            }
-
-            _profiles[p] = new CompiledProfile
-            {
-                Name = declaration.Name,
-                ArchetypeIndices = indices.ToArray(),
-                World = observer.Kind == ObserverKind.World,
-                Region = observer.Kind == ObserverKind.ClientRegion,
-                MaxEdgeM = observer.Kind == ObserverKind.ClientRegion ? observer.MaxEdgeM : 0d,
-                NearBudget = observer.Kind == ObserverKind.ClientRegion ? observer.NearBudget : 0,
-                Radius = observer.Kind == ObserverKind.Sphere ? observer.EffectiveRadius : 0d,
-                MaxRadius = observer.Kind == ObserverKind.Sphere ? Math.Max(observer.EffectiveRadius, observer.MaxRadius) : 0d,
-                Slack = observer.Kind == ObserverKind.Sphere ? observer.VisibilitySlack : 0d,
-                Source = observer.Kind != ObserverKind.Sphere ? ViewpointSource.Placed
-                    : observer.FollowsControlled ? ViewpointSource.Controlled
-                    : observer.BoundEntity != EntityId.Null ? ViewpointSource.Bound
-                    : observer.Placement.HasValue ? ViewpointSource.Fixed
-                    : ViewpointSource.Placed,
-                BoundEntity = observer.BoundEntity,
-                Placement = observer.Placement ?? default,
-                Bands = observer.Kind == ObserverKind.Sphere ? new LodBands(observer.Bands) : default,
-                Automatic = declaration.PushDetection == PushDetection.Automatic,
-                TickDivisor = declaration.TickDivisor,
-                AggregateTileM = aggregate?.TileM ?? 0d,
-                AggregateRateHz = aggregate?.RateHz ?? 0d,
-                // A World's aggregate covers every tile and a ClientRegion's its hull (09 § 8): only a Sphere's has a radius.
-                AggregateRadiusM = aggregate == null || observer.Kind != ObserverKind.Sphere ? 0d : aggregate.AggregateRadiusM,
-                AggregateArchetypes = aggregate == null ? [] : AggregateIndices(plans, declaration.Name, aggregate),
-            };
         }
 
         sessions.BindProfiles(name => _byName.TryGetValue(name, out var index) ? index : -1);
+    }
+
+    // A variant's or an exclusion's kind: one the catalog lists (the registry refuses others at Start; a registry built directly reaches here).
+    private int DeclaredKind(ProfileDeclaration profile, string kind)
+    {
+        var index = KindIndex(kind);
+        return index >= 0 ? index : throw new InvalidOperationException(
+            $"Profile '{profile.Name}' names realm kind '{kind}', which RealmKinds does not declare (12-realms § 2.7).");
+    }
+
+    /// <summary>A realm kind's canonical index, or -1 for a kind no declaration names.</summary>
+    public int KindIndex(string kind) => Array.IndexOf(_realmKinds, kind ?? "");
+
+    /// <summary>
+    /// The compiled profile serving a session of declared profile <paramref name="profile"/> in a realm of kind <paramref name="kind"/> (canonical index):
+    /// the profile, its variant for the kind, or -1 when the profile excludes it. A kind of -1 (no realm) is the profile itself.
+    /// </summary>
+    public int VariantOf(int profile, int kind) =>
+        kind < 0 || (uint)profile >= (uint)_declaredCount || kind >= _realmKinds.Length ? profile : _variantOf[(profile * _realmKinds.Length) + kind];
+
+    /// <summary>Whether compiled profile <paramref name="profile"/> serves anything: some observer reaches an archetype.</summary>
+    public bool IsServed(int profile) => (uint)profile < (uint)_profiles.Length && _profiles[profile].ArchetypeIndices.Length > 0;
+
+    /// <summary>Compiled profile <paramref name="profile"/>'s tick divisor: its sessions are served one tick in this many.</summary>
+    public int DivisorOf(int profile) => _profiles[profile].TickDivisor;
+
+    // One declaration — a profile, or a variant of one (owner) whose name, detection and rate class it keeps: those are profile-wide (12-realms § 1.4).
+    private CompiledProfile Compile(CompiledProjectionPlan[] plans, ProfileDeclaration declaration, ProfileDeclaration owner, int slot)
+    {
+        var name = owner.Name;
+        if (declaration.Observers.Count == 0)
+        {
+            // A profile that observes nothing serves its sessions nothing; TryGetProfile reports it as not served.
+            return new CompiledProfile { Name = name, ArchetypeIndices = [], TickDivisor = owner.TickDivisor };
+        }
+
+        ObserverDeclaration observer = null;
+        ObserverDeclaration aggregate = null;
+        foreach (var o in declaration.Observers)
+        {
+            if (o.Kind == ObserverKind.Aggregate)
+            {
+                if (aggregate != null)
+                {
+                    // The registry refuses this at Start; a registry built directly, unfrozen, reaches here.
+                    throw new NotSupportedException(
+                        $"Profile '{name}' declares two aggregates; a profile holds at most one Aggregate beside its World, Sphere or ClientRegion.");
+                }
+
+                aggregate = o;
+            }
+            else
+            {
+                if (observer != null)
+                {
+                    // The registry refuses this at Start; a registry built directly, unfrozen, reaches here.
+                    throw new NotSupportedException(
+                        $"Profile '{name}' declares two entity observers; a profile is served through exactly one World, Sphere or ClientRegion.");
+                }
+
+                observer = o;
+            }
+        }
+
+        if (observer == null)
+        {
+            throw new NotSupportedException(
+                $"Profile '{name}' declares an Aggregate alone; an aggregate is a tier beside a World, Sphere or ClientRegion.");
+        }
+
+        if (observer.Kind == ObserverKind.Sphere && (!double.IsFinite(observer.Radius) || observer.Radius <= 0))
+        {
+            throw new InvalidOperationException(
+                $"Profile '{name}' declares a Sphere observer with radius {observer.Radius}. A sphere needs a positive radius.");
+        }
+
+        var indices = new List<int>();
+        foreach (var archetype in observer.Archetypes)
+        {
+            var index = IndexOfArchetype(plans, archetype);
+            if (index < 0)
+            {
+                throw new InvalidOperationException(
+                    $"Profile '{name}' observes '{archetype.Name}', which declares no projection. An observer reaches an archetype through its "
+                    + "projection, so declare one with subs.Archetype<" + archetype.Name + ">(...) or drop it from the profile.");
+            }
+
+            if (index >= ArchetypeSet.Capacity)
+            {
+                // The registry refuses a 256th archetype before a plan exists; a registry built directly reaches here.
+                throw new NotSupportedException(
+                    $"Profile '{name}' observes '{archetype.Name}' at plan index {index}. A profile's archetype set holds plan indices below "
+                    + $"{ArchetypeSet.Capacity}.");
+            }
+
+            if (!indices.Contains(index))
+            {
+                indices.Add(index);
+                _sets[slot].Add(index);
+            }
+        }
+
+        return new CompiledProfile
+        {
+            Name = name,
+            ArchetypeIndices = indices.ToArray(),
+            World = observer.Kind == ObserverKind.World,
+            Region = observer.Kind == ObserverKind.ClientRegion,
+            MaxEdgeM = observer.Kind == ObserverKind.ClientRegion ? observer.MaxEdgeM : 0d,
+            NearBudget = observer.Kind == ObserverKind.ClientRegion ? observer.NearBudget : 0,
+            Radius = observer.Kind == ObserverKind.Sphere ? observer.EffectiveRadius : 0d,
+            MaxRadius = observer.Kind == ObserverKind.Sphere ? Math.Max(observer.EffectiveRadius, observer.MaxRadius) : 0d,
+            Slack = observer.Kind == ObserverKind.Sphere ? observer.VisibilitySlack : 0d,
+
+            // The anchor (12-realms § 1.3): a Sphere's centre, and on every shape the source of the session's realm.
+            Source = observer.FollowsControlled ? ViewpointSource.Controlled
+                : observer.BoundEntity != EntityId.Null ? ViewpointSource.Bound
+                : observer.Placement.HasValue ? ViewpointSource.Fixed
+                : ViewpointSource.Placed,
+            BoundEntity = observer.BoundEntity,
+            Placement = observer.Placement ?? default,
+            Bands = observer.Kind == ObserverKind.Sphere ? new LodBands(observer.Bands) : default,
+            Automatic = owner.PushDetection == PushDetection.Automatic,
+            TickDivisor = owner.TickDivisor,
+            AggregateTileM = aggregate?.TileM ?? 0d,
+            AggregateRateHz = aggregate?.RateHz ?? 0d,
+            // A World's aggregate covers every tile and a ClientRegion's its hull (09 § 8): only a Sphere's has a radius.
+            AggregateRadiusM = aggregate == null || observer.Kind != ObserverKind.Sphere ? 0d : aggregate.AggregateRadiusM,
+            AggregateArchetypes = aggregate == null ? [] : AggregateIndices(plans, name, aggregate),
+        };
     }
 
     private static int[] AggregateIndices(CompiledProjectionPlan[] plans, string profile, ObserverDeclaration aggregate)

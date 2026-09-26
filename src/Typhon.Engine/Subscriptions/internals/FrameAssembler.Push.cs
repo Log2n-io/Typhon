@@ -137,6 +137,31 @@ internal sealed unsafe partial class FrameAssembler
                     break;
             }
 
+            // The realm's kind picks the profile's variant (12-realms § 1.4) — in the switch itself, so a realm and variant change is one reset. A realm no
+            // session may be in (no replication declared) puts the session in none; a kind the profile excludes serves it nothing there.
+            var kind = RealmKindOf(realm);
+            if (kind == UnreplicatedRealm)
+            {
+                realm = RealmId.NoneValue;
+                RealmsUnreplicated++;
+            }
+            else if (hasProfile)
+            {
+                var variant = Profiles.VariantOf(profile, kind);
+                if (variant < 0)
+                {
+                    RealmsUnserved++;
+                }
+
+                hasProfile = variant >= 0 && Profiles.IsServed(variant);
+                if (hasProfile)
+                {
+                    profile = variant;
+                    world = Profiles.IsWorld(variant);
+                    divisor = Profiles.DivisorOf(variant);
+                }
+            }
+
             PrepareSession(session);
             var state = StateOf(session);
             PushReplication replication = null;
@@ -422,9 +447,20 @@ internal sealed unsafe partial class FrameAssembler
     private ushort[] _observedGeneration = [];
     private uint[] _observedSeen = [];
 
-    // Realm frames by realm id, built once per registered realm (the Realm object is the identity: an id reused after an Unregister is a new frame).
+    // Realm frames and kinds by realm id, built once per registered realm (the Realm object is the identity: an id reused after an Unregister is a new
+    // frame).
     private RealmFrame[] _realmFrames = [];
+    private int[] _realmKinds = [];
     private object[] _realmFrameOwners = [];
+
+    /// <summary>What <see cref="RealmKindOf"/> answers for a registered realm no session may be in: no replication declared (12-realms § 2.1).</summary>
+    private const int UnreplicatedRealm = -2;
+
+    /// <summary>Sessions whose realm has no replication declared — a followed entity that entered one — and so are in none; per session per tick.</summary>
+    public long RealmsUnreplicated;
+
+    /// <summary>Sessions in a realm whose kind their profile excludes (<c>NotIn</c>), served nothing there; per session per tick.</summary>
+    public long RealmsUnserved;
 
     private void EnsureRealmSlots()
     {
@@ -596,32 +632,65 @@ internal sealed unsafe partial class FrameAssembler
     }
 
     /// <summary>The <c>REALM</c> block's frame for <paramref name="realm"/>; <see langword="null"/> for none, which the block writes as <c>REALM(NONE)</c>.</summary>
-    private RealmFrame FrameOf(int realm)
+    private RealmFrame FrameOf(int realm) => ResolveRealm(realm) >= 0 ? (realm == RealmId.Default.Value || !MultiRealm ? Realm : _realmFrames[realm]) : null;
+
+    /// <summary>
+    /// A realm's kind (its canonical index, which picks its sessions' profile variants): -1 for none or an unregistered realm, <see cref="UnreplicatedRealm"/>
+    /// for one no session may be in.
+    /// </summary>
+    private int RealmKindOf(int realm) => ResolveRealm(realm);
+
+    private int ResolveRealm(int realm)
     {
         if (realm < 0 || realm == RealmId.NoneValue)
         {
-            return null;
+            return -1;
         }
 
-        if (realm == RealmId.Default.Value || !MultiRealm)
+        if (!MultiRealm)
         {
-            return Realm;
+            return 0;
         }
 
         var owner = Engine?.RealmTable?.TryGet((ushort)realm);
         if (realm >= _realmFrames.Length)
         {
-            Array.Resize(ref _realmFrames, Math.Max(realm + 1, _realmFrames.Length * 2));
+            Array.Resize(ref _realmFrames, Math.Max(realm + 1, Math.Max(8, _realmFrames.Length * 2)));
+            Array.Resize(ref _realmKinds, _realmFrames.Length);
             Array.Resize(ref _realmFrameOwners, _realmFrames.Length);
         }
 
-        if (!ReferenceEquals(_realmFrameOwners[realm], owner) || _realmFrames[realm] == null)
+        if (!ReferenceEquals(_realmFrameOwners[realm], owner) || (_realmFrames[realm] == null && _realmKinds[realm] >= 0))
         {
-            _realmFrames[realm] = owner == null ? null : SubscriptionsRuntime.BuildRealmFrame(Engine, _options, (ushort)realm);
             _realmFrameOwners[realm] = owner;
+            var replication = owner?.Config?.Replication;
+            if (owner == null)
+            {
+                _realmFrames[realm] = null;
+                _realmKinds[realm] = -1;
+            }
+            else if (replication == null && realm != RealmId.Default.Value)
+            {
+                _realmFrames[realm] = null;
+                _realmKinds[realm] = UnreplicatedRealm;
+            }
+            else if (Profiles.KindIndex(replication?.Kind ?? "") < 0)
+            {
+                // A kind the subscriptions never declared: nothing could say which variant serves it. Refused at Start for the realms registered by
+                // then; one registered later is treated as a realm no session may be in, and counted.
+                _realmFrames[realm] = null;
+                _realmKinds[realm] = UnreplicatedRealm;
+            }
+            else
+            {
+                _realmKinds[realm] = Profiles.KindIndex(replication?.Kind ?? "");
+                _realmFrames[realm] = realm == RealmId.Default.Value
+                    ? Realm
+                    : SubscriptionsRuntime.BuildRealmFrame(Engine, _options, (ushort)realm, _realmKinds[realm]);
+            }
         }
 
-        return _realmFrames[realm];
+        return _realmKinds[realm];
     }
 
     // A session observes the realm it is in (RLM-03): the realm policy keeps an observed realm active. Counted once per session, moved with it.

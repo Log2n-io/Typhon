@@ -91,8 +91,8 @@ internal static class CatalogBuilder
             },
             SessionKinds = Copy(registry.Sessions.DeclaredKinds),
 
-            // One realm kind until kinds are declared (R4.3b): the default, "".
-            RealmKinds = [""],
+            // The default kind "" and every declared one (12-realms § 1.4); the serializer puts them in canonical order, which a REALM's kindIdx indexes.
+            RealmKinds = ["", .. registry.DeclaredRealmKinds],
             Archetypes = archetypes,
             Enums = enums,
             Events = BuildEvents(registry, enums),

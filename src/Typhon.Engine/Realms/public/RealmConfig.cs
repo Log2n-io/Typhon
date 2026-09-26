@@ -41,6 +41,12 @@ public sealed class RealmConfig
     /// <summary>The realm this one belongs to, for event routing only (an interior's planet). <see cref="RealmId.None"/> for a root.</summary>
     public RealmId Parent { get; init; } = RealmId.None;
 
+    /// <summary>
+    /// How sessions are served in this realm (12-realms § 2.1), or <see langword="null"/> when no session may be in it: entering it throws, and a session
+    /// whose followed entity enters it is in no realm. Realm 0 of <c>ConfigureSpatialGrid</c> is served with the subscription options' own cell.
+    /// </summary>
+    public RealmReplicationConfig Replication { get; init; }
+
     /// <summary>A realm simulated at full rate whether observed or not — what a single-world application's realm 0 is.</summary>
     public static RealmConfig SimulatedAlways(SpatialGridConfig grid) =>
         new() { Grid = grid, WhenUnobserved = RealmUnobserved.Simulate, UnobservedTickDivisor = 1 };
@@ -74,6 +80,43 @@ public sealed class RealmConfig
         if (Parent == id)
         {
             throw new ArgumentException($"Realm {id.Value} cannot be its own parent.", nameof(Parent));
+        }
+
+        Replication?.Validate(id);
+    }
+}
+
+/// <summary>
+/// How a realm is replicated (12-realms § 2.1): the kind its sessions' profile variants are chosen by, its replication cell, its position width and an
+/// opaque tag its clients pick a scene by. Application policy, not persisted identity: the grid is the identity (D-1).
+/// </summary>
+[PublicAPI]
+public sealed class RealmReplicationConfig
+{
+    /// <summary>The realm's kind, one of <c>SubscriptionsRegistry.RealmKinds</c>; <c>""</c>, the default kind, always exists.</summary>
+    public string Kind { get; init; } = "";
+
+    /// <summary>The realm's replication cell, in metres — declared, never derived (L3).</summary>
+    public required double CellM { get; init; }
+
+    /// <summary>Position bits per axis on the wire in this realm: 16 or 24 (32 needs a wider block layout — not yet).</summary>
+    public int PositionBits { get; init; } = 24;
+
+    /// <summary>Opaque to the engine; travels in the realm's <c>REALM</c> block for the client to choose its scene by.</summary>
+    public uint AppTag { get; init; }
+
+    internal void Validate(RealmId id)
+    {
+        ArgumentNullException.ThrowIfNull(Kind, nameof(Kind));
+        if (!double.IsFinite(CellM) || CellM <= 0d)
+        {
+            throw new ArgumentOutOfRangeException(nameof(CellM), CellM, $"Realm {id.Value}: the replication cell must be a positive number of metres.");
+        }
+
+        if (PositionBits is not (16 or 24))
+        {
+            throw new ArgumentOutOfRangeException(nameof(PositionBits), PositionBits,
+                $"Realm {id.Value}: positions travel at 16 or 24 bits per axis (32 needs a replication block layout that reserves it).");
         }
     }
 }

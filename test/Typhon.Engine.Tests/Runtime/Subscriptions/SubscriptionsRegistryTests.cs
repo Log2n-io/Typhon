@@ -527,8 +527,9 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
     }
 
     /// <summary>
-    /// What a ClientRegion does not have is refused at <c>Start</c> (09 § 5–7): a centre (Bind, At, AroundControlled name a Sphere's), a near budget on
-    /// another shape (a Sphere's budget is its session's bytes), and the far tier of <c>Far</c>, which is an Aggregate's.
+    /// What a shape does not have is refused at <c>Start</c> (09 § 5–7): a near budget on another shape than a ClientRegion (a Sphere's budget is its
+    /// session's bytes), the far tier of <c>Far</c>, which is an Aggregate's, and an aggregate radius beside a region. An anchor on a ClientRegion is legal
+    /// since realms (12-realms § 1.3): it names the session's realm, not a centre.
     /// </summary>
     [Test]
     [VerifiesRule("SUB-16")]
@@ -552,8 +553,16 @@ class SubscriptionsRegistryTests : TestBase<SubscriptionsRegistryTests>
             }
         });
 
+        if (@case is 0 or 1 or 4)
+        {
+            // Past the shape check: this fixture declares no projection, so Start stops later, at the profile's archetypes — not at its anchor.
+            var later = Assert.Catch(runtime.Start);
+            Assert.That(later, Is.Not.InstanceOf<NotSupportedException>(), "an anchor on a ClientRegion names its session's realm");
+            return;
+        }
+
         var ex = Assert.Throws<NotSupportedException>(runtime.Start);
-        Assert.That(ex.Message, Does.Contain(@case switch { 0 or 1 or 4 => "only a Sphere has", 2 => "near budget", 3 => "Aggregate", _ => "radius" }));
+        Assert.That(ex.Message, Does.Contain(@case switch { 2 => "near budget", 3 => "Aggregate", _ => "radius" }));
     }
 
     /// <summary>

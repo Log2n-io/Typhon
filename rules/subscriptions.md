@@ -378,8 +378,9 @@
     must be distinguishable, and the unplaced session is the one that sees nothing
   invariant a profile is served through exactly ONE entity observer, World, Sphere or ClientRegion, with at most one Aggregate beside it (09 § 5) —
     which sends AGG, never entity records, so the entity known-set stays that one observer's; a second entity observer, an aggregate alone, a near
-    budget on any shape but a ClientRegion, the far tier of Far() (an Aggregate's), a centre (Bind, At, AroundControlled) on any shape but a Sphere, and an
-    Aggregate radius beside anything but a Sphere are refused at Start. Profiles may declare different radii, a leave radius and a run-time maximum (09 § 3–4): one window serves them all,
+    budget on any shape but a ClientRegion, the far tier of Far() (an Aggregate's), two anchors (Bind, At, AroundControlled) on one observer, and an
+    Aggregate radius beside anything but a Sphere are refused at Start. An anchor on a World or a ClientRegion names the session's realm only
+    (12-realms § 1.3); a profile's variants by realm kind (In) all take the realm from the same source. Profiles may declare different radii, a leave radius and a run-time maximum (09 § 3–4): one window serves them all,
     sized for the largest radius any session can take, and that radius counts against the window bound at Start
   invariant a radius change (SetRadius, or a profile change between Sphere radii) is geometry like an anchor move: the next frame sweeps the shell
     between the two radii and does not reset

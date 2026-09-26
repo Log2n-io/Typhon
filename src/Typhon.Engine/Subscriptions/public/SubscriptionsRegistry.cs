@@ -50,6 +50,7 @@ public sealed class SubscriptionsRegistry
 {
     private readonly List<ArchetypeProjection> _archetypes = [];
     private readonly List<ProfileDeclaration> _profiles = [];
+    private readonly List<string> _realmKinds = [];
     private readonly List<CommandDeclaration> _commands = [];
     private readonly List<EventDeclaration> _events = [];
     private readonly List<MetricDeclaration> _metrics = [];
@@ -147,6 +148,42 @@ public sealed class SubscriptionsRegistry
         }
 
         return null;
+    }
+
+    /// <summary>The realm kinds declared with <see cref="RealmKinds"/>; the default kind <c>""</c> is implicit.</summary>
+    public IReadOnlyList<string> DeclaredRealmKinds => _realmKinds;
+
+    /// <summary>
+    /// Declares the kinds a realm may carry (12-realms § 1.4) — <c>planet</c>, <c>interior</c>, <c>space</c> — which a profile's variants are chosen by
+    /// (<see cref="ProfileBuilder.In"/>). The default kind <c>""</c> always exists; the catalog lists them in canonical order.
+    /// </summary>
+    /// <param name="kinds">Distinct, non-empty names.</param>
+    /// <returns>This registry.</returns>
+    public SubscriptionsRegistry RealmKinds(params string[] kinds)
+    {
+        ThrowIfFrozen();
+        ArgumentNullException.ThrowIfNull(kinds);
+        foreach (var kind in kinds)
+        {
+            if (string.IsNullOrEmpty(kind))
+            {
+                throw new ArgumentException("A realm kind is a non-empty name; the default kind, \"\", always exists.", nameof(kinds));
+            }
+
+            if (_realmKinds.Contains(kind))
+            {
+                throw new InvalidOperationException($"Realm kind '{kind}' is already declared.");
+            }
+
+            if (_realmKinds.Count + 2 > ProtocolConstants.MaxRealmKinds)
+            {
+                throw new InvalidOperationException($"At most {ProtocolConstants.MaxRealmKinds - 1} realm kinds beside the default one.");
+            }
+
+            _realmKinds.Add(kind);
+        }
+
+        return this;
     }
 
     /// <summary>
@@ -429,10 +466,64 @@ public sealed class SubscriptionsRegistry
         return this;
     }
 
+    // Where a profile takes its realm from (12-realms § 1.3): an anchored observer's entity or fixed point, otherwise the application's placement.
+    private static ViewpointSource SourceOf(ProfileDeclaration profile)
+    {
+        foreach (var observer in profile.Observers)
+        {
+            if (observer.Kind == ObserverKind.Aggregate)
+            {
+                continue;
+            }
+
+            return observer.FollowsControlled ? ViewpointSource.Controlled
+                : observer.BoundEntity != EntityId.Null ? ViewpointSource.Bound
+                : observer.Placement.HasValue ? ViewpointSource.Fixed
+                : ViewpointSource.Placed;
+        }
+
+        return ViewpointSource.Placed;
+    }
+
     private void RefuseUnbuiltShapes()
     {
         foreach (var profile in _profiles)
         {
+            // Variants by realm kind (12-realms § 1.4): of declared kinds only, one per kind, never nested, and sharing the base's realm source — the
+            // realm a session is in is resolved before its variant is, so every variant must agree on where it comes from.
+            foreach (var (kind, variant) in profile.Variants)
+            {
+                if (!_realmKinds.Contains(kind) && kind.Length != 0)
+                {
+                    throw new InvalidOperationException($"Profile '{profile.Name}' has a variant for realm kind '{kind}', which RealmKinds does not declare.");
+                }
+
+                if (variant.Variants.Count > 0 || variant.Excluded.Count > 0)
+                {
+                    throw new NotSupportedException($"Profile '{profile.Name}': a variant ('{kind}') declares variants of its own. Variants do not nest.");
+                }
+
+                if (SourceOf(variant) != SourceOf(profile))
+                {
+                    throw new NotSupportedException(
+                        $"Profile '{profile.Name}': its '{kind}' variant takes its realm from another source ({SourceOf(variant)}) than the profile " +
+                        $"({SourceOf(profile)}). A session's realm is resolved before its variant, so every variant follows the same one (12-realms § 1.3).");
+                }
+            }
+
+            foreach (var kind in profile.Excluded)
+            {
+                if (!_realmKinds.Contains(kind) && kind.Length != 0)
+                {
+                    throw new InvalidOperationException($"Profile '{profile.Name}' excludes realm kind '{kind}', which RealmKinds does not declare.");
+                }
+
+                if (profile.Variants.ContainsKey(kind))
+                {
+                    throw new InvalidOperationException($"Profile '{profile.Name}' both declares a variant for realm kind '{kind}' and excludes it.");
+                }
+            }
+
             foreach (var observer in profile.Observers)
             {
                 if (observer.Kind == ObserverKind.Sphere
@@ -445,11 +536,11 @@ public sealed class SubscriptionsRegistry
                 }
 
                 if (observer.Kind != ObserverKind.Sphere
-                    && (observer.BoundEntity != EntityId.Null || observer.FollowsControlled || observer.Placement.HasValue))
+                    && (observer.BoundEntity != EntityId.Null ? 1 : 0) + (observer.FollowsControlled ? 1 : 0) + (observer.Placement.HasValue ? 1 : 0) > 1)
                 {
-                    // A World has no centre and a ClientRegion's is the client's; serving either without the centre it names would be a silent substitution.
+                    // On a World or a ClientRegion an anchor names the session's realm only (12-realms § 1.3) — and two anchors name two realms.
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}' centres a {observer.Kind} observer (Bind, AroundControlled or At), which only a Sphere has.");
+                        $"Profile '{profile.Name}' anchors a {observer.Kind} observer in more than one way (Bind, AroundControlled, At). Declare one.");
                 }
 
                 if (observer.NearBudget != 0 && observer.Kind != ObserverKind.ClientRegion)

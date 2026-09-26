@@ -35,14 +35,25 @@ class RealmSessionTests : TestBase<RealmSessionTests>
         dbe.ConfigureRealms(4);
         dbe.ConfigureSpatialGrid(Realm0Grid());
         dbe.InitializeArchetypes();
-        dbe.Realms.Register(new RealmId(1), RealmConfig.SimulatedAlways(Realm1Grid()));
+        dbe.Realms.Register(new RealmId(1), new RealmConfig
+        {
+            Grid = Realm1Grid(),
+            WhenUnobserved = RealmUnobserved.Simulate,
+            UnobservedTickDivisor = 1,
+            Replication = new RealmReplicationConfig { Kind = "interior", CellM = 5, PositionBits = 16, AppTag = 42 },
+        });
+
+        // A realm no session may be in: no replication declared.
+        dbe.Realms.Register(new RealmId(2), RealmConfig.SimulatedAlways(Realm1Grid()));
         return dbe;
     }
 
-    private static FrameHarness CreateHarness(DatabaseEngine dbe)
+    private static FrameHarness CreateHarness(DatabaseEngine dbe, Action<SubscriptionsRegistry> more = null)
     {
         var harness = FrameHarness.Create(dbe, subs =>
         {
+            subs.RealmKinds("interior");
+            more?.Invoke(subs);
             subs.Archetype<RealmUnit>(a => a.Motion(RealmUnit.Pos, m => m.Teleport(20)));
             subs.Profile(World, p => p.World().Of<RealmUnit>());
             subs.Profile(Follow, p => p.Sphere(30).AroundControlled().Of<RealmUnit>());
@@ -273,6 +284,7 @@ class RealmSessionTests : TestBase<RealmSessionTests>
         using var dbe = SetupEngine();
         using var harness = FrameHarness.Create(dbe, subs =>
         {
+            subs.RealmKinds("interior");
             subs.Archetype<RealmUnit>(a => a.Motion(RealmUnit.Pos, m => m.Teleport(20)));
             subs.Profile(World, p => p.World().Of<RealmUnit>());
             subs.Command<RealmGoTo>(c => c.Rate(1_000, 1_000).Field(g => g.At, Codec.Pos3));
@@ -342,6 +354,81 @@ class RealmSessionTests : TestBase<RealmSessionTests>
     private static RecordValues GoTo(double x, double y, double z) => new() { ["At"] = FieldValue.Of(x, y, z) };
 
     private static RecordValues Ping(uint n) => new() { ["N"] = FieldValue.Of((double)n) };
+
+    [Test]
+    public void ARealmsFrameCarriesItsKindTagCellAndWidth_AndARealmWithNoReplicationCannotBeEntered()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var session = harness.OpenSessions(1, World)[0];
+        var commands = harness.Subscriptions.Commands;
+        Assert.That(() => commands.Enter(session, new RealmId(2)), Throws.InvalidOperationException, "realm 2 declares no replication");
+
+        commands.Enter(session, RealmId.Default);
+        Spawn(dbe, 0, 1);
+        Run(harness, session, 2);
+        commands.Enter(session, new RealmId(1));
+        Run(harness, session, 1);
+        var store = harness.Replica(session).Store;
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.Realm?.RealmId, Is.EqualTo((ushort)1));
+            Assert.That(store.RealmKind, Is.EqualTo("interior"));
+            Assert.That(store.Realm?.AppTag, Is.EqualTo(42u));
+            Assert.That(store.Realm?.CellM, Is.EqualTo(5d));
+            Assert.That(store.Realm?.PositionBits, Is.EqualTo(16));
+        });
+    }
+
+    [Test]
+    public void AProfilesVariantServesTheRealmsOfItsKind_AndAnExcludedKindServesNothing()
+    {
+        using var dbe = SetupEngine();
+
+        // In realm 0 (kind ""), the base's unplaced Sphere would see nothing: its "" variant is a World, and serves everything.
+        using var harness = CreateHarness(dbe, subs =>
+        {
+            subs.Profile("scaled", p =>
+            {
+                p.Sphere(30).Of<RealmUnit>();
+                p.In("", v => v.World().Of<RealmUnit>());
+            });
+            subs.Profile("elsewhere", p =>
+            {
+                p.World().Of<RealmUnit>();
+                p.NotIn("");
+            });
+        });
+        var scaled = harness.OpenSessions(1, "scaled")[0];
+        var elsewhere = harness.OpenSessions(1, "elsewhere")[0];
+        harness.Subscriptions.Commands.Enter(scaled, RealmId.Default);
+        harness.Subscriptions.Commands.Enter(elsewhere, RealmId.Default);
+        Spawn(dbe, 0, 3);
+        for (var i = 0; i < 3; i++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            harness.Deliver(scaled);
+            harness.Deliver(elsewhere);
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(harness, scaled), Is.EqualTo(3), "the realm's kind picked the World variant");
+            Assert.That(Held(harness, elsewhere), Is.Zero, "a kind the profile excludes serves it nothing");
+            Assert.That(harness.Assembler.RealmsUnserved, Is.GreaterThan(0), "and is counted");
+        });
+    }
+
+    [Test]
+    public void AVariantForAKindNobodyDeclaredIsRefusedAtStart()
+    {
+        using var dbe = SetupEngine();
+        Assert.That(() => CreateHarness(dbe, subs => subs.Profile("cave", p =>
+        {
+            p.World().Of<RealmUnit>();
+            p.In("cave", v => v.World().Of<RealmUnit>());
+        })), Throws.InvalidOperationException.With.Message.Contains("does not declare"));
+    }
 
     [Test]
     public void ARealmSessionSlotIsGivenBackAndTheRealmIsObservedWhileASessionIsInIt()
