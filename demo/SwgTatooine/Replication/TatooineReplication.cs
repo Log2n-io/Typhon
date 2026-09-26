@@ -49,6 +49,12 @@ public static class TatooineReplication
     /// </remarks>
     private const double PlayerRadiusM = 192d;
 
+    /// <summary>The realm kind of a building's interior (Realms G3): a one-cell realm, served whole.</summary>
+    public const string InteriorKind = "interior";
+
+    /// <summary>The realm kind of space (Realms G3): a deep realm at its own cell.</summary>
+    public const string SpaceKind = "space";
+
     /// <summary>The replication grid's cell side (<see cref="SubscriptionsOptions.ReplicationCellM"/>): a third of <see cref="PlayerRadiusM"/>.</summary>
     public const double ReplicationCellM = PlayerRadiusM / 3d;
 
@@ -101,6 +107,9 @@ public static class TatooineReplication
         // [OnEnter], [Fraction] and [Owner] on its components' fields (Ecs/Archetypes.cs, Ecs/Components.cs; design/Subscriptions/11 § 5). Everyone sees a
         // player's health as an 8-bit bar; the player alone sees the exact number and its mission waypoint, in SELF (11 § 2) — SWG's own HAM display and
         // quest marker. A builder call, subs.Archetype<T>(a => …), would replace an archetype's attributes for a deployment that wants otherwise.
+        // Planets are the default kind; interiors and space are served differently (12-realms § 1.4) — one profile name for every scale.
+        subs.RealmKinds(InteriorKind, SpaceKind);
+
         subs.Archetype<Creature>();
         subs.Archetype<CityNpc>();
         subs.Archetype<Player>();
@@ -123,6 +132,9 @@ public static class TatooineReplication
                     .Of<CreatureLair>()
                     .Of<WorldObject>();
                 p.Aggregate(GodAggregateTileM, rateHz: 1).Of<Creature>().Of<CityNpc>().Of<Player>();
+
+                // A camera over a planet has nothing to show inside a building: the god camera is served nothing in an interior.
+                p.NotIn(InteriorKind);
             });
         }
         else
@@ -137,14 +149,19 @@ public static class TatooineReplication
                 .Of<WorldObject>());
         }
 
-        // Centred on the player the session controls, at its post-fence position (09 § 6): no per-tick Place.
-        subs.Profile(PlayerProfile, p => p
-            .Detection(detection)
-            .Sphere(PlayerRadiusM, leave: PlayerLeaveM)
-            .AroundControlled()
-            .Of<Player>()
-            .Of<CityNpc>()
-            .Of<Creature>());
+        // Centred on the player the session controls, at its post-fence position (09 § 6): no per-tick Place. The session follows its player through
+        // doors and shuttles (12-realms § 1.3): inside a building everything in it, one cell; in space a World of the players there.
+        subs.Profile(PlayerProfile, p =>
+        {
+            p.Detection(detection)
+                .Sphere(PlayerRadiusM, leave: PlayerLeaveM)
+                .AroundControlled()
+                .Of<Player>()
+                .Of<CityNpc>()
+                .Of<Creature>();
+            p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>());
+            p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
+        });
     }
 
     /// <summary>
