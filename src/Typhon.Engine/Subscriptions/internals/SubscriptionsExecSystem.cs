@@ -310,7 +310,7 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 
         var from = FrameAssembler.PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
         ProjectAll(subs, ctx, chunkIndex, chunkCount);
-        subs.Push?.CountWorker(chunkIndex);
+        subs.Hub?.CountWorkers(chunkIndex);
         if (from != 0L)
         {
             Interlocked.Add(ref ProjectBusyTicks, Stopwatch.GetTimestamp() - from);
@@ -466,9 +466,9 @@ internal sealed class SubscriptionsPushIndexExecSystem : SubscriptionsExecSystem
     /// <inheritdoc />
     protected override SubscriptionsStage Stage => SubscriptionsStage.Project;
 
-    protected override int PrepareChunks(SubscriptionsContext ctx) => ctx.Subscriptions?.Push?.BeginParallelIndex() ?? 0;
+    protected override int PrepareChunks(SubscriptionsContext ctx) => ctx.Subscriptions?.Hub?.BeginParallelIndex() ?? 0;
 
-    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => ctx.Subscriptions?.Push?.PlaceWorker(chunkIndex);
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => ctx.Subscriptions?.Hub?.PlaceWorker(chunkIndex);
 }
 
 /// <summary>
@@ -491,17 +491,11 @@ internal sealed class SubscriptionsPushFarExecSystem : SubscriptionsExecSystemBa
     // nobody to flush to: a session that opens later starts with a reset and its whole view, never with an old flush.
     protected override int PrepareChunks(SubscriptionsContext ctx)
     {
-        var push = ctx.Subscriptions?.Push;
-        if (push == null)
-        {
-            return 0;
-        }
-
-        push.FinishIndex();
-        return ctx.SessionCount > 0 ? push.BeginFarFold(ctx.WorkerCount) : 0;
+        var hub = ctx.Subscriptions?.Hub;
+        return hub == null ? 0 : hub.PrepareFar(ctx.WorkerCount, ctx.SessionCount > 0);
     }
 
-    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => ctx.Subscriptions?.Push?.FoldFarChunk(chunkIndex);
+    protected override void ExecuteChunk(SubscriptionsContext ctx, int chunkIndex, int chunkCount) => ctx.Subscriptions?.Hub?.FoldFarChunk(chunkIndex);
 }
 
 /// <summary>

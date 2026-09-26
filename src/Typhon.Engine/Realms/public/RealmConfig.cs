@@ -99,7 +99,7 @@ public sealed class RealmReplicationConfig
     /// <summary>The realm's replication cell, in metres — declared, never derived (L3).</summary>
     public required double CellM { get; init; }
 
-    /// <summary>Position bits per axis on the wire in this realm: 16 or 24 (32 needs a wider block layout — not yet).</summary>
+    /// <summary>Position bits per axis on the wire in this realm: 24, the replication block layout's (per-realm widths come with V2, 12-realms § 5.5).</summary>
     public int PositionBits { get; init; } = 24;
 
     /// <summary>Opaque to the engine; travels in the realm's <c>REALM</c> block for the client to choose its scene by.</summary>
@@ -113,10 +113,10 @@ public sealed class RealmReplicationConfig
             throw new ArgumentOutOfRangeException(nameof(CellM), CellM, $"Realm {id.Value}: the replication cell must be a positive number of metres.");
         }
 
-        if (PositionBits is not (16 or 24))
+        if (PositionBits != 24)
         {
             throw new ArgumentOutOfRangeException(nameof(PositionBits), PositionBits,
-                $"Realm {id.Value}: positions travel at 16 or 24 bits per axis (32 needs a replication block layout that reserves it).");
+                $"Realm {id.Value}: positions travel at 24 bits per axis, the replication block layout's; per-realm widths are not built yet (12-realms § 5.5).");
         }
     }
 }

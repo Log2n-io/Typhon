@@ -456,6 +456,25 @@ internal sealed class SubscriptionProfiles
         }
     }
 
+    /// <summary>
+    /// The largest radius a session can take in a realm of kind <paramref name="kind"/> (12-realms § 1.4): over every profile's variant serving that kind —
+    /// what that realm's window is sized for, so a planet's radius does not bound an interior's cell.
+    /// </summary>
+    public double MaxRadiusFor(int kind)
+    {
+        var r = 0d;
+        for (var p = 0; p < _declaredCount; p++)
+        {
+            var served = VariantOf(p, kind);
+            if (served >= 0)
+            {
+                r = Math.Max(r, _profiles[served].MaxRadius);
+            }
+        }
+
+        return r;
+    }
+
     /// <summary>The radius a session of profile <paramref name="profile"/> starts with: its R′; zero for <c>World</c>.</summary>
     public double RadiusOf(int profile) => _profiles[profile].Radius;
 

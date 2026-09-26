@@ -130,12 +130,13 @@ internal sealed class RealmCodecs
             var position = plans[a].Position;
             if (position != null)
             {
-                // The block layout reserves the plan's width per axis for the previous and enter positions: a wider realm would compare and cache codes
-                // truncated. Per-realm widths above the plan's need the layout sized for the largest (12-realms § 5.5, MaxPositionBits).
-                if (position.Frame != null && positionBits > position.Frame.AxisBytes * 8)
+                // The block layout and the entities encoder use the plan's width per axis for the previous and enter positions: a wider realm would cache
+                // codes truncated, a narrower one would be copied past its bytes. Per-realm widths need the layout and the encoder to take the realm's
+                // (12-realms § 5.5, V2); until then a realm's width is the plan's.
+                if (position.Frame != null && positionBits != position.Frame.AxisBytes * 8)
                 {
                     throw new NotSupportedException(
-                        $"Realm {realm}: {positionBits}-bit positions exceed the {position.Frame.AxisBytes * 8} bits the block layout of plan {a} reserves");
+                        $"Realm {realm}: {positionBits}-bit positions, where the block layout of plan {a} is {position.Frame.AxisBytes * 8} bits per axis");
                 }
 
                 byPlan[a] = PositionFrame.Over(in grid, position.Dims, positionBits);

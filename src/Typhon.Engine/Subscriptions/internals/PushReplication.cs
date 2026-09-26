@@ -789,15 +789,15 @@ internal abstract unsafe partial class PushReplication
     /// <c>forceDeep</c>, which only tests set, since on a flat grid both must agree.
     /// </summary>
     public static PushReplication Create(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic,
-        ReplicationGrid grid, int maxSessions, bool shadow = false, bool forceDeep = false)
+        ReplicationGrid grid, int maxSessions, bool shadow = false, bool forceDeep = false, ushort realm = 0, RealmCodecs codecs = null)
     {
         return grid == null || (grid.Flat && !forceDeep)
-            ? new PushReplication<PushEvent>(plans, states, isPush, automatic, grid, maxSessions, shadow)
-            : new PushReplication<PushEvent3>(plans, states, isPush, automatic, grid, maxSessions, shadow);
+            ? new PushReplication<PushEvent>(plans, states, isPush, automatic, grid, maxSessions, shadow, realm, codecs)
+            : new PushReplication<PushEvent3>(plans, states, isPush, automatic, grid, maxSessions, shadow, realm, codecs);
     }
 
     private protected PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic,
-        ReplicationGrid grid, int maxSessions, bool shadow, bool deep)
+        ReplicationGrid grid, int maxSessions, bool shadow, bool deep, ushort realm = 0, RealmCodecs codecs = null)
     {
         Shadow = shadow || Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
         _plans = plans;
@@ -818,8 +818,8 @@ internal abstract unsafe partial class PushReplication
             }
         }
 
-        ServedRealm = RealmId.Default.Value;
-        Codecs = RealmCodecs.FromPlans(plans);
+        ServedRealm = realm;
+        Codecs = codecs ?? RealmCodecs.FromPlans(plans);
         Bootstrapped = new bool[plans.Length];
         EverythingThisTick = new bool[plans.Length];
 
@@ -1326,6 +1326,32 @@ internal abstract unsafe partial class PushReplication
             // one connected since holds nothing. Dropped rather than kept, because with no session connected nothing else ever empties the list.
             _orphanCount = 0;
         }
+    }
+
+    /// <summary>
+    /// Brings a replication the hub activated in the frame prologue (R4.4) to this tick: an empty index stands for it, and every live entity of the realm is
+    /// pushed from the next tick on — a reactivated one's missed ticks are a gap, so its occupancy and counts are recounted as after any gap. Serial.
+    /// </summary>
+    internal void PrimeForTick(uint tick, int workers)
+    {
+        Array.Clear(Bootstrapped);
+        BeginRealmTick(tick);
+        BeginMark(workers, countInProject: false);
+        BuildIndex();
+    }
+
+    /// <summary>The spatial grid this realm's entities of an archetype are indexed in, or null when the archetype has none in this realm.</summary>
+    private protected SpatialGrid RealmGridOf(ArchetypeClusterState cs)
+    {
+        var byRealm = cs.RealmSpatial;
+        return byRealm != null && ServedRealm < byRealm.Length ? Volatile.Read(ref byRealm[ServedRealm])?.Grid : null;
+    }
+
+    /// <summary>A replicated entity's v̂ (or enter position), decoded over this realm's frame: the point its sessions' geometry is tested against.</summary>
+    internal void DecodeVisibility(int archetype, nint block, int slot, out float x, out float y, out float z)
+    {
+        var layout = _states[archetype].Layout;
+        Decode(archetype, (byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + PositionOffset(archetype), out x, out y, out z);
     }
 
     /// <summary>After the hub marked the push set: this realm's projection bookkeeping for the tick.</summary>

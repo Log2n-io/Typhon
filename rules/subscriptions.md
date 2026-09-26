@@ -639,6 +639,22 @@
     SelfBlockTests.LastSeqAndRejectionsReachTheClient for the rate and application paths.
 
 
+### SUB-28: A session holds and resolves only its own realm `[fatal][silent]`
+  invariant every ENTITIES record, AGG tile and DEBUG geometry sent to s, and every successful TryResolve for s, concerns entities and cells of realm(s)
+    — whatever their local coordinates; realm(s) = None → s holds nothing positioned
+  invariant each served realm has its own replication: its push index, log, occupancy, aggregate and near counts hold only events of blocks with
+    block.Realm = that realm (block.Realm = ClusterRealmMap[its cluster], stamped at attach); a session's geometry lives in its realm's replication
+    only, in a realm-local slot, so a lookup in another realm's reads the unbound sentinel
+  invariant a realm with no session stops being served (no mark, projection, index or frame work) until a session is placed in it again, when it is
+    re-pushed whole and recounted as after a gap
+  invariant until events are realm-aware (R4.7), the geometric routes (Near, ToKnown) are filed by realm 0's cells and reach realm 0's sessions only
+  never decide isolation by geometry: identical local coordinates in two realms are the expected case
+  scope: PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
+    ArchetypeReplicationState.TryAttachBlock
+  on_violation: silent. A client sees or targets an entity of a world it is not in — a cheat, and a store holding two worlds' netIds.
+  verified: RealmSessionTests.EachRealmsSessionsHoldThatRealmsEntitiesOnly_AtIdenticalLocalCoordinates,
+    RealmSessionTests.ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns, RealmReplicationTests.AnEntityOfARealmNotServedIsNeverKnownToASession
+
 ### SUB-29: A session is in one realm at a time, and a realm switch is one published RESET|REALM frame `[fatal][silent]`
   invariant realm(s) ∈ {None} ∪ RealmId is one value per tick: the application's (Place(realm, pos) / Enter / Leave), the followed entity's after this
     tick's fence (Bind, AroundControlled — a teleport switches its sessions in the same tick), or realm 0 (At); a session nobody placed is in realm 0

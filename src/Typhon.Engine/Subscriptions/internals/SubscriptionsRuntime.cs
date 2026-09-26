@@ -238,17 +238,19 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 }
 
                 _frames.Push = Push;
-                var (farPhase, farWindow) = Profiles.FarFold;
-                Push.ConfigureFar(farPhase, farWindow);
-                var encodePlans = new ArchetypeEncodePlan[Plans.Length];
+                _engine = engine;
+                _observed = observed;
+                _automatic = automatic;
+                _encodePlans = new ArchetypeEncodePlan[Plans.Length];
                 for (var a = 0; a < Plans.Length; a++)
                 {
-                    encodePlans[a] = _frames.EncodePlanOf(a);
+                    _encodePlans[a] = _frames.EncodePlanOf(a);
                 }
 
-                Push.AttachEncodePlans(encodePlans);
-                ConfigureAggregates(observed);
-                ConfigureRegions();
+                ConfigureRealm(Push, Grid, Realm0Frame, first: true);
+
+                // Every other realm is served the first time a session is placed in it (R4.4), from its own grid and replication config.
+                Hub.Factory = CreateRealmReplication;
             }
 
             // The send side (P1-14b). It holds no memory of its own beyond one view and one work item per slot; what it carries is the rule that a frame
@@ -420,7 +422,60 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// ClientRegion sessions (09 § 7): one window width, sized for the widest extent any profile accepts, bounded like a Sphere's window, and the archetype
     /// sets the near budgets count.
     /// </summary>
-    private void ConfigureRegions()
+    // What every realm's replication is built from (R4.4): the engine, the plans' push flags and encode plans, and the near budgets' archetype sets.
+    private DatabaseEngine _engine;
+    private bool[] _observed;
+    private bool[] _automatic;
+    private ArchetypeEncodePlan[] _encodePlans;
+    private ArchetypeSet[] _nearSets;
+
+    /// <summary>Why the last realm whose replication could not be built was refused; diagnostics only.</summary>
+    internal string LastUnservableRealm { get; private set; }
+
+    // A realm's replication: far fold, encode plans, aggregates over its frame and region windows over its grid. The first (realm 0's, at Start) also binds
+    // the profiles' aggregates and near budgets, which are realm-independent.
+    private void ConfigureRealm(PushReplication push, ReplicationGrid grid, RealmFrame frame, bool first)
+    {
+        var (farPhase, farWindow) = Profiles.FarFold;
+        push.ConfigureFar(farPhase, farWindow);
+        push.AttachEncodePlans(_encodePlans);
+        ConfigureAggregates(push, frame, first);
+        ConfigureRegions(push, grid);
+    }
+
+    /// <summary>
+    /// Builds <paramref name="realm"/>'s replication the first time a session is placed in it (R4.4): its grid at its declared cell, its codecs over its
+    /// bounds and width, its aggregates and region windows. Null when the realm declares no replication, or when its grid cannot serve the declared
+    /// profiles — refused, counted by the hub, never thrown: this runs in the frame prologue.
+    /// </summary>
+    private PushReplication CreateRealmReplication(ushort realm)
+    {
+        var entry = _engine?.RealmTable?.TryGet(realm);
+        var config = entry?.Config?.Replication;
+        if (entry == null || config == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            // Sized for the variants that serve the realm's kind, not for every profile's (12-realms § 1.4).
+            var grid = ReplicationGrid.Resolve(config.CellM, entry.GridConfig, Profiles.MaxRadiusFor(Profiles.KindIndex(config.Kind)));
+            var codecs = RealmCodecs.Create(realm, in entry.GridConfig, Plans, config.PositionBits);
+            var push = PushReplication.Create(Plans, _replicationStates, _observed, _automatic, grid, Options.MaxSessions, Options.PushShadow,
+                Options.ForceDeepReplicationForTest, realm, codecs);
+            var frame = BuildRealmFrame(_engine, Options, realm, Math.Max(0, Profiles.KindIndex(config.Kind)));
+            ConfigureRealm(push, grid, frame, first: false);
+            return push;
+        }
+        catch (Exception e) when (e is NotSupportedException or InvalidOperationException or ArgumentException)
+        {
+            LastUnservableRealm = $"realm {realm}: {e.Message}";
+            return null;
+        }
+    }
+
+    private void ConfigureRegions(PushReplication push, ReplicationGrid grid)
     {
         // ClientRegion (09 § 7): one window width for every region session, sized for the widest extent any profile accepts, and bounded like a Sphere's
         // window — the cells a gather pays for.
@@ -431,19 +486,20 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         }
 
         // The implementation's depth, not the grid's: the deep one (a flat grid served deep only in tests) keeps W² rows of W cells.
-        var window = (long)Math.Ceiling(edge / Grid.CellM) + 5;
-        var cells = window * window * (Push.Deep ? window : 1);
+        var window = (long)Math.Ceiling(edge / grid.CellM) + 5;
+        var cells = window * window * (push.Deep ? window : 1);
         if (window > 64 || cells > ReplicationGrid.MaxWindowCells)
         {
-            var widest = Push.Deep ? 9 : 48;
+            var widest = push.Deep ? 9 : 48;
             throw new InvalidOperationException(
-                $"A ClientRegion accepts regions {edge} m wide, and with SubscriptionsOptions.ReplicationCellM = {Grid.CellM} its sessions' window would be " +
+                $"A ClientRegion accepts regions {edge} m wide, and with a replication cell of {grid.CellM} m its sessions' window would be " +
                 $"{window} cells per axis (⌈maxEdgeM / c⌉ + 5), {cells} cells, past the bound of {ReplicationGrid.MaxWindowCells}. In a " +
-                $"{(Push.Deep ? "deep" : "flat")} grid maxEdgeM is at most {widest} cells, {widest * Grid.CellM} m: lower it, or raise the cell side to at " +
+                $"{(push.Deep ? "deep" : "flat")} grid maxEdgeM is at most {widest} cells, {widest * grid.CellM} m: lower it, or raise the cell side to at " +
                 $"least {Math.Ceiling(edge / widest * 1000d) / 1000d} m.");
         }
 
-        Push.ConfigureRegions((int)window, Profiles.BindNearCounts().ToArray());
+        _nearSets ??= Profiles.BindNearCounts().ToArray();
+        push.ConfigureRegions((int)window, _nearSets);
     }
 
     /// <summary>
@@ -451,8 +507,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// cells over the same origin — the counts follow cell changes, so a tile edge inside a cell would let a move cross it unseen — and every archetype a grid
     /// counts must be one push replication serves.
     /// </summary>
-    private void ConfigureAggregates(bool[] observed)
+    private void ConfigureAggregates(PushReplication push, RealmFrame realmFrame, bool bindProfiles)
     {
+        var observed = _observed;
         var canonical = Catalog.Canonical.Grids ?? [];
         if (canonical.Length == 0)
         {
@@ -485,8 +542,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 columns[plan] = j;
             }
 
-            // Laid over the served realm's frame (typhon.3, 12-realms § 5.3): the same origin and dimensions a client derives from the REALM block.
-            var frame = Realm0Frame ?? throw new NotSupportedException("An Aggregate needs a spatial world: configure a spatial grid.");
+            // Laid over the realm's frame (typhon.3, 12-realms § 5.3): the same origin and dimensions a client derives from the REALM block.
+            var frame = realmFrame ?? throw new NotSupportedException("An Aggregate needs a spatial world: configure a spatial grid.");
             var tiles = grid.TileCells;
 
             // A client refuses a grid past the catalog's cell limit when it reads the REALM (1007): refused here, at Start, not on every session's first
@@ -502,7 +559,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 frame.AggregateDim(1, tiles), frame.AggregateDim(2, tiles), columns, grid.Archetypes.Length);
         }
 
-        Push.ConfigureAggregates(grids);
+        push.ConfigureAggregates(grids);
+        if (!bindProfiles)
+        {
+            return;
+        }
+
         // Matched by the tile in cells, as the catalog built it: the metres the grid stores are cells × cellM, which need not equal the declared tile
         // bit for bit (0.3 m over 0.1 m cells is 3 cells, stored as 0.30000000000000004 m).
         var cellM = Realm0Frame.CellM;

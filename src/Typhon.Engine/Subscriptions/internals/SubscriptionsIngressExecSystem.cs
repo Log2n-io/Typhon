@@ -1172,12 +1172,8 @@ internal sealed class SubscriptionsIngressExecSystem : ChunkedCallbackSystem<Sub
         {
             // The shadow oracle's check runs HERE — after last tick's frames were published and before this tick's fence moves any
             // replication entry. Anywhere later compares the clients against entries a migration has already carried or parked.
-            var push = ctx.Subscriptions.Push;
-            if (push != null && push.Shadow)
-            {
-                // Blocks are replication's own native memory and the active list is an array: no page is read, so no epoch is needed.
-                push.RunQueuedShadowChecks();
-            }
+            // Blocks are replication's own native memory and the active list is an array: no page is read, so no epoch is needed.
+            ctx.Subscriptions.Hub?.RunQueuedShadowChecks();
 
             return ingress.BeginTick(ctx);
         }

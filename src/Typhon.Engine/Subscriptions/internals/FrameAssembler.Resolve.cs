@@ -2,7 +2,7 @@ using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
-internal sealed partial class FrameAssembler
+internal sealed unsafe partial class FrameAssembler
 {
     /// <summary>
     /// Whether <paramref name="session"/> holds <paramref name="entity"/>, which <paramref name="netId"/> names — its controlled entity, or one its COMMITTED
@@ -37,7 +37,7 @@ internal sealed partial class FrameAssembler
         try
         {
             if (!locator.TryLocate(entity, out var clusters, out var chunk, out var slot)
-                || !Push.TryVisibilityAt(clusters, chunk, slot, entity, out var archetype, out var carried, out var x, out var y, out var z)
+                || !Push.TryReplicaAt(clusters, chunk, slot, entity, out var archetype, out var block, out var carried)
                 || carried != netId)
             {
                 return false;
@@ -55,8 +55,12 @@ internal sealed partial class FrameAssembler
                 return false;
             }
 
+            // The entity's realm's replication (SUB-28): its frame decodes the entity's v̂, and its geometry is the session's only if the session is placed in
+            // that realm — a session of another realm reads an unbound slot there and holds nothing, whatever the local coordinates.
+            var owner = Push.Hub?.For(((ReplicationBlockHeader*)block)->Realm) ?? Push;
+            owner.DecodeVisibility(archetype, block, slot, out var x, out var y, out var z);
             var shape = Profiles.IsWorld(profile) ? PushShape.World : Profiles.RegionOf(profile) ? PushShape.Region : PushShape.Sphere;
-            return Push.HoldsCommitted(session, shape, x, y, z);
+            return owner.HoldsCommitted(session, shape, x, y, z);
         }
         finally
         {

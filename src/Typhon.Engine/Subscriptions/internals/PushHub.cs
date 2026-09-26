@@ -208,7 +208,7 @@ internal sealed unsafe class PushHub
             link.Generation = session.Generation;
         }
 
-        var replication = For(realm);
+        var replication = For(realm) ?? Activate(realm, tick);
         var p = _placement[slot];
         var local = (int)(p >> 32);
         if (local != 0 && (ushort)p == session.Generation && (ushort)(p >> 16) == realm)
@@ -257,7 +257,10 @@ internal sealed unsafe class PushHub
         }
     }
 
-    /// <summary>Every <see cref="SweepEvery"/> ticks, after the tick's placements: slots no session was placed in go back. Serial (the frame prologue).</summary>
+    /// <summary>
+    /// Every <see cref="SweepEvery"/> ticks, after the tick's placements: slots no session was placed in go back, and a realm left with no session stops being
+    /// served (R4.4, SUB-13) — kept, dormant, until a session is placed in it again. Realm 0 is always served. Serial (the frame prologue).
+    /// </summary>
     internal void SweepUnplaced(uint tick)
     {
         if (tick % SweepEvery != 0)
@@ -269,6 +272,236 @@ internal sealed unsafe class PushHub
         for (var r = 0; r < active.Length; r++)
         {
             active[r].ReleaseUnseen(tick, this);
+        }
+
+        for (var r = _activeCount - 1; r >= 0; r--)
+        {
+            var replication = _active[r];
+            if (replication.ServedRealm != RealmId.Default.Value && replication.SessionsHere == 0)
+            {
+                Deactivate(r);
+            }
+        }
+    }
+
+    // ══ Realms served on demand (R4.4) ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Builds a realm's replication the first time a session is placed in it; null when the realm has none, or its grid cannot be served.</summary>
+    internal Func<ushort, PushReplication> Factory;
+
+    /// <summary>The worker count the tick's projection was marked for, which a replication activated in the frame prologue sizes its lists by.</summary>
+    internal int Workers = 1;
+
+    // Replications of realms no session is in any more, kept for their next session; and realms whose replication could not be built, not retried.
+    private PushReplication[] _dormant = [];
+    private bool[] _unservable = [];
+
+    /// <summary>Realms whose replication was built or woken for a session — cumulative.</summary>
+    public long RealmsActivated;
+
+    /// <summary>Realms that stopped being served when their last session left — cumulative.</summary>
+    public long RealmsDeactivated;
+
+    /// <summary>Realms a session was placed in whose replication could not be built (counted once per realm).</summary>
+    public long RealmsUnservable;
+
+    private PushReplication Activate(ushort realm, uint tick)
+    {
+        if (Factory == null || (realm < _unservable.Length && _unservable[realm]))
+        {
+            return null;
+        }
+
+        var replication = realm < _dormant.Length ? _dormant[realm] : null;
+        if (replication != null)
+        {
+            _dormant[realm] = null;
+        }
+        else
+        {
+            replication = Factory(realm);
+            if (replication == null)
+            {
+                if (realm >= _unservable.Length)
+                {
+                    Array.Resize(ref _unservable, Math.Max(realm + 1, Math.Max(8, _unservable.Length * 2)));
+                }
+
+                _unservable[realm] = true;
+                RealmsUnservable++;
+                return null;
+            }
+        }
+
+        Serve(realm, replication);
+        replication.PrimeForTick(tick, Workers);
+        RealmsActivated++;
+        return replication;
+    }
+
+    private void Deactivate(int index)
+    {
+        var replication = _active[index];
+        var realm = replication.ServedRealm;
+        _byRealm[realm] = null;
+        _active[index] = _active[--_activeCount];
+        _active[_activeCount] = null;
+        if (realm >= _dormant.Length)
+        {
+            Array.Resize(ref _dormant, Math.Max(realm + 1, Math.Max(8, _dormant.Length * 2)));
+        }
+
+        _dormant[realm] = replication;
+        RealmsDeactivated++;
+    }
+
+    // ══ The stages, over the served realms: one realm (the common case) calls straight through ════════════════════════════════════════════════════════
+
+    // Per stage, chunk i is served realm r's chunk (i − start[r]): the index merge's plan and the far fold's.
+    private int[] _indexStarts = new int[2];
+    private int[] _farStarts = new int[2];
+
+    /// <summary>A projection chunk's end: every served realm sorts the run it holds from this worker.</summary>
+    internal void CountWorkers(int worker)
+    {
+        for (var r = 0; r < _activeCount; r++)
+        {
+            _active[r].CountWorker(worker);
+        }
+    }
+
+    /// <summary>The index merge's plan over every served realm; its chunk count.</summary>
+    internal int BeginParallelIndex() => _activeCount == 1 ? _active[0].BeginParallelIndex() : Plan(ref _indexStarts, static (r, _) => r.BeginParallelIndex(), 0);
+
+    /// <summary>One chunk of the index merge.</summary>
+    internal void PlaceWorker(int chunk)
+    {
+        if (_activeCount == 1)
+        {
+            _active[0].PlaceWorker(chunk);
+            return;
+        }
+
+        var r = Locate(_indexStarts, chunk);
+        if (r >= 0)
+        {
+            _active[r].PlaceWorker(chunk - _indexStarts[r]);
+        }
+    }
+
+    /// <summary>Every served realm's index finished, then the far fold's plan over them — none without a session; its chunk count.</summary>
+    internal int PrepareFar(int workers, bool sessions)
+    {
+        for (var r = 0; r < _activeCount; r++)
+        {
+            _active[r].FinishIndex();
+        }
+
+        if (!sessions)
+        {
+            return 0;
+        }
+
+        return _activeCount == 1 ? _active[0].BeginFarFold(workers) : Plan(ref _farStarts, static (r, w) => r.BeginFarFold(w), workers);
+    }
+
+    /// <summary>One chunk of the far fold.</summary>
+    internal void FoldFarChunk(int chunk)
+    {
+        if (_activeCount == 1)
+        {
+            _active[0].FoldFarChunk(chunk);
+            return;
+        }
+
+        var r = Locate(_farStarts, chunk);
+        if (r >= 0)
+        {
+            _active[r].FoldFarChunk(chunk - _farStarts[r]);
+        }
+    }
+
+    private int Plan(ref int[] starts, Func<PushReplication, int, int> prepare, int workers)
+    {
+        if (starts.Length < _activeCount + 1)
+        {
+            starts = new int[Math.Max(_activeCount + 1, starts.Length * 2)];
+        }
+
+        var total = 0;
+        for (var r = 0; r < _activeCount; r++)
+        {
+            starts[r] = total;
+            total += prepare(_active[r], workers);
+        }
+
+        starts[_activeCount] = total;
+        return total;
+    }
+
+    private int Locate(int[] starts, int chunk)
+    {
+        for (var r = 0; r < _activeCount; r++)
+        {
+            if (chunk < starts[r + 1])
+            {
+                return chunk >= starts[r] ? r : -1;
+            }
+        }
+
+        return -1;
+    }
+
+    /// <summary>The frame prologue's serial share, per served realm: the index built where its stage did not, and the occupied cells in order.</summary>
+    internal void BuildIndexes()
+    {
+        for (var r = 0; r < _activeCount; r++)
+        {
+            if (!_active[r].Indexed)
+            {
+                _active[r].BuildIndex();
+            }
+
+            _active[r].PrepareWorldOrder();
+        }
+    }
+
+    /// <summary>Every served realm's far flushes into the tick's log slot.</summary>
+    internal void EndFarFolds()
+    {
+        for (var r = 0; r < _activeCount; r++)
+        {
+            _active[r].EndFarFold();
+        }
+    }
+
+    /// <summary>Every served realm's LOD census, over the tick's push sessions (each counts its own).</summary>
+    internal void RecountLevels(SessionId[] sessions, int count)
+    {
+        for (var r = 0; r < _activeCount; r++)
+        {
+            _active[r].RecountLevels(sessions, count);
+        }
+    }
+
+    /// <summary>The overload step (09 § 10), for every served realm's gathers and budget loops.</summary>
+    internal void SetOverloadStep(int step)
+    {
+        for (var r = 0; r < _activeCount; r++)
+        {
+            _active[r].OverloadStep = step;
+        }
+    }
+
+    /// <summary>The shadow oracle's queued checks, in every served realm that keeps shadows.</summary>
+    internal void RunQueuedShadowChecks()
+    {
+        for (var r = 0; r < _activeCount; r++)
+        {
+            if (_active[r].Shadow)
+            {
+                _active[r].RunQueuedShadowChecks();
+            }
         }
     }
 
@@ -512,6 +745,7 @@ internal sealed unsafe class PushHub
     /// <summary>After the watched lists were reset: marks the push set and lists each block once, so the projection pass visits exactly it.</summary>
     public void MarkPushed(int workers, bool countInProject = false)
     {
+        Workers = workers;
         foreach (var a in _pushIndices)
         {
             var state = _states[a];

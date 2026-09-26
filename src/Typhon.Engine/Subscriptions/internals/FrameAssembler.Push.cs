@@ -105,7 +105,6 @@ internal sealed unsafe partial class FrameAssembler
         // with, and the detector's hold is what brings it back.
         var multiplier = Math.Max(1, Volatile.Read(ref _tickMultiplier));
         var overload = multiplier > 1 ? 1 : 0;
-        Push.OverloadStep = overload;
         var n = 0;
         var tick = (uint)_tick;
         var hub = Push.Hub;
@@ -251,16 +250,12 @@ internal sealed unsafe partial class FrameAssembler
         // Slots of sessions that closed or lost their profile since the last sweep go back, and so do their realm observations.
         hub.SweepUnplaced(tick);
         SweepObservers(tick);
+        hub.SetOverloadStep(overload);
 
-        // Every tick the track runs is indexed, sessions bound or not: the index is the tick's log slot, and its cell changes are the occupancy's only
-        // input (SUB-24). A tick left unindexed would leave the occupancy short of its spawns and crossings.
-        if (!Push.Indexed)
-        {
-            Push.BuildIndex();
-        }
-
-        // After the index, whose finish brought the occupancy to this tick: the occupied cells in order, for the World fills still under way.
-        Push.PrepareWorldOrder();
+        // Every tick the track runs is indexed in every served realm, sessions bound or not: the index is the tick's log slot, and its cell changes are the
+        // occupancy's only input (SUB-24). A tick left unindexed would leave the occupancy short of its spawns and crossings. After the index, whose finish
+        // brought the occupancy to this tick: the occupied cells in order, for the World fills still under way.
+        hub.BuildIndexes();
 
         // Events (09 § 11): this tick's emissions, encoded once — after projection, so their entities' netIds exist — into the event log.
         if (Events != null)
@@ -281,11 +276,11 @@ internal sealed unsafe partial class FrameAssembler
         // Distance LOD: the far flushes into the tick's log slot — folded by their stage, or here when the index was built here.
         if (n > 0)
         {
-            Push.EndFarFold();
+            hub.EndFarFolds();
         }
 
         // The LOD census, recounted before this tick's commits move it — only while a level is in use (09 § 10).
-        Push.RecountLevels(_pushSessions, n);
+        hub.RecountLevels(_pushSessions, n);
 
         // Shadow oracle: every 50 ticks, up to eight sessions compared with the geometry. Serial, and before the frames: the anchors it reads are the
         // committed ones, which is what the shadows describe.
@@ -297,7 +292,7 @@ internal sealed unsafe partial class FrameAssembler
             for (var i = 0; i < sample; i++)
             {
                 var k = (int)((i * (long)n) / sample);
-                Push.QueueShadowCheck(_pushSessions[k], in Profiles.SetOf(_pushProfiles[k]));
+                _pushReplication[k].QueueShadowCheck(_pushSessions[k], in Profiles.SetOf(_pushProfiles[k]));
             }
         }
 
@@ -1163,6 +1158,9 @@ internal sealed unsafe partial class FrameAssembler
             mark = now;
         }
 
+        // A pending reset is owed whatever the gather found: a realm switch lands on a fresh realm-local state, whose gather has nothing of its own to reset,
+        // while the client still holds the old realm's view (SUB-29).
+        reset |= state.PendingReset;
         var flags = TickFlags.None;
         if (reset)
         {
@@ -1190,9 +1188,20 @@ internal sealed unsafe partial class FrameAssembler
         var eventsLost = 0L;
         if (events != null)
         {
-            var geometry = new SessionEventGeometry(push, session, _pushWorld[index]);
-            events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, out eventCount,
-                out eventBytes, out eventsLost);
+            // Geometric routes are filed by realm 0's cells until events are realm-aware (R4.7): a session of another realm, where the same local
+            // coordinates mean another place, hears the session-addressed routes only (SUB-28).
+            if (ReferenceEquals(push, Push))
+            {
+                var geometry = new SessionEventGeometry(push, session, _pushWorld[index]);
+                events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, out eventCount,
+                    out eventBytes, out eventsLost);
+            }
+            else
+            {
+                var nowhere = default(NoEventGeometry);
+                events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, _sessions.ControlledOf(session), session, ref nowhere, out eventCount,
+                    out eventBytes, out eventsLost);
+            }
 
             // Events take at most half a frame: past it they are counted, not sent, so a burst cannot make every frame oversize and starve the session.
             if (eventBytes > _maxFrameBytes / 2)

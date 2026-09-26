@@ -40,7 +40,7 @@ class RealmSessionTests : TestBase<RealmSessionTests>
             Grid = Realm1Grid(),
             WhenUnobserved = RealmUnobserved.Simulate,
             UnobservedTickDivisor = 1,
-            Replication = new RealmReplicationConfig { Kind = "interior", CellM = 5, PositionBits = 16, AppTag = 42 },
+            Replication = new RealmReplicationConfig { Kind = "interior", CellM = 8, AppTag = 42 },
         });
 
         // A realm no session may be in: no replication declared.
@@ -375,8 +375,8 @@ class RealmSessionTests : TestBase<RealmSessionTests>
             Assert.That(store.Realm?.RealmId, Is.EqualTo((ushort)1));
             Assert.That(store.RealmKind, Is.EqualTo("interior"));
             Assert.That(store.Realm?.AppTag, Is.EqualTo(42u));
-            Assert.That(store.Realm?.CellM, Is.EqualTo(5d));
-            Assert.That(store.Realm?.PositionBits, Is.EqualTo(16));
+            Assert.That(store.Realm?.CellM, Is.EqualTo(8d));
+            Assert.That(store.Realm?.PositionBits, Is.EqualTo(24));
         });
     }
 
@@ -428,6 +428,78 @@ class RealmSessionTests : TestBase<RealmSessionTests>
             p.World().Of<RealmUnit>();
             p.In("cave", v => v.World().Of<RealmUnit>());
         })), Throws.InvalidOperationException.With.Message.Contains("does not declare"));
+    }
+
+    [Test]
+    [VerifiesRule("SUB-28")]
+    public void EachRealmsSessionsHoldThatRealmsEntitiesOnly_AtIdenticalLocalCoordinates()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var sessions = harness.OpenSessions(2, World);
+        var commands = harness.Subscriptions.Commands;
+        commands.Enter(sessions[0], RealmId.Default);
+        commands.Enter(sessions[1], new RealmId(1));
+
+        // Same local coordinates in both realms: only which realm's structures an entry lives in can keep them apart (SUB-28).
+        var inZero = Spawn(dbe, 0, 3);
+        var inOne = Spawn(dbe, 1, 3);
+        for (var i = 0; i < 4; i++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            harness.Deliver(sessions[0]);
+            harness.Deliver(sessions[1]);
+        }
+
+        var archetype = harness.CatalogPlan.ArchetypeByName(nameof(RealmUnit)).Idx;
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Subscriptions.Hub.Active.Length, Is.EqualTo(2), $"realm 1 is served for its session ({harness.Subscriptions.LastUnservableRealm})");
+            Assert.That(harness.Replica(sessions[0]).NetIds(archetype), Is.EquivalentTo(Array.ConvertAll(inZero, harness.NetIdOf)));
+            Assert.That(harness.Replica(sessions[1]).NetIds(archetype), Is.EquivalentTo(Array.ConvertAll(inOne, harness.NetIdOf)));
+            for (var i = 0; i < inOne.Length; i++)
+            {
+                // Decoded over realm 1's frame (bounds −40…40): the place in realm 1, not a code of realm 0's.
+                var at = harness.Replica(sessions[1]).Position(archetype, harness.NetIdOf(inOne[i]));
+                Assert.That(at[0], Is.EqualTo(5 + (10 * i)).Within(0.01), $"entity {i} x");
+                Assert.That(at[1], Is.EqualTo(25).Within(0.01), $"entity {i} y");
+            }
+        });
+    }
+
+    [Test]
+    public void ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var session = harness.OpenSessions(1, World)[0];
+        var commands = harness.Subscriptions.Commands;
+        var hub = harness.Subscriptions.Hub;
+        commands.Enter(session, new RealmId(1));
+        Spawn(dbe, 1, 2);
+        Run(harness, session, 3);
+        Assert.That(Held(harness, session), Is.EqualTo(2));
+
+        // Out of realm 1, and the next sweep (every 64 ticks) stops serving it: no mark, projection or index for it after.
+        commands.Enter(session, RealmId.Default);
+        Run(harness, session, 70);
+        Assert.Multiple(() =>
+        {
+            Assert.That(hub.RealmsDeactivated, Is.EqualTo(1));
+            Assert.That(hub.For(1), Is.Null);
+        });
+
+        // Changed while nobody watched: an entity more. Back in, the realm is served again and its whole population re-pushed.
+        var later = Spawn(dbe, 1, 1);
+        Run(harness, session, 3);
+        commands.Enter(session, new RealmId(1));
+        Run(harness, session, 4);
+        Assert.Multiple(() =>
+        {
+            Assert.That(hub.RealmsActivated, Is.EqualTo(2), "built once, woken once");
+            Assert.That(Held(harness, session), Is.EqualTo(3), "refilled with what changed while it was dormant");
+            Assert.That(harness.NetIdOf(later[0]), Is.Not.Zero);
+        });
     }
 
     [Test]

@@ -199,7 +199,7 @@ sealed unsafe class FrameHarness : IDisposable
         }
 
         // The shadow oracle's checks queued by the previous tick, where the ingress drain runs them: before this tick's projection moves a block.
-        Subscriptions.Push?.RunQueuedShadowChecks();
+        Subscriptions.Hub?.RunQueuedShadowChecks();
 
         // The tick boundary the runtime drains the identity quarantine at: last tick's releases become reissuable.
         if (DrainNetIds)
