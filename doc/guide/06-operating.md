@@ -97,9 +97,9 @@ The page cache defaults to **256 MiB** (`PagedMMFOptions.DefaultCacheSizeBytes`)
 
 > 💡 **Cache size is not a database-size cap.** `DatabaseCacheSize` bounds the *resident working set*, not how much you can store — the on-disk database can be many times the cache; cold pages live on disk and page in on demand (persistent data, indexes, and the entity map all page out — only *Transient* components stay RAM-resident). Size the cache for throughput/latency, not capacity. This is the SQL/SQLite model, and it's what sets Typhon apart from in-memory ECS frameworks.
 
-When a bounded resource fills, each one has a baked-in policy: a cache **evicts**, the WAL **waits** (applying backpressure to commits), and hard client-facing limits **fail fast** with a `ResourceExhaustedException` (which is transient — see §3). You don't choose these per resource; they're semantic properties of each subsystem.
+When a bounded resource fills, each one has a baked-in policy: a cache **evicts**, the WAL **waits** (applying backpressure to commits), and hard client-facing limits **fail fast** with a `ResourceExhaustedException` (which is transient — see [§3](#3--error-handling-ground-rules)). You don't choose these per resource; they're semantic properties of each subsystem.
 
-> 💡 **Why you don't get a hundred tuning knobs.** The budget surface is deliberately tiny because the engine knows its own access patterns better than a config file does. You declare the *envelope* (how much memory it may use, where the data lives, whether durability is on); it self-manages the rest. If you ever need to see *where* the budget is going, that's exactly what the resource graph in §1 shows you — observe first, then resize the one cap that matters.
+> 💡 **Why you don't get a hundred tuning knobs.** The budget surface is deliberately tiny because the engine knows its own access patterns better than a config file does. You declare the *envelope* (how much memory it may use, where the data lives, whether durability is on); it self-manages the rest. If you ever need to see *where* the budget is going, that's exactly what the resource graph in [§1](#1--seeing-inside-a-running-engine) shows you — observe first, then resize the one cap that matters.
 
 ---
 
@@ -173,7 +173,7 @@ You can now declare a data model, choose the right storage mode per component, w
 Where to go from here:
 - **Serve it** — show the world to browsers, game clients and bots with [ch.7](07-subscriptions.md).
 - **Build something** — the loop from [ch.1](01-first-app.md) is a real, runnable starting point; grow it.
-- **Go deep** when you hit a wall — the **map** in §4 points at the exact reference chapter.
+- **Go deep** when you hit a wall — the **map** in [§4](#4--going-deeper--the-map) points at the exact reference chapter.
 
 ## 🧩 Key concepts & types
 

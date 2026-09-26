@@ -24,7 +24,7 @@ Two decisions shape everything below:
   structure and spatial changes. Per-tick work follows what changed, never the archetype.
 - **What a session holds is geometry.** Nothing is stored per (session, entity). A session's view is recomputed from its anchor, the cells
   delivered to it, and each entity's last visible position. A session costs a few hundred bytes plus its frames, whatever it holds.
-  § 3 explains the algorithm and why it scales.
+  [§3](#3-the-cell-algorithm-who-receives-what) explains the algorithm and why it scales.
 
 This chapter is the mechanism. For usage see [Guide ch.7](../guide/07-subscriptions.md); for per-feature guarantees, the
 [feature catalog](../feature-set/Subscriptions/README.md).
@@ -103,7 +103,7 @@ float jitter never produces segments; a run restarts when the step departs from 
 so a changing tick period (overload time dilation) never distorts motion; the velocity codec's width is derived from `Teleport` and the
 largest tick multiplier.
 
-**The visibility position v̂** is updated here, per pushed mover: it is what every geometric test reads (§ 3.1).
+**The visibility position v̂** is updated here, per pushed mover: it is what every geometric test reads ([§3.1](#31-terms)).
 
 **Identities.** One global netId space (`NetIdAllocator`, per-worker leases), because an entity reference in an event or a command is a bare
 netId. A released netId is **quarantined** for longer than a session may go without a frame, so no frame can carry an identity's leave and
@@ -221,7 +221,7 @@ Cost: `O(events)` plus a fixed prologue. An empty world of any extent costs the 
    it is handled there.
 4. **The crescent**, only when the anchor moved or the radius changed. Delivered cells that straddle either sphere are swept: each entity
    without an event is tested against both spheres → enter or leave. Cells inside both spheres or outside both are not touched.
-5. **Distance LOD.** Far entities' updates wait for their phase tick and are flushed from the log (§ 4).
+5. **Distance LOD.** Far entities' updates wait for their phase tick and are flushed from the log ([§4](#4-frames)).
 
 After a skip, the missed ticks are folded from the log into one union before step 3 (SUB-03). Past the log, or when the log cannot say,
 the session is reset. The anchor, window and radius computed here are **pending**: they commit only when the frame is published, so a frame
@@ -235,7 +235,7 @@ occupancy map's occupied cells only. A **`ClientRegion`** session replaces the s
 
 | Work | Grows with | Does not grow with |
 |---|---|---|
-| The index (§ 3.4) | this tick's events | world size, entity count, session count |
+| The index ([§3.4](#34-each-tick-the-shared-index)) | this tick's events | world size, entity count, session count |
 | A session's event step | occupied probe units in its box, events in its range | world size, entities it holds |
 | A session's delivery | cells delivered this frame, bounded by the enter budget | entities already held |
 | A session's sweep | only anchor moves: straddling cells' entities | a still viewer: zero |
@@ -253,7 +253,7 @@ occupancy map's occupied cells only. A **`ClientRegion`** session replaces the s
 
 **Measured**, on the SWG Tatooine demo (269 k entities, 50 Hz, Ryzen 9 7950X, bots on the same machine):
 - 1 000 player sessions: the replication track took **1.95 ms** a tick, against **9.17 ms** for the per-session pipeline it replaced
-  (paired A/B, 6/6 pairs, same wire bytes within 5 %); ≈ 1.5 ms after later work (§ 10).
+  (paired A/B, 6/6 pairs, same wire bytes within 5 %); ≈ 1.5 ms after later work ([§10](#10-cost)).
 - 5 000 player sessions: track p99 **3.25 ms** (one run, simulation at 10 Hz).
 - The index build is ≈ 0.1 ms. The rest is Project and Frames, which grow with changes and sessions, never with the world.
 
@@ -261,17 +261,17 @@ What binds next is the network link, not the CPU, and the levers there are paylo
 
 ## 4. Frames
 
-`Frames`' prologue runs the skip policy (§ 6) and the per-profile work; its chunks claim sessions one at a time (`FrameAssembler`). For each
+`Frames`' prologue runs the skip policy ([§6](#6-hand-off-send-pumps-and-backpressure)) and the per-profile work; its chunks claim sessions one at a time (`FrameAssembler`). For each
 session:
 
-1. **The gather** (§ 3.5): missed ticks folded from the log, then the anchor and window, delivery, this tick's events and the crescent,
+1. **The gather** ([§3.5](#35-each-session-the-gather)): missed ticks folded from the log, then the anchor and window, delivery, this tick's events and the crescent,
    giving enter, update and leave lists per archetype.
 2. **Distance bands** (`LodBands`): an update to an entity far from the session before and after waits for the entity's phase tick and is
    flushed from the log; enters and leaves never wait.
 3. **Records sorted by netId, encoded once per archetype** into an `ENTITIES` block (`EntitiesEncoder`): an enter copies the entity's encoded
    enter record, an update the group bodies the projection encoded. Then `SELF`, `ACKS`, `EVENTS`, `AGG`, `STATS`, `DEBUG`.
 
-Each identity is reached once per frame without a dedupe set (§ 3.2). Frames are encoded into a per-worker scratch, then copied into a pooled native block of the right size class
+Each identity is reached once per frame without a dedupe set ([§3.2](#32-the-invariant)). Frames are encoded into a per-worker scratch, then copied into a pooled native block of the right size class
 (`FramePool`: 512 B, 2, 8, 32, 128, 256 KiB). Two sessions in the same state receive identical bytes.
 
 ## 5. Owner state and acknowledgements
@@ -358,7 +358,7 @@ implementations of `IReplicatedArchetype` (the builder calls) and `IReplicatedMe
 
 Measured on the SWG Tatooine demo — 269 k entities, 1 000 player sessions (Sphere 192 m), 50 Hz, Release, Ryzen 9 7950X, bots on the same
 machine: the whole replication track ≈ **1.5–1.6 ms** per tick (≈ 20 % of the tick), wire ≈ 100 KB/s per session. Project and Frames are
-the two large stages, ≈ 0.7–0.8 ms each; the push index ≈ 0.1 ms. Why it costs so little, and what it grows with: § 3.6.
+the two large stages, ≈ 0.7–0.8 ms each; the push index ≈ 0.1 ms. Why it costs so little, and what it grows with: [§3.6](#36-why-it-scales).
 
 ## 11. Rules
 

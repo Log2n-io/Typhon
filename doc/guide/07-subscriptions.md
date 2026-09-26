@@ -49,7 +49,7 @@ Two things to hold on to:
   write a client should see — and by itself for spawns, destroys, `WriteSpatial` moves and migrations. A write you do not push is not
   sent. That is the contract that makes the cost follow what changed, never the size of the world.
 - **What a session holds is geometry.** Nothing is kept per (client, entity). A player's session holds the entities within its radius; a
-  client that falls behind is skipped, never queued, and its next frame carries the union of what it missed (§ 2 says how, in brief).
+  client that falls behind is skipped, never queued, and its next frame carries the union of what it missed ([§9](#9-budgets-backpressure-and-limits) says how, in brief).
 
 ---
 

@@ -41,7 +41,7 @@ This is the rule that makes the whole thing safe, and you mostly *don't write it
 
 - The runtime opens **one `UnitOfWork` per tick** and flushes it at tick end.
 - Each `CallbackSystem` / `QuerySystem` gets its **own `Transaction`**, created on the worker thread that runs it, and **committed and disposed by the scheduler** when the system returns.
-- Your system body just *uses* `ctx.Transaction` (or `ctx.Accessor`, §5). It never calls `Commit` or `Dispose`.
+- Your system body just *uses* `ctx.Transaction` (or `ctx.Accessor`, [§5](#5-running-in-parallel)). It never calls `Commit` or `Dispose`.
 
 > 💡 **Why you must not commit your own transaction.** The scheduler owns the lifecycle so it can enforce the invariants from [ch.3](03-transactions.md) across many systems at once: one consistent snapshot per system, one durability cycle per tick, single-thread affinity (the transaction was made *on this worker* and must die there). If you committed it yourself, you'd be fighting the scheduler for ownership of the tick's atomicity. The deal is simple: you write logic, the engine writes the commit. The one escape hatch — a write that must be durable *right now*, independent of the tick — is `ctx.CreateSideTransaction(...)` ([§6](#6-building-and-running-the-runtime)).
 

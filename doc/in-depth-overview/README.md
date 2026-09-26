@@ -144,7 +144,7 @@ Terms that show up across multiple chapters. Each entry points to where the type
 
 Every chapter in this series maps to **exactly one** `src/Typhon.Engine/<Folder>/`. Two exceptions, declared up-front:
 
-- **01-foundation** also covers a few small helpers from `src/Typhon.Engine/Hosting/` (§9), which doesn't have enough mass to justify its own chapter, and points to sibling-project types in `src/Typhon.Schema.Definition/` users may encounter.
+- **01-foundation** also covers a few small helpers from `src/Typhon.Engine/Hosting/` ([01-foundation §8](01-foundation.md#8-hosting-helpers)), which doesn't have enough mass to justify its own chapter, and points to sibling-project types in `src/Typhon.Schema.Definition/` users may encounter.
 - **12-observability** merges `src/Typhon.Engine/Observability/` and `src/Typhon.Engine/Profiler/` because the typed event pipeline they implement is one cohesive story.
 
 **15-subscriptions** covers `src/Typhon.Engine/Subscriptions/` and the sibling projects it ships with — `Typhon.Protocol` (the wire), `Typhon.Subscriptions.AspNetCore`, the two client SDKs and the replication generator — because the wire contract is one story across them.

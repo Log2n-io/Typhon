@@ -64,7 +64,7 @@ Immutable, validated at construction:
 | `CellCount` | Derived. `GridWidth × GridHeight × GridDepth`; must fit a 32-bit key. |
 | `InverseCellSize` | Precomputed `1 / CellSize`. |
 
-Cell keys are **pool slots** in a sparse structure: a root directory from packed block coordinates to a block (a dense `int[]` over every block of the world up to 16 384 blocks, a hash map beyond — §8), a dense per-block `int[]` of cell-slot indices, and a chunked pool holding one 64-byte `CellState` per *occupied* cell. A cell exists only once something occupies it; an empty region costs one absent hash entry rather than a descriptor per cell. Keys are handed out in creation order, so they renumber across a rebuild and must not be cached across one.
+Cell keys are **pool slots** in a sparse structure: a root directory from packed block coordinates to a block (a dense `int[]` over every block of the world up to 16 384 blocks, a hash map beyond — [§8](#8-realms)), a dense per-block `int[]` of cell-slot indices, and a chunked pool holding one 64-byte `CellState` per *occupied* cell. A cell exists only once something occupies it; an empty region costs one absent hash entry rather than a descriptor per cell. Keys are handed out in creation order, so they renumber across a rebuild and must not be cached across one.
 
 The block extent is derived per axis as `clamp(nextPow2(extentInCells), 1, 16)`, so a flat world's blocks are `16 × 16 × 1` and a cubic world's are `16³`. Within a block a neighbour is index arithmetic; only a step across a block face costs a root lookup.
 
@@ -339,7 +339,7 @@ It is lazily created on first use (`GetOrCreateTriggerSystem` on `SpatialIndexSt
 
 ## 7. Intra-cell drift, relocation and repair
 
-§6's cluster migration handles an entity that leaves its **cell**. This section covers the slower failure that happens when nothing leaves at all — an entity moves *within* its cell, and its cluster's bound grows to follow it.
+[§6](#6-spawn--write--destroy-flows)'s cluster migration handles an entity that leaves its **cell**. This section covers the slower failure that happens when nothing leaves at all — an entity moves *within* its cell, and its cluster's bound grows to follow it.
 
 **Why the layout decays.** Slot placement happens once, when the slot is claimed, and `ClaimSlotInCell` takes the first cluster with a free slot — with no AABB awareness at all. Under motion that decays until a cluster's bound covers most of its cell, at which point a narrow query opens every cluster in the cell instead of the two or three it geometrically overlaps. The write-time CAS in `ClusterRef.MaybeGrowAndFlagShrink` cannot detect this, because it *grows* the bound to contain every entity the cluster holds: "outside my own cluster's AABB" is never true of anything.
 
@@ -382,7 +382,7 @@ Relocation is a per-tick **delta**: it moves what drifted and leaves the rest al
 
 Repair is the other mechanism. It discards a unit's layout entirely, sorts its entities by position and re-packs them in sort order ([`ArchetypeClusterState.Repair.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.Repair.cs)). It is the only thing in the engine that **shrinks a zone map**.
 
-- **The sort key is an intra-cell Morton code** — three axes at 21 bits, filling 63 of a `ulong`'s 64. It is not a cell key — no level of the grid addresses cells by Morton code (§2). This one orders entities *within* a single cell, where the coordinate range is one cell wide by construction, so the 10-bits-per-axis ceiling that rules a 32-bit 3D Morton key out for cell addressing does not apply. 21 bits resolves a cell into ~2.1 M steps per axis, far below the quantisation a float position could distinguish.
+- **The sort key is an intra-cell Morton code** — three axes at 21 bits, filling 63 of a `ulong`'s 64. It is not a cell key — no level of the grid addresses cells by Morton code ([§2](#2-spatial-grid)). This one orders entities *within* a single cell, where the coordinate range is one cell wide by construction, so the 10-bits-per-axis ceiling that rules a 32-bit 3D Morton key out for cell addressing does not apply. 21 bits resolves a cell into ~2.1 M steps per axis, far below the quantisation a float position could distinguish.
 - **A unit is a cell's N worst clusters**, `RepairWorstClustersPerUnit` (default 8), where "worst" is the largest maximum axis extent. Finer than a whole cell, still internally coherent, and it targets the clusters actually costing selectivity rather than spending a whole cell's budget to fix eight bad bounds.
 - **It reuses the ordinary migration pipeline.** A re-pack knows its own destinations, so it could write them directly and claim no slot; instead it emits normal `MigrationRequest`s carrying a pinned cluster *and* a pinned slot. The extra cost is one uncontended CAS on a cache line the copy is about to touch anyway; what it buys is that entity-map keying, cell-relative rebase, index element ids, zone maps, dirty-bit deltas and orphan rollback are not duplicated for a path that runs rarely.
 
@@ -409,9 +409,9 @@ How much budget there is to spend follows what spending buys. Each tick an arche
 
 ## 8. Realms
 
-A **realm** is an isolated world in the same engine — a planet, a building interior, space, an instanced dungeon. Everything in §§2–7 is per realm:
+A **realm** is an isolated world in the same engine — a planet, a building interior, space, an instanced dungeon. Everything in [§2](#2-spatial-grid)–[§7](#7-intra-cell-drift-relocation-and-repair) is per realm:
 each owns its `SpatialGrid` (bounds, cell size, 2D or 3D), and each spatial archetype holds one `RealmArchetypeSpatial` per realm it lives in — the
-per-cell index, cluster pool, reach and escape lists that §§3–7 describe. Code lives in
+per-cell index, cluster pool, reach and escape lists that [§3](#3-the-per-cell-cluster-index)–[§7](#7-intra-cell-drift-relocation-and-repair) describe. Code lives in
 [`Realms/`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Realms/); the feature page is
 [Realms — Several Worlds in One Engine](../feature-set/Spatial/realms.md).
 
@@ -454,7 +454,7 @@ Run-time `Unregister` marks the realm `Closing`; it is removed once empty, and i
 
 ## See also
 
-- [01-foundation](01-foundation.md) — `OlcLatch` (used in the node headers of a promoted cell's tree), epoch model (every spatial query and mutation enters `EpochGuard`), `SpatialTypes` live in the sibling `Typhon.Schema.Definition` project (§9)
+- [01-foundation](01-foundation.md) — `OlcLatch` (used in the node headers of a promoted cell's tree), epoch model (every spatial query and mutation enters `EpochGuard`), `SpatialTypes` live in the sibling `Typhon.Schema.Definition` project ([01-foundation §9](01-foundation.md#9-schema-definition-types-sibling-project))
 - [03-indexing](03-indexing.md) — B+Tree contrast: same OLC philosophy, but B+Tree uses a two-phase `SpinWriteLock` tuned for longer lock holds (the R-Tree uses a plain `SpinWait` loop instead)
 - [06-ecs](06-ecs.md) — cluster storage and `ArchetypeClusterState`, where per-archetype spatial bookkeeping (cluster AABBs, cell links, migration flags) lives
 - [09-querying](09-querying.md) — `EcsQuery` and the dispatch from `WhereInAABB` / `WhereNearby` / `WhereRay` / `WhereFrustum` into the cluster walk

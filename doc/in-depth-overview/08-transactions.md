@@ -33,9 +33,9 @@ Three tiers, top to bottom:
 A few invariants the rest of this doc assumes:
 
 - **Single-thread-affine.** A `Transaction` is created on a thread and only that thread may operate on it. There's no internal locking on the `Transaction` object itself — the type is `[NoCopy]` in spirit and asserts thread affinity in DEBUG builds.
-- **Scheduler-managed in production.** Inside the runtime ([10-runtime](10-runtime.md)), each tick creates *one* `UnitOfWork`, and each system that mutates gets *one* `Transaction` from that UoW. `PipelineSystem`s have no `Transaction` — they read at a snapshot via `PointInTimeAccessor` ([06-ecs](06-ecs.md) §5). Application code that uses the engine directly (Shell, tests) follows the same shape but builds the UoW itself.
+- **Scheduler-managed in production.** Inside the runtime ([10-runtime](10-runtime.md)), each tick creates *one* `UnitOfWork`, and each system that mutates gets *one* `Transaction` from that UoW. `PipelineSystem`s have no `Transaction` — they read at a snapshot via `PointInTimeAccessor` ([06-ecs §5](06-ecs.md#5-access-open--openmut)). Application code that uses the engine directly (Shell, tests) follows the same shape but builds the UoW itself.
 - **TSN is allocated at Transaction construction**, not at commit. `TransactionChain._nextFreeId` is `Interlocked.Increment`-ed every time a `Transaction` is created (or a `PointInTimeAccessor` reads). The TSN is the snapshot point for reads and gets stamped on every revision element this transaction writes.
-- **`UowId` is allocated at UoW construction** from the `UowRegistry`, persistent (survives crash), and stamps every revision element so recovery can void the writes of a UoW that didn't commit ([11-durability](11-durability.md) §4).
+- **`UowId` is allocated at UoW construction** from the `UowRegistry`, persistent (survives crash), and stamps every revision element so recovery can void the writes of a UoW that didn't commit ([11-durability §4](11-durability.md#4-segment-management)).
 
 ### Storage modes — what's transactional, what isn't
 
@@ -87,7 +87,7 @@ The pricing argument is straightforward: `Deferred` amortizes fsync over a whole
 
 ### 2.2 The ChangeSet model
 
-`Deferred` and `GroupCommit` share a single `ChangeSet` across all transactions in the UoW — the page mutations from every transaction land in one batch. `Immediate` gives each transaction its *own* `ChangeSet` so its `Commit()` can flush in isolation. The `ChangeSet` is the dirty-page accounting layer that the page cache ([02-storage](02-storage.md) §5) uses to decide what to write.
+`Deferred` and `GroupCommit` share a single `ChangeSet` across all transactions in the UoW — the page mutations from every transaction land in one batch. `Immediate` gives each transaction its *own* `ChangeSet` so its `Commit()` can flush in isolation. The `ChangeSet` is the dirty-page accounting layer that the page cache ([02-storage §5](02-storage.md#5-changeset--dirty-tracking)) uses to decide what to write.
 
 The UoW pre-allocates the shared `ChangeSet` before allocating the `UowId`. That ordering is deliberate: registry page mutations (writing the new `UowRegistryEntry`) piggyback on this `ChangeSet` instead of triggering a synchronous I/O on whatever thread is calling `CreateUnitOfWork`.
 
@@ -98,7 +98,7 @@ The UoW pre-allocates the shared `ChangeSet` before allocating the `UowId`. That
 1. `CreateUnitOfWork` → state `Pending`, `UowId` allocated, shared `ChangeSet` created (if applicable).
 2. Each `tx.Commit()` writes revision elements (stamped with `UowId`) and appends its **logical record batch** to the WAL via `DurabilityLog.Append` — the batch is assembled by `CommitBatchBuilder` and encoded by the single `RecordCodec` (`Durability/internals/`).
 3. `uow.Flush()` or `uow.FlushAsync()` (or `Dispose` for non-`Deferred`) advances state to `WalDurable` and calls `UowRegistry.RecordCommit(uowId, 0, ChangeSet)` to mark the slot as committed-in-the-registry.
-4. The checkpoint later transitions `WalDurable → Committed` once data pages are fsynced ([11-durability](11-durability.md) §5).
+4. The checkpoint later transitions `WalDurable → Committed` once data pages are fsynced ([11-durability §5](11-durability.md#5-checkpoint-v2)).
 
 ### 2.4 `ReleaseExcessDirtyMarks` on Dispose (WAL mode)
 
@@ -110,7 +110,7 @@ In WAL mode the `ChangeSet` accumulates dirty-page marks that *never* get balanc
 
 [`Transactions/public/Transaction.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.cs), [`Transaction.ECS.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Transactions/public/Transaction.ECS.cs)
 
-`Transaction` extends `EntityAccessor` ([06-ecs](06-ecs.md) §5) — the same `Open` / `OpenMut` surface that read-only accessors use, plus mutation hooks (`Spawn`, `Destroy`, write paths) and the `Commit` / `Rollback` finalization.
+`Transaction` extends `EntityAccessor` ([06-ecs §5](06-ecs.md#5-access-open--openmut)) — the same `Open` / `OpenMut` surface that read-only accessors use, plus mutation hooks (`Spawn`, `Destroy`, write paths) and the `Commit` / `Rollback` finalization.
 
 ### 3.1 Creating a transaction
 
@@ -278,7 +278,7 @@ public void Release(ushort uowId, ChangeSet externalCs = null);
 
 ### 5.4 Recovery integration
 
-On engine start, `LoadFromDiskRaw` scans every entry up to `_currentCapacity`, rebuilds both bitmaps, counts `Pending`/`WalDurable`/`Committed`/`Void` slots. The `WalRecovery` segment scan then promotes `Pending → WalDurable` for UoWs whose commit marker survived; whatever's left in `Pending` gets voided via `VoidRemainingPending`. See [11-durability](11-durability.md) §7 for the full sequence. **This persisted-registry path does not decide commit fate** — that is the WAL `TxCommit` marker's job — and it is slated for removal as the registry is demoted to a volatile allocator ([11-durability §8](11-durability.md)).
+On engine start, `LoadFromDiskRaw` scans every entry up to `_currentCapacity`, rebuilds both bitmaps, counts `Pending`/`WalDurable`/`Committed`/`Void` slots. The `WalRecovery` segment scan then promotes `Pending → WalDurable` for UoWs whose commit marker survived; whatever's left in `Pending` gets voided via `VoidRemainingPending`. See [11-durability §7](11-durability.md#7-recovery) for the full sequence. **This persisted-registry path does not decide commit fate** — that is the WAL `TxCommit` marker's job — and it is slated for removal as the registry is demoted to a volatile allocator ([11-durability §8](11-durability.md)).
 
 ---
 
@@ -366,4 +366,4 @@ Plus `PoolCount` (idle transactions in the pool, max 16) and `ActiveCount` (curr
 - [01-foundation](01-foundation.md) — `UnitOfWorkContext`, `WaitContext`, `Deadline`, `EpochManager` (the primitives every transaction operation sits on)
 - [05-revision](05-revision.md) — how `UowId` is encoded into revision elements and consumed by the visibility check
 - [06-ecs](06-ecs.md) — `Spawn` / `Destroy` live on `Transaction`; the commit pipeline calls `PrepareEcsDestroys` → `FlushEcsPendingOperations` → `FinalizeSpawns` → cluster-versioned slot commit
-- [11-durability](11-durability.md) — WAL integration (`DurabilityLog.Append`, `RequestFlush`, `WaitForDurable`), the checkpoint v2 cycle, the `Pending → WalDurable → Committed → Free` UoW state machine (§8)
+- [11-durability](11-durability.md) — WAL integration (`DurabilityLog.Append`, `RequestFlush`, `WaitForDurable`), the checkpoint v2 cycle, the `Pending → WalDurable → Committed → Free` UoW state machine ([11-durability §8](11-durability.md#8-uow-state-machine))

@@ -55,7 +55,7 @@ using (var tx = dbe.CreateQuickTransaction())
 
 **Until `Commit`, no other transaction can see your Versioned changes** — they read the previous value. That's isolation: a half-finished transaction is invisible.
 
-`Rollback` is where storage mode bites (see §5): it cleanly reverts **Versioned** data, but an in-place **SingleVersion/Transient** write has *already happened* and stays. Rollback is not a universal undo — it's an undo of what was written *transactionally*. For `SingleVersion` that is a per-transaction choice rather than a property of the mode: open the transaction with the `Commit` discipline (§5) and the write is staged instead of applied in place, so `Rollback` does revert it.
+`Rollback` is where storage mode bites (see [§5](#5-what-each-storage-mode-guarantees-here)): it cleanly reverts **Versioned** data, but an in-place **SingleVersion/Transient** write has *already happened* and stays. Rollback is not a universal undo — it's an undo of what was written *transactionally*. For `SingleVersion` that is a per-transaction choice rather than a property of the mode: open the transaction with the `Commit` discipline ([§5](#5-what-each-storage-mode-guarantees-here)) and the write is staged instead of applied in place, so `Rollback` does revert it.
 
 ---
 

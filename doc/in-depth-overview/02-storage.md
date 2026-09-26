@@ -41,7 +41,7 @@ Cross-cutting concerns sit alongside this layered core:
 
 - **Dirty tracking** — [`ChangeSet`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/ChangeSet.cs) — coordinates `DirtyCounter` / `ActiveChunkWriters` lifecycle for a UoW.
 - **Backpressure** — [`IPageCacheBackpressureStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/IPageCacheBackpressureStrategy.cs) / [`WaitForIOStrategy`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/internals/WaitForIOStrategy.cs) — what happens when the clock-sweep finds nothing evictable.
-- **Page CRC & seqlock** — CRC32C torn-write *detection* + consistent checkpoint snapshots (no FPI; recovery rebuilds — see §7).
+- **Page CRC & seqlock** — CRC32C torn-write *detection* + consistent checkpoint snapshots (no FPI; recovery rebuilds — see [§7](#7-page-crc--seqlock-writes)).
 - **Storage introspection** — [`StorageMapTypes`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/StorageMapTypes.cs) — the read-only surface Workbench's Database File Map uses.
 
 ---
@@ -71,7 +71,7 @@ Constants defined on `PagedMMF`:
 | `PageRawDataSize` | 8000 | What user code actually writes to |
 | `PageSizePow2` | 13 | `2^13 = 8192` (used for shift-instead-of-divide) |
 
-The base header is a small struct ([`PageBaseHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageBaseHeader.cs)) with `Flags`, `Type`, `FormatRevision`, `ChangeRevision` (incremented every disk write), `PageChecksum` (CRC32C over the page, skipping the checksum field itself), and `ModificationCounter` (the **seqlock counter** used for torn-page detection — see §7). The header struct itself only occupies the first 24 bytes; the rest of the 64-byte zone is reserved for forward compatibility.
+The base header is a small struct ([`PageBaseHeader`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Storage/public/PageBaseHeader.cs)) with `Flags`, `Type`, `FormatRevision`, `ChangeRevision` (incremented every disk write), `PageChecksum` (CRC32C over the page, skipping the checksum field itself), and `ModificationCounter` (the **seqlock counter** used for torn-page detection — see [§7](#7-page-crc--seqlock-writes)). The header struct itself only occupies the first 24 bytes; the rest of the 64-byte zone is reserved for forward compatibility.
 
 ### `PageInfo` and `PageState`
 
@@ -79,7 +79,7 @@ Each in-memory page has a sidecar [`PageInfo`](https://github.com/Log2n-io/Typho
 
 - `MemPageIndex` / `FilePageIndex` — slot ↔ file mapping
 - `PageState` — current state machine value (see below)
-- `ClockSweepCounter` — eviction heuristic (range 0..5, see §2.4)
+- `ClockSweepCounter` — eviction heuristic (range 0..5, see [§2](#two-pass-clock-sweep-eviction))
 - `DirtyCounter` (`DC`) — > 0 means the page has unsaved writes; prevents eviction
 - `ActiveChunkWriters` (`ACW`) — > 0 means writers are mid-flight; prevents *checkpoint snapshot* (but not eviction)
 - `SlotRefCount` — number of `ChunkAccessor` slots holding raw pointers into this page
@@ -125,13 +125,13 @@ Pass 2 (counter-ignoring):    scan up to N slots
 
 The counter is incremented on every access via `PageInfo.IncrementClockSweepCounter`, capped at `ClockSweepMaxValue = 5`. Hot pages climb to 5 and survive several full sweeps; cold pages decrement to 0 and get reclaimed. The second pass exists for the case where every page has DC > 0 or is epoch-protected at the moment we sweep — we still need a slot, so we make one more circle ignoring the heuristic but respecting the *real* eviction blockers (DC, ACW, SlotRefCount, AccessEpoch).
 
-When both passes fail, the **backpressure path** kicks in (see §6). The clock hand `_clockSweepCurrentIndex` is a `CacheLinePaddedInt` to avoid false sharing with adjacent state.
+When both passes fail, the **backpressure path** kicks in (see [§6](#6-backpressure)). The clock hand `_clockSweepCurrentIndex` is a `CacheLinePaddedInt` to avoid false sharing with adjacent state.
 
 ### Two micro-optimizations worth mentioning
 
 `AllocateMemoryPageCore` has a fast prefix path: if `filePageIndex - 1` is already cached in `memPageIndex N`, the allocator tries `N + 1` first. This lets sequential page reads coalesce into a single disk write later when both pages flush.
 
-CRC verification is **lazy**. `EnsurePageVerified` (line ~1436) runs only the first time a page is touched after load. If `PageChecksumVerification.RecoveryOnly` is set (the default until recovery completes), it's skipped entirely. After recovery, `DatabaseEngine` flips the mode to `OnLoad` — every fresh load verifies, then `CrcVerified` is cached until the slot is reused. On mismatch *during recovery* the page is recorded **suspect** — rebuilt if it backs a derived structure, or a loud failure if it still backs a live primary chunk (§7, and [11-durability §6](11-durability.md)); during normal operation a `PageCorruptionException` propagates.
+CRC verification is **lazy**. `EnsurePageVerified` (line ~1436) runs only the first time a page is touched after load. If `PageChecksumVerification.RecoveryOnly` is set (the default until recovery completes), it's skipped entirely. After recovery, `DatabaseEngine` flips the mode to `OnLoad` — every fresh load verifies, then `CrcVerified` is cached until the slot is reused. On mismatch *during recovery* the page is recorded **suspect** — rebuilt if it backs a derived structure, or a loud failure if it still backs a live primary chunk ([§7](#7-page-crc--seqlock-writes), and [11-durability §6](11-durability.md)); during normal operation a `PageCorruptionException` propagates.
 
 ---
 
@@ -199,7 +199,7 @@ A *segment* is a typed view of a sequence of file pages. The base class [`Logica
 
 ### `LogicalSegment<TStore>` — page-list segment
 
-**Directory-only root (v4).** The root page is a *pure directory page*: its entire 8000-byte raw-data area lists the first 2000 pages of the segment — it carries **no** segment data. If the segment grows beyond 2000 pages, additional **map-extension pages** are chained, each holding another 2000 (= `PageRawDataSize / sizeof(int)`) page indices. Because the root holds no data, the CK-05 twin that shadows every directory page (§7) protects only the immutable directory — never live data — and directory addressing is uniform (root and every extension page hold the same number of entries). One consequence: a segment always spans **at least 2 pages** (the directory root + at least one data page); the allocators clamp to this minimum.
+**Directory-only root (v4).** The root page is a *pure directory page*: its entire 8000-byte raw-data area lists the first 2000 pages of the segment — it carries **no** segment data. If the segment grows beyond 2000 pages, additional **map-extension pages** are chained, each holding another 2000 (= `PageRawDataSize / sizeof(int)`) page indices. Because the root holds no data, the CK-05 twin that shadows every directory page ([§7](#7-page-crc--seqlock-writes)) protects only the immutable directory — never live data — and directory addressing is uniform (root and every extension page hold the same number of entries). One consequence: a segment always spans **at least 2 pages** (the directory root + at least one data page); the allocators clamp to this minimum.
 
 Two relevant constants:
 
@@ -246,7 +246,7 @@ Phase A is the linearization point — once it succeeds, the page is "removed" a
 
 #### Growth — uses your `ChangeSet`
 
-`Grow(minNewPageCount, changeSet)` doubles the segment (or grows to the minimum requested), then for every newly allocated page calls `_store.EnsureDirtyAtLeast(memPageIdx, 2)`. That `2`, not `1`, is the **growth-race fix**: see §5 below.
+`Grow(minNewPageCount, changeSet)` doubles the segment (or grows to the minimum requested), then for every newly allocated page calls `_store.EnsureDirtyAtLeast(memPageIdx, 2)`. That `2`, not `1`, is the **growth-race fix**: see [§5](#5-changeset--dirty-tracking) below.
 
 `EnsureCapacity(minChunkCount, changeSet)` is the pre-sizing entry point used by schema migration; `GrowIfNeeded` is the lazy variant used inside `AllocateChunk` when `_allocatedCount == _capacity`.
 
@@ -276,7 +276,7 @@ Three-tier hot path inside `GetChunkAddress`:
 
 `memPageIndex` for a slot is computed *on demand* from `_baseAddresses[slot]` minus `_memPagesBaseAddr`, shifted by `PageSizePow2`. This saves 64 B of state per accessor (no `_memPageIndices[16]`) at the cost of ~3 cycles in slow paths only.
 
-Dirty marking: `MarkSlotDirty(slot)` sets the dirty bit, calls `_store.IncrementActiveChunkWriters(memPageIdx)`, and registers the page with the `ChangeSet`. See §5 — this is the choreography that makes B+Tree splits torn-page-safe.
+Dirty marking: `MarkSlotDirty(slot)` sets the dirty bit, calls `_store.IncrementActiveChunkWriters(memPageIdx)`, and registers the page with the `ChangeSet`. See [§5](#5-changeset--dirty-tracking) — this is the choreography that makes B+Tree splits torn-page-safe.
 
 ---
 
