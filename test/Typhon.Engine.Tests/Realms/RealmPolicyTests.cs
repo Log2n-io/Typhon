@@ -184,6 +184,76 @@ class RealmPolicyTests : TestBase<RealmPolicyTests>
         Assert.DoesNotThrow(() => pin.Dispose(), "review #4: the removal zeroed the count and the release went negative");
     }
 
+    /// <summary>Tick start's job without a runtime: evaluate the policy, then bring the archetype's runnable index up to date.</summary>
+    private static void EvaluateAndIndex(DatabaseEngine dbe)
+    {
+        dbe.RealmTable.EvaluatePolicy();
+        var cs = StateOf(dbe);
+        cs.RealmDispatch ??= new RealmDispatchIndex();
+        cs.RealmDispatch.Update(cs, dbe.RealmTable);
+    }
+
+    [Test]
+    [VerifiesRule("DM-04")]
+    public void DormantRealm_WrittenEntity_MigratedAndIndexed()
+    {
+        // Dormancy freezes elective work only: a write to an entity of a dormant realm is still detected, migrated and indexed at the fence.
+        using var dbe = ThreeRealms(out _, out var in1, out _);
+        for (var i = 0; i <= SleepAfter; i++)
+        {
+            EvaluateAndIndex(dbe);
+        }
+
+        Assert.That(dbe.RealmTable.StateOf(1), Is.EqualTo(RealmRunState.Dormant));
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            ref var pos = ref tx.OpenMut(in1[0]).Write(RealmUnit.Pos);
+            pos.Bounds = new AABB2F { MinX = 85, MinY = 15, MaxX = 85, MaxY = 15 };
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(2);
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var near = new AABB2F { MinX = 80, MinY = 10, MaxX = 90, MaxY = 20 };
+        Assert.That(dbe.ClusterSpatialQuery<RealmUnit>(new RealmId(1)).AABB(near).Count(), Is.EqualTo(1), "moved across cells and indexed in its realm");
+    }
+
+    [Test]
+    [VerifiesRule("DM-04")]
+    public void DormantRealm_ClustersNeitherSleepNorHeartbeat()
+    {
+        // A dormant realm's clusters are frozen by the sweep; a runnable realm's go to sleep as usual.
+        using var dbe = ThreeRealms(out _, out _, out _);
+        var cs = StateOf(dbe);
+        cs.SleepThresholdTicks = 3;
+        cs.HeartbeatIntervalTicks = 4;
+        for (var i = 0; i <= SleepAfter; i++)
+        {
+            EvaluateAndIndex(dbe);
+        }
+
+        for (var tick = 2; tick < 40; tick++)
+        {
+            dbe.WriteTickFence(tick);
+        }
+
+        var active = cs.ReadActiveClusterList(out var count);
+        for (var i = 0; i < count; i++)
+        {
+            var chunkId = active[i];
+            var realm = cs.ClusterRealmMap[chunkId];
+            if (realm == 1)
+            {
+                Assert.That((cs.SleepStates[chunkId], cs.SleepCounters[chunkId]), Is.EqualTo((ClusterSleepState.Active, (ushort)0)),
+                    "a dormant realm's cluster: no counter advance, so no sleep and no heartbeat");
+            }
+            else
+            {
+                Assert.That(cs.SleepStates[chunkId], Is.Not.EqualTo(ClusterSleepState.Active), $"a runnable realm's idle cluster sleeps (realm {realm})");
+            }
+        }
+    }
+
     [Test]
     public void Counts_AndOccupancy_SpanEveryRealm()
     {
