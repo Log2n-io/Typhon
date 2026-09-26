@@ -95,7 +95,18 @@ internal abstract unsafe partial class PushReplication
     private protected readonly CompiledProjectionPlan[] _plans;
     private protected readonly ArchetypeReplicationState[] _states;
     private protected readonly int[] _pushIndices;
-    private readonly bool[] _bootstrapped;
+
+    /// <summary>The hub that collects this realm's blocks and routes them here (R4.1); set when the hub starts serving the realm.</summary>
+    internal PushHub Hub;
+
+    /// <summary>Per plan index: this realm's live entities of the archetype have all been pushed once — its bootstrap (R4.1: per realm).</summary>
+    internal readonly bool[] Bootstrapped;
+
+    /// <summary>Per plan index, this tick: every live entity of the archetype in this realm is pushed (bootstrap, a gap, or an undescribed fence).</summary>
+    internal readonly bool[] EverythingThisTick;
+
+    /// <summary>Whether this realm's blocks step follows a tick its track did not run for (<see cref="BeginRealmTick"/>).</summary>
+    internal bool ResumedThisTick { get; private set; }
 
     // Per plan index: the cold-entry offset of the entity's last projected position.
     private protected readonly int[] _positionOffset;
@@ -103,31 +114,6 @@ internal abstract unsafe partial class PushReplication
     /// <summary>The cold-entry offset of a push archetype's last projected position.</summary>
     public int PositionOffset(int archetype) => _positionOffset[archetype];
 
-    // Per plan index: the engine, not the application, detects this archetype's changes. Every live entity is pushed every tick and the byte compare
-    // keeps only those that changed.
-    private readonly bool[] _automatic;
-
-    // ── The forgotten-push validator (explicit detection) ──
-    //
-    // A few clusters of each explicit archetype are projected whole every tick, round-robin. A slot among them that the application did not push and
-    // that still produces an event changed without a push: counted by group, and sent anyway, so the validator heals what it finds.
-
-    /// <summary>How many clusters per explicit archetype the validator projects whole each tick; zero turns it off.</summary>
-    public int ValidateClustersPerTick = int.TryParse(Environment.GetEnvironmentVariable("TYPHON_PUSH_VALIDATE"), out var v) ? v : 0;
-
-    private readonly int[] _validateCursor;
-    private readonly Dictionary<int, ulong>[] _validating;
-
-    /// <summary>Slots the validator found changed without a push, and of those, how many had moved (a segment) — cumulative.</summary>
-    public long ForgottenPushes;
-    public long ForgottenMotion;
-    public long ValidatedSlots;
-    private readonly long[][] _forgottenGroups;
-
-    /// <summary>Per plan index and change group, how many forgotten pushes changed it.</summary>
-    public long ForgottenGroups(int archetype, int group) =>
-        (uint)archetype < (uint)_forgottenGroups.Length && _forgottenGroups[archetype] != null && (uint)group < (uint)_forgottenGroups[archetype].Length
-            ? Interlocked.Read(ref _forgottenGroups[archetype][group]) : 0;
 
     // Position decode per archetype: axes 0 and 1, and axis 2 where the grid is deep and the codec has it — in a flat grid, or for a 2D codec, the
     // geometric z is 0 (10 § 3.4).
@@ -186,13 +172,6 @@ internal abstract unsafe partial class PushReplication
     private protected readonly int _gridH;
     private protected readonly int _gridD;
 
-    // Per archetype, this tick's push set as (chunk, mask) pairs.
-    private readonly int[][] _pushChunks;
-    private readonly ulong[][] _pushMasks;
-    private readonly int[] _pushCount;
-
-    // Per archetype, by chunk id: slots to push again next tick — still extrapolating, or denied an identity.
-    private readonly long[][] _repush;
 
     /// <summary>
     /// Distance LOD (09 § 9–10): the fold's phase — the smallest period any session is gathered with, whose flush ticks are every band's — and its window,
@@ -565,12 +544,9 @@ internal abstract unsafe partial class PushReplication
     /// <summary>The frame stage's encode plans, whose group tick slots decide what an update carries.</summary>
     public void AttachEncodePlans(ArchetypeEncodePlan[] plans) => _encodePlans = plans;
 
-    // Per archetype, this tick's push set's blocks, parallel to _pushChunks — looked up once in PrepareBlocks.
-    private readonly nint[][] _pushBlocks;
 
     // Counters, cumulative.
     public long Events;
-    public long SlotsPushed;
     public long Enters;
     public long Leaves;
     public long Updates;
@@ -584,7 +560,6 @@ internal abstract unsafe partial class PushReplication
     public long SortTicks;
     public long MergeTicks;
     public long FinishTicks;
-    public long PrepareTicks;
     public long GatherTicks;
 
     // -- The shadow oracle (TYPHON_PUSH_SHADOW=1) --
@@ -704,7 +679,6 @@ internal abstract unsafe partial class PushReplication
         Shadow = shadow || Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
         _plans = plans;
         _states = states;
-        _automatic = automatic;
         var count = 0;
         for (var a = 0; a < isPush.Length; a++)
         {
@@ -723,15 +697,8 @@ internal abstract unsafe partial class PushReplication
 
         ServedRealm = RealmId.Default.Value;
         Codecs = RealmCodecs.FromPlans(plans);
-        _bootstrapped = new bool[plans.Length];
-        _validateCursor = new int[plans.Length];
-        _validating = new Dictionary<int, ulong>[plans.Length];
-        _forgottenGroups = new long[plans.Length][];
-        for (var a = 0; a < plans.Length; a++)
-        {
-            _validating[a] = [];
-            _forgottenGroups[a] = new long[8];
-        }
+        Bootstrapped = new bool[plans.Length];
+        EverythingThisTick = new bool[plans.Length];
 
         _minX = new double[plans.Length];
         _minY = new double[plans.Length];
@@ -745,11 +712,6 @@ internal abstract unsafe partial class PushReplication
         _queryPad = new double[plans.Length];
         _skipMargin = new double[plans.Length];
         _positionOffset = new int[plans.Length];
-        _pushChunks = new int[plans.Length][];
-        _pushBlocks = new nint[plans.Length][];
-        _pushMasks = new ulong[plans.Length][];
-        _pushCount = new int[plans.Length];
-        _repush = new long[plans.Length][];
 
         foreach (var a in _pushIndices)
         {
@@ -798,10 +760,6 @@ internal abstract unsafe partial class PushReplication
             _skipMargin[a] = _pruneMargin[a];
 
             _axisBytes[a] = frame.AxisBytes;
-            _pushChunks[a] = new int[64];
-            _pushBlocks[a] = new nint[64];
-            _pushMasks[a] = new ulong[64];
-            _repush[a] = [];
         }
 
         // Null only without a spatial grid, where every observed archetype was refused above for having no position.
@@ -1214,29 +1172,26 @@ internal abstract unsafe partial class PushReplication
         return (uint)chunkId < (uint)table.Length ? (ReplicationBlockHeader*)table[chunkId] : null;
     }
 
-    // ══ Blocks step (serial) ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // ══ Blocks step (serial): this realm's half; the collector is the hub's ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Before the parked drain: drops last tick's push marks, collects this tick's push set, and gives every cluster in it a block — so an entity that
-    /// migrated into a cluster with no block is drained into one this tick rather than dropped.
+    /// The start of this realm's blocks step (R4.1): its own gap detection. A tick the track did not run for, or ran without finishing its index, lost
+    /// this realm's cell changes; the next finish recounts, and every live entity of the realm is re-pushed (<see cref="ResumedThisTick"/>).
     /// </summary>
-    // The realm map PrepareBlocks filters the archetype it is collecting by, or null when the engine has one realm. Serial, like the collector.
-    private ushort[] _servedFilter;
-
-    public void PrepareBlocks(uint tick)
+    internal void BeginRealmTick(uint tick)
     {
-        var from = Stopwatch.GetTimestamp();
         _tick = tick;
         var resumed = _preparedTick != 0 && tick != _preparedTick + 1;
 
         // A tick the track ran whose index was never finished (a stage fault between the projection and the frames) lost its cell changes as surely as a
-        // tick it skipped. _indexedTick still names the last finished tick here: MarkPushed resets it later in this step.
+        // tick it skipped. _indexedTick still names the last finished tick here: BeginMark resets it later in this step.
         var unindexed = _preparedTick != 0 && !resumed && _indexedTick != _preparedTick;
         _preparedTick = tick;
 
         // Either way the occupancy missed changes. It is recounted when this tick's index is finished, not now: the fence has yet to place this tick's
         // carried and parked entries, and only the projection makes the blocks' occupancy words describe them (SUB-24).
         _recountAtFinish |= resumed || unindexed;
+        ResumedThisTick = resumed;
         if (resumed)
         {
             GapRepushes++;
@@ -1245,211 +1200,14 @@ internal abstract unsafe partial class PushReplication
             // one connected since holds nothing. Dropped rather than kept, because with no session connected nothing else ever empties the list.
             _orphanCount = 0;
         }
-
-        foreach (var a in _pushIndices)
-        {
-            var state = _states[a];
-            var list = state.WatchedBlocks;
-            for (var i = 0; i < list.Count; i++)
-            {
-                list[i]->WatchedMask = 0;
-            }
-
-            _pushCount[a] = 0;
-            var cs = state.ClusterState;
-            if (cs == null)
-            {
-                continue;
-            }
-
-            var capacity = cs.ClusterAabbs?.Length ?? 0;
-            if (_repush[a].Length < capacity)
-            {
-                Array.Resize(ref _repush[a], capacity);
-            }
-
-            // Realms (R4.2): on an engine with more than one realm, a cluster of a realm this replication does not serve is never pushed, so it never gets
-            // a block, an identity or an event. One realm: no map, and AddPush's test is a null check.
-            _servedFilter = (cs.RealmTableOrNull?.RegisteredCount ?? 1) > 1 ? Volatile.Read(ref cs.ClusterRealmMap) : null;
-            var slotMask = state.Layout.SlotCount >= 64 ? ulong.MaxValue : (1UL << state.Layout.SlotCount) - 1;
-            var everything = _automatic[a] || !_bootstrapped[a] || resumed || (Volatile.Read(ref cs.StructureTick) == tick && cs.StructureCoversAll);
-            if (everything)
-            {
-                // First tick, a tick after a gap, or a tick the fence could not describe: every live entity is pushed, which is what gives every entity of a
-                // push archetype an identity and an encoded state before any session asks — the geometric known-set assumes a described entity for every
-                // position. Every slot of an active cluster is visited, so a slot emptied during a gap gives its identity back too.
-                var ids = cs.ReadActiveClusterList(out var active);
-                for (var i = 0; ids != null && i < active; i++)
-                {
-                    AddPush(a, ids[i], slotMask);
-                }
-
-                _bootstrapped[a] = true;
-            }
-            else if (Volatile.Read(ref cs.StructureTick) == tick)
-            {
-                var words = cs.StructureWords;
-                for (var c = 0; c < words.Length; c++)
-                {
-                    var w = (ulong)words[c];
-                    if (w != 0UL)
-                    {
-                        AddPush(a, c, w & slotMask);
-                    }
-                }
-            }
-
-            // The validator: a few whole clusters, noting which of their slots nobody pushed. Before the repush list is consumed, which it reads.
-            _validating[a].Clear();
-            if (!everything && ValidateClustersPerTick > 0)
-            {
-                Validate(a, cs, tick, slotMask);
-            }
-
-            // Slots still extrapolating or denied an identity last tick: the engine's own pushes. A client dead-reckons a mover until told it stopped, so a
-            // mover that stops without a write must still be visited, and an entity with no identity is invisible until it gets one.
-            var repush = _repush[a];
-            for (var c = 0; c < repush.Length; c++)
-            {
-                var w = (ulong)repush[c];
-                if (w != 0UL)
-                {
-                    AddPush(a, c, w & slotMask);
-                    repush[c] = 0;
-                }
-            }
-
-            // Blocks for every cluster pushed into. Serial by contract (pool and directory are single-threaded here).
-            if (_pushBlocks[a].Length < _pushChunks[a].Length)
-            {
-                Array.Resize(ref _pushBlocks[a], _pushChunks[a].Length);
-            }
-
-            for (var i = 0; i < _pushCount[a]; i++)
-            {
-                var chunk = _pushChunks[a][i];
-                var block = BlockOf(a, chunk);
-                if (block == null && !state.TryAttachBlock(chunk, out block))
-                {
-                    block = null;
-                }
-
-                _pushBlocks[a][i] = (nint)block;
-            }
-        }
-
-        PrepareTicks += Stopwatch.GetTimestamp() - from;
     }
 
-    /// <summary>Adds the validator's clusters for this tick to the push set, remembering which of their slots were not pushed otherwise.</summary>
-    private void Validate(int a, ArchetypeClusterState cs, uint tick, ulong slotMask)
-    {
-        var ids = cs.ReadActiveClusterList(out var active);
-        if (ids == null || active == 0)
-        {
-            return;
-        }
-
-        var words = Volatile.Read(ref cs.StructureTick) == tick ? cs.StructureWords : default;
-        var repush = _repush[a];
-        var count = Math.Min(ValidateClustersPerTick, active);
-        for (var i = 0; i < count; i++)
-        {
-            var cursor = _validateCursor[a]++ % active;
-            var chunk = ids[cursor];
-            var pushed = ((uint)chunk < (uint)words.Length ? (ulong)words[chunk] : 0UL) | ((uint)chunk < (uint)repush.Length ? (ulong)repush[chunk] : 0UL);
-            var unpushed = slotMask & ~pushed;
-            if (unpushed == 0UL || !_validating[a].TryAdd(chunk, unpushed))
-            {
-                continue;
-            }
-
-            AddPush(a, chunk, unpushed);
-            ValidatedSlots += BitOperations.PopCount(unpushed);
-        }
-    }
-
-    /// <summary>Called by a projecting worker for an event: counts it as a forgotten push when only the validator asked for the slot.</summary>
-    private protected void NoteIfForgotten(int archetype, ReplicationBlockHeader* block, int slot, byte flags, int groups)
-    {
-        var validating = _validating[archetype];
-        if (validating.Count == 0 || !validating.TryGetValue(block->ChunkId, out var mask) || (mask & (1UL << slot)) == 0)
-        {
-            return;
-        }
-
-        Interlocked.Increment(ref ForgottenPushes);
-        if ((flags & PushEvent.Segment) != 0)
-        {
-            Interlocked.Increment(ref ForgottenMotion);
-        }
-
-        var perGroup = _forgottenGroups[archetype];
-        for (var g = 0; g < perGroup.Length; g++)
-        {
-            if ((groups & (1 << g)) != 0)
-            {
-                Interlocked.Increment(ref perGroup[g]);
-            }
-        }
-    }
-
-    private void AddPush(int a, int chunk, ulong mask)
-    {
-        if (mask == 0UL || chunk < 0)
-        {
-            return;
-        }
-
-        var served = _servedFilter;
-        if (served != null && (uint)chunk < (uint)served.Length && served[chunk] != ServedRealm)
-        {
-            return;
-        }
-
-        var n = _pushCount[a];
-        if (n == _pushChunks[a].Length)
-        {
-            Array.Resize(ref _pushChunks[a], n * 2);
-            Array.Resize(ref _pushMasks[a], n * 2);
-        }
-
-        // Adjacent duplicates (the repush list following the structure words) are merged; others are merged by the block's mask OR below.
-        _pushChunks[a][n] = chunk;
-        _pushMasks[a][n] = mask;
-        _pushCount[a] = n + 1;
-    }
-
-    /// <summary>After the watched lists were reset: marks the push set and lists each block once, so the projection pass visits exactly it.</summary>
-    public void MarkPushed(int workers, bool countInProject = false)
+    /// <summary>After the hub marked the push set: this realm's projection bookkeeping for the tick.</summary>
+    internal void BeginMark(int workers, bool countInProject)
     {
         // The parallel index (BeginParallelIndex): the projection's chunks sort their own events as they finish.
         _countInProject = countInProject && ParallelIndex;
         _indexedTick = uint.MaxValue;
-
-        foreach (var a in _pushIndices)
-        {
-            var state = _states[a];
-            var list = state.WatchedBlocks;
-            for (var i = 0; i < _pushCount[a]; i++)
-            {
-                var block = (ReplicationBlockHeader*)_pushBlocks[a][i];
-                if (block == null)
-                {
-                    continue;
-                }
-
-                var before = block->WatchedMask;
-                block->WatchedMask = before | _pushMasks[a][i];
-                if (before == 0UL)
-                {
-                    list.Add(block);
-                }
-
-                SlotsPushed += BitOperations.PopCount(_pushMasks[a][i]);
-            }
-        }
-
         ResetWorkers(workers);
     }
 
@@ -1506,16 +1264,6 @@ internal abstract unsafe partial class PushReplication
 
     /// <summary>Records an entry that is about to vanish at the fence, so every session holding it is told to drop it. Rare; locked.</summary>
     public abstract void Orphan(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId, int cause);
-
-    /// <summary>Marks slots of a cluster to be pushed again next tick. Called by the worker that owns the block — one writer per chunk.</summary>
-    public void Repush(int archetype, int chunkId, ulong slots)
-    {
-        var r = _repush[archetype];
-        if ((uint)chunkId < (uint)r.Length)
-        {
-            r[chunkId] |= (long)slots;
-        }
-    }
 
     // ══ The push index (design/Subscriptions/10 § 2.3) ═══════════════════════════════════════════════════════════════════════════════════════════════
 

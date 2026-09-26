@@ -567,7 +567,7 @@ sealed unsafe class FrameHarness : IDisposable
 
         // The runtime's order (SubscriptionsProjectExecSystem.BlocksStep): the push set and a block for every cluster in it, before the parked drain, so an
         // entity that migrated into a cluster with no block lands in one this tick.
-        push.PrepareBlocks(stamp);
+        Subscriptions.Hub.PrepareBlocks(stamp);
         Subscriptions.Self?.Refresh(Sessions);
         for (var a = 0; a < states.Length; a++)
         {
@@ -581,7 +581,7 @@ sealed unsafe class FrameHarness : IDisposable
 
         // The projection sorts its events for the parallel index, which the push index stage then merges (SubscriptionsPushIndexExecSystem).
         var lists = Math.Max(1, ProjectionWorkers);
-        push.MarkPushed(workers: lists, countInProject: !SerialIndex);
+        Subscriptions.Hub.MarkPushed(workers: lists, countInProject: !SerialIndex);
 
         // As the runtime: a tick with no watched block skips the projection's opening, and only flushes the identity releases that fall due.
         var watched = 0;

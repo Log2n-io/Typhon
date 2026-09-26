@@ -145,7 +145,9 @@ internal static unsafe class ProjectionPass
         var arena = state.Scratch[worker];
 
         // A push-served archetype is projected only where pushed, and every slot projected here becomes one event the frame stage fans out.
-        var push = state.Push;
+        // The replication of the block's realm (R4.1): a block describes one cluster, and a cluster is in one realm from its claim to its drain. The hub
+        // only ever pushes blocks of realms it serves.
+        var push = state.Push?.Hub?.For(block->Realm) ?? state.Push;
         var pushIndex = state.PushArchetypeIndex;
 
         // The frame of the block's realm (R4.2, SUB-30): a block describes one cluster, and a cluster is in one realm from its claim to its drain, so the
@@ -317,7 +319,7 @@ internal static unsafe class ProjectionPass
                         // demand — initializes it. Deferring an entity by a tick is the only failure available here that neither allocates on a worker nor
                         // hands two entities one identity; it is counted so a lease that is chronically too small is visible rather than inferred.
                         state.NoteNetIdStarvation();
-                        push?.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                        push?.Hub.Repush(pushIndex, block->ChunkId, 1UL << slot);
                         continue;
                     }
 
@@ -394,7 +396,7 @@ internal static unsafe class ProjectionPass
                 // the one push a developer cannot be asked to make, because nothing the application writes marks a stop.
                 if (push != null && motion.Enabled && MotionTracker.IsExtrapolating(in motion, hotBytes))
                 {
-                    push.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                    push.Hub.Repush(pushIndex, block->ChunkId, 1UL << slot);
                 }
             }
             else if (position != null && initialize && layout.EnterPositionBytes > 0)

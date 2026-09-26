@@ -756,7 +756,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 4244, [0], nameof(PushOracleTests),
             detection: PushDetection.Explicit);
         oracle.Workload.ForgetPushesAfter = 0;
-        oracle.Push.ValidateClustersPerTick = int.MaxValue;
+        oracle.Push.Hub.ValidateClustersPerTick = int.MaxValue;
 
         for (var i = 0; i < GateTicks; i++)
         {
@@ -765,7 +765,7 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
 
         oracle.Quiesce();
         oracle.AssertConverged("writes that were never pushed, found by a validator that visits every cluster every tick");
-        Assert.That(oracle.Push.ForgottenPushes, Is.GreaterThan(20), "the workload wrote without pushing, and the validator should have seen it");
+        Assert.That(oracle.Push.Hub.ForgottenPushes, Is.GreaterThan(20), "the workload wrote without pushing, and the validator should have seen it");
         AssertLookedAtSomething(oracle);
     }
 
@@ -775,15 +775,15 @@ sealed class PushOracleTests : TestBase<PushOracleTests>
     {
         using var oracle = OracleHarness.Create(ProjectionTestSchema.SetupEngine(ServiceProvider), seed: 4245, [0], nameof(PushOracleTests),
             detection: PushDetection.Explicit);
-        oracle.Push.ValidateClustersPerTick = int.MaxValue;
+        oracle.Push.Hub.ValidateClustersPerTick = int.MaxValue;
 
         for (var i = 0; i < GateTicks; i++)
         {
             oracle.Step();
         }
 
-        Assert.That(oracle.Push.ValidatedSlots, Is.GreaterThan(1000), "the validator checked too little to mean anything");
-        Assert.That(oracle.Push.ForgottenPushes, Is.Zero, "every write was pushed, so anything the validator reports is a false positive");
+        Assert.That(oracle.Push.Hub.ValidatedSlots, Is.GreaterThan(1000), "the validator checked too little to mean anything");
+        Assert.That(oracle.Push.Hub.ForgottenPushes, Is.Zero, "every write was pushed, so anything the validator reports is a false positive");
     }
 
     /// <summary>

@@ -925,9 +925,9 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             return;
         }
 
-        if (ValidateClustersPerTick > 0 && hot != null)
+        if (Hub.ValidateClustersPerTick > 0 && hot != null)
         {
-            NoteIfForgotten(archetype, block, slot, flags, groups);
+            Hub.NoteIfForgotten(archetype, block, slot, flags, groups);
         }
 
         if (hot != null)

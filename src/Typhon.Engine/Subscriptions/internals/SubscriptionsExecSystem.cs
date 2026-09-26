@@ -233,7 +233,7 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
             return 0;
         }
 
-        push.PrepareBlocks(tick);
+        subs.Hub.PrepareBlocks(tick);
 
         // Owner routing (11 § 2.2): the reverse Control map the projection's chunks read, rebuilt only when a session's controlled entity changed.
         subs.Self?.Refresh(subs.Sessions);
@@ -258,7 +258,7 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
             states[i].BeginWatchedBlocks(tick);
         }
 
-        push.MarkPushed(Math.Max(1, ctx.WorkerCount), countInProject: true);
+        subs.Hub.MarkPushed(Math.Max(1, ctx.WorkerCount), countInProject: true);
 
         if (timed)
         {

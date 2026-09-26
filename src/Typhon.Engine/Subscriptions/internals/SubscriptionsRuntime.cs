@@ -191,6 +191,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 Grid = spatial == null ? null : ReplicationGrid.Resolve(Options.ReplicationCellM, spatial.Config, Profiles.MaxRadius);
                 Push = PushReplication.Create(Plans, _replicationStates, observed, automatic, Grid, Options.MaxSessions, Options.PushShadow,
                     Options.ForceDeepReplicationForTest);
+
+                // The engine-wide collector (R4.1), serving realm 0's replication; the stages below loop over its served realms as they are added.
+                Hub = new PushHub(_replicationStates, observed, automatic, Push);
                 for (var a = 0; a < observed.Length; a++)
                 {
                     if (observed[a])
@@ -474,6 +477,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// Realm 0's frame (<c>typhon.3</c>), or <see langword="null"/> without a spatial grid: the <c>REALM</c> block every session's first frame carries, and
     /// the frame its positions — records, events, commands, regions, aggregate grids — are quantized over (SUB-30).
     /// </summary>
+    /// <summary>The engine-wide half of push replication: the collector and the served realms' replications (R4.1); null without a push path.</summary>
+    public PushHub Hub { get; private set; }
+
     public RealmFrame Realm0Frame { get; }
 
     /// <summary>Realm 0's frame: its grid's bounds, the replication cell, the default width, flat when the replication grid is one cell deep.</summary>

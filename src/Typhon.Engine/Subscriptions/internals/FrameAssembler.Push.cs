@@ -240,9 +240,9 @@ internal sealed unsafe partial class FrameAssembler
         var p = Push;
         var f = 1000d / Stopwatch.Frequency;
         Console.Error.WriteLine(
-            $"  PUSH: {_pushSessionCount} sessions; slots pushed {p.SlotsPushed}, events {p.Events}; enters {p.Enters}, leaves {p.Leaves}, updates {p.Updates}; "
+            $"  PUSH: {_pushSessionCount} sessions; slots pushed {p.Hub.SlotsPushed}, events {p.Events}; enters {p.Enters}, leaves {p.Leaves}, updates {p.Updates}; "
             + $"cells delivered {p.CellsDelivered}, sweeps {p.Sweeps} ({p.SweepSlots} slots); resets {p.Resets}; "
-            + $"serial prepare {p.PrepareTicks * f:F0} ms, index {p.IndexTicks * f:F0} ms "
+            + $"serial prepare {p.Hub.PrepareTicks * f:F0} ms, index {p.IndexTicks * f:F0} ms "
             + $"(sort {p.SortTicks * f:F0}, merge {p.MergeTicks * f:F0}, finish {p.FinishTicks * f:F0}), gather busy {p.GatherTicks * f:F0} ms (cumulative)");
         Console.Error.WriteLine(
             $"  PUSH CELLS: delivery {p.DeliverTicks * f:F0} ms, {p.DeliverDecoded} decoded for {p.DeliverEntered} entered; "
@@ -252,7 +252,7 @@ internal sealed unsafe partial class FrameAssembler
             $"  PUSH LOG: catch-ups {p.LogCatchUps} over {p.LogCatchUpTicks} missed ticks; resets: too old {p.LogTooOld}, ambiguous {p.LogAmbiguous}; "
             + $"gap re-pushes {p.GapRepushes}, "
             + $"occupancy recounts {p.OccupancyRecounts} ({p.RecountTicks * f:F0} ms)");
-        if (p.ValidateClustersPerTick > 0)
+        if (p.Hub.ValidateClustersPerTick > 0)
         {
             var groups = new System.Text.StringBuilder();
             for (var a = 0; a < _plans.Length; a++)
@@ -260,7 +260,7 @@ internal sealed unsafe partial class FrameAssembler
                 var planGroups = _plans[a].Groups;
                 for (var g = 0; planGroups != null && g < planGroups.Length; g++)
                 {
-                    var n = p.ForgottenGroups(a, g);
+                    var n = p.Hub.ForgottenGroups(a, g);
                     if (n > 0)
                     {
                         groups.Append($" {_plans[a].Name}.{planGroups[g].Name}={n}");
@@ -268,7 +268,7 @@ internal sealed unsafe partial class FrameAssembler
                 }
             }
 
-            Console.Error.WriteLine($"  PUSH VALIDATOR: {p.ValidatedSlots} slots checked, forgotten pushes {p.ForgottenPushes} (motion {p.ForgottenMotion});{groups}");
+            Console.Error.WriteLine($"  PUSH VALIDATOR: {p.Hub.ValidatedSlots} slots checked, forgotten pushes {p.Hub.ForgottenPushes} (motion {p.Hub.ForgottenMotion});{groups}");
         }
 
         Console.Error.WriteLine("  PUSH MIGRATION: " + p.MigrationSummary() + $"orphans: release {p.OrphanRelease}, migrate {p.OrphanMigrate}, drain {p.OrphanDrain}");
