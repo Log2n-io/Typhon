@@ -440,6 +440,10 @@ descends from this one property.
             once, and a failed system starts no further phase, whatever the cleanup asks for — the single-threaded path's rule. The
             drain used to complete a failed system without its cleanup (its entity list never returned, its checkerboard phase left
             behind), and a failed phase A still re-dispatched phase B
+  invariant a prepare that throws fails THAT system (DispatchParallelQuery, #1063): the failure is recorded against it, its cleanup runs
+            once, no further phase starts and it is completed, so its successors are skipped and the tick ends. It runs from its
+            predecessor's completion (or the root marking), and escaping from there the worker's safety net blamed the predecessor —
+            already complete — and the parallel system was never completed: the tick waited on it forever
   never a chunk index judged against a count read separately from its claim
   rationale: nothing fences workers out between dispatches. A parallel system's ready flag stays set once it completes, and a worker
     can be preempted anywhere in its claim loop and resume one or more dispatches later. With the count and the index held apart,
@@ -469,7 +473,8 @@ descends from this one property.
             ADrainerParkedInAFailedTick_DoesNotSwallowChunksOfTheNext (window 3: the worker that threw is parked before its next
             drain claim — 13 of tick 2's 16 chunks were swallowed). Mutant: ACounterOpenAcrossTheTickBoundary_IsCaughtByTheVerifier
             reopens P's finished dispatch's claims before the release. FenceWindowTripwireTests covers the tripwire, and
-            ExceptionHandlingTests.AFailedParallelSystem_RunsItsCleanupOnce_AndStartsNoFurtherPhase the completion of a drained system.
+            ExceptionHandlingTests.AFailedParallelSystem_RunsItsCleanupOnce_AndStartsNoFurtherPhase the completion of a drained system,
+            ExceptionHandlingTests.AParallelSystemWhosePrepareThrows_FailsItself_AndTheTickCompletes a prepare that throws (hung before).
 
 ### CD-02: A dispatch's chunks tile the cluster list Prepare counted `[fatal]` `[silent]`
   invariant the cluster ranges a parallel QuerySystem's chunks walk tile the list its dispatch splits exactly: chunk k of n walks its share of an
@@ -498,6 +503,9 @@ descends from this one property.
             EnterScope unconditionally); a parallel QuerySystem from the per-worker EntityAccessor (InitLightweight, for the accessor's lifetime);
             a ChunkedCallbackSystem from the dispatcher itself, once per chunk (ExecuteChunkedCallback); and a parallel QuerySystem that WritesVersioned
             from its per-chunk Transaction (ExecuteChunkWithTransaction) rather than from an accessor — four mechanisms, not three
+  invariant a parallel QuerySystem's PREPARE — the runtime's own work before its chunks: the change filter's dirty scan, the tier, sleep and
+            descendant materializations — runs inside a scope the runtime opens (OnParallelQueryPrepare, #1063). It reads cluster pages
+            through ChunkAccessors like a body does, and outside a scope it read pages nothing protected (Debug asserted, which hung the tick)
   note the parallel-query accessor pins for the ACCESSOR'S lifetime and never exits inside the tick (EntityAccessor.InitLightweight, "No epoch exit
        here"): a standing pin rather than a scope. The guarantee holds, but this rule now makes that pin load-bearing for a public contract
   note the dispatcher's own EpochGuard.Dispose THROWS on a depth mismatch (EpochThreadRegistry.UnpinCurrentThread), so a body that leaks a scope —
@@ -521,13 +529,16 @@ descends from this one property.
   on_violation: a body reading cluster or component pages with no live scope can have those pages reclaimed under it mid-read — a torn read or a
     use-after-free, silent, and only under eviction pressure. The reverse violation, blocking inside the scope, is silent too: reclamation stalls
     behind the oldest live epoch and the page cache grows until something else fails
-  scope: TyphonRuntime.cs (ExecuteChunkedCallback, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction, OnParallelQueryChunk), Transaction.cs (Init),
+  scope: TyphonRuntime.cs (ExecuteChunkedCallback, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction, OnParallelQueryChunk, OnParallelQueryPrepare),
+         Transaction.cs (Init),
          ChunkedCallbackSystem.cs,
          EntityAccessor.cs (InitLightweight), EpochGuard.cs (Enter, Dispose), ClusterSpatialQuery.cs
   verified: EpochScopeAroundSystemBodiesTests — one test per mechanism, each asserting a live scope from inside the body:
             ASerialCallbackSystemBody_RunsInsideAnEpochScope, AParallelQuerySystemBody_RunsInsideAnEpochScope,
             AChunkedCallbackSystemBody_RunsInsideAnEpochScope (the last fails on the pre-fix dispatcher, which called CallbackAction with no guard), plus
-            AChunkedCallbackBody_CanRunThePublicClusterSpatialQuery, the case the rule exists for
+            AChunkedCallbackBody_CanRunThePublicClusterSpatialQuery, the case the rule exists for;
+            ParallelChangeFilterEpochTests.AParallelChangeFilterOverAnIndexedComponent_KeepsTicking_AndSeesItsChanges the prepare (red without its
+            scope: the Debug assert, then the hung tick)
 
 ## Module: Worker Wake
 

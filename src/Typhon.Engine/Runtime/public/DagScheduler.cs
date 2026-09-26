@@ -2091,7 +2091,33 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     {
         // Nothing to close before preparing: a first dispatch finds the word closed by ResetTickState, and a re-dispatch (#234 checkerboard phase B)
         // finds phase A's word exhausted — every chunk was claimed before phase A completed — so either refuses every claim until the publish below.
-        var totalChunks = ParallelQueryPrepareCallback?.Invoke(sysIdx) ?? 0;
+        int totalChunks;
+        try
+        {
+            totalChunks = ParallelQueryPrepareCallback?.Invoke(sysIdx) ?? 0;
+        }
+        catch (Exception ex)
+        {
+            // A prepare that throws fails THIS system (#1063). It runs from its predecessor's completion (successor dispatch) or the tick's root marking;
+            // escaping from here, the worker's safety net blamed the predecessor — already complete — and this system was never completed, so the tick
+            // waited on it forever. Failed and completed here instead: its successors are skipped, its dispatch resources go back, no further checkerboard
+            // phase starts, and the tick ends.
+            _systemFailed[sysIdx] = true;
+            _currentTickSystemMetrics[sysIdx].SkipReason = SkipReason.Exception;
+            RecordSystemFailure(sysIdx, Systems[sysIdx].Name, ex);
+            try
+            {
+                ParallelQueryCleanupCallback?.Invoke(sysIdx);
+            }
+            catch (Exception cleanupEx)
+            {
+                LogSystemException(sysIdx, Systems[sysIdx].Name, cleanupEx);
+            }
+
+            OnSystemComplete(sysIdx, workerId, trackUtilization);
+            return;
+        }
+
         if (totalChunks <= 0)
         {
             // Empty entity set — cleanup may trigger re-dispatch (checkerboard: zero Red clusters but non-zero Black).

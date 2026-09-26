@@ -1755,6 +1755,24 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     private int OnParallelQueryPrepare(int sysIdx)
     {
+        // A chunked callback prepares nothing but a chunk count.
+        var epochs = Engine?.EpochManager;
+        if (epochs == null || Scheduler.Systems[sysIdx].ExplicitChunkCount > 0)
+        {
+            return OnParallelQueryPrepareCore(sysIdx);
+        }
+
+        // The prepare reads cluster pages — the change filter's dirty scan, the tier, sleep and descendant materializations — so it holds an epoch, as
+        // every chunk does (#1063). Outside one, a scan's accessor held pages nothing protected; in Debug it asserted, which hung the tick. Guards nest:
+        // inside another scope this is one atomic pair.
+        using (EpochGuard.Enter(epochs))
+        {
+            return OnParallelQueryPrepareCore(sysIdx);
+        }
+    }
+
+    private int OnParallelQueryPrepareCore(int sysIdx)
+    {
         var sys = Scheduler.Systems[sysIdx];
 
         // Chunked-CallbackSystem fast-path: skip all entity-prep (no view, no PTA, no tier index, no change-filter materialization).

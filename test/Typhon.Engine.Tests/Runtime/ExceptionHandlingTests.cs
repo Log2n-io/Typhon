@@ -84,6 +84,51 @@ class ExceptionHandlingTests
         }
     }
 
+    /// <summary>
+    /// #1063: a parallel system's prepare runs from its predecessor's completion. A prepare that throws must fail THAT system — its successors skipped,
+    /// its cleanup run, the tick completed — not escape to the worker's safety net, which blamed the (already complete) predecessor and left the tick
+    /// waiting on the parallel system forever.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CD-01")]
+    public void AParallelSystemWhosePrepareThrows_FailsItself_AndTheTickCompletes()
+    {
+        var gate = 0;
+        var after = 0;
+        var cleanups = 0;
+        var dag = RuntimeSchedule.Create(new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 }).PublicTrack.DeclareDag("Test");
+        dag.CallbackSystem("Gate", _ => Interlocked.Increment(ref gate));
+        dag.QuerySystem("P", _ => { }, after: "Gate", input: () => null, parallel: true);
+        dag.CallbackSystem("After", _ => Interlocked.Increment(ref after), after: "P");
+
+        using var scheduler = dag.Build(_registry.Runtime);
+        scheduler.ParallelQueryPrepareCallback = _ => throw new InvalidOperationException("prepare fails");
+        scheduler.ParallelQueryChunkCallback = (_, _, _, _) => Assert.Fail("a system whose prepare failed runs no chunk");
+        scheduler.ParallelQueryCleanupCallback = _ =>
+        {
+            Interlocked.Increment(ref cleanups);
+            return true;   // asks for another phase: a failed system must not start one
+        };
+
+        scheduler.Start();
+        var advanced = SpinWait.SpinUntil(() => scheduler.CurrentTickNumber >= 4, TimeSpan.FromSeconds(3));
+        scheduler.Shutdown();
+
+        var ring = scheduler.Telemetry;
+        var systems = ring.GetSystemMetrics(ring.NewestTick);
+        var (gateSkip, pSkip, afterSkip) = (systems[0].SkipReason, systems[1].SkipReason, systems[2].SkipReason);
+        Assert.Multiple(() =>
+        {
+            Assert.That(advanced, Is.True, "the tick completes when a parallel system's prepare throws");
+            Assert.That(gate, Is.GreaterThanOrEqualTo(4), "the predecessor runs every tick");
+            Assert.That(after, Is.Zero, "the failed system's successor is skipped");
+            Assert.That(pSkip, Is.EqualTo(SkipReason.Exception), "the failure is the parallel system's");
+            Assert.That(gateSkip, Is.Not.EqualTo(SkipReason.Exception), "not its predecessor's");
+            Assert.That(afterSkip, Is.EqualTo(SkipReason.DependencyFailed));
+            Assert.That(cleanups, Is.EqualTo(gate), "one cleanup per failed prepare, and no further phase");
+        });
+    }
+
     [Test]
     public void ParallelQueryException_TickCompletes_NoFullCpuWedge()
     {

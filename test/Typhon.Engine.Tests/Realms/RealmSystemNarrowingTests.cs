@@ -223,8 +223,7 @@ class RealmSystemNarrowingTests : TestBase<RealmSystemNarrowingTests>
             {
                 var dag = schedule.PublicTrack.DeclareDag("Test");
 
-                // One entity of each realm scored every tick: only realm 1's may reach the narrowed system, and only that one. Non-parallel: a parallel
-                // change-filtered system over an indexed component stalls the runtime after two ticks, on main as well — a separate defect.
+                // One entity of each realm scored every tick: only realm 1's may reach the narrowed system, and only that one.
                 dag.CallbackSystem("Write", ctx =>
                 {
                     ctx.Transaction.OpenMut(ids[0][0]).Write(ScoredUnit.Score).Value++;
@@ -237,7 +236,7 @@ class RealmSystemNarrowingTests : TestBase<RealmSystemNarrowingTests>
                     {
                         delivered.Add(id);
                     }
-                }, input: () => view, parallel: false, changeFilter: [typeof(RealmScore)], realms: [new RealmId(1)], after: "Write");
+                }, input: () => view, parallel: true, changeFilter: [typeof(RealmScore)], realms: [new RealmId(1)], after: "Write");
             }, new RuntimeOptions { WorkerCount = 2, BaseTickRate = 1000 });
 
             runtime.Start();
