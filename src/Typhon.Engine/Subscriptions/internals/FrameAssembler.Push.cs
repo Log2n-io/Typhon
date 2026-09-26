@@ -558,6 +558,26 @@ internal sealed unsafe partial class FrameAssembler
         Observe(session, realm);
     }
 
+    /// <summary>
+    /// Before a <c>RESET</c> that switches the session's realm is published: the transport's view of it (<see cref="SessionRealmView"/>), so a command the
+    /// client builds in the new realm can never be decoded over the old one. A frame refused after this point leaves a view one switch early, which only
+    /// refuses the rare command built in the old realm meanwhile.
+    /// </summary>
+    private void PublishRealmView(SessionId session, SessionFrameState state, bool reset)
+    {
+        if (!reset || Realm == null || state.PendingRealm == state.CommittedRealm)
+        {
+            return;
+        }
+
+        var ingress = Ingress;
+        if (ingress != null)
+        {
+            var previous = ingress.RealmViewOf(session);
+            ingress.PublishRealmView(new SessionRealmView(session, state.PendingRealm, state.PendingFrame, state.CommittedRealm, previous?.Frame, (uint)_tick));
+        }
+    }
+
     /// <summary>A published <c>RESET</c> carried the session's pending realm: it is what its client holds now.</summary>
     private void CommitRealm(SessionFrameState state)
     {
@@ -785,6 +805,7 @@ internal sealed unsafe partial class FrameAssembler
 
         ReturnIfValid(previous);
         buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
+        PublishRealmView(session, state, reset);
         send->PublishFrame(sequence, block, length, _tick);
         events?.NoteDelivered(count, lost);
         CommitSelf(session, state, in self, -1, ref counters);
@@ -1264,6 +1285,7 @@ internal sealed unsafe partial class FrameAssembler
 
         ReturnIfValid(previous);
         buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
+        PublishRealmView(session, state, reset);
         send->PublishFrame(sequence, block, length, _tick);
         published = length;
         if (eventCount > 0)

@@ -16,6 +16,38 @@ namespace Typhon.Engine.Internals;
 /// the transport thread that owns the connection; the region, the last sequence and the delivered counters belong to the tick. Nothing here is written by
 /// both, which is what makes the whole path lock-free once a session exists (SUB-05's shape, one level below the session table).
 /// </remarks>
+/// <summary>
+/// A session's realm as its client holds it, for the transport's command decode (12-realms § 2.5): the realm of its last published <c>RESET</c> with its
+/// frame, the one before with its frame, and the tick of the switch between them. Immutable, replaced whole by the frame stage BEFORE the switching frame
+/// is published — so a command a client built in the new realm can never meet the old view — and read by the transport with one acquire load; the
+/// transport reads no other session state (SUB-05).
+/// </summary>
+internal sealed class SessionRealmView
+{
+    public SessionRealmView(SessionId session, int committed, RealmFrame frame, int previous, RealmFrame previousFrame, uint switchTick)
+    {
+        Session = session;
+        Committed = committed;
+        Frame = frame;
+        Previous = previous;
+        PreviousFrame = previousFrame;
+        SwitchTick = switchTick;
+    }
+
+    /// <summary>The session this view is of: a slot's next occupant never reads its predecessor's.</summary>
+    public SessionId Session { get; }
+
+    public int Committed { get; }
+
+    public RealmFrame Frame { get; }
+
+    public int Previous { get; }
+
+    public RealmFrame PreviousFrame { get; }
+
+    public uint SwitchTick { get; }
+}
+
 internal sealed class SessionIngress
 {
     /// <summary>Creates a row for a session that has just taken a ring.</summary>
@@ -299,6 +331,39 @@ internal sealed class SubscriptionsIngress : IDisposable
     // ── the transport side ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// The frame a <c>COMMANDS</c> message's realm-framed fields are decoded over (12-realms § 2.5): the realm the client held at the batch's
+    /// <c>clientTick</c> — the committed one, or the one before when the batch predates the switch (<paramref name="stale"/>). One realm: its frame.
+    /// </summary>
+    /// <param name="session">The session, whose realm view is read.</param>
+    /// <param name="message">The message, type byte included.</param>
+    /// <param name="stale">The batch was built in a realm the session has since left.</param>
+    private RealmFrame CommandFrame(SessionId session, ReadOnlySpan<byte> message, out bool stale)
+    {
+        stale = false;
+        if (!MultiRealm)
+        {
+            return Realm;
+        }
+
+        var view = RealmViewOf(session);
+        if (view == null)
+        {
+            return null;
+        }
+
+        // u8 type | u32 clientTick: a message too short for it is refused by the decode itself.
+        if (message.Length < 5 || BinaryPrimitives.ReadUInt32LittleEndian(message[1..]) >= view.SwitchTick)
+        {
+            return view.Frame;
+        }
+
+        // Decoded over the old realm's frame when there was one: its positioned commands are refused either way, and a batch from before any realm must
+        // not close the session for a frame it could not have had.
+        stale = view.Committed != view.Previous;
+        return view.PreviousFrame ?? view.Frame;
+    }
+
+    /// <summary>
     /// Validates a whole <c>COMMANDS</c> message and frames each command it carries into the session's ring.
     /// </summary>
     /// <param name="session">Whose commands they are.</param>
@@ -318,7 +383,7 @@ internal sealed class SubscriptionsIngress : IDisposable
             // No ring to frame into (the pool is exhausted, or the session is going away) — but a malformed message is still malformed: validated, so it
             // still closes with 1007.
             var validating = new RefusingSink(null);
-            CommandsMessage.Read(message, Commands.Plan, ref validating, Realm);
+            CommandsMessage.Read(message, Commands.Plan, ref validating, CommandFrame(session, message, out _));
             return;
         }
 
@@ -337,8 +402,9 @@ internal sealed class SubscriptionsIngress : IDisposable
         // used), and a heap buffer per message is the allocation this whole path exists to avoid.
         Span<byte> payload = stackalloc byte[CommandRegistry.MaxPayloadBytes];
         Span<RegionVertex> vertices = stackalloc RegionVertex[BuiltInCommands.MaxRegionVertices];
-        var sink = new IngressCommandSink(this, row, role, payload, vertices);
-        CommandsMessage.Read(message, Commands.Plan, ref sink, Realm);
+        var frame = CommandFrame(session, message, out var stale);
+        var sink = new IngressCommandSink(this, row, role, payload, vertices, frame, stale);
+        CommandsMessage.Read(message, Commands.Plan, ref sink, frame);
         sink.Flush();
     }
 
@@ -354,7 +420,7 @@ internal sealed class SubscriptionsIngress : IDisposable
     {
         var row = RowFor(session);
         var sink = new RefusingSink(row);
-        CommandsMessage.Read(message, Commands.Plan, ref sink, Realm);
+        CommandsMessage.Read(message, Commands.Plan, ref sink, CommandFrame(session, message, out _));
         if (row != null)
         {
             row.OverBudgetMessages++;
@@ -644,13 +710,63 @@ internal sealed class SubscriptionsIngress : IDisposable
         NoteSeq(row, seq);
         row.DrainedCommands++;
 
+        // The realm the client held when it built the batch (12-realms § 2.5), from the frame stage's own record: tick side, like this drain.
+        var built = RealmAt(row.Session, clientTick);
         if (info.IsClientRegion)
         {
-            ApplyRegion(row, seq, body);
+            // A region framed in a realm the session has since left names places that are no longer its own: dropped, as the transport would have.
+            if (!MultiRealm || built == Frames?.StateOf(row.Session)?.CommittedRealm)
+            {
+                ApplyRegion(row, seq, body);
+            }
+
             return;
         }
 
-        Buffers.ByWireIdx(wireIdx)?.Append(segment, row.Session, seq, clientTick, body);
+        Buffers.ByWireIdx(wireIdx)?.Append(segment, row.Session, seq, clientTick, built < 0 ? RealmId.NoneValue : (ushort)built, body);
+    }
+
+    // Per session slot: the session's realm as its client holds it, for the transport's command decode — written by the frame stage, read by transports.
+    private SessionRealmView[] _realmViews = [];
+
+    /// <summary>
+    /// Publishes a session's realm view (<see cref="SessionRealmView"/>) — with a release store, before the frame that switches the client is published.
+    /// Tick side.
+    /// </summary>
+    internal void PublishRealmView(SessionRealmView view)
+    {
+        var slot = view.Session.Slot;
+        if (slot >= _realmViews.Length)
+        {
+            var grown = new SessionRealmView[Math.Max(slot + 1, Math.Max(16, _realmViews.Length * 2))];
+            Array.Copy(_realmViews, grown, _realmViews.Length);
+            Volatile.Write(ref _realmViews, grown);
+        }
+
+        Volatile.Write(ref _realmViews[slot], view);
+    }
+
+    /// <summary>The session's realm view, or null before its first published <c>RESET</c>. Any thread: one acquire load of an immutable object.</summary>
+    internal SessionRealmView RealmViewOf(SessionId session)
+    {
+        var views = Volatile.Read(ref _realmViews);
+        var view = session.IsValid && session.Slot < views.Length ? Volatile.Read(ref views[session.Slot]) : null;
+        return view != null && view.Session == session ? view : null;
+    }
+
+    /// <summary>
+    /// The realm a session's client held at <paramref name="clientTick"/>: the committed one from its switch on, the one before it earlier — -1 before any.
+    /// Tick side (the frame state's).
+    /// </summary>
+    internal int RealmAt(SessionId session, uint clientTick)
+    {
+        var state = Frames?.StateOf(session);
+        if (state == null || state.Generation != session.Generation)
+        {
+            return -1;
+        }
+
+        return clientTick >= state.RealmSwitchTick ? state.CommittedRealm : state.PreviousRealm;
     }
 
     private void ApplyRegion(SessionIngress row, ushort seq, ReadOnlySpan<byte> body)
@@ -815,8 +931,11 @@ internal ref struct IngressCommandSink : ICommandSink
     private readonly SessionRole _role;
     private readonly Span<byte> _payload;
     private readonly Span<RegionVertex> _vertices;
+    private readonly RealmFrame _frame;
+    private readonly bool _stale;
 
     private CommandTypeInfo _current;
+    private bool _framed;
     private ushort _seq;
     private uint _clientTick;
     private int _vertexCount;
@@ -831,13 +950,18 @@ internal ref struct IngressCommandSink : ICommandSink
     /// <param name="role">The session's role, which decides what it may send.</param>
     /// <param name="payload">The caller's scratch for the command being rebuilt, <see cref="CommandRegistry.MaxPayloadBytes"/> wide.</param>
     /// <param name="vertices">The caller's scratch for a region's vertices.</param>
-    public IngressCommandSink(SubscriptionsIngress ingress, SessionIngress row, SessionRole role, Span<byte> payload, Span<RegionVertex> vertices)
+    /// <param name="frame">The realm frame the batch's realm-framed fields are decoded over.</param>
+    /// <param name="stale">The batch was built in a realm the session has since left: a command with a realm-framed field is refused.</param>
+    public IngressCommandSink(SubscriptionsIngress ingress, SessionIngress row, SessionRole role, Span<byte> payload, Span<RegionVertex> vertices,
+        RealmFrame frame = null, bool stale = false)
     {
         _ingress = ingress;
         _row = row;
         _role = role;
         _payload = payload;
         _vertices = vertices;
+        _frame = frame ?? ingress.Realm;
+        _stale = stale;
     }
 
     /// <inheritdoc />
@@ -850,6 +974,7 @@ internal ref struct IngressCommandSink : ICommandSink
         _clientTick = clientTick;
         _vertexCount = 0;
         _vertexDims = 2;
+        _framed = false;
         _altitudeM = 0;
         _budgetKiBps = 0;
         _open = _current != null;
@@ -911,6 +1036,7 @@ internal ref struct IngressCommandSink : ICommandSink
             return;
         }
 
+        _framed |= field.Kind is CodecKind.Pos2 or CodecKind.Pos3;
         var bindings = _current.Bindings;
         if ((uint)field.Ordinal < (uint)bindings.Length)
         {
@@ -939,7 +1065,8 @@ internal ref struct IngressCommandSink : ICommandSink
 
         // Always pos3 on the wire (typhon.3, D-8); the realm decides the hull: a flat realm's region is (x, y) on the plane z = 0 (10 § 6).
         var stride = field.Components;
-        _vertexDims = _ingress.Realm is { Deep: true } ? 3 : 2;
+        _framed = true;
+        _vertexDims = _frame is { Deep: true } ? 3 : 2;
         _vertexCount = Math.Min(count, BuiltInCommands.MaxRegionVertices);
         for (var i = 0; i < _vertexCount; i++)
         {
@@ -958,6 +1085,18 @@ internal ref struct IngressCommandSink : ICommandSink
         }
 
         _open = false;
+
+        // Built in a realm the session has left (12-realms § 2.5): its positions are the old realm's. A region is dropped — the client sends its new
+        // realm's on the switch — and anything else is refused, never delivered.
+        if (_stale && _framed)
+        {
+            if (!_current.IsClientRegion)
+            {
+                Refuse(AckReasons.RealmChanged);
+            }
+
+            return;
+        }
 
         if (_current.IsClientRegion)
         {

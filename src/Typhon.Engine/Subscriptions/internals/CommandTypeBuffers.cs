@@ -17,6 +17,9 @@ internal struct CommandHeader
 
     /// <summary>The client's sequence number.</summary>
     public ushort Seq;
+
+    /// <summary>The realm the client held when it built the batch (12-realms § 2.5); <see cref="RealmId.NoneValue"/> for none.</summary>
+    public ushort Realm;
 }
 
 /// <summary>An <c>ACKS</c> record: a command the server consumed and refused.</summary>
@@ -207,8 +210,9 @@ internal sealed class CommandTypeBuffer
     /// <param name="session">Whose command it is.</param>
     /// <param name="seq">Its sequence number.</param>
     /// <param name="clientTick">The client frame it belongs to.</param>
+    /// <param name="realm">The realm the client held when it built the batch.</param>
     /// <param name="payload">The decoded command, exactly <see cref="Stride"/> bytes.</param>
-    public void Append(int segment, SessionId session, ushort seq, uint clientTick, scoped ReadOnlySpan<byte> payload)
+    public void Append(int segment, SessionId session, ushort seq, uint clientTick, ushort realm, scoped ReadOnlySpan<byte> payload)
     {
         var slot = session.Slot;
         var fresh = _sessionTick[slot] != _tick;
@@ -237,7 +241,7 @@ internal sealed class CommandTypeBuffer
             _sessionCount[slot]++;
         }
 
-        _headers[segment][index] = new CommandHeader { Session = session.Value, ClientTick = clientTick, Seq = seq };
+        _headers[segment][index] = new CommandHeader { Session = session.Value, ClientTick = clientTick, Seq = seq, Realm = realm };
         payload[.._stride].CopyTo(new Span<byte>(_payloads[segment], index * _stride, _stride));
         _delivered++;
     }

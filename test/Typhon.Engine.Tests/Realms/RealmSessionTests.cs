@@ -267,6 +267,83 @@ class RealmSessionTests : TestBase<RealmSessionTests>
     }
 
     [Test]
+    [VerifiesRule("SUB-30")]
+    public void ACommandIsFramedByTheRealmItWasBuiltIn_AndAPositionFromALeftRealmIsRefused()
+    {
+        using var dbe = SetupEngine();
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            subs.Archetype<RealmUnit>(a => a.Motion(RealmUnit.Pos, m => m.Teleport(20)));
+            subs.Profile(World, p => p.World().Of<RealmUnit>());
+            subs.Command<RealmGoTo>(c => c.Rate(1_000, 1_000).Field(g => g.At, Codec.Pos3));
+            subs.Command<RealmPing>(c => c.Rate(1_000, 1_000).Field(p => p.N, Codec.VarUInt));
+        }, nameof(ACommandIsFramedByTheRealmItWasBuiltIn_AndAPositionFromALeftRealmIsRefused), replicationCellM: 10);
+        harness.RunFence = true;
+        harness.RunIngress = true;
+        var session = harness.OpenSessions(1, World)[0];
+        var commands = harness.Subscriptions.Commands;
+        var ingress = harness.Subscriptions.Ingress;
+        commands.Enter(session, RealmId.Default);
+        Spawn(dbe, 0, 2);
+        Run(harness, session, 3);
+        var realm0 = harness.Replica(session).Store.Realm;
+
+        commands.Enter(session, new RealmId(1));
+        harness.RunTick(harness.Tick + 1);
+        var switchTick = (uint)harness.Tick;
+        harness.Deliver(session);
+        var realm1 = harness.Replica(session).Store.Realm;
+        Assert.That(realm1.RealmId, Is.EqualTo((ushort)1));
+
+        // Built before the switch, in realm 0: the position is refused (REALM_CHANGED), the command without one arrives, framed by the realm it was built in.
+        ingress.OnCommands(session, Encode(harness.CatalogPlan, switchTick - 1, realm0, ("RealmGoTo", 10, GoTo(5, 6, 0)), ("RealmPing", 11, Ping(7))));
+        harness.RunTick(harness.Tick + 1);
+        var log = harness.Read(session);
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.Commands<RealmGoTo>().Count, Is.Zero, "a position built in a realm the session left never reaches the application");
+            Assert.That(log?.Acks, Does.Contain(((ushort)10, AckReasons.RealmChanged)));
+            Assert.That(commands.Commands<RealmPing>().Count, Is.EqualTo(1));
+            foreach (ref readonly var ping in commands.Commands<RealmPing>())
+            {
+                Assert.That(ping.Realm, Is.EqualTo(RealmId.Default), "a command arrives with the realm it was built in");
+            }
+        });
+
+        // Built in the new realm: decoded over its frame, and says so.
+        ingress.OnCommands(session, Encode(harness.CatalogPlan, switchTick, realm1, ("RealmGoTo", 12, GoTo(-30.5, 12.25, 0))));
+        harness.RunTick(harness.Tick + 1);
+        Assert.That(commands.Commands<RealmGoTo>().Count, Is.EqualTo(1));
+        foreach (var goTo in commands.Commands<RealmGoTo>())
+        {
+            Assert.Multiple(() =>
+            {
+                Assert.That(goTo.Realm, Is.EqualTo(new RealmId(1)));
+                Assert.That(goTo.Value.At.X, Is.EqualTo(-30.5).Within(realm1.ForCommands.Step[0]));
+                Assert.That(goTo.Value.At.Y, Is.EqualTo(12.25).Within(realm1.ForCommands.Step[1]));
+            });
+        }
+    }
+
+    private static byte[] Encode(CatalogPlan plan, uint clientTick, RealmFrame frame, params (string Name, ushort Seq, RecordValues Values)[] batch)
+    {
+        var list = new System.Collections.Generic.List<(MessagePlan, ushort, RecordValues)>();
+        foreach (var (name, seq, values) in batch)
+        {
+            list.Add((plan.CommandByName(name), seq, values));
+        }
+
+        var buffer = new byte[1024];
+        var writer = new WireWriter(buffer);
+        CommandsMessage.Write(ref writer, clientTick, list, frame);
+        return writer.Written.ToArray();
+    }
+
+    private static RecordValues GoTo(double x, double y, double z) => new() { ["At"] = FieldValue.Of(x, y, z) };
+
+    private static RecordValues Ping(uint n) => new() { ["N"] = FieldValue.Of((double)n) };
+
+    [Test]
     public void ARealmSessionSlotIsGivenBackAndTheRealmIsObservedWhileASessionIsInIt()
     {
         using var dbe = SetupEngine();
@@ -297,3 +374,17 @@ class RealmSessionTests : TestBase<RealmSessionTests>
         Assert.That(dbe.RealmTable.ObserverCount(1), Is.Zero);
     }
 }
+
+#pragma warning disable CS0649
+/// <summary>A command with a realm-framed field: where to go, in the session's realm.</summary>
+struct RealmGoTo
+{
+    public Vector3D At;
+}
+
+/// <summary>A command with none.</summary>
+struct RealmPing
+{
+    public uint N;
+}
+#pragma warning restore CS0649

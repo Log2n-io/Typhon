@@ -240,6 +240,12 @@ public static class AckReasons
     /// <summary>The session's role may not send this command type (the catalog's <c>roles</c>).</summary>
     public const byte Forbidden = 4;
 
+    /// <summary>
+    /// A command with a realm-framed field built in a realm the session has since left (12-realms § 2.5): its positions mean places in the old realm, so it
+    /// never reaches the application. A <c>ClientRegion</c> is dropped instead — the client sends its new realm's.
+    /// </summary>
+    public const byte RealmChanged = 5;
+
     /// <summary>The first application-defined reason code.</summary>
     public const byte FirstApplicationReason = 128;
 }

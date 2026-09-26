@@ -665,14 +665,18 @@
   invariant a session receives its frame before any value framed by it: its first published frame is a RESET whose first block is REALM, retried until
     one is published; a REALM travels only as the first block of a RESET frame, and every decoding pass adopts it; a decoder refuses a positioned
     ENTITIES, an AGG, a DEBUG push geometry or a position field while it holds no realm (1002), and a REALM elsewhere or out of range (1007)
-  invariant a command's realm-framed field travels at RealmFrame.CommandPositionBits (32) over the realm's bounds, so the transport parses it without
-    reading the session's realm (SUB-05); until sessions are placed in realms it decodes with the served realm's frame
+  invariant a command's realm-framed field travels at RealmFrame.CommandPositionBits (32) over the bounds of the realm the client held at the batch's
+    clientTick; the transport decodes it over that realm's frame, read from the session's realm view — immutable, published by the frame stage before
+    the switching frame, the only session state a transport reads (SUB-05); a command whose realm-framed field was built in a realm the session has left
+    is refused with ACK REALM_CHANGED (a ClientRegion is dropped) and never reaches the application; every command arrives with the realm it was built in
   invariant a velocity is realm-independent: its unit is 2^unitExp metres per tick, derived from the archetype's tolerance and MaxAge (W5)
   scope: RealmFrame, RealmCodecs, PositionFrame, ProjectionPass.QuantizePosition, ProjectionCompiler.VelocityCodec, SessionFrameState.RealmSent,
+    SubscriptionsIngress.CommandFrame, SessionRealmView, IngressCommandSink.Flush,
     EntitiesEncoder.WriteHeader, SubscriptionsRuntime.BuildRealm0Frame, TickReader.Read, FieldCodec.ReadNumber, CommandsMessage.Read
   on_violation: silent. A value encoded over one frame and decoded over another is a wrong position a client renders without error; a catalog that
     carried bounds could describe one realm only, and every other realm's positions would decode into it.
-  verified: RealmReplicationTests.RealmFramedQuantizationEqualsTheCatalogCodecForRealmZero (realm 0's frame is the codec's; another realm's frame
+  verified: RealmSessionTests.ACommandIsFramedByTheRealmItWasBuiltIn_AndAPositionFromALeftRealmIsRefused,
+    RealmReplicationTests.RealmFramedQuantizationEqualsTheCatalogCodecForRealmZero (realm 0's frame is the codec's; another realm's frame
     gives other codes for the same place), RealmReplicationTests.ASessionsFirstPublishedFrameIsAResetWhoseFirstBlockIsItsRealm,
     EntitiesEncodingTests.TheProducedBytesDecodeIntoTheClientsReplica (the replica decodes the engine's stream over the REALM it was sent);
     protocol goldens tick-realm, tick-realm-none and wire-refusals (realm-without-reset, realm-not-first, positioned-entities-without-realm,

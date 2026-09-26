@@ -15,13 +15,21 @@ namespace Typhon.Engine;
 [PublicAPI]
 public readonly struct ClientCommand<T> where T : unmanaged
 {
-    internal ClientCommand(SessionId session, ushort seq, uint clientTick, in T value)
+    internal ClientCommand(SessionId session, ushort seq, uint clientTick, in T value, RealmId realm = default)
     {
         Session = session;
         Seq = seq;
         ClientTick = clientTick;
         Value = value;
+        Realm = realm;
     }
+
+    /// <summary>
+    /// The realm the client held when it built the command (12-realms § 2.5) — the session's realm at <see cref="ClientTick"/>. A command whose realm-framed
+    /// field was built in a realm the session has left never arrives (<c>ACK REALM_CHANGED</c>); one without such a field arrives with the realm it was
+    /// built in, for the application to judge.
+    /// </summary>
+    public RealmId Realm { get; }
 
     /// <summary>Which session sent it.</summary>
     public SessionId Session { get; }
@@ -152,7 +160,8 @@ public readonly struct CommandBatch<T> where T : unmanaged
     {
         var header = buffer.HeadersIn(segment)[index];
         var payload = buffer.PayloadsIn(segment).Slice(index * buffer.Stride, buffer.Stride);
-        return new ClientCommand<T>(SessionId.FromValue(header.Session), header.Seq, header.ClientTick, in MemoryMarshal.AsRef<T>(payload));
+        return new ClientCommand<T>(SessionId.FromValue(header.Session), header.Seq, header.ClientTick, in MemoryMarshal.AsRef<T>(payload),
+            new RealmId(header.Realm));
     }
 
     /// <summary>Walks a <see cref="CommandBatch{T}"/>.</summary>

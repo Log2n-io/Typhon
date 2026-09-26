@@ -111,6 +111,8 @@ export const AckReason = {
   RateLimited: 1,
   Rejected: 2,
   RegionInvalid: 3,
+  /** A command with a realm-framed field, built in a realm the session has since left (12-realms § 2.5). */
+  RealmChanged: 5,
   /** The session's role may not send this command type (the catalog's `roles`). */
   Forbidden: 4,
   FirstApplicationReason: 128,
