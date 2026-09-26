@@ -443,6 +443,8 @@ application pin) ⇒ `Active`; unobserved ⇒ `Simulated` at `UnobservedTickDivi
 Each spatial archetype keeps a `RealmDispatchIndex` of runnable clusters, rebuilt only when the policy or the cluster set changed; a dormant realm's
 clusters reach no system and take no maintenance (RLM-04), a divided realm's clusters run once every N runs of a system (RLM-05). With every realm
 runnable, none of this filters: dispatch is the single-realm path. Repair keys its queue by (realm, cell) and plans each candidate in its own grid.
+A system declared `InRealms(...)` carries a realm mask: its selection is its runnable realms' own cluster lists (or the tier selection filtered by the
+mask), and the change-filter dirty scans skip clusters outside it (RLM-07).
 
 **Persistence.** Each realm's identity (bounds, cell size, hysteresis) is a row of the realm catalog (`RealmR1`), written synchronously at its first
 registration and checked at every open (RLM-01); the spatial rebuild files each cluster in the realm its entities name and checks every slot (RM-06).

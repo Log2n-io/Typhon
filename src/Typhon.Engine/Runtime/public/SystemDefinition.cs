@@ -253,6 +253,41 @@ public sealed class SystemDefinition
     /// <summary>How this QuerySystem runs over realms simulated at a divisor (Realms D4, RLM-05). See <see cref="Engine.RealmRate"/>.</summary>
     public RealmRate RealmRate { get; internal set; }
 
+    /// <summary>The realms this QuerySystem is narrowed to (<see cref="SystemBuilder.InRealms"/>), or <see langword="null"/> for every runnable realm.</summary>
+    public System.Collections.Generic.IReadOnlyList<RealmId> Realms { get; private set; }
+
+    // One bit per realm id of Realms, for the dispatch's membership test; null when the system is not narrowed.
+    internal ulong[] RealmMask { get; private set; }
+
+    internal void SetRealms(RealmId[] realms)
+    {
+        Realms = realms;
+        RealmMask = null;
+        if (realms == null)
+        {
+            return;
+        }
+
+        var max = 0;
+        foreach (var realm in realms)
+        {
+            max = Math.Max(max, realm.Value);
+        }
+
+        var mask = new ulong[(max >> 6) + 1];
+        foreach (var realm in realms)
+        {
+            mask[realm.Value >> 6] |= 1UL << (realm.Value & 63);
+        }
+
+        RealmMask = mask;
+    }
+
+    /// <summary>True when <paramref name="realm"/> is one this system runs in: always, when it is not narrowed.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static bool InMask(ulong[] mask, ushort realm) =>
+        mask == null || ((realm >> 6) < mask.Length && (mask[realm >> 6] & (1UL << (realm & 63))) != 0);
+
     /// <summary>
     /// When true, this parallel QuerySystem uses two-phase checkerboard dispatch (issue #234). Clusters are split into Red
     /// (<c>(cellX + cellY) % 2 == 0</c>) and Black sets, dispatched as two sequential parallel phases within one DAG node.

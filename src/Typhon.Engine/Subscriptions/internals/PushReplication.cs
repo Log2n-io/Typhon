@@ -1013,7 +1013,7 @@ internal abstract unsafe partial class PushReplication
             var state = _states[a];
             var cs = state.ClusterState;
             var active = 0;
-            var ids = cs?.ReadActiveClusterList(out active);
+            var ids = cs?.ReadRealmClusterList(ServedRealm, out active);
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {

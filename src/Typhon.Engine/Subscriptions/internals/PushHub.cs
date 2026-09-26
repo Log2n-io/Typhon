@@ -619,10 +619,31 @@ internal sealed unsafe class PushHub
             if (anyEverything)
             {
                 _everythingPass = true;
-                var ids = cs.ReadActiveClusterList(out var clusters);
-                for (var i = 0; ids != null && i < clusters; i++)
+                if (_single)
                 {
-                    AddPush(a, ids[i], slotMask);
+                    var ids = cs.ReadActiveClusterList(out var clusters);
+                    for (var i = 0; ids != null && i < clusters; i++)
+                    {
+                        AddPush(a, ids[i], slotMask);
+                    }
+                }
+                else
+                {
+                    // Only the realms that asked for everything: their own lists (RM-07). AddPush would drop every other realm's chunk anyway, so a
+                    // one-room interior bootstrapping no longer walks the planet's clusters.
+                    for (var r = 0; r < active.Length; r++)
+                    {
+                        if (!active[r].EverythingThisTick[a])
+                        {
+                            continue;
+                        }
+
+                        var ids = cs.ReadRealmClusterList(active[r].ServedRealm, out var clusters);
+                        for (var i = 0; i < clusters; i++)
+                        {
+                            AddPush(a, ids[i], slotMask);
+                        }
+                    }
                 }
 
                 _everythingPass = false;

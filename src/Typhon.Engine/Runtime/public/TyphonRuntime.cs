@@ -668,6 +668,26 @@ public sealed partial class TyphonRuntime : IDisposable
                 }
             }
 
+            // A realm narrowing is a cluster selection: it needs a QuerySystem over a cluster archetype, and realm ids the engine can hold.
+            if (sys.RealmMask != null)
+            {
+                if (_systemClusterStates[i] == null)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{sys.Name}' is narrowed to realms (InRealm/InRealms), which selects clusters: it must be a QuerySystem over a cluster archetype.");
+                }
+
+                var maxRealms = Engine?.RealmTable?.MaxRealms ?? 1;
+                foreach (var realm in sys.Realms)
+                {
+                    if (realm.Value >= maxRealms)
+                    {
+                        throw new InvalidOperationException(
+                            $"System '{sys.Name}' is narrowed to realm {realm.Value}, beyond the engine's {maxRealms} realm ids (ConfigureRealms).");
+                    }
+                }
+            }
+
             // Resolve changeFilter component types → ComponentTable references
             if (sys.ChangeFilterTypes is { Length: > 0 })
             {
@@ -810,8 +830,9 @@ public sealed partial class TyphonRuntime : IDisposable
         var span = list.AsSpan();
         int count = 0;
 
-        // Non-cluster path: scan ComponentTable dirty bitmap
-        if (bitmap.Length > 0)
+        // Non-cluster path: scan ComponentTable dirty bitmap. Those entities are in realm 0.
+        var realmMask = Scheduler.Systems[sysIdx].RealmMask;
+        if (bitmap.Length > 0 && SystemDefinition.InMask(realmMask, RealmId.Default.Value))
         {
             var accessor = table.ComponentSegment.CreateChunkAccessor();
             try
@@ -848,7 +869,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // Issue #231: tier-filtered systems scope the scan to the tier's clusters (Q9) instead of walking the full snapshot bitmap.
         var sys = Scheduler.Systems[sysIdx];
         var effectiveTier = (SimTier)((byte)sys.TierFilter & (byte)view.TierFilter);
-        count = ScanClusterDirtyEntities(table, view, effectiveTier, span, count);
+        count = ScanClusterDirtyEntities(table, view, effectiveTier, span, count, realmMask);
 
         if (count == 0)
         {
@@ -865,7 +886,8 @@ public sealed partial class TyphonRuntime : IDisposable
     /// When <paramref name="effectiveTier"/> is non-<see cref="SimTier.All"/> and the archetype has a configured spatial grid, the scan walks only the
     /// tier's clusters (issue #231 Q9). Returns the updated count.
     /// </summary>
-    private unsafe int ScanClusterDirtyEntities(ComponentTable table, ViewBase view, SimTier effectiveTier, Span<EntityId> span, int count)
+    private unsafe int ScanClusterDirtyEntities(ComponentTable table, ViewBase view, SimTier effectiveTier, Span<EntityId> span, int count,
+        ulong[] realmMask)
     {
         int maxArchId = Math.Min(ArchetypeRegistry.MaxArchetypeId, Engine._archetypeStates.Length - 1);
         bool tierFiltered = effectiveTier != SimTier.All && Engine.PrimaryGrid != null;
@@ -902,6 +924,12 @@ public sealed partial class TyphonRuntime : IDisposable
                         {
                             continue;
                         }
+
+                        // InRealms: a narrowed change filter sees its realms' changes only.
+                        if (realmMask != null && !SystemDefinition.InMask(realmMask, RealmOfCluster(cs, chunkId)))
+                        {
+                            continue;
+                        }
                         if (chunkId >= snapshot.Length)
                         {
                             continue;
@@ -935,7 +963,8 @@ public sealed partial class TyphonRuntime : IDisposable
                     {
                         long word = snapshot[wordIdx];
                         if (word == 0 || (sleepStates != null && wordIdx < sleepStates.Length && sleepStates[wordIdx] == ClusterSleepState.Sleeping)
-                            || (dormant != null && dormant.IsExcluded(wordIdx)))
+                            || (dormant != null && dormant.IsExcluded(wordIdx))
+                        || (realmMask != null && !SystemDefinition.InMask(realmMask, RealmOfCluster(cs, wordIdx))))
                         {
                             continue;
                         }
@@ -984,11 +1013,12 @@ public sealed partial class TyphonRuntime : IDisposable
             return false;
         }
 
-        // Non-cluster path
+        // Non-cluster path: those entities are in realm 0.
+        var realmMask = Scheduler.Systems[sysIdx].RealmMask;
         var accessor = table.ComponentSegment.CreateChunkAccessor();
         try
         {
-            for (var wordIdx = 0; wordIdx < bitmap.Length; wordIdx++)
+            for (var wordIdx = 0; wordIdx < (SystemDefinition.InMask(realmMask, RealmId.Default.Value) ? bitmap.Length : 0); wordIdx++)
             {
                 var word = bitmap[wordIdx];
                 while (word != 0)
@@ -1016,7 +1046,7 @@ public sealed partial class TyphonRuntime : IDisposable
         }
 
         // Cluster path (Phase 4a): scan cluster dirty bitmaps for archetypes referencing this table
-        ScanClusterDirtyEntitiesIntoSet(table, view, dirtyInView);
+        ScanClusterDirtyEntitiesIntoSet(table, view, dirtyInView, realmMask);
 
         return true;
     }
@@ -1025,7 +1055,7 @@ public sealed partial class TyphonRuntime : IDisposable
     /// Scan cluster dirty bitmaps for all archetypes referencing the given table, adding matching entities to the dedup set.
     /// Multi-table variant that adds to HashMap instead of Span.
     /// </summary>
-    private unsafe void ScanClusterDirtyEntitiesIntoSet(ComponentTable table, ViewBase view, HashMap<long> dirtyInView)
+    private unsafe void ScanClusterDirtyEntitiesIntoSet(ComponentTable table, ViewBase view, HashMap<long> dirtyInView, ulong[] realmMask)
     {
         int maxArchId = Math.Min(ArchetypeRegistry.MaxArchetypeId, Engine._archetypeStates.Length - 1);
         for (int archId = 0; archId <= maxArchId; archId++)
@@ -1053,7 +1083,8 @@ public sealed partial class TyphonRuntime : IDisposable
                 {
                     long word = snapshot[wordIdx];
                     if (word == 0 || (sleepStates != null && wordIdx < sleepStates.Length && sleepStates[wordIdx] == ClusterSleepState.Sleeping)
-                        || (dormant != null && dormant.IsExcluded(wordIdx)))
+                        || (dormant != null && dormant.IsExcluded(wordIdx))
+                        || (realmMask != null && !SystemDefinition.InMask(realmMask, RealmOfCluster(cs, wordIdx))))
                     {
                         continue;
                     }
@@ -1143,6 +1174,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var realms = Engine.RealmTable;
         var strided = _systemStrided[sysIdx];
         var run = _systemStrideRun[sysIdx];
+        var realmMask = Scheduler.Systems[sysIdx].RealmMask;
         var subtree = ArchetypeRegistry.GetMetadata((ushort)parent.ArchetypeId)?.SubtreeArchetypeIds;
         if (subtree == null)
         {
@@ -1161,6 +1193,12 @@ public sealed partial class TyphonRuntime : IDisposable
             var map = cs?.ClusterRealmMap;
             if (cs?.ClusterSegment == null || map == null || realms == null)
             {
+                // No realm state: the archetype's entities are in realm 0.
+                if (!SystemDefinition.InMask(realmMask, RealmId.Default.Value))
+                {
+                    continue;
+                }
+
                 foreach (var pk in view.EntityIdsInternal)
                 {
                     if (EntityId.FromRaw(pk).ArchetypeId == archetypeId)
@@ -1180,7 +1218,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 {
                     var chunkId = active[i];
                     var realm = chunkId < map.Length ? map[chunkId] : (ushort)0;
-                    if (!realms.IsRunnable(realm))
+                    if (!realms.IsRunnable(realm) || !SystemDefinition.InMask(realmMask, realm))
                     {
                         continue;
                     }
@@ -1492,6 +1530,14 @@ public sealed partial class TyphonRuntime : IDisposable
 
         // Realms D1: a system nothing else narrowed selects its archetype's runnable clusters — zero-copy, the index is rebuilt only at tick start. The tier
         // lists above already leave dormant realms out. Filtering false (one realm, or none dormant) keeps the pre-realm path (RLM-04).
+        // A system narrowed to realms (InRealms): its realms' own cluster lists — O(clusters there) — or, after a tier selection, that selection filtered
+        // by realm. Non-runnable realms give nothing (RLM-04), so the runnable-set filter below is not needed.
+        if (sys.RealmMask is { } realmMask)
+        {
+            _systemRealmNarrowed[sysIdx] = true;
+            ids = SelectRealmClusters(sysIdx, cs, realmMask, ids, ref count);
+        }
+
         if (ids == null && tier == SimTier.All && cs.RealmDispatch is { Filtering: true } dispatch)
         {
             _systemRealmNarrowed[sysIdx] = true;
@@ -1594,6 +1640,98 @@ public sealed partial class TyphonRuntime : IDisposable
         }
 
         return ids;
+    }
+
+    /// <summary>
+    /// The clusters of the realms <paramref name="mask"/> names that are runnable this tick. From the realms' own lists when nothing selected before
+    /// (<paramref name="ids"/> null) — one runnable realm's list is taken as it is, several are gathered into this system's buffer — or
+    /// <paramref name="ids"/> filtered by realm. An archetype without realm state is wholly in realm 0.
+    /// </summary>
+    private int[] SelectRealmClusters(int sysIdx, ArchetypeClusterState cs, ulong[] mask, int[] ids, ref int count)
+    {
+        var table = Engine.RealmTable;
+        var map = System.Threading.Volatile.Read(ref cs.ClusterRealmMap);
+        if (ids != null)
+        {
+            var buf = ReferenceEquals(ids, _systemAmortizationBuffers[sysIdx]) ? ids : EnsureSelectionBuffer(sysIdx, count);
+            var written = 0;
+            for (var i = 0; i < count; i++)
+            {
+                var chunkId = ids[i];
+                var realm = map != null && chunkId < map.Length ? map[chunkId] : RealmId.Default.Value;
+                if (SystemDefinition.InMask(mask, realm) && (table == null || table.IsRunnable(realm)))
+                {
+                    buf[written++] = chunkId;
+                }
+            }
+
+            count = written;
+            return buf;
+        }
+
+        // The realms to gather, runnable and registered, in id order.
+        int[] single = null;
+        var singleCount = 0;
+        var realms = 0;
+        var total = 0;
+        for (var word = 0; word < mask.Length; word++)
+        {
+            for (var bits = mask[word]; bits != 0; bits &= bits - 1)
+            {
+                var realm = (ushort)((word << 6) + BitOperations.TrailingZeroCount(bits));
+                if (table != null && (table.TryGet(realm) == null || !table.IsRunnable(realm)))
+                {
+                    continue;
+                }
+
+                var list = cs.ReadRealmClusterList(realm, out var n);
+                if (n == 0)
+                {
+                    continue;
+                }
+
+                realms++;
+                total += n;
+                single = list;
+                singleCount = n;
+            }
+        }
+
+        if (realms <= 1)
+        {
+            // CD-02 holds as for the active list: an append leaves the list's first entries in place, so the pair read above tiles the dispatch.
+            count = singleCount;
+            return single ?? EnsureSelectionBuffer(sysIdx, 0);
+        }
+
+        var gathered = EnsureSelectionBuffer(sysIdx, total);
+        count = 0;
+        for (var word = 0; word < mask.Length; word++)
+        {
+            for (var bits = mask[word]; bits != 0; bits &= bits - 1)
+            {
+                var realm = (ushort)((word << 6) + BitOperations.TrailingZeroCount(bits));
+                if (table != null && (table.TryGet(realm) == null || !table.IsRunnable(realm)))
+                {
+                    continue;
+                }
+
+                var list = cs.ReadRealmClusterList(realm, out var n);
+                n = Math.Min(n, gathered.Length - count);
+                Array.Copy(list, 0, gathered, count, n);
+                count += n;
+            }
+        }
+
+        return gathered;
+    }
+
+    // A cluster's realm for the dispatch's realm tests: realm 0 for an archetype without realm state.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ushort RealmOfCluster(ArchetypeClusterState cs, int chunkId)
+    {
+        var map = cs.ClusterRealmMap;
+        return map != null && (uint)chunkId < (uint)map.Length ? map[chunkId] : RealmId.Default.Value;
     }
 
     /// <summary>This system's own selection buffer, grown (never shrunk) to hold at least <paramref name="needed"/> ids.</summary>

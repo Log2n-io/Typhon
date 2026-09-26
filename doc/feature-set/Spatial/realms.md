@@ -36,8 +36,10 @@ query answers in one realm only; an empty interior can sleep; thousands of one-r
 - **One realm's clusters, walked alone.** `accessor.GetClusterEnumerator(realm)` (on `ArchetypeAccessor<T>`, or `GetClusterEnumerator<T>(realm)` on a
   transaction or `ctx.Accessor`) walks only that realm's clusters of the archetype — O(clusters in that realm), not a filter over every realm's — and
   `ClusterCountIn(realm)` counts them. Each realm keeps its own cluster list, joined at claim and left at drain.
-- **Systems see every runnable realm.** A QuerySystem walks the clusters of every realm its policy lets run this tick; `ClusterRef.Realm` says which
-  realm a cluster is in, so a system scopes its own spatial queries by it. A system that works on one realm walks that realm's list instead.
+- **Systems see every runnable realm — or the ones they name.** A QuerySystem walks the clusters of every realm its policy lets run this tick;
+  `ClusterRef.Realm` says which realm a cluster is in, so a system scopes its own spatial queries by it. Declared `InRealm(r)` / `InRealms(a, b)`
+  (`realms:` on `QuerySystem`), it is dispatched those realms' clusters only, taken from their own lists — in parallel chunks like any system — and
+  a change filter on it sees those realms' changes only. A realm registered later is picked up from the tick it is registered.
 - **Each realm has a policy when nobody watches it.** `WhenUnobserved = Simulate` keeps it running, at full rate or at `UnobservedTickDivisor`
   (each cluster once every N runs, integrated over N ticks of delta time); `Sleep` makes it dormant after `SleepAfterTicks` unobserved ticks — no
   systems, no spatial maintenance. A realm is observed while a client session is in it, or while the application pins it with `Realms.Observe`.
@@ -97,6 +99,13 @@ Per realm at run time: `Realms.StateOf(id)` (`Active`, `Simulated`, `Dormant`, `
 `ctx.Realms.IsRunnable / DivisorOf / TicksPerVisit`, and `GetSpatialGridOccupancy(realm)`. A system that must see every cluster every tick whatever
 its realm's divisor declares `.RealmRate(RealmRate.Full)`.
 
+```csharp
+// The cantina's own logic: dispatched realm 1's clusters only, in parallel; its bar reacts to realm 1's drink orders only.
+dag.QuerySystem("CantinaMusic", ctx => { /* … */ }, input: () => patrons, parallel: true, realms: [new RealmId(1)]);
+dag.QuerySystem("BarOrders", ctx => { /* … */ }, input: () => patrons, changeFilter: [typeof(DrinkOrder)], realms: [new RealmId(1)]);
+// or, with the builder: b.InRealm(new RealmId(1)) / b.InRealms(RealmId.Default, new RealmId(2))
+```
+
 ## ⚠️ Guarantees & limits
 
 - **Isolation.** A spatial query answers in exactly one realm (SQ-08); the narrowphase returns only that realm's entities (RM-04). A cluster holds
@@ -114,14 +123,17 @@ its realm's divisor declares `.RealmRate(RealmRate.Full)`.
   clusters run exactly once every N runs of a system (RLM-05). With every realm runnable, dispatch is exactly the single-realm path.
 - **Lifecycle.** A realm is removed only once empty, and its id may be registered again only after a later open has proven it empty (RLM-06). Realm
   0 cannot be unregistered.
-- **Limits.** A QuerySystem cannot yet be narrowed to one realm by its declaration (it walks every runnable realm; filter by `ClusterRef.Realm`, or
-  walk `GetClusterEnumerator(realm)` from a non-parallel system). Tier assignment through `TickContext.SpatialGrid` is realm 0's grid only; other realms' cells keep their tiers. Realm ids are
+- **Narrowed systems.** Dispatched their realms' runnable clusters only, a dormant or unregistered realm giving nothing; with a tier filter, the
+  intersection; with a change filter, their realms' changes only, on every scan path (RLM-07). Refused when the runtime is built on a system that
+  selects no clusters, or on a realm id beyond `ConfigureRealms`.
+- **Limits.** The realm set is fixed at declaration (ids, not a predicate): a system for "every dungeon" names the dungeons' ids up front. Tier
+  assignment through `TickContext.SpatialGrid` is realm 0's grid only; other realms' cells keep their tiers. Realm ids are
   `ushort`s below `MaxRealms` (0xFFFF is "no realm"). `[RealmKey]` is one `ushort` per archetype, on a SingleVersion component, without `[Index]`.
   The per-archetype spatial telemetry event is one per archetype, not per realm.
 
 ## 🧪 Tests
 
-`RealmClusterListTests`, `RealmTableTests`, `RealmRegistrationTests`, `RealmKeyTests`, `RealmKeyComponentTests`, `RealmArchetypeSpatialTests`, `CrossRealmMigrationTests`,
+`RealmClusterListTests`, `RealmSystemNarrowingTests`, `RealmTableTests`, `RealmRegistrationTests`, `RealmKeyTests`, `RealmKeyComponentTests`, `RealmArchetypeSpatialTests`, `CrossRealmMigrationTests`,
 `RealmFenceTests`, `RealmRepairTests`, `RealmPolicyTests`, `RealmDivisorTests`, `RealmLifecycleTests`, `RealmCatalogTests`, `RealmCatalogCrashTests`,
 `RealmReopenTests`, `RecoveryRealmTests`, `RealmFootprintTests`, `RealmRuntimeTests` (engine); the SWG demo's `RealmChecks` (planets, interiors,
 space, dungeons).

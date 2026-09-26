@@ -1440,7 +1440,8 @@ internal sealed unsafe partial class PushReplication<TEvent>
                 continue;
             }
 
-            var ids = cs.ReadActiveClusterList(out var active);
+            // This realm's clusters only (RM-07): a region's hull is in this realm's frame.
+            var ids = cs.ReadRealmClusterList(ServedRealm, out var active);
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {

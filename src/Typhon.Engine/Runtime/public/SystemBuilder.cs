@@ -25,6 +25,7 @@ public sealed class SystemBuilder
     internal int _throttledTickDivisor = 1;
     internal bool _canShed;
     internal RealmRate _realmRate;
+    internal RealmId[] _realms;
     internal bool _parallel;
     internal bool _writesVersioned;
     internal float _chunksPerWorker = 1f;
@@ -119,6 +120,43 @@ public sealed class SystemBuilder
     {
         _realmRate = rate;
         return this;
+    }
+
+    /// <summary>
+    /// Narrows this QuerySystem to realm <paramref name="realm"/> (Realms): it is dispatched that realm's clusters only — read from the realm's own cluster
+    /// list, not filtered out of every realm's — and a change filter sees that realm's changes only. A realm not runnable this tick (dormant) gives it
+    /// nothing, like any other system. See <see cref="InRealms"/>.
+    /// </summary>
+    public SystemBuilder InRealm(RealmId realm) => InRealms(realm);
+
+    /// <summary>
+    /// Narrows this QuerySystem to the realms <paramref name="realms"/>: their clusters only, and a change filter sees their changes only. A realm may be
+    /// registered after the runtime is built (it is dispatched from the tick it is registered); it must be below the engine's realm count.
+    /// </summary>
+    /// <exception cref="ArgumentException">No realm, or <see cref="RealmId.None"/>.</exception>
+    public SystemBuilder InRealms(params RealmId[] realms)
+    {
+        _realms = CheckedRealms(realms);
+        return this;
+    }
+
+    internal static RealmId[] CheckedRealms(RealmId[] realms)
+    {
+        ArgumentNullException.ThrowIfNull(realms);
+        if (realms.Length == 0)
+        {
+            throw new ArgumentException("A system narrowed to realms needs at least one realm.", nameof(realms));
+        }
+
+        foreach (var realm in realms)
+        {
+            if (realm.IsNone)
+            {
+                throw new ArgumentException("RealmId.None is not a realm a system can run in.", nameof(realms));
+            }
+        }
+
+        return (RealmId[])realms.Clone();
     }
 
     /// <summary>Set whether this system can be shed entirely under severe overload.</summary>
@@ -477,6 +515,12 @@ public sealed class SystemBuilder<TContext> where TContext : class
     public SystemBuilder<TContext> CellAmortize(int denominator) { _inner.CellAmortize(denominator); return this; }
     /// <inheritdoc cref="SystemBuilder.RealmRate(Engine.RealmRate)"/>
     public SystemBuilder<TContext> RealmRate(RealmRate rate) { _inner.RealmRate(rate); return this; }
+
+    /// <inheritdoc cref="SystemBuilder.InRealm(RealmId)"/>
+    public SystemBuilder<TContext> InRealm(RealmId realm) { _inner.InRealm(realm); return this; }
+
+    /// <inheritdoc cref="SystemBuilder.InRealms(RealmId[])"/>
+    public SystemBuilder<TContext> InRealms(params RealmId[] realms) { _inner.InRealms(realms); return this; }
     /// <summary>Enables two-phase checkerboard dispatch — no two adjacent cells are processed simultaneously. Requires <see cref="Parallel"/>.</summary>
     public SystemBuilder<TContext> Checkerboard() { _inner.Checkerboard(); return this; }
     /// <summary>Assigns this system to a phase. The phase must be one declared on the owning DAG.</summary>

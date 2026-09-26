@@ -60,6 +60,7 @@ game.QuerySystem("IdleDrift", ctx =>
 |---|---|---|
 | `tier:` (`QuerySystem`) / `b.Tier(...)` (`SystemBuilder`) | `SimTier.All` | Restrict dispatch to clusters in matching cells; flags combine (`SimTier.Near` = `Tier0 \| Tier1`) |
 | `cellAmortize:` / `b.CellAmortize(N)` | `0` (off) | Process `1/N` of the tier's clusters per tick, rotating buckets by tick number; requires a non-`All` tier |
+| `realms:` / `b.InRealm(r)`, `b.InRealms(...)` | every runnable realm | Restrict dispatch to the clusters of those realms ([Realms](../../Spatial/realms.md)); intersects with the tier |
 
 ## ⚠️ Guarantees & limits
 

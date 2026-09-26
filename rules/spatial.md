@@ -2408,3 +2408,20 @@
     synchronous Closing mark, or the entry refusal, fails them, run by hand 2026-09-26)
   on_violation: entities of a realm the application destroyed reappear in a new realm on the same id, or a realm vanishes with entities in it
 
+### RLM-07: A QuerySystem narrowed to realms is dispatched their runnable clusters only, and a narrowed change filter their changes only `[fatal][silent]`
+  invariant a system declared InRealm(s) / InRealms(...) is dispatched, each run, exactly the clusters of those realms that are runnable this tick —
+    from the realms' own cluster lists (RM-07) when nothing selected before, or the tier / amortization selection filtered by realm; a realm not
+    runnable, or not (yet) registered, gives it nothing; a divided realm is strided (RLM-05) and sleeping clusters leave, as for any system
+  invariant a narrowed change-filtered system sees the dirty entities of those realms only, on every scan path (full snapshot, tier-scoped,
+    single- and multi-table), and a descendant archetype's clusters are narrowed the same way; entities of an archetype without realm state are in
+    realm 0
+  invariant a narrowing is refused when the runtime is built on a system that selects no clusters (not a QuerySystem over a cluster archetype) or
+    names a realm id beyond the engine's realm count; an empty set or RealmId.None is refused at declaration
+  scope: SystemBuilder.InRealms, SystemDefinition.RealmMask, TyphonRuntime.SelectRealmClusters, TyphonRuntime.ScanClusterDirtyEntities
+  verified: RealmSystemNarrowingTests.ANarrowedSystemSeesItsRealmsEntitiesOnly (red without the selection narrowing),
+    RealmSystemNarrowingTests.ADormantRealmGivesANarrowedSystemNothing (red when a non-runnable realm's list is taken),
+    RealmSystemNarrowingTests.ANarrowedChangeFilterOverTheDirtySetSeesItsRealmsChangesOnly (red when the dirty scan ignores the realm),
+    RealmSystemNarrowingTests.ATierFilterAndARealmNarrowingIntersect, RealmSystemNarrowingTests.ANarrowingOnACallbackSystemOrBeyondTheRealmCountIsRefused
+  on_violation: a system written for one realm acts on another's entities — an interior's logic runs on the planet — or reacts to another realm's
+    changes
+

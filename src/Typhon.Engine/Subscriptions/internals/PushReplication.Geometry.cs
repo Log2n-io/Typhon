@@ -1545,7 +1545,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 continue;
             }
 
-            var ids = cs.ReadActiveClusterList(out var active);
+            // This realm's clusters only (RM-07): O(clusters here), not every realm's filtered.
+            var ids = cs.ReadRealmClusterList(ServedRealm, out var active);
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {
@@ -1597,7 +1598,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 continue;
             }
 
-            var ids = cs.ReadActiveClusterList(out var active);
+            // This realm's clusters only (RM-07): O(clusters here), not every realm's filtered.
+            var ids = cs.ReadRealmClusterList(ServedRealm, out var active);
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {
@@ -3725,7 +3727,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 continue;
             }
 
-            var ids = cs.ReadActiveClusterList(out var active);
+            // This realm's clusters only (RM-07): O(clusters here), not every realm's filtered.
+            var ids = cs.ReadRealmClusterList(ServedRealm, out var active);
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {
