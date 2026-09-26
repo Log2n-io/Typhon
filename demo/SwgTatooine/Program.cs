@@ -56,6 +56,14 @@ internal static class Program
             return 0;
         }
         Console.WriteLine($"  {sim.Census}");
+
+        // The composition, not just the size: two runs with the same creature count and different template mixes are not the same workload (S0-5).
+        var composition = sim.Census.Composition();
+        if (composition.Length > 0)
+        {
+            Console.WriteLine($"  creatures: {composition}");
+        }
+
         // Live cell count is only reachable through TickContext.SpatialGrid, so it is reported by the telemetry system
         // once the runtime is up rather than here.
         var perAxis = (int)(config.WorldEdgeM / config.ResolveCellSize());

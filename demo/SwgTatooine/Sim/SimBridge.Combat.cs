@@ -26,17 +26,6 @@ namespace SwgTatooine;
 /// </remarks>
 public sealed partial class SimBridge
 {
-    /// <summary>
-    /// [CORE3] Revival interval, in ticks. A wild lair respawns a killed mobile after
-    /// <c>random(RESPAWN_TIME_MAX - RESPAWN_TIME_MIN) + RESPAWN_TIME_MIN</c>, which is a uniform 120-240 s
-    /// (<c>LairObserver.idl</c>) — 1 200-2 400 ticks at 10 Hz. The midpoint is used.
-    /// </summary>
-    /// <remarks>
-    /// The first pass estimated 30 s. Six times too fast, which mattered: it made the world churn far more than SWG's
-    /// did. A destroy-mission lair, by contrast, never respawns at all — <c>checkRespawn</c> short-circuits for one.
-    /// </remarks>
-    private const int RespawnTicks = 1800;
-
     /// <summary>Shooters counted per creature before it stops asking: four players is as much fire as the damage model applies.</summary>
     private const int MaxShooters = 4;
 
@@ -50,6 +39,7 @@ public sealed partial class SimBridge
         long revived = 0;
         var minDelay = (int)(TatooineData.MinAttackDelaySec * _config.TickRateHz);
         var delaySpan = Math.Max(1, (int)((TatooineData.MaxAttackDelaySec - TatooineData.MinAttackDelaySec) * _config.TickRateHz));
+        var respawnTicks = Math.Max(1, (int)(_config.RespawnSeconds * _config.TickRateHz));
         var batch = _config.CombatApi == CombatApi.Batch;
         Span<BSphere2F> members = stackalloc BSphere2F[64];
         Span<int> slots = stackalloc int[64];
@@ -78,14 +68,12 @@ public sealed partial class SimBridge
             Span<CreatureVitals> vitalsRw = default;
             Span<CreatureBrain> brainsRw = default;
             var timers = cluster.GetSpan(Creature.Timers);
-            var chunk = cluster.ChunkId;
 
             if (batch)
             {
                 CombatBatch(
                     ctx.TickNumber,
                     in cluster,
-                    chunk,
                     bits0,
                     places,
                     vitals,
@@ -96,6 +84,7 @@ public sealed partial class SimBridge
                     shooters,
                     minDelay,
                     delaySpan,
+                    respawnTicks,
                     ref engaged,
                     ref killed,
                     ref revived);
@@ -133,8 +122,8 @@ public sealed partial class SimBridge
                     e.Dispose();
                 }
 
-                TakeFire(in cluster, vitals, brains, ref vitalsRw, ref brainsRw, ref t, count, ctx.TickNumber, chunk, idx, minDelay, delaySpan, ref engaged,
-                    ref killed);
+                TakeFire(in cluster, vitals, brains, ref vitalsRw, ref brainsRw, ref t, count, ctx.TickNumber, cluster.GetEntityId(idx).EntityKey, idx,
+                    minDelay, delaySpan, respawnTicks, ref engaged, ref killed);
             }
         }
 
@@ -181,6 +170,10 @@ public sealed partial class SimBridge
             BrainsRw(in cluster, ref brainsRw)[idx].Mode = AiMode.Wander;
             TatooineReplication.Replicate(in cluster, idx);
             t.ThinkCooldown = 1;
+
+            // The move system's one and only teleport-home signal (S0-1). It used to read ThinkCooldown == 1 as this, and so teleported every living
+            // wanderer that happened to be one tick from its next decision. See CreatureTimers.JustRevived.
+            t.JustRevived = 1;
 
             // Cleared, or a creature revived part-way through an old rest keeps standing until a schedule from its previous life runs out. Zero is in the
             // past for every tick, so the next decision picks a fresh leg.
@@ -233,7 +226,6 @@ public sealed partial class SimBridge
     private void CombatBatch(
         long tick,
         in ClusterRef<Creature> cluster,
-        int chunk,
         ulong bits,
         ReadOnlySpan<CreaturePlacement> places,
         ReadOnlySpan<CreatureVitals> vitals,
@@ -244,6 +236,7 @@ public sealed partial class SimBridge
         Span<int> shooters,
         int minDelay,
         int delaySpan,
+        int respawnTicks,
         ref long engaged,
         ref long killed,
         ref long revived)
@@ -273,13 +266,14 @@ public sealed partial class SimBridge
         for (var j = 0; j < m; j++)
         {
             var idx = slots[j];
-            TakeFire(in cluster, vitals, brains, ref vitalsRw, ref brainsRw, ref timers[idx], shooters[j], tick, chunk, idx, minDelay, delaySpan, ref engaged,
+            TakeFire(in cluster, vitals, brains, ref vitalsRw, ref brainsRw, ref timers[idx], shooters[j], tick, cluster.GetEntityId(idx).EntityKey, idx,
+                minDelay, delaySpan, respawnTicks, ref engaged,
                 ref killed);
         }
     }
 
     /// <summary>The damage from <paramref name="shooters"/> players in range, and what it does to the creature.</summary>
-    private static void TakeFire(
+    private void TakeFire(
         in ClusterRef<Creature> cluster,
         ReadOnlySpan<CreatureVitals> vitals,
         ReadOnlySpan<CreatureBrain> brains,
@@ -288,10 +282,11 @@ public sealed partial class SimBridge
         ref CreatureTimers t,
         int shooters,
         long tick,
-        int chunk,
+        long key,
         int idx,
         int minDelay,
         int delaySpan,
+        int respawnTicks,
         ref long engaged,
         ref long killed)
     {
@@ -301,7 +296,7 @@ public sealed partial class SimBridge
         }
 
         engaged++;
-        t.AttackCooldown = minDelay + (int)(Hash01(Salt(tick, chunk, idx, 0x27220A95u)) * delaySpan);
+        t.AttackCooldown = minDelay + (int)(Hash01(Salt(tick, key, 0x27220A95u)) * delaySpan);
         var health = vitals[idx].Health - (PlayerDamagePerHit * shooters);
         if (health > 0)
         {
@@ -321,7 +316,7 @@ public sealed partial class SimBridge
         VitalsRw(in cluster, ref vitalsRw)[idx].Health = 0;
         BrainsRw(in cluster, ref brainsRw)[idx].Mode = AiMode.Dead;
         TatooineReplication.Replicate(in cluster, idx);
-        t.ThinkCooldown = RespawnTicks;
+        t.ThinkCooldown = respawnTicks;
         killed++;
     }
 

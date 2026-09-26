@@ -104,7 +104,7 @@ public sealed partial class TatooineSim
     /// <summary>The simulation's own schedule, plus the one system a server needs that a benchmark does not.</summary>
     private void BuildServeSchedule(RuntimeSchedule schedule)
     {
-        BuildSchedule(schedule);
+        BuildSchedule(schedule, replicating: true);
 
         // A session with no profile is in no tick's session set and receives nothing, so this is what turns a connection into a viewer. It runs on the public
         // track like any other system, which is the point: binding a session is application work, not engine work.

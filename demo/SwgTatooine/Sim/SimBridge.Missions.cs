@@ -28,7 +28,11 @@ namespace SwgTatooine;
 public sealed partial class SimBridge
 {
     /// <summary>[CORE3] How often a dormant mission lair looks for a player to serve. Ties to the 5 s spawn-area cooldown.</summary>
-    private const int MissionOfferIntervalTicks = 50;
+    /// <remarks>
+    /// <b>In seconds, converted at the configured rate (S0-3).</b> It was a raw 50 ticks calibrated for 10 Hz, so at <c>--hz 50</c> offers fired five
+    /// times too often and the mission churn an <c>--hz</c> sweep measured was the sweep's own artefact.
+    /// </remarks>
+    private const float MissionOfferIntervalSeconds = 5f;
 
     /// <summary>Radius within which a dormant lair will look for a player to build a mission around.</summary>
     private const float MissionSeekRadiusM = 3000f;
@@ -43,6 +47,7 @@ public sealed partial class SimBridge
         var minD = TatooineData.DestroyMissionMinDistanceM * scale;
         var spanD = (TatooineData.DestroyMissionMaxDistanceM - TatooineData.DestroyMissionMinDistanceM) * scale;
         var seek = MissionSeekRadiusM * scale;
+        var offerTicks = Math.Max(1, (int)(MissionOfferIntervalSeconds * _config.TickRateHz));
         var half = _config.WorldEdgeM * 0.5f;
         long issued = 0;
         long completed = 0;
@@ -62,7 +67,6 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(CreatureLair.Bounds);
             var spawners = cluster.GetSpan(CreatureLair.Spawner);
             var vitals = cluster.GetSpan(CreatureLair.Vitals);
-            var chunk = cluster.ChunkId;
 
             var bits = bits0;
             while (bits != 0)
@@ -98,7 +102,7 @@ public sealed partial class SimBridge
                     continue;
                 }
 
-                lair.RespawnCooldown = MissionOfferIntervalTicks;
+                lair.RespawnCooldown = offerTicks;
 
                 var lx = places[idx].X;
                 var lz = places[idx].Z;
@@ -126,11 +130,13 @@ public sealed partial class SimBridge
                     continue;
                 }
 
+                var key = cluster.GetEntityId(idx).EntityKey;
+
                 // Core3's twenty tries at a uniform 1-2 km, rejecting anything inside a city region.
                 for (var attempt = 0; attempt < 20; attempt++)
                 {
-                    var ang = Hash01(Salt(tick, chunk, idx, 0xB5297A4Du + (uint)attempt)) * MathF.PI * 2f;
-                    var dist = minD + (Hash01(Salt(tick, chunk, idx, 0x68E31DA4u + (uint)attempt)) * spanD);
+                    var ang = Hash01(Salt(tick, key, 0xB5297A4Du + (uint)attempt)) * MathF.PI * 2f;
+                    var dist = minD + (Hash01(Salt(tick, key, 0x68E31DA4u + (uint)attempt)) * spanD);
                     var tx = px + (MathF.Cos(ang) * dist);
                     var tz = pz + (MathF.Sin(ang) * dist);
                     if (tx < -half || tx > half || tz < -half || tz > half || InsideCity(tx, tz))
@@ -139,8 +145,8 @@ public sealed partial class SimBridge
                     }
 
                     // Difficulty 1-9, and Core3's hit points for it.
-                    var difficulty = 1 + (int)(Hash01(Salt(tick, chunk, idx, 0x9E3779B7u)) * 9f);
-                    v.MaxHealth = difficulty * (900 + (int)(Hash01(Salt(tick, chunk, idx, 0x1E35A7BDu)) * 200));
+                    var difficulty = 1 + (int)(Hash01(Salt(tick, key, 0x9E3779B7u)) * 9f);
+                    v.MaxHealth = difficulty * (900 + (int)(Hash01(Salt(tick, key, 0x1E35A7BDu)) * 200));
                     v.Health = v.MaxHealth;
                     lair.MissionId = difficulty;
                     lair.AliveCount = 1;

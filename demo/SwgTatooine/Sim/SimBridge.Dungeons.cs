@@ -103,8 +103,10 @@ public sealed partial class SimBridge
             var c = edge * 0.5f;
             for (var m = 0; m < _config.DungeonMobs; m++)
             {
-                var a = Hash01(Salt(tick, realm, m, 0x3E1F7A93u)) * MathF.PI * 2f;
-                var r = edge * 0.25f * MathF.Sqrt(Hash01(Salt(tick, realm, m, 0x71C5B2D1u)));
+                // Not an entity draw — the mob does not exist yet. The realm and the member index are the logical identity, and both are stable.
+                var mobKey = ((long)realm << 32) | (uint)m;
+                var a = Hash01(Salt(tick, mobKey, 0x3E1F7A93u)) * MathF.PI * 2f;
+                var r = edge * 0.25f * MathF.Sqrt(Hash01(Salt(tick, mobKey, 0x71C5B2D1u)));
                 var x = c + (MathF.Cos(a) * r);
                 var z = c + (MathF.Sin(a) * r);
                 var bounds = default(NpcPlacement);
@@ -119,7 +121,7 @@ public sealed partial class SimBridge
 
             // The party: idle players on planet 0, from a rotating start so every dungeon draws different ones.
             var players = _index.Players;
-            var offset = (int)(Hash01(Salt(tick, realm, 0, 0x5F3759DFu)) * Math.Max(1, players.Count));
+            var offset = (int)(Hash01(Salt(tick, realm, 0x5F3759DFu)) * Math.Max(1, players.Count));
             for (var i = 0; i < players.Count && party.Count < _config.DungeonParty; i++)
             {
                 var id = players[(offset + i) % players.Count];

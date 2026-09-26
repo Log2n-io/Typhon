@@ -92,7 +92,15 @@ public static class Sweep
 
     private static string WriteReport(List<SweepRow> rows, SimConfig template)
     {
-        var dir = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "claude", "scratch"));
+        // `claude/` is a separate private repo, so a checkout without it had the report written into a directory that does not exist there (#947). Prefer it
+        // when it is present, fall back to beside the binary, and let --report-dir override both.
+        var dir = template.ReportDirectory;
+        if (string.IsNullOrEmpty(dir))
+        {
+            var docs = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "claude", "scratch"));
+            dir = Directory.Exists(Path.GetDirectoryName(docs)) ? docs : AppContext.BaseDirectory;
+        }
+
         Directory.CreateDirectory(dir);
         var path = Path.Combine(dir, $"swg-tatooine-sweep-{DateTime.Now:yyyy-MM-dd}.md");
         var w = new StringBuilder();

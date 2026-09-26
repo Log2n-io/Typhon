@@ -32,6 +32,10 @@ internal sealed class CreatureThinkSystem : QuerySystem
         .Reads<PlayerPlacement>()
         .Writes<CreatureBrain>()
         .Writes<CreatureMotion>()
+
+        // The think, move and combat systems all write CreatureTimers and none of them used to say so. Phase order happens to serialize them, so the
+        // omission never bit — but that is the DAG being lucky rather than informed, which is what rule ED-05 is about.
+        .Writes<CreatureTimers>()
         .Input(() => _bridge.CreatureView);
 
     protected override void Execute(TickContext ctx) => _bridge.CreatureThinkTick(ctx);
@@ -72,6 +76,9 @@ internal sealed class CreatureMoveSystem : QuerySystem
         .Reads<CreatureMotion>()
         .Reads<CreatureBrain>()
         .Writes<CreaturePlacement>()
+
+        // Clears CreatureTimers.JustRevived after the teleport home (S0-1); see CreatureThink for why this was missing.
+        .Writes<CreatureTimers>()
         .Input(() => _bridge.CreatureView);
 
     protected override void Execute(TickContext ctx) => _bridge.CreatureMoveTick(ctx);
@@ -243,6 +250,9 @@ internal sealed class CreatureCombatSystem : QuerySystem
         .Reads<PlayerPlacement>()
         .Writes<CreatureVitals>()
         .Writes<CreatureBrain>()
+
+        // Counts the respawn down, cycles the weapon and raises JustRevived; see CreatureThink for why this was missing.
+        .Writes<CreatureTimers>()
         .Input(() => _bridge.CreatureView);
 
     protected override void Execute(TickContext ctx) => _bridge.CreatureCombatTick(ctx);

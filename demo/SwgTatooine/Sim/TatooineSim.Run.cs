@@ -63,7 +63,8 @@ public sealed partial class TatooineSim
             StructureView = _structureView,
         };
 
-        _runtime = TyphonRuntime.Create(Dbe, BuildSchedule, new RuntimeOptions
+        // A lambda, not the method group: BuildSchedule takes an optional `replicating` that only the serve path sets.
+        _runtime = TyphonRuntime.Create(Dbe, schedule => BuildSchedule(schedule), new RuntimeOptions
         {
             // Unpaced: a rate no tick can meet, so each starts when the last one ends, and an overload response that cannot escalate — at that overrun it
             // would shed systems and change the workload being counted.
@@ -106,14 +107,24 @@ public sealed partial class TatooineSim
 
         var reached = _runtime.CurrentTickNumber;
         _runtime.Shutdown();
+
+        // Unpaced, the loop keeps ticking between the poll above noticing the count and Shutdown actually landing, so a run executes AT LEAST `total` ticks
+        // and an unknown number more. Two runs of the same seed therefore end in different states. The measured window is clamped to `total` below so at
+        // least the denominator is the same every run; an exact stop needs a tick limit the runtime does not offer (reported as an engine gap).
+        Executed = _runtime.CurrentTickNumber;
         LastGc = GcSnapshot.Take() - gcBefore;
 
         if (reached < total)
         {
             Console.WriteLine($"  !! only reached tick {reached} of {total} ({aborts} aborts)");
         }
+        else if (Executed > total)
+        {
+            Console.WriteLine($"  .. ran {Executed} ticks for a {total}-tick request; measured the first {total}");
+        }
 
-        var result = Summarise(reached);
+        // Clamped: the window must be the same size every run, whatever the shutdown overshoot was.
+        var result = Summarise(Math.Min(reached, total));
         LastStats = _bridge.DrainStats();
         return result;
     }
@@ -362,7 +373,12 @@ public sealed partial class TatooineSim
     /// <summary>
     /// The system DAG: one graph on the public track, with the seven phases in causal order.
     /// </summary>
-    private void BuildSchedule(RuntimeSchedule schedule)
+    /// <param name="schedule">The schedule to declare into.</param>
+    /// <param name="replicating">
+    /// True when the caller also declares replication, which computes each session's interest for real — so the awareness pass is dropped unless
+    /// <c>--awareness</c> asks for it. See <see cref="SimConfig.ForceAwareness"/>.
+    /// </param>
+    private void BuildSchedule(RuntimeSchedule schedule, bool replicating = false)
     {
         var dag = schedule.PublicTrack.DeclareDag("Tatooine")
             .Phases(SimPhases.Spawn, SimPhases.Think, SimPhases.Move, SimPhases.Awareness, SimPhases.Resolve,
@@ -401,18 +417,23 @@ public sealed partial class TatooineSim
             dag.Add(new ShipScanSystem(_bridge));
         }
 
-        if (_config.SplitAwareness)
+        // Interest is computed once. With replication declared it is replication that computes it, for real, per session; awareness would be a second pass
+        // over the same players whose result is counted and dropped (#950). --awareness keeps it anyway, as a labelled spatial-query benchmark.
+        if (!replicating || _config.ForceAwareness)
         {
-            // Four systems over the same players, one per queried archetype. They share no write, so they run
-            // concurrently and each gets its own chunk allocation.
-            dag.Add(new AwarenessSplitSystem(_bridge, AwarenessTarget.Structures));
-            dag.Add(new AwarenessSplitSystem(_bridge, AwarenessTarget.Creatures));
-            dag.Add(new AwarenessSplitSystem(_bridge, AwarenessTarget.Npcs));
-            dag.Add(new AwarenessSplitSystem(_bridge, AwarenessTarget.Players));
-        }
-        else
-        {
-            dag.Add(new AwarenessSystem(_bridge));
+            if (_config.SplitAwareness)
+            {
+                // Four systems over the same players, one per queried archetype. They share no write, so they run
+                // concurrently and each gets its own chunk allocation.
+                dag.Add(new AwarenessSplitSystem(_bridge, AwarenessTarget.Structures));
+                dag.Add(new AwarenessSplitSystem(_bridge, AwarenessTarget.Creatures));
+                dag.Add(new AwarenessSplitSystem(_bridge, AwarenessTarget.Npcs));
+                dag.Add(new AwarenessSplitSystem(_bridge, AwarenessTarget.Players));
+            }
+            else
+            {
+                dag.Add(new AwarenessSystem(_bridge));
+            }
         }
 
         dag.Add(new CreatureCombatSystem(_bridge));

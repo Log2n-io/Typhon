@@ -376,6 +376,19 @@ public struct CreatureBrain
     /// <summary>The lair that owns this creature, so a kill can decrement its live count.</summary>
     [Field] public EntityId Lair;
 
+    /// <summary>Which <see cref="CreatureTemplates"/> entry this creature was spawned from — a womp rat, a bantha, a mission defender (S0-5).</summary>
+    /// <remarks>
+    /// <b>A creature that does not carry its template cannot be reasoned about after it is spawned.</b> Its stats were baked from the template at spawn and
+    /// the template then thrown away, so nothing downstream — a census, a loot table, a damage model, a client choosing a mesh — can ask what kind of
+    /// creature this is. Every one of those had to infer it, and the only inference available was a stat: <c>AggroRadius &gt; 0</c> for "aggressive", which
+    /// conflates a passive template with an aggressive one whose radius happens to be scaled to zero.
+    /// <para>
+    /// Not replicated yet, deliberately: the wire surface is not changed inside a measurement-hygiene pass. An <c>[OnEnter(CodecKind.U8)]</c> is the
+    /// natural next step, since the value is immutable per entity and the client needs it to style creatures by kind.
+    /// </para>
+    /// <para>It costs no memory: <see cref="AggroRadius"/> leaves four bytes of padding before the 8-byte-aligned <see cref="Lair"/>.</para>
+    /// </remarks>
+    [Field] public byte Template;
 }
 
 /// <summary>
@@ -426,6 +439,19 @@ public struct CreatureTimers
     /// <see cref="CreatureVitals"/>: beside the health the projection sends, every decrement read as a change to a replicated component.
     /// </summary>
     [Field] public int AttackCooldown;
+
+    /// <summary>
+    /// Set by the revival in <c>ReadyToTakeFire</c>, consumed and cleared by <c>CreatureMoveTick</c>: this creature is to be teleported to its lair once.
+    /// </summary>
+    /// <remarks>
+    /// <b>An explicit flag because the inference it replaces was wrong (S0-1).</b> Revival used to signal itself by setting
+    /// <see cref="ThinkCooldown"/> to 1, and the move system read <c>Wander &amp;&amp; ThinkCooldown == 1 &amp;&amp; X != HomeX</c> as "just revived". But a
+    /// perfectly alive wandering creature passes through <c>ThinkCooldown == 1</c> on the way down to its next decision, so it was teleported home once per
+    /// AI cycle: 96 % of wanderers sat within 3 m of their lair centre, and the whole world was a set of point clusters rather than spread ones — which is
+    /// precisely the property cell size is measured against. Nothing else in the struct is free to mean two things, so nothing else is inferred.
+    /// <para>It costs no memory: the four fields above leave four bytes of tail padding at an 8-byte alignment.</para>
+    /// </remarks>
+    [Field] public byte JustRevived;
 }
 
 /// <summary>A city NPC's behaviour. Almost always <see cref="AiMode.Idle"/>.</summary>

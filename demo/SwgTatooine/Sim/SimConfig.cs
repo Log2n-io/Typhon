@@ -380,6 +380,32 @@ public sealed class SimConfig
     public bool SplitAwareness;
 
     /// <summary>
+    /// Keep the awareness system in the schedule even when replication is declared (<c>--awareness</c>).
+    /// </summary>
+    /// <remarks>
+    /// <b>Under <c>serve</c>, awareness is a phantom pass and is dropped by default (#950, S0-6).</b> Replication computes each session's interest for real;
+    /// <c>AwarenessSystem</c> then computed the same interest again and threw it away as a <c>Count()</c>. So the server's tick carried a whole second
+    /// interest pass that nothing read, and every per-hit figure the README quotes describes a caller that counts rather than one that produces lists.
+    /// <para>
+    /// The system is still worth having as a <i>labelled</i> spatial-query benchmark — it is the cleanest interest-query workload in the demo — which is what
+    /// this flag keeps. In <c>run</c> (no sessions) it is the interest system and is always scheduled.
+    /// </para>
+    /// </remarks>
+    public bool ForceAwareness;
+
+    /// <summary>Where <c>--sweep</c> writes its report (<c>--report-dir</c>). Empty picks the docs repo when present, else the binary's directory (#947).</summary>
+    public string ReportDirectory;
+
+    /// <summary>
+    /// [CORE3] Seconds before a wild lair revives a killed creature (<c>--respawn-s</c>). A uniform 120-240 s in <c>LairObserver.idl</c>; the midpoint.
+    /// </summary>
+    /// <remarks>
+    /// Configurable because at the shipped 180 s nothing revives inside a 200-tick measurement, so the revival path — the one teleport in the simulation, and
+    /// the largest position jump it makes — is never exercised by a short run or by a test. A destroy-mission lair never respawns at all.
+    /// </remarks>
+    public float RespawnSeconds = 180f;
+
+    /// <summary>
     /// Per-system <c>MinChunkSize</c> for the awareness system only. <c>0</c> leaves it on the global floor.
     /// </summary>
     /// <remarks>

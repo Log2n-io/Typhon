@@ -48,7 +48,6 @@ public sealed partial class SimBridge
 
             var places = cluster.GetReadOnlySpan(Starship.Bounds);
             var motions = cluster.GetSpan(Starship.Move);
-            var chunk = cluster.ChunkId;
             var moved = bits;
             var clusterDt = perTick * ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: N ticks per visit of a strided realm at divisor N
             while (bits != 0)
@@ -65,9 +64,10 @@ public sealed partial class SimBridge
                 var len = Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz));
                 if (len < WaypointReachedM)
                 {
-                    move.DestX = (Hash01(Salt(tick, chunk, idx, 0x4CF5AD43u)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
-                    move.DestY = (Hash01(Salt(tick, chunk, idx, 0x2F8B6E1Du)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
-                    move.DestZ = (Hash01(Salt(tick, chunk, idx, 0x9D2C5680u)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
+                    var key = cluster.GetEntityId(idx).EntityKey;
+                    move.DestX = (Hash01(Salt(tick, key, 0x4CF5AD43u)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
+                    move.DestY = (Hash01(Salt(tick, key, 0x2F8B6E1Du)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
+                    move.DestZ = (Hash01(Salt(tick, key, 0x9D2C5680u)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
                     dx = move.DestX - x;
                     dy = move.DestY - y;
                     dz = move.DestZ - z;
@@ -111,7 +111,6 @@ public sealed partial class SimBridge
             }
 
             var places = cluster.GetReadOnlySpan(Starship.Bounds);
-            var chunk = cluster.ChunkId;
             var realm = cluster.Realm;
             var k = ctx.Realms.TicksPerVisit(realm);
             while (bits != 0)
@@ -119,7 +118,8 @@ public sealed partial class SimBridge
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
                 // "A scan tick fell inside the k ticks this visit stands for" (review #4: `== 0` aliased with the divisor stride and some ships never scanned).
-                if ((tick + (chunk * 64) + idx) % ShipScanPeriodTicks >= k)
+                // Staggered by identity, not by chunk and slot: a repair or a migration must not reshuffle which tick a ship scans on (S0-4's defect).
+                if ((tick + cluster.GetEntityId(idx).EntityKey) % ShipScanPeriodTicks >= k)
                 {
                     continue;
                 }

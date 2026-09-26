@@ -39,6 +39,16 @@ public sealed partial class TatooineSim : IDisposable
     /// <summary>Populations actually created, for the report.</summary>
     public WorldCensus Census { get; private set; }
 
+    /// <summary>
+    /// How many ticks the runtime actually executed, read after the shutdown rather than at the poll that requested it.
+    /// </summary>
+    /// <remarks>
+    /// Unpaced, this exceeds the requested count by however many ticks fit between the polling loop noticing the target and <c>Shutdown</c> landing — so a
+    /// run's length is not reproducible and neither is its end state. The measured window is clamped to the request; this is the number to quote when a claim
+    /// is per-tick.
+    /// </remarks>
+    public long Executed { get; private set; }
+
     /// <summary>Entity handles and place geometry the systems address after the build.</summary>
     /// <summary>Each planet's destinations and handles, indexed by its realm (Realms G1).</summary>
     public WorldIndex[] Indexes { get; private set; } = [new WorldIndex()];

@@ -202,7 +202,6 @@ public sealed partial class SimBridge
             var states = cluster.GetSpan(Player.State);
             var motions = cluster.GetSpan(Player.Move);
             var places = cluster.GetReadOnlySpan(Player.Bounds);
-            var chunk = cluster.ChunkId;
             var planet = cluster.Realm.Value;
             var planetPorts = PortsOf(planet);
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: a divided planet's cluster is seen once in k ticks
@@ -232,26 +231,27 @@ public sealed partial class SimBridge
                 // over what remains and certain on the last tick, so nobody queued before the window closes misses the shuttle.
                 // At divisor k a visit stands for k ticks: the landing tick falls inside it when phase < k, and a trickle boarding is k times as likely
                 // (review #4: `phase == 0` let a divided planet's burst passengers miss nearly every shuttle).
+                var key = cluster.GetEntityId(idx).EntityKey;
                 var board = _config.ShuttleBurst
                     ? phase < k
-                    : Hash01(Salt(tick, chunk, idx, 0x5A17EE21u)) * (window - phase) < k;
+                    : Hash01(Salt(tick, key, 0x5A17EE21u)) * (window - phase) < k;
                 if (!board)
                 {
                     continue;
                 }
 
                 var h = places[idx].HalfExtent;
-                var interPlanet = _config.Planets > 1 && planet < _config.Planets && Hash01(Salt(tick, chunk, idx, 0x0B4E1A37u)) < _config.InterPlanetShare;
+                var interPlanet = _config.Planets > 1 && planet < _config.Planets && Hash01(Salt(tick, key, 0x0B4E1A37u)) < _config.InterPlanetShare;
                 if (interPlanet)
                 {
                     // Bound for another planet: a realm change, applied by TeleportSystem after this system.
-                    BoardInterPlanet(cluster.GetEntityId(idx), planet, dest, h, Salt(tick, chunk, idx, 0x5D2A0C8Fu));
+                    BoardInterPlanet(cluster.GetEntityId(idx), planet, dest, h, Salt(tick, key, 0x5D2A0C8Fu));
                 }
                 else
                 {
                     var (portX, portZ) = planetPorts[dest];
-                    var r = ArrivalScatterM * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0x2F9B1D63u)));
-                    var a = Hash01(Salt(tick, chunk, idx, 0x6C8E9CF5u)) * MathF.PI * 2f;
+                    var r = ArrivalScatterM * MathF.Sqrt(Hash01(Salt(tick, key, 0x2F9B1D63u)));
+                    var a = Hash01(Salt(tick, key, 0x6C8E9CF5u)) * MathF.PI * 2f;
                     var nb = default(PlayerPlacement);
                     nb.SetAt(Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h), Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h),
                         h);
@@ -262,7 +262,7 @@ public sealed partial class SimBridge
                 move.VelX = 0f;
                 move.VelZ = 0f;
                 state.Activity = PlayerActivity.Idle;
-                state.ActivityTicks = (20 * _config.TickRateHz) + (int)(Hash01(Salt(tick, chunk, idx, 0x1B56C4E9u)) * 100 * _config.TickRateHz);
+                state.ActivityTicks = (20 * _config.TickRateHz) + (int)(Hash01(Salt(tick, key, 0x1B56C4E9u)) * 100 * _config.TickRateHz);
                 TatooineReplication.Replicate(in cluster, idx);
                 boardings++;
 

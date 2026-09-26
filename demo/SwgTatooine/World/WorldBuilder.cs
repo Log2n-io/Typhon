@@ -341,6 +341,7 @@ public static class WorldBuilder
                 {
                     SpawnCreature(tx, ref rng, lairId, template, lx, lz, spawnRadius, config);
                     census.Creatures++;
+                    census.CreaturesByTemplate[template]++;
                 }
             }
 
@@ -374,7 +375,7 @@ public static class WorldBuilder
             HomeZ = lairZ,
             LeashRadius = TatooineData.LeashRadiusM * config.ContentScale,
             AggroRadius = CreatureTemplates.Aggressive[template] ? TatooineData.AggroRadiusM * config.ContentScale : 0f,
-
+            Template = (byte)template,
             Lair = lairId,
         };
 
@@ -662,6 +663,7 @@ public static class WorldBuilder
                 {
                     SpawnCreature(tx, ref rng, lairId, template, lx, lz, spawnRadius, config);
                     census.Creatures++;
+                    census.CreaturesByTemplate[template]++;
                 }
             }
 

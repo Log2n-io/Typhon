@@ -54,6 +54,9 @@ public sealed partial class SimBridge
         _creatureAttackRange = MeleeRange;
         AwarenessMinChunk = config.AwarenessMinChunk;
         _rngState = (uint)config.Seed | 1u;
+
+        // Every per-tick draw is salted with this, so --seed reproduces a run (M0-4). Odd, so a seed of 0 still perturbs the mix.
+        _seedSalt = ((uint)config.Seed * 0x9E3779B1u) | 1u;
         InitShuttles();
         InitChunkStats();
     }
@@ -75,6 +78,9 @@ public sealed partial class SimBridge
 
     /// <summary>Ticks in one wander leg, derived from the tick rate.</summary>
     private readonly int _wanderLegTicks;
+
+    /// <summary>The run's seed, folded into every per-tick salt. See <see cref="Salt"/>.</summary>
+    private readonly uint _seedSalt;
 
     /// <summary>The distance at which a creature stops closing and begins attacking.</summary>
     private readonly float _creatureAttackRange;
@@ -149,9 +155,15 @@ public sealed partial class SimBridge
         return (salt >> 8) * (1f / 16_777_216f);
     }
 
-    /// <summary>Mix a tick, a slot and a cluster into a salt that decorrelates two entities in the same cluster.</summary>
-    private static uint Salt(long tick, int cluster, int slot, uint stream)
-        => (uint)tick * 2654435761u ^ ((uint)cluster * 2246822519u) ^ ((uint)slot * 3266489917u) ^ stream;
+    /// <summary>Mix the run's seed, a stable entity identity and the tick into a salt that decorrelates two entities in the same cluster.</summary>
+    /// <remarks>
+    /// <b>Keyed on identity, not layout, and salted by <c>--seed</c> (S0-4).</b> It used to mix the cluster id and the slot — where an entity happens to be
+    /// stored — so the same seed did not reproduce the same run, and a repair pass or a cross-realm migration silently changed every draw. An
+    /// <see cref="EntityId.EntityKey"/> is monotonic per archetype and never recycled, so it survives both. Callers pass an entity's key, or a logical
+    /// identity of their own where the draw is not per entity (a realm id, say) — never a chunk or a slot.
+    /// </remarks>
+    private uint Salt(long tick, long key, uint stream)
+        => ((uint)tick * 2654435761u) ^ ((uint)key * 2246822519u) ^ ((uint)(key >> 32) * 3266489917u) ^ stream ^ _seedSalt;
 }
 
 /// <summary>One tick's behavioural counters — what the simulation did, as opposed to what it cost.</summary>

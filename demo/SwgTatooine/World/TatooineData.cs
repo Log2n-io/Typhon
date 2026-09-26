@@ -267,4 +267,16 @@ public static class CreatureTemplates
     /// suggests.
     /// </remarks>
     public static readonly float[] LairSpawnRadius = [25f, 25f, 25f, 25f, 25f, 25f];
+
+    /// <summary>The template's name, for a census line. Index order matches the tables above.</summary>
+    public static string Name(int template) => template switch
+    {
+        WompRat => "womp rats",
+        Squill => "squills",
+        Bantha => "banthas",
+        TuskenRaider => "Tusken raiders",
+        Ronto => "rontos",
+        MissionDefender => "mission defenders",
+        _ => $"template {template}",
+    };
 }
