@@ -95,6 +95,34 @@ public sealed class RealmRegistry
         return _engine.DestroyRealmContents(id, tx);
     }
 
+    /// <summary>How many registered realms are in each run state this tick, and how many run at a divisor (Realms D6). Before
+    /// <c>InitializeArchetypes</c>, all zero.</summary>
+    public RealmStateCounts Counts
+    {
+        get
+        {
+            var table = _engine.RealmTable;
+            if (table == null)
+            {
+                return default;
+            }
+
+            int active = 0, simulated = 0, dormant = 0, closing = 0;
+            foreach (var realm in table.Registered)
+            {
+                switch (table.StateOf(realm.Id.Value))
+                {
+                    case RealmRunState.Active: active++; break;
+                    case RealmRunState.Simulated: simulated++; break;
+                    case RealmRunState.Dormant: dormant++; break;
+                    default: closing++; break;
+                }
+            }
+
+            return new RealmStateCounts(active, simulated, dormant, closing, table.DividedCount, table.PolicyEpoch);
+        }
+    }
+
     /// <summary>What realm <paramref name="id"/> is doing this tick, as its policy decided at tick start.</summary>
     public RealmRunState StateOf(RealmId id) => OpenTable().StateOf(id.Value);
 

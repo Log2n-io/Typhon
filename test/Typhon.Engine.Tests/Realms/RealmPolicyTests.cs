@@ -151,6 +151,26 @@ class RealmPolicyTests : TestBase<RealmPolicyTests>
     }
 
     [Test]
+    public void Counts_AndOccupancy_SpanEveryRealm()
+    {
+        using var dbe = ThreeRealms(out _, out _, out _);
+        for (var i = 0; i <= SleepAfter; i++)
+        {
+            dbe.RealmTable.EvaluatePolicy();
+        }
+
+        var counts = dbe.Realms.Counts;
+        Assert.That((counts.Simulated, counts.Dormant, counts.Active, counts.Closing), Is.EqualTo((2, 1, 0, 0)));
+
+        // Realms D6: the engine-wide occupancy is every realm's grid summed; each realm's is its own.
+        var total = dbe.GetSpatialGridOccupancy();
+        var perRealm = new[] { 0, 1, 2 }.Select(r => dbe.GetSpatialGridOccupancy(new RealmId((ushort)r))).ToArray();
+        Assert.That(total.OccupiedCellCount, Is.EqualTo(perRealm.Sum(o => o.OccupiedCellCount)).And.GreaterThan(perRealm[0].OccupiedCellCount));
+        Assert.That(total.ResidentBytes, Is.EqualTo(perRealm.Sum(o => o.ResidentBytes)));
+        Assert.That(dbe.GetSpatialGridOccupancy(new RealmId(7)), Is.EqualTo(default(SpatialGridOccupancy)), "an unregistered realm reads empty");
+    }
+
+    [Test]
     public void AnEntry_WakesADormantRealm_WhichSleepsAgainAfterItsHold()
     {
         using var dbe = ThreeRealms(out var in0, out _, out _);

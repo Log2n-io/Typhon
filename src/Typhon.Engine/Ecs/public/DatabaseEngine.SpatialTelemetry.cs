@@ -89,8 +89,50 @@ public partial class DatabaseEngine
     [PublicAPI]
     public SpatialGridOccupancy GetSpatialGridOccupancy()
     {
-        // The primary realm's grid (realm 0 in a single-world database); per-realm occupancy is Realms RT-8's.
-        var grid = PrimaryGrid;
+        // Realms D6 (RT-8): every realm's grid summed — blocks, cells and bytes; the block shape is the primary realm's (one realm: exactly its grid),
+        // and the fill is occupied cells over the summed capacity of the allocated blocks, whose shape may differ realm to realm.
+        var primary = PrimaryGrid;
+        var realms = _realms;
+        if (primary == null || realms == null)
+        {
+            return default;
+        }
+
+        var blocks = 0;
+        var cells = 0;
+        long capacity = 0;
+        long resident = 0;
+        long dense = 0;
+        foreach (var realm in realms.Registered)
+        {
+            var grid = realm.Grid;
+            blocks += grid.BlockCount;
+            cells += grid.CellCount;
+            capacity += (long)grid.BlockCount * grid.BlockCellCapacity;
+            resident += grid.ResidentBytes;
+            dense += grid.DenseEquivalentBytes;
+        }
+
+        var (bx, by, bz) = primary.BlockDimensions;
+        return new SpatialGridOccupancy
+        {
+            BlockCount = blocks,
+            OccupiedCellCount = cells,
+            BlockCellCapacity = primary.BlockCellCapacity,
+            BlockDimX = bx,
+            BlockDimY = by,
+            BlockDimZ = bz,
+            IntraBlockFill = capacity == 0 ? 0d : (double)cells / capacity,
+            ResidentBytes = resident,
+            DenseEquivalentBytes = dense,
+        };
+    }
+
+    /// <summary>One realm's grid occupancy (Realms D6). An unregistered realm yields an all-zero snapshot.</summary>
+    [PublicAPI]
+    public SpatialGridOccupancy GetSpatialGridOccupancy(RealmId realm)
+    {
+        var grid = _realms?.TryGet(realm.Value)?.Grid;
         if (grid == null)
         {
             return default;

@@ -70,6 +70,16 @@ public readonly struct RealmsAccessor
     public RealmRunState StateOf(RealmId realm) => _table?.StateOf(realm.Value) ?? RealmRunState.Active;
 }
 
+/// <summary>Registered realms per run state this tick (<see cref="RealmRegistry.Counts"/>).</summary>
+/// <param name="Active">Observed or pinned: full rate.</param>
+/// <param name="Simulated">Unobserved, simulated (at the realm's divisor).</param>
+/// <param name="Dormant">Asleep: no system, no elective maintenance.</param>
+/// <param name="Closing">Unregistered, waiting to be empty.</param>
+/// <param name="Divided">Runnable realms simulated at a divisor above 1.</param>
+/// <param name="PolicyEpoch">Moves whenever any realm's state or divisor changes — a policy flip counter.</param>
+[PublicAPI]
+public readonly record struct RealmStateCounts(int Active, int Simulated, int Dormant, int Closing, int Divided, int PolicyEpoch);
+
 /// <summary>
 /// An application pin on a realm (<see cref="RealmRegistry.Observe"/>): while held, the realm is <see cref="RealmRunState.Active"/> from the next tick on
 /// — what a headless server, a benchmark or a test uses where no session observes. Dispose releases it; disposing twice releases once.
