@@ -466,6 +466,20 @@ public sealed class SubscriptionsRegistry
         return this;
     }
 
+    // The anchor's target: the entity a Bind follows or the point an At fixes — a variant must name the same one as its profile.
+    private static (EntityId Entity, Vector3D? Point) AnchorOf(ProfileDeclaration profile)
+    {
+        foreach (var observer in profile.Observers)
+        {
+            if (observer.Kind != ObserverKind.Aggregate)
+            {
+                return (observer.BoundEntity, observer.Placement);
+            }
+        }
+
+        return (EntityId.Null, null);
+    }
+
     // Where a profile takes its realm from (12-realms § 1.3): an anchored observer's entity or fixed point, otherwise the application's placement.
     private static ViewpointSource SourceOf(ProfileDeclaration profile)
     {
@@ -483,6 +497,45 @@ public sealed class SubscriptionsRegistry
         }
 
         return ViewpointSource.Placed;
+    }
+
+    // What a shape does not have, per observer (09 § 5–7): checked for a profile and for each of its variants.
+    private static void RefuseUnbuiltObservers(string name, ProfileDeclaration profile)
+    {
+        foreach (var observer in profile.Observers)
+        {
+            if (observer.Kind == ObserverKind.Sphere
+                && (observer.BoundEntity != EntityId.Null ? 1 : 0) + (observer.FollowsControlled ? 1 : 0) + (observer.Placement.HasValue ? 1 : 0) > 1)
+            {
+                // Bind, AroundControlled and At each name where the sphere is centred; two of them name two places, and serving either would be a
+                // silent substitution.
+                throw new NotSupportedException(
+                    $"Profile '{name}' declares a Sphere centred in more than one way (Bind, AroundControlled, At). Declare one.");
+            }
+
+            if (observer.Kind != ObserverKind.Sphere
+                && (observer.BoundEntity != EntityId.Null ? 1 : 0) + (observer.FollowsControlled ? 1 : 0) + (observer.Placement.HasValue ? 1 : 0) > 1)
+            {
+                // On a World or a ClientRegion an anchor names the session's realm only (12-realms § 1.3) — and two anchors name two realms.
+                throw new NotSupportedException(
+                    $"Profile '{name}' anchors a {observer.Kind} observer in more than one way (Bind, AroundControlled, At). Declare one.");
+            }
+
+            if (observer.NearBudget != 0 && observer.Kind != ObserverKind.ClientRegion)
+            {
+                throw new NotSupportedException(
+                    $"Profile '{name}' declares a near budget on a {observer.Kind} observer. A near budget caps a ClientRegion's delivered cells " +
+                    "(09 § 7); a Sphere's session takes a byte budget (SetBudget).");
+            }
+
+            if (observer.FarTileM != 0)
+            {
+                throw new NotSupportedException(
+                    $"Profile '{name}' declares a far tier with Far(tileM, maxHz). The far tier is an Aggregate beside the entity observer: " +
+                    "p.Aggregate(tileM, rateHz).Of<A>().");
+            }
+
+        }
     }
 
     private void RefuseUnbuiltShapes()
@@ -503,12 +556,28 @@ public sealed class SubscriptionsRegistry
                     throw new NotSupportedException($"Profile '{profile.Name}': a variant ('{kind}') declares variants of its own. Variants do not nest.");
                 }
 
-                if (SourceOf(variant) != SourceOf(profile))
+                if (SourceOf(variant) != SourceOf(profile) || AnchorOf(variant) != AnchorOf(profile))
                 {
                     throw new NotSupportedException(
-                        $"Profile '{profile.Name}': its '{kind}' variant takes its realm from another source ({SourceOf(variant)}) than the profile " +
+                        $"Profile '{profile.Name}': its '{kind}' variant takes its realm from another anchor ({SourceOf(variant)}) than the profile " +
                         $"({SourceOf(profile)}). A session's realm is resolved before its variant, so every variant follows the same one (12-realms § 1.3).");
                 }
+
+                if (variant.TickDivisor != profile.TickDivisor || variant.PushDetection != profile.PushDetection)
+                {
+                    throw new NotSupportedException(
+                        $"Profile '{profile.Name}': its '{kind}' variant declares its own Every or Detection. Both are profile-wide (12-realms § 1.4): declare " +
+                        "them on the profile, before its variants.");
+                }
+
+                RefuseUnbuiltObservers(profile.Name + "[" + kind + "]", variant);
+            }
+
+            if (profile.Variants.Count > 0 && profile.Observers.Count == 0)
+            {
+                throw new NotSupportedException(
+                    $"Profile '{profile.Name}' has variants and observes nothing itself: the realms of every other kind would serve it nothing, silently. " +
+                    "Give it its own observers, and exclude the kinds it must not serve with NotIn.");
             }
 
             foreach (var kind in profile.Excluded)
@@ -524,40 +593,7 @@ public sealed class SubscriptionsRegistry
                 }
             }
 
-            foreach (var observer in profile.Observers)
-            {
-                if (observer.Kind == ObserverKind.Sphere
-                    && (observer.BoundEntity != EntityId.Null ? 1 : 0) + (observer.FollowsControlled ? 1 : 0) + (observer.Placement.HasValue ? 1 : 0) > 1)
-                {
-                    // Bind, AroundControlled and At each name where the sphere is centred; two of them name two places, and serving either would be a
-                    // silent substitution.
-                    throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a Sphere centred in more than one way (Bind, AroundControlled, At). Declare one.");
-                }
-
-                if (observer.Kind != ObserverKind.Sphere
-                    && (observer.BoundEntity != EntityId.Null ? 1 : 0) + (observer.FollowsControlled ? 1 : 0) + (observer.Placement.HasValue ? 1 : 0) > 1)
-                {
-                    // On a World or a ClientRegion an anchor names the session's realm only (12-realms § 1.3) — and two anchors name two realms.
-                    throw new NotSupportedException(
-                        $"Profile '{profile.Name}' anchors a {observer.Kind} observer in more than one way (Bind, AroundControlled, At). Declare one.");
-                }
-
-                if (observer.NearBudget != 0 && observer.Kind != ObserverKind.ClientRegion)
-                {
-                    throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a near budget on a {observer.Kind} observer. A near budget caps a ClientRegion's delivered cells " +
-                        "(09 § 7); a Sphere's session takes a byte budget (SetBudget).");
-                }
-
-                if (observer.FarTileM != 0)
-                {
-                    throw new NotSupportedException(
-                        $"Profile '{profile.Name}' declares a far tier with Far(tileM, maxHz). The far tier is an Aggregate beside the entity observer: " +
-                        "p.Aggregate(tileM, rateHz).Of<A>().");
-                }
-
-            }
+            RefuseUnbuiltObservers(profile.Name, profile);
 
             // Tiers (09 § 5): one entity observer, and at most one Aggregate beside it.
             var entityObservers = 0;

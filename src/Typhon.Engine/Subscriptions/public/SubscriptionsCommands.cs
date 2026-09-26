@@ -381,7 +381,19 @@ public sealed class SubscriptionsCommands
     /// </exception>
     public bool Place(SessionId session, Vector3D position)
     {
-        if (_ingress.MultiRealm && _ingress.Sessions.RealmOf(session) is < 0 or RealmId.NoneValue)
+        if (_ingress.Sessions.RealmOf(session) == RealmId.NoneValue)
+        {
+            // Taken out with Leave: with one realm, placing it again is placing it in realm 0; with several it must say which.
+            if (_ingress.MultiRealm)
+            {
+                throw new InvalidOperationException(
+                    $"{session} is in no realm, and this engine holds several: place it with Place(session, realm, position) (12-realms § 1.3).");
+            }
+
+            return _ingress.Sessions.SetRealm(session, RealmId.Default.Value, placed: true, position);
+        }
+
+        if (_ingress.MultiRealm && _ingress.Sessions.RealmOf(session) < 0)
         {
             throw new InvalidOperationException(
                 $"{session} is in no realm, and this engine holds several: place it with Place(session, realm, position) (12-realms § 1.3).");

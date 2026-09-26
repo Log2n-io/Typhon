@@ -58,16 +58,22 @@ public unsafe ref struct EntityRef
     internal ArchetypeClusterInfo _clusterLayout;   // Layout info for offset computation
 
     /// <summary>
-    /// Marks this entity's slot in its cluster's per-tick structure word — the push set replication projects after the fence (ADR-067). The write-by-id
-    /// counterpart of <c>ClusterRef.NotePushed</c>: a command's effect on the entity it names is reached by id, not by walking its cluster.
-    /// </summary>
-    /// <summary>
     /// The realm the entity is in (Realms): its cluster's — what an event it emits names as its point's realm (<c>RouteNear(point, realm)</c>). Realm 0
     /// for an archetype without clusters or without a realm key.
     /// </summary>
-    public readonly RealmId Realm =>
-        _engineState?.ClusterState?.ClusterRealmMap is { } map && (uint)_clusterChunkId < (uint)map.Length ? new RealmId(map[_clusterChunkId]) : RealmId.Default;
+    public readonly RealmId Realm
+    {
+        get
+        {
+            var map = _engineState?.ClusterState is { } clusters ? System.Threading.Volatile.Read(ref clusters.ClusterRealmMap) : null;
+            return map != null && (uint)_clusterChunkId < (uint)map.Length ? new RealmId(map[_clusterChunkId]) : RealmId.Default;
+        }
+    }
 
+    /// <summary>
+    /// Marks this entity's slot in its cluster's per-tick structure word — the push set replication projects after the fence (ADR-067). The write-by-id
+    /// counterpart of <c>ClusterRef.NotePushed</c>: a command's effect on the entity it names is reached by id, not by walking its cluster.
+    /// </summary>
     internal readonly void NotePushed() => _engineState?.ClusterState?.NoteStructureSlots(_clusterChunkId, 1UL << _clusterSlotIndex);
 
     internal EntityRef(EntityId id, ArchetypeMetadata archetype, ArchetypeEngineState engineState, EntityAccessor accessor, ushort enabledBits)

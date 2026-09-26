@@ -372,7 +372,11 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         var realms = _attachedTo != null ? Volatile.Read(ref _attachedTo.ClusterRealmMap) : null;
         if (realms != null && (uint)dstChunkId < (uint)realms.Length && realms[dstChunkId] != source->Realm)
         {
-            Orphaned(source, coldSource, ((ReplicationHotEntry*)hotSource)->NetId, 3);
+            if (Push != null)
+            {
+                Orphaned(source, coldSource, ((ReplicationHotEntry*)hotSource)->NetId, 3);
+            }
+
             ClearEntry(srcBytes, srcSlot);
             Interlocked.Increment(ref _entriesLeftRealm);
             return ReplicationMigrationOutcome.NothingToCarry;
@@ -554,7 +558,10 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     var droppedId = ((ReplicationHotEntry*)bytes)->NetId;
                     if (droppedId != NetIdAllocator.NoNetId)
                     {
-                        Orphaned(null, bytes + Layout.HotStride, droppedId, 2);
+                        // A parked entry never crossed realms (R4.5 leaves those before they park): its realm is its destination cluster's.
+                        var map = _attachedTo == null ? null : Volatile.Read(ref _attachedTo.ClusterRealmMap);
+                        var realm = map != null && (uint)chunkId < (uint)map.Length ? map[chunkId] : RealmId.Default.Value;
+                        Orphaned(null, bytes + Layout.HotStride, droppedId, 2, realm);
                     }
                 }
 
@@ -625,11 +632,11 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     }
 
     /// <summary>An entry vanished with no projection to see it go: every session holding it is told it left, and its identity goes back to the allocator.</summary>
-    private void Orphaned(ReplicationBlockHeader* block, byte* cold, uint netId, int cause)
+    private void Orphaned(ReplicationBlockHeader* block, byte* cold, uint netId, int cause, ushort parkedRealm = 0)
     {
         // Filed in the replication of the realm the entry was last described in; a realm nobody serves holds no session to tell. A parked drop has no
-        // block: a parked entry never crossed realms (R4.5 leaves those before they park), and parks only inside realm 0's served clusters today.
-        var push = block == null || Push.Hub == null ? Push : Push.Hub.For(block->Realm);
+        // block: its caller names the realm.
+        var push = Push.Hub == null ? Push : Push.Hub.For(block == null ? parkedRealm : block->Realm);
         push?.Orphan(PushArchetypeIndex, block, cold, Layout, netId, cause);
         lock (_orphanedLock)
         {

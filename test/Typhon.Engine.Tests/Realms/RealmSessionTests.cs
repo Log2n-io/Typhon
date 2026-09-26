@@ -337,6 +337,169 @@ class RealmSessionTests : TestBase<RealmSessionTests>
         }
     }
 
+    [Test]
+    [VerifiesRule("SUB-30")]
+    public void APositionDecodedBeforeASwitchAndDrainedAfterItIsRefused()
+    {
+        using var dbe = SetupEngine();
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            subs.RealmKinds("interior");
+            subs.Archetype<RealmUnit>(a => a.Motion(RealmUnit.Pos, m => m.Teleport(20)));
+            subs.Profile(World, p => p.World().Of<RealmUnit>());
+            subs.Command<RealmGoTo>(c => c.Rate(1_000, 1_000).Field(g => g.At, Codec.Pos3));
+            subs.Command<RealmPing>(c => c.Rate(1_000, 1_000).Field(p => p.N, Codec.VarUInt));
+        }, nameof(APositionDecodedBeforeASwitchAndDrainedAfterItIsRefused), replicationCellM: 10);
+        harness.RunFence = true;
+        harness.RunIngress = true;
+        var session = harness.OpenSessions(1, World)[0];
+        var commands = harness.Subscriptions.Commands;
+        commands.Enter(session, RealmId.Default);
+        Spawn(dbe, 0, 2);
+        Run(harness, session, 3);
+        var realm0 = harness.Replica(session).Store.Realm;
+
+        // Decoded in realm 0, then the switch is published before any drain: the ring still holds the command when the session is in realm 1.
+        harness.Subscriptions.Ingress.OnCommands(session,
+            Encode(harness.CatalogPlan, (uint)harness.Tick, realm0, ("RealmGoTo", 20, GoTo(5, 6, 0)), ("RealmPing", 21, Ping(3))));
+        harness.RunIngress = false;
+        commands.Enter(session, new RealmId(1));
+        Run(harness, session, 1);
+        Assert.That(commands.RealmOf(session), Is.EqualTo(new RealmId(1)));
+
+        harness.RunIngress = true;
+        harness.RunTick(harness.Tick + 1);
+        var log = harness.Read(session);
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.Commands<RealmGoTo>().Count, Is.Zero, "realm 0's position never reaches the application once the session is in realm 1");
+            Assert.That(log?.Acks, Does.Contain(((ushort)20, AckReasons.RealmChanged)));
+            Assert.That(commands.Commands<RealmPing>().Count, Is.EqualTo(1), "a command with no position is not refused");
+        });
+    }
+
+    [Test]
+    [VerifiesRule("SUB-24")]
+    public void AWokenRealmsOccupancyCountsItsOwnEntitiesOnly()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var sessions = harness.OpenSessions(2, World);
+        var commands = harness.Subscriptions.Commands;
+        var hub = harness.Subscriptions.Hub;
+        commands.Enter(sessions[0], RealmId.Default);
+        commands.Enter(sessions[1], new RealmId(1));
+        Spawn(dbe, 0, 3);
+        var inOne = Spawn(dbe, 1, 2);
+
+        void RunBoth(int ticks)
+        {
+            for (var i = 0; i < ticks; i++)
+            {
+                harness.RunTick(harness.Tick + 1);
+                harness.Deliver(sessions[0]);
+                harness.Deliver(sessions[1]);
+            }
+        }
+
+        RunBoth(3);
+        commands.Enter(sessions[1], RealmId.Default);
+        RunBoth(70);
+        Assert.That(hub.For(1), Is.Null, "realm 1 went dormant");
+
+        // While it slept: one more entity, and one moved inside it.
+        Spawn(dbe, 1, 1);
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Teleport(inOne[0], RealmUnit.Pos, new RealmId(1), At(-30, -30, 1, 0));
+            tx.Commit();
+        }
+
+        RunBoth(2);
+        commands.Enter(sessions[1], new RealmId(1));
+        RunBoth(4);
+        var one = hub.For(1);
+        var zero = hub.For(0);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Total(one.Occupancy), Is.EqualTo(3), "realm 1's occupancy counts realm 1's entities, not realm 0's");
+            Assert.That(one.VerifyOccupancy(), Is.Zero);
+            Assert.That(Total(zero.Occupancy), Is.EqualTo(3));
+            Assert.That(zero.VerifyOccupancy(), Is.Zero);
+            Assert.That(Held(harness, sessions[1]), Is.EqualTo(3));
+        });
+    }
+
+    private static int Total(ReplicationOccupancy occupancy)
+    {
+        var keys = occupancy.OrderedKeys(out var count);
+        var total = 0;
+        for (var i = 0; i < count; i++)
+        {
+            total += occupancy.Get(keys[i]);
+        }
+
+        return total;
+    }
+
+    [Test]
+    public void WithOneRealmASessionTakenOutWithLeaveIsPlacedBackInRealm0()
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<RealmPos>();
+        dbe.ConfigureSpatialGrid(Realm0Grid());
+        dbe.InitializeArchetypes();
+        using (dbe)
+        {
+            using var harness = FrameHarness.Create(dbe, subs =>
+            {
+                subs.Archetype<RealmUnit>(a => a.Motion(RealmUnit.Pos, m => m.Teleport(20)));
+                subs.Profile("near", p => p.Sphere(30).Of<RealmUnit>());
+            }, nameof(WithOneRealmASessionTakenOutWithLeaveIsPlacedBackInRealm0), replicationCellM: 10);
+            harness.RunFence = true;
+            var session = harness.OpenSessions(1, "near")[0];
+            var commands = harness.Subscriptions.Commands;
+            Spawn(dbe, 0, 2);
+            Assert.That(commands.Place(session, new Vector3D(5, 25, 0)), Is.True);
+            Run(harness, session, 3);
+            Assert.That(Held(harness, session), Is.EqualTo(2));
+
+            commands.Leave(session);
+            Run(harness, session, 2);
+            Assert.That(commands.RealmOf(session), Is.EqualTo(RealmId.None));
+
+            Assert.That(commands.Place(session, new Vector3D(5, 25, 0)), Is.True);
+            Run(harness, session, 3);
+            Assert.Multiple(() =>
+            {
+                Assert.That(commands.RealmOf(session), Is.EqualTo(RealmId.Default), "the one realm there is");
+                Assert.That(Held(harness, session), Is.EqualTo(2));
+            });
+        }
+    }
+
+    [Test]
+    public void ARadiusSetForTheProfileIsBoundedByTheVariantServingTheRealm()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe, subs => subs.Profile("scoped", p =>
+        {
+            p.Sphere(10, max: 40).Of<RealmUnit>();
+            p.In("interior", v => v.Sphere(5).Of<RealmUnit>());
+        }));
+        var session = harness.OpenSessions(1, "scoped")[0];
+        var commands = harness.Subscriptions.Commands;
+        Assert.That(commands.Place(session, RealmId.Default, new Vector3D(5, 25, 0)), Is.True);
+        Assert.That(commands.SetRadius(session, 35), Is.True, "within the declared profile's bounds");
+        Spawn(dbe, 1, 3);
+        Run(harness, session, 2);
+
+        // Realm 1's window is sized for the interior variant's 5 m: the session is gathered at 5 m there, not at the 35 m it asked for on the planet.
+        Assert.That(commands.Place(session, new RealmId(1), new Vector3D(5, 25, 0)), Is.True);
+        Run(harness, session, 3);
+        Assert.That(Held(harness, session), Is.EqualTo(1), "only the entity within the variant's radius");
+    }
+
     private static byte[] Encode(CatalogPlan plan, uint clientTick, RealmFrame frame, params (string Name, ushort Seq, RecordValues Values)[] batch)
     {
         var list = new System.Collections.Generic.List<(MessagePlan, ushort, RecordValues)>();

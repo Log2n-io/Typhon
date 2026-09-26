@@ -57,7 +57,12 @@ internal sealed unsafe partial class FrameAssembler
 
             // The entity's realm's replication (SUB-28): its frame decodes the entity's v̂, and its geometry is the session's only if the session is placed in
             // that realm — a session of another realm reads an unbound slot there and holds nothing, whatever the local coordinates.
-            var owner = Push.Hub?.For(((ReplicationBlockHeader*)block)->Realm) ?? Push;
+            var owner = Push.Hub == null ? Push : Push.Hub.For(((ReplicationBlockHeader*)block)->Realm);
+            if (owner == null)
+            {
+                return false;
+            }
+
             owner.DecodeVisibility(archetype, block, slot, out var x, out var y, out var z);
             var shape = Profiles.IsWorld(profile) ? PushShape.World : Profiles.RegionOf(profile) ? PushShape.Region : PushShape.Sphere;
             return owner.HoldsCommitted(session, shape, x, y, z);

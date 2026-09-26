@@ -16,6 +16,7 @@ namespace Typhon.Engine.Tests.Realms;
 /// </summary>
 [TestFixture]
 [Explicit("A measurement, not a check: run by hand (Realms D-7)")]
+[Category("Manual")] // It reports µs per realm per tick and asserts nothing about them: a CI box's timing would be read as a result it is not.
 [NonParallelizable]
 class ManyRealmReplicationBench : TestBase<ManyRealmReplicationBench>
 {

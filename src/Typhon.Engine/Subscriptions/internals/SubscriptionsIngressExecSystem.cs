@@ -190,6 +190,12 @@ internal sealed class SubscriptionsIngress : IDisposable
     internal const ushort AckRecordMarker = 0xFFFF;
 
     /// <summary>
+    /// Set in a ring record's type index: the command carries a realm-framed field (12-realms § 2.5), which the drain refuses when the session left the
+    /// realm it was built in between the transport's decode and the drain. Command wire indices stay below it (checked at Start).
+    /// </summary>
+    internal const ushort FramedRecordFlag = 0x8000;
+
+    /// <summary>
     /// The transport-side refusals (rate, role, budget, pre-check, region) one session may place in a tick's shared acknowledgement log. The log is sized
     /// to hold this many for every session (<see cref="CommandTypeBuffers.AckCapacity"/>), so no session's refusals can crowd out another's. An honest client
     /// is refused a handful of commands a tick at most; past this share the rest settle through <c>lastSeq</c> and are counted.
@@ -263,6 +269,7 @@ internal sealed class SubscriptionsIngress : IDisposable
         _registry = registry;
         _pool = pool;
         _sendPump = sendPump;
+        _realmViews = new SessionRealmView[Math.Max(1, maxSessions)];
         _rows = new SessionIngress[maxSessions];
         Commands = commands;
         Buffers = buffers;
@@ -673,6 +680,12 @@ internal sealed class SubscriptionsIngress : IDisposable
         }
 
         var wireIdx = BinaryPrimitives.ReadUInt16LittleEndian(record);
+        var framed = wireIdx != AckRecordMarker && (wireIdx & FramedRecordFlag) != 0;
+        if (wireIdx != AckRecordMarker)
+        {
+            wireIdx &= unchecked((ushort)~FramedRecordFlag);
+        }
+
         var seq = BinaryPrimitives.ReadUInt16LittleEndian(record[2..]);
         var clientTick = BinaryPrimitives.ReadUInt32LittleEndian(record[4..]);
         var body = record[RecordHeaderBytes..];
@@ -723,11 +736,18 @@ internal sealed class SubscriptionsIngress : IDisposable
             return;
         }
 
+        // A position built in a realm the session has left since the transport decoded it: refused, never delivered (SUB-30).
+        if (MultiRealm && framed && built != Frames?.StateOf(row.Session)?.CommittedRealm)
+        {
+            Buffers.Acks.Add(row.Session, seq, AckReasons.RealmChanged);
+            return;
+        }
+
         Buffers.ByWireIdx(wireIdx)?.Append(segment, row.Session, seq, clientTick, built < 0 ? RealmId.NoneValue : (ushort)built, body);
     }
 
     // Per session slot: the session's realm as its client holds it, for the transport's command decode — written by the frame stage, read by transports.
-    private SessionRealmView[] _realmViews = [];
+    private SessionRealmView[] _realmViews;
 
     /// <summary>
     /// Publishes a session's realm view (<see cref="SessionRealmView"/>) — with a release store, before the frame that switches the client is published.
@@ -1111,7 +1131,8 @@ internal ref struct IngressCommandSink : ICommandSink
             return;
         }
 
-        SubscriptionsIngress.Publish(_row, (ushort)_current.WireIdx, _seq, _clientTick, _payload[.._current.PayloadSize]);
+        SubscriptionsIngress.Publish(_row, (ushort)(_current.WireIdx | (_framed ? SubscriptionsIngress.FramedRecordFlag : 0)), _seq, _clientTick,
+            _payload[.._current.PayloadSize]);
     }
 
     private void FlushRegion()

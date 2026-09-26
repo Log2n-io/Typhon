@@ -665,8 +665,8 @@
     tick's fence (Bind, AroundControlled — a teleport switches its sessions in the same tick), or realm 0 (At); a session nobody placed is in realm 0
     on an engine with one realm and in none on an engine with several, where it holds nothing positioned
   invariant s's committed realm changes only when a frame with RESET whose FIRST block is REALM(realm(s)) is published; a switch not published is
-    retried as a RESET until one is (SUB-03); a switch away from a realm the client holds entities of is sent at once, one from nothing rides the first
-    frame that has something to say
+    retried as a RESET until one is (SUB-03); a switch of a session that has been sent any frame is a forced RESET, sent at once; only a session never
+    framed has its first realm ride the first frame that has something to say
   invariant across a switch the link state (budget level, radius shrink, rate), the events cursor, SELF's pending owner mask, the ack cursor and netIds
     are preserved; the realm-local geometry is given back and taken anew, and a new realm-local slot under a client that holds frames is a RESET
   invariant an entity-anchored session is never moved explicitly (Place(realm) / Enter / Leave throw); a realm-less Place on an engine with several
@@ -690,14 +690,16 @@
   invariant a command's realm-framed field travels at RealmFrame.CommandPositionBits (32) over the bounds of the realm the client held at the batch's
     clientTick; the transport decodes it over that realm's frame, read from the session's realm view — immutable, published by the frame stage before
     the switching frame, the only session state a transport reads (SUB-05); a command whose realm-framed field was built in a realm the session has left
-    is refused with ACK REALM_CHANGED (a ClientRegion is dropped) and never reaches the application; every command arrives with the realm it was built in
+    is refused with ACK REALM_CHANGED (a ClientRegion is dropped) and never reaches the application — at the transport, or at the drain when the switch
+    was published between the two (the ring record carries SubscriptionsIngress.FramedRecordFlag); every command arrives with the realm it was built in
   invariant a velocity is realm-independent: its unit is 2^unitExp metres per tick, derived from the archetype's tolerance and MaxAge (W5)
   scope: RealmFrame, RealmCodecs, PositionFrame, ProjectionPass.QuantizePosition, ProjectionCompiler.VelocityCodec, SessionFrameState.RealmSent,
-    SubscriptionsIngress.CommandFrame, SessionRealmView, IngressCommandSink.Flush,
+    SubscriptionsIngress.CommandFrame, SubscriptionsIngress.FramedRecordFlag, SessionRealmView, IngressCommandSink.Flush,
     EntitiesEncoder.WriteHeader, SubscriptionsRuntime.BuildRealm0Frame, TickReader.Read, FieldCodec.ReadNumber, CommandsMessage.Read
   on_violation: silent. A value encoded over one frame and decoded over another is a wrong position a client renders without error; a catalog that
     carried bounds could describe one realm only, and every other realm's positions would decode into it.
   verified: RealmSessionTests.ACommandIsFramedByTheRealmItWasBuiltIn_AndAPositionFromALeftRealmIsRefused,
+    RealmSessionTests.APositionDecodedBeforeASwitchAndDrainedAfterItIsRefused,
     RealmReplicationTests.RealmFramedQuantizationEqualsTheCatalogCodecForRealmZero (realm 0's frame is the codec's; another realm's frame
     gives other codes for the same place), RealmReplicationTests.ASessionsFirstPublishedFrameIsAResetWhoseFirstBlockIsItsRealm,
     EntitiesEncodingTests.TheProducedBytesDecodeIntoTheClientsReplica (the replica decodes the engine's stream over the REALM it was sent);
@@ -943,10 +945,11 @@
 
 ### SUB-24: The occupancy counts exactly the entities whose last pushed position lies in each cell `[fatal][silent]`
   invariant after every index, ∀ cell: occupancy(cell) = the live, identified entries of observed archetypes whose last pushed position lies in cell,
-    and a cell with none has no entry
+    and a cell with none has no entry; with several realms, each served realm's occupancy counts that realm's entries only, in its own frame
   invariant every tick the track runs is indexed, sessions bound to a profile or not: the tick's cell changes are the occupancy's only input
   invariant a tick whose changes the occupancy missed — one the track did not run for, or one it ran but never finished indexing — is followed by a
-    recount at the next index's finish, after that tick's projection: only then do the blocks describe the fence's carried and parked entries
+    recount at the next index's finish, after that tick's projection: only then do the blocks describe the fence's carried and parked entries; a realm
+    woken from dormancy is such a tick's successor — it is recounted after its first projection, never over the blocks it last saw
   invariant the aggregate grids (09 § 8) take the same deltas per archetype and tile: after every index, ∀ grid, tile, counted archetype a: count = the
     live, identified entries of a whose last pushed position lies in the tile; a recount of the occupancy recounts them. A tile is a whole number of
     replication cells over the same origin — a move within a cell never crosses a tile edge — and a grid counts only archetypes push replication serves
@@ -973,6 +976,8 @@
     the zero rows are dropped), PushOracle3DTests.ABudgetedPolyhedronHoldsWholeCellsAndItsAggregateTheRest (also an aggregate one tile as tall as the
     world — red when its z extent is taken as the grid's). Falsifiability: PushIndexTests.AnOccupancyThatKeepsMoversInTheCellTheyLeftIsCaught runs the
     mutant that drops a secondary's decrement; dropping it from the aggregate deltas turns TheCountsEqualARecountUnderChurn red.
+    RealmSessionTests.AWokenRealmsOccupancyCountsItsOwnEntitiesOnly (two realms, one dormant across a spawn and a move; red when the recount walks
+    every realm's blocks).
 
 ### SUB-25: The push index holds this tick's events in cell order and touches only occupied cells `[perf][silent]`
   invariant ∀ tick T, the index (= T's log slot) holds every event of T once under its primary cell and once more under the cell a mover left, cells

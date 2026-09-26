@@ -1549,7 +1549,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {
-                if (!state.Directory.TryGetBlock(ids[i], out var block))
+                // The active cluster list is engine-wide: another realm's entities are counted by its own replication, in its own frame.
+                if (!state.Directory.TryGetBlock(ids[i], out var block) || block->Realm != ServedRealm)
                 {
                     continue;
                 }
@@ -1600,7 +1601,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {
-                if (!state.Directory.TryGetBlock(ids[i], out var block))
+                // The active cluster list is engine-wide: another realm's entities are counted by its own replication, in its own frame.
+                if (!state.Directory.TryGetBlock(ids[i], out var block) || block->Realm != ServedRealm)
                 {
                     continue;
                 }
@@ -3727,7 +3729,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {
-                if (!state.Directory.TryGetBlock(ids[i], out var block))
+                // The active cluster list is engine-wide: another realm's entities are counted by its own replication, in its own frame.
+                if (!state.Directory.TryGetBlock(ids[i], out var block) || block->Realm != ServedRealm)
                 {
                     continue;
                 }

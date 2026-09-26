@@ -1339,6 +1339,10 @@ internal abstract unsafe partial class PushReplication
         BeginRealmTick(tick);
         BeginMark(workers, countInProject: false);
         BuildIndex();
+
+        // Its blocks were not projected while it slept: only the next tick's projection makes their occupancy words describe them (SUB-24), so the
+        // recount is carried to that tick's index finish — the one BuildIndex just ran counted what the realm last saw.
+        _recountAtFinish = true;
     }
 
     /// <summary>The spatial grid this realm's entities of an archetype are indexed in, or null when the archetype has none in this realm.</summary>

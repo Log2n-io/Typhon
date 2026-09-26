@@ -475,6 +475,22 @@ internal sealed class SubscriptionProfiles
         return r;
     }
 
+    /// <summary>The widest ClientRegion edge a session can send in a realm of kind <paramref name="kind"/>: over every profile's variant serving it.</summary>
+    public double MaxRegionEdgeFor(int kind)
+    {
+        var edge = 0d;
+        for (var p = 0; p < _declaredCount; p++)
+        {
+            var served = VariantOf(p, kind);
+            if (served >= 0)
+            {
+                edge = Math.Max(edge, _profiles[served].MaxEdgeM);
+            }
+        }
+
+        return edge;
+    }
+
     /// <summary>The radius a session of profile <paramref name="profile"/> starts with: its R′; zero for <c>World</c>.</summary>
     public double RadiusOf(int profile) => _profiles[profile].Radius;
 

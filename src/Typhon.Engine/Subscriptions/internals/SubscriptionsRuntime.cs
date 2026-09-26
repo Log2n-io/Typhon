@@ -202,7 +202,8 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             {
                 // Null only when no spatial grid is configured, and then an observed archetype has no position, which the push path refuses by name first.
                 var spatial = engine.Realm0Grid;
-                Grid = spatial == null ? null : ReplicationGrid.Resolve(Options.ReplicationCellM, spatial.Config, Profiles.MaxRadius);
+                // Sized for the variants that serve realm 0's kind (12-realms § 1.4), not for every kind's: a space variant's radius does not bound a planet.
+                Grid = spatial == null ? null : ReplicationGrid.Resolve(Options.ReplicationCellM, spatial.Config, Profiles.MaxRadiusFor(Realm0Frame?.KindIdx ?? 0));
                 Push = PushReplication.Create(Plans, _replicationStates, observed, automatic, Grid, Options.MaxSessions, Options.PushShadow,
                     Options.ForceDeepReplicationForTest);
 
@@ -247,10 +248,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                     _encodePlans[a] = _frames.EncodePlanOf(a);
                 }
 
-                ConfigureRealm(Push, Grid, Realm0Frame, first: true);
+                ConfigureRealm(Push, Grid, Realm0Frame, Realm0Frame?.KindIdx ?? 0, first: true);
 
                 // Every other realm is served the first time a session is placed in it (R4.4), from its own grid and replication config.
                 Hub.Factory = CreateRealmReplication;
+                Hub.RealmIdentity = id => _engine.RealmTable?.TryGet(id);
             }
 
             // The send side (P1-14b). It holds no memory of its own beyond one view and one work item per slot; what it carries is the rule that a frame
@@ -292,6 +294,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             if (Events != null)
             {
                 Events.Realm = Realm0Frame;
+                Events.RealmFrames = _frames.RealmFrameFor;
 
                 // With several realms a point is a place only with its realm (12-realms § 2.7): a realm-less RouteNear would file every point in realm 0.
                 for (var i = 0; engine.ConfiguredMaxRealms > 1 && i < registry.Events.Count; i++)
@@ -302,6 +305,20 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                         throw new NotSupportedException(
                             $"Event '{declaration.Name}' routes Near without a realm, and this engine holds several: declare RouteNear(point, realm) " +
                             "(12-realms § 2.7).");
+                    }
+
+                    // A position is a place only in one realm's frame (SUB-30); a session-addressed event reaches sessions of every realm.
+                    if (declaration.Routing is EventRouting.Broadcast or EventRouting.ToOwner or EventRouting.ToSession)
+                    {
+                        foreach (var field in CatalogPlan.EventByName(declaration.Name)?.Body.Fields ?? [])
+                        {
+                            if (field.Kind is CodecKind.Pos2 or CodecKind.Pos3)
+                            {
+                                throw new NotSupportedException(
+                                    $"Event '{declaration.Name}' carries position '{field.Name}' and reaches sessions of every realm ({declaration.Routing}): a " +
+                                    "position means a place in one realm only. Route it to a realm (RouteNear, RouteToKnown, RouteToRealm) (SUB-30).");
+                            }
+                        }
                     }
                 }
 
@@ -446,13 +463,13 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     // A realm's replication: far fold, encode plans, aggregates over its frame and region windows over its grid. The first (realm 0's, at Start) also binds
     // the profiles' aggregates and near budgets, which are realm-independent.
-    private void ConfigureRealm(PushReplication push, ReplicationGrid grid, RealmFrame frame, bool first)
+    private void ConfigureRealm(PushReplication push, ReplicationGrid grid, RealmFrame frame, int kind, bool first)
     {
         var (farPhase, farWindow) = Profiles.FarFold;
         push.ConfigureFar(farPhase, farWindow);
         push.AttachEncodePlans(_encodePlans);
         ConfigureAggregates(push, frame, first);
-        ConfigureRegions(push, grid);
+        ConfigureRegions(push, grid, kind);
     }
 
     /// <summary>
@@ -476,8 +493,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             var codecs = RealmCodecs.Create(realm, in entry.GridConfig, Plans, config.PositionBits);
             var push = PushReplication.Create(Plans, _replicationStates, _observed, _automatic, grid, Options.MaxSessions, Options.PushShadow,
                 Options.ForceDeepReplicationForTest, realm, codecs);
-            var frame = BuildRealmFrame(_engine, Options, realm, Math.Max(0, Profiles.KindIndex(config.Kind)));
-            ConfigureRealm(push, grid, frame, first: false);
+            var kind = Math.Max(0, Profiles.KindIndex(config.Kind));
+            var frame = BuildRealmFrame(_engine, Options, realm, kind);
+            ConfigureRealm(push, grid, frame, kind, first: false);
             return push;
         }
         catch (Exception e) when (e is NotSupportedException or InvalidOperationException or ArgumentException)
@@ -487,11 +505,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         }
     }
 
-    private void ConfigureRegions(PushReplication push, ReplicationGrid grid)
+    private void ConfigureRegions(PushReplication push, ReplicationGrid grid, int kind)
     {
-        // ClientRegion (09 § 7): one window width for every region session, sized for the widest extent any profile accepts, and bounded like a Sphere's
-        // window — the cells a gather pays for.
-        var edge = Profiles.MaxRegionEdgeM;
+        // ClientRegion (09 § 7): one window width for every region session of the realm, sized for the widest extent a variant serving its kind accepts,
+        // and bounded like a Sphere's window — the cells a gather pays for.
+        var edge = Profiles.MaxRegionEdgeFor(kind);
         if (edge <= 0)
         {
             return;

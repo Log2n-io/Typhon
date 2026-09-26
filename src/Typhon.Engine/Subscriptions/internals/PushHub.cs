@@ -289,6 +289,15 @@ internal sealed unsafe class PushHub
     /// <summary>Builds a realm's replication the first time a session is placed in it; null when the realm has none, or its grid cannot be served.</summary>
     internal Func<ushort, PushReplication> Factory;
 
+    /// <summary>
+    /// The identity of the realm registered under an id now (its table entry), set with <see cref="Factory"/>: a realm removed and registered again under
+    /// the same id is another realm, whose dormant replication and refusal are not its predecessor's (Realms D5).
+    /// </summary>
+    internal Func<ushort, object> RealmIdentity;
+
+    // Per realm id: the identity the dormant replication or the refusal was recorded for.
+    private object[] _recordedFor = [];
+
     /// <summary>The worker count the tick's projection was marked for, which a replication activated in the frame prologue sizes its lists by.</summary>
     internal int Workers = 1;
 
@@ -307,7 +316,28 @@ internal sealed unsafe class PushHub
 
     private PushReplication Activate(ushort realm, uint tick)
     {
-        if (Factory == null || (realm < _unservable.Length && _unservable[realm]))
+        if (Factory == null)
+        {
+            return null;
+        }
+
+        var identity = RealmIdentity?.Invoke(realm);
+        if (realm < _recordedFor.Length && _recordedFor[realm] != null && !ReferenceEquals(_recordedFor[realm], identity))
+        {
+            // Registered again since: what was recorded for the id belonged to the realm removed.
+            _recordedFor[realm] = null;
+            if (realm < _dormant.Length)
+            {
+                _dormant[realm] = null;
+            }
+
+            if (realm < _unservable.Length)
+            {
+                _unservable[realm] = false;
+            }
+        }
+
+        if (realm < _unservable.Length && _unservable[realm])
         {
             return null;
         }
@@ -319,7 +349,17 @@ internal sealed unsafe class PushHub
         }
         else
         {
-            replication = Factory(realm);
+            try
+            {
+                replication = Factory(realm);
+            }
+            catch (Exception)
+            {
+                // Anything the factory did not foresee refuses the realm like a refusal it did: the prologue never throws, and is not retried every tick.
+                replication = null;
+            }
+
+            Record(realm, identity);
             if (replication == null)
             {
                 if (realm >= _unservable.Length)
@@ -337,6 +377,16 @@ internal sealed unsafe class PushHub
         replication.PrimeForTick(tick, Workers);
         RealmsActivated++;
         return replication;
+    }
+
+    private void Record(ushort realm, object identity)
+    {
+        if (realm >= _recordedFor.Length)
+        {
+            Array.Resize(ref _recordedFor, Math.Max(realm + 1, Math.Max(8, _recordedFor.Length * 2)));
+        }
+
+        _recordedFor[realm] = identity;
     }
 
     private void Deactivate(int index)

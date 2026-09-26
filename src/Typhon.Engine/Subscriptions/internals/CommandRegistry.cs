@@ -292,6 +292,12 @@ internal sealed class CommandRegistry
             highest = Math.Max(highest, command.Idx);
         }
 
+        // The ingress ring marks a realm-framed command in its type index's top bit (SubscriptionsIngress.FramedRecordFlag).
+        if (highest >= SubscriptionsIngress.FramedRecordFlag)
+        {
+            throw new InvalidOperationException($"The catalog declares command index {highest}: at most {SubscriptionsIngress.FramedRecordFlag - 1} are carried.");
+        }
+
         var table = new CommandTypeInfo[highest + 1];
         var byStruct = new Dictionary<Type, CommandTypeInfo>();
         var count = 0;

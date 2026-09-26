@@ -27,6 +27,7 @@ public sealed class RealmRegistry
     /// <exception cref="InvalidOperationException">After <c>InitializeArchetypes</c> (run-time registration is not supported yet), or a duplicate.</exception>
     public void Register(RealmId id, RealmConfig config)
     {
+        CheckParentChain(id, config);
         ArgumentNullException.ThrowIfNull(config);
         if (_engine.RealmTable != null)
         {
@@ -50,6 +51,28 @@ public sealed class RealmRegistry
         if (!_pending.TryAdd(id.Value, config))
         {
             throw new InvalidOperationException($"Realm {id.Value} is already registered.");
+        }
+    }
+
+    // The parent tree routes RouteToRealm's subtree (12-realms § 3), walked at most 8 deep on the tick: a cycle or a deeper chain would silently lose
+    // announcements there, so it is refused here, off the tick.
+    private void CheckParentChain(RealmId id, RealmConfig config)
+    {
+        var parent = config?.Parent ?? RealmId.None;
+        for (var depth = 0; !parent.IsNone; depth++)
+        {
+            if (parent == id)
+            {
+                throw new ArgumentException($"Realm {id.Value}: its parent chain comes back to it — the parent tree may not have a cycle.", nameof(config));
+            }
+
+            if (depth >= 8)
+            {
+                throw new ArgumentException($"Realm {id.Value}: its parent chain is deeper than 8 realms.", nameof(config));
+            }
+
+            var next = _engine.RealmTable?.TryGet(parent.Value)?.Config ?? (_pending.TryGetValue(parent.Value, out var pending) ? pending : null);
+            parent = next?.Parent ?? RealmId.None;
         }
     }
 

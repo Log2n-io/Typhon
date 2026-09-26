@@ -125,11 +125,11 @@ internal sealed unsafe partial class FrameAssembler
                     break;
                 case ViewpointSource.Bound:
                     follow = Profiles.BoundEntityOf(profile);
-                    realm = AnchorRealm(session, follow, _anyRealmMoves);
+                    realm = AnchorRealm(session, follow, _anyRealmMoves && _movedEntities.Contains(follow.RawValue));
                     break;
                 case ViewpointSource.Controlled:
                     follow = _sessions.ControlledOf(session);
-                    realm = AnchorRealm(session, follow, _anyRealmMoves && Self == null);
+                    realm = AnchorRealm(session, follow, _anyRealmMoves && Self == null && _movedEntities.Contains(follow.RawValue));
                     break;
                 default:
                     realm = PlacedRealm(session);
@@ -236,7 +236,9 @@ internal sealed unsafe partial class FrameAssembler
 
             // The radius this frame is gathered at: the session's run-time one when SetRadius gave it one, its profile's R′ otherwise (09 § 3–4).
             var radius = _sessions.Radius(session);
-            _pushRadius[n] = radius > 0 ? radius : Profiles.RadiusOf(profile);
+            // Bounded by the variant serving the realm (12-realms § 1.4): SetRadius was checked against the declared profile, whose maximum may be wider
+            // than the window this realm was sized for.
+            _pushRadius[n] = radius > 0 ? Math.Min(radius, Profiles.MaxRadiusOf(profile)) : Profiles.RadiusOf(profile);
             _pushSessions[n++] = session;
             // Only a World session served this tick can fill: a rate class skips the others (the check the frame stage repeats below).
             if (world && (divisor <= 1 || ((_tick + session.Slot) % (uint)divisor) == 0))
@@ -447,7 +449,9 @@ internal sealed unsafe partial class FrameAssembler
     private int[] _anchorRealm = [];
     private ushort[] _anchorGeneration = [];
 
-    // This tick: the fence moved some entity across realms; and every anchor must be read again (the first tick, or one after a tick the track missed).
+    // This tick: the entities the fence moved across realms (their raw ids, reused set); and every anchor must be read again (the first tick, or one
+    // after a tick the track missed).
+    private readonly System.Collections.Generic.HashSet<ulong> _movedEntities = [];
     private bool _anyRealmMoves;
     private bool _anchorsStale;
     private long _realmTick;
@@ -506,6 +510,7 @@ internal sealed unsafe partial class FrameAssembler
         _anchorsStale = _realmTick == 0 || _tick != _realmTick + 1;
         _realmTick = _tick;
         _anyRealmMoves = false;
+        _movedEntities.Clear();
         var states = MultiRealm ? Engine?._stateByRouting : null;
         if (states == null)
         {
@@ -521,9 +526,12 @@ internal sealed unsafe partial class FrameAssembler
             }
 
             _anyRealmMoves = true;
-            foreach (var move in clusters.LastFenceRealmChanges)
+            var moves = clusters.LastFenceRealmChanges;
+            for (var m = 0; m < moves.Count; m++)
             {
+                var move = moves[m];
                 var raw = (ulong)move.EntityId;
+                _movedEntities.Add(raw);
                 for (var slot = Self?.FirstControlling(raw) ?? -1; slot >= 0; slot = Self.NextControlling(slot))
                 {
                     if (_anchorEntity[slot].RawValue == raw)
@@ -606,8 +614,7 @@ internal sealed unsafe partial class FrameAssembler
 
     /// <summary>
     /// Before a <c>RESET</c> that switches the session's realm is published: the transport's view of it (<see cref="SessionRealmView"/>), so a command the
-    /// client builds in the new realm can never be decoded over the old one. A frame refused after this point leaves a view one switch early, which only
-    /// refuses the rare command built in the old realm meanwhile.
+    /// client builds in the new realm can never be decoded over the old one. Called after every point that can refuse the frame, just before it is published.
     /// </summary>
     private void PublishRealmView(SessionId session, SessionFrameState state, bool reset)
     {
@@ -640,6 +647,9 @@ internal sealed unsafe partial class FrameAssembler
 
         state.CommittedRealm = state.PendingRealm;
     }
+
+    /// <summary>A realm's frame for the event encoder (SUB-30); null for none. Serial: the frame prologue.</summary>
+    internal RealmFrame RealmFrameFor(ushort realm) => FrameOf(realm);
 
     /// <summary>The <c>REALM</c> block's frame for <paramref name="realm"/>; <see langword="null"/> for none, which the block writes as <c>REALM(NONE)</c>.</summary>
     private RealmFrame FrameOf(int realm) => ResolveRealm(realm) >= 0 ? (realm == RealmId.Default.Value || !MultiRealm ? Realm : _realmFrames[realm]) : null;
@@ -694,9 +704,19 @@ internal sealed unsafe partial class FrameAssembler
             else
             {
                 _realmKinds[realm] = Profiles.KindIndex(replication?.Kind ?? "");
-                _realmFrames[realm] = realm == RealmId.Default.Value
-                    ? Realm
-                    : SubscriptionsRuntime.BuildRealmFrame(Engine, _options, (ushort)realm, _realmKinds[realm]);
+                try
+                {
+                    _realmFrames[realm] = realm == RealmId.Default.Value
+                        ? Realm
+                        : SubscriptionsRuntime.BuildRealmFrame(Engine, _options, (ushort)realm, _realmKinds[realm]);
+                }
+                catch (ArgumentException)
+                {
+                    // A frame its values cannot make (a registration after Start the REALM validation refuses): no session may be in the realm,
+                    // counted — the tick never throws.
+                    _realmFrames[realm] = null;
+                    _realmKinds[realm] = UnreplicatedRealm;
+                }
             }
         }
 

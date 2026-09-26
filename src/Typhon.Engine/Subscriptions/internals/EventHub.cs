@@ -219,6 +219,12 @@ internal sealed class EventHub
     /// <summary>The served realm's frame, which an event's realm-framed field is quantized over (SUB-30); set by the runtime.</summary>
     internal RealmFrame Realm { get; set; }
 
+    /// <summary>A realm's frame, for an event whose point or entity is in another realm than 0 (SUB-30); set by the runtime. Called in the prologue.</summary>
+    internal Func<ushort, RealmFrame> RealmFrames { get; set; }
+
+    // The frame this tick's event being encoded is framed by: its realm's.
+    private RealmFrame _encodeFrame;
+
     /// <summary>How many ticks the loss count reaches back.</summary>
     public const int SummaryDepth = 256;
 
@@ -551,6 +557,9 @@ internal sealed class EventHub
                         // The routing point is the application's code: whatever it throws drops its event, not the tick.
                         try
                         {
+                            // A position field is framed by the event's realm (SUB-30) — its point's, its entity's or its addressee's — where its hearers are.
+                            var realm = EventRealm(info, payload, ref entities);
+                            _encodeFrame = realm == RealmId.Default.Value || RealmFrames == null ? Realm : RealmFrames(realm) ?? Realm;
                             if (Encode(slot, info, payload, ref entities, one, pack))
                             {
                                 Route(slot, info, payload, target, ref entities, push);
@@ -684,6 +693,30 @@ internal sealed class EventHub
         }
     }
 
+    // The realm an event is heard in: a Near point's or a ToRealm addressee's, a ToKnown's first entity's; realm 0 for a session-addressed route.
+    private ushort EventRealm<TEntities>(EventTypeInfo info, ReadOnlySpan<byte> payload, ref TEntities entities) where TEntities : IEventEntities, allows ref struct
+    {
+        switch (info.Routing)
+        {
+            case EventRouting.Near:
+            case EventRouting.ToRealm:
+                return info.RealmOf?.Invoke(payload) ?? RealmId.Default.Value;
+            case EventRouting.ToKnown:
+                foreach (var offset in info.EntityOffsets)
+                {
+                    var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[offset..]));
+                    if (!entity.IsNull && Resolve(ref entities, entity, out _, out _, out _, out _, out var realm))
+                    {
+                        return realm;
+                    }
+                }
+
+                return RealmId.Default.Value;
+            default:
+                return RealmId.Default.Value;
+        }
+    }
+
     private static ulong CellKey(int cx, int cy, int cz) => ((ulong)(uint)cz << 42) | ((ulong)(uint)cy << 21) | (uint)cx;
 
     private bool Encode<TEntities>(Tick slot, EventTypeInfo info, ReadOnlySpan<byte> payload, ref TEntities entities, scoped Span<double> one,
@@ -723,7 +756,7 @@ internal sealed class EventHub
                     f.Load(payload, one);
                 }
 
-                FieldCodec.WriteNumber(ref w, f.Field, one, Realm);
+                FieldCodec.WriteNumber(ref w, f.Field, one, _encodeFrame);
             }
         }
         catch (ArgumentException)
