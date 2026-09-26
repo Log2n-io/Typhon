@@ -62,7 +62,7 @@ public sealed partial class TatooineSim : IDisposable
     // How each kind of realm is served to sessions (Realms G3, 12-realms § 2.1): planets at the planet's replication cell, an interior as one cell,
     // space at its own 500 m cell. Planet 0 is ConfigureSpatialGrid's realm, served at SubscriptionsOptions.ReplicationCellM.
     private static readonly RealmReplicationConfig PlanetReplication = new() { CellM = TatooineReplication.ReplicationCellM };
-    private static readonly RealmReplicationConfig InteriorReplication = new() { Kind = TatooineReplication.InteriorKind, CellM = WorldBuilder.InteriorEdgeM };
+    internal static readonly RealmReplicationConfig InteriorReplication = new() { Kind = TatooineReplication.InteriorKind, CellM = WorldBuilder.InteriorEdgeM };
     private static readonly RealmReplicationConfig SpaceReplication = new() { Kind = TatooineReplication.SpaceKind, CellM = 500d };
 
     public TatooineSim(SimConfig config)
@@ -202,19 +202,25 @@ public sealed partial class TatooineSim : IDisposable
         // Interiors sleep once unobserved for --interior-sleep seconds (G2): a player walking in wakes one, and pins it while inside.
         var interiorGridConfig = SpatialGridConfig.Flat(Vector2.Zero, new Vector2(WorldBuilder.InteriorEdgeM, WorldBuilder.InteriorEdgeM),
             WorldBuilder.InteriorEdgeM);
-        var interiorGrid = _config.InteriorSleepS > 0f
-            ? new RealmConfig
-            {
-                Grid = interiorGridConfig,
-                WhenUnobserved = RealmUnobserved.Sleep,
-                UnobservedTickDivisor = 1,
-                SleepAfterTicks = Math.Max(1, (int)(_config.InteriorSleepS * _config.TickRateHz)),
-                Replication = InteriorReplication,
-            }
-            : Divided(interiorGridConfig, 1, InteriorReplication);
-        for (var realm = _config.Planets; realm < _config.Planets * (1 + InteriorsPerPlanet); realm++)
+        // Each interior's parent is its planet (Realms G3): a planet's news reaches the players in its buildings (RouteToRealm, subtree).
+        RealmConfig InteriorOf(int planet) => new()
         {
-            Dbe.Realms.Register(new RealmId((ushort)realm), interiorGrid);
+            Grid = interiorGridConfig,
+            WhenUnobserved = _config.InteriorSleepS > 0f ? RealmUnobserved.Sleep : RealmUnobserved.Simulate,
+            UnobservedTickDivisor = 1,
+            SleepAfterTicks = _config.InteriorSleepS > 0f ? Math.Max(1, (int)(_config.InteriorSleepS * _config.TickRateHz)) : 0,
+            Parent = new RealmId((ushort)planet),
+            Replication = InteriorReplication,
+        };
+
+        for (var planet = 0; planet < _config.Planets && InteriorsPerPlanet > 0; planet++)
+        {
+            var interior = InteriorOf(planet);
+            var first = _config.Planets + (planet * InteriorsPerPlanet);
+            for (var realm = first; realm < first + InteriorsPerPlanet; realm++)
+            {
+                Dbe.Realms.Register(new RealmId((ushort)realm), interior);
+            }
         }
 
         // Space (G1c): the last realm, a deep grid — a 16 km cube in 500 m cells, 32 deep — for the f64 starships.

@@ -19,6 +19,38 @@ namespace SwgTatooine;
 /// compiler treats "no change group" as an error rather than as a shape.
 /// </para>
 /// </remarks>
+/// <summary>A god camera asks to look at another planet (Realms G3): the planet's realm id.</summary>
+public struct ViewRealm
+{
+    /// <summary>The planet, 0 to <c>--planets</c> − 1.</summary>
+    public uint Realm;
+}
+
+/// <summary>
+/// News of a realm, heard by every session in it and in the realms under it (Realms G3: <c>RouteToRealm</c> over the parent tree) — a planet's news
+/// reaches the players in its buildings and dungeons.
+/// </summary>
+public struct RealmNews
+{
+    /// <summary>A dungeon opened: <see cref="Subject"/> is its realm, <see cref="Count"/> its party.</summary>
+    public const ushort DungeonOpened = 1;
+
+    /// <summary>A dungeon closed: its party is sent home.</summary>
+    public const ushort DungeonClosed = 2;
+
+    /// <summary>The realm the news is about, and whose subtree hears it.</summary>
+    public ushort Realm;
+
+    /// <summary>What happened.</summary>
+    public ushort What;
+
+    /// <summary>The realm it happened in.</summary>
+    public ushort Subject;
+
+    /// <summary>How many took part.</summary>
+    public ushort Count;
+}
+
 public static class TatooineReplication
 {
     /// <summary>The god camera's profile: the whole planet, every archetype, through a <c>World</c> observer.</summary>
@@ -91,6 +123,27 @@ public static class TatooineReplication
     /// <summary>The god region's near budget, entities (<c>--god-near</c>); 10 000 by default, AC-3's.</summary>
     public static int GodNearBudget { get; set; } = 10_000;
 
+    /// <summary>How many planets a god camera may look at with <see cref="ViewRealm"/> (<c>--planets</c>); planet p is realm p.</summary>
+    public static int Planets { get; set; } = 1;
+
+    // Whether the declarations were made: a measurement run has no replication, and an announcement there has nobody to reach.
+    private static bool _declared;
+
+    // Announcements emitted, for the periodic report.
+    private static long _announced;
+
+    /// <summary>Announces <paramref name="news"/> to its realm's subtree, when this process serves clients. From a serial system.</summary>
+    /// <param name="tick">The tick context of the system this is called from.</param>
+    /// <param name="news">The news.</param>
+    public static void Announce(TickContext tick, in RealmNews news)
+    {
+        if (_declared && tick.Subscriptions != null)
+        {
+            tick.Subscriptions.Emit(in news);
+            System.Threading.Interlocked.Increment(ref _announced);
+        }
+    }
+
     /// <summary>The god region's aggregate tile, metres; its counts refresh once a second.</summary>
     private const double GodAggregateTileM = 256d;
 
@@ -162,6 +215,11 @@ public static class TatooineReplication
             p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>());
             p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
         });
+
+        // Realms G3: a planet's news reaches its subtree, and a god camera moves between planets with a command.
+        subs.Event<RealmNews>(e => e.RouteToRealm(n => new RealmId(n.Realm), subtree: true));
+        subs.Command<ViewRealm>(c => c.Rate(2, 4).Field(v => v.Realm, Codec.VarUInt));
+        _declared = true;
     }
 
     /// <summary>
@@ -200,6 +258,16 @@ public static class TatooineReplication
                 {
                     subs.Enter(e.Session, RealmId.Default);
                 }
+            }
+        }
+
+        // A god camera's move to another planet: its next frame is a RESET carrying the planet's REALM (SUB-29). A player's session follows its player,
+        // and a realm that is not a planet is not the god camera's to enter.
+        foreach (var command in subs.Commands<ViewRealm>())
+        {
+            if (command.Value.Realm < (uint)Planets && string.Equals(subs.SessionKindOf(command.Session), GodKind, StringComparison.Ordinal))
+            {
+                subs.Enter(command.Session, new RealmId((ushort)command.Value.Realm));
             }
         }
     }
@@ -423,7 +491,7 @@ public static class TatooineReplication
             var idf = subs.IdentityFlow;
             Console.Error.WriteLine(
                 $"  identities: {idf.Minted} minted, {idf.Released} released, {idf.Reused} reused; "
-                + $"{subs.EntriesMigrated} entries relocated between clusters");
+                + $"{subs.EntriesMigrated} entries relocated between clusters; {System.Threading.Volatile.Read(ref _announced)} realm news announced");
             var sendPath = subs.SendPath;
             var st = subs.SendTotals;
             var now = System.Diagnostics.Stopwatch.GetTimestamp();

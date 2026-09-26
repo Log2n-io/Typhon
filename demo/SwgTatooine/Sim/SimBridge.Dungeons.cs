@@ -76,12 +76,15 @@ public sealed partial class SimBridge
         var start = Stopwatch.GetTimestamp();
         var realm = (ushort)(FirstDungeonRealm + _nextDungeonSlot++);
         var edge = WorldBuilder.InteriorEdgeM;
+        // Under planet 0, whose players it draws from, and served like an interior: the party's sessions follow their players in (Realms G3).
         Dbe.Realms.Register(new RealmId(realm), new RealmConfig
         {
             Grid = Typhon.Engine.SpatialGridConfig.Flat(Vector2.Zero, new Vector2(edge, edge), edge),
             WhenUnobserved = RealmUnobserved.Sleep,
             UnobservedTickDivisor = 1,
             SleepAfterTicks = Math.Max(1, _config.TickRateHz),
+            Parent = RealmId.Default,
+            Replication = TatooineSim.InteriorReplication,
         });
 
         var dungeon = new Dungeon
@@ -148,6 +151,7 @@ public sealed partial class SimBridge
         dungeon.Party = party.ToArray();
         dungeon.Home = home.ToArray();
         _openDungeons.Add(dungeon);
+        TatooineReplication.Announce(ctx, new RealmNews { Realm = 0, What = RealmNews.DungeonOpened, Subject = realm, Count = (ushort)party.Count });
         _dungeonsOpened++;
         _dungeonPartyTotal += party.Count;
         _dungeonOpenTicks += Stopwatch.GetTimestamp() - start;
@@ -182,6 +186,10 @@ public sealed partial class SimBridge
 
             tx.Commit();
         }
+
+        // Heard on planet 0 and in the dungeon itself, before it closes: its party is still inside until the fence sends it home.
+        TatooineReplication.Announce(ctx,
+            new RealmNews { Realm = 0, What = RealmNews.DungeonClosed, Subject = dungeon.Realm, Count = (ushort)dungeon.Party.Length });
 
         // Closing from here: nothing may enter; the fence that applies the teleports and the destroys finds it empty and removes it.
         Dbe.Realms.Unregister(new RealmId(dungeon.Realm));

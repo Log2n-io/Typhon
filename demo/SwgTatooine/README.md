@@ -292,6 +292,12 @@ Useful flags:
 | `--dungeons N` | 0 | Dungeon instances over the run: a realm registered at run time for a party, emptied and unregistered when it leaves |
 | `--dungeon-interval S` / `--dungeon-stay S` | 10 / 20 | Seconds between openings / seconds a party stays |
 | `--dungeon-party N` / `--dungeon-mobs N` | 8 / 24 | Players per party / mobs per dungeon |
+
+Served (`--serve`), each kind of realm is replicated at its own scale (Realms G3): planets at the planet cell, an interior or a dungeon as one cell
+whose player sessions see everything in it, space at its 500 m cell. A player's session follows its player through doors, shuttles and dungeons, each
+switch one `RESET` over the new realm. Interiors and dungeons sit under their planet in the realm tree, so a planet's `RealmNews` (a dungeon opening or
+closing) reaches the players inside its buildings too. A god camera starts on planet 0 and moves with the `ViewRealm` command; `SwgTatooine.Bots
+--kind god --god-tour S --planets N` tours the planets every S seconds and reports the switches applied and the news heard.
 | `--tick-log <path>` | — | Every measured tick's duration, one per line |
 | `--seed <n>` | fixed | Every random decision, so two runs build the same world |
 

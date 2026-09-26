@@ -23,6 +23,11 @@ var connectBatch = int.Parse(Arg("--connect-batch") ?? "1");
 // A god camera's region edge, metres: what a ClientRegion god profile (the server's --god-region) observes. The default is the swarm's own.
 var regionM = Arg("--region-m");
 
+// --god-tour <seconds> --planets <n>: every god camera moves to the next planet on that period (Realms G3), and the report counts the switches applied
+// and the RealmNews announcements heard.
+var tourSeconds = int.Parse(Arg("--god-tour") ?? "0");
+var planets = int.Parse(Arg("--planets") ?? "1");
+
 // --fuzz <clients> [--fuzz-rate <msgs/s per client>] [--fuzz-mode mixed|valid|churn|mixed-slow]: hostile connections instead of a swarm, for
 // AC-17's live half (Fuzzer). Rate 0 is the control arm.
 var fuzz = Arg("--fuzz");
@@ -42,6 +47,8 @@ var options = new BotSwarmOptions
     ConnectBatch = connectBatch,
     Kind = kind,
     RegionRadiusM = regionM == null ? new BotSwarmOptions().RegionRadiusM : double.Parse(regionM, System.Globalization.CultureInfo.InvariantCulture),
+    TourEverySeconds = tourSeconds,
+    Planets = planets,
 };
 
 Console.WriteLine($"connecting {bots} {kind} bots to {endpoint} …");
@@ -187,6 +194,8 @@ Console.WriteLine($"ran {(DateTime.UtcNow - started).TotalSeconds:F0}s over {swa
 Console.WriteLine($"connected at end: {swarm.Connected} of {opened}");
 Console.WriteLine($"messages received: {swarm.MessagesReceived}");
 Console.WriteLine($"receive-loop faults: {swarm.Faults}");
+var (toursAsked, realmSwitches, news) = swarm.Realms();
+Console.WriteLine($"realms: {toursAsked} tours asked, {realmSwitches} realm switches applied, {news} RealmNews heard");
 
 if (swarm.Disconnects.Count == 0)
 {

@@ -199,6 +199,25 @@ class RealmEventTests : TestBase<RealmEventTests>
     }
 
     [Test]
+    public void AnAnnouncementToRealm0ReachesItsSessions()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var sessions = OpenIn(harness, 0, 1);
+        Spawn(dbe, 0, 5, 5);
+        Run(harness, sessions, 3);
+
+        harness.Subscriptions.Commands.Emit(new RealmAnnounce { R = 0, Seq = 41 });
+        Run(harness, sessions, 1);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(Seqs(harness, sessions[0], nameof(RealmAnnounce)), Is.EqualTo(new[] { 41 }));
+            Assert.That(Seqs(harness, sessions[1], nameof(RealmAnnounce)), Is.Empty, "realm 1 is not below realm 0");
+        });
+    }
+
+    [Test]
     public void ARealmLessNearRouteIsRefusedWithSeveralRealms()
     {
         using var dbe = SetupEngine();

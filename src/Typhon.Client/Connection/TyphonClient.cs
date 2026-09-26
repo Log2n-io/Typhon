@@ -340,7 +340,7 @@ public sealed class TyphonClient : IAsyncDisposable
             // may not even be able to describe.
             Plan = CatalogPlan.Compile(CatalogSerializer.FromUtf8(welcome.CatalogJson));
             Store = new WorldStore(Plan, _options.SegmentHistory);
-            _applier = new FrameApplier(Store);
+            _applier = new FrameApplier(Store, _options.Events);
             return;
         }
 
@@ -351,7 +351,7 @@ public sealed class TyphonClient : IAsyncDisposable
         }
 
         // The catalog was skipped because the hash matched. The store is kept; the server will send whatever the session needs to be told.
-        _applier ??= new FrameApplier(Store);
+        _applier ??= new FrameApplier(Store, _options.Events);
     }
 
     private async Task ReceiveLoopAsync(CancellationToken ct)

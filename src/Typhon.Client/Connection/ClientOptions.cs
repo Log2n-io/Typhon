@@ -68,6 +68,9 @@ public sealed class ClientOptions
     /// <summary>A recorder to hand every inbound message to, or <see langword="null"/>.</summary>
     public Recorder Recorder { get; init; }
 
+    /// <summary>Receives every frame's events as they are applied, on the receive loop; <see langword="null"/> drops them.</summary>
+    public IEventHandler Events { get; init; }
+
     /// <summary>Throws when the options cannot produce a connection.</summary>
     internal void Validate()
     {

@@ -76,6 +76,7 @@ public sealed partial class TatooineSim
         TatooineReplication.PlayerLeaveM = _config.PlayerLeaveM;
         TatooineReplication.GodRegionMaxEdgeM = _config.GodRegionMaxEdgeM;
         TatooineReplication.GodNearBudget = _config.GodNearBudget;
+        TatooineReplication.Planets = _config.Planets;
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
