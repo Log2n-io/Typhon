@@ -329,6 +329,12 @@ internal sealed class SessionFrameState
     /// <summary>Whether the next frame must carry <c>RESET</c> and refill the view from nothing.</summary>
     public bool PendingReset { get; set; }
 
+    /// <summary>
+    /// Whether a frame carrying the session's <c>REALM</c> has been published (<c>typhon.3</c>, R5.3). Until it has, every frame is a <c>RESET</c>, which is the
+    /// only frame a <c>REALM</c> may travel in — a skipped first frame is therefore retried rather than lost.
+    /// </summary>
+    public bool RealmSent { get; set; }
+
     /// <summary>Whether the initial fill under the enter budget has completed — the <c>VIEW_COMPLETE</c> flag.</summary>
     public bool ViewComplete { get; set; }
 
@@ -380,6 +386,7 @@ internal sealed class SessionFrameState
         Generation = generation;
         Profile = null;
         PendingReset = false;
+        RealmSent = false;
         ViewComplete = false;
         FramesProduced = 0;
         DegradeLevel = 0;

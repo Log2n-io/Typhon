@@ -165,11 +165,13 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
             Assert.That(creature.Position.Kind, Is.EqualTo(CatalogPosition.MotionKind));
             Assert.That(creature.Position.Model, Is.EqualTo(CatalogPosition.LinearModel));
             Assert.That(creature.Position.Pos.Kind, Is.EqualTo(CodecKind.Pos2));
-            Assert.That(creature.Position.Pos.Bits, Is.EqualTo(Codec.DefaultPositionBits));
+            Assert.That((creature.Position.Pos.Bits, creature.Position.Pos.Min), Is.EqualTo((0, (double[])null)),
+                "realm-framed (typhon.3): width and bounds are the REALM block's, never the catalog's");
             Assert.That(creature.Position.Vel.Kind, Is.EqualTo(CodecKind.Vel2));
 
-            // The same objects the compiler derived, not a second derivation of the same numbers: what the catalog says IS what the encoder was built with.
-            Assert.That(creature.Position.Pos, Is.SameAs(creaturePlan.Position.Pos));
+            // The velocity is the object the compiler derived, not a second derivation of the same numbers: what the catalog says IS what the encoder was
+            // built with. The position is its kind alone.
+            Assert.That(creature.Position.Pos.Kind, Is.EqualTo(creaturePlan.Position.Pos.Kind));
             Assert.That(creature.Position.Vel, Is.SameAs(creaturePlan.Position.Vel));
             Assert.That(creature.Owner, Is.Null);
 
@@ -203,11 +205,9 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
             Assert.That(BuiltInCommands.HasClientRegionShape(catalog.Commands[0]), Is.True,
                 "the engine interprets this command itself, so it has to be the engine's shape and not merely its name");
 
-            // The region's vertices quantize with the world's own position codec, so a decoded footprint can never leave the world (W28).
+            // The region's vertices are pos3 over the session's realm frame (typhon.3, D-8), so a decoded footprint can never leave the realm (W28).
             var vertices = Array.Find(catalog.Commands[0].Fields, f => f.Name == BuiltInCommands.RegionVerticesField);
-            var creaturePos = ArchetypeNamed(catalog, nameof(ProjCreature)).Position.Pos;
-            Assert.That(vertices.Codec.Of.Min, Is.EqualTo(creaturePos.Min));
-            Assert.That(vertices.Codec.Of.Bits, Is.EqualTo(creaturePos.Bits));
+            Assert.That((vertices.Codec.Of.Kind, vertices.Codec.Of.Bits, vertices.Codec.Of.Min), Is.EqualTo((CodecKind.Pos3, 0, (double[])null)));
 
             Assert.That(catalog.Commands[1].Idx, Is.EqualTo(ProtocolConstants.FirstAppCommandIdx), "application commands start above the reserved range");
             Assert.That(catalog.Commands[1].Name, Is.EqualTo(nameof(SwgMoveTo)));
@@ -319,10 +319,10 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
         HashSet<string> allowed =
         [
             "protocol", "major", "minor", "app", "name", "revision", "tick", "periodUs", "pingHz",
-            "limits", "frameBytes", "clientMessageBytes", "resumeGraceMs", "sessionKinds",
+            "limits", "frameBytes", "clientMessageBytes", "resumeGraceMs", "sessionKinds", "realmKinds",
             "archetypes", "idx", "groups", "position", "kind", "model", "pos", "vel", "fields", "codec", "group", "onEnter", "enum", "smoothing", "owner",
             "enums", "events", "scope", "commands", "delivery", "rate", "perSec", "burst",
-            "grids", "origin", "cell", "dims", "archetypeIdx", "metrics", "unit", "labels",
+            "grids", "tileCells", "archetypeIdx", "metrics", "unit", "labels",
             "t", "bits", "min", "max", "scale", "unitExp", "n", "maxBytes", "of", "minCount", "maxCount", "fixedBytes",
         ];
 
@@ -544,15 +544,16 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
     /// <summary>
     /// A profile asking for a client region in a world with no replicated 2-D position is refused: the region's vertices have nothing to quantize against.
     /// </summary>
+    /// <summary>
+    /// A region needs no archetype's position codec (typhon.3, D-8): its vertices are pos3 over the session's realm frame, so a runtime that replicates no
+    /// positioned archetype still offers regions.
+    /// </summary>
     [Test]
-    public void AClientRegionWithNoPositionIsRefused()
+    public void AClientRegionNeedsNoPositionedArchetype()
     {
         using var dbe = SetupEngine();
-
-        var ex = Assert.Throws<InvalidOperationException>(() => Build(dbe, subs =>
-            subs.Profile("region", p => p.ClientRegion(maxEdgeM: 512))));
-
-        Assert.That(ex.Message, Does.Contain("region"));
+        var catalog = Build(dbe, subs => subs.Profile("region", p => p.ClientRegion(maxEdgeM: 512))).Canonical;
+        Assert.That(BuiltInCommands.HasClientRegionShape(catalog.Commands[0]), Is.True);
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

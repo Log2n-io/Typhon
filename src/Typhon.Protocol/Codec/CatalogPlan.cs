@@ -61,7 +61,8 @@ public sealed class FieldPlan
             Components = Element.Components;
         }
 
-        if (Kind is CodecKind.Quant or CodecKind.Pos2 or CodecKind.Pos3)
+        // A position's quantum is the realm frame's (typhon.3), per frame: RealmFrame.Step.
+        if (Kind is CodecKind.Quant)
         {
             QuantStep = new double[Components];
             for (var i = 0; i < Components; i++)
@@ -117,7 +118,7 @@ public sealed class FieldPlan
     /// <summary>For a velocity: the unit's binary exponent — one code is <c>2^VelocityUnitExp</c> metres per tick (W5).</summary>
     public int VelocityUnitExp { get; }
 
-    /// <summary>For a <c>quant</c> or position codec, the step on each axis, computed once exactly as <see cref="WireMath.QuantStep"/> does.</summary>
+    /// <summary>For a <c>quant</c> codec, its step, computed once exactly as <see cref="WireMath.QuantStep"/> does; <see langword="null"/> otherwise.</summary>
     public double[] QuantStep { get; }
 
     /// <summary>The number of names of the field's enum, or 0 when it has none; a server refuses a command value at or above it (W13).</summary>
@@ -406,6 +407,7 @@ public sealed class CatalogPlan
         SessionMetrics = session.ToArray();
 
         Grids = catalog.Grids ?? [];
+        RealmKinds = catalog.RealmKinds is { Length: > 0 } kinds ? kinds : DefaultRealmKinds;
         for (var i = 0; i < Grids.Length; i++)
         {
             if (Grids[i].Idx != i)
@@ -429,6 +431,12 @@ public sealed class CatalogPlan
 
     /// <summary>The grids, by index.</summary>
     public CatalogGrid[] Grids { get; }
+
+    /// <summary>The realm kinds a catalog that declares none has: the default kind alone.</summary>
+    public static readonly string[] DefaultRealmKinds = [""];
+
+    /// <summary>The realm kinds, in canonical order: a <c>REALM</c> block's <c>kindIdx</c> indexes this. <see cref="DefaultRealmKinds"/> when none.</summary>
+    public string[] RealmKinds { get; }
 
     /// <summary>Compiles a catalog that is already canonical.</summary>
     /// <param name="canonical">A validated, canonical catalog.</param>

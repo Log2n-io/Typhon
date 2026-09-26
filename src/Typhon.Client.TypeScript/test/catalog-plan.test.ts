@@ -48,13 +48,6 @@ const cases: [string, (c: CatalogObject) => void, RegExp][] = [
     /at most 255 elements/,
   ],
   [
-    'a position codec without one bound per axis',
-    (c) => {
-      archetype(c, 'Buoy').position!.pos.min = [-8192];
-    },
-    /pos2 needs 2 min and max/,
-  ],
-  [
     'a velocity without a unit exponent',
     (c) => {
       archetype(c, 'Drone').position!.vel = { t: 'vel3', bits: 8 };
@@ -161,46 +154,18 @@ const cases: [string, (c: CatalogObject) => void, RegExp][] = [
     /not a byte-aligned number/,
   ],
   [
-    'a grid of one axis',
+    'a grid of no tile',
     (c) => {
-      c.grids[0] = { idx: 0, origin: [0], cell: 1, dims: [4], archetypes: [1] };
+      c.grids[0] = { idx: 0, tileCells: 0, archetypes: [1] };
     },
-    /2 or 3 dims, with one origin per axis/,
+    /a tile of at least one replication cell/,
   ],
   [
-    'a grid with fewer origins than axes',
+    'a grid of a fractional tile',
     (c) => {
-      c.grids[0]!.origin = [0];
+      c.grids[0]!.tileCells = 1.5;
     },
-    /2 or 3 dims, with one origin per axis/,
-  ],
-  [
-    'a grid of a zero cell',
-    (c) => {
-      c.grids[0]!.cell = 0;
-    },
-    /finite origin and a positive finite cell/,
-  ],
-  [
-    'a grid with an infinite origin',
-    (c) => {
-      c.grids[0]!.origin = [0, Infinity];
-    },
-    /finite origin and a positive finite cell/,
-  ],
-  [
-    'a grid with a fractional dimension',
-    (c) => {
-      c.grids[0]!.dims = [16, 1.5];
-    },
-    /every dimension must be an integer of at least 1/,
-  ],
-  [
-    'a grid beyond 2^24 cells',
-    (c) => {
-      c.grids[0]!.dims = [4097, 4096];
-    },
-    /more than 16777216 cells/,
+    /a tile of at least one replication cell/,
   ],
   [
     'a grid counting an archetype that does not exist',

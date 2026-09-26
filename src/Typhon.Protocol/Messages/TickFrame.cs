@@ -50,6 +50,9 @@ public static class BlockTypes
     /// <summary>Source lifecycle.</summary>
     public const byte Sources = 0x08;
 
+    /// <summary>The session's realm frame (<c>typhon.3</c>): only in a <c>RESET</c> frame, and always its first block.</summary>
+    public const byte Realm = 0x09;
+
     /// <summary>An application-defined payload.</summary>
     public const byte Ext = 0x7F;
 }
@@ -89,6 +92,13 @@ public interface ITickSink : IFieldSink
     /// <param name="flags">The frame's flags.</param>
     /// <param name="periodUs">The elapsed interval's period when <see cref="TickFlags.Period"/> is set, otherwise 0.</param>
     void BeginTick(uint tick, TickFlags flags, uint periodUs);
+
+    /// <summary>
+    /// A <c>REALM</c> block: the session's realm frame from here on, or <see langword="null"/> for <c>REALM(NONE)</c>. Delivered after the reader adopted it,
+    /// so every positioned value that follows decodes over it.
+    /// </summary>
+    /// <param name="frame">The new frame, or <see langword="null"/>.</param>
+    void Realm(RealmFrame frame);
 
     /// <summary>An <c>ENTITIES</c> block begins.</summary>
     /// <param name="archetype">Its archetype.</param>
@@ -185,17 +195,37 @@ public interface ITickSink : IFieldSink
 /// </summary>
 public static class TickReader
 {
+    /// <summary>
+    /// Decodes one self-contained <c>TICK</c> message: the session holds no realm frame before it, so any positioned value must follow a <c>REALM</c> block of
+    /// the same message. A session decoder keeps its frame across messages with the other overload.
+    /// </summary>
+    /// <typeparam name="TSink">The sink type.</typeparam>
+    /// <param name="message">The whole message.</param>
+    /// <param name="plan">The compiled catalog.</param>
+    /// <param name="sink">Receives the frame.</param>
+    /// <param name="blocks">Which blocks reach the sink.</param>
+    /// <exception cref="WireFormatException">The message is malformed.</exception>
+    public static void Read<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink, TickBlocks blocks = TickBlocks.All)
+        where TSink : ITickSink, allows ref struct
+    {
+        RealmFrame frame = null;
+        Read(message, plan, ref frame, ref sink, blocks);
+    }
+
     /// <summary>Decodes one <c>TICK</c> message, type byte included.</summary>
     /// <typeparam name="TSink">The sink type; a struct keeps the calls inlined.</typeparam>
     /// <param name="message">The whole message.</param>
     /// <param name="plan">The session's compiled catalog.</param>
+    /// <param name="frame">
+    /// The session's realm frame, held across messages by the caller: every positioned value decodes over it, and a <c>REALM</c> block replaces it (SUB-30).
+    /// </param>
     /// <param name="sink">Receives the frame.</param>
     /// <param name="blocks">
     /// Which blocks reach the sink; the others are skipped by their length, unread. A store reads a frame twice — every block but <c>EVENTS</c>, then
     /// <c>EVENTS</c> alone — to apply § 5's order whatever order the blocks travel in.
     /// </param>
     /// <exception cref="WireFormatException">The message is malformed.</exception>
-    public static void Read<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink, TickBlocks blocks = TickBlocks.All)
+    public static void Read<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref RealmFrame frame, ref TSink sink, TickBlocks blocks = TickBlocks.All)
         where TSink : ITickSink, allows ref struct
     {
         var reader = new WireReader(message);
@@ -212,11 +242,20 @@ public static class TickReader
         // One ENTITIES block per archetype (03 § 10): a record in one block for an entity entering in another would apply out of order.
         Span<ulong> seenArchetypes = stackalloc ulong[(ProtocolConstants.MaxArchetypes + 63) / 64];
         seenArchetypes.Clear();
+        var first = true;
         while (!reader.IsAtEnd)
         {
             var type = reader.ReadU8();
             var length = reader.ReadVaruAtMost(reader.Remaining, "block length");
             var block = reader.Slice(length);
+
+            // Refused whichever pass reads the frame (12-realms § 5.2): only a RESET frame may carry a REALM, and only as its first block.
+            if (type == BlockTypes.Realm && (!first || (flags & TickFlags.Reset) == 0))
+            {
+                throw WireFormatException.Malformed(first ? "a REALM block in a frame without RESET" : "a REALM block that is not the frame's first");
+            }
+
+            first = false;
             if ((blocks & (type == BlockTypes.Events ? TickBlocks.Events : TickBlocks.AllButEvents)) == 0)
             {
                 continue;
@@ -224,17 +263,21 @@ public static class TickReader
 
             switch (type)
             {
+                case BlockTypes.Realm:
+                    frame = ReadRealm(ref block, plan);
+                    sink.Realm(frame);
+                    break;
                 case BlockTypes.Entities:
-                    ReadEntities(ref block, plan, tick, seenArchetypes, ref sink);
+                    ReadEntities(ref block, plan, tick, seenArchetypes, frame, ref sink);
                     break;
                 case BlockTypes.Events:
-                    ReadEvents(ref block, plan, tick, ref sink);
+                    ReadEvents(ref block, plan, tick, frame, ref sink);
                     break;
                 case BlockTypes.Self:
-                    ReadSelf(ref block, plan, tick, ref sink);
+                    ReadSelf(ref block, plan, tick, frame, ref sink);
                     break;
                 case BlockTypes.Agg:
-                    ReadAggregate(ref block, plan, ref sink);
+                    ReadAggregate(ref block, plan, frame, ref sink);
                     break;
                 case BlockTypes.Stats:
                     ReadStats(ref block, plan, tick, ref sink);
@@ -288,7 +331,24 @@ public static class TickReader
         sink.EndTick();
     }
 
-    private static void ReadEntities<TSink>(ref WireReader r, CatalogPlan plan, uint tick, scoped Span<ulong> seenArchetypes, ref TSink sink)
+    private static RealmFrame ReadRealm(ref WireReader r, CatalogPlan plan)
+    {
+        var frame = RealmFrame.Read(ref r, plan.RealmKinds.Length);
+
+        // An AGG grid over this frame must stay within the cell bound a store allocates for (W28): refused with the frame, before any AGG of it.
+        foreach (var grid in frame == null ? [] : plan.Grids)
+        {
+            if (frame.AggregateCellCount(grid.TileCells) > CatalogValidator.MaxGridCells)
+            {
+                throw WireFormatException.Malformed($"grid {grid.Idx} over this REALM has more than {CatalogValidator.MaxGridCells} cells");
+            }
+        }
+
+        return frame;
+    }
+
+    private static void ReadEntities<TSink>(ref WireReader r, CatalogPlan plan, uint tick, scoped Span<ulong> seenArchetypes, RealmFrame frame,
+        ref TSink sink)
         where TSink : ITickSink, allows ref struct
     {
         var archetype = plan.Archetype(r.ReadVaruAtMost(int.MaxValue, "archetype index"));
@@ -301,6 +361,11 @@ public static class TickReader
 
         seen |= bit;
         var position = archetype.Position;
+        if (position != null && frame == null)
+        {
+            throw WireFormatException.Protocol($"an ENTITIES block for positioned archetype '{archetype.Name}' while the session holds no realm");
+        }
+
         sink.BeginEntities(archetype);
         Span<double> p = stackalloc double[3];
         Span<double> v = stackalloc double[3];
@@ -319,7 +384,7 @@ public static class TickReader
                 if (position != null)
                 {
                     dims = position.Dims;
-                    FieldCodec.ReadNumber(ref r, position.Pos, tick, p);
+                    FieldCodec.ReadNumber(ref r, position.Pos, tick, p, frame);
                     if (position.Moving)
                     {
                         velDims = ReadSegmentTail(ref r, position, tick, v, out t0, out epoch);
@@ -327,10 +392,10 @@ public static class TickReader
                 }
 
                 sink.Enter(netId, p[..dims], v[..velDims], t0, epoch);
-                FieldCodec.ReadSection(ref r, archetype.OnEnter, tick, ref sink);
+                FieldCodec.ReadSection(ref r, archetype.OnEnter, tick, ref sink, frame);
                 foreach (var section in archetype.GroupSections)
                 {
-                    FieldCodec.ReadSection(ref r, section, tick, ref sink);
+                    FieldCodec.ReadSection(ref r, section, tick, ref sink, frame);
                 }
             }
         }
@@ -348,7 +413,7 @@ public static class TickReader
             for (var n = ReadRunLength(ref r); n > 0; n--)
             {
                 var netId = NextNetId(ref r, ref prev);
-                FieldCodec.ReadNumber(ref r, position.Pos, tick, p);
+                FieldCodec.ReadNumber(ref r, position.Pos, tick, p, frame);
                 var velDims = ReadSegmentTail(ref r, position, tick, v, out var t0, out var epoch);
                 sink.Segment(netId, p[..position.Dims], v[..velDims], t0, epoch);
             }
@@ -373,7 +438,7 @@ public static class TickReader
                 {
                     if ((mask & (1 << g)) != 0)
                     {
-                        FieldCodec.ReadSection(ref r, archetype.GroupSections[g], tick, ref sink);
+                        FieldCodec.ReadSection(ref r, archetype.GroupSections[g], tick, ref sink, frame);
                     }
                 }
             }
@@ -437,18 +502,18 @@ public static class TickReader
         return (uint)next;
     }
 
-    private static void ReadEvents<TSink>(ref WireReader r, CatalogPlan plan, uint tick, ref TSink sink)
+    private static void ReadEvents<TSink>(ref WireReader r, CatalogPlan plan, uint tick, RealmFrame frame, ref TSink sink)
         where TSink : ITickSink, allows ref struct
     {
         for (var n = r.ReadVaru(); n > 0; n--)
         {
             var type = plan.Event(r.ReadVaruAtMost(int.MaxValue, "event index"));
             sink.Event(type);
-            FieldCodec.ReadSection(ref r, type.Body, tick, ref sink);
+            FieldCodec.ReadSection(ref r, type.Body, tick, ref sink, frame);
         }
     }
 
-    private static void ReadSelf<TSink>(ref WireReader r, CatalogPlan plan, uint tick, ref TSink sink)
+    private static void ReadSelf<TSink>(ref WireReader r, CatalogPlan plan, uint tick, RealmFrame frame, ref TSink sink)
         where TSink : ITickSink, allows ref struct
     {
         var archetypeIdx = r.ReadVaruAtMost(int.MaxValue, "archetype index");
@@ -481,12 +546,12 @@ public static class TickReader
         {
             if ((mask & (1 << g)) != 0)
             {
-                FieldCodec.ReadSection(ref r, archetype.OwnerSections[g], tick, ref sink);
+                FieldCodec.ReadSection(ref r, archetype.OwnerSections[g], tick, ref sink, frame);
             }
         }
     }
 
-    private static void ReadAggregate<TSink>(ref WireReader r, CatalogPlan plan, ref TSink sink)
+    private static void ReadAggregate<TSink>(ref WireReader r, CatalogPlan plan, RealmFrame frame, ref TSink sink)
         where TSink : ITickSink, allows ref struct
     {
         var gridIdx = r.ReadVaruAtMost(int.MaxValue, "grid index");
@@ -498,11 +563,13 @@ public static class TickReader
         var grid = plan.Grids[gridIdx];
         var flags = r.ReadU8();
         sink.BeginAggregate(grid, (flags & 1) != 0);
-        var cellCount = 1L;
-        foreach (var d in grid.Dims ?? [])
+        // The grid's dimensions are the frame's (typhon.3, 12-realms § 5.3): no realm, no grid.
+        if (frame == null)
         {
-            cellCount *= d;
+            throw WireFormatException.Protocol($"an AGG block for grid {gridIdx} while the session holds no realm");
         }
+
+        var cellCount = frame.AggregateCellCount(grid.TileCells);
 
         var archetypes = grid.Archetypes?.Length ?? 0;
         if (archetypes > ProtocolConstants.MaxArchetypes)
@@ -666,6 +733,25 @@ public static class TickWriter
     /// <param name="mark">The value <see cref="BeginBlock"/> returned.</param>
     public static void EndBlock(ref WireWriter w, int mark) => w.EndLengthPrefixed(mark);
 
+    /// <summary>Writes a whole <c>REALM</c> block: <paramref name="frame"/>, or <c>REALM(NONE)</c> when it is <see langword="null"/>. First block of a
+    /// <c>RESET</c> frame only.</summary>
+    /// <param name="w">The writer.</param>
+    /// <param name="frame">The session's new realm frame, or <see langword="null"/>.</param>
+    public static void WriteRealm(ref WireWriter w, RealmFrame frame)
+    {
+        var mark = BeginBlock(ref w, BlockTypes.Realm);
+        if (frame == null)
+        {
+            RealmFrame.WriteNone(ref w);
+        }
+        else
+        {
+            frame.Write(ref w);
+        }
+
+        EndBlock(ref w, mark);
+    }
+
     /// <summary>Writes a whole <c>ENTITIES</c> block. Each list must be sorted by ascending, distinct netId.</summary>
     /// <param name="w">The writer.</param>
     /// <param name="frameTick">The frame's tick: every segment's start tick must be at or before it, and less than 2¹⁶ ticks older.</param>
@@ -674,6 +760,7 @@ public static class TickWriter
     /// <param name="segments">Motion segments.</param>
     /// <param name="states">State records.</param>
     /// <param name="leaves">Leaving netIds.</param>
+    /// <param name="frame">The realm frame positions are quantized over; required for a positioned archetype.</param>
     public static void WriteEntities(
         ref WireWriter w,
         uint frameTick,
@@ -681,7 +768,8 @@ public static class TickWriter
         IReadOnlyList<EnterRecord> enters,
         IReadOnlyList<SegmentRecord> segments,
         IReadOnlyList<StateRecord> states,
-        IReadOnlyList<uint> leaves)
+        IReadOnlyList<uint> leaves,
+        RealmFrame frame = null)
     {
         var mark = BeginBlock(ref w, BlockTypes.Entities);
         w.WriteVaru((uint)archetype.Idx);
@@ -694,17 +782,17 @@ public static class TickWriter
             WriteGap(ref w, ref prev, e.NetId);
             if (position != null)
             {
-                FieldCodec.WriteNumber(ref w, position.Pos, e.Position);
+                FieldCodec.WriteNumber(ref w, position.Pos, e.Position, frame);
                 if (position.Moving)
                 {
                     WriteSegmentTail(ref w, frameTick, position, e.Velocity, e.T0, e.Epoch);
                 }
             }
 
-            FieldCodec.WriteSection(ref w, archetype.OnEnter, e.Values.For);
+            FieldCodec.WriteSection(ref w, archetype.OnEnter, e.Values.For, frame);
             foreach (var section in archetype.GroupSections)
             {
-                FieldCodec.WriteSection(ref w, section, e.Values.For);
+                FieldCodec.WriteSection(ref w, section, e.Values.For, frame);
             }
         }
 
@@ -718,7 +806,7 @@ public static class TickWriter
         foreach (var s in segments)
         {
             WriteGap(ref w, ref prev, s.NetId);
-            FieldCodec.WriteNumber(ref w, position.Pos, s.Position);
+            FieldCodec.WriteNumber(ref w, position.Pos, s.Position, frame);
             WriteSegmentTail(ref w, frameTick, position, s.Velocity, s.T0, s.Epoch);
         }
 
@@ -737,7 +825,7 @@ public static class TickWriter
             {
                 if ((s.GroupMask & (1 << g)) != 0)
                 {
-                    FieldCodec.WriteSection(ref w, archetype.GroupSections[g], s.Values.For);
+                    FieldCodec.WriteSection(ref w, archetype.GroupSections[g], s.Values.For, frame);
                 }
             }
         }
@@ -776,14 +864,15 @@ public static class TickWriter
     /// <summary>Writes a whole <c>EVENTS</c> block.</summary>
     /// <param name="w">The writer.</param>
     /// <param name="events">Each event's type and field values, in emission order.</param>
-    public static void WriteEvents(ref WireWriter w, IReadOnlyList<(MessagePlan Type, RecordValues Values)> events)
+    /// <param name="frame">The realm frame a position field is quantized over.</param>
+    public static void WriteEvents(ref WireWriter w, IReadOnlyList<(MessagePlan Type, RecordValues Values)> events, RealmFrame frame = null)
     {
         var mark = BeginBlock(ref w, BlockTypes.Events);
         w.WriteVaru((uint)events.Count);
         foreach (var (type, values) in events)
         {
             w.WriteVaru((uint)type.Idx);
-            FieldCodec.WriteSection(ref w, type.Body, values.For);
+            FieldCodec.WriteSection(ref w, type.Body, values.For, frame);
         }
 
         EndBlock(ref w, mark);
@@ -809,7 +898,9 @@ public static class TickWriter
     /// <param name="lastSeq">The highest drained command sequence.</param>
     /// <param name="ownerMask">The owner groups carried.</param>
     /// <param name="values">Their fields' values.</param>
-    public static void WriteSelf(ref WireWriter w, ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask, RecordValues values)
+    /// <param name="frame">The realm frame a position field is quantized over.</param>
+    public static void WriteSelf(ref WireWriter w, ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask, RecordValues values,
+        RealmFrame frame = null)
     {
         if (netId == 0)
         {
@@ -830,7 +921,7 @@ public static class TickWriter
         {
             if ((ownerMask & (1 << g)) != 0)
             {
-                FieldCodec.WriteSection(ref w, archetype.OwnerSections[g], values.For);
+                FieldCodec.WriteSection(ref w, archetype.OwnerSections[g], values.For, frame);
             }
         }
 

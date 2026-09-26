@@ -75,12 +75,16 @@ public class GoldenCodecTests
             new CatalogCodec { Kind = CodecKind.Quant, Min = [0], Max = [1], Bits = 24 }, S(0), S(0.5), S(0.999999), S(1));
         Vector("codec-quant-32", "quant at 32 bits, codes ≥ 2³¹, up to the top code.",
             new CatalogCodec { Kind = CodecKind.Quant, Min = [-1000], Max = [1000], Bits = 32 }, S(0), S(999.99), S(-1000), S(1000));
-        Vector("codec-pos2", "pos2 over ±8192 at 24 bits (W3): corners, origin (code 8 388 608), max clamp, one NaN axis.", CatalogSamples.Pos2(),
+        // Realm-framed (typhon.3, SUB-30): the codec is the kind alone, and width and bounds are the vector's frame, which a decoder takes as the session's.
+        Vector("codec-pos2", "pos2 over a flat frame of ±8192 at 24 bits (W3): corners, origin (code 8 388 608), max clamp, one NaN axis.",
+            CatalogSamples.Pos2(), CatalogSamples.SwgFrame,
             V(-8192, -8192), V(0, 0), V(8191.9990234375, -0.0009765625), V(8192, 8192), V(Nan, 12.5));
-        Vector("codec-pos3", "pos3 at 16 bits, 6 bytes per value.",
-            new CatalogCodec { Kind = CodecKind.Pos3, Min = [-1024, -64, -1024], Max = [1024, 64, 1024], Bits = 16 }, V(0, 0, 0), V(-1024, 63.99, 1023.97));
-        Vector("codec-pos3-24", "pos3 at 24 bits, 9 bytes per value.",
-            new CatalogCodec { Kind = CodecKind.Pos3, Min = [-8192, -8192, -8192], Max = [8192, 8192, 8192], Bits = 24 }, V(1.5, -2.25, 8191.999));
+        Vector("codec-pos3", "pos3 over a deep frame at 16 bits, 6 bytes per value.", new CatalogCodec { Kind = CodecKind.Pos3 },
+            new RealmFrame(9, 2, 0, 0, 16, 64, deep: true, [-1024, -64, -1024], [1024, 64, 1024]), V(0, 0, 0), V(-1024, 63.99, 1023.97));
+        Vector("codec-pos3-24", "pos3 over a deep frame at 24 bits, 9 bytes per value.", new CatalogCodec { Kind = CodecKind.Pos3 },
+            new RealmFrame(9, 2, 0, 0, 24, 64, deep: true, [-8192, -8192, -8192], [8192, 8192, 8192]), V(1.5, -2.25, 8191.999));
+        Vector("codec-pos3-32", "pos3 over a deep frame at 32 bits, 12 bytes per value: codes at and past 2³¹.", new CatalogCodec { Kind = CodecKind.Pos3 },
+            new RealmFrame(9, 2, 0, 0, 32, 64, deep: true, [-1e9, -1e9, -1e9], [1e9, 1e9, 1e9]), V(0, 999_999_999.5, -1e9), V(123.456, -0.001, 1e9));
         Vector("codec-vec2", "vec2 with scale 0.5 at 8 bits (W4): symmetric clamp, ties away from zero; the wire-only code −128 decodes as −127.",
             new CatalogCodec { Kind = CodecKind.Vec2, Scale = 0.5, Bits = 8 }, V(0, 0), V(0.25, -0.25), V(1000, -1000), V(Nan, 63.5), Raw(0x80, 0x80));
         Vector("codec-vec3", "vec3 with scale 0.001 at 16 bits.",
@@ -252,20 +256,23 @@ public class GoldenCodecTests
         var buffer = new byte[512];
         var w = new WireWriter(buffer);
         var cases = new List<JsonObject>();
+        // A client sends a region at the command width over its frame (RealmFrame.ForCommands): 32 bits, whatever the realm's own.
+        var frame = CatalogSamples.KitchenFrame.ForCommands;
         foreach (var count in new[] { 3, 4, 16 })
         {
-            var flat = new double[count * 2];
+            var flat = new double[count * 3];
             for (var i = 0; i < count; i++)
             {
-                flat[2 * i] = -8192 + i * 1000.5;
-                flat[2 * i + 1] = 8191 - i * 333.25;
+                flat[3 * i] = -8192 + i * 1000.5;
+                flat[3 * i + 1] = 8191 - i * 333.25;
+                flat[3 * i + 2] = -64 + i * 7.75;
             }
 
             var start = w.Position;
-            FieldCodec.WriteSection(ref w, new SectionPlanBuilder(vertices).Plan, _ => new FieldValue { Numbers = flat });
+            FieldCodec.WriteSection(ref w, new SectionPlanBuilder(vertices).Plan, _ => new FieldValue { Numbers = flat }, frame);
             var r = new WireReader(buffer.AsSpan(start, w.Position - start));
             var sink = new RecordingSink();
-            FieldCodec.ReadSection(ref r, new SectionPlanBuilder(vertices).Plan, FrameTick, ref sink);
+            FieldCodec.ReadSection(ref r, new SectionPlanBuilder(vertices).Plan, FrameTick, ref sink, frame);
             var decoded = (JsonObject)sink.Log[0]!;
             cases.Add(new JsonObject
             {
@@ -274,7 +281,8 @@ public class GoldenCodecTests
             });
         }
 
-        Finish("codec-list", "list<pos2, 3..16> — ClientRegion's vertices (W28): the minimum, a quad, and the maximum.", vertices, cases, w.Written.ToArray());
+        Finish("codec-list", "list<pos3, 3..16> — ClientRegion's vertices (W28, D-8) at the 32-bit command width over the session's frame: the minimum, a "
+            + "quad, and the maximum.", vertices, cases, w.Written.ToArray(), extra: new JsonObject { ["frame"] = CatalogSamples.FrameJson(frame) });
     }
 
     /// <summary>
@@ -341,9 +349,15 @@ public class GoldenCodecTests
     }
 
     private static void Vector(string name, string description, CatalogCodec codec, params FieldValue[] inputs) =>
-        Vector(name, description, codec, FrameTick, inputs);
+        Vector(name, description, codec, FrameTick, null, inputs);
 
-    private static void Vector(string name, string description, CatalogCodec codec, uint frameTick, params FieldValue[] inputs)
+    private static void Vector(string name, string description, CatalogCodec codec, uint frameTick, params FieldValue[] inputs) =>
+        Vector(name, description, codec, frameTick, null, inputs);
+
+    private static void Vector(string name, string description, CatalogCodec codec, RealmFrame frame, params FieldValue[] inputs) =>
+        Vector(name, description, codec, FrameTick, frame, inputs);
+
+    private static void Vector(string name, string description, CatalogCodec codec, uint frameTick, RealmFrame frame, params FieldValue[] inputs)
     {
         var plan = new FieldPlanBuilder(codec).Plan;
         var buffer = new byte[1024];
@@ -351,22 +365,23 @@ public class GoldenCodecTests
         var cases = new List<JsonObject>();
         foreach (var input in inputs)
         {
-            cases.Add(EncodeCase(ref w, plan, frameTick, input));
+            cases.Add(EncodeCase(ref w, plan, frameTick, input, frame));
         }
 
-        Finish(name, description, plan, cases, w.Written.ToArray(), frameTick);
+        Finish(name, description, plan, cases, w.Written.ToArray(), frameTick,
+            frame == null ? null : new JsonObject { ["frame"] = CatalogSamples.FrameJson(frame) });
     }
 
     /// <summary>
     /// Encodes one case and decodes it back. A value carrying <see cref="FieldValue.Bytes"/> instead of numbers is a decode-only case: its raw bytes are
     /// written verbatim, and its expectation has no <c>input</c> — a wire form no encoder produces but every decoder must read.
     /// </summary>
-    private static JsonObject EncodeCase(ref WireWriter w, FieldPlan plan, uint frameTick, FieldValue input)
+    private static JsonObject EncodeCase(ref WireWriter w, FieldPlan plan, uint frameTick, FieldValue input, RealmFrame frame = null)
     {
         var start = w.Position;
         if (input.Numbers != null)
         {
-            FieldCodec.WriteNumber(ref w, plan, input.Numbers);
+            FieldCodec.WriteNumber(ref w, plan, input.Numbers, frame);
         }
         else
         {
@@ -376,7 +391,7 @@ public class GoldenCodecTests
         var length = w.Position - start;
         Span<double> decoded = stackalloc double[4];
         var r = new WireReader(w.Written.Slice(start, length));
-        FieldCodec.ReadNumber(ref r, plan, frameTick, decoded);
+        FieldCodec.ReadNumber(ref r, plan, frameTick, decoded, frame);
         Assert.That(r.IsAtEnd, Is.True, $"{plan.Codec.Type}: decode consumed {r.Position} of {length} bytes");
 
         var json = new JsonObject();

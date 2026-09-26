@@ -65,6 +65,19 @@ public class GoldenRefusalTests
         byte[] emptyLedger = [BlockTypes.Entities, 0x05, ledger, 0x00, 0x00, 0x00, 0x00];
         Tick(cases, "entities-block-twice-for-one-archetype", [MessageTypes.Tick, 0x70, 0x11, 0x01, 0x00, 0x00, .. emptyLedger, .. emptyLedger]);
 
+        // typhon.3 (12-realms § 5.2): a REALM only as the first block of a RESET frame, with a valid frame; nothing positioned while no realm is held.
+        byte[] realm = Realm(CatalogSamples.KitchenFrame);
+        byte[] reset = [MessageTypes.Tick, 0x70, 0x11, 0x01, 0x00, (byte)TickFlags.Reset];
+        Tick(cases, "realm-without-reset", [MessageTypes.Tick, 0x70, 0x11, 0x01, 0x00, 0x00, .. realm]);
+        Tick(cases, "realm-not-first", [.. reset, .. emptyLedger, .. realm]);
+        Tick(cases, "realm-bits-20", [.. reset, .. RealmWith(realm, 10, 20)]);
+        Tick(cases, "realm-min-not-below-max", [.. reset, .. RealmWith(realm, 43, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xC0, 0xC0)]);
+        Tick(cases, "realm-kind-out-of-range", [.. reset, .. RealmWith(realm, 5, 0x03)]);
+        Tick(cases, "realm-reserved-flag", [.. reset, .. RealmWith(realm, 4, 0x06)]);
+        Tick(cases, "realm-cell-zero", [.. reset, .. RealmWith(realm, 11, 0, 0, 0, 0, 0, 0, 0, 0)]);
+        Tick(cases, "positioned-entities-without-realm", Block(BlockTypes.Entities, beacon, 0x00, 0x00, 0x00, 0x00), CloseCodes.ProtocolError, held: false);
+        Tick(cases, "aggregate-without-realm", Block(BlockTypes.Agg, 0x00, 0x00, 0x00), CloseCodes.ProtocolError, held: false);
+
         var steer = (byte)Kitchen.CommandByName("Steer").Idx;
         Commands(cases, "commands-count-zero", [MessageTypes.Commands, 0, 0, 0, 0, 0x00]);
         Commands(cases, "commands-unknown-type", [MessageTypes.Commands, 0, 0, 0, 0, 0x01, 0x63, 0x00, 0x00]);
@@ -92,8 +105,10 @@ public class GoldenRefusalTests
         Golden.Assert("wire-refusals", [], new JsonObject
         {
             ["description"] = "Byte sequences every decoder must refuse, with the close code it must refuse them with. kind: codec (one value of `codec`), "
-                + "tick and commands (a whole message against catalog-kitchen-sink), message (a whole control message of `type`).",
+                + "tick and commands (a whole message against catalog-kitchen-sink; a tick case decodes with `frame` held unless it says held: false), "
+                + "message (a whole control message of `type`).",
             ["catalog"] = "catalog-kitchen-sink",
+            ["frame"] = CatalogSamples.FrameJson(CatalogSamples.KitchenFrame),
             ["cases"] = cases,
         });
     }
@@ -129,16 +144,43 @@ public class GoldenRefusalTests
         });
     }
 
-    private static void Tick(JsonArray cases, string name, byte[] bytes, ushort expected = CloseCodes.MalformedPayload)
+    private static void Tick(JsonArray cases, string name, byte[] bytes, ushort expected = CloseCodes.MalformedPayload, bool held = true)
     {
         var code = Refusal(name, bytes, b =>
         {
             var sink = new RecordingSink();
-            TickReader.Read(b, Kitchen, ref sink);
+            var frame = held ? CatalogSamples.KitchenFrame : null;
+            TickReader.Read(b, Kitchen, ref frame, ref sink);
         });
 
         Assert.That(code, Is.EqualTo(expected), name);
-        cases.Add(new JsonObject { ["name"] = name, ["kind"] = "tick", ["hex"] = Golden.Hex(bytes), ["closeCode"] = code });
+        var json = new JsonObject { ["name"] = name, ["kind"] = "tick", ["hex"] = Golden.Hex(bytes), ["closeCode"] = code };
+        if (!held)
+        {
+            json["held"] = false;
+        }
+
+        cases.Add(json);
+    }
+
+    /// <summary>A whole REALM block: type, length, content.</summary>
+    private static byte[] Realm(RealmFrame frame)
+    {
+        var buffer = new byte[128];
+        var w = new WireWriter(buffer);
+        TickWriter.WriteRealm(ref w, frame);
+        return w.Written.ToArray();
+    }
+
+    /// <summary>
+    /// A REALM block with the bytes at content offset <paramref name="at"/> replaced: id 0, generation 2, flags 4, kind 5, tag 6, bits 10, cell 11, min 19,
+    /// max 43 (after the type and a one-byte length).
+    /// </summary>
+    private static byte[] RealmWith(byte[] block, int at, params byte[] bytes)
+    {
+        var copy = (byte[])block.Clone();
+        bytes.CopyTo(copy, 2 + at);
+        return copy;
     }
 
     private static void Commands(JsonArray cases, string name, byte[] bytes)
@@ -147,7 +189,7 @@ public class GoldenRefusalTests
         var code = Refusal(name, bytes, b =>
         {
             var sink = new RecordingSink();
-            CommandsMessage.Read(b, Kitchen, ref sink);
+            CommandsMessage.Read(b, Kitchen, ref sink, CatalogSamples.KitchenFrame);
             delivered = sink.Log.Count;
         });
 

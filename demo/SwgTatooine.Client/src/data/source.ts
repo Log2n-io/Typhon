@@ -227,6 +227,8 @@ export class TyphonSource implements DataSource {
         : new RegionSender({
             plan,
             send: (type, values) => this.commands?.enqueue(type, values),
+            // The session's realm (typhon.3): a region is a polygon in a flat realm, a polyhedron in a deep one.
+            realm: () => this.applier?.realmFrame ?? null,
             onRejected: () => {
               // The server kept the previous region, so the NEXT identical request is the one not worth sending — which is a fact about what was last
               // sent, not a reason to forget where the camera is. Clearing pendingRegion also zeroed the reported effective radius and made the
@@ -283,9 +285,14 @@ export class TyphonSource implements DataSource {
     region?.poll();
     const connection = this.client.connection;
     if (connection !== null) {
-      this.commands?.flush(applier.tick, (bytes) => {
-        connection.send(bytes);
-      });
+      // Realm-framed fields (a region's vertices) travel over the session's realm frame (typhon.3).
+      this.commands?.flush(
+        applier.tick,
+        (bytes) => {
+          connection.send(bytes);
+        },
+        applier.realmFrame,
+      );
     }
   }
 

@@ -117,6 +117,8 @@ internal sealed class RecordingSink : ITickSink, ICommandSink
     public void BeginTick(uint tick, TickFlags flags, uint periodUs) =>
         Log.Add(new JsonObject { ["call"] = "beginTick", ["tick"] = tick, ["flags"] = (int)flags, ["periodUs"] = periodUs });
 
+    public void Realm(RealmFrame frame) => Log.Add(new JsonObject { ["call"] = "realm", ["frame"] = CatalogSamples.FrameJson(frame) });
+
     public void BeginEntities(ArchetypePlan archetype) => Log.Add(new JsonObject { ["call"] = "beginEntities", ["archetype"] = archetype.Name });
 
     public void Enter(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch) =>

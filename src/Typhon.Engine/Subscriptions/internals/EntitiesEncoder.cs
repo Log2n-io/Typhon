@@ -189,7 +189,18 @@ internal static unsafe class EntitiesEncoder
     /// <param name="w">The writer.</param>
     /// <param name="tick">The frame's tick, truncated to the wire's <c>u32</c>.</param>
     /// <param name="flags">The frame's flags.</param>
-    public static void WriteHeader(ref WireWriter w, uint tick, TickFlags flags) => TickWriter.WriteHeader(ref w, tick, flags);
+    /// <param name="realm">
+    /// The session's realm frame: a <c>RESET</c> frame carries it as its first block (<c>typhon.3</c>, 12-realms § 5.2) — every reset, so a client that lost
+    /// its store also re-learns its frame. <see langword="null"/> writes none, which only a runtime without a spatial grid does.
+    /// </param>
+    public static void WriteHeader(ref WireWriter w, uint tick, TickFlags flags, RealmFrame realm = null)
+    {
+        TickWriter.WriteHeader(ref w, tick, flags);
+        if ((flags & TickFlags.Reset) != 0 && realm != null)
+        {
+            TickWriter.WriteRealm(ref w, realm);
+        }
+    }
 
     /// <summary>
     /// Writes one archetype's <c>ENTITIES</c> block. Each sub-list must already be sorted ascending by netId and hold no netId twice.

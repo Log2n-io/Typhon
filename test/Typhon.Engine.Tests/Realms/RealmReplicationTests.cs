@@ -77,6 +77,7 @@ unsafe class RealmReplicationTests : TestBase<RealmReplicationTests>
         harness.Replica(session).NetIds(harness.CatalogPlan.ArchetypeByName(nameof(RealmUnit)).Idx).Length;
 
     [Test]
+    [VerifiesRule("SUB-30")]
     public void RealmFramedQuantizationEqualsTheCatalogCodecForRealmZero()
     {
         using var dbe = SetupEngine();

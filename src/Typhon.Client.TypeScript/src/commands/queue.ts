@@ -1,7 +1,22 @@
 import type { CatalogPlan, MessagePlan } from '../protocol/catalog.js';
 import { writeCommands, type CommandInput } from '../protocol/commands.js';
 import { writeSection, type FieldValues } from '../protocol/field-codec.js';
+import { ProtocolConstants } from '../protocol/constants.js';
+import { RealmFrame } from '../protocol/realm-frame.js';
 import { varuSize, WireWriter } from '../protocol/writer.js';
+
+/** Any frame at the command width: a queued command's size depends on its values' widths, never on the realm's bounds. */
+const MEASURING_FRAME = new RealmFrame(
+  0,
+  0,
+  0,
+  0,
+  ProtocolConstants.commandPositionBits,
+  1,
+  true,
+  [-1, -1, -1],
+  [1, 1, 1],
+);
 
 /** What {@link CommandQueue.enqueue} returns instead of a sequence number. */
 export const CommandRefused = {
@@ -124,9 +139,10 @@ export class CommandQueue {
    * Returns the messages sent; 0 when nothing was pending. Each message's bytes are valid until the next call.
    *
    * `clientTick` is **the newest server tick this client had applied when the batch was built** (§ 10) — never a
-   * predicted tick, never a local frame counter: `FrameApplier.tick`.
+   * predicted tick, never a local frame counter: `FrameApplier.tick`. `frame` is the session's realm frame
+   * (`FrameApplier.realmFrame`), which a realm-framed field — a position, a region's vertices — travels over.
    */
-  flush(clientTick: number, send: (message: Uint8Array) => void): number {
+  flush(clientTick: number, send: (message: Uint8Array) => void, frame: RealmFrame | null = null): number {
     const pending = this.pending;
     if (pending.length === 0) {
       return 0;
@@ -151,7 +167,7 @@ export class CommandQueue {
       }
 
       this.writer.reset();
-      writeCommands(this.writer, clientTick, batch);
+      writeCommands(this.writer, clientTick, batch, frame);
       send(this.writer.written());
       messages++;
       from = to;
@@ -173,7 +189,8 @@ export class CommandQueue {
 
   private measure(type: MessagePlan, values: FieldValues): number {
     this.measuring.reset();
-    writeSection(this.measuring, type.body, values, true);
+    // A realm-framed field's width is the command width whatever the realm (typhon.3), so any frame measures it.
+    writeSection(this.measuring, type.body, values, true, MEASURING_FRAME);
     return varuSize(type.idx) + 2 + this.measuring.position;
   }
 

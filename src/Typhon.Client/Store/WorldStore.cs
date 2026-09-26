@@ -97,6 +97,21 @@ public sealed class WorldStore
     /// <summary>The aggregate grids, by grid index.</summary>
     public AggregateGrid[] Aggregates { get; }
 
+    /// <summary>
+    /// The realm the session is in (<c>typhon.3</c>): the frame every position this store holds was decoded over, or <see langword="null"/> before the
+    /// first <c>REALM</c> and after a <c>REALM(NONE)</c>.
+    /// </summary>
+    public RealmFrame Realm { get; private set; }
+
+    /// <summary>The name of <see cref="Realm"/>'s kind, from the catalog's <c>realmKinds</c>; <see langword="null"/> in no realm.</summary>
+    public string RealmKind => Realm == null ? null : Plan.RealmKinds[Realm.KindIdx];
+
+    /// <summary>
+    /// Raised when a <c>REALM</c> block changes the session's realm: the previous frame (or <see langword="null"/>) and the new one (or
+    /// <see langword="null"/>). Raised once, after the <c>RESET</c> that carried it cleared the store and before any of the frame's records apply.
+    /// </summary>
+    public event Action<RealmFrame, RealmFrame> RealmChanged;
+
     /// <summary>The latest server-scope metric values, by <see cref="CatalogPlan.ServerMetrics"/> position.</summary>
     public double[][] ServerMetricValues { get; }
 
@@ -214,6 +229,22 @@ public sealed class WorldStore
         Sources.Clear();
     }
 
+    /// <summary>Adopts a <c>REALM</c> block's frame: every aggregate grid is re-laid over it, and <see cref="RealmChanged"/> fires when it changed.</summary>
+    internal void SetRealm(RealmFrame frame)
+    {
+        var previous = Realm;
+        Realm = frame;
+        foreach (var grid in Aggregates)
+        {
+            grid.Frame(frame);
+        }
+
+        if (!Equals(previous, frame))
+        {
+            RealmChanged?.Invoke(previous, frame);
+        }
+    }
+
     internal void Reset()
     {
         foreach (var a in Archetypes)
@@ -311,14 +342,26 @@ public sealed class AggregateGrid
     {
         Grid = grid;
         ArchetypeCount = grid.Archetypes?.Length ?? 0;
-        var cells = 1L;
-        foreach (var d in grid.Dims ?? [])
+    }
+
+    /// <summary>Lays the grid over a realm's frame (<c>typhon.3</c>): origin and dimensions are the frame's, the tile <c>tileCells × cellM</c>.</summary>
+    internal void Frame(RealmFrame frame)
+    {
+        Origin = frame == null ? [0d, 0d, 0d] : [frame.Min[0], frame.Min[1], frame.Min[2]];
+        TileM = frame == null ? 0d : Grid.TileCells * frame.CellM;
+        Dims = frame == null ? [0, 0, 0] : [frame.AggregateDim(0, Grid.TileCells), frame.AggregateDim(1, Grid.TileCells), frame.AggregateDim(2, Grid.TileCells)];
+        var cells = frame == null ? 0 : Math.Min(frame.AggregateCellCount(Grid.TileCells), MaxCells);
+        if (cells != CellCount)
         {
-            cells *= Math.Max(0, d);
-            cells = Math.Min(cells, MaxCells + 1);
+            CellCount = (int)cells;
+            Counts = [];
+        }
+        else
+        {
+            Array.Clear(Counts);
         }
 
-        CellCount = (int)Math.Min(cells, MaxCells);
+        Changed.Clear();
     }
 
     /// <summary>The grid.</summary>
@@ -327,8 +370,17 @@ public sealed class AggregateGrid
     /// <summary>Counts per cell.</summary>
     public int ArchetypeCount { get; }
 
-    /// <summary>Cells in the grid, capped at 2²⁴.</summary>
-    public int CellCount { get; }
+    /// <summary>Cells in the grid over the session's realm, capped at 2²⁴; 0 in no realm.</summary>
+    public int CellCount { get; private set; }
+
+    /// <summary>The grid's origin over the session's realm: the frame's lower bounds, three axes.</summary>
+    public double[] Origin { get; private set; } = [0d, 0d, 0d];
+
+    /// <summary>The tile's side over the session's realm, in metres.</summary>
+    public double TileM { get; private set; }
+
+    /// <summary>Cells per axis over the session's realm, three axes (1 on z in a flat realm).</summary>
+    public int[] Dims { get; private set; } = [0, 0, 0];
 
     /// <summary><c>CellCount × ArchetypeCount</c> counts, allocated on the first <c>AGG</c> for this grid.</summary>
     public uint[] Counts { get; private set; } = [];

@@ -22,6 +22,12 @@ internal sealed unsafe partial class FrameAssembler
     /// <summary>The push path, when some profile observes an archetype.</summary>
     internal PushReplication Push;
 
+    /// <summary>The served realm's frame, which every <c>RESET</c> frame carries as its first block (<c>typhon.3</c>); set by the runtime.</summary>
+    internal RealmFrame Realm;
+
+    // A REALM block at its largest: type, length, u16 id, u16 generation, flags, varu kind, u32 tag, u8 bits, f64 cell, six f64 bounds.
+    private const int RealmBlockBound = 1 + 2 + 2 + 2 + 1 + 5 + 4 + 1 + 8 + (6 * 8);
+
     /// <summary>The declared profiles, which name each session's observer.</summary>
     internal SubscriptionProfiles Profiles;
 
@@ -434,6 +440,10 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
+        // A session's first published frame is a RESET carrying its REALM (typhon.3), and only once it has something to say: a frame for the REALM alone
+        // would be one more frame whose presence depends on when the session connected. Nothing was published before it, so the store it clears is empty.
+        reset |= !state.RealmSent && Realm != null;
+
         var send = SendStateOf(slot);
         if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick) || SkipPolicy.AcknowledgementLag(send->ProducedTick, send->AckedTick) > _lagBoundTicks
             || !send->TryBeginFrame(out var sequence, out var recycled))
@@ -442,9 +452,9 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        var buffer = scratch.Bytes(64 + bytes + SelfBound(in self));
+        var buffer = scratch.Bytes(64 + RealmBlockBound + bytes + SelfBound(in self));
         var writer = new WireWriter(buffer);
-        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, reset ? TickFlags.Reset : TickFlags.None);
+        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, reset ? TickFlags.Reset : TickFlags.None, Realm);
         WriteSelf(ref writer, in self, scratch);
         if (count > 0)
         {
@@ -469,6 +479,7 @@ internal sealed unsafe partial class FrameAssembler
         _eventsLastTick[slot] = (uint)_tick;
         _eventsLastGeneration[slot] = session.Generation;
         state.PendingReset = false;
+        state.RealmSent |= reset;
         state.BytesPublished += length;
         state.FramesProduced++;
         state.FramesSinceDegrade++;
@@ -853,12 +864,21 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
+        // A session's first published frame is a RESET carrying its REALM (typhon.3), and only once it has something to say: a frame for the REALM alone
+        // would be one more frame whose presence depends on when the session connected. Nothing was published before it, so the store it clears is empty
+        // and nothing gathered above assumed otherwise — it is not a view reset, and is not counted as one.
+        if (!reset && !state.RealmSent && Realm != null)
+        {
+            reset = true;
+            flags |= TickFlags.Reset;
+        }
+
         var bound = UpperBound(scratch) + (emitStats ? stats.MaxBlockBytes : 0) + (eventCount > 0 ? eventBytes + 16 : 0)
             + (aggWrite ? 24 + (aggRows * 5 * (1 + aggCounts.ArchetypeCount)) : 0) + (debugWrite ? 16 + DebugGrid.MaxBytes + debugGeometry : 0)
-            + SelfBound(in self);
+            + SelfBound(in self) + RealmBlockBound;
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
-        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags);
+        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags, Realm);
         for (var a = 0; a < _plans.Length; a++)
         {
             if (scratch.Count(a, FrameListKind.Enter) == 0 && scratch.Count(a, FrameListKind.Segment) == 0 && scratch.Count(a, FrameListKind.State) == 0
@@ -971,6 +991,7 @@ internal sealed unsafe partial class FrameAssembler
 
         state.BytesPublished += length;
         state.PendingReset = false;
+        state.RealmSent |= reset;
         state.FramesProduced++;
         state.FramesSinceDegrade++;
         scratch.AddReady(session);

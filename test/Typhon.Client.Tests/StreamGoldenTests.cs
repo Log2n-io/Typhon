@@ -85,17 +85,18 @@ public class StreamGoldenTests
         // Frame 1 — a RESET fill of every kind of archetype, owner state, aggregates and metrics.
         var w = new WireWriter(buffer);
         TickWriter.WriteHeader(ref w, 1000, TickFlags.Reset | TickFlags.ViewComplete);
+        TickWriter.WriteRealm(ref w, TestFrames.Kitchen);
         TickWriter.WriteEntities(ref w, 1000, beacon,
             [Enter(3, [100, 200], ("channel", 1), ("strength", 0.5), ("drift", -1)), Enter(4, [-50.25, 12], ("channel", 2), ("strength", 8), ("drift", 7))],
-            [], [], []);
+            [], [], [], TestFrames.Kitchen);
         TickWriter.WriteEntities(ref w, 1000, buoy,
-            [new EnterRecord { NetId = 10, Position = [1, 2], T0 = 999, Epoch = 4, Values = Values(("depth", -3), ("reading", 12345)) }], [], [], []);
-        TickWriter.WriteEntities(ref w, 1000, drone, [DroneEnter(100, 1000), DroneEnter(101, 998)], [], [], []);
-        TickWriter.WriteEntities(ref w, 1000, ledger, [new EnterRecord { NetId = 7, Values = LedgerValues(77, -5) }], [], [], []);
+            [new EnterRecord { NetId = 10, Position = [1, 2], T0 = 999, Epoch = 4, Values = Values(("depth", -3), ("reading", 12345)) }], [], [], [], TestFrames.Kitchen);
+        TickWriter.WriteEntities(ref w, 1000, drone, [DroneEnter(100, 1000), DroneEnter(101, 998)], [], [], [], TestFrames.Kitchen);
+        TickWriter.WriteEntities(ref w, 1000, ledger, [new EnterRecord { NetId = 7, Values = LedgerValues(77, -5) }], [], [], [], TestFrames.Kitchen);
         TickWriter.WriteSelf(ref w, drone, 100, 5, 0b11, new RecordValues
         {
             ["manifest"] = FieldValue.Of([1, 2]), ["fuel"] = FieldValue.Of(2.5), ["pin"] = FieldValue.Of(42), ["vault"] = FieldValue.Of(1),
-        });
+        }, TestFrames.Kitchen);
         TickWriter.WriteAggregate(ref w, plan.Grids[0], reset: true, [(1u, [2u, 1u]), (5u, [0u, 3u])]);
         TickWriter.WriteStats(ref w, plan, new Dictionary<string, double[]>
         {
@@ -107,19 +108,19 @@ public class StreamGoldenTests
         w = new WireWriter(buffer);
         TickWriter.WriteHeader(ref w, 1001, TickFlags.None, periodUs: 100_000);
         TickWriter.WriteEntities(ref w, 1001, beacon, [], [],
-            [new StateRecord { NetId = 4, GroupMask = 1, Values = Values(("strength", 1.5), ("drift", 2)) }], [3]);
-        TickWriter.WriteEntities(ref w, 1001, buoy, [], [new SegmentRecord { NetId = 10, Position = [1.5, 2.5], T0 = 1001, Epoch = 4 }], [], []);
+            [new StateRecord { NetId = 4, GroupMask = 1, Values = Values(("strength", 1.5), ("drift", 2)) }], [3], TestFrames.Kitchen);
+        TickWriter.WriteEntities(ref w, 1001, buoy, [], [new SegmentRecord { NetId = 10, Position = [1.5, 2.5], T0 = 1001, Epoch = 4 }], [], [], TestFrames.Kitchen);
         var flags = Values(("armed", 0), ("lights", 1), ("stance", 1));
         TickWriter.WriteEntities(ref w, 1001, drone,
             [],
             [new SegmentRecord { NetId = 100, Position = [11, 21, -31], Velocity = [0.25, 0, 0], T0 = 1001, Epoch = 1 }],
             [new StateRecord { NetId = 101, GroupMask = 0b001, Values = flags }],
-            [101]);
+            [101], TestFrames.Kitchen);
         TickWriter.WriteEvents(ref w,
         [
             (plan.EventByName("Ping"), new RecordValues { ["from"] = FieldValue.Of(101), ["path"] = FieldValue.Of(0, 0), ["loud"] = FieldValue.Of(1) }),
-        ]);
-        TickWriter.WriteSelf(ref w, drone, 100, 6, 0b10, new RecordValues { ["pin"] = FieldValue.Of(43), ["vault"] = FieldValue.Of(0) });
+        ], TestFrames.Kitchen);
+        TickWriter.WriteSelf(ref w, drone, 100, 6, 0b10, new RecordValues { ["pin"] = FieldValue.Of(43), ["vault"] = FieldValue.Of(0) }, TestFrames.Kitchen);
         TickWriter.WriteAcks(ref w, [(6, AckReasons.Rejected)]);
         TickWriter.WriteSources(ref w, [(9, SourceStatus.Applied, 0)]);
         TickWriter.WriteAggregate(ref w, plan.Grids[0], reset: false, [(1u, [0u, 0u]), (7u, [4u, 4u])]);
@@ -137,15 +138,16 @@ public class StreamGoldenTests
             }),
             (plan.EventByName("Ping"), new RecordValues { ["from"] = FieldValue.Of(102), ["path"] = FieldValue.Of(1, 1), ["loud"] = FieldValue.Of(0) }),
             (plan.EventByName("Ping"), new RecordValues { ["from"] = FieldValue.Of(101), ["path"] = FieldValue.Of(1, 1), ["loud"] = FieldValue.Of(1) }),
-        ]);
-        TickWriter.WriteEntities(ref w, 1002, drone, [DroneEnter(102, 1002)], [], [], []);
-        TickWriter.WriteEntities(ref w, 1002, ledger, [new EnterRecord { NetId = 3, Values = LedgerValues(9, 5) }], [], [], []);
+        ], TestFrames.Kitchen);
+        TickWriter.WriteEntities(ref w, 1002, drone, [DroneEnter(102, 1002)], [], [], [], TestFrames.Kitchen);
+        TickWriter.WriteEntities(ref w, 1002, ledger, [new EnterRecord { NetId = 3, Values = LedgerValues(9, 5) }], [], [], [], TestFrames.Kitchen);
         frames.Add(w.Written.ToArray());
 
         // Frame 4 — RESET: only what this frame carries survives.
         w = new WireWriter(buffer);
         TickWriter.WriteHeader(ref w, 1003, TickFlags.Reset);
-        TickWriter.WriteEntities(ref w, 1003, beacon, [Enter(50, [0, 0], ("channel", 3), ("strength", 0), ("drift", 0))], [], [], []);
+        TickWriter.WriteRealm(ref w, TestFrames.Kitchen);
+        TickWriter.WriteEntities(ref w, 1003, beacon, [Enter(50, [0, 0], ("channel", 3), ("strength", 0), ("drift", 0))], [], [], [], TestFrames.Kitchen);
         frames.Add(w.Written.ToArray());
 
         return frames;

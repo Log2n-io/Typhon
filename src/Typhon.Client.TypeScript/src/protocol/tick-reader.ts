@@ -6,10 +6,11 @@ import {
   type MessagePlan,
   type MetricPlan,
 } from './catalog.js';
-import { BlockType, MessageType, SourceStatus, TickFlags } from './constants.js';
+import { BlockType, MessageType, ProtocolConstants, SourceStatus, TickFlags } from './constants.js';
 import { malformed, protocolError } from './errors.js';
 import { readNumber, readSection, type FieldSink } from './field-codec.js';
 import { WireReader } from './reader.js';
+import { RealmFrame } from './realm-frame.js';
 import type { ArchetypeStore } from '../store/archetype-store.js';
 
 /**
@@ -20,6 +21,11 @@ import type { ArchetypeStore } from '../store/archetype-store.js';
 export interface TickSink extends FieldSink {
   /** A frame begins. `periodUs` is the elapsed interval's period when {@link TickFlags.Period} is set, otherwise 0. */
   beginTick(tick: number, flags: number, periodUs: number): void;
+  /**
+   * A `REALM` block (`typhon.3`): the session's frame from here on, or `null` for `REALM(NONE)`. Delivered after the
+   * reader adopted it ({@link TickReader.realm}), so every positioned value that follows decodes over it.
+   */
+  realm(frame: RealmFrame | null): void;
   /** An `ENTITIES` block begins; the records that follow belong to `archetype`. */
   beginEntities(archetype: ArchetypePlan): void;
   /**
@@ -91,7 +97,7 @@ export interface EntitiesTarget {
  * A generated decoder for one archetype's `ENTITIES` block, after its archetype index: every record, straight into the
  * target's columns. {@link TickReader} still reads the block's framing and checks it is the archetype's only one.
  */
-export type EntitiesDecoder = (r: WireReader, tick: number, target: EntitiesTarget) => void;
+export type EntitiesDecoder = (r: WireReader, tick: number, target: EntitiesTarget, frame: RealmFrame) => void;
 
 /** The generated decoders a `typhon-codegen` module exports, and the catalog they were generated from. */
 export interface GeneratedDecoders {
@@ -111,13 +117,14 @@ export const BlockMask = {
   Debug: 1 << BlockType.Debug,
   Acks: 1 << BlockType.Acks,
   Sources: 1 << BlockType.Sources,
-  Ext: 1 << 9,
-  Unknown: 1 << 10,
-  All: 0x7fe,
+  Realm: 1 << BlockType.Realm,
+  Ext: 1 << 10,
+  Unknown: 1 << 11,
+  All: 0xffe,
 } as const;
 
 function blockBit(type: number): number {
-  return type >= BlockType.Entities && type <= BlockType.Sources
+  return type >= BlockType.Entities && type <= BlockType.Realm
     ? 1 << type
     : type === BlockType.Ext
       ? BlockMask.Ext
@@ -147,6 +154,13 @@ export class TickReader {
   private reads = 0;
   private readonly generated: readonly (EntitiesDecoder | null)[] | null;
   private readonly target: EntitiesTarget | null;
+
+  /**
+   * The session's realm frame (`typhon.3`, SUB-30), held across messages: every positioned value decodes over it, and a
+   * `REALM` block replaces it. `null` before the first `REALM` and after a `REALM(NONE)`; a caller that resumes a
+   * session may set it.
+   */
+  realm: RealmFrame | null = null;
 
   /**
    * With `generated` and its `target`, an archetype's `ENTITIES` block is decoded by its generated decoder straight into
@@ -199,9 +213,19 @@ export class TickReader {
     const periodUs = (flags & TickFlags.Period) !== 0 ? r.u32() : 0;
     sink.beginTick(tick, flags, periodUs);
 
+    let first = true;
     while (!r.isAtEnd) {
       const type = r.u8();
       const length = r.varuAtMost(r.remaining, 'block length');
+
+      // Refused whichever pass reads the frame (12-realms § 5.2): only a RESET frame carries a REALM, as its first block.
+      if (type === BlockType.Realm && (!first || (flags & TickFlags.Reset) === 0)) {
+        throw malformed(
+          first ? 'a REALM block in a frame without RESET' : "a REALM block that is not the frame's first",
+        );
+      }
+
+      first = false;
       if ((blocks & blockBit(type)) === 0) {
         r.skip(length);
         continue;
@@ -209,6 +233,10 @@ export class TickReader {
 
       const saved = r.pushLimit(length);
       switch (type) {
+        case BlockType.Realm:
+          this.realm = this.readRealm();
+          sink.realm(this.realm);
+          break;
         case BlockType.Entities:
           this.readEntities(tick, sink);
           break;
@@ -216,7 +244,7 @@ export class TickReader {
           for (let n = r.varu(); n > 0; n--) {
             const eventType = this.plan.event(r.varu());
             sink.event(eventType);
-            readSection(r, eventType.body, tick, sink);
+            readSection(r, eventType.body, tick, sink, false, this.realm);
           }
 
           break;
@@ -279,6 +307,21 @@ export class TickReader {
     sink.endTick();
   }
 
+  private readRealm(): RealmFrame | null {
+    const frame = RealmFrame.read(this.r, this.plan.realmKinds.length);
+
+    // An AGG grid over this frame must stay within the cell bound a store allocates for (W28): refused with the frame.
+    if (frame !== null) {
+      for (const grid of this.plan.grids) {
+        if (frame.aggregateCellCount(grid.tileCells) > ProtocolConstants.maxGridCells) {
+          throw malformed(`grid ${grid.idx} over this REALM has more than ${ProtocolConstants.maxGridCells} cells`);
+        }
+      }
+    }
+
+    return frame;
+  }
+
   private readEntities(tick: number, sink: TickSink): void {
     const r = this.r;
     const archetype = this.plan.archetype(r.varu());
@@ -291,10 +334,17 @@ export class TickReader {
     const p = this.positions[archetype.idx]!;
     const v = this.velocities[archetype.idx]!;
     const sections = archetype.groupSections;
+    const frame = this.realm;
+    if (position !== null && frame === null) {
+      throw protocolError(
+        `an ENTITIES block for positioned archetype '${archetype.name}' while the session holds no realm`,
+      );
+    }
+
     sink.beginEntities(archetype);
     const generated = this.generated?.[archetype.idx];
     if (generated != null) {
-      generated(r, tick, this.target!);
+      generated(r, tick, this.target!, frame!);
       return;
     }
 
@@ -308,7 +358,7 @@ export class TickReader {
         t0[0] = 0;
         let epoch = 0;
         if (position !== null) {
-          readNumber(r, position.pos, tick, p, 0);
+          readNumber(r, position.pos, tick, p, 0, frame);
           if (position.moving) {
             if (position.vel !== null) {
               readNumber(r, position.vel, tick, v, 0);
@@ -322,9 +372,9 @@ export class TickReader {
         }
 
         sink.enter(prev, p, v, t0, epoch);
-        readSection(r, archetype.onEnter, tick, sink);
+        readSection(r, archetype.onEnter, tick, sink, false, frame);
         for (let s = 0; s < sections.length; s++) {
-          readSection(r, sections[s]!, tick, sink);
+          readSection(r, sections[s]!, tick, sink, false, frame);
         }
       }
     }
@@ -339,7 +389,7 @@ export class TickReader {
       let prev = -1;
       for (let n = runLength(r); n > 0; n--) {
         prev = nextNetId(r, prev);
-        readNumber(r, position!.pos, tick, p, 0);
+        readNumber(r, position!.pos, tick, p, 0, frame);
         if (position!.vel !== null) {
           readNumber(r, position!.vel, tick, v, 0);
         }
@@ -364,7 +414,7 @@ export class TickReader {
         sink.state(prev, mask);
         for (let g = 0; g < groupCount; g++) {
           if ((mask & (1 << g)) !== 0) {
-            readSection(r, sections[g]!, tick, sink);
+            readSection(r, sections[g]!, tick, sink, false, frame);
           }
         }
       }
@@ -410,7 +460,7 @@ export class TickReader {
     sink.self(archetype, netId, lastSeq, mask);
     for (let g = 0; g < groupCount; g++) {
       if ((mask & (1 << g)) !== 0) {
-        readSection(r, archetype.ownerSections[g]!, tick, sink);
+        readSection(r, archetype.ownerSections[g]!, tick, sink, false, this.realm);
       }
     }
   }
@@ -419,13 +469,20 @@ export class TickReader {
     const r = this.r;
     const grid = this.plan.grid(r.varu());
     const flags = r.u8();
+
+    // The grid's dimensions are the frame's (typhon.3, 12-realms § 5.3): no realm, no grid.
+    if (this.realm === null) {
+      throw protocolError(`an AGG block for grid ${grid.idx} while the session holds no realm`);
+    }
+
+    const cellCount = this.realm.aggregateCellCount(grid.tileCells);
     sink.beginAggregate(grid, (flags & 1) !== 0);
     const counts = grid.counts;
     let prev = -1;
     for (let n = r.varu(); n > 0; n--) {
       const cell = prev + 1 + r.varu();
-      if (cell >= grid.cellCount) {
-        throw malformed(`AGG cell ${cell} is outside the grid's ${grid.cellCount} cells`);
+      if (cell >= cellCount) {
+        throw malformed(`AGG cell ${cell} is outside the grid's ${cellCount} cells`);
       }
 
       prev = cell;

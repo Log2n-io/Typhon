@@ -121,7 +121,8 @@ public class GoldenCatalogRefusalTests
                 Fields = [new CatalogField { Name = "path", Codec = new CatalogCodec { Kind = CodecKind.List, Of = CatalogSamples.Pos2(), MaxCount = 4 } }],
             },
         ],
-        Grids = [new CatalogGrid { Origin = [-8192, -8192], Cell = 512, Dims = [32, 32], Archetypes = [0] }],
+        Grids = [new CatalogGrid { TileCells = 2, Archetypes = [0] }],
+        RealmKinds = [""],
         Metrics =
         [
             new CatalogMetric

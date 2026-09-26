@@ -29,6 +29,7 @@ import {
   type TickSink,
 } from '../src/index.js';
 import { goldenBin } from './golden-support.js';
+import { KITCHEN } from './frames.js';
 
 /*
  * The encoders refuse what they cannot represent instead of writing its low bits, and the module-level decoders let go
@@ -58,19 +59,28 @@ describe('tick writers', () => {
   it('refuse a negative segment start tick and a frame tick beyond u32', () => {
     const segment = { netId: 1, position: [0, 0, 0], velocity: [0, 0, 0], t0: -1, epoch: 0 };
     expect(() => {
-      writeEntitiesBlock(new WireWriter(), 0, drone, [], [segment], [], []);
+      writeEntitiesBlock(new WireWriter(), 0, drone, [], [segment], [], [], KITCHEN);
     }).toThrow(RangeError);
     expect(() => {
-      writeEntitiesBlock(new WireWriter(), 2 ** 32, drone, [], [{ ...segment, t0: 2 ** 32 - 1 }], [], []);
+      writeEntitiesBlock(new WireWriter(), 2 ** 32, drone, [], [{ ...segment, t0: 2 ** 32 - 1 }], [], [], KITCHEN);
     }).toThrow(/frame tick/);
   });
 
   it('refuse a state or owner mask that only fits after truncation to 32 bits', () => {
     expect(() => {
-      writeEntitiesBlock(new WireWriter(), 1, beacon, [], [], [{ netId: 1, groupMask: 2 ** 32 + 1, values: {} }], []);
+      writeEntitiesBlock(
+        new WireWriter(),
+        1,
+        beacon,
+        [],
+        [],
+        [{ netId: 1, groupMask: 2 ** 32 + 1, values: {} }],
+        [],
+        KITCHEN,
+      );
     }).toThrow(RangeError);
     expect(() => {
-      writeSelfBlock(new WireWriter(), drone, 1, 0, 2 ** 32 + 1, {});
+      writeSelfBlock(new WireWriter(), drone, 1, 0, 2 ** 32 + 1, {}, KITCHEN);
     }).toThrow(RangeError);
     expect(() => {
       writeTickHeader(new WireWriter(), 1, 256, 0);
@@ -135,10 +145,10 @@ describe('message and command writers', () => {
         writeBye(new WireWriter(), 4000.5);
       },
       () => {
-        writeCommands(new WireWriter(), 2 ** 32, [{ type: steer, seq: 0, values: {} }]);
+        writeCommands(new WireWriter(), 2 ** 32, [{ type: steer, seq: 0, values: {} }], KITCHEN);
       },
       () => {
-        writeCommands(new WireWriter(), 0, [{ type: steer, seq: 65_536, values: {} }]);
+        writeCommands(new WireWriter(), 0, [{ type: steer, seq: 65_536, values: {} }], KITCHEN);
       },
     ];
     for (const write of cases) {
@@ -200,7 +210,7 @@ describe.skipIf(gc === undefined && (process.env.CI ?? '') === '')('decoders reu
       ),
     ).toBe(true);
 
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     expect(
       await collectableAfter(
         () => {
@@ -225,9 +235,12 @@ describe.skipIf(gc === undefined && (process.env.CI ?? '') === '')('decoders reu
       await collectableAfter(
         () => {
           const w = new WireWriter();
-          writeCommands(w, 1, [
-            { type: steer, seq: 1, values: { boost: 1, stance: 1, heading: 0, note: '', speed: 0 } },
-          ]);
+          writeCommands(
+            w,
+            1,
+            [{ type: steer, seq: 1, values: { boost: 1, stance: 1, heading: 0, note: '', speed: 0 } }],
+            KITCHEN,
+          );
           return w.toBytes();
         },
         (message) => {
@@ -259,6 +272,7 @@ describe('a released reader', () => {
     const noop = (): void => undefined;
     const quiet: TickSink = {
       beginTick: noop,
+      realm: noop,
       beginEntities: noop,
       enter: noop,
       segment: noop,

@@ -1,4 +1,4 @@
-using System.Buffers.Binary;
+﻿using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Text.Json.Nodes;
 using NUnit.Framework;
@@ -220,6 +220,10 @@ public class MotionWrapGoldenTests
             var tick = FirstTick + (uint)k;
             var w = new WireWriter(buffer);
             TickWriter.WriteHeader(ref w, tick, k == 0 ? TickFlags.Reset | TickFlags.ViewComplete : TickFlags.None);
+            if (k == 0)
+            {
+                TickWriter.WriteRealm(ref w, TestFrames.Kitchen);
+            }
 
             var enters = new List<EnterRecord>();
             var segments = new List<SegmentRecord>();
@@ -244,16 +248,16 @@ public class MotionWrapGoldenTests
                 segments.Add(new SegmentRecord { NetId = 11, Position = BuoySample(k), T0 = tick, Epoch = k <= EpochEnterFrame + 1 ? (byte)4 : (byte)5 });
             }
 
-            TickWriter.WriteEntities(ref w, tick, buoy, enters, segments, [], []);
+            TickWriter.WriteEntities(ref w, tick, buoy, enters, segments, [], [], TestFrames.Kitchen);
 
             // Drone 100 — the same teleport under the linear model, each segment carrying a velocity of its own so the chosen one is identifiable.
             if (k == EpochEnterFrame)
             {
-                TickWriter.WriteEntities(ref w, tick, drone, [DroneEnter(100, tick)], [], [], []);
+                TickWriter.WriteEntities(ref w, tick, drone, [DroneEnter(100, tick)], [], [], [], TestFrames.Kitchen);
             }
             else if (k is EpochEnterFrame + 1 or EpochEnterFrame + 2 or EpochEnterFrame + 3)
             {
-                TickWriter.WriteEntities(ref w, tick, drone, [], [DroneSegment(100, k, tick)], [], []);
+                TickWriter.WriteEntities(ref w, tick, drone, [], [DroneSegment(100, k, tick)], [], [], TestFrames.Kitchen);
             }
 
             frames.Add(w.Written.ToArray());

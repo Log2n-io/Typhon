@@ -1,6 +1,25 @@
 {
-  "description": "COMMANDS against catalog-kitchen-sink: a ClientRegion quad at built-in index 0, then Steer at 16 twice, seq wrapping 65535 \u2192 0.",
+  "description": "COMMANDS against catalog-kitchen-sink: a ClientRegion quad at built-in index 0 (pos3 vertices at the command width, 32 bits, over the session\u0027s frame), then Steer at 16 twice, seq wrapping 65535 \u2192 0.",
   "catalog": "catalog-kitchen-sink",
+  "frame": {
+    "realmId": 3,
+    "generation": 7,
+    "kindIdx": 1,
+    "appTag": 12648430,
+    "posBits": 24,
+    "cellM": "4070000000000000",
+    "deep": true,
+    "min": [
+      "c0c0000000000000",
+      "c0c0000000000000",
+      "c050000000000000"
+    ],
+    "max": [
+      "40c0000000000000",
+      "40c0000000000000",
+      "4050000000000000"
+    ]
+  },
   "inputs": [
     {
       "type": "ClientRegion",
@@ -9,12 +28,16 @@
         "vertices": [
           "c059000000000000",
           "c059000000000000",
+          "0000000000000000",
           "4059000000000000",
           "c059000000000000",
+          "0000000000000000",
           "4062c00000000000",
           "4069000000000000",
+          "0000000000000000",
           "c062c00000000000",
-          "4069000000000000"
+          "4069000000000000",
+          "0000000000000000"
         ],
         "altitudeM": [
           "4075e80000000000"
@@ -93,12 +116,16 @@
       "values": [
         "c059000000000000",
         "c059000000000000",
+        "0000000000000000",
         "4059000000000000",
         "c059000000000000",
+        "0000000000000000",
         "4062c00000000000",
         "4069000000000000",
+        "0000000000000000",
         "c062c00000000000",
-        "4069000000000000"
+        "4069000000000000",
+        "0000000000000000"
       ]
     },
     {

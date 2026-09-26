@@ -142,6 +142,7 @@ export {
   writeEntitiesBlock,
   writeEventsBlock,
   writeExtBlock,
+  writeRealmBlock,
   writeSelfBlock,
   writeSelfNoneBlock,
   writeSourcesBlock,
@@ -155,6 +156,7 @@ export {
   type StateRecord,
 } from './protocol/tick-writer.js';
 export { readCommands, writeCommands, type CommandInput, type CommandSink } from './protocol/commands.js';
+export { NO_REALM, RealmFrame } from './protocol/realm-frame.js';
 export {
   catalogHashFromHex,
   catalogHashToHex,

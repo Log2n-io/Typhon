@@ -41,6 +41,13 @@ export const ProtocolConstants = {
   /** The legal range of a velocity codec's `unitExp` (W5): 2^-40 to 2^16 metres per tick. */
   minVelocityUnitExp: -40,
   maxVelocityUnitExp: 16,
+  /** The most realm kinds a catalog declares: a `REALM` block's `varu kindIdx` stays one byte. */
+  maxRealmKinds: 128,
+  /**
+   * Bits per axis of a realm-framed field a client SENDS: always 32, whatever the realm's own width, because the
+   * server's transport parses a command without reading the session's realm (SUB-05).
+   */
+  commandPositionBits: 32,
 } as const;
 
 /** The 4-byte TCP preamble, ASCII `TYP3`: each side writes its own, and a mismatch closes without a `KICK` (W31). */
@@ -68,6 +75,8 @@ export const BlockType = {
   Debug: 0x06,
   Acks: 0x07,
   Sources: 0x08,
+  /** The session's realm frame (`typhon.3`): only in a `RESET` frame, and always its first block. */
+  Realm: 0x09,
   Ext: 0x7f,
 } as const;
 

@@ -38,7 +38,8 @@ public class EntitiesRunTests
 
         var sink = new RecordingSink();
         var message = Frame(SpliceStateRuns(runA, runB));
-        TickReader.Read(message, Plan, ref sink);
+        var frame = CatalogSamples.KitchenFrame;
+        TickReader.Read(message, Plan, ref frame, ref sink);
 
         Assert.That(Calls(sink, "state"), Is.EqualTo(new uint[] { 40, 41, 7 }), "every run's records reach the sink, in the order the runs travel");
 
@@ -48,6 +49,7 @@ public class EntitiesRunTests
         {
             ["description"] = "an ENTITIES state sub-list of two runs, the second restarting at a lower netId than the first ended on",
             ["catalog"] = "catalog-kitchen-sink",
+            ["frame"] = CatalogSamples.FrameJson(CatalogSamples.KitchenFrame),
             ["log"] = sink.Log.DeepClone(),
         });
     }
@@ -77,14 +79,19 @@ public class EntitiesRunTests
     {
         // runs = 1, records = 0. A sub-list with nothing to say writes a zero RUN count instead, so this byte string is not one any encoder produces.
         var sink = new RecordingSink();
-        Assert.Throws<WireFormatException>(() => TickReader.Read(Frame([0x01, 0x00]), Plan, ref sink));
+        Assert.Throws<WireFormatException>(() =>
+        {
+            var frame = CatalogSamples.KitchenFrame;
+            TickReader.Read(Frame([0x01, 0x00]), Plan, ref frame, ref sink);
+        });
     }
 
     [Test]
     public void ASubListWithNoRunsIsWellFormedAndSilent()
     {
         var sink = new RecordingSink();
-        TickReader.Read(Frame([0x00]), Plan, ref sink);
+        var frame = CatalogSamples.KitchenFrame;
+        TickReader.Read(Frame([0x00]), Plan, ref frame, ref sink);
         Assert.That(Calls(sink, "state"), Is.Empty);
     }
 

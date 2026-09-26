@@ -34,7 +34,7 @@ class ClientRegionCommandTests : TestBase<ClientRegionCommandTests>
         private readonly DatabaseEngine _engine;
         private long _tick;
 
-        public Harness(DatabaseEngine engine, Action<SubscriptionsRegistry> declare = null, bool regionCodecFromGrid = false)
+        public Harness(DatabaseEngine engine, Action<SubscriptionsRegistry> declare = null)
         {
             _engine = engine;
             Registry = new ResourceRegistry(new ResourceRegistryOptions { Name = "ClientRegionCommandTests" });
@@ -64,8 +64,7 @@ class ClientRegionCommandTests : TestBase<ClientRegionCommandTests>
             }
 
             var plans = ProjectionCompiler.Compile(Subs, engine, ProjectionTestSchema.TickPeriodSeconds, largestTickMultiplier: 1);
-            var export = CatalogBuilder.Build(Subs, plans, CatalogBuilder.DefaultAppName, appRevision: 0, tickPeriodUs: 10_000, systemNames: [],
-                regionCodecFromGrid ? engine.SpatialGrid.Config : null);
+            var export = CatalogBuilder.Build(Subs, plans, CatalogBuilder.DefaultAppName, appRevision: 0, tickPeriodUs: 10_000, systemNames: []);
             Plan = CatalogPlan.Compile(export.Canonical);
 
             SessionTable = new SessionTable("Sessions", Registry.Runtime, Allocator, options, Subs.Sessions.SessionEvents);
@@ -73,6 +72,8 @@ class ClientRegionCommandTests : TestBase<ClientRegionCommandTests>
             Pool = new IngressRingPool("IngressRings", Registry.Runtime, Allocator, options);
             Ingress = new SubscriptionsIngress(SessionTable, Subs, CommandTypes, new CommandTypeBuffers(CommandTypes, options.MaxSessions), Pool,
                 options.MaxSessions);
+            Frame = SubscriptionsRuntime.BuildRealm0Frame(engine, options);
+            Ingress.Realm = Frame;
         }
 
         public ResourceRegistry Registry { get; }
@@ -114,12 +115,16 @@ class ClientRegionCommandTests : TestBase<ClientRegionCommandTests>
             Assert.That(Ingress.DrainFaults, Is.Zero, $"the drain threw: {Ingress.LastDrainFault}");
         }
 
+        /// <summary>The served realm's frame, which the region's vertices travel over (typhon.3).</summary>
+        public RealmFrame Frame { get; }
+
         /// <summary>Sends a region as a client would, through the protocol's own writer.</summary>
         public void SendRegion(SessionId session, ushort seq, double[] flattenedVertices, double altitudeM = 120, int budgetKiBps = 256)
         {
             var values = new RecordValues
             {
-                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(flattenedVertices),
+                // pos3 on the wire (typhon.3, D-8); this harness's realm is flat, so its (x, y) pairs travel with z = 0.
+                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(WithZeroZ(flattenedVertices)),
                 [BuiltInCommands.RegionAltitudeField] = FieldValue.Of(altitudeM),
                 [BuiltInCommands.RegionBudgetField] = FieldValue.Of(budgetKiBps),
             };
@@ -131,8 +136,20 @@ class ClientRegionCommandTests : TestBase<ClientRegionCommandTests>
 
             var buffer = new byte[4096];
             var writer = new WireWriter(buffer);
-            CommandsMessage.Write(ref writer, clientTick: 1, commands);
+            CommandsMessage.Write(ref writer, clientTick: 1, commands, Frame);
             Ingress.OnCommands(session, writer.Written);
+        }
+
+        private static double[] WithZeroZ(double[] pairs)
+        {
+            var triples = new double[(pairs.Length + 1) / 2 * 3];
+            for (var i = 0; i < pairs.Length / 2; i++)
+            {
+                triples[3 * i] = pairs[2 * i];
+                triples[(3 * i) + 1] = pairs[(2 * i) + 1];
+            }
+
+            return pairs.Length % 2 == 0 ? triples : [.. triples, 0];
         }
 
         public void Dispose()
@@ -280,8 +297,8 @@ class ClientRegionCommandTests : TestBase<ClientRegionCommandTests>
             Assert.That(vertices.Kind, Is.EqualTo(CodecKind.List));
             Assert.That(vertices.Codec.MinCount, Is.EqualTo(BuiltInCommands.MinRegionVertices), "three points is the fewest a footprint can have");
             Assert.That(vertices.Codec.MaxCount, Is.EqualTo(BuiltInCommands.MaxRegionVertices), "sixteen is the ceiling the wire declares");
-            Assert.That(vertices.Element.Kind, Is.EqualTo(CodecKind.Pos2),
-                "vertices quantize exactly like an archetype's position, so a decoded region can never leave the world");
+            Assert.That(vertices.Element.Kind, Is.EqualTo(CodecKind.Pos3),
+                "vertices are realm-framed like an archetype's position, so a decoded region can never leave the realm");
         });
 
         var ex = Assert.Throws<ArgumentException>(() => harness.SendRegion(session, 1, [0, 0, 10, 10]),

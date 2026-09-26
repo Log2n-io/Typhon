@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using Typhon.Protocol;
@@ -436,16 +436,6 @@ public class MotionEvaluatorTests
 
     private static CatalogPosition Static(int dims) => new() { Kind = CatalogPosition.StaticKind, Pos = Pos(dims) };
 
-    private static CatalogCodec Pos(int dims)
-    {
-        var min = new double[dims];
-        var max = new double[dims];
-        for (var i = 0; i < dims; i++)
-        {
-            min[i] = -8192;
-            max[i] = 8192;
-        }
-
-        return new CatalogCodec { Kind = dims == 2 ? CodecKind.Pos2 : CodecKind.Pos3, Bits = 24, Min = min, Max = max };
-    }
+    // Realm-framed (typhon.3): the catalog names the kind; width and bounds are a REALM block's.
+    private static CatalogCodec Pos(int dims) => new() { Kind = dims == 2 ? CodecKind.Pos2 : CodecKind.Pos3 };
 }

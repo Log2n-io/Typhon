@@ -1,20 +1,28 @@
 {
-  "description": "pos3 at 24 bits, 9 bytes per value.",
+  "description": "pos3 over a deep frame at 24 bits, 9 bytes per value.",
   "codec": {
-    "t": "pos3",
-    "bits": 24,
-    "min": [
-      -8192,
-      -8192,
-      -8192
-    ],
-    "max": [
-      8192,
-      8192,
-      8192
-    ]
+    "t": "pos3"
   },
   "frameTick": 70000,
+  "frame": {
+    "realmId": 9,
+    "generation": 2,
+    "kindIdx": 0,
+    "appTag": 0,
+    "posBits": 24,
+    "cellM": "4050000000000000",
+    "deep": true,
+    "min": [
+      "c0c0000000000000",
+      "c0c0000000000000",
+      "c0c0000000000000"
+    ],
+    "max": [
+      "40c0000000000000",
+      "40c0000000000000",
+      "40c0000000000000"
+    ]
+  },
   "cases": [
     {
       "input": [

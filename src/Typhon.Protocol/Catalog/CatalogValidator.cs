@@ -93,6 +93,7 @@ public static class CatalogValidator
         }
 
         CheckStrings("sessionKinds", c.SessionKinds, ProtocolConstants.SessionKindMaxBytes, problems);
+        CheckRealmKinds(c.RealmKinds, problems);
 
         var enums = c.Enums ?? new Dictionary<string, string[]>();
         foreach (var (name, names) in enums)
@@ -490,41 +491,11 @@ public static class CatalogValidator
             }
 
             var where = $"grid {i}";
-            var dims = g.Dims ?? [];
-            if (dims.Length is not (2 or 3) || g.Origin == null || g.Origin.Length != dims.Length)
-            {
-                problems.Add($"{where}: dims and origin need 2 or 3 matching axes");
-            }
 
-            foreach (var o in g.Origin ?? [])
+            // Origin and dimensions are the realm frame's (typhon.3): the catalog carries the tile alone, in replication cells.
+            if (g.TileCells < 1)
             {
-                if (!double.IsFinite(o))
-                {
-                    problems.Add($"{where}: origin must be finite");
-                }
-            }
-
-            if (!(g.Cell > 0) || !double.IsFinite(g.Cell))
-            {
-                problems.Add($"{where}: cell must be positive and finite");
-            }
-
-            var cells = 1L;
-            foreach (var d in dims)
-            {
-                if (d < 1)
-                {
-                    problems.Add($"{where}: every dimension must be at least 1");
-                    cells = 0;
-                    break;
-                }
-
-                cells = Math.Min(cells * d, MaxGridCells + 1);
-            }
-
-            if (cells > MaxGridCells)
-            {
-                problems.Add($"{where}: more than {MaxGridCells} cells");
+                problems.Add($"{where}: tileCells must be at least 1");
             }
 
             var seen = new HashSet<int>();
@@ -536,22 +507,35 @@ public static class CatalogValidator
                 }
             }
 
-            // A structural key per grid, so a catalog of many grids costs linear time: a client validates what a server sends, before any limit applies.
-            var key = new StringBuilder().Append(Key(g.Cell));
-            foreach (var o in g.Origin ?? [])
+            var key = new StringBuilder().Append(g.TileCells).Append('#').AppendJoin(',', g.Archetypes ?? []).ToString();
+            if (!shapes.TryAdd(key, i))
             {
-                key.Append('|').Append(Key(o));
-            }
-
-            key.Append('#').AppendJoin(',', g.Dims ?? []).Append('#').AppendJoin(',', g.Archetypes ?? []);
-            if (!shapes.TryAdd(key.ToString(), i))
-            {
-                problems.Add($"{where} duplicates grid {shapes[key.ToString()]}");
+                problems.Add($"{where} duplicates grid {shapes[key]}");
             }
         }
+    }
 
-        // Round-trip formatting, with -0 folded into 0 so the key matches double equality.
-        static string Key(double x) => (x == 0 ? 0 : x).ToString("R", CultureInfo.InvariantCulture);
+    private static void CheckRealmKinds(string[] kinds, List<string> problems)
+    {
+        // Absent or empty means the default kind alone: a catalog with nothing realm-framed need not name one.
+        if (kinds == null)
+        {
+            return;
+        }
+
+        if (kinds.Length > ProtocolConstants.MaxRealmKinds)
+        {
+            problems.Add($"realmKinds: {kinds.Length} kinds; at most {ProtocolConstants.MaxRealmKinds}");
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var k in kinds)
+        {
+            if (k == null || Encoding.UTF8.GetByteCount(k) > ProtocolConstants.SessionKindMaxBytes || !seen.Add(k))
+            {
+                problems.Add($"realmKinds: '{k}' is null, longer than {ProtocolConstants.SessionKindMaxBytes} UTF-8 bytes, or listed twice");
+            }
+        }
     }
 
     private static void CheckCodec(string at, CatalogCodec codec, int maxBytes, List<string> problems)
@@ -571,12 +555,8 @@ public static class CatalogValidator
                 CheckBounds(at, codec, 1, problems);
                 break;
             case CodecKind.Pos2:
-                CheckBits(at, codec.Bits, problems);
-                CheckBounds(at, codec, 2, problems);
-                break;
             case CodecKind.Pos3:
-                CheckBits(at, codec.Bits, problems);
-                CheckBounds(at, codec, 3, problems);
+                // Realm-framed (typhon.3, SUB-30): bits and bounds are the REALM block's, and a parameter here is refused as unread.
                 break;
             case CodecKind.Vec2:
             case CodecKind.Vec3:
@@ -665,7 +645,8 @@ public static class CatalogValidator
 
         var reads = codec.Kind switch
         {
-            CodecKind.Quant or CodecKind.Pos2 or CodecKind.Pos3 => Parameter.Bits | Parameter.Bounds,
+            CodecKind.Quant => Parameter.Bits | Parameter.Bounds,
+            CodecKind.Pos2 or CodecKind.Pos3 => Parameter.None,
             CodecKind.Vec2 or CodecKind.Vec3 => Parameter.Bits | Parameter.Scale,
             CodecKind.Vel2 or CodecKind.Vel3 => Parameter.Bits | Parameter.UnitExp,
             CodecKind.Unorm or CodecKind.Snorm or CodecKind.Angle => Parameter.Bits,

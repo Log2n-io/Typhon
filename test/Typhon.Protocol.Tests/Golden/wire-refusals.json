@@ -1,6 +1,25 @@
 {
-  "description": "Byte sequences every decoder must refuse, with the close code it must refuse them with. kind: codec (one value of \u0060codec\u0060), tick and commands (a whole message against catalog-kitchen-sink), message (a whole control message of \u0060type\u0060).",
+  "description": "Byte sequences every decoder must refuse, with the close code it must refuse them with. kind: codec (one value of \u0060codec\u0060), tick and commands (a whole message against catalog-kitchen-sink; a tick case decodes with \u0060frame\u0060 held unless it says held: false), message (a whole control message of \u0060type\u0060).",
   "catalog": "catalog-kitchen-sink",
+  "frame": {
+    "realmId": 3,
+    "generation": 7,
+    "kindIdx": 1,
+    "appTag": 12648430,
+    "posBits": 24,
+    "cellM": "4070000000000000",
+    "deep": true,
+    "min": [
+      "c0c0000000000000",
+      "c0c0000000000000",
+      "c050000000000000"
+    ],
+    "max": [
+      "40c0000000000000",
+      "40c0000000000000",
+      "4050000000000000"
+    ]
+  },
   "cases": [
     {
       "name": "varu-over-32-bits",
@@ -247,6 +266,62 @@
       "kind": "tick",
       "hex": "0270110100000105030000000001050300000000",
       "closeCode": 1007
+    },
+    {
+      "name": "realm-without-reset",
+      "kind": "tick",
+      "hex": "0270110100000943030007000201eeffc000180000000000007040000000000000c0c0000000000000c0c000000000000050c0000000000000c040000000000000c0400000000000005040",
+      "closeCode": 1007
+    },
+    {
+      "name": "realm-not-first",
+      "kind": "tick",
+      "hex": "027011010002010503000000000943030007000201eeffc000180000000000007040000000000000c0c0000000000000c0c000000000000050c0000000000000c040000000000000c0400000000000005040",
+      "closeCode": 1007
+    },
+    {
+      "name": "realm-bits-20",
+      "kind": "tick",
+      "hex": "0270110100020943030007000201eeffc000140000000000007040000000000000c0c0000000000000c0c000000000000050c0000000000000c040000000000000c0400000000000005040",
+      "closeCode": 1007
+    },
+    {
+      "name": "realm-min-not-below-max",
+      "kind": "tick",
+      "hex": "0270110100020943030007000201eeffc000180000000000007040000000000000c0c0000000000000c0c000000000000050c0000000000000c0c0000000000000c0400000000000005040",
+      "closeCode": 1007
+    },
+    {
+      "name": "realm-kind-out-of-range",
+      "kind": "tick",
+      "hex": "0270110100020943030007000203eeffc000180000000000007040000000000000c0c0000000000000c0c000000000000050c0000000000000c040000000000000c0400000000000005040",
+      "closeCode": 1007
+    },
+    {
+      "name": "realm-reserved-flag",
+      "kind": "tick",
+      "hex": "0270110100020943030007000601eeffc000180000000000007040000000000000c0c0000000000000c0c000000000000050c0000000000000c040000000000000c0400000000000005040",
+      "closeCode": 1007
+    },
+    {
+      "name": "realm-cell-zero",
+      "kind": "tick",
+      "hex": "0270110100020943030007000201eeffc000180000000000000000000000000000c0c0000000000000c0c000000000000050c0000000000000c040000000000000c0400000000000005040",
+      "closeCode": 1007
+    },
+    {
+      "name": "positioned-entities-without-realm",
+      "kind": "tick",
+      "hex": "02701101000001050000000000",
+      "closeCode": 1002,
+      "held": false
+    },
+    {
+      "name": "aggregate-without-realm",
+      "kind": "tick",
+      "hex": "0270110100000403000000",
+      "closeCode": 1002,
+      "held": false
     },
     {
       "name": "commands-count-zero",

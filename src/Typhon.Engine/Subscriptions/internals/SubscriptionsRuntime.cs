@@ -131,8 +131,10 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             Plans = ProjectionCompiler.Compile(registry, engine, NominalTickPeriodSeconds, LargestTickMultiplier, Options.ReplicationCellM,
                 Options.VisibilitySlackMForTest);
 
-            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames,
-                engine.Realm0Grid?.Config);
+            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames);
+
+            // The served realm's frame (typhon.3): what every position a session of it receives, and every position it sends, is quantized over.
+            Realm0Frame = BuildRealm0Frame(engine, Options);
 
             _sessions = new SessionTable("Subscriptions.Sessions", parent, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
 
@@ -148,6 +150,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 NominalTickPeriodUs);
             _frames.Profiles = Profiles;
             _frames.Engine = engine;
+            _frames.Realm = Realm0Frame;
 
             // The push path (ADR-067): every archetype some profile observes is served by it.
             var observed = Profiles.ObservedArchetypes;
@@ -230,6 +233,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 Options.MaxSessions, _sendPump);
             _frames.Ingress = _ingress;
             _ingress.Frames = _frames;
+            _ingress.Realm = Realm0Frame;
             _ingress.ReplicationStates = _replicationStates;
 
             // netId → entity for a command's entity references (SUB-26): the projection binds each identity it assigns, and every release unbinds it.
@@ -242,6 +246,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             }
             // Events (09 § 11): compiled against the catalog, and one commands view per worker slot, so Emit records into the worker's own buffer.
             Events = EventHub.Build(registry, CatalogPlan);
+            if (Events != null)
+            {
+                Events.Realm = Realm0Frame;
+            }
+
             _frames!.Events = Events;
             var workerSlots = (parent as DagScheduler)?.WorkerSlotCount ?? 0;
             Events?.BindWorkerSlots(workerSlots);
@@ -404,13 +413,6 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         for (var g = 0; g < canonical.Length; g++)
         {
             var grid = canonical[g];
-            var cells = grid.Cell / Grid.CellM;
-            if (Math.Abs(cells - Math.Round(cells)) > 1e-9 || Math.Round(cells) < 1)
-            {
-                throw new NotSupportedException(
-                    $"An Aggregate's tile of {grid.Cell} m is not a whole number of the {Grid.CellM} m replication cells: tile counts follow cell changes, so a tile " +
-                    "edge inside a cell would let a move cross it unseen. Declare a multiple of the cell.");
-            }
 
             var columns = new int[Plans.Length];
             Array.Fill(columns, -1);
@@ -427,8 +429,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 columns[plan] = j;
             }
 
-            grids[g] = new AggregateCounts(grid.Idx, grid.Origin[0], grid.Origin[1], grid.Origin.Length > 2 ? grid.Origin[2] : 0d, grid.Cell, grid.Dims[0],
-                grid.Dims[1], grid.Dims.Length > 2 ? grid.Dims[2] : 1, columns, grid.Archetypes.Length);
+            // Laid over the served realm's frame (typhon.3, 12-realms § 5.3): the same origin and dimensions a client derives from the REALM block.
+            var frame = Realm0Frame;
+            var tiles = grid.TileCells;
+            grids[g] = new AggregateCounts(grid.Idx, frame.Min[0], frame.Min[1], frame.Min[2], tiles * frame.CellM, frame.AggregateDim(0, tiles),
+                frame.AggregateDim(1, tiles), frame.AggregateDim(2, tiles), columns, grid.Archetypes.Length);
         }
 
         Push.ConfigureAggregates(grids);
@@ -464,6 +469,31 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     /// <summary>The declared events' hub, or <see langword="null"/> when no event is declared.</summary>
     public EventHub Events { get; }
+
+    /// <summary>
+    /// Realm 0's frame (<c>typhon.3</c>), or <see langword="null"/> without a spatial grid: the <c>REALM</c> block every session's first frame carries, and
+    /// the frame its positions — records, events, commands, regions, aggregate grids — are quantized over (SUB-30).
+    /// </summary>
+    public RealmFrame Realm0Frame { get; }
+
+    /// <summary>Realm 0's frame: its grid's bounds, the replication cell, the default width, flat when the replication grid is one cell deep.</summary>
+    internal static RealmFrame BuildRealm0Frame(DatabaseEngine engine, SubscriptionsOptions options)
+    {
+        var spatial = engine.Realm0Grid;
+        if (spatial == null)
+        {
+            return null;
+        }
+
+        ref readonly var config = ref spatial.Config;
+        var cellM = options.ReplicationCellM > 0 ? options.ReplicationCellM : config.CellSize;
+        var generation = engine.PersistedRealmCatalog != null && engine.PersistedRealmCatalog.TryGetValue(RealmId.Default.Value, out var row)
+            ? (ushort)row.Row.Generation
+            : (ushort)0;
+        return new RealmFrame(RealmId.Default.Value, generation, kindIdx: 0, appTag: 0, Codec.DefaultPositionBits, cellM,
+            deep: !ReplicationGrid.IsFlat(config, cellM), [config.WorldMin.X, config.WorldMin.Y, config.WorldMin.Z],
+            [config.WorldMax.X, config.WorldMax.Y, config.WorldMax.Z]);
+    }
 
     /// <summary>The per-archetype replication state, parallel to <see cref="Plans"/>. Empty on an inactive runtime.</summary>
     public ArchetypeReplicationState[] ReplicationStates => _replicationStates;

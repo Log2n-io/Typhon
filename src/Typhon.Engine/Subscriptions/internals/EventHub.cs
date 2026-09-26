@@ -198,6 +198,9 @@ internal sealed class EventTypeInfo
 /// </remarks>
 internal sealed class EventHub
 {
+    /// <summary>The served realm's frame, which an event's realm-framed field is quantized over (SUB-30); set by the runtime.</summary>
+    internal RealmFrame Realm { get; set; }
+
     /// <summary>How many ticks the loss count reaches back.</summary>
     public const int SummaryDepth = 256;
 
@@ -688,7 +691,7 @@ internal sealed class EventHub
                     f.Load(payload, one);
                 }
 
-                FieldCodec.WriteNumber(ref w, f.Field, one);
+                FieldCodec.WriteNumber(ref w, f.Field, one, Realm);
             }
         }
         catch (ArgumentException)

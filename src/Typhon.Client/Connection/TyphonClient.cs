@@ -201,7 +201,8 @@ public sealed class TyphonClient : IAsyncDisposable
 
         var seq = unchecked(++_commandSeq);
         var tick = LastAppliedTick;
-        var message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(plan, seq, values)]));
+        var frame = Store?.Realm;
+        var message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(plan, seq, values)], frame));
         await transport.SendAsync(message, ct).ConfigureAwait(false);
         return seq;
     }

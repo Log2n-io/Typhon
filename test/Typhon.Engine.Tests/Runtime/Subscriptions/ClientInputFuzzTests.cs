@@ -146,13 +146,17 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
     private sealed class Templates
     {
         private readonly CatalogPlan _plan;
+
+        // The served realm's frame: a region's pos3 vertices travel over it at the command width (typhon.3).
+        private readonly RealmFrame _frame;
         private readonly Random _rng;
         private readonly int _messageCap;
         private ushort _seq;
 
-        public Templates(CatalogPlan plan, Random rng, int messageCap)
+        public Templates(CatalogPlan plan, Random rng, int messageCap, RealmFrame frame)
         {
             _plan = plan;
+            _frame = frame;
             _rng = rng;
             _messageCap = messageCap;
         }
@@ -195,7 +199,7 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
 
             var buffer = new byte[4096];
             var writer = new WireWriter(buffer);
-            CommandsMessage.Write(ref writer, (uint)_rng.Next(), list);
+            CommandsMessage.Write(ref writer, (uint)_rng.Next(), list, _frame);
             return writer.Written.ToArray();
         }
 
@@ -243,11 +247,11 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
                 2 => 20_000,                                   // far wider than the profile's max edge: clamped
                 _ => 20 + (_rng.NextDouble() * 300),
             };
-            var coords = new double[n * 2];
+            var coords = new double[n * 3];   // pos3 on the wire (typhon.3, D-8); z = 0 in this flat realm
             for (var v = 0; v < n; v++)
             {
                 var a = v * Math.PI * 2 / n;
-                (coords[v * 2], coords[(v * 2) + 1]) = shape switch
+                (coords[v * 3], coords[(v * 3) + 1]) = shape switch
                 {
                     3 => (cx + (v * 10), cy + (v * 10)),        // collinear
                     4 => (cx, cy),                             // every vertex the same
@@ -359,7 +363,8 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
         using var harness = Harness(dbe, $"{nameof(ClientInputFuzzTests)}_{seed}");
         var rng = new Random(seed);
         var host = (ISubscriptionsHost)harness.Subscriptions;
-        var templates = new Templates(harness.CatalogPlan, rng, new SubscriptionsOptions { IngressBytesPerSecond = TestIngress.Budget }.ClientMessageBytes);
+        var templates = new Templates(harness.CatalogPlan, rng, new SubscriptionsOptions { IngressBytesPerSecond = TestIngress.Budget }.ClientMessageBytes,
+            harness.Subscriptions.Realm0Frame);
         var info = new LinkInfo { Transport = "fuzz", SubProtocol = ProtocolConstants.WebSocketSubprotocol };
         var clients = new List<Client>();
         var closes = new Dictionary<ushort, int>();

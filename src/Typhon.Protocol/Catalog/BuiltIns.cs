@@ -110,23 +110,20 @@ public static class BuiltInCommands
         return fields.Length == 3
             && command.Delivery == CatalogCommand.LatestDelivery
             && command.Rate is { PerSec: 5, Burst: 5 }
-            && vertices is { Kind: CodecKind.List, MaxCount: MaxRegionVertices, Of.Kind: CodecKind.Pos2 or CodecKind.Pos3 }
-            && vertices.MinCount == MinVertices(vertices.Of.Kind == CodecKind.Pos3 ? 3 : 2)
+            && vertices is { Kind: CodecKind.List, MinCount: MinRegionVertices, MaxCount: MaxRegionVertices, Of.Kind: CodecKind.Pos3 }
             && altitude?.Kind == CodecKind.F16
             && budget?.Kind == CodecKind.U16
             && Array.TrueForAll(fields, f => f is { Group: null, OnEnter: false, Enum: null });
     }
 
     /// <summary>
-    /// Builds the <c>ClientRegion</c> command for a world whose positions use <paramref name="position"/>: its vertices are quantized exactly like the
-    /// archetypes' positions, so a decoded region can never leave the world. A flat world's region is a polygon of 3–16 points, a deep world's a
-    /// polyhedron of 4–16 (10 § 6).
+    /// Builds the <c>ClientRegion</c> command: its vertices are always <c>list&lt;pos3&gt;</c> over the session's realm frame (<c>typhon.3</c>, D-8), so a
+    /// decoded region can never leave the realm. A flat realm ignores z and needs a polygon of 3–16 points; a deep one a polyhedron of 4–16, which the
+    /// engine checks when it builds the hull (10 § 6).
     /// </summary>
-    /// <param name="position">The grid's <see cref="CodecKind.Pos2"/> codec in a flat world, its <see cref="CodecKind.Pos3"/> codec in a deep one.</param>
     /// <returns>The command definition: latest-wins, at most 5 per second.</returns>
-    public static CatalogCommand CreateClientRegion(CatalogCodec position)
+    public static CatalogCommand CreateClientRegion()
     {
-        ArgumentNullException.ThrowIfNull(position);
         return new CatalogCommand
         {
             Idx = ClientRegionIdx,
@@ -140,7 +137,7 @@ public static class BuiltInCommands
                     Name = RegionVerticesField,
                     Codec = new CatalogCodec
                     {
-                        Kind = CodecKind.List, Of = position, MinCount = MinVertices(position.Kind == CodecKind.Pos3 ? 3 : 2),
+                        Kind = CodecKind.List, Of = new CatalogCodec { Kind = CodecKind.Pos3 }, MinCount = MinRegionVertices,
                         MaxCount = MaxRegionVertices,
                     },
                 },

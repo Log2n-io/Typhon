@@ -68,7 +68,8 @@ describe('golden catalogs', () => {
     expect(plan.command(16).name).toBe('MoveTo');
     expect(plan.event(16).name).toBe('Attack');
     expect(() => plan.event(0)).toThrow();
-    expect(plan.grids[0]!.cellCount).toBe(64 * 64);
+    // 64 × 64 cells over catalog-swg's realm: a 1-cell tile of 256 m across 16 384 m.
+    expect(plan.grids[0]!.tileCells).toBe(1);
     expect(plan.metrics.map((m) => [m.name, m.offset, m.valueCount])).toEqual([['typhon.tick.p99', 0, 1]]);
   });
 
@@ -225,16 +226,17 @@ describe('golden catalogs', () => {
     expect(problemsOf(subscribe)).toMatch(/'SubscribeRequest' is reserved/);
   });
 
-  it('refuses grids of other than 2 or 3 axes, beyond 2^24 cells, or counting an archetype twice', () => {
+  it('refuses grids without a tile, duplicated, or counting an archetype twice', () => {
     const catalog = kitchenSink();
     catalog.grids.push(
-      { idx: 1, origin: [0], cell: 1, dims: [4], archetypes: [0] },
-      { idx: 2, origin: [0, 0, 0], cell: 1, dims: [4096, 4096, 2], archetypes: [1, 1] },
+      { idx: 1, tileCells: 0, archetypes: [0] },
+      { idx: 2, tileCells: 9, archetypes: [1, 1] },
+      { idx: 3, tileCells: 9, archetypes: [1, 1] },
     );
     const problems = problemsOf(catalog);
-    expect(problems).toMatch(/grid 1: dims and origin need 2 or 3 matching axes/);
-    expect(problems).toMatch(/grid 2: more than 16777216 cells/);
+    expect(problems).toMatch(/grid 1: tileCells must be at least 1/);
     expect(problems).toMatch(/grid 2: archetype index 1 does not exist or is listed twice/);
+    expect(problems).toMatch(/grid 3 duplicates grid 2/);
   });
 
   it('refuses a valid catalog that is not canonical: order, index, reserved range, spelled-out default', () => {

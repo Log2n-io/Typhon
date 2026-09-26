@@ -194,6 +194,7 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
 
     /// <summary>A profile switch tells the client to clear its store, and the view refills from nothing.</summary>
     [Test]
+    [VerifiesRule("SUB-30")]
     public void AProfileSwitchResetsTheView()
     {
         using var harness = Create();
@@ -213,7 +214,8 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(first.Flags & TickFlags.Reset, Is.EqualTo(TickFlags.None), "a brand-new session's store is already empty");
+            Assert.That(first.Flags & TickFlags.Reset, Is.EqualTo(TickFlags.Reset),
+                "a brand-new session's first frame is a RESET, the only frame its REALM may travel in (typhon.3); its empty store loses nothing");
             Assert.That(first.Flags & TickFlags.ViewComplete, Is.EqualTo(TickFlags.ViewComplete), "and its fill completed inside the budget");
             Assert.That(reset, Is.Not.Null);
             Assert.That(reset.Flags & TickFlags.Reset, Is.EqualTo(TickFlags.Reset), "a profile switch is a RESET (03 § 5)");

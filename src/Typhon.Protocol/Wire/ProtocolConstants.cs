@@ -19,6 +19,9 @@ public static class ProtocolConstants
     /// <summary>The 4-byte TCP preamble, ASCII <c>TYP3</c>: each side writes its own; a mismatch closes the connection without a <c>KICK</c> (W31).</summary>
     public static System.ReadOnlySpan<byte> TcpPreamble => "TYP3"u8;
 
+    /// <summary>The most realm kinds a catalog declares: a <c>REALM</c> block's <c>varu kindIdx</c> stays one byte.</summary>
+    public const int MaxRealmKinds = 128;
+
     /// <summary>Smallest velocity unit exponent a catalog may declare: <c>2^-40</c> m per tick, far below any float32 position jitter.</summary>
     public const int MinVelocityUnitExp = -40;
 

@@ -3,6 +3,7 @@ import { CodecKind } from './codec-kinds.js';
 import { BlockType, MessageType, SourceStatus, TickFlags } from './constants.js';
 import { writeNumber, writeSection, type FieldValues } from './field-codec.js';
 import { uintInRange } from './range.js';
+import { RealmFrame } from './realm-frame.js';
 import type { WireWriter } from './writer.js';
 
 /*
@@ -80,6 +81,18 @@ export function endBlock(w: WireWriter, mark: number): void {
   w.endLengthPrefixed(mark);
 }
 
+/** A `REALM` block: `frame`, or `REALM(NONE)` for `null` (`typhon.3`). First block of a `RESET` frame only. */
+export function writeRealmBlock(w: WireWriter, frame: RealmFrame | null): void {
+  const mark = beginBlock(w, BlockType.Realm);
+  if (frame === null) {
+    RealmFrame.writeNone(w);
+  } else {
+    frame.write(w);
+  }
+
+  endBlock(w, mark);
+}
+
 /**
  * A whole `ENTITIES` block for the frame at `frameTick`. Each list must be sorted by ascending, distinct netId, and every
  * segment's `t0` must lie in the 2^16 ticks up to the frame's (W9), or `tickLo` would decode it 65 536 ticks off.
@@ -92,6 +105,7 @@ export function writeEntitiesBlock(
   segments: readonly SegmentRecord[],
   states: readonly StateRecord[],
   leaves: readonly number[],
+  frame: RealmFrame | null = null,
 ): void {
   const mark = beginBlock(w, BlockType.Entities);
   w.varu(archetype.idx);
@@ -102,15 +116,15 @@ export function writeEntitiesBlock(
   for (const e of enters) {
     prev = writeGap(w, prev, e.netId);
     if (position !== null) {
-      writeNumber(w, position.pos, e.position ?? NO_VALUES);
+      writeNumber(w, position.pos, e.position ?? NO_VALUES, 0, frame);
       if (position.moving) {
         writeSegmentTail(w, frameTick, position, e.velocity ?? NO_VALUES, e.t0 ?? 0, e.epoch ?? 0);
       }
     }
 
-    writeSection(w, archetype.onEnter, e.values);
+    writeSection(w, archetype.onEnter, e.values, false, frame);
     for (const section of archetype.groupSections) {
-      writeSection(w, section, e.values);
+      writeSection(w, section, e.values, false, frame);
     }
   }
 
@@ -122,7 +136,7 @@ export function writeEntitiesBlock(
   prev = -1;
   for (const s of segments) {
     prev = writeGap(w, prev, s.netId);
-    writeNumber(w, position!.pos, s.position);
+    writeNumber(w, position!.pos, s.position, 0, frame);
     writeSegmentTail(w, frameTick, position!, s.velocity ?? NO_VALUES, s.t0, s.epoch);
   }
 
@@ -139,7 +153,7 @@ export function writeEntitiesBlock(
     w.u8(s.groupMask);
     for (let g = 0; g < groupCount; g++) {
       if ((s.groupMask & (1 << g)) !== 0) {
-        writeSection(w, archetype.groupSections[g]!, s.values);
+        writeSection(w, archetype.groupSections[g]!, s.values, false, frame);
       }
     }
   }
@@ -170,12 +184,12 @@ function writeRunHeader(w: WireWriter, count: number): void {
 }
 
 /** A whole `EVENTS` block, in emission order. */
-export function writeEventsBlock(w: WireWriter, events: readonly EventInput[]): void {
+export function writeEventsBlock(w: WireWriter, events: readonly EventInput[], frame: RealmFrame | null = null): void {
   const mark = beginBlock(w, BlockType.Events);
   w.varu(events.length);
   for (const e of events) {
     w.varu(e.type.idx);
-    writeSection(w, e.type.body, e.values);
+    writeSection(w, e.type.body, e.values, false, frame);
   }
 
   endBlock(w, mark);
@@ -189,6 +203,7 @@ export function writeSelfBlock(
   lastSeq: number,
   ownerMask: number,
   values: FieldValues,
+  frame: RealmFrame | null = null,
 ): void {
   if (netId === 0) {
     throw new RangeError('netId 0 is no controlled entity; write it with writeSelfNoneBlock');
@@ -206,7 +221,7 @@ export function writeSelfBlock(
   w.u8(ownerMask);
   for (let g = 0; g < groupCount; g++) {
     if ((ownerMask & (1 << g)) !== 0) {
-      writeSection(w, archetype.ownerSections[g]!, values);
+      writeSection(w, archetype.ownerSections[g]!, values, false, frame);
     }
   }
 

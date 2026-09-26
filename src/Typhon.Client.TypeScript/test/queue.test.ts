@@ -8,6 +8,7 @@ import {
   type FieldValues,
   type MessagePlan,
 } from '../src/index.js';
+import { SWG } from './frames.js';
 import { catalogPlan } from './net-support.js';
 
 /*
@@ -24,7 +25,8 @@ function steerValues(heading: number): FieldValues {
 }
 
 function regionValues(x: number): FieldValues {
-  return { altitudeM: 10, budgetKiBps: 64, vertices: [x, 0, x + 10, 0, x + 10, 10] };
+  // pos3 vertices (typhon.3, D-8): z = 0 on the ground.
+  return { altitudeM: 10, budgetKiBps: 64, vertices: [x, 0, 0, x + 10, 0, 0, x + 10, 10, 0] };
 }
 
 interface Decoded {
@@ -39,17 +41,22 @@ function decode(messages: Uint8Array[]): Decoded {
   const types: string[] = [];
   for (const message of messages) {
     expect(message[0]).toBe(MessageType.Commands);
-    readCommands(message, plan, {
-      command: (type, seq, clientTick) => {
-        types.push(type.name);
-        seqs.push(seq);
-        clientTicks.push(clientTick);
+    readCommands(
+      message,
+      plan,
+      {
+        command: (type, seq, clientTick) => {
+          types.push(type.name);
+          seqs.push(seq);
+          clientTicks.push(clientTick);
+        },
+        number: () => undefined,
+        text: () => undefined,
+        bytes: () => undefined,
+        list: () => undefined,
       },
-      number: () => undefined,
-      text: () => undefined,
-      bytes: () => undefined,
-      list: () => undefined,
-    });
+      SWG,
+    );
   }
 
   return { seqs, clientTicks, types };
@@ -112,7 +119,7 @@ describe('CommandQueue', () => {
     expect([queue.pendingCount, queue.coalescedCount]).toEqual([2, 1]);
 
     const messages: Uint8Array[] = [];
-    queue.flush(5, (m) => messages.push(m.slice()));
+    queue.flush(5, (m) => messages.push(m.slice()), SWG);
     const decoded = decode(messages);
     expect(decoded.types).toEqual(['Steer', 'ClientRegion']);
     expect(decoded.seqs).toEqual([1, second]);

@@ -235,6 +235,12 @@ internal sealed class SubscriptionsIngress : IDisposable
     /// <summary>The bound command types.</summary>
     public CommandRegistry Commands { get; }
 
+    /// <summary>
+    /// The served realm's frame: a command's realm-framed field is decoded over it at <see cref="RealmFrame.CommandPositionBits"/>. Realm 0's, fixed for the
+    /// runtime's life until sessions are placed in realms (R4.3), which is what lets the transport decode it without reading the session's realm (SUB-05).
+    /// </summary>
+    public RealmFrame Realm { get; set; }
+
     /// <summary>This tick's typed buffers.</summary>
     public CommandTypeBuffers Buffers { get; }
 
@@ -303,7 +309,7 @@ internal sealed class SubscriptionsIngress : IDisposable
             // No ring to frame into (the pool is exhausted, or the session is going away) — but a malformed message is still malformed: validated, so it
             // still closes with 1007.
             var validating = new RefusingSink(null);
-            CommandsMessage.Read(message, Commands.Plan, ref validating);
+            CommandsMessage.Read(message, Commands.Plan, ref validating, Realm);
             return;
         }
 
@@ -323,7 +329,7 @@ internal sealed class SubscriptionsIngress : IDisposable
         Span<byte> payload = stackalloc byte[CommandRegistry.MaxPayloadBytes];
         Span<RegionVertex> vertices = stackalloc RegionVertex[BuiltInCommands.MaxRegionVertices];
         var sink = new IngressCommandSink(this, row, role, payload, vertices);
-        CommandsMessage.Read(message, Commands.Plan, ref sink);
+        CommandsMessage.Read(message, Commands.Plan, ref sink, Realm);
         sink.Flush();
     }
 
@@ -339,7 +345,7 @@ internal sealed class SubscriptionsIngress : IDisposable
     {
         var row = RowFor(session);
         var sink = new RefusingSink(row);
-        CommandsMessage.Read(message, Commands.Plan, ref sink);
+        CommandsMessage.Read(message, Commands.Plan, ref sink, Realm);
         if (row != null)
         {
             row.OverBudgetMessages++;
@@ -922,12 +928,13 @@ internal ref struct IngressCommandSink : ICommandSink
             return;
         }
 
-        // The codec's axes are the world's (10 § 6): a pos2 vertex is (x, y) on the plane z = 0, a pos3 vertex (x, y, z).
-        _vertexDims = field.Components == 3 ? 3 : 2;
+        // Always pos3 on the wire (typhon.3, D-8); the realm decides the hull: a flat realm's region is (x, y) on the plane z = 0 (10 § 6).
+        var stride = field.Components;
+        _vertexDims = _ingress.Realm is { Deep: true } ? 3 : 2;
         _vertexCount = Math.Min(count, BuiltInCommands.MaxRegionVertices);
         for (var i = 0; i < _vertexCount; i++)
         {
-            var at = i * _vertexDims;
+            var at = i * stride;
             _vertices[i] = new RegionVertex { X = components[at], Y = components[at + 1], Z = _vertexDims == 3 ? components[at + 2] : 0d };
         }
     }

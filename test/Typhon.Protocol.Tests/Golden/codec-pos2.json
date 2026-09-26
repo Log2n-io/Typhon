@@ -1,18 +1,28 @@
 {
-  "description": "pos2 over \u00B18192 at 24 bits (W3): corners, origin (code 8 388 608), max clamp, one NaN axis.",
+  "description": "pos2 over a flat frame of \u00B18192 at 24 bits (W3): corners, origin (code 8 388 608), max clamp, one NaN axis.",
   "codec": {
-    "t": "pos2",
-    "bits": 24,
-    "min": [
-      -8192,
-      -8192
-    ],
-    "max": [
-      8192,
-      8192
-    ]
+    "t": "pos2"
   },
   "frameTick": 70000,
+  "frame": {
+    "realmId": 0,
+    "generation": 0,
+    "kindIdx": 0,
+    "appTag": 0,
+    "posBits": 24,
+    "cellM": "4070000000000000",
+    "deep": false,
+    "min": [
+      "c0c0000000000000",
+      "c0c0000000000000",
+      "0000000000000000"
+    ],
+    "max": [
+      "40c0000000000000",
+      "40c0000000000000",
+      "4070000000000000"
+    ]
+  },
   "cases": [
     {
       "input": [
