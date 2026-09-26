@@ -31,8 +31,14 @@ internal sealed class RealmDispatchIndex
     /// <summary>Active clusters left out by the last rebuild — telemetry and tests.</summary>
     internal int ExcludedCount;
 
-    private int _builtPolicyEpoch = -1;
+    private int _builtRunnableEpoch = -1;
     private int _builtClusterSetVersion = -1;
+    private int[] _scratch = [];
+    private ulong[] _scratchExcluded = [];
+
+    /// <summary>The cluster-set version this list was built at. A selection finding the live version moved filters the live list instead (review #4).
+    /// </summary>
+    internal int BuiltClusterSetVersion => _builtClusterSetVersion;
 
     /// <summary>True when <paramref name="chunkId"/> lies in a non-runnable realm. Only meaningful while <see cref="Filtering"/>.</summary>
     internal bool IsExcluded(int chunkId)
@@ -44,7 +50,8 @@ internal sealed class RealmDispatchIndex
     /// <summary>Brings the index up to date with the realm policy and the cluster set. Tick start only (RLM-03).</summary>
     internal void Update(ArchetypeClusterState cs, RealmTable realms)
     {
-        var policy = realms.PolicyEpoch;
+        // Keyed on RUNNABILITY, not the whole policy: an Active <-> Simulated or divisor-only flip changes no member (review #4).
+        var policy = realms.RunnableEpoch;
         if (realms.NonRunnableCount == 0)
         {
             // The common case, every realm runnable: nothing to filter, whatever the cluster set.
@@ -55,31 +62,34 @@ internal sealed class RealmDispatchIndex
                 Stamp++;
             }
 
-            _builtPolicyEpoch = policy;
+            _builtRunnableEpoch = policy;
+            _builtClusterSetVersion = -1;
             return;
         }
 
         var version = cs.ClusterSetVersion;
-        if (policy == _builtPolicyEpoch && version == _builtClusterSetVersion)
+        if (policy == _builtRunnableEpoch && version == _builtClusterSetVersion)
         {
             return;
         }
 
+        // Built into scratch and compared with the current lists: the stamp — the tier index's staleness signal — moves only when the content changed
+        // (review #4), so a policy flip that leaves this archetype's runnable set as it was costs no tier-index rebuild.
         var realmMap = cs.ClusterRealmMap;
         var active = cs.ReadActiveClusterList(out var activeCount);
-        if (Ids.Length < activeCount)
+        if (_scratch.Length < activeCount)
         {
-            Ids = new int[Math.Max(activeCount, Ids.Length * 2)];
+            _scratch = new int[Math.Max(activeCount, _scratch.Length * 2)];
         }
 
         var words = ((realmMap?.Length ?? 0) + 63) >> 6;
-        if (Excluded.Length < words)
+        if (_scratchExcluded.Length < words)
         {
-            Excluded = new ulong[Math.Max(words, Excluded.Length * 2)];
+            _scratchExcluded = new ulong[Math.Max(words, _scratchExcluded.Length * 2)];
         }
         else
         {
-            Array.Clear(Excluded);
+            Array.Clear(_scratchExcluded);
         }
 
         var count = 0;
@@ -90,24 +100,32 @@ internal sealed class RealmDispatchIndex
             if (realmMap != null && chunkId < realmMap.Length && !realms.IsRunnable(realmMap[chunkId]))
             {
                 var word = chunkId >> 6;
-                if (word >= Excluded.Length)
+                if (word >= _scratchExcluded.Length)
                 {
-                    Array.Resize(ref Excluded, Math.Max(word + 1, Excluded.Length * 2));
+                    Array.Resize(ref _scratchExcluded, Math.Max(word + 1, _scratchExcluded.Length * 2));
                 }
 
-                Excluded[word] |= 1UL << (chunkId & 63);
+                _scratchExcluded[word] |= 1UL << (chunkId & 63);
                 excluded++;
                 continue;
             }
 
-            Ids[count++] = chunkId;
+            _scratch[count++] = chunkId;
         }
 
+        var same = Filtering == (excluded > 0) && count == Count && _scratch.AsSpan(0, count).SequenceEqual(Ids.AsSpan(0, Count))
+            && Excluded.Length == _scratchExcluded.Length && Excluded.AsSpan().SequenceEqual(_scratchExcluded);
+        (Ids, _scratch) = (_scratch, Ids);
+        (Excluded, _scratchExcluded) = (_scratchExcluded, Excluded);
         Count = count;
         ExcludedCount = excluded;
         Filtering = excluded > 0;
-        Stamp++;
-        _builtPolicyEpoch = policy;
+        if (!same)
+        {
+            Stamp++;
+        }
+
+        _builtRunnableEpoch = policy;
         _builtClusterSetVersion = version;
     }
 }

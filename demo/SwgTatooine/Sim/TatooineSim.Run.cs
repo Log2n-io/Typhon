@@ -124,6 +124,9 @@ public sealed partial class TatooineSim
     /// <summary>What the portals did (Realms G1b).</summary>
     public void PrintPortalReport() => _bridge?.PrintPortalReport();
 
+    /// <summary>True when a player inside pins interior <paramref name="realm"/> (Realms G2).</summary>
+    public bool IsInteriorPinned(ushort realm) => _bridge?.IsInteriorPinned(realm) ?? false;
+
     /// <summary>What the dungeons did (Realms G2).</summary>
     public void PrintDungeonReport() => _bridge?.PrintDungeonReport();
 

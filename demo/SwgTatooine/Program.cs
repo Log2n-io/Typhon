@@ -39,8 +39,12 @@ internal static class Program
 
         // After the build, before any tick: what the world and its realms hold (Realms G1d compares runs with and without --interiors against README § 11).
         // The page cache is a fixed native block of --cache-mib, the same in every run, so it cancels in a difference.
-        Console.WriteLine($"  memory after build: managed {GC.GetTotalMemory(true) / 1048576.0:F1} MB, private "
-            + $"{Process.GetCurrentProcess().PrivateMemorySize64 / 1048576.0:F1} MB");
+        // Only in a realms run: the forced collection would otherwise give every default run a heap main's does not have (review #4, A/B fairness).
+        if (config.Interiors || config.Space || config.Planets > 1 || config.Dungeons > 0)
+        {
+            Console.WriteLine($"  memory after build: managed {GC.GetTotalMemory(true) / 1048576.0:F1} MB, private "
+                + $"{Process.GetCurrentProcess().PrivateMemorySize64 / 1048576.0:F1} MB");
+        }
 
         // `--serve <port>` turns the benchmark into a server: the same world and the same systems, ticking forever behind a WebSocket, with the browser
         // client served beside it. It returns from here rather than falling through to the measurement report, which has nothing to say about a run with no

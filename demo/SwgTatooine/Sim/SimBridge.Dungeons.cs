@@ -29,6 +29,10 @@ public sealed partial class SimBridge
     }
 
     private readonly List<Dungeon> _openDungeons = [];
+
+    // Players a Close sent home THIS tick: their return is committed but not yet fenced, so they read Idle in realm 0 — never picked again before it lands
+    // (review #4: a close and an open in one tick could teleport a returning player straight into the next dungeon).
+    private readonly HashSet<EntityId> _closedThisTick = [];
     private int _nextDungeonSlot;
     private long _nextDungeonTick;
     private int _dungeonsOpened;
@@ -49,6 +53,7 @@ public sealed partial class SimBridge
     public void DungeonTick(TickContext ctx)
     {
         var tick = ctx.TickNumber;
+        _closedThisTick.Clear();
         for (var i = _openDungeons.Count - 1; i >= 0; i--)
         {
             if (tick >= _openDungeons[i].CloseTick)
@@ -60,8 +65,9 @@ public sealed partial class SimBridge
 
         if (_nextDungeonSlot < _config.Dungeons && tick >= _nextDungeonTick)
         {
-            Open(ctx, tick);
+            // Scheduled BEFORE the open: a throw inside it must not make every following tick burn the next slot (review #4).
             _nextDungeonTick = tick + Math.Max(1, (long)(_config.DungeonIntervalS * _config.TickRateHz));
+            Open(ctx, tick);
         }
     }
 
@@ -114,15 +120,13 @@ public sealed partial class SimBridge
             for (var i = 0; i < players.Count && party.Count < _config.DungeonParty; i++)
             {
                 var id = players[(offset + i) % players.Count];
-                if (_interiorPins.ContainsKey(id) || !tx.TryOpenMut(id, out var player))
+                if (_interiorPins.ContainsKey(id) || _closedThisTick.Contains(id) || !tx.TryOpen(id, out var candidate)
+                    || candidate.Read(Player.Realm).Value != 0 || candidate.Read(Player.State).Activity != PlayerActivity.Idle)
                 {
-                    continue;
+                    continue;   // read-only first: a rejected candidate's page is not dirtied
                 }
 
-                if (player.Read(Player.Realm).Value != 0 || player.Read(Player.State).Activity != PlayerActivity.Idle)
-                {
-                    continue;
-                }
+                var player = tx.OpenMut(id);
 
                 var p = player.Read(Player.Bounds);
                 home.Add((p.X, p.Z));
@@ -157,6 +161,7 @@ public sealed partial class SimBridge
             for (var i = 0; i < dungeon.Party.Length; i++)
             {
                 var id = dungeon.Party[i];
+                _closedThisTick.Add(id);
                 if (!tx.TryOpenMut(id, out var player))
                 {
                     continue;

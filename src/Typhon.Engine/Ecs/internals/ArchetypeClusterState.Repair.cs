@@ -207,7 +207,34 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Bounded by the number of cells that have both nominated and converged, which is the population that would
     /// otherwise re-sort itself every tick. An entry is dropped the moment its cell is genuinely repaired.
     /// </remarks>
-    private readonly Dictionary<int, ulong> _repairNoOpGeometry = [];
+    // Keyed by (realm, cell) — CellRepairQueue.Key — like the queue: two realms sharing a cell key must not overwrite each other's memo (review #4).
+    private readonly Dictionary<long, ulong> _repairNoOpGeometry = [];
+
+    /// <summary>Drops the no-op memo entries of a removed realm.</summary>
+    private void ForgetRepairNoOpMemo(ushort realm)
+    {
+        if (_repairNoOpGeometry.Count == 0)
+        {
+            return;
+        }
+
+        List<long> gone = null;
+        foreach (var key in _repairNoOpGeometry.Keys)
+        {
+            if (CellRepairQueue.RealmOf(key) == realm)
+            {
+                (gone ??= []).Add(key);
+            }
+        }
+
+        if (gone != null)
+        {
+            foreach (var key in gone)
+            {
+                _repairNoOpGeometry.Remove(key);
+            }
+        }
+    }
 
     /// <summary>
     /// Source slots already named by a request sitting in this tick's drain prefix, keyed by cluster chunk id (#877).
@@ -702,7 +729,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // the Morton order without changing any bound, and this will skip a re-sort that would have helped. That is the
         // same exposure CR-03 already records as a scoped exception, and it is the delta path's population, not repair's.
         var geometry = HashUnitGeometry(candidates, clusters.Length);
-        if (_repairNoOpGeometry.TryGetValue(cellKey, out var lastNoOp) && lastNoOp == geometry)
+        if (_repairNoOpGeometry.TryGetValue(queueKey, out var lastNoOp) && lastNoOp == geometry)
         {
             // Dropped from the queue, not merely skipped. The memo says this cell's geometry has not changed since it was found already packed, so it is
             // not waiting for budget and ageing it to the head spends the head slot on a cell that cannot use it — and, in a CAPPED queue, evicts a cell
@@ -823,12 +850,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             // Dropped from the queue too: a unit whose sort would change nothing is not waiting for budget, so ageing it to the head would spend the
             // head slot on a cell that cannot use it. The memo above is what stops it costing a gather next tick; nomination re-queues it the moment its
             // geometry actually changes.
-            _repairNoOpGeometry[cellKey] = geometry;
+            _repairNoOpGeometry[queueKey] = geometry;
             RepairQueue?.Remove(queueKey);
             return 0;
         }
 
-        _repairNoOpGeometry.Remove(cellKey);
+        _repairNoOpGeometry.Remove(queueKey);
 
         if (valveFired)
         {

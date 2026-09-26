@@ -37,6 +37,22 @@ public sealed partial class SimBridge
     // Realms G2: a player inside an interior pins it active — no session observes in this demo, so without the pin an occupied interior would go dormant
     // under its player and stop running it. Touched only by TeleportTick, which is serial.
     private readonly System.Collections.Generic.Dictionary<EntityId, RealmObserver> _interiorPins = [];
+    private readonly System.Collections.Generic.List<TeleportRequest> _appliedCrossings = [];
+    private long _droppedCrossings;
+
+    /// <summary>True when a player inside pins interior <paramref name="realm"/> active (Realms G2) — what the demo checks read.</summary>
+    public bool IsInteriorPinned(ushort realm)
+    {
+        foreach (var pin in _interiorPins.Values)
+        {
+            if (pin.Realm.Value == realm)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
     private long _portalEntriesTick;
     private long _portalExitsTick;
     private long _portalEntries;
@@ -164,30 +180,31 @@ public sealed partial class SimBridge
         long entries = 0;
         long exits = 0;
         long planets = 0;
+        _appliedCrossings.Clear();
         using (var tx = ctx.CreateSideTransaction(DurabilityMode.GroupCommit, CommitDiscipline.Commit))
         {
             while (_teleports.TryDequeue(out var r))
             {
+                // A crossing that can no longer apply — its destination closed or gone, its player gone — is dropped, not allowed to throw: one bad
+                // request must not abort the tick and lose every crossing already dequeued (review #4).
+                var dest = new RealmId(r.Realm);
+                if (!Dbe.Realms.IsRegistered(dest) || Dbe.Realms.StateOf(dest) == RealmRunState.Closing || !tx.IsAlive(r.Id))
+                {
+                    _droppedCrossings++;
+                    continue;
+                }
+
                 var nb = default(PlayerPlacement);
                 nb.SetAt(r.X, r.Z, r.HalfExtent);
-                tx.Teleport(r.Id, Player.Bounds, new RealmId(r.Realm), in nb);
+                tx.Teleport(r.Id, Player.Bounds, dest, in nb);
+                _appliedCrossings.Add(r);
                 switch (r.Kind)
                 {
                     case CrossingKind.Enter:
                         entries++;
-                        if (_config.InteriorSleepS > 0f && !_interiorPins.ContainsKey(r.Id))
-                        {
-                            _interiorPins[r.Id] = Dbe.Realms.Observe(new RealmId(r.Realm));
-                        }
-
                         break;
                     case CrossingKind.Exit:
                         exits++;
-                        if (_interiorPins.Remove(r.Id, out var pin))
-                        {
-                            pin.Dispose();
-                        }
-
                         break;
                     default:
                         planets++;
@@ -198,6 +215,19 @@ public sealed partial class SimBridge
             var commit = Stopwatch.GetTimestamp();
             tx.Commit();
             _teleportCommitTicks += Stopwatch.GetTimestamp() - commit;
+        }
+
+        // Pins follow the COMMITTED crossings only.
+        foreach (var r in _appliedCrossings)
+        {
+            if (r.Kind == CrossingKind.Enter && _config.InteriorSleepS > 0f && !_interiorPins.ContainsKey(r.Id))
+            {
+                _interiorPins[r.Id] = Dbe.Realms.Observe(new RealmId(r.Realm));
+            }
+            else if (r.Kind != CrossingKind.Enter && _interiorPins.Remove(r.Id, out var pin))
+            {
+                pin.Dispose();
+            }
         }
 
         _teleportTicks += Stopwatch.GetTimestamp() - start;

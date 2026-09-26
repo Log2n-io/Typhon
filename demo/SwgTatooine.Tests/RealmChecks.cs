@@ -317,7 +317,9 @@ public sealed class GalaxyTests
             if (Worlds.PlayersIn(_sim.Dbe, realm.Value, Worlds.Everywhere).Count > 0)
             {
                 occupied++;
-                Assert.That(_sim.Dbe.Realms.StateOf(realm), Is.Not.EqualTo(RealmRunState.Dormant), $"interior {r} holds a player and sleeps under it");
+                // Pinned, not "not Dormant": a player entering in the last tick is indexed there while the realm still reads the state that tick's
+                // start decided — the pin takes effect at the next tick start (review #4).
+                Assert.That(_sim.IsInteriorPinned(realm.Value), Is.True, $"interior {r} holds a player and nothing pins it");
             }
         }
 

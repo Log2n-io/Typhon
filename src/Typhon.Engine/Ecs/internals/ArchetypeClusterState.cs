@@ -3075,10 +3075,27 @@ internal sealed unsafe partial class ArchetypeClusterState
     // The engine's realms, to create an archetype's state in a realm lazily. Set by InitializeSpatial.
     private RealmTable _realmTable;
 
-    // The realms this archetype has state in, densely, for whole-archetype passes: never walk RealmSpatial, which is sized to MaxRealms (up to 65 535).
-    // Appended under _finalizeLock, grown by doubling; readers take the count, then the array — the writer publishes the array, then the count.
-    private RealmArchetypeSpatial[] _presentRealmSpatial = [];
-    private int _presentRealmCount;
+    /// <summary>The engine's realm table (null for a non-spatial archetype): the repair queue reads realm runnability through it.</summary>
+    internal RealmTable RealmTableOrNull => _realmTable;
+
+    /// <summary>One immutable view of the present list — array and count published as ONE reference (review #4: a removal compacts the list, and a
+    /// reader pairing one publication's count with another's array read a null).</summary>
+    private sealed class PresentSnapshot
+    {
+        internal static readonly PresentSnapshot Empty = new([], 0);
+        internal readonly RealmArchetypeSpatial[] Items;
+        internal readonly int Count;
+
+        internal PresentSnapshot(RealmArchetypeSpatial[] items, int count)
+        {
+            Items = items;
+            Count = count;
+        }
+    }
+
+    // The realms this archetype has state in, densely, for whole-archetype passes: never walk RealmSpatial, which is sized per registered id. Appended
+    // under _finalizeLock into spare capacity (grown by doubling) with a new snapshot over the same array; a drop publishes a compacted copy.
+    private PresentSnapshot _present = PresentSnapshot.Empty;
 
     /// <summary>The largest <c>ClusterReach</c> of any realm this archetype lives in — the telemetry's archetype-level reach (a MAX, like the engine's).</summary>
     internal float MaxClusterReachAcrossRealms
@@ -3142,6 +3159,13 @@ internal sealed unsafe partial class ArchetypeClusterState
             throw new InvalidOperationException($"Realm {realm} cannot hold archetype {ArchetypeId}: {r.IncompatibilityOf(ArchetypeId)}");
         }
     }
+
+    /// <summary>
+    /// Where a spawn whose staged key turned invalid lands: the realm Spawn validated — unless that realm has since closed or gone (a spawn validated
+    /// before Unregister and committed after it, review #4), then the primary realm. The commit never throws for it (D-2); the key is rewritten.
+    /// </summary>
+    internal ushort SpawnFallbackRealm(ushort validated) =>
+        IsValidRealmForEntity(validated) ? validated : _realmTable.Primary.Id.Value;
 
     /// <summary>True when an entity of this archetype may be in realm <paramref name="realm"/>: registered, and able to hold it.</summary>
     /// <remarks>A Closing realm is not: an entity already in it stays (the fence compares against the cluster's realm first), none may enter.</remarks>
@@ -3340,8 +3364,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     {
         get
         {
-            var count = Volatile.Read(ref _presentRealmCount);
-            return Volatile.Read(ref _presentRealmSpatial).AsSpan(0, count);
+            var present = Volatile.Read(ref _present);
+            return present.Items.AsSpan(0, present.Count);
         }
     }
 
@@ -3392,19 +3416,24 @@ internal sealed unsafe partial class ArchetypeClusterState
         try
         {
             var dropped = RealmSpatial[realm];
-            var present = new RealmArchetypeSpatial[Math.Max(4, _presentRealmSpatial.Length)];
+            var old = _present;
+            var compacted = new RealmArchetypeSpatial[Math.Max(4, old.Items.Length)];
             var n = 0;
-            for (var i = 0; i < _presentRealmCount; i++)
+            for (var i = 0; i < old.Count; i++)
             {
-                if (!ReferenceEquals(_presentRealmSpatial[i], dropped))
+                if (!ReferenceEquals(old.Items[i], dropped))
                 {
-                    present[n++] = _presentRealmSpatial[i];
+                    compacted[n++] = old.Items[i];
                 }
             }
 
             Volatile.Write(ref RealmSpatial[realm], null);
-            Volatile.Write(ref _presentRealmCount, n);
-            Volatile.Write(ref _presentRealmSpatial, present);
+            Volatile.Write(ref _present, new PresentSnapshot(compacted, n));
+
+            // The realm's repair candidates and no-op memo entries go with it (review #4): a removed id reads non-runnable, so they would otherwise wait
+            // in the queue for ever and keep the planner running every tick.
+            RepairQueue?.RemoveRealm(realm);
+            ForgetRepairNoOpMemo(realm);
         }
         finally
         {
@@ -3449,19 +3478,19 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         var registered = _realmTable.Get(realm);
         var created = new RealmArchetypeSpatial(this, registered.Id, registered.Grid);
-        var present = _presentRealmSpatial;
-        if (_presentRealmCount == present.Length)
+        var current = _present;
+        var items = current.Items;
+        if (current.Count == items.Length)
         {
-            var grown = new RealmArchetypeSpatial[Math.Max(4, present.Length * 2)];
-            present.CopyTo(grown, 0);
-            present = grown;
+            var grown = new RealmArchetypeSpatial[Math.Max(4, items.Length * 2)];
+            items.CopyTo(grown, 0);
+            items = grown;
         }
 
-        present[_presentRealmCount] = created;
-        // Release order: the state itself before either index into it; the dense array before its count.
+        items[current.Count] = created;
+        // Release order: the state itself before either index into it; one snapshot for the dense list.
         Volatile.Write(ref RealmSpatial[realm], created);
-        Volatile.Write(ref _presentRealmSpatial, present);
-        Volatile.Write(ref _presentRealmCount, _presentRealmCount + 1);
+        Volatile.Write(ref _present, new PresentSnapshot(items, current.Count + 1));
         return created;
     }
 
@@ -6250,7 +6279,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <param name="dirtyBits">Occupancy-masked dirty bitmap snapshot from the tick fence. Word index = chunkId.
     /// A nonzero word means at least one entity in that cluster was written this tick.</param>
     /// <param name="tickNumber">Current tick number, used for heartbeat staggering.</param>
-    internal void DormancySweep(long[] dirtyBits, long tickNumber)
+    /// <param name="activityBits">Optional: the spatial barrier's per-cluster process bitmap (bit per chunk id) — a cluster WriteSpatial touched this tick
+    /// is active even with no dirty bit (the clean-spatial fence branch).</param>
+    internal void DormancySweep(long[] dirtyBits, long tickNumber, long[] activityBits = null)
     {
         if (SleepStates == null || SleepThresholdTicks <= 0)
         {
@@ -6272,7 +6303,8 @@ internal sealed unsafe partial class ArchetypeClusterState
             if (state == ClusterSleepState.Active)
             {
                 // Check dirty bitmap: nonzero word means at least one entity written this tick
-                var dirty = chunkId < dirtyBits.Length && dirtyBits[chunkId] != 0;
+                var dirty = (chunkId < dirtyBits.Length && dirtyBits[chunkId] != 0)
+                    || (activityBits != null && (chunkId >> 6) < activityBits.Length && (activityBits[chunkId >> 6] & (1L << (chunkId & 63))) != 0);
                 if (dirty)
                 {
                     SleepCounters[chunkId] = 0;
@@ -10395,8 +10427,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // Indexed by realm id, sized to the highest REGISTERED id rather than MaxRealms: 8 B per slot per spatial archetype is 512 KB (LOH) at
             // 65 535, for ids that hold nothing. Registration is at open only today; run-time registration (RT-7) grows it.
             RealmSpatial = new RealmArchetypeSpatial[realms.HighestRegisteredId + 1];
-            _presentRealmSpatial = new RealmArchetypeSpatial[4];
-            _presentRealmCount = 0;
+            _present = PresentSnapshot.Empty;
             // Issue #233: allocate dormancy arrays for spatial archetypes. Non-spatial archetypes leave SleepStates null (zero overhead).
             var capacity = Math.Max(16, PrimarySegmentCapacity);
             SleepStates = new ClusterSleepState[capacity];

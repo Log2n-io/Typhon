@@ -1990,6 +1990,14 @@ public partial class DatabaseEngine
         // The membership signal, from the same window: after the finalization drain, so a slot released and a cluster retired this tick are both in it.
         clusterState.PublishStructureChanges(tickNumber);
 
+        // Clean-spatial-refresh branch (path 1): nothing was written through the dirty bitmap, but WriteSpatial may have moved clusters — the barrier's
+        // process bitmap says which, and they are not quiet. Swept HERE, before the bookkeeping below clears that bitmap (Realms §9.3-3; review #4: an
+        // archetype moved only by WriteSpatial must not fall asleep while it moves). Every other active cluster is one tick quieter.
+        if (clusterState.FenceBranchPath == 1)
+        {
+            clusterState.DormancySweep(Array.Empty<long>(), tickNumber, clusterState.ClusterProcessBitmap);
+        }
+
         if (clusterState.SpatialSlot.HasSpatialIndex && clusterState.SpatialSlot.FieldInfo.Mode == SpatialMode.Dynamic)
         {
             clusterState.ClearAabbRefreshBookkeeping();
@@ -2014,12 +2022,9 @@ public partial class DatabaseEngine
 
         EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, PrimaryGrid);
 
-        // Clean-spatial-refresh branch (path 1) stops here — no WAL emit. It still sweeps, with nothing dirty: nothing was written this tick, so every
-        // active cluster is one tick quieter (Realms §9.3-3). Returning before the sweep froze the counters of a fully idle Dynamic archetype, and its
-        // clusters never slept nor did a sleeping one's heartbeat fire.
+        // Clean-spatial-refresh branch (path 1) stops here — no WAL emit; it was swept above, before the process bitmap was cleared.
         if (clusterState.FenceBranchPath == 1)
         {
-            clusterState.DormancySweep(Array.Empty<long>(), tickNumber);
             return false;
         }
 

@@ -124,7 +124,13 @@ public sealed class RealmRegistry
     }
 
     /// <summary>What realm <paramref name="id"/> is doing this tick, as its policy decided at tick start.</summary>
-    public RealmRunState StateOf(RealmId id) => OpenTable().StateOf(id.Value);
+    /// <remarks>A realm Unregister has closed reads <see cref="RealmRunState.Closing"/> at once: entries are refused from the call on. Its policy state
+    /// — what dispatch reads — follows at the next tick start (RLM-03).</remarks>
+    public RealmRunState StateOf(RealmId id)
+    {
+        var table = OpenTable();
+        return table.Get(id.Value).Closing ? RealmRunState.Closing : table.StateOf(id.Value);
+    }
 
     private RealmTable OpenTable() => _engine.RealmTable
         ?? throw new InvalidOperationException("Realms are observed, woken and inspected after InitializeArchetypes, once the realm table exists.");

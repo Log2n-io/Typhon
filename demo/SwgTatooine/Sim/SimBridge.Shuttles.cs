@@ -205,6 +205,7 @@ public sealed partial class SimBridge
             var chunk = cluster.ChunkId;
             var planet = cluster.Realm.Value;
             var planetPorts = PortsOf(planet);
+            var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: a divided planet's cluster is seen once in k ticks
             while (queued != 0)
             {
                 var idx = BitOperations.TrailingZeroCount(queued);
@@ -229,16 +230,19 @@ public sealed partial class SimBridge
 
                 // Burst: the whole queue on the landing tick. Trickle: each passenger with probability 1 / (ticks left in the window), which is uniform
                 // over what remains and certain on the last tick, so nobody queued before the window closes misses the shuttle.
+                // At divisor k a visit stands for k ticks: the landing tick falls inside it when phase < k, and a trickle boarding is k times as likely
+                // (review #4: `phase == 0` let a divided planet's burst passengers miss nearly every shuttle).
                 var board = _config.ShuttleBurst
-                    ? phase == 0
-                    : Hash01(Salt(tick, chunk, idx, 0x5A17EE21u)) * (window - phase) < 1f;
+                    ? phase < k
+                    : Hash01(Salt(tick, chunk, idx, 0x5A17EE21u)) * (window - phase) < k;
                 if (!board)
                 {
                     continue;
                 }
 
                 var h = places[idx].HalfExtent;
-                if (_config.Planets > 1 && planet < _config.Planets && Hash01(Salt(tick, chunk, idx, 0x0B4E1A37u)) < _config.InterPlanetShare)
+                var interPlanet = _config.Planets > 1 && planet < _config.Planets && Hash01(Salt(tick, chunk, idx, 0x0B4E1A37u)) < _config.InterPlanetShare;
+                if (interPlanet)
                 {
                     // Bound for another planet: a realm change, applied by TeleportSystem after this system.
                     BoardInterPlanet(cluster.GetEntityId(idx), planet, dest, h, Salt(tick, chunk, idx, 0x5D2A0C8Fu));
@@ -261,7 +265,12 @@ public sealed partial class SimBridge
                 state.ActivityTicks = (20 * _config.TickRateHz) + (int)(Hash01(Salt(tick, chunk, idx, 0x1B56C4E9u)) * 100 * _config.TickRateHz);
                 TatooineReplication.Replicate(in cluster, idx);
                 boardings++;
-                Interlocked.Increment(ref _portArrivals[dest]);
+
+                // The port probe reads planet 0's ports: only arrivals there count (review #4).
+                if (planet == 0 && !interPlanet)
+                {
+                    Interlocked.Increment(ref _portArrivals[dest]);
+                }
             }
         }
 

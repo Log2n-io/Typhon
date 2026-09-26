@@ -2075,7 +2075,7 @@ public unsafe partial class Transaction
                                 // placed in the validated realm and the key corrected, counted — the commit never throws for it (D-2).
                                 if (!ctx.ClusterState.IsValidRealmForEntity(realm))
                                 {
-                                    realm = entry.SpawnRealm;
+                                    realm = ctx.ClusterState.SpawnFallbackRealm(entry.SpawnRealm);
                                     *key = realm;
                                     Interlocked.Increment(ref ctx.ClusterState.LastTickRealmKeyReverts);
                                 }
@@ -2479,6 +2479,7 @@ public unsafe partial class Transaction
             var fieldType = SpatialFieldType.AABB2F;
             var orderRealm = -1;
             SpatialGrid orderGrid = null;
+            ArchetypeClusterState orderClusterState = null;
             var realmKeySlot = 0;
             var realmKeyOverhead = 0;
 
@@ -2493,6 +2494,9 @@ public unsafe partial class Transaction
                     var meta = _dbe.GetMetaByRouting((ushort)archId);
                     var engineState = meta != null && meta.IsClusterEligible ? _dbe._archetypeStates[meta.ArchetypeId] : null;
                     ArchetypeClusterState clusterState = engineState?.ClusterState;
+                    orderClusterState = clusterState;
+                    orderRealm = -1;   // validity is per archetype: a realm cached for another archetype decides nothing here
+                    orderGrid = null;
                     if (clusterState != null && clusterState.SpatialSlot.HasSpatialIndex && (realm0Grid != null || clusterState.SpatialSlot.HasRealmKey))
                     {
                         ref readonly var ss = ref clusterState.SpatialSlot;
@@ -2529,14 +2533,16 @@ public unsafe partial class Transaction
                             if (realm != orderRealm)
                             {
                                 // An invalid staged key sorts where FinalizeSpawns will place it: in the realm Spawn validated.
-                                var valid = _dbe._archetypeStates[archId]?.ClusterState?.IsValidRealmForEntity(realm) ?? false;
+                                // The RESOLVED state (meta.ArchetypeId), not _archetypeStates[archId]: archId is the routing id, and indexing by it made this
+                                // check always false — every spawn sorted by the fallback (review #4).
+                                var valid = orderClusterState?.IsValidRealmForEntity(realm) ?? false;
                                 orderRealm = valid ? realm : -1;
                                 orderGrid = valid ? _dbe.RealmTable.Get(realm).Grid : null;
                             }
 
                             if (orderGrid == null)
                             {
-                                realm = entry.SpawnRealm;
+                                realm = orderClusterState.SpawnFallbackRealm(entry.SpawnRealm);
                                 grid = _dbe.RealmTable.Get(realm).Grid;
                             }
                             else

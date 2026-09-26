@@ -67,8 +67,10 @@ public partial class DatabaseEngine
                 state?.ClusterState?.EnsureRealmSpatialCapacity(id.Value + 1);
             }
 
+            // Durable first, published second (review #4): an entity can enter the realm only once its catalog row is on disk, so a crash can never
+            // leave committed entities in a realm the next open does not know (RLM-01). A failed write publishes nothing.
+            PersistRealmCatalogRows([(id.Value, config.Grid)]);
             table.Register(id, grid, config, MarkRealmCompatibility);
-            PersistRealmCatalogEntries([id.Value]);
         }
     }
 
@@ -151,12 +153,19 @@ public partial class DatabaseEngine
             }
         }
 
+        // Not concurrently with a fence (the fence moves slots): call it from a system or between ticks. An id read from a slot the fence was moving is
+        // checked alive before it is destroyed.
+        var destroyed = 0;
         foreach (var entity in ids)
         {
-            tx.Destroy(entity);
+            if (tx.IsAlive(entity))
+            {
+                tx.Destroy(entity);
+                destroyed++;
+            }
         }
 
-        return ids.Count;
+        return destroyed;
     }
 
     /// <summary>
@@ -200,10 +209,17 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
-    /// After recovery at open: a realm that was Closing when the engine last stopped is retired when it holds nothing — its catalog row marked retired,
-    /// its id free — and stays Closing otherwise, for the application to empty (RLM-06).
+    /// After recovery at open, resolve every realm that was Closing when the engine last stopped (RLM-06). Closing is never carried across an open:
+    /// <list type="bullet">
+    /// <item>something still names it — a cluster in it, or ANY entity's [RealmKey] (WAL replay places a replayed spawn by plain claim, possibly in
+    /// another realm's cluster, and the first fence moves it home by its key) — or the application registered it at this open: it is live again, its
+    /// row back to Live, and the application may unregister it anew;</item>
+    /// <item>otherwise it is retired: its row marked Retired, its id free (a registration reuses the row at the next generation).</item>
+    /// </list>
+    /// Keeping it Closing instead would refuse the key of every replayed entity as an entry and the fence would revert it into the cluster's realm — the
+    /// entity resurrected elsewhere (review #4).
     /// </summary>
-    private void ResolveClosingRealmsAtOpen()
+    private void ResolveClosingRealmsAtOpen(IReadOnlyDictionary<ushort, RealmConfig> registeredAtOpen)
     {
         if (_closingRealmsAtOpen == null || _realms == null)
         {
@@ -217,14 +233,15 @@ public partial class DatabaseEngine
                 continue;
             }
 
-            if (RealmHoldsClusters(id))
+            var (chunkId, row) = _persistedRealms[id];
+            if ((registeredAtOpen != null && registeredAtOpen.ContainsKey(id)) || RealmHoldsClusters(id) || AnySlotNamesRealm(id))
             {
-                (_unavailableRealmIds ??= []).Add(id);
-                _realms.MarkClosing(id);
+                row.State = RealmR1.StateLive;
+                WriteRealmCatalogRow(chunkId, ref row);
+                _persistedRealms[id] = (chunkId, row);
                 continue;
             }
 
-            var (chunkId, row) = _persistedRealms[id];
             row.State = RealmR1.StateRetired;
             WriteRealmCatalogRow(chunkId, ref row);
             _persistedRealms.Remove(id);
@@ -238,6 +255,44 @@ public partial class DatabaseEngine
         }
 
         _closingRealmsAtOpen = null;
+    }
+
+    /// <summary>True when any occupied slot of any realm-keyed archetype names realm <paramref name="id"/> in its key. Open-time only: one pass over the
+    /// clusters of every realm-keyed archetype.</summary>
+    private unsafe bool AnySlotNamesRealm(ushort id)
+    {
+        using var epoch = EpochGuard.Enter(EpochManager);
+        foreach (var state in _archetypeStates)
+        {
+            var cs = state?.ClusterState;
+            if (cs == null || !cs.SpatialSlot.HasRealmKey || cs.ClusterSegment == null)
+            {
+                continue;
+            }
+
+            var accessor = cs.ClusterSegment.CreateChunkAccessor();
+            try
+            {
+                var active = cs.ReadActiveClusterList(out var count);
+                for (var i = 0; i < count; i++)
+                {
+                    var clusterBase = accessor.GetChunkAddress(active[i]);
+                    for (var bits = *(ulong*)clusterBase; bits != 0; bits &= bits - 1)
+                    {
+                        if (*cs.RealmKeyAt(clusterBase, System.Numerics.BitOperations.TrailingZeroCount(bits)) == id)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+
+        return false;
     }
 
     /// <summary>True when any archetype has an active cluster in realm <paramref name="id"/>.</summary>

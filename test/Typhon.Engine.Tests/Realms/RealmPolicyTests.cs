@@ -151,6 +151,40 @@ class RealmPolicyTests : TestBase<RealmPolicyTests>
     }
 
     [Test]
+    [VerifiesRule("RLM-03")]
+    public void Unregister_ClosesAtOnce_ButThePolicyStateMovesOnlyAtTheNextEvaluation()
+    {
+        // Review #4: MarkClosing wrote the state mid-tick (two systems of one tick could see different divisors) and raced the evaluation.
+        using var dbe = ThreeRealms(out _, out _, out _);
+        var table = dbe.RealmTable;
+        table.EvaluatePolicy();
+        var before = table.StateOf(2);
+        dbe.Realms.Unregister(new RealmId(2));
+        Assert.That(table.Get(2).Closing, Is.True, "entries are refused at once");
+        Assert.That(table.StateOf(2), Is.EqualTo(before), "the tick's decided state holds until the next evaluation");
+        table.EvaluatePolicy();
+        Assert.That((table.StateOf(2), table.DivisorOf(2)), Is.EqualTo((RealmRunState.Closing, 1)));
+        Assert.That(dbe.Realms.Counts.Closing, Is.EqualTo(1));
+    }
+
+    [Test]
+    public void AnObserverOfARemovedRealm_ReleasesWithoutThrowing()
+    {
+        using var dbe = ThreeRealms(out _, out _, out var in2);
+        var pin = dbe.Realms.Observe(new RealmId(2));
+        dbe.Realms.Unregister(new RealmId(2));
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            dbe.Realms.DestroyContents(new RealmId(2), tx);
+            tx.Commit();
+        }
+
+        dbe.WriteTickFence(2);
+        Assert.That(dbe.RealmTable.IsRegistered(2), Is.False);
+        Assert.DoesNotThrow(() => pin.Dispose(), "review #4: the removal zeroed the count and the release went negative");
+    }
+
+    [Test]
     public void Counts_AndOccupancy_SpanEveryRealm()
     {
         using var dbe = ThreeRealms(out _, out _, out _);

@@ -50,7 +50,7 @@ public sealed partial class SimBridge
             var motions = cluster.GetSpan(Starship.Move);
             var chunk = cluster.ChunkId;
             var moved = bits;
-            var clusterDt = perTick * ctx.Realms.DivisorOf(cluster.Realm);   // Realms G2: N ticks per visit at divisor N
+            var clusterDt = perTick * ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: N ticks per visit of a strided realm at divisor N
             while (bits != 0)
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
@@ -113,11 +113,13 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(Starship.Bounds);
             var chunk = cluster.ChunkId;
             var realm = cluster.Realm;
+            var k = ctx.Realms.TicksPerVisit(realm);
             while (bits != 0)
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
-                if ((tick + (chunk * 64) + idx) % ShipScanPeriodTicks != 0)
+                // "A scan tick fell inside the k ticks this visit stands for" (review #4: `== 0` aliased with the divisor stride and some ships never scanned).
+                if ((tick + (chunk * 64) + idx) % ShipScanPeriodTicks >= k)
                 {
                     continue;
                 }

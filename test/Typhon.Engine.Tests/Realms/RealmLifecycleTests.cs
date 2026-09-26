@@ -156,6 +156,68 @@ class RealmLifecycleTests : TestBase<RealmLifecycleTests>
     }
 
     [Test]
+    [VerifiesRule("RLM-06")]
+    public void ASpawnValidatedBeforeUnregister_CommittedAfter_LandsInThePrimaryRealm()
+    {
+        // Review #4: the commit fell back to the validated realm — by then Closing (an entry into it) or gone (a throw mid-commit).
+        using var scope = ServiceProvider.CreateScope();
+        using var dbe = Open(scope);
+        dbe.Realms.Register(new RealmId(3), RealmConfig.SimulatedAlways(Grid()));
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Spawn<RealmUnit>(RealmUnit.Pos.Set(At(40, 40, 3)));
+            dbe.Realms.Unregister(new RealmId(3));
+            Assert.That(tx.Commit(), Is.True, "the commit never throws for it (D-2)");
+        }
+
+        dbe.WriteTickFence(1);
+        Assert.That(Count(dbe, 0), Is.EqualTo(1), "placed in the primary realm, its key rewritten");
+        dbe.WriteTickFence(2);
+        Assert.That(dbe.RealmTable.IsRegistered(3), Is.False, "the closing realm received nothing and was removed");
+    }
+
+    [Test]
+    [CancelAfter(30_000)]
+    [VerifiesRule("RLM-06")]
+    public void CrashAfterUnregister_WithEntitiesStillInIt_ReopensLive_NothingMisfiled()
+    {
+        // Review #4: WAL replay places a replayed spawn by plain claim, possibly in another realm's cluster; retiring the realm (nothing IN it) made the
+        // first fence revert the entity's key into that other realm. Something names the realm, so it reopens live and the entity goes home by its key.
+        using (var scope = ServiceProvider.CreateScope())
+        {
+            var dbe = Open(scope);
+            dbe.Realms.Register(new RealmId(6), RealmConfig.SimulatedAlways(Grid()));
+
+            // Commit discipline: the SingleVersion values (the realm key among them) reach the WAL at commit, not at a fence that never runs here.
+            using (var uow = dbe.CreateUnitOfWork())
+            {
+                using (var tx = uow.CreateTransaction(CommitDiscipline.Commit))
+                {
+                    for (var i = 0; i < 4; i++)
+                    {
+                        tx.Spawn<RealmUnit>(RealmUnit.Pos.Set(At(5 + (10 * i), 50, 6, i)));
+                    }
+
+                    Assert.That(tx.Commit(), Is.True);
+                }
+
+                uow.Flush();
+            }
+
+            dbe.Realms.Unregister(new RealmId(6));
+            dbe.SimulateHardCrash();
+        }
+
+        using var reopen = ServiceProvider.CreateScope();
+        using var engine = Open(reopen, configure: false);
+        Assert.That(engine.RealmTable.IsRegistered(6), Is.True, "its entities name it: live again, never retired under them");
+        Assert.That(engine.RealmTable.Get(6).Closing, Is.False);
+        engine.WriteTickFence(1);
+        Assert.That(Count(engine, 6), Is.EqualTo(4), "every replayed entity is filed in its own realm");
+        Assert.That(Count(engine, 0), Is.Zero, "and none in another");
+    }
+
+    [Test]
     [CancelAfter(30_000)]
     [VerifiesRule("RLM-06")]
     public void CrashAfterUnregister_TheRealmIsNeverResurrected()

@@ -2337,7 +2337,8 @@
     and before any system is dispatched; every dispatch, scan and fence stage of the tick reads the state it decided
   invariant observed (a session or an application pin) ⇒ Active at divisor 1; unobserved ⇒ Simulated at the realm's UnobservedTickDivisor, except a
     Sleep realm unobserved for more than SleepAfterTicks evaluations, which is Dormant; an entry (a cross-realm migration) or Wake restarts the hold
-  invariant observers and wake requests arrive from any thread and take effect at the next evaluation — never mid-tick
+  invariant observers, wake requests and Unregister's Closing flag arrive from any thread and take effect at the next evaluation — never mid-tick;
+    the evaluation maps a Closing realm to state Closing at divisor 1 (the flag itself refuses entries at once)
   never re-evaluate from a worker, or between two systems of one tick: two systems of the tick would dispatch different realm sets, and a tier index
     rebuilt mid-dispatch zeroes the arrays a parallel system is walking (TI-01)
   scope: RealmTable.EvaluatePolicy, TyphonRuntime.UpdateRealmPolicyAtTickStart, RealmDispatchIndex.Update
@@ -2361,7 +2362,12 @@
   invariant for a RealmRate.Divided QuerySystem without a change filter, a cluster of a realm at divisor N > 1 is selected on run r iff
     (r + PhaseOf(realm) + chunkId) mod N == 0 — so over any N consecutive runs every such cluster is selected exactly once, and the realm's load is
     spread over the N runs rather than landing on one
-  invariant keyed on the SYSTEM's run count, never the tick number: a TickDivisor would otherwise alias it and starve every cluster off its parity
+  invariant keyed on the SYSTEM's run count, never the tick number: a TickDivisor would otherwise alias it and starve every cluster off its parity;
+    with cellAmortize A the key is run / A (bucket visits), or gcd(A, N) > 1 starves clusters
+  invariant only a run whose dispatch was strided multiplies: ctx.Realms.DeltaTime and TicksPerVisit give N for it, 1 for a change-filtered, Full or
+    unstrided run; descendant archetypes of the view are narrowed the same way
+  known limit time is not conserved across a divisor CHANGE (1 -> N: the next visit may integrate up to N - 1 ticks too many; N -> 1: up to N - 1
+    too few) — observer churn is where it shows; a per-cluster last-visit stamp would fix it at a per-cluster cost, not paid today
   invariant ctx.Realms.DeltaTime(realm) = AmortizedDeltaTime × the realm's divisor for a Divided system, AmortizedDeltaTime for a Full one
   invariant a change-filtered system and a RealmRate.Full system are not strided; an observed realm is at divisor 1; no divided realm ⇒ one branch
   scope: TyphonRuntime.SelectDispatchClusters, RealmTable.PhaseOf, RealmTable.DividedCount, RealmsAccessor.DeltaTime, SystemBuilder.RealmRate
@@ -2370,13 +2376,16 @@
   on_violation: a planet's creatures integrated twice in some windows and never in others, or at the wrong delta time — visible as jumps
 
 ### RLM-06: A realm leaves only empty, and its id returns only after an open proves it empty `[fatal][silent]`
-  invariant a run-time Register grows every archetype's per-realm table and marks the archetypes the realm cannot hold BEFORE publishing it, then
-    writes its catalog row synchronously (RLM-01) — no entity can enter a half-built realm
+  invariant a run-time Register grows every archetype's per-realm table, writes its catalog row synchronously (RLM-01) and marks the archetypes the
+    realm cannot hold, all BEFORE publishing it — no entity can enter a half-built realm, nor one the next open would not know
   invariant Unregister marks the catalog row Closing synchronously, then the realm: from then on no entity may enter it (spawn and teleport throw; a
     raw key write naming it is reverted at the fence, D-2); entities already in it stay and still answer its queries
   invariant the first fence that finds a Closing realm holding no cluster removes it: every archetype's state for it, then its table slot
-  invariant an id unregistered this session is not registrable again in it; an open whose recovery leaves a Closing realm empty retires its row (the
-    id is then free, and a registration reuses the row at the next generation); one that finds entities keeps it Closing
+  invariant an id unregistered this session is not registrable again in it. Closing is never carried across an open: after recovery a Closing
+    realm that something still names — a cluster in it, ANY entity's [RealmKey] (replay claims slots cell- and realm-agnostically), or the
+    application's registration at this open — is live again (row Live); one nothing names is retired (row Retired, id free, reused at the next
+    generation). Kept Closing, a replayed entity's key would be refused as an entry and reverted into another realm
+  invariant a spawn validated before Unregister and committed after it lands in the primary realm, its key rewritten (D-2); the commit never throws
   never remove a realm that holds a cluster, and never free its id on the strength of in-memory state alone: a crash before the destroys are
     checkpointed leaves their entities in the data pages, and a realm id reused by then would receive them on replay
   scope: DatabaseEngine.RegisterRealmAtRuntime, DatabaseEngine.UnregisterRealm, DatabaseEngine.RemoveEmptyClosingRealms,

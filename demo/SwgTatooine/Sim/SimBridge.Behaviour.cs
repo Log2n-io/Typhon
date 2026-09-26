@@ -349,7 +349,7 @@ public sealed partial class SimBridge
             var motions = cluster.GetSpan(Player.Move);
             var chunk = cluster.ChunkId;
             var realm = cluster.Realm.Value;
-            var k = ctx.Realms.DivisorOf(cluster.Realm);   // Realms G2: N ticks elapse between two visits at divisor N
+            var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: N ticks elapse between two visits of a strided realm at divisor N
 
             // Explicit replication (ADR-067): the players whose replicated activity this pass changes. Positions are pushed by WriteSpatial.
             var pushSlots = 0UL;
@@ -372,7 +372,8 @@ public sealed partial class SimBridge
                     {
                         var dx = move.DestX - x;
                         var dz = move.DestZ - z;
-                        if ((dx * dx) + (dz * dz) < 25f)
+                        var reach = MathF.Max(5f, k * move.SpeedMps * MetresPerTick);
+                        if ((dx * dx) + (dz * dz) < reach * reach)
                         {
                             // Arrived. A traveller stops rather than running past; a fighter stays put and swings.
                             move.VelX = 0f;
@@ -561,7 +562,7 @@ public sealed partial class SimBridge
             var brains = cluster.GetReadOnlySpan(Creature.Ai);
             var timers = cluster.GetReadOnlySpan(Creature.Timers);
             // Realms G2: a realm at divisor N reaches this system once in N ticks, so its creatures cover N ticks' ground (1 at full rate).
-            var k = ctx.Realms.DivisorOf(cluster.Realm);
+            var k = ctx.Realms.TicksPerVisit(cluster.Realm);
 
             var moved = 0UL;
             var bits = bits0;
@@ -648,7 +649,7 @@ public sealed partial class SimBridge
 
             var places = cluster.GetReadOnlySpan(Player.Bounds);
             var motions = cluster.GetReadOnlySpan(Player.Move);
-            var k = ctx.Realms.DivisorOf(cluster.Realm);   // Realms G2, as for creatures
+            var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2, as for creatures
 
             var moved = 0UL;
             var bits = bits0;
@@ -721,7 +722,7 @@ public sealed partial class SimBridge
             var timers = cluster.GetSpan(CityNpc.Timers);
             var motions = cluster.GetSpan(CityNpc.Move);
             var chunk = cluster.ChunkId;
-            var k = ctx.Realms.DivisorOf(cluster.Realm);   // Realms G2, as for creatures
+            var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2, as for creatures
 
             var moved = 0UL;
             var bits = bits0;

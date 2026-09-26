@@ -111,7 +111,8 @@ public sealed class SimConfig
     /// </summary>
     public bool Interiors;
 
-    /// <summary>NPCs standing in each interior. [EST]</summary>
+    /// <summary>NPCs standing in each interior. [EST] Per interior, NOT scaled by the population scale: an interior's crowd is a room's, whatever the
+    /// planet's population.</summary>
     public int InteriorNpcs = 3;
 
     /// <summary>Share of in-city idle decisions that walk into a building instead. [EST]</summary>

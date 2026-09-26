@@ -265,6 +265,13 @@ public sealed partial class TatooineSim : IDisposable
             var census = WorldBuilder.Populate(Dbe, Map, _config, Indexes[planet], (ushort)planet);
             if (InteriorsPerPlanet > 0)
             {
+                // Portal j of planet p is realm Planets + p·N + j: every planet must have exactly N portals, or the decode reads another door.
+                if (Indexes[planet].Portals.Count != InteriorsPerPlanet)
+                {
+                    throw new InvalidOperationException(
+                        $"Planet {planet} has {Indexes[planet].Portals.Count} portals where the realm layout reserved {InteriorsPerPlanet}.");
+                }
+
                 WorldBuilder.PopulateInteriors(Dbe, _config, Indexes[planet], _config.Planets + (planet * InteriorsPerPlanet), census);
             }
 

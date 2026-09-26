@@ -112,6 +112,12 @@ public sealed partial class TyphonRuntime : IDisposable
     // OnSystemStartInternal), never for a tick the scheduler skipped. The cellAmortize bucket is keyed on it rather than on the tick number, so a
     // TickDivisor sharing a factor with cellAmortize cannot starve a bucket (tick % 2 is always 0 for a system that runs every other tick).
     private readonly long[] _systemRunCount;
+
+    // Realms (review #4), per system, set by each run's selection: whether the divisor stride applied (ctx.Realms.DeltaTime multiplies only then),
+    // whether any realm narrowing applied (dormant filter or stride — descendants must then be narrowed the same way), and the run key the stride used.
+    private readonly bool[] _systemStrided;
+    private readonly bool[] _systemRealmNarrowed;
+    private readonly ulong[] _systemStrideRun;
     // Issue #231: per-system cluster-range entity view, allocated lazily the first time a tier-filtered system runs Path 1 (full non-versioned). Reused across
     // ticks. [sysIdx][workerIdx]. Null slot = not allocated yet.
     private readonly ClusterRangeEntityView[][] _tierRangeViews;
@@ -320,6 +326,9 @@ public sealed partial class TyphonRuntime : IDisposable
         _dispatchClusterCount = new int[scheduler.AllSystemCount];
         _systemAmortizationBuffers = new int[scheduler.AllSystemCount][];
         _systemRunCount = new long[scheduler.AllSystemCount];
+        _systemStrided = new bool[scheduler.AllSystemCount];
+        _systemRealmNarrowed = new bool[scheduler.AllSystemCount];
+        _systemStrideRun = new ulong[scheduler.AllSystemCount];
         _tierRangeViews = new ClusterRangeEntityView[scheduler.AllSystemCount][];
         _checkerboardPhase = new int[scheduler.AllSystemCount];
         _checkerboardRedIds = new int[scheduler.AllSystemCount][];
@@ -919,7 +928,8 @@ public sealed partial class TyphonRuntime : IDisposable
                 {
                     // RT-1: sleeping clusters are skipped on this branch too, as on the tier branch above (issue #233) and on every other dispatch path.
                     var sleepStates = cs.SleepingClusterCount > 0 ? cs.SleepStates : null;
-                    // Realms D1: and so are the clusters of dormant realms — a change there reaches no system until the realm runs again.
+                    // Realms D1: and so are the clusters of dormant realms — a change made there is DROPPED for change-filtered systems, not deferred:
+                    // the snapshot is per tick, and a wake does not replay it (a dormant realm's systems do not run; its changes are its own business).
                     var dormant = cs.RealmDispatch is { Filtering: true } dispatch ? dispatch : null;
                     for (int wordIdx = 0; wordIdx < snapshot.Length; wordIdx++)
                     {
@@ -1107,7 +1117,7 @@ public sealed partial class TyphonRuntime : IDisposable
             var sys = Scheduler.Systems[sysIdx];
             var cs = _systemClusterStates[sysIdx];
             return BuildClusterScopedEntityList(cs, _dispatchClusterIds[sysIdx], _dispatchClusterCount[sysIdx], view,
-                WithDescendants(sys, cs, EffectiveTier(sysIdx)));
+                WithDescendants(sys, cs, EffectiveTier(sysIdx)), sysIdx);
         }
 
         var list = PooledEntityList.Rent(view.Count);
@@ -1124,6 +1134,82 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
+    /// The view's entities of the bound archetype's descendants, walked through each descendant's own clusters so the realm narrowing of this run applies
+    /// to them too: clusters of non-runnable realms skipped, those of divided realms kept only on this run's stride. A descendant without realm state is
+    /// appended from the view unfiltered, as before.
+    /// </summary>
+    private unsafe void AppendRealmScopedDescendants(ArchetypeClusterState parent, ViewBase view, Span<EntityId> span, ref int count, int sysIdx)
+    {
+        var realms = Engine.RealmTable;
+        var strided = _systemStrided[sysIdx];
+        var run = _systemStrideRun[sysIdx];
+        var subtree = ArchetypeRegistry.GetMetadata((ushort)parent.ArchetypeId)?.SubtreeArchetypeIds;
+        if (subtree == null)
+        {
+            return;
+        }
+
+        using var guard = EpochGuard.Enter(Engine.EpochManager);
+        foreach (var archetypeId in subtree)
+        {
+            if (archetypeId == parent.ArchetypeId)
+            {
+                continue;
+            }
+
+            var cs = archetypeId < Engine._archetypeStates.Length ? Engine._archetypeStates[archetypeId]?.ClusterState : null;
+            var map = cs?.ClusterRealmMap;
+            if (cs?.ClusterSegment == null || map == null || realms == null)
+            {
+                foreach (var pk in view.EntityIdsInternal)
+                {
+                    if (EntityId.FromRaw(pk).ArchetypeId == archetypeId)
+                    {
+                        span[count++] = EntityId.FromRaw(pk);
+                    }
+                }
+
+                continue;
+            }
+
+            var accessor = cs.ClusterSegment.CreateChunkAccessor();
+            try
+            {
+                var active = cs.ReadActiveClusterList(out var activeCount);
+                for (var i = 0; i < activeCount; i++)
+                {
+                    var chunkId = active[i];
+                    var realm = chunkId < map.Length ? map[chunkId] : (ushort)0;
+                    if (!realms.IsRunnable(realm))
+                    {
+                        continue;
+                    }
+
+                    var divisor = (uint)realms.DivisorOf(realm);
+                    if (strided && divisor > 1 && (run + (ulong)RealmTable.PhaseOf(realm) + (ulong)chunkId) % divisor != 0)
+                    {
+                        continue;
+                    }
+
+                    var clusterBase = accessor.GetChunkAddress(chunkId);
+                    for (var bits = *(ulong*)clusterBase; bits != 0; bits &= bits - 1)
+                    {
+                        var pk = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + (BitOperations.TrailingZeroCount(bits) * 8));
+                        if (view.Contains(pk))
+                        {
+                            span[count++] = EntityId.FromRaw(pk);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
     /// True when a materialized selection must also carry the view's entities of other archetypes than the bound one. A view over an archetype with
     /// descendants holds their entities too, but the selection walks only the bound archetype's clusters. Carried — unfiltered, as before RT-1 — only when
     /// the selection is a sleep filter alone: a tier or checkerboard selection never included them (the bound archetype's grid cells decide both).
@@ -1136,7 +1222,8 @@ public sealed partial class TyphonRuntime : IDisposable
     /// ids in cluster order, kept when the view holds them. Cost is proportional to the selected clusters' entities, not to the view. With
     /// <paramref name="withDescendants"/> the view's entities of other archetypes follow (see <see cref="WithDescendants"/>).
     /// </summary>
-    private PooledEntityList BuildClusterScopedEntityList(ArchetypeClusterState cs, int[] clusterIds, int clusterCount, ViewBase view, bool withDescendants)
+    private PooledEntityList BuildClusterScopedEntityList(ArchetypeClusterState cs, int[] clusterIds, int clusterCount, ViewBase view, bool withDescendants,
+        int sysIdx)
     {
         var extra = 0;
         if (withDescendants)
@@ -1176,11 +1263,20 @@ public sealed partial class TyphonRuntime : IDisposable
         if (extra > 0)
         {
             var span = list.AsSpan();
-            foreach (var pk in view.EntityIdsInternal)
+            if (_systemRealmNarrowed[sysIdx])
             {
-                if (EntityId.FromRaw(pk).ArchetypeId != cs.ArchetypeId)
+                // Realm narrowing applied to the bound archetype: descendants get the same — their clusters in dormant realms left out, those of divided
+                // realms strided on the same run key (review #4: appended unfiltered they bypassed RLM-04 and RLM-05).
+                AppendRealmScopedDescendants(cs, view, span, ref count, sysIdx);
+            }
+            else
+            {
+                foreach (var pk in view.EntityIdsInternal)
                 {
-                    span[count++] = EntityId.FromRaw(pk);
+                    if (EntityId.FromRaw(pk).ArchetypeId != cs.ArchetypeId)
+                    {
+                        span[count++] = EntityId.FromRaw(pk);
+                    }
                 }
             }
         }
@@ -1351,6 +1447,8 @@ public sealed partial class TyphonRuntime : IDisposable
     private int[] SelectDispatchClusters(int sysIdx, SimTier tier, out int count)
     {
         count = 0;
+        _systemStrided[sysIdx] = false;
+        _systemRealmNarrowed[sysIdx] = false;
         var cs = _systemClusterStates[sysIdx];
         if (cs == null)
         {
@@ -1396,8 +1494,31 @@ public sealed partial class TyphonRuntime : IDisposable
         // lists above already leave dormant realms out. Filtering false (one realm, or none dormant) keeps the pre-realm path (RLM-04).
         if (ids == null && tier == SimTier.All && cs.RealmDispatch is { Filtering: true } dispatch)
         {
-            ids = dispatch.Ids;
-            count = dispatch.Count;
+            _systemRealmNarrowed[sysIdx] = true;
+            if (dispatch.BuiltClusterSetVersion == cs.ClusterSetVersion)
+            {
+                ids = dispatch.Ids;
+                count = dispatch.Count;
+            }
+            else
+            {
+                // A system earlier in this tick changed the cluster set (a destroy commit frees a cluster inline, CLUSTERWALK-01, and its chunk id can be
+                // reused at once): the tick-start list may name a freed or reused chunk. Filter the live list into this system's own buffer (review #4).
+                var live = ReadActiveClusterList(cs, out var liveCount);
+                var buf = EnsureSelectionBuffer(sysIdx, liveCount);
+                var map = cs.ClusterRealmMap;
+                var table = Engine.RealmTable;
+                for (var i = 0; i < liveCount; i++)
+                {
+                    var chunkId = live[i];
+                    if (chunkId >= map.Length || table.IsRunnable(map[chunkId]))
+                    {
+                        buf[count++] = chunkId;
+                    }
+                }
+
+                ids = buf;
+            }
         }
 
         // Realms D4 (RLM-05): a realm simulated at divisor N contributes each of its clusters once every N runs of the system — keyed on the system's own
@@ -1414,7 +1535,18 @@ public sealed partial class TyphonRuntime : IDisposable
 
             var buf = ReferenceEquals(ids, _systemAmortizationBuffers[sysIdx]) ? ids : EnsureSelectionBuffer(sysIdx, count);
             var realmMap = cs.ClusterRealmMap;
+
+            // With cellAmortize A the list is already one bucket in A, rotating on the run count: the realm stride counts BUCKET visits (run / A), or with
+            // gcd(A, N) > 1 some clusters would never meet both conditions (review #4).
             var run = (ulong)Math.Max(0, _systemRunCount[sysIdx] - 1);
+            if (sys.CellAmortize > 0)
+            {
+                run /= (ulong)sys.CellAmortize;
+            }
+
+            _systemStrided[sysIdx] = true;
+            _systemRealmNarrowed[sysIdx] = true;
+            _systemStrideRun[sysIdx] = run;
             var written = 0;
             for (var i = 0; i < count; i++)
             {
@@ -1644,7 +1776,7 @@ public sealed partial class TyphonRuntime : IDisposable
             // independently build and store a full list in _parallelEntityLists[sysIdx], leaking (WorkerCount-1) pooled lists per tick.
             if (cs.ClusterSegment == null)
             {
-                var entityList = BuildClusterScopedEntityList(cs, _systemTierClusterIds[sysIdx], tierClusterCount, view, withDescendants: false);
+                var entityList = BuildClusterScopedEntityList(cs, _systemTierClusterIds[sysIdx], tierClusterCount, view, withDescendants: false, sysIdx);
                 _parallelEntityLists[sysIdx] = entityList;
                 metrics.EntitiesProcessed = entityList.Count;
                 return entityList.Count == 0 ? 0 : ComputeChunkCount(entityList.Count, sysIdx);
@@ -2003,7 +2135,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ClusterIds = clusterIdArray,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
-            Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, sys.RealmRate == RealmRate.Divided),
+            Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
@@ -2165,7 +2297,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 ClusterIds = clusterIdArray,
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
-                Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, sys.RealmRate == RealmRate.Divided),
+                Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
                 Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
                 WorkerId = workerId,
                 ChunkIndex = chunkIndex,
@@ -3012,7 +3144,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ConsumedQueues = _systemConsumedQueues[sysIdx],
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
-            Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, sys.RealmRate == RealmRate.Divided),
+            Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             // Single-invocation system: one chunk, index 0. Left at the default 0 before #860, which made the documented slicing formula

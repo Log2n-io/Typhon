@@ -55,13 +55,19 @@ public readonly struct RealmsAccessor
     }
 
     /// <summary>
-    /// The time a cluster of <paramref name="realm"/> integrates over this run: <see cref="TickContext.AmortizedDeltaTime"/> × the realm's divisor for a
-    /// <see cref="RealmRate.Divided"/> system (it saw the cluster once in that many runs), the amortized delta time for a <see cref="RealmRate.Full"/> one.
+    /// The time a cluster of <paramref name="realm"/> integrates over this run: <see cref="TickContext.AmortizedDeltaTime"/> × the realm's divisor when
+    /// this run's dispatch was strided (it saw the cluster once in that many runs), the amortized delta time otherwise.
     /// </summary>
     public float DeltaTime(RealmId realm) => _divided && _table != null ? _amortizedDeltaTime * _table.DivisorOf(realm.Value) : _amortizedDeltaTime;
 
     /// <summary>The realm's rate divisor this tick: 1 when observed, its <see cref="RealmConfig.UnobservedTickDivisor"/> otherwise.</summary>
     public int DivisorOf(RealmId realm) => _table?.DivisorOf(realm.Value) ?? 1;
+
+    /// <summary>
+    /// Ticks one visit of a cluster of <paramref name="realm"/> stands for in THIS run: the realm's divisor when this system's dispatch was strided, 1
+    /// otherwise (a <see cref="RealmRate.Full"/> or change-filtered system sees every cluster every run). What a fixed-step simulation multiplies by.
+    /// </summary>
+    public int TicksPerVisit(RealmId realm) => _divided && _table != null ? _table.DivisorOf(realm.Value) : 1;
 
     /// <summary>True when <paramref name="realm"/>'s clusters are dispatched this tick.</summary>
     public bool IsRunnable(RealmId realm) => _table == null || _table.IsRunnable(realm.Value);

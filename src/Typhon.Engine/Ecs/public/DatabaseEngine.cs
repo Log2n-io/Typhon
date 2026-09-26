@@ -977,6 +977,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// </summary>
     private void PersistRealmCatalogEntries(List<ushort> ids)
     {
+        var rows = new List<(ushort, SpatialGridConfig)>(ids.Count);
+        foreach (var id in ids)
+        {
+            rows.Add((id, _realms.Get(id).GridConfig));
+        }
+
+        PersistRealmCatalogRows(rows);
+    }
+
+    /// <summary>The body of <see cref="PersistRealmCatalogEntries"/>, from identities directly — a run-time registration persists before it publishes.</summary>
+    private void PersistRealmCatalogRows(List<(ushort Id, SpatialGridConfig Grid)> rowsToWrite)
+    {
         var cs = MMF.CreateChangeSet();
         if (_realmsTable == null)
         {
@@ -988,9 +1000,9 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
 
         _persistedRealms ??= [];
-        foreach (var id in ids)
+        foreach (var (id, gridConfig) in rowsToWrite)
         {
-            var row = RowOf(id, _realms.Get(id).GridConfig);
+            var row = RowOf(id, in gridConfig);
             int chunkId;
             if (_retiredRealmRows != null && _retiredRealmRows.Remove(id, out var retired))
             {
@@ -4312,8 +4324,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // that runs before component metadata exists (TXW-1). No-op on a clean reopen (the WAL window is empty).
         RunWalV2Recovery();
 
-        // Realms D5: a realm closing when the engine last stopped is retired now if recovery left it empty, and stays closing otherwise (RLM-06).
-        ResolveClosingRealmsAtOpen();
+        // Realms D5: a realm closing when the engine last stopped is retired now when nothing names it, live again otherwise (RLM-06). Then the
+        // primary realm is fixed for the session: a run-time registration of a lower id must not move the archetype-level knobs.
+        ResolveClosingRealmsAtOpen(_realmRegistry?.Pending);
+        _realms?.PinPrimary();
 
         // Recovery is now complete — restore the configured CRC verification mode (deferred to RecoveryOnly at open on the crash path, see
         // InitializeCheckpointManager) so normal operation gets on-load corruption detection again.

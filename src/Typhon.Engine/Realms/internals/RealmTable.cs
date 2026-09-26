@@ -66,17 +66,34 @@ internal sealed class Realm
 /// plain array load on every hot path; registration is rare and off-tick.
 /// </summary>
 /// <remarks>
-/// Readers are lock-free: a realm is published with a release store into its slot and into the dense <see cref="Registered"/> copy, so a reader that
+/// Readers are lock-free: a realm is published with a release store into its slot and into the dense <see cref="Registered"/> snapshot, so a reader that
 /// sees it sees a fully built <see cref="Realm"/> (x64 and arm64). Writers serialize on a private lock.
 /// </remarks>
 internal sealed class RealmTable
 {
     private readonly Realm[] _byId;
-    // Dense, in registration order, grown by doubling (never copied per registration: thousands of realms would make that quadratic). A reader takes the
-    // count first and the array second; the writer publishes the array first and the count second, so the array is never older than the count.
-    private Realm[] _registered = new Realm[4];
-    private int _registeredCount;
+
+    /// <summary>One immutable view of the dense list: the array and how many of its entries are live, published as ONE reference so a reader can never
+    /// pair one publication's count with another's array (a removal compacts the list — review #4).</summary>
+    private sealed class Snapshot
+    {
+        internal readonly Realm[] Items;
+        internal readonly int Count;
+
+        internal Snapshot(Realm[] items, int count)
+        {
+            Items = items;
+            Count = count;
+        }
+    }
+
+    // Dense, in registration order. An append writes into spare capacity (grown by doubling, so thousands of realms stay linear) and publishes a new
+    // snapshot over the same array; a removal publishes a compacted copy. Entries below a published count are never written again.
+    private Snapshot _registered = new(new Realm[4], 0);
     private readonly Lock _writeLock = new();
+
+    // The primary realm, fixed at open (review #4): a run-time registration of a lower id must not move the archetype-level configuration mid-run.
+    private Realm _pinnedPrimary;
 
     internal RealmTable(int maxRealms)
     {
@@ -105,16 +122,27 @@ internal sealed class RealmTable
     private readonly int[] _unobservedTicks;
     private readonly byte[] _wakeRequested;
 
-    /// <summary>Moves whenever any realm's state or divisor changes — the runnable indexes' staleness stamp.</summary>
+    /// <summary>Moves whenever any realm's state or divisor changes. Written only by <see cref="EvaluatePolicy"/> and <see cref="Remove"/>, both on the
+    /// tick thread.</summary>
     internal int PolicyEpoch { get; private set; }
+
+    /// <summary>Moves only when some realm's RUNNABILITY changes (becomes or stops being Dormant) — what the runnable indexes depend on. An Active ↔
+    /// Simulated or divisor-only flip leaves it, so observer churn rebuilds nothing (review #4).</summary>
+    internal int RunnableEpoch { get; private set; }
 
     /// <summary>Registered realms that are not runnable this tick (<see cref="RealmRunState.Dormant"/>). Zero ⇒ nothing is filtered anywhere (RLM-04).</summary>
     internal int NonRunnableCount { get; private set; }
 
-    /// <summary>Registered realms that are Closing (Realms D5): the fence checks them for removal only while this is non-zero.</summary>
-    internal int ClosingCount { get; private set; }
+    private int _closingCount;
 
-    /// <summary>Marks realm <paramref name="id"/> Closing: entries refused from now on, removal once empty. Idempotent.</summary>
+    /// <summary>Registered realms that are Closing (Realms D5): the fence checks them for removal only while this is non-zero.</summary>
+    internal int ClosingCount => Volatile.Read(ref _closingCount);
+
+    /// <summary>
+    /// Marks realm <paramref name="id"/> Closing: entries refused from now on (the flag, read by every entry check), removal once empty. Idempotent, any
+    /// thread. The policy STATE follows at the next evaluation, never mid-tick (RLM-03): every system of the tick keeps the state and divisor tick start
+    /// decided.
+    /// </summary>
     internal void MarkClosing(ushort id)
     {
         var realm = Get(id);
@@ -126,10 +154,7 @@ internal sealed class RealmTable
             }
 
             realm.Closing = true;
-            _state[id] = RealmRunState.Closing;
-            _divisor[id] = 1;
-            ClosingCount++;
-            PolicyEpoch++;
+            Interlocked.Increment(ref _closingCount);
         }
     }
 
@@ -144,29 +169,31 @@ internal sealed class RealmTable
         lock (_writeLock)
         {
             var old = _registered;
-            var grown = new Realm[Math.Max(4, old.Length)];
+            var compacted = new Realm[Math.Max(4, old.Items.Length)];
             var n = 0;
-            for (var i = 0; i < _registeredCount; i++)
+            for (var i = 0; i < old.Count; i++)
             {
-                if (!ReferenceEquals(old[i], realm))
+                if (!ReferenceEquals(old.Items[i], realm))
                 {
-                    grown[n++] = old[i];
+                    compacted[n++] = old.Items[i];
                 }
             }
 
             if (realm.Closing)
             {
-                ClosingCount--;
+                Interlocked.Decrement(ref _closingCount);
             }
 
             Volatile.Write(ref _byId[id], null);
-            Volatile.Write(ref _registeredCount, n);
-            Volatile.Write(ref _registered, grown);
+            Volatile.Write(ref _registered, new Snapshot(compacted, n));
+
+            // The observer count is left as it is: a pin taken before the removal still releases once, and the id is quarantined for the session
+            // (RLM-06), so nothing else reads it (review #4: zeroing it made that release throw).
             _state[id] = RealmRunState.Dormant;
-            _observers[id] = 0;
             _unobservedTicks[id] = 0;
             _wakeRequested[id] = 0;
             PolicyEpoch++;
+            RunnableEpoch++;
         }
     }
 
@@ -212,6 +239,9 @@ internal sealed class RealmTable
         }
     }
 
+    /// <summary>Fixes the primary realm for the rest of the session (end of open). Idempotent.</summary>
+    internal void PinPrimary() => _pinnedPrimary ??= ComputePrimary();
+
     /// <summary>Requests that <paramref name="id"/> be simulated from the next tick on, restarting its sleep hold. Any thread.</summary>
     internal void RequestWake(ushort id) => Volatile.Write(ref _wakeRequested[id], 1);
 
@@ -233,14 +263,15 @@ internal sealed class RealmTable
         {
             var id = realm.Id.Value;
             var config = realm.Config;
-            if (realm.Closing)
-            {
-                continue;   // Closing is final until removal: runnable, full rate, for its remaining entities
-            }
-
             RealmRunState next;
             ushort divisor;
-            if (Volatile.Read(ref _observers[id]) > 0)
+            if (realm.Closing)
+            {
+                // Closing is final until removal: runnable at full rate, for the entities still in it.
+                next = RealmRunState.Closing;
+                divisor = 1;
+            }
+            else if (Volatile.Read(ref _observers[id]) > 0)
             {
                 next = RealmRunState.Active;
                 divisor = 1;
@@ -281,6 +312,11 @@ internal sealed class RealmTable
 
             if (next != _state[id] || divisor != _divisor[id])
             {
+                if ((next == RealmRunState.Dormant) != (_state[id] == RealmRunState.Dormant))
+                {
+                    RunnableEpoch++;
+                }
+
                 _state[id] = next;
                 _divisor[id] = divisor;
                 changed = true;
@@ -315,29 +351,28 @@ internal sealed class RealmTable
     /// spatial knobs — maintenance budgets, the migration cost model, repair — which are per archetype, not per realm, until per-realm maintenance
     /// scheduling lands (Realms D). Null when no realm is registered.
     /// </summary>
-    internal Realm Primary
+    internal Realm Primary => _pinnedPrimary ?? ComputePrimary();
+
+    private Realm ComputePrimary()
     {
-        get
+        var realm0 = Default;
+        if (realm0 != null)
         {
-            var realm0 = Default;
-            if (realm0 != null)
-            {
-                return realm0;
-            }
-
-            // The LOWEST registered id, not the first registered: registration order comes from a dictionary, and the primary realm supplies the
-            // archetype-level budgets — it must not depend on enumeration order.
-            Realm lowest = null;
-            foreach (var realm in Registered)
-            {
-                if (lowest == null || realm.Id.Value < lowest.Id.Value)
-                {
-                    lowest = realm;
-                }
-            }
-
-            return lowest;
+            return realm0;
         }
+
+        // The LOWEST registered id, not the first registered: registration order comes from a dictionary, and the primary realm supplies the
+        // archetype-level budgets — it must not depend on enumeration order.
+        Realm lowest = null;
+        foreach (var realm in Registered)
+        {
+            if (lowest == null || realm.Id.Value < lowest.Id.Value)
+            {
+                lowest = realm;
+            }
+        }
+
+        return lowest;
     }
 
     /// <summary>The highest registered realm id (0 when none): per-archetype realm tables are sized to it, not to <see cref="MaxRealms"/>.</summary>
@@ -355,13 +390,13 @@ internal sealed class RealmTable
         }
     }
 
-    /// <summary>The registered realms, densely, in registration order — a consistent snapshot: entries are only ever appended.</summary>
+    /// <summary>The registered realms, densely, in registration order — one consistent snapshot (a single reference: count and array together).</summary>
     internal ReadOnlySpan<Realm> Registered
     {
         get
         {
-            var count = Volatile.Read(ref _registeredCount);
-            return Volatile.Read(ref _registered).AsSpan(0, count);
+            var snapshot = Volatile.Read(ref _registered);
+            return snapshot.Items.AsSpan(0, snapshot.Count);
         }
     }
 
@@ -403,23 +438,23 @@ internal sealed class RealmTable
             realm = new Realm(id, grid, config);
             beforePublish?.Invoke(realm);
 
-            var registered = _registered;
-            if (_registeredCount == registered.Length)
+            var current = _registered;
+            var items = current.Items;
+            if (current.Count == items.Length)
             {
-                var grown = new Realm[registered.Length * 2];
-                registered.CopyTo(grown, 0);
-                registered = grown;
+                var grown = new Realm[items.Length * 2];
+                items.CopyTo(grown, 0);
+                items = grown;
             }
 
-            registered[_registeredCount] = realm;
+            items[current.Count] = realm;
 
             // Simulated at full rate until the first evaluation decides otherwise: a Sleep realm holds SleepAfterTicks before it goes dormant.
             _state[id.Value] = RealmRunState.Simulated;
             _divisor[id.Value] = 1;
             _unobservedTicks[id.Value] = 0;
             Volatile.Write(ref _byId[id.Value], realm);
-            Volatile.Write(ref _registered, registered);
-            Volatile.Write(ref _registeredCount, _registeredCount + 1);
+            Volatile.Write(ref _registered, new Snapshot(items, current.Count + 1));
         }
 
         return realm;

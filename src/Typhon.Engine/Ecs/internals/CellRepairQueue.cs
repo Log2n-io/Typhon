@@ -341,8 +341,11 @@ internal sealed class CellRepairQueue
             return 0f;
         }
 
+        // A candidate of a realm that is not runnable does not age (review #4): unbounded ageing would carry waiting dormant candidates to the head and
+        // leave fresh runnable ones at the tail, where eviction takes its victims.
         var age = tickNumber - candidate.WaitingSinceTick;
-        var ageFactor = 1f + (_agingRatePerTick * (age > 0 ? age : 0));
+        var realms = state.RealmTableOrNull;
+        var ageFactor = realms != null && !realms.IsRunnable(RealmOf(key)) ? 1f : 1f + (_agingRatePerTick * (age > 0 ? age : 0));
         return candidate.Degradation * TierWeight(rs.Grid, cellKey) * clusters.Length * ageFactor;
     }
 
@@ -429,6 +432,40 @@ internal sealed class CellRepairQueue
         }
 
         return false;
+    }
+
+    /// <summary>Drops every candidate and cooling entry of <paramref name="realm"/> — a removed realm (Realms D5). O(queue), rare.</summary>
+    internal void RemoveRealm(ushort realm)
+    {
+        List<long> gone = null;
+        foreach (var key in _candidates.Keys)
+        {
+            if (RealmOf(key) == realm)
+            {
+                (gone ??= []).Add(key);
+            }
+        }
+
+        foreach (var key in _cooling.Keys)
+        {
+            if (RealmOf(key) == realm)
+            {
+                (gone ??= []).Add(key);
+            }
+        }
+
+        if (gone == null)
+        {
+            return;
+        }
+
+        foreach (var key in gone)
+        {
+            _candidates.Remove(key);
+            _cooling.Remove(key);   // its FIFO entry releases nothing when it comes due: the cooling map no longer holds it
+        }
+
+        _dirtySinceRank++;
     }
 
     /// <summary>Forget one cell — called when the planner declines it as unrepairable. A cell it services goes through <see cref="MarkRepaired"/>.</summary>
