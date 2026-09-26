@@ -33,6 +33,10 @@ public sealed partial class SimBridge
     private const float DoorStepM = 8f;
 
     private readonly ConcurrentQueue<TeleportRequest> _teleports = new();
+
+    // Realms G2: a player inside an interior pins it active — no session observes in this demo, so without the pin an occupied interior would go dormant
+    // under its player and stop running it. Touched only by TeleportTick, which is serial.
+    private readonly System.Collections.Generic.Dictionary<EntityId, RealmObserver> _interiorPins = [];
     private long _portalEntriesTick;
     private long _portalExitsTick;
     private long _portalEntries;
@@ -171,9 +175,19 @@ public sealed partial class SimBridge
                 {
                     case CrossingKind.Enter:
                         entries++;
+                        if (_config.InteriorSleepS > 0f && !_interiorPins.ContainsKey(r.Id))
+                        {
+                            _interiorPins[r.Id] = Dbe.Realms.Observe(new RealmId(r.Realm));
+                        }
+
                         break;
                     case CrossingKind.Exit:
                         exits++;
+                        if (_interiorPins.Remove(r.Id, out var pin))
+                        {
+                            pin.Dispose();
+                        }
+
                         break;
                     default:
                         planets++;

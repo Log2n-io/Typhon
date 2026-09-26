@@ -132,6 +132,35 @@ public sealed class SimConfig
     /// <summary>Starships at population scale 1. [EST]</summary>
     public int Starships = 250;
 
+    // ── Per-realm policy (Realms G2, phase D) ────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Unobserved seconds before an interior goes dormant — no system, no maintenance — until a player walks in (an entry wakes it, and a player inside
+    /// pins it active). 0 keeps interiors simulated always.
+    /// </summary>
+    public float InteriorSleepS = 10f;
+
+    /// <summary>Planets after the first are simulated at this divisor: each of their clusters once every N ticks, over N ticks' delta time. 1 = full rate.</summary>
+    public int PlanetDivisor = 1;
+
+    /// <summary>The space realm's divisor, as <see cref="PlanetDivisor"/>.</summary>
+    public int SpaceDivisor = 1;
+
+    /// <summary>Dungeon instances over the run: each a realm registered at run time when a party enters, and unregistered once emptied. 0 = none.</summary>
+    public int Dungeons;
+
+    /// <summary>Seconds between two dungeon openings.</summary>
+    public float DungeonIntervalS = 10f;
+
+    /// <summary>Seconds a party stays in its dungeon.</summary>
+    public float DungeonStayS = 20f;
+
+    /// <summary>Players in one party.</summary>
+    public int DungeonParty = 8;
+
+    /// <summary>Mobs spawned in one dungeon.</summary>
+    public int DungeonMobs = 24;
+
     // ── Shuttles (#910) ─────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Players also travel between cities by shuttle. Off reproduces the pre-shuttle simulation exactly.</summary>

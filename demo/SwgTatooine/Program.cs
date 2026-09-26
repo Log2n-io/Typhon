@@ -99,6 +99,13 @@ internal static class Program
         sim.PrintShuttleReport();
         sim.PrintPortalReport();
         sim.PrintSpaceReport();
+        sim.PrintDungeonReport();
+        var counts = sim.Dbe.Realms.Counts;
+        if (counts.Active + counts.Simulated + counts.Dormant + counts.Closing > 1)
+        {
+            Console.WriteLine($"  realms at the end: {counts.Active} active, {counts.Simulated} simulated, {counts.Dormant} dormant, {counts.Closing} closing; "
+                + $"{counts.Divided} divided; policy epoch {counts.PolicyEpoch}");
+        }
         sim.PrintSpatialTelemetry();
         sim.PrintWorkProbe();
         sim.PrintChunkStats();

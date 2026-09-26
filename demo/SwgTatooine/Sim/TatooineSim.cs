@@ -52,6 +52,14 @@ public sealed partial class TatooineSim : IDisposable
     /// <summary>The space realm (Realms G1c), after the planets and the interiors; -1 without <c>--space</c>.</summary>
     public int SpaceRealm { get; private set; } = -1;
 
+    /// <summary>The first dungeon slot's realm id (Realms G2): <c>--dungeons</c> ids from here, registered at run time.</summary>
+    public int FirstDungeonRealm { get; private set; }
+
+    /// <summary>A realm simulated at full rate always (divisor 1), or unobserved at <paramref name="divisor"/>.</summary>
+    private static RealmConfig Divided(SpatialGridConfig grid, int divisor) => divisor <= 1
+        ? RealmConfig.SimulatedAlways(grid)
+        : new RealmConfig { Grid = grid, WhenUnobserved = RealmUnobserved.Simulate, UnobservedTickDivisor = divisor };
+
     public TatooineSim(SimConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -170,19 +178,34 @@ public sealed partial class TatooineSim : IDisposable
         InteriorsPerPlanet = _config.Interiors ? WorldBuilder.CountEnterable(Map) : 0;
         var realms = _config.Planets * (1 + InteriorsPerPlanet);
         SpaceRealm = _config.Space ? realms++ : -1;
+
+        // Dungeon slots (G2): ids after space, each used by one instance — an id unregistered this session is not registrable again (RLM-06).
+        FirstDungeonRealm = realms;
+        realms += _config.Dungeons;
         if (realms > 1)
         {
             Dbe.ConfigureRealms(realms);
         }
 
         Dbe.ConfigureSpatialGrid(planetGrid);
+        // Planet 0 runs at full rate always — it is the measured workload. A further planet is simulated at --planet-divisor (G2).
         for (var planet = 1; planet < _config.Planets; planet++)
         {
-            Dbe.Realms.Register(new RealmId((ushort)planet), RealmConfig.SimulatedAlways(planetGrid));
+            Dbe.Realms.Register(new RealmId((ushort)planet), Divided(planetGrid, _config.PlanetDivisor));
         }
 
-        var interiorGrid = RealmConfig.SimulatedAlways(SpatialGridConfig.Flat(Vector2.Zero,
-            new Vector2(WorldBuilder.InteriorEdgeM, WorldBuilder.InteriorEdgeM), WorldBuilder.InteriorEdgeM));
+        // Interiors sleep once unobserved for --interior-sleep seconds (G2): a player walking in wakes one, and pins it while inside.
+        var interiorGridConfig = SpatialGridConfig.Flat(Vector2.Zero, new Vector2(WorldBuilder.InteriorEdgeM, WorldBuilder.InteriorEdgeM),
+            WorldBuilder.InteriorEdgeM);
+        var interiorGrid = _config.InteriorSleepS > 0f
+            ? new RealmConfig
+            {
+                Grid = interiorGridConfig,
+                WhenUnobserved = RealmUnobserved.Sleep,
+                UnobservedTickDivisor = 1,
+                SleepAfterTicks = Math.Max(1, (int)(_config.InteriorSleepS * _config.TickRateHz)),
+            }
+            : RealmConfig.SimulatedAlways(interiorGridConfig);
         for (var realm = _config.Planets; realm < _config.Planets * (1 + InteriorsPerPlanet); realm++)
         {
             Dbe.Realms.Register(new RealmId((ushort)realm), interiorGrid);
@@ -193,7 +216,7 @@ public sealed partial class TatooineSim : IDisposable
         {
             var edge = WorldBuilder.SpaceEdgeM * 0.5;
             Dbe.Realms.Register(new RealmId((ushort)SpaceRealm),
-                RealmConfig.SimulatedAlways(new SpatialGridConfig(new Vector3D(-edge, -edge, -edge), new Vector3D(edge, edge, edge), 500d)));
+                Divided(new SpatialGridConfig(new Vector3D(-edge, -edge, -edge), new Vector3D(edge, edge, edge), 500d), _config.SpaceDivisor));
         }
 
         Dbe.InitializeArchetypes();

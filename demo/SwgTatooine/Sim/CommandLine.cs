@@ -49,6 +49,21 @@ public static class CommandLine
         }
 
         c.Space = Array.IndexOf(args, "--space") >= 0;
+        c.InteriorSleepS = Float(args, "--interior-sleep", c.InteriorSleepS);
+        c.PlanetDivisor = Int(args, "--planet-divisor", c.PlanetDivisor);
+        c.SpaceDivisor = Int(args, "--space-divisor", c.SpaceDivisor);
+        c.Dungeons = Int(args, "--dungeons", c.Dungeons);
+        c.DungeonIntervalS = Float(args, "--dungeon-interval", c.DungeonIntervalS);
+        c.DungeonStayS = Float(args, "--dungeon-stay", c.DungeonStayS);
+        c.DungeonParty = Int(args, "--dungeon-party", c.DungeonParty);
+        c.DungeonMobs = Int(args, "--dungeon-mobs", c.DungeonMobs);
+        if (c.InteriorSleepS < 0f || c.PlanetDivisor < 1 || c.SpaceDivisor < 1 || c.Dungeons < 0 || !(c.DungeonIntervalS > 0f) || !(c.DungeonStayS > 0f)
+            || c.DungeonParty < 1 || c.DungeonMobs < 0)
+        {
+            throw new ArgumentException("--interior-sleep >= 0, --planet-divisor/--space-divisor >= 1, --dungeons >= 0, positive dungeon interval and stay, "
+                + "--dungeon-party >= 1, --dungeon-mobs >= 0");
+        }
+
         c.Starships = Int(args, "--starships", c.Starships);
         if (c.Starships < 0)
         {

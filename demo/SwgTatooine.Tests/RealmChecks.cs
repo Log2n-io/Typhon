@@ -170,7 +170,7 @@ public sealed class GalaxyTests
         config.Interiors = true;
         config.Space = true;
         config.InteriorShare = 1f;
-        config.InteriorStayS = 1f;
+        config.InteriorStayS = 15f;   // 15-60 s: some players are still inside when the run stops, and early ones have left
         config.ShuttleShare = 1f;
         config.ShuttleIntervalS = 2f;
         config.BoardingWindowS = 1f;
@@ -179,6 +179,15 @@ public sealed class GalaxyTests
         config.TickRateHz = 2;
         config.WarmTicks = 10;
         config.MeasuredTicks = 400;
+
+        // Realms G2: interiors sleep after 2 s unobserved, planet 1 and space run at divisor 2, and four dungeons open and close during the run.
+        config.InteriorSleepS = 2f;
+        config.PlanetDivisor = 2;
+        config.SpaceDivisor = 2;
+        config.Dungeons = 4;
+        config.DungeonIntervalS = 30f;
+        config.DungeonStayS = 20f;
+        config.DungeonParty = 4;
         _sim = new TatooineSim(config);
         _sim.Initialize();
         _sim.Run();
@@ -192,13 +201,15 @@ public sealed class GalaxyTests
         Worlds.Delete(_dir);
     }
 
-    /// <summary>The planets and every interior, by realm id: a player may be in any of them.</summary>
+    /// <summary>Every realm a player may be in: the planets, the interiors and any dungeon still open.</summary>
     private IEnumerable<ushort> PlayerRealms()
     {
-        var last = _sim.Config.Planets * (1 + _sim.InteriorsPerPlanet);
-        for (var r = 0; r < last; r++)
+        for (var id = 0; id < _sim.Dbe.Realms.MaxRealms; id++)
         {
-            yield return (ushort)r;
+            if (id != _sim.SpaceRealm && _sim.Dbe.Realms.IsRegistered(new RealmId((ushort)id)))
+            {
+                yield return (ushort)id;
+            }
         }
     }
 
@@ -289,6 +300,43 @@ public sealed class GalaxyTests
         }
 
         Assert.That(queries, Is.GreaterThan(128));
+    }
+
+    [Test]
+    public void UnobservedInteriors_GoDormant_OccupiedOnesStayActive()
+    {
+        // Counted, not timed. That a dormant realm's clusters reach no system is the engine's RLM-04 (RealmPolicyTests); here, that the demo's
+        // interiors actually go dormant at scale while the occupied ones stay active.
+        var counts = _sim.Dbe.Realms.Counts;
+        Assert.That(counts.Dormant, Is.GreaterThan(_sim.InteriorsPerPlanet), "most interiors hold no player and sleep");
+        Assert.That(counts.Divided, Is.EqualTo(2), "planet 1 and space run at their divisor");
+        var occupied = 0;
+        for (var r = _sim.Config.Planets; r < _sim.Config.Planets * (1 + _sim.InteriorsPerPlanet); r++)
+        {
+            var realm = new RealmId((ushort)r);
+            if (Worlds.PlayersIn(_sim.Dbe, realm.Value, Worlds.Everywhere).Count > 0)
+            {
+                occupied++;
+                Assert.That(_sim.Dbe.Realms.StateOf(realm), Is.Not.EqualTo(RealmRunState.Dormant), $"interior {r} holds a player and sleeps under it");
+            }
+        }
+
+        Assert.That(occupied, Is.GreaterThan(0), "precondition: some interior is occupied at the end");
+    }
+
+    [Test]
+    public void Dungeons_OpenAndClose_AndAClosedOneLeavesNothingBehind()
+    {
+        var (opened, closed) = _sim.DungeonTotals;
+        Assert.That(opened, Is.GreaterThanOrEqualTo(3), "dungeons opened during the run");
+        Assert.That(opened - closed, Is.InRange(0, 1), "every dungeon but the last is closed");
+        for (var slot = 0; slot < closed; slot++)
+        {
+            var realm = new RealmId((ushort)(_sim.FirstDungeonRealm + slot));
+            Assert.That(_sim.Dbe.Realms.IsRegistered(realm), Is.False, $"dungeon {slot} was removed once emptied");
+        }
+
+        Assert.That(_sim.Dbe.Realms.Counts.Closing, Is.Zero, "nothing waits in Closing: each emptied dungeon went at its fence");
     }
 
     [Test]

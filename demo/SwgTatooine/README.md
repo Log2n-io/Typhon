@@ -286,6 +286,12 @@ Useful flags:
 | `--interplanet-share F` | 0.2 | With `--planets` ≥ 2, share of shuttle boardings bound for the same city on another planet (a realm change) |
 | `--space` | off | A space realm after the interiors: a deep 3D grid (16 km cube, 500 m cells) of AI starships with f64 bounds, flying waypoints and scanning 1 km around them |
 | `--starships N` | 250 | Starships at population scale 1 |
+| `--interior-sleep S` | 10 | Interiors go dormant after S unobserved seconds (no system, no maintenance); a player walking in wakes one and pins it while inside. 0 = always simulated |
+| `--planet-divisor N` | 1 | Planets after the first run each cluster once every N ticks, over N ticks' delta time |
+| `--space-divisor N` | 1 | The same for the space realm |
+| `--dungeons N` | 0 | Dungeon instances over the run: a realm registered at run time for a party, emptied and unregistered when it leaves |
+| `--dungeon-interval S` / `--dungeon-stay S` | 10 / 20 | Seconds between openings / seconds a party stays |
+| `--dungeon-party N` / `--dungeon-mobs N` | 8 / 24 | Players per party / mobs per dungeon |
 | `--tick-log <path>` | — | Every measured tick's duration, one per line |
 | `--seed <n>` | fixed | Every random decision, so two runs build the same world |
 

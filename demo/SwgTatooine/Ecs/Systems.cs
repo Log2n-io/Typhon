@@ -341,6 +341,45 @@ internal sealed class TeleportSystem : CallbackSystem
     protected override void Execute(TickContext ctx) => _bridge.TeleportTick(ctx);
 }
 
+/// <summary>
+/// Realms G2: dungeon instances — a realm registered at run time when a party enters, emptied and unregistered when it leaves.
+/// </summary>
+/// <remarks>Serial, in the Spawn phase after Teleport: it registers, spawns, teleports and destroys through its own side transactions, and every one of
+/// those touches Player and CityNpc, so the scheduler orders it after the systems that write them in this phase.</remarks>
+internal sealed class DungeonSystem : CallbackSystem
+{
+    private readonly SimBridge _bridge;
+    private readonly bool _afterShuttle;
+
+    public DungeonSystem(SimBridge bridge, bool afterShuttle)
+    {
+        _bridge = bridge;
+        _afterShuttle = afterShuttle;
+    }
+
+    protected override void Configure(SystemBuilder b)
+    {
+        b.Name("Dungeon")
+            .Phase(SimPhases.Spawn)
+            .Writes<PlayerPlacement>()
+            .Writes<PlayerRealm>()
+            .Writes<PlayerState>()
+            .Writes<PlayerMotion>()
+            .Writes<NpcPlacement>();
+        // Both write the player's placement (and Shuttle its state) in this phase. AfterAll, not two After calls: After holds one dependency.
+        if (_afterShuttle)
+        {
+            b.AfterAll("Teleport", "Shuttle");
+        }
+        else
+        {
+            b.After("Teleport");
+        }
+    }
+
+    protected override void Execute(TickContext ctx) => _bridge.DungeonTick(ctx);
+}
+
 /// <summary>Per-tick shuttle bookkeeping and, with <c>--probe</c>, the arrival-cell query probe. It declares the player positions its queries read, like
 /// any system; a CallbackSystem that declares component access still runs (measured: it did here, every tick).</summary>
 internal sealed class ShuttleProbeSystem : CallbackSystem

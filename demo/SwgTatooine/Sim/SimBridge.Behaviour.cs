@@ -349,6 +349,7 @@ public sealed partial class SimBridge
             var motions = cluster.GetSpan(Player.Move);
             var chunk = cluster.ChunkId;
             var realm = cluster.Realm.Value;
+            var k = ctx.Realms.DivisorOf(cluster.Realm);   // Realms G2: N ticks elapse between two visits at divisor N
 
             // Explicit replication (ADR-067): the players whose replicated activity this pass changes. Positions are pushed by WriteSpatial.
             var pushSlots = 0UL;
@@ -365,7 +366,7 @@ public sealed partial class SimBridge
 
                 if (state.ActivityTicks > 0)
                 {
-                    state.ActivityTicks--;
+                    state.ActivityTicks = Math.Max(0, state.ActivityTicks - k);
                     if (state.Activity is PlayerActivity.Travelling or PlayerActivity.Roaming or PlayerActivity.Combat or PlayerActivity.ToShuttle
                         or PlayerActivity.ToPortal)
                     {
@@ -403,6 +404,11 @@ public sealed partial class SimBridge
                     }
 
                     continue;
+                }
+
+                if (IsDungeonRealm(realm))
+                {
+                    continue;   // a dungeon party waits for its dungeon to send it home (G2)
                 }
 
                 if (realm >= _config.Planets)
@@ -554,6 +560,8 @@ public sealed partial class SimBridge
             var motions = cluster.GetReadOnlySpan(Creature.Move);
             var brains = cluster.GetReadOnlySpan(Creature.Ai);
             var timers = cluster.GetReadOnlySpan(Creature.Timers);
+            // Realms G2: a realm at divisor N reaches this system once in N ticks, so its creatures cover N ticks' ground (1 at full rate).
+            var k = ctx.Realms.DivisorOf(cluster.Realm);
 
             var moved = 0UL;
             var bits = bits0;
@@ -581,8 +589,8 @@ public sealed partial class SimBridge
                 }
                 else
                 {
-                    x = Math.Clamp(p.X + move.VelX, -half + h, half - h);
-                    z = Math.Clamp(p.Z + move.VelZ, -half + h, half - h);
+                    x = Math.Clamp(p.X + (move.VelX * k), -half + h, half - h);
+                    z = Math.Clamp(p.Z + (move.VelZ * k), -half + h, half - h);
                 }
 
                 // WriteSpatial rather than a plain span write: the barrier flags migration and AABB growth inline, which
@@ -640,6 +648,7 @@ public sealed partial class SimBridge
 
             var places = cluster.GetReadOnlySpan(Player.Bounds);
             var motions = cluster.GetReadOnlySpan(Player.Move);
+            var k = ctx.Realms.DivisorOf(cluster.Realm);   // Realms G2, as for creatures
 
             var moved = 0UL;
             var bits = bits0;
@@ -656,8 +665,8 @@ public sealed partial class SimBridge
 
                 var p = places[idx];
                 var h = p.HalfExtent;
-                var x = Math.Clamp(p.X + move.VelX, -half + h, half - h);
-                var z = Math.Clamp(p.Z + move.VelZ, -half + h, half - h);
+                var x = Math.Clamp(p.X + (move.VelX * k), -half + h, half - h);
+                var z = Math.Clamp(p.Z + (move.VelZ * k), -half + h, half - h);
                 var nb = default(PlayerPlacement);
                 nb.SetAt(x, z, h);
                 if (batched)
@@ -712,6 +721,7 @@ public sealed partial class SimBridge
             var timers = cluster.GetSpan(CityNpc.Timers);
             var motions = cluster.GetSpan(CityNpc.Move);
             var chunk = cluster.ChunkId;
+            var k = ctx.Realms.DivisorOf(cluster.Realm);   // Realms G2, as for creatures
 
             var moved = 0UL;
             var bits = bits0;
@@ -765,7 +775,7 @@ public sealed partial class SimBridge
                 }
 
                 var nb = default(NpcPlacement);
-                nb.SetAt(p.X + move.VelX, p.Z + move.VelZ, p.HalfExtent);
+                nb.SetAt(p.X + (move.VelX * k), p.Z + (move.VelZ * k), p.HalfExtent);
                 if (batched)
                 {
                     next[idx] = nb;

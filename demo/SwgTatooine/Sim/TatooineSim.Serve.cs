@@ -40,6 +40,7 @@ public sealed partial class TatooineSim
             Dbe = Dbe,
             PlanetIndexes = Indexes,
             InteriorsPerPlanet = InteriorsPerPlanet,
+            FirstDungeonRealm = FirstDungeonRealm,
             PlayerView = _playerView,
             CreatureView = _creatureView,
             NpcView = _npcView,

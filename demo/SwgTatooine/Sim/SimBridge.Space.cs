@@ -50,6 +50,7 @@ public sealed partial class SimBridge
             var motions = cluster.GetSpan(Starship.Move);
             var chunk = cluster.ChunkId;
             var moved = bits;
+            var clusterDt = perTick * ctx.Realms.DivisorOf(cluster.Realm);   // Realms G2: N ticks per visit at divisor N
             while (bits != 0)
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
@@ -74,7 +75,7 @@ public sealed partial class SimBridge
                     waypoints++;
                 }
 
-                var step = Math.Min(len, move.SpeedMps * perTick);
+                var step = Math.Min(len, move.SpeedMps * clusterDt);
                 move.VelX = dx / len * step;
                 move.VelY = dy / len * step;
                 move.VelZ = dz / len * step;

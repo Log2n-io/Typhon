@@ -54,6 +54,7 @@ public sealed partial class TatooineSim
             Dbe = Dbe,
             PlanetIndexes = Indexes,
             InteriorsPerPlanet = InteriorsPerPlanet,
+            FirstDungeonRealm = FirstDungeonRealm,
             PlayerView = _playerView,
             CreatureView = _creatureView,
             NpcView = _npcView,
@@ -122,6 +123,12 @@ public sealed partial class TatooineSim
 
     /// <summary>What the portals did (Realms G1b).</summary>
     public void PrintPortalReport() => _bridge?.PrintPortalReport();
+
+    /// <summary>What the dungeons did (Realms G2).</summary>
+    public void PrintDungeonReport() => _bridge?.PrintDungeonReport();
+
+    /// <summary>Dungeons opened and closed over the run (Realms G2).</summary>
+    public (int Opened, int Closed) DungeonTotals => _bridge?.DungeonTotals ?? default;
 
     /// <summary>Crossings over the run: into interiors, out of them, between planets (Realms G1b).</summary>
     public (long Entries, long Exits, long InterPlanet) CrossingTotals => _bridge?.CrossingTotals ?? default;
@@ -367,9 +374,14 @@ public sealed partial class TatooineSim
         }
 
         // Portal crossings, and with several planets the shuttles bound for another one: both are realm changes.
-        if (InteriorsPerPlanet > 0 || (_config.Planets > 1 && _config.Shuttles))
+        if (InteriorsPerPlanet > 0 || (_config.Planets > 1 && _config.Shuttles) || _config.Dungeons > 0)
         {
             dag.Add(new TeleportSystem(_bridge, _config.Shuttles));
+        }
+
+        if (_config.Dungeons > 0)
+        {
+            dag.Add(new DungeonSystem(_bridge, _config.Shuttles));
         }
 
         dag.Add(new SpatialTelemetrySystem(_bridge));
