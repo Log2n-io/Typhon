@@ -60,7 +60,7 @@ catch (TyphonException ex)
 | `ResourceExhaustedException` | `TyphonException` | `true` | see [Resource Exhaustion Handling](./resource-exhaustion-handling.md) |
 | `SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException` | `TyphonException` | `false` | `Diff`, `Failures`, `PersistedRevision`/`RuntimeRevision` |
 | `UniqueConstraintViolationException` | `TyphonException` | `false` | — |
-| `InvalidAccessException` | `TyphonException` | `false` | `SystemName`, `UndeclaredType` (DEBUG-only) |
+| `InvalidAccessException` | `TyphonException` | `false` | `SystemName`, `UndeclaredType` (opt-in; `Typhon:Checks:DeclaredAccess`) |
 
 ## ⚠️ Guarantees & limits
 

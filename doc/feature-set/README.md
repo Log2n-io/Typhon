@@ -277,7 +277,7 @@ Every Public feature, one line each — the application-facing surface, complete
 | Storage & Corruption Exceptions | Typed failures for storage I/O, CRC32C page corruption (unhealable), and another-process database-file-lock detection. | ✅ Implemented | 🟣 Advanced | [→](Errors/storage-corruption-exceptions.md) |
 | Durability (WAL / BulkLoad / Commit) Exceptions | Typed, fail-fast failures from the WAL writer, the commit pipeline's durability wait, and BulkLoad session lifecycle. | ✅ Implemented | 🟣 Advanced | [→](Errors/durability-exceptions.md) |
 | Schema & Constraint Violation Exceptions | Engine-refuses-to-proceed failures for the data model: breaking schema mismatch, migration failure, revision downgrade, duplicate unique key. | ✅ Implemented | 🟣 Advanced | [→](Errors/schema-constraint-exceptions.md) |
-| Runtime/Scheduler Declared-Access Validation | DEBUG-only InvalidAccessException when a system writes a component it never declared via Writes\<T\>()/SideWrites\<T\>(), compiled out in RELEASE. | ✅ Implemented | 🟣 Advanced | [→](Errors/runtime-access-validation.md) |
+| Runtime/Scheduler Declared-Access Validation | Opt-in InvalidAccessException when a system writes a component it never declared via Writes\<T\>()/SideWrites\<T\>() — enabled by `Typhon:Checks:DeclaredAccess`, zero cost when off. | ✅ Implemented | 🟣 Advanced | [→](Errors/runtime-access-validation.md) |
 
 ### Profiler
 
