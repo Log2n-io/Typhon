@@ -65,6 +65,7 @@ var nearby = t.Query<AntArch>()
 
 ## ⚠️ Guarantees & limits
 
+- **One realm per query** — `dbe.ClusterSpatialQuery<TArch>()` queries realm 0, `ClusterSpatialQuery<TArch>(realm)` another registered realm; the narrowphase returns only that realm's entities (RM-04, [Realms](./realms.md)).
 - **Raw enumerator requires an `EpochGuard` scope** — `ClusterSpatialQuery<TArch>` reads cluster pages directly, so the caller must hold `EpochGuard.Enter(dbe.EpochManager)` for the call's duration. `EpochGuard` is `internal`; reaching it directly (as above) requires the same `InternalsVisibleTo` boundary as Cluster Dormancy. Application code without that access goes through `EcsQuery.WhereNearby`/`WhereInAABB`, which manages the epoch scope internally.
 - **Requires `ConfigureSpatialGrid`** before `InitializeArchetypes` — a cluster-eligible archetype with a `[SpatialIndex]` field and no configured grid throws at archetype initialization, not at first query.
 - **The raw enumerator exposes AABB and Radius only** — `ClusterSpatialQuery<TArch>` has no Ray or Frustum entry point. Both shapes *are* served on this same cluster path, through `EcsQuery.WhereRay` / `WhereFrustum` (see [Spatial Query API](./spatial-query-api.md)).

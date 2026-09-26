@@ -286,6 +286,10 @@ Three spatial predicates cover the common needs:
 
 That's the user-facing surface, and it is where the *free* part ends. Keeping the index live as thousands of characters move every tick costs real per-tick work — the fence recomputes cluster bounds, migrates entities across cells, and re-packs cells whose layout has decayed — and the size you gave `cellSize` above is the single number that most changes that bill. Read [What Spatial Costs You](../feature-set/Spatial/spatial-cost-model.md) before you declare a second spatial archetype; it covers the four cost centres and the rule for choosing a cell size. [07-spatial](../in-depth-overview/07-spatial.md) is the mechanism underneath, if you want it.
 
+> **Several worlds?** The grid you just configured is realm 0, the default world, and everything above works without ever naming a realm. When one
+> server hosts isolated worlds at different scales — planets, building interiors, space — register each as a realm with its own grid, give the
+> archetypes that travel between them a `[RealmKey]`, and query with `.InRealm(realm)`: [Realms — Several Worlds in One Engine](../feature-set/Spatial/realms.md).
+
 ---
 
 ## 6. Two things the engine quietly does for you

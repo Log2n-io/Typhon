@@ -67,5 +67,6 @@ ctx.Subscriptions.Enter(godSession, new RealmId(1));             // a camera wit
 
 ## 🔗 Related
 
+- [Realms — Several Worlds in One Engine](../Spatial/realms.md) — registering realms, `[RealmKey]`, queries and policy
 - [Wire protocol & catalog](wire-protocol.md) — the `REALM` block · [Profiles & observers](profiles-observers.md) · [Events](events.md)
 - Design: `claude/design/Subscriptions/12-realms.md` · Decision: ADR-068

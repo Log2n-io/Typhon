@@ -67,6 +67,7 @@ var rayHits = t.Query<UnitArch>()
 - **kNN returns real distances in order** — results come back ascending by squared distance to the closest point on each entity's tight bounds, so no caller-side re-sort is needed. Early termination is sound because a cluster box's distance is a lower bound on the distance to anything inside it.
 - **Counting has no shortcut on the fluent path** — `EcsQuery.Count()` after a spatial predicate builds the result set and returns its size; `ClusterSpatialQuery`'s enumerator `Count()` does not (see above). The subtree-containment shortcut lives on `SpatialRTree.CountInAABB`, which no production path calls; it is exercised by tests and benchmarks only.
 - **kNN is engine-internal today** — reachable only from engine code, with no fluent predicate and no `ClusterSpatialQuery` shape. Frustum, by contrast, is on the public fluent surface as `WhereFrustum`.
+- **A query answers in one realm** — realm 0 unless `EcsQuery.InRealm(realm)` / `ClusterSpatialQuery<T>(realm)` names another; entities of another realm at the same coordinates are never returned (SQ-08, [Realms](./realms.md)).
 - **Public fluent surface allows one spatial predicate per query** — a second `WhereNearby`/`WhereInAABB`/`WhereRay`/`WhereFrustum` call throws; see [Spatial Query Predicates](../Querying/spatial-predicates.md) for full composition rules.
 
 ## 🧪 Tests
