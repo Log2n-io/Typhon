@@ -62,7 +62,7 @@ class RealmTableTests : TestBase<RealmTableTests>
 
         Assert.That(dbe.RealmTable, Is.Not.Null);
         Assert.That(dbe.RealmTable.Default, Is.Not.Null);
-        Assert.That(dbe.SpatialGrid, Is.SameAs(dbe.RealmTable.Default.Grid), "the single-world grid is realm 0's");
+        Assert.That(dbe.Realm0Grid, Is.SameAs(dbe.RealmTable.Default.Grid), "the single-world grid is realm 0's");
         Assert.That(dbe.RealmTable.Registered.Length, Is.EqualTo(1));
     }
 
@@ -72,7 +72,7 @@ class RealmTableTests : TestBase<RealmTableTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.InitializeArchetypes();
 
-        Assert.That(dbe.SpatialGrid, Is.Null);
+        Assert.That(dbe.Realm0Grid, Is.Null);
     }
 
     /// <summary>A grid belongs to one realm: registering it twice would make its realm id name the wrong realm's state (SpatialOf).</summary>

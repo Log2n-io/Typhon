@@ -1379,7 +1379,7 @@ public unsafe ref struct AabbClusterEnumerator
     }
 
     /// <summary>
-    /// Open the next named outlier (<see cref="ArchetypeClusterState.EscapedClusters"/>) this query overlaps and the cell walk did not reach, making it the
+    /// Open the next named outlier (<see cref="RealmArchetypeSpatial.EscapedClusters"/>) this query overlaps and the cell walk did not reach, making it the
     /// current cluster. Returns false once none is left.
     /// </summary>
     /// <remarks>

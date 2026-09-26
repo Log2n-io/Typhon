@@ -104,7 +104,7 @@ class ClusterFrustumTests : TestBase<ClusterFrustumTests>
         int n;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            n = cs.QueryFrustum(dbe.SpatialGrid, planes, 4,
+            n = cs.QueryFrustum(dbe.Realm0Grid, planes, 4,
                 new Vector3Like(wMinX, wMinY, 0f), new Vector3Like(wMaxX, wMaxY, 0f), buffer, categoryMask: 0);
         }
 
@@ -117,7 +117,7 @@ class ClusterFrustumTests : TestBase<ClusterFrustumTests>
         var oracle = new HashSet<long>();
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
             {
                 if (OracleAccepts(planes, 4, (float)r.MinX, (float)r.MinY, (float)r.MaxX, (float)r.MaxY))
                 {
@@ -126,7 +126,7 @@ class ClusterFrustumTests : TestBase<ClusterFrustumTests>
             }
         }
 
-        return (hits, oracle, cs.PromotedCellCount);
+        return (hits, oracle, cs.Realm0Spatial.PromotedCellCount);
     }
 
     [Test]

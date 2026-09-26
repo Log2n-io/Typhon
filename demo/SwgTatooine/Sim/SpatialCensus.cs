@@ -59,9 +59,9 @@ internal static class SpatialCensus
     private static unsafe (int Halves, double Extent, double ToBound, double Occupancy, double EngineBound) Tightness(DatabaseEngine dbe,
         ArchetypeClusterState cs)
     {
-        var cellSize = (double)dbe.SpatialGrid.Config.CellSize;
+        var cellSize = (double)dbe.Realm0Grid.Config.CellSize;
         var slots = BitOperations.PopCount(cs.Layout.FullMask);
-        var perCell = cs.PerCellIndex;
+        var perCell = cs.Realm0Spatial.PerCellIndex;
         var halves = 0;
         var measured = 0;
         double extentSum = 0d, toBoundSum = 0d, engineBoundSum = 0d;
@@ -74,7 +74,7 @@ internal static class SpatialCensus
                 continue;
             }
 
-            var ids = cs.CellClusterPool.GetClusters(cellKey);
+            var ids = cs.Realm0Spatial.CellClusterPool.GetClusters(cellKey);
             if (ids.Length < TightClusters)
             {
                 continue;
@@ -103,7 +103,7 @@ internal static class SpatialCensus
 
             halves++;
             var bound = Math.Min(1d, Math.Sqrt((double)slots / halfEntities));
-            var cellEntities = dbe.SpatialGrid.GetCell(cellKey).EntityCount;
+            var cellEntities = dbe.Realm0Grid.GetCell(cellKey).EntityCount;
             var engineBound = cellEntities <= slots ? 1d : Math.Sqrt((double)slots / cellEntities);
             extentSum += halfExtent;
             toBoundSum += halfExtent / bound;
@@ -125,19 +125,19 @@ internal static class SpatialCensus
     internal static unsafe (int Clusters, double ToBound, double Extent, double Occupancy) CellTightness(DatabaseEngine dbe, ArchetypeClusterState cs,
         int cellKey)
     {
-        var perCell = cs?.PerCellIndex;
+        var perCell = cs?.Realm0Spatial?.PerCellIndex;
         if (perCell == null || (uint)cellKey >= (uint)perCell.Length || perCell[cellKey] == null)
         {
             return (0, 0d, 0d, 0d);
         }
 
-        var ids = cs.CellClusterPool.GetClusters(cellKey);
+        var ids = cs.Realm0Spatial.CellClusterPool.GetClusters(cellKey);
         if (ids.Length == 0)
         {
             return (0, 0d, 0d, 0d);
         }
 
-        var cellSize = (double)dbe.SpatialGrid.Config.CellSize;
+        var cellSize = (double)dbe.Realm0Grid.Config.CellSize;
         var slots = BitOperations.PopCount(cs.Layout.FullMask);
         double extent = 0d;
         var counted = 0;
@@ -169,7 +169,7 @@ internal static class SpatialCensus
     private static void Row(DatabaseEngine dbe, string name, int archetypeId)
     {
         var cs = dbe._archetypeStates[archetypeId]?.ClusterState;
-        var perCell = cs?.PerCellIndex;
+        var perCell = cs?.Realm0Spatial?.PerCellIndex;
         if (perCell == null)
         {
             Console.WriteLine($"  {name,-13} (no per-cell index)");
@@ -200,7 +200,7 @@ internal static class SpatialCensus
         }
 
         var (tightHalves, extent, toBound, occupancy, engineBound) = Tightness(dbe, cs);
-        Console.WriteLine($"  {name,-13} {halves,7:N0} {maxC,7:N0} {dense,13:N0} {cs.PromotedCellCount,8:N0}   "
+        Console.WriteLine($"  {name,-13} {halves,7:N0} {maxC,7:N0} {dense,13:N0} {cs.Realm0Spatial.PromotedCellCount,8:N0}   "
             + $"{tightHalves,13:N0} {extent,7:F3} {toBound,9:F2} {occupancy,8:P0} {engineBound,16:F2} "
             + $"{dbe.GetSpatialTelemetry(archetypeId).ActiveClusterCount,9:N0}");
     }

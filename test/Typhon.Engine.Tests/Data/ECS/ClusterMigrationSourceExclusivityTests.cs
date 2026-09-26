@@ -95,7 +95,7 @@ class ClusterMigrationSourceExclusivityTests : TestBase<ClusterMigrationSourceEx
         state.EnqueueMigration(new MigrationRequest(7, 4, 0, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
         state.EnqueueMigration(new MigrationRequest(9, 3, 0, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
 
-        state.ApplyMigrationThrottle(dbe.SpatialGrid);
+        state.ApplyMigrationThrottle(dbe.Realm0Grid);
 
         var survivors = new List<string>();
         for (var i = 0; i < state.PendingMigrationCount; i++)
@@ -136,7 +136,7 @@ class ClusterMigrationSourceExclusivityTests : TestBase<ClusterMigrationSourceEx
         state.EnqueueMigration(new MigrationRequest(7, 3, 0, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
         state.EnqueueMigration(new MigrationRequest(8, 3, 0, 11, 5, MigrationRequest.AnySlot, MigrationKind.Relocation));
 
-        state.ApplyMigrationThrottle(dbe.SpatialGrid);
+        state.ApplyMigrationThrottle(dbe.Realm0Grid);
 
         Assert.Multiple(() =>
         {

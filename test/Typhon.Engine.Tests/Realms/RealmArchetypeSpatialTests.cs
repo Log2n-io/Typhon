@@ -39,10 +39,10 @@ class RealmArchetypeSpatialTests : TestBase<RealmArchetypeSpatialTests>
 
         var cs = dbe._archetypeStates[Archetype<TierUnit>.Metadata.ArchetypeId].ClusterState;
         Assert.That(cs.RealmSpatial, Has.Length.EqualTo(1));
-        Assert.That(cs.DefaultRealmSpatial, Is.SameAs(cs.RealmSpatial[0]));
-        Assert.That(cs.DefaultRealmSpatial.Realm, Is.EqualTo(RealmId.Default));
-        Assert.That(cs.DefaultRealmSpatial.Grid, Is.SameAs(dbe.SpatialGrid));
-        Assert.That(cs.CellClusterPool, Is.SameAs(cs.DefaultRealmSpatial.CellClusterPool));
+        Assert.That(cs.Realm0Spatial, Is.SameAs(cs.RealmSpatial[0]));
+        Assert.That(cs.Realm0Spatial.Realm, Is.EqualTo(RealmId.Default));
+        Assert.That(cs.Realm0Spatial.Grid, Is.SameAs(dbe.Realm0Grid));
+        Assert.That(cs.Realm0Spatial.CellClusterPool, Is.SameAs(cs.Realm0Spatial.CellClusterPool));
     }
 
     [Test]

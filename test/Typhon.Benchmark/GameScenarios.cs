@@ -1125,7 +1125,7 @@ internal static class GameScenarios
         var zHi = flat ? float.PositiveInfinity : at.Z + radius;
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var n = 0;
-        foreach (var hit in cs.QueryAabb(dbe.SpatialGrid, at.X - radius, at.Y - radius, zLo, at.X + radius, at.Y + radius, zHi))
+        foreach (var hit in cs.QueryAabb(dbe.Realm0Grid, at.X - radius, at.Y - radius, zLo, at.X + radius, at.Y + radius, zHi))
         {
             n += hit.Entity.IsNull ? 0 : 1;
         }
@@ -1137,12 +1137,12 @@ internal static class GameScenarios
     {
         var cs = dbe._archetypeStates[Archetype<GameEntity>.Metadata.ArchetypeId].ClusterState;
         row.Clusters = cs.ActiveClusterCount;
-        row.PromotedCells = cs.PromotedCellCount;
+        row.PromotedCells = cs.Realm0Spatial.PromotedCellCount;
 
         var live = 0;
-        for (var key = 0; key < dbe.SpatialGrid.CellCount; key++)
+        for (var key = 0; key < dbe.Realm0Grid.CellCount; key++)
         {
-            if (dbe.SpatialGrid.GetCell(key).EntityCount > 0)
+            if (dbe.Realm0Grid.GetCell(key).EntityCount > 0)
             {
                 live++;
             }

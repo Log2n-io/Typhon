@@ -172,7 +172,7 @@
     realm map too, or a query would answer with another world's entities (SQ-08)
   scope: SpatialRTree.Query.cs (all enumerators), CountInAABB, AabbClusterEnumerator, ArchetypeClusterState.QueryRay,
     ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest, ArchetypeClusterState.CoveredRadiusSq,
-    ArchetypeClusterState.ClusterReach, ArchetypeClusterState.EscapedClusters, ArchetypeClusterState.RefreshClusterReach,
+    RealmArchetypeSpatial.ClusterReach, RealmArchetypeSpatial.EscapedClusters, ArchetypeClusterState.RefreshClusterReach,
     ArchetypeClusterState.RaiseClusterReachForSpawn, ArchetypeClusterState.CellReachFrame, ArchetypeClusterState.FoldReach,
     ArchetypeClusterState.RejectBounds, ArchetypeClusterState.BeginClusterAabbsWrite, ArchetypeClusterState.ClusterAabbsWriteLanded,
     ClusterRef.ApplySpatialWrite,

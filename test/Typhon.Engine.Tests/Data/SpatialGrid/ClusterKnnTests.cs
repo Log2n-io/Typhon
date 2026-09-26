@@ -72,7 +72,7 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
     /// <c>30² = 900</c>. B is the true nearest neighbour and it is not in the first shell.</para>
     /// <para><b>What the bug did.</b> After ring 0 the search held A, and asked whether the region it had covered reached as far as A. Measuring to the cell
     /// FACE it answered 50, and <c>50² = 2500 ≥ 1600</c>, so it stopped one shell too early and returned A. The fix accounts for B's 20-unit overhang
-    /// into cell (1, 1): either <c>ArchetypeClusterState.ClusterReach</c> covers it and the stopping rule subtracts it, or — as here, since B is the only
+    /// into cell (1, 1): either <c>RealmArchetypeSpatial.ClusterReach</c> covers it and the stopping rule subtracts it, or — as here, since B is the only
     /// cluster reaching past its cell and reaches further than a hysteresis margin — B is NAMED in <c>EscapedClusters</c> and pushed onto the heap with its
     /// true lower bound, <c>30² = 900 &lt; 1600</c>, before the first ring. Either way B is found.</para>
     /// <para><b>Why the rest of this fixture cannot catch it.</b> Every other test spawns <see cref="PointAt"/> — zero-extent entities, whose overhang is
@@ -103,20 +103,22 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
         var cs = ClusterStateOf(dbe);
 
         // Non-vacuity: the two entities must land in DIFFERENT cells, or the overhang never matters and this test degenerates into "kNN works".
-        int nearCell = dbe.SpatialGrid.WorldToCellKey(205f, 150f, 0f);
-        int farCell = dbe.SpatialGrid.WorldToCellKey(190f, 150f, 0f);
+        int nearCell = dbe.Realm0Grid.WorldToCellKey(205f, 150f, 0f);
+        int farCell = dbe.Realm0Grid.WorldToCellKey(190f, 150f, 0f);
         Assert.That(nearCell, Is.Not.EqualTo(farCell), "the nearer entity must be filed one cell out, or the ring search never has to reach for it");
-        Assert.That(cs.ClusterReach > 0f || cs.EscapedClusters.Count > 0, Is.True,
+        Assert.That(cs.Realm0Spatial.ClusterReach > 0f || cs.Realm0Spatial.EscapedClusters.Count > 0, Is.True,
             "B's overhang must have been observed — covered by the reach or named — or the corrected search is a no-op");
 
         var buffer = new (long entityId, double distSq)[1];
         int n;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            n = cs.QueryNearest(dbe.SpatialGrid, 150f, 150f, 0f, k: 1, buffer, categoryMask: 0);
+            n = cs.QueryNearest(dbe.Realm0Grid, 150f, 150f, 0f, k: 1, buffer, categoryMask: 0);
         }
 
-        TestContext.Out.WriteLine($"KNN overhang: n={n} distSq={(n > 0 ? buffer[0].distSq : -1f)} reach={cs.ClusterReach} named={cs.EscapedClusters.Count}");
+        var spatial = cs.Realm0Spatial;
+        TestContext.Out.WriteLine(
+            $"KNN overhang: n={n} distSq={(n > 0 ? buffer[0].distSq : -1f)} reach={spatial.ClusterReach} named={spatial.EscapedClusters.Count}");
 
         Assert.Multiple(() =>
         {
@@ -133,7 +135,7 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
         var all = new List<(long entityId, double distSq)>();
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
             {
                 // Double, matching the engine since #919 F2. It matters that this MIRRORS the production arithmetic rather than approximating it: the
                 // oracle's job is to be an independent implementation of the same SEMANTICS, and a narrower one disagrees by more than the tolerance at
@@ -177,7 +179,7 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
         int n;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            n = cs.QueryNearest(dbe.SpatialGrid, px, py, 0f, k, buffer, categoryMask: 0);
+            n = cs.QueryNearest(dbe.Realm0Grid, px, py, 0f, k, buffer, categoryMask: 0);
         }
 
         var knn = new List<(long entityId, double distSq)>();
@@ -192,14 +194,14 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
         int reachable = 0;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var _ in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
+            foreach (var _ in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
             {
                 reachable++;
             }
         }
         Assert.That(reachable, Is.EqualTo(entityCount), "the index lost entities — every comparison below would share that blind spot");
 
-        return (knn, Oracle(dbe, cs, px, py, k), cs.PromotedCellCount);
+        return (knn, Oracle(dbe, cs, px, py, k), cs.Realm0Spatial.PromotedCellCount);
     }
 
     private static void AssertMatchesOracle(List<(long entityId, double distSq)> knn, List<(long entityId, double distSq)> oracle, string stage)
@@ -307,7 +309,7 @@ class ClusterKnnTests : TestBase<ClusterKnnTests>
         var buffer = new (long entityId, double distSq)[5];
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.QueryNearest(dbe.SpatialGrid, 1_000f, 1_000f, 0f, 5, buffer, out scanned, categoryMask: 0);
+            cs.QueryNearest(dbe.Realm0Grid, 1_000f, 1_000f, 0f, 5, buffer, out scanned, categoryMask: 0);
         }
 
         TestContext.Out.WriteLine($"KNN opened {scanned} of {totalClusters} clusters for k=5 over 6000 entities");

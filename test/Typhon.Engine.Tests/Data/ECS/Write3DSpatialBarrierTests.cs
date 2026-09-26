@@ -282,7 +282,7 @@ class Write3DSpatialBarrierTests : TestBase<Write3DSpatialBarrierTests>
         dbe.WriteTickFence(2);
 
         int cellKey = CellOf(dbe, id);
-        coords = cellKey < 0 ? (-1, -1, -1) : dbe.SpatialGrid.CellKeyToCoords(cellKey);
+        coords = cellKey < 0 ? (-1, -1, -1) : dbe.Realm0Grid.CellKeyToCoords(cellKey);
         return cellKey;
     }
 
@@ -446,7 +446,7 @@ class Write3DSpatialBarrierTests : TestBase<Write3DSpatialBarrierTests>
     private static unsafe void AssertEveryClusterBoundContainsItsEntities(DatabaseEngine dbe, string what)
     {
         var cs = StateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var accessor = cs.ClusterSegment.CreateChunkAccessor();
         try

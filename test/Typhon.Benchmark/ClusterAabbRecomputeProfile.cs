@@ -105,7 +105,7 @@ public static class ClusterAabbRecomputeProfile
         dbe.WriteTickFence(1);
 
         var state = dbe._archetypeStates[Archetype<TArch>.Metadata.ArchetypeId].ClusterState;
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         Console.WriteLine($"  active clusters = {state.ActiveClusterCount:N0}, mean fill = {entities / (double)state.ActiveClusterCount:F1} of 64 slots");
 
         // Warm-up: tiered compilation and the page window both need a pass before the measurement means anything.

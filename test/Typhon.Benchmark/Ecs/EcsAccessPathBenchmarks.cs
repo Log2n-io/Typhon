@@ -186,7 +186,7 @@ public class EcsAccessPathBenchmarks : IDisposable
         var meta = ArchetypeRegistry.GetMetadata<ApBenchUnit>();
         _clusterState = _dbe._archetypeStates[meta.ArchetypeId].ClusterState;
 
-        var grid = _clusterState.Grid;
+        var grid = _clusterState.Realm0Spatial.Grid;
         for (int c = 0; c < CellCount; c++)
         {
             float baseX = c % CellsPerSide * CellSize + CellSize * 0.5f;
@@ -288,7 +288,7 @@ public class EcsAccessPathBenchmarks : IDisposable
         float sum = 0;
         for (int c = 0; c < CellCount; c++)
         {
-            var clusters = _clusterState.CellClusterPool.GetClusters(_cellKeys[c]);
+            var clusters = _clusterState.Realm0Spatial.CellClusterPool.GetClusters(_cellKeys[c]);
             if (clusters.Length == 0)
             {
                 continue;
@@ -336,7 +336,7 @@ public class EcsAccessPathBenchmarks : IDisposable
             for (int dx = -1; dx <= 1; dx++)
             {
                 int c = (CenterY + dy) * CellsPerSide + (CenterX + dx);
-                var clusters = _clusterState.CellClusterPool.GetClusters(_cellKeys[c]);
+                var clusters = _clusterState.Realm0Spatial.CellClusterPool.GetClusters(_cellKeys[c]);
                 if (clusters.Length == 0)
                 {
                     continue;

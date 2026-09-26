@@ -75,7 +75,7 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
         var entities = new HashSet<EntityId>();
         using (EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, minX, minY, double.NegativeInfinity, maxX, maxY, double.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, minX, minY, double.NegativeInfinity, maxX, maxY, double.PositiveInfinity))
             {
                 entities.Add(r.Entity);
             }
@@ -95,7 +95,7 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
     private static unsafe int CountSlotsOutsideTheirClusterCell(DatabaseEngine dbe)
     {
         var cs = dbe._archetypeStates[ArchetypeId].ClusterState;
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         ref readonly var ss = ref cs.SpatialSlot;
         var outside = 0;
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
@@ -151,9 +151,9 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
         Assert.That(QueryTags(reopened, 0, 0, WorldMax, WorldMax), Has.Count.EqualTo(population), "the whole-world query must see every recovered entity");
 
         var cellEntities = 0;
-        for (var key = 0; key < reopened.SpatialGrid.CellCount; key++)
+        for (var key = 0; key < reopened.Realm0Grid.CellCount; key++)
         {
-            cellEntities += reopened.SpatialGrid.GetCell(key).EntityCount;
+            cellEntities += reopened.Realm0Grid.GetCell(key).EntityCount;
         }
 
         Assert.That(cellEntities, Is.EqualTo(population), "the rebuilt cell counters disagree with cluster storage");
@@ -230,7 +230,7 @@ class RecoverySpatialRebuildTests : TestBase<RecoverySpatialRebuildTests>
         var moved = new List<EntityId>();
         using (EpochGuard.Enter(reopened.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(reopened.SpatialGrid, 0, 0, double.NegativeInfinity, WorldMax, WorldMax, double.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(reopened.Realm0Grid, 0, 0, double.NegativeInfinity, WorldMax, WorldMax, double.PositiveInfinity))
             {
                 moved.Add(r.Entity);
             }

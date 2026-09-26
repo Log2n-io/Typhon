@@ -102,7 +102,7 @@ class F64WorldLifecycleTests : TestBase<F64WorldLifecycleTests>
             Assert.DoesNotThrow(() => dbe.InitializeArchetypes(),
                 "an f64 grid config must reconstruct from the persisted record without the game re-declaring it");
 
-            var cfg = dbe.SpatialGrid.Config;
+            var cfg = dbe.Realm0Grid.Config;
             Assert.Multiple(() =>
             {
                 Assert.That(cfg.WorldMin, Is.EqualTo(new Vector3D(FarOrigin, FarOrigin, FarOrigin)), "the reconstructed world frame must be exact, not near");
@@ -144,7 +144,7 @@ class F64WorldLifecycleTests : TestBase<F64WorldLifecycleTests>
                 {
                     continue;
                 }
-                var (cx, cy, cz) = dbe.SpatialGrid.CellKeyToCoords(cellKey);
+                var (cx, cy, cz) = dbe.Realm0Grid.CellKeyToCoords(cellKey);
                 var clusterBase = accessor.GetChunkAddress(chunkId);
                 var occupancy = *(ulong*)clusterBase;
                 while (occupancy != 0)

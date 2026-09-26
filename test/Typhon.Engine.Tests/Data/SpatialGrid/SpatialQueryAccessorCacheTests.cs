@@ -200,7 +200,8 @@ class SpatialQueryAccessorCacheTests : TestBase<SpatialQueryAccessorCacheTests>
     {
         using var dbe = SetupEngine(ServiceProvider, cellSize: 1_000f, worldMax: 4_000f, promoteThreshold: 24);
         Spawn(dbe, 3_000, seed: 6);
-        Assert.That(StateOf(dbe).PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote, so both queries pop tree hits from their windows");
+        Assert.That(StateOf(dbe).Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
+            "precondition: the cell must promote, so both queries pop tree hits from their windows");
         AssertNestedQueriesAnswerAsAlone(dbe, outerMax: 1_000f);
     }
 
@@ -262,7 +263,7 @@ class SpatialQueryAccessorCacheTests : TestBase<SpatialQueryAccessorCacheTests>
         using var dbe = SetupEngine(ServiceProvider, cellSize: 1_000f, worldMax: 4_000f, promoteThreshold: 24);
         Spawn(dbe, 5_000, seed: 7);
         var cs = StateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote");
 
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         Assert.That(CountInBox(dbe, 0f, 0f, 1_000f, 1_000f), Is.EqualTo(5_000), "every entity sits in the promoted cell, and the box covers it");

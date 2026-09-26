@@ -40,8 +40,8 @@ class DormancyTests : TestBase<DormancyTests>
             tx.Commit();
         }
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(x, y, 0f);
-        dbe.SpatialGrid.SetCellTier(cellKey, tier);
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(x, y, 0f);
+        dbe.Realm0Grid.SetCellTier(cellKey, tier);
 
         // Find the chunkId for this entity
         int chunkId = cs.ClusterCellMap != null ? FindChunkIdForCell(cs, cellKey) : cs.ActiveClusterIds[cs.ActiveClusterCount - 1];
@@ -114,8 +114,8 @@ class DormancyTests : TestBase<DormancyTests>
         using var dbe = SetupEngineWithGrid();
 
         // Spawn two entities in two different Tier0 cells
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -124,8 +124,8 @@ class DormancyTests : TestBase<DormancyTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier0);
 
         var meta = Archetype<TierUnit>.Metadata;
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
@@ -427,11 +427,11 @@ class DormancyTests : TestBase<DormancyTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier0);
 
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f);
         int chunkA = FindChunkIdForCell(cs, cellA);
         int chunkB = FindChunkIdForCell(cs, cellB);
 
@@ -459,9 +459,9 @@ class DormancyTests : TestBase<DormancyTests>
         using var dbe = SetupEngineWithGrid();
 
         // Spawn two entities in Tier0, one in Tier1
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
-        var cellC = dbe.SpatialGrid.WorldToCellKey(25f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f);
+        var cellC = dbe.Realm0Grid.WorldToCellKey(25f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -471,9 +471,9 @@ class DormancyTests : TestBase<DormancyTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellC, SimTier.Tier1);
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellC, SimTier.Tier1);
 
         var meta = Archetype<TierUnit>.Metadata;
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
@@ -592,8 +592,8 @@ class DormancyTests : TestBase<DormancyTests>
     {
         using var dbe = SetupEngineWithGrid();
 
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -603,8 +603,8 @@ class DormancyTests : TestBase<DormancyTests>
         }
 
         // Set tiers (required for spatial grid, but the system uses SimTier.All)
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier0);
 
         var meta = Archetype<TierUnit>.Metadata;
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;

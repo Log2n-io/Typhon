@@ -1810,7 +1810,7 @@ public static class SpatialPartitionMatrix
             return;
         }
 
-        var cellSize = dbe.SpatialGrid.Config.CellSize;
+        var cellSize = dbe.Realm0Grid.Config.CellSize;
         var extents = new List<double>(cs.ActiveClusterCount);
         for (var i = 0; i < cs.ActiveClusterCount; i++)
         {
@@ -1832,9 +1832,9 @@ public static class SpatialPartitionMatrix
         // Cells that HOLD something, not cells that exist: under a clustered distribution the grid materialises cells the population never reaches,
         // and clusters per cell read low against them.
         var liveCells = 0;
-        for (var key = 0; key < dbe.SpatialGrid.CellCount; key++)
+        for (var key = 0; key < dbe.Realm0Grid.CellCount; key++)
         {
-            if (dbe.SpatialGrid.GetCell(key).EntityCount > 0)
+            if (dbe.Realm0Grid.GetCell(key).EntityCount > 0)
             {
                 liveCells++;
             }
@@ -1875,7 +1875,7 @@ public static class SpatialPartitionMatrix
     {
         var t = dbe.GetSpatialTelemetry(archetypeId);
         var cs = dbe._archetypeStates[archetypeId].ClusterState;
-        var cellSize = dbe.SpatialGrid.Config.CellSize;
+        var cellSize = dbe.Realm0Grid.Config.CellSize;
         var sum = 0d;
         var count = 0;
         for (var i = 0; i < cs.ActiveClusterCount; i++)

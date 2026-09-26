@@ -1003,7 +1003,7 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
         var idB = Archetype<SpTelUnitB>.Metadata.ArchetypeId;
         var sa = dbe._archetypeStates[ArchetypeId].ClusterState;
         var sb = dbe._archetypeStates[idB].ClusterState;
-        var cfg = dbe.SpatialGrid.Config;
+        var cfg = dbe.Realm0Grid.Config;
 
         // A best of 2, then half as bad again: A for 10 ticks, B for 30, so both reach the whole budget and B's streak is the longer.
         DriveController(sa, in cfg, 2_000, 200);
@@ -1049,7 +1049,7 @@ class SpatialMigrationTelemetryTests : TestBase<SpatialMigrationTelemetryTests>
         var id = Archetype<SpTelPlainUnit>.Metadata.ArchetypeId;
         var state = dbe._archetypeStates[id]?.ClusterState;
         Assert.That(state, Is.Not.Null, "precondition: the plain archetype has a cluster state, as every cluster-eligible archetype does");
-        var cfg = dbe.SpatialGrid.Config;
+        var cfg = dbe.Realm0Grid.Config;
         DriveController(state, in cfg, 2_000, 200);
         DriveController(state, in cfg, 3_000, ArchetypeClusterState.EfficiencyRebaseTicks + 50);
 

@@ -453,11 +453,11 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// out, so the loop may only stop once the k-th distance fits inside the covered region. A face that coincides with the world bound is treated as
     /// unbounded — there is nothing beyond it to find.</para>
     /// <para><b>The shell of cells is NOT the region those cells cover.</b> A cluster is filed by its entities' CENTRES, so its box reaches up to
-    /// <see cref="ClusterReach"/> outside its own cell — the few that reach further are named and put on the heap before the first ring — and a cluster
-    /// one shell out can therefore hold an entity nearer than the face distance. Taking
-    /// the face distance as covered is what dropped true nearest neighbours: with 100-unit cells, a query at (150,150), a point at (190,150) and a 50-wide box
-    /// centred at (205,150) reaching x=180, ring 0 declared 50 units covered, 50^2 beat the point's 40^2, and the nearer box was never opened. Subtracting the
-    /// overhang is what makes the stopping rule true again; it costs breadth, and only where extended entities actually exist.</para>
+    /// <see cref="RealmArchetypeSpatial.ClusterReach"/> outside its own cell — the few that reach further are named and put on the heap before the first ring —
+    /// and a cluster one shell out can therefore hold an entity nearer than the face distance. Taking the face distance as covered is what dropped true
+    /// nearest neighbours: with 100-unit cells, a query at (150,150), a point at (190,150) and a 50-wide box centred at (205,150) reaching x=180, ring 0
+    /// declared 50 units covered, 50^2 beat the point's 40^2, and the nearer box was never opened. Subtracting the overhang is what makes the stopping
+    /// rule true again; it costs breadth, and only where extended entities actually exist.</para>
     /// </remarks>
     private static double CoveredRadiusSq(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D,
         double px, double py, double pz, double reach)

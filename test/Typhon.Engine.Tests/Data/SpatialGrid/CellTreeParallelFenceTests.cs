@@ -127,7 +127,7 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
 
         AssertPreconditions(cs, barrierOnly);
 
@@ -268,13 +268,14 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.Zero, "this must run on the linear index — CA-02 is about the ordinary broadphase, not the promoted one");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.Zero,
+            "this must run on the linear index — CA-02 is about the ordinary broadphase, not the promoted one");
 
         for (int t = 0; t < MotionTicks; t++)
         {
             using (var tx = dbe.CreateQuickTransaction())
             {
-                RotateEveryEntity(tx, cs, dbe.SpatialGrid);
+                RotateEveryEntity(tx, cs, dbe.Realm0Grid);
                 tx.Commit();
             }
             dbe.WriteTickFence(2 + t);
@@ -373,9 +374,9 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
     private static void AssertPreconditions(ArchetypeClusterState cs, bool barrierOnly)
     {
         int promoted = 0;
-        for (int cellKey = 0; cellKey < cs.PerCellIndex.Length; cellKey++)
+        for (int cellKey = 0; cellKey < cs.Realm0Spatial.PerCellIndex.Length; cellKey++)
         {
-            if (cs.PerCellIndex[cellKey]?.HasDynamicTree == true)
+            if (cs.Realm0Spatial.PerCellIndex[cellKey]?.HasDynamicTree == true)
             {
                 promoted++;
             }
@@ -429,9 +430,9 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
 
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            for (int cellKey = 0; cellKey < cs.PerCellIndex.Length; cellKey++)
+            for (int cellKey = 0; cellKey < cs.Realm0Spatial.PerCellIndex.Length; cellKey++)
             {
-                var tree = cs.PerCellIndex[cellKey]?.DynamicTree;
+                var tree = cs.Realm0Spatial.PerCellIndex[cellKey]?.DynamicTree;
                 if (tree == null)
                 {
                     continue;
@@ -516,7 +517,7 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
             var actual = new HashSet<long>();
             using (var epoch = EpochGuard.Enter(dbe.EpochManager))
             {
-                foreach (var r in cs.QueryAabb(dbe.SpatialGrid, minX, minY, float.NegativeInfinity, maxX, maxY, float.PositiveInfinity))
+                foreach (var r in cs.QueryAabb(dbe.Realm0Grid, minX, minY, float.NegativeInfinity, maxX, maxY, float.PositiveInfinity))
                 {
                     actual.Add(SlotKey(r.ClusterChunkId, r.SlotIndex));
                 }
@@ -554,13 +555,13 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
             int cellKey = cs.ClusterCellMap[chunkId];
             var b = byKey[key];
             ref readonly var stored = ref cs.ClusterAabbs[chunkId];
-            dbe.SpatialGrid.CellOrigin(cellKey, out double ox, out double oy, out _);
+            dbe.Realm0Grid.CellOrigin(cellKey, out double ox, out double oy, out _);
 
             TestContext.Out.WriteLine($"q{queryIndex} box=({minX:F3},{minY:F3})-({maxX:F3},{maxY:F3}) missing chunk={chunkId} slot={key & 255} "
                 + $"entity=({b.minX:F3},{b.minY:F3})-({b.maxX:F3},{b.maxY:F3})");
             TestContext.Out.WriteLine($"    ClusterAabbs=({ox + stored.MinX:F3},{oy + stored.MinY:F3})-({ox + stored.MaxX:F3},{oy + stored.MaxY:F3})");
 
-            var linear = cs.PerCellIndex[cellKey]?.DynamicIndex;
+            var linear = cs.Realm0Spatial.PerCellIndex[cellKey]?.DynamicIndex;
             if (linear != null)
             {
                 int indexSlot = cs.ClusterSpatialIndexSlot[chunkId];
@@ -626,7 +627,7 @@ class CellTreeParallelFenceTests : TestBase<CellTreeParallelFenceTests>
                 foreach (int chunkId in ClustersInSlice(cs, barrierOnly, item.SliceStart, item.SliceCount))
                 {
                     int cellKey = cs.ClusterCellMap[chunkId];
-                    if (cellKey < 0 || cs.PerCellIndex[cellKey]?.HasDynamicTree != true)
+                    if (cellKey < 0 || cs.Realm0Spatial.PerCellIndex[cellKey]?.HasDynamicTree != true)
                     {
                         continue;
                     }

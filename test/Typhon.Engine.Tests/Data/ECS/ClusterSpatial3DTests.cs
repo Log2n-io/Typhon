@@ -98,12 +98,12 @@ class ClusterSpatial3DTests : TestBase<ClusterSpatial3DTests>
         dbe.WriteTickFence(1);
 
         var cs = dbe._archetypeStates[Archetype<ClSpatialUnit>.Metadata.ArchetypeId].ClusterState;
-        Assert.That(cs.PromotedCellCount, promote ? Is.GreaterThan(0) : Is.Zero, "the arm did not get the structure it was asked for");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, promote ? Is.GreaterThan(0) : Is.Zero, "the arm did not get the structure it was asked for");
 
         var found = new HashSet<long>();
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, openAxis ? float.NegativeInfinity : 0f,
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, openAxis ? float.NegativeInfinity : 0f,
                          1_000f, 1_000f, openAxis ? float.PositiveInfinity : 1_000f))
             {
                 found.Add(unchecked((long)r.Entity.RawValue));
@@ -655,7 +655,7 @@ class ClusterSpatial3DTests : TestBase<ClusterSpatial3DTests>
             tx.Commit();
         }
 
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         int lowCell = grid.WorldToCellKey(50f, 50f, 50f);
         int highCell = grid.WorldToCellKey(50f, 50f, 950f);
         Assert.That(lowCell, Is.Not.EqualTo(highCell), "9 cells apart on Z must not be the same cell in a cubic grid");
@@ -683,7 +683,7 @@ class ClusterSpatial3DTests : TestBase<ClusterSpatial3DTests>
             tx.Commit();
         }
 
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         grid.WorldToCellRange(0f, 0f, 0f, 100f, 100f, 1000f, out _, out _, out var minZ, out _, out _, out var maxZ);
         Assert.That(maxZ - minZ, Is.GreaterThanOrEqualTo(9), "the query must genuinely span several Z cells, or the loop below is never exercised");
 

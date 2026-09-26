@@ -225,7 +225,7 @@ class SvComponentCollectionTests : TestBase<SvComponentCollectionTests>
             Assert.That(t.Commit(), Is.True, "spawn commit");
         }
 
-        Assert.That(dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f), Is.Not.EqualTo(dbe.SpatialGrid.WorldToCellKey(350f, 350f, 0f)));
+        Assert.That(dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f), Is.Not.EqualTo(dbe.Realm0Grid.WorldToCellKey(350f, 350f, 0f)));
 
         using (var t = dbe.CreateQuickTransaction())
         {

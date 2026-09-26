@@ -105,10 +105,10 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(4));
 
         // Assign each cell to a different tier.
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier1);
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(25f, 5f, 0f), SimTier.Tier2);
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(35f, 5f, 0f), SimTier.Tier3);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier1);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(25f, 5f, 0f), SimTier.Tier2);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(35f, 5f, 0f), SimTier.Tier3);
 
         var index = new TierClusterIndex();
         index.Rebuild(cs, dbe.RealmTable.TierVersion);
@@ -137,7 +137,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
 
         var index = new TierClusterIndex();
         index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
@@ -162,14 +162,14 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
 
         var index = new TierClusterIndex();
         index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
         Assert.That(index.RebuildCount, Is.EqualTo(1));
 
         // Change the cell's tier → version bumps → rebuild runs.
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier2);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier2);
         index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
         Assert.That(index.RebuildCount, Is.EqualTo(2));
         Assert.That(index.GetClusters(SimTier.Tier0).Length, Is.EqualTo(0));
@@ -189,7 +189,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
 
         var index = new TierClusterIndex();
         index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
@@ -201,7 +201,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(55f, 55f)));
             tx.Commit();
         }
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(55f, 55f, 0f), SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(55f, 55f, 0f), SimTier.Tier0);
 
         index.RebuildIfStale(cs, dbe.RealmTable.TierVersion);
         Assert.That(index.RebuildCount, Is.GreaterThan(rebuildsBeforeSpawn));
@@ -280,10 +280,10 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         var meta = Archetype<TierUnit>.Metadata;
 
         // Spawn one entity per cell across four different cells.
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
-        var cellC = dbe.SpatialGrid.WorldToCellKey(25f, 5f, 0f);
-        var cellD = dbe.SpatialGrid.WorldToCellKey(35f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f);
+        var cellC = dbe.Realm0Grid.WorldToCellKey(25f, 5f, 0f);
+        var cellD = dbe.Realm0Grid.WorldToCellKey(35f, 5f, 0f);
 
         EntityId eA, eB, eC, eD;
         using (var tx = dbe.CreateQuickTransaction())
@@ -295,10 +295,10 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier1);
-        dbe.SpatialGrid.SetCellTier(cellC, SimTier.Tier2);
-        dbe.SpatialGrid.SetCellTier(cellD, SimTier.Tier3);
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier1);
+        dbe.Realm0Grid.SetCellTier(cellC, SimTier.Tier2);
+        dbe.Realm0Grid.SetCellTier(cellD, SimTier.Tier3);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -335,9 +335,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
     public void TierDispatch_MultiTierNear_SeesTier0AndTier1()
     {
         using var dbe = SetupEngineWithGrid();
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
-        var cellC = dbe.SpatialGrid.WorldToCellKey(25f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f);
+        var cellC = dbe.Realm0Grid.WorldToCellKey(25f, 5f, 0f);
 
         EntityId eA, eB, eC;
         using (var tx = dbe.CreateQuickTransaction())
@@ -348,9 +348,9 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier1);
-        dbe.SpatialGrid.SetCellTier(cellC, SimTier.Tier2);
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier1);
+        dbe.Realm0Grid.SetCellTier(cellC, SimTier.Tier2);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -400,7 +400,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         }
         for (int i = 0; i < 4; i++)
         {
-            dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(coords[i], 5f, 0f), SimTier.Tier2);
+            dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(coords[i], 5f, 0f), SimTier.Tier2);
         }
 
         using var txView = dbe.CreateQuickTransaction();
@@ -452,7 +452,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(5f, 5f)));
             tx.Commit();
         }
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier2);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier2);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -535,8 +535,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         // calls BuildFullViewEntitySet.
         using var dbe = SetupEngineWithGrid();
 
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f);
 
         EntityId eA, eB;
         using (var tx = dbe.CreateQuickTransaction())
@@ -545,8 +545,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             eB = tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(15f, 5f)));
             tx.Commit();
         }
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier3);
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier3);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -586,8 +586,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         // should only see the tier's dirty entities.
         using var dbe = SetupEngineWithGrid();
 
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(55f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(55f, 5f, 0f);
 
         EntityId eA, eB;
         using (var tx = dbe.CreateQuickTransaction())
@@ -596,8 +596,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             eB = tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(55f, 5f)));
             tx.Commit();
         }
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier3);
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier3);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -661,7 +661,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
     {
         using var dbe = SetupEngineWithGrid();
 
-        var cell = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
+        var cell = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -669,7 +669,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(6f, 5f)));
             tx.Commit();
         }
-        dbe.SpatialGrid.SetCellTier(cell, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cell, SimTier.Tier0);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -728,8 +728,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
     {
         using var dbe = SetupEngineWithGrid();
 
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(55f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(55f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -737,8 +737,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(55f, 5f)));
             tx.Commit();
         }
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier3);
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier3);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -791,16 +791,16 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         using var dbe = SetupEngineWithGrid();
 
         // Spawn entities only in Tier0; assign Tier2 to a different cell with NO entities.
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(55f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(55f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
             tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(5f, 5f)));
             tx.Commit();
         }
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier2); // empty cell with Tier2
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier2); // empty cell with Tier2
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -843,8 +843,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
     {
         using var dbe = SetupEngineWithGrid();
 
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f);
 
         EntityId eA, eB;
         using (var tx = dbe.CreateQuickTransaction())
@@ -853,8 +853,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             eB = tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(15f, 5f)));
             tx.Commit();
         }
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier3);
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier3);
 
         using var txView = dbe.CreateQuickTransaction();
         // Apply tier on the VIEW, not the system. System tier defaults to All.
@@ -907,8 +907,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             tx.Commit();
         }
         // Both cells set to Tier0; Tier1 stays empty.
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f), SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(15f, 5f, 0f), SimTier.Tier0);
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
         var index = new TierClusterIndex();
@@ -941,7 +941,7 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             int cx = i % 10;
             tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(cx * 10f + 5f, cy * 10f + 5f)));
             tx.Commit();
-            dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(cx * 10f + 5f, cy * 10f + 5f, 0f), SimTier.Tier0);
+            dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(cx * 10f + 5f, cy * 10f + 5f, 0f), SimTier.Tier0);
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
@@ -962,8 +962,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
         using var dbe = SetupEngineWithGrid();
         var meta = Archetype<TierUnit>.Metadata;
 
-        var cellA = dbe.SpatialGrid.WorldToCellKey(5f, 5f, 0f);
-        var cellB = dbe.SpatialGrid.WorldToCellKey(55f, 5f, 0f);
+        var cellA = dbe.Realm0Grid.WorldToCellKey(5f, 5f, 0f);
+        var cellB = dbe.Realm0Grid.WorldToCellKey(55f, 5f, 0f);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -972,8 +972,8 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(cellA, SimTier.Tier1);
-        dbe.SpatialGrid.SetCellTier(cellB, SimTier.Tier0);
+        dbe.Realm0Grid.SetCellTier(cellA, SimTier.Tier1);
+        dbe.Realm0Grid.SetCellTier(cellB, SimTier.Tier0);
 
         using var txView = dbe.CreateQuickTransaction();
         var view = txView.Query<TierUnit>().ToView();
@@ -1041,13 +1041,13 @@ class TierDispatchTests : TestBase<TierDispatchTests>
             {
                 float x = 5f + i * 10f;
                 entityIds[i] = tx.Spawn<TierUnit>(TierUnit.Pos.Set(PointAt(x, 5f)));
-                cellKeys[i] = dbe.SpatialGrid.WorldToCellKey(x, 5f, 0f);
+                cellKeys[i] = dbe.Realm0Grid.WorldToCellKey(x, 5f, 0f);
             }
             tx.Commit();
         }
         for (int i = 0; i < cellCount; i++)
         {
-            dbe.SpatialGrid.SetCellTier(cellKeys[i], SimTier.Tier0);
+            dbe.Realm0Grid.SetCellTier(cellKeys[i], SimTier.Tier0);
         }
 
         using var viewTx = dbe.CreateQuickTransaction();

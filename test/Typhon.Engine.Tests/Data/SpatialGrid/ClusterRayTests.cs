@@ -114,7 +114,7 @@ class ClusterRayTests : TestBase<ClusterRayTests>
         int n;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            n = cs.QueryRay(dbe.SpatialGrid, ox, oy, 0f, dx, dy, 0f, maxDist, buffer, categoryMask: 0);
+            n = cs.QueryRay(dbe.Realm0Grid, ox, oy, 0f, dx, dy, 0f, maxDist, buffer, categoryMask: 0);
         }
 
         var hits = new List<(long id, float t)>();
@@ -130,7 +130,7 @@ class ClusterRayTests : TestBase<ClusterRayTests>
         var oracle = new List<(long id, float t)>();
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
             {
                 if (OracleRayHit(ox, oy, ndx, ndy, maxDist, (float)r.MinX, (float)r.MinY, (float)r.MaxX, (float)r.MaxY, out float t))
                 {
@@ -146,14 +146,14 @@ class ClusterRayTests : TestBase<ClusterRayTests>
         int reachable = 0;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var _ in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
+            foreach (var _ in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
             {
                 reachable++;
             }
         }
         Assert.That(reachable, Is.EqualTo(entityCount), "the index lost entities — every comparison below would share that blind spot");
 
-return (hits, oracle, cs.PromotedCellCount);
+return (hits, oracle, cs.Realm0Spatial.PromotedCellCount);
     }
 
     private static void AssertMatches(List<(long id, float t)> hits, List<(long id, float t)> oracle, string stage)

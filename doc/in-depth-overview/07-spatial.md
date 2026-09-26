@@ -417,8 +417,8 @@ per-cell index, cluster pool, reach and escape lists that [§3](#3-the-per-cell-
 
 **Identity.** Realms are registered in a `RealmTable` (`ConfigureRealms(n)` sizes the id range; `ConfigureSpatialGrid` registers realm 0). Every
 realm owns its grid instance, and the grid carries its `RealmId`: `SpatialOf(grid)` is `RealmSpatial[grid.Realm]`, one load per call. A method
-holding a grid therefore works in exactly that grid's realm. The old realm-0 shortcuts on `ArchetypeClusterState` are `[Obsolete]` with diagnostic
-`TYRLM001`, an error inside the engine, so no engine code can read realm 0's state implicitly.
+holding a grid therefore works in exactly that grid's realm. There is no realm-0 shortcut: realm 0's state is reached by naming it
+(`Realm0Spatial`, `Realm0Grid`), so no code can read realm 0's state implicitly.
 
 **Where an entity is.** An archetype with a `[RealmKey]` field (a `ushort`, beside the spatial field or in a component of its own) places each entity
 in the realm its key names; without one, every entity is in realm 0. A cluster holds one realm's entities, and `ClusterRealmMap` (a `ushort` per

@@ -2151,18 +2151,6 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </summary>
     internal byte[] ClusterShrinkPendingAxes;
 
-    /// <summary>
-    /// Per-archetype per-cell spatial slot, indexed by cellKey. Null entries for cells where this archetype has no clusters. Lazy-allocated:
-    /// the <see cref="PerCellSpatialSlot"/> is created on first cluster insertion into that cell. The DynamicIndex inside is also lazy (created on first
-    /// <see cref="CellSpatialIndex.Add"/>). Null entirely for non-spatial archetypes or before grid opt-in.
-    /// </summary>
-    [Obsolete(Realm0Shortcut, DiagnosticId = "TYRLM001")]
-    internal PerCellSpatialSlot[] PerCellIndex
-    {
-        get => DefaultRealmSpatial?.PerCellIndex;
-        set => DefaultRealmSpatial.PerCellIndex = value;
-    }
-
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Per-cell R-Tree promotion (#872 step 9)
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -2222,10 +2210,6 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// <see cref="ArchetypeClusterState"/> is constructed by static factory methods that hold none.
     /// </remarks>
     internal Func<int, (ChunkBasedSegment<TransientStore> segment, TransientStore store)> CellTreeSegmentFactory;
-
-    /// <summary>Cells currently served by a tree, counted for telemetry and for the tests that assert promotion did or did not happen.</summary>
-    [Obsolete(Realm0Shortcut, DiagnosticId = "TYRLM001")]
-    internal int PromotedCellCount => DefaultRealmSpatial?.PromotedCellCount ?? 0;
 
     /// <summary>
     /// One deferred index write for a cluster in a promoted cell. Carries no bounds — <see cref="ClusterAabbs"/> already holds them by the time this is
@@ -2962,40 +2946,15 @@ internal sealed unsafe partial class ArchetypeClusterState
         count++;
     }
 
-
-    /// <summary>
-    /// Per-archetype per-cell cluster claim list (issue #229 Q10 resolution). Holds the cluster chunk IDs of THIS archetype's clusters attached to each
-    /// grid cell. Before Q10 this pool was owned by <see cref="SpatialGrid"/> and shared across archetypes, which meant two spatial archetypes couldn't
-    /// coexist on the same grid (their cluster chunk IDs would collide at the cell level). Under Q10 each archetype owns its own pool — queries and
-    /// spawn-time "find a free slot in this cell" scans only see clusters of the current archetype. <c>null</c> when the archetype has no spatial field
-    /// or when no grid is configured. Allocated during <see cref="InitializeSpatial"/> when the grid is known.
-    /// </summary>
-    [Obsolete(Realm0Shortcut, DiagnosticId = "TYRLM001")]
-    internal CellClusterPool CellClusterPool
-    {
-        get => DefaultRealmSpatial?.CellClusterPool;
-        set => DefaultRealmSpatial.CellClusterPool = value;
-    }
-
-    /// <summary>
-    /// This archetype's spatial state per realm (Realms SP-2), indexed by realm id; null for a non-spatial archetype. One realm today.
-    /// </summary>
+    /// <summary>This archetype's spatial state per realm (Realms SP-2), indexed by realm id; null for a non-spatial archetype.</summary>
     internal RealmArchetypeSpatial[] RealmSpatial;
 
-    /// <summary>Realm 0's spatial state (<c>RealmSpatial[0]</c>), or null for a non-spatial archetype. Test-facing; engine code says <see cref="Realm0Spatial"/>.</summary>
-    [Obsolete(Realm0Shortcut, DiagnosticId = "TYRLM001")]
-    internal RealmArchetypeSpatial DefaultRealmSpatial => Realm0Spatial;
-
-    /// <summary>Realm 0's spatial state, named as such at the engine sites that are single-realm until the multi-realm steps (see the Realms plan).</summary>
-    internal RealmArchetypeSpatial Realm0Spatial => RealmSpatial is { Length: > 0 } byRealm ? Volatile.Read(ref byRealm[0]) : null;
-
-
     /// <summary>
-    /// The message of the realm-0 forwarding properties' <c>TYRLM001</c>: engine code must name the realm it works in, or a second realm silently reads
-    /// realm 0's cells. Tests, benchmarks and single-world diagnostics suppress it (their projects' NoWarn).
+    /// Realm 0's spatial state (<c>RealmSpatial[0]</c>), or null for a non-spatial archetype — realm 0 named as such, for tests, single-world
+    /// diagnostics and the engine sites that are realm 0 by definition. Per-realm engine work resolves <see cref="SpatialOf"/> or
+    /// <c>SpatialOfCluster</c>.
     /// </summary>
-    internal const string Realm0Shortcut =
-        "Realm 0's spatial state, for tests and single-world diagnostics. Engine code resolves the realm: SpatialOf(grid) or SpatialOfCluster(chunkId).";
+    internal RealmArchetypeSpatial Realm0Spatial => RealmSpatial is { Length: > 0 } byRealm ? Volatile.Read(ref byRealm[0]) : null;
 
     /// <summary>
     /// This archetype's spatial state in the realm <paramref name="grid"/> belongs to (each realm owns its grid, SP-3) — or
@@ -3612,11 +3571,6 @@ internal sealed unsafe partial class ArchetypeClusterState
             ProcessWakeRequest(chunkId);
         }
     }
-
-    /// <summary>Back-reference to the engine's <see cref="SpatialGrid"/>. Set during <see cref="InitializeSpatial"/>. Used by <c>ClusterRef.WriteSpatial</c> to
-    /// evaluate cell-boundary crossings at the write site without plumbing the grid through every call layer. <c>null</c> for non-spatial archetypes.</summary>
-    [Obsolete(Realm0Shortcut, DiagnosticId = "TYRLM001")]
-    internal SpatialGrid Grid => DefaultRealmSpatial?.Grid;
 
     /// <summary>
     /// When <c>true</c>, the engine treats <c>ClusterRef.WriteSpatial</c> as the canonical (and only) writer of this archetype's spatial component. Enables two
@@ -6220,7 +6174,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Grow <see cref="PerCellIndex"/> to hold at least <paramref name="requiredLength"/> entries. New slots are left <c>null</c> —
+    /// Grow <see cref="RealmArchetypeSpatial.PerCellIndex"/> to hold at least <paramref name="requiredLength"/> entries. New slots are left <c>null</c> —
     /// each <see cref="PerCellSpatialSlot"/> is lazily allocated on first cluster insertion into that cell via <see cref="AddClusterToPerCellIndex"/>.
     /// Issue #230.
     /// </summary>
@@ -7369,42 +7323,6 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// How far past its own cell every cell-walking query reaches for this archetype's clusters, in world units: the largest IN-WORLD overhang of any cluster
-    /// not named in <see cref="EscapedClusters"/>. Recomputed at every fence from the live index (<see cref="RefreshClusterReach"/>), so it falls again once
-    /// the cluster that raised it is fixed; between fences only a spawn raises it (<see cref="RaiseClusterReachForSpawn"/>).
-    /// </summary>
-    /// <remarks>
-    /// <para><b>Why a cluster can leave its cell at all.</b> Cell membership is decided by an entity's CENTRE — <c>SpatialGrid.ReadSpatialCenter3D</c>, and the
-    /// migration check in <c>DetectClusterMigrations</c> uses the same point — so an entity with extent protrudes past its cell by up to its own
-    /// half-extent, a drifter inside the migration hysteresis band by that band as well, and the cluster box that unions them protrudes with them.
-    /// <c>C13</c> makes a cluster belong to exactly one cell; it does not make its geometry fit inside one. Every cell-walking query therefore grows its cell
-    /// range by this much (SQ-01), and kNN's stopping rule subtracts it (<see cref="CoveredRadiusSq"/>).</para>
-    /// <para><b>In-world only.</b> A side of an EDGE cell faces no cell, and every query's cell range is clamped into the grid, so the part of a box beyond
-    /// the grid can never make a query miss its cluster — a query reaching for it lands in that same edge cell. It is not counted. On the SWG Tatooine
-    /// world that part was the whole of the ~930 m every Creature and Lair query used to be widened by: lairs and their creatures placed outside the playable
-    /// area are filed in edge cells, and their boxes reach out of the world, never into a neighbour (2026-09-13).</para>
-    /// <para><b>Why it may fall, when it used to be a running maximum.</b> "Too large merely widens a search" held while only kNN read it. Once box, radius,
-    /// ray and frustum queries widened by it too, one transient outlier — an entity teleported across the map and not yet migrated, a box a migration left
-    /// stale — cost every later query of the archetype ~50x its cells for the rest of the process: SWG's whole-run slow mode and its x128 multi-second
-    /// ticks. So it is recomputed at each fence from the cluster boxes, which bound what the coming tick's queries read, and the outliers above it are
-    /// named instead.</para>
-    /// <para><b>Between fences only a spawn can raise it.</b> A move grows <see cref="ClusterAabbs"/> at once, but reaches the per-cell index — what queries
-    /// read — at the fence, or earlier only through a spawn's widen or a tree demotion that republish the cluster's current box; a moved entity is therefore
-    /// reachable from the fence after its write, as it always was. A spawn widens the index at once, so it raises the reach by the spawned entity's own
-    /// in-world overhang first. Nothing structural runs during the fence (EW-01: a spawn's EntityMap insert throws inside the fence window), and queries do
-    /// not either, so the recompute's stores cannot race a raise or be half-seen by a query.</para>
-    /// </remarks>
-    [Obsolete(Realm0Shortcut, DiagnosticId = "TYRLM001")]
-    internal float ClusterReach => DefaultRealmSpatial?.ClusterReach ?? 0f;
-
-    /// <summary>
-    /// The clusters whose in-world overhang exceeds <see cref="ClusterReach"/>, named so that no query has to widen to reach them. Published by
-    /// <see cref="RefreshClusterReach"/> with a release store; never null.
-    /// </summary>
-    [Obsolete(Realm0Shortcut, DiagnosticId = "TYRLM001")]
-    internal EscapedClusterSet EscapedClusters => DefaultRealmSpatial?.EscapedClusters ?? EscapedClusterSet.Empty;
-
-    /// <summary>
     /// One axis of a box's in-world overhang, in its cell's frame: how far it reaches below 0 or above <paramref name="cellSize"/>, ignoring whatever lies
     /// past the grid's own extent — <paramref name="gridLo"/> and <paramref name="gridHi"/>, also in the cell's frame. Negative when the box stays inside.
     /// </summary>
@@ -7420,7 +7338,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         return f < value ? MathF.BitIncrement(f) : f;
     }
 
-    /// <summary>Raise <see cref="ClusterReach"/> to at least <paramref name="reach"/>: a CAS max, since spawns on several threads raise it together.</summary>
+    /// <summary>Raise <see cref="RealmArchetypeSpatial.ClusterReach"/> to at least <paramref name="reach"/>: a CAS max, since spawns on several threads
+    /// raise it together.</summary>
     private static void RaiseClusterReach(RealmArchetypeSpatial rs, float reach)
     {
         RealmArchetypeSpatial.AssertNotNone(rs);
@@ -7437,14 +7356,15 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// A spawned entity's contribution to <see cref="ClusterReach"/>: its own box's in-world overhang past the cell it is filed in, whose world-space minimum
-    /// corner is (<paramref name="originX"/>, <paramref name="originY"/>, <paramref name="originZ"/>). Called by the spawn path before the index widen that
-    /// makes the entity queryable. <paramref name="coords"/> is the field decode — <c>[minX, minY, maxX, maxY]</c> in 2D, <c>[minX, minY, minZ, maxX, maxY,
-    /// maxZ]</c> in 3D, world units.
+    /// A spawned entity's contribution to <see cref="RealmArchetypeSpatial.ClusterReach"/>: its own box's in-world overhang past the cell it is filed in,
+    /// whose world-space minimum corner is (<paramref name="originX"/>, <paramref name="originY"/>, <paramref name="originZ"/>). Called by the spawn path
+    /// before the index widen that makes the entity queryable. <paramref name="coords"/> is the field decode — <c>[minX, minY, maxX, maxY]</c> in 2D,
+    /// <c>[minX, minY, minZ, maxX, maxY, maxZ]</c> in 3D, world units.
     /// </summary>
     /// <remarks>
-    /// The entity's box and not the cluster's: the rest of the cluster box is already covered — by the reach, or by <see cref="EscapedClusters"/> — and a
-    /// spawn into a named outlier must not fold that outlier's whole reach into every query until the next fence.
+    /// The entity's box and not the cluster's: the rest of the cluster box is already covered — by the reach, or by
+    /// <see cref="RealmArchetypeSpatial.EscapedClusters"/> — and a spawn into a named outlier must not fold that outlier's whole reach into every query until
+    /// the next fence.
     /// </remarks>
     internal void RaiseClusterReachForSpawn(SpatialGrid grid, int cellKey, double originX, double originY, double originZ, ReadOnlySpan<double> coords,
         bool is3D)
@@ -7499,8 +7419,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// Recompute <see cref="ClusterReach"/> and <see cref="EscapedClusters"/> for the coming tick's queries, from the cluster boxes in
-    /// <see cref="ClusterAabbs"/>. Runs once the index is final — at the end of <c>FinalizeArchetypeFenceHead</c>, and after a rebuild.
+    /// Recompute <see cref="RealmArchetypeSpatial.ClusterReach"/> and <see cref="RealmArchetypeSpatial.EscapedClusters"/> for the coming tick's queries,
+    /// from the cluster boxes in <see cref="ClusterAabbs"/>. Runs once the index is final — at the end of <c>FinalizeArchetypeFenceHead</c>, and after a
+    /// rebuild.
     /// </summary>
     /// <remarks>
     /// <para><b>Why <see cref="ClusterAabbs"/> covers the index.</b> What the reach must cover is the box the per-cell index holds for each cluster, since
@@ -7712,8 +7633,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
-    /// SQ-01 checker, for tests: does every cluster in the per-cell index either stay within <see cref="ClusterReach"/> or appear, current, in
-    /// <see cref="EscapedClusters"/>? False with the first violation described.
+    /// SQ-01 checker, for tests: does every cluster in the per-cell index either stay within <see cref="RealmArchetypeSpatial.ClusterReach"/> or appear,
+    /// current, in <see cref="RealmArchetypeSpatial.EscapedClusters"/>? False with the first violation described.
     /// </summary>
     /// <remarks>
     /// Walks the INDEX, cell by cell, where <see cref="RefreshClusterReach"/> reads <see cref="ClusterAabbs"/>: a write that left a linear half's box wider
@@ -9193,8 +9114,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// retired and the unlatched reads below are safe (#940).
     /// </summary>
     /// <remarks>
-    /// <see cref="PromotedCellCount"/> is tested as well as the gate, because <c>ForceCellHalfStructure</c> switches a half in place with the gate off — an
-    /// instrument the crossover benchmark uses. Testing the gate alone would leave exactly that configuration on the unlatched path.
+    /// <see cref="RealmArchetypeSpatial.PromotedCellCount"/> is tested as well as the gate, because <c>ForceCellHalfStructure</c> switches a half in place
+    /// with the gate off — an instrument the crossover benchmark uses. Testing the gate alone would leave exactly that configuration on the unlatched
+    /// path.
     /// </remarks>
     private bool CellTreesPossible(RealmArchetypeSpatial rs) => CellTreePromoteThreshold != int.MaxValue || Volatile.Read(ref rs.PromotedCellCount) > 0;
 
@@ -9319,13 +9241,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         slot.HasDynamicTree ? ClusterAabbs[clusterChunkId].CategoryMask : slot.DynamicIndex.CategoryMasks[indexSlot];
 
     /// <summary>
-    /// Return every live cell tree's chunks to the archetype's shared segment. Call before discarding <see cref="PerCellIndex"/> wholesale.
+    /// Return every live cell tree's chunks to the archetype's shared segment. Call before discarding <see cref="RealmArchetypeSpatial.PerCellIndex"/>
+    /// wholesale.
     /// </summary>
     /// <remarks>
-    /// The rebuild paths clear the per-cell index and reset <see cref="PromotedCellCount"/>, which drops the last reference to every promoted cell's tree.
-    /// On a <c>TransientStore</c> segment that reclaims nothing — the chunks stay allocated and the segment is never rebuilt, so a rebuild that runs after
-    /// cells have promoted strands their whole node sets for the life of the database. Reachable because these same methods PROMOTE while rebuilding: they
-    /// call <see cref="AddClusterToPerCellIndex"/> per cluster, which evaluates the threshold.
+    /// The rebuild paths clear the per-cell index and reset <see cref="RealmArchetypeSpatial.PromotedCellCount"/>, which drops the last reference to every
+    /// promoted cell's tree. On a <c>TransientStore</c> segment that reclaims nothing — the chunks stay allocated and the segment is never rebuilt, so a
+    /// rebuild that runs after cells have promoted strands their whole node sets for the life of the database. Reachable because these same methods
+    /// PROMOTE while rebuilding: they call <see cref="AddClusterToPerCellIndex"/> per cluster, which evaluates the threshold.
     /// </remarks>
     /// <param name="rs">The realm whose cells these are (Realms SP-3).</param>
     /// <param name="epochManager">
@@ -10688,13 +10611,13 @@ internal struct ClusterIndexSlot<TStore> where TStore : struct, IPageStore
 /// <summary>
 /// Per-archetype spatial index metadata for a cluster-eligible archetype with a <c>[SpatialIndex]</c> field. Holds the narrowphase-facing metadata
 /// (<see cref="Slot"/>, <see cref="FieldOffset"/>, <see cref="FieldInfo"/>, <see cref="Descriptor"/>) that both the legacy per-entity tree (being removed
-/// in issue #230 Phase 3) and the new per-cell cluster index path (<see cref="ArchetypeClusterState.PerCellIndex"/>) read during spatial bound dispatch.
+/// in issue #230 Phase 3) and the new per-cell cluster index path (<see cref="RealmArchetypeSpatial.PerCellIndex"/>) read during spatial bound dispatch.
 /// </summary>
 internal struct ClusterSpatialSlot
 {
     /// <summary>
     /// <c>true</c> when <see cref="ArchetypeClusterState.InitializeSpatial"/> has populated this slot with a configured spatial field. This is the single
-    /// check for "does this archetype have a cluster spatial index?" — the per-cell index (<see cref="ArchetypeClusterState.PerCellIndex"/>) itself is
+    /// check for "does this archetype have a cluster spatial index?" — the per-cell index (<see cref="RealmArchetypeSpatial.PerCellIndex"/>) itself is
     /// lazily allocated and provides no always-on existence sentinel of its own.
     /// </summary>
     public bool HasSpatialIndex;

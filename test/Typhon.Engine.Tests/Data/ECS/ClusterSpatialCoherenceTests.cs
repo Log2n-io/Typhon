@@ -128,8 +128,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         Assert.That(clusterState.ActiveClusterCount, Is.EqualTo(1));
 
         // That cluster is attached to exactly one cell (cell (1, 2))
-        int expectedCellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
-        ref var cell = ref dbe.SpatialGrid.GetCell(expectedCellKey);
+        int expectedCellKey = dbe.Realm0Grid.WorldToCellKey(150f, 250f, 0f);
+        ref var cell = ref dbe.Realm0Grid.GetCell(expectedCellKey);
         Assert.That(cell.EntityCount, Is.EqualTo(5));
         Assert.That(cell.ClusterCount, Is.EqualTo(1));
 
@@ -155,13 +155,13 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         var clusterState = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
         Assert.That(clusterState.ActiveClusterCount, Is.EqualTo(2));
 
-        int cellA = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        int cellB = dbe.SpatialGrid.WorldToCellKey(550f, 350f, 0f);
+        int cellA = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        int cellB = dbe.Realm0Grid.WorldToCellKey(550f, 350f, 0f);
         Assert.That(cellA, Is.Not.EqualTo(cellB));
-        Assert.That(dbe.SpatialGrid.GetCell(cellA).ClusterCount, Is.EqualTo(1));
-        Assert.That(dbe.SpatialGrid.GetCell(cellA).EntityCount, Is.EqualTo(1));
-        Assert.That(dbe.SpatialGrid.GetCell(cellB).ClusterCount, Is.EqualTo(1));
-        Assert.That(dbe.SpatialGrid.GetCell(cellB).EntityCount, Is.EqualTo(1));
+        Assert.That(dbe.Realm0Grid.GetCell(cellA).ClusterCount, Is.EqualTo(1));
+        Assert.That(dbe.Realm0Grid.GetCell(cellA).EntityCount, Is.EqualTo(1));
+        Assert.That(dbe.Realm0Grid.GetCell(cellB).ClusterCount, Is.EqualTo(1));
+        Assert.That(dbe.Realm0Grid.GetCell(cellB).EntityCount, Is.EqualTo(1));
 
         // Active clusters belong to exactly these two cells (order undefined)
         int c0 = clusterState.ActiveClusterIds[0];
@@ -195,8 +195,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         Assert.That(clusterState.ActiveClusterCount, Is.EqualTo(2),
             "overflowing one cluster should allocate a second one in the same cell");
 
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        ref var cell = ref dbe.SpatialGrid.GetCell(cellKey);
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        ref var cell = ref dbe.Realm0Grid.GetCell(cellKey);
         Assert.That(cell.ClusterCount, Is.EqualTo(2));
         Assert.That(cell.EntityCount, Is.EqualTo(clusterSize + 3));
 
@@ -228,10 +228,10 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
 
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(4), "3 full clusters + 1 partial");
-        Assert.That(cs.CellClusterPool.GetScanCursor(cellKey), Is.EqualTo(3),
+        Assert.That(cs.Realm0Spatial.CellClusterPool.GetScanCursor(cellKey), Is.EqualTo(3),
             "cursor must point at the last (only non-full) cluster — proves the scan does not restart at 0");
     }
 
@@ -255,8 +255,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        Assert.That(cs.CellClusterPool.GetScanCursor(cellKey), Is.GreaterThan(0), "cursor advanced during spawn");
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        Assert.That(cs.Realm0Spatial.CellClusterPool.GetScanCursor(cellKey), Is.GreaterThan(0), "cursor advanced during spawn");
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -264,7 +264,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        Assert.That(cs.CellClusterPool.GetScanCursor(cellKey), Is.EqualTo(0),
+        Assert.That(cs.Realm0Spatial.CellClusterPool.GetScanCursor(cellKey), Is.EqualTo(0),
             "releasing a slot must reset the cursor so the freed slot can be reused");
     }
 
@@ -289,7 +289,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
         int clusterCountBefore = cs.ActiveClusterCount;
         Assert.That(clusterCountBefore, Is.EqualTo(3), "exactly 3 full clusters spawned");
 
@@ -300,7 +300,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         }
 
         // Plant a stale-high cursor (past every cluster) — simulates the parallel-migration path where releases no longer reset the cursor.
-        cs.CellClusterPool.SetScanCursor(cellKey, 3);
+        cs.Realm0Spatial.CellClusterPool.SetScanCursor(cellKey, 3);
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -310,7 +310,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
 
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(clusterCountBefore),
             "phase-2 must reclaim the freed slot in cluster 0 — no new cluster allocated despite the stale-high cursor");
-        Assert.That(cs.CellClusterPool.GetScanCursor(cellKey), Is.EqualTo(0),
+        Assert.That(cs.Realm0Spatial.CellClusterPool.GetScanCursor(cellKey), Is.EqualTo(0),
             "phase-2 success moves the cursor backward to the reclaimed region");
     }
 
@@ -331,9 +331,9 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
-        Assert.That(dbe.SpatialGrid.GetCell(cellKey).ClusterCount, Is.EqualTo(1));
-        Assert.That(dbe.SpatialGrid.GetCell(cellKey).EntityCount, Is.EqualTo(1));
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(150f, 250f, 0f);
+        Assert.That(dbe.Realm0Grid.GetCell(cellKey).ClusterCount, Is.EqualTo(1));
+        Assert.That(dbe.Realm0Grid.GetCell(cellKey).EntityCount, Is.EqualTo(1));
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -341,7 +341,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        ref var cellAfter = ref dbe.SpatialGrid.GetCell(cellKey);
+        ref var cellAfter = ref dbe.Realm0Grid.GetCell(cellKey);
         Assert.That(cellAfter.ClusterCount, Is.EqualTo(0), "empty cluster must detach from its cell");
         Assert.That(cellAfter.EntityCount, Is.EqualTo(0));
     }
@@ -363,8 +363,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        Assert.That(dbe.SpatialGrid.GetCell(cellKey).EntityCount, Is.EqualTo(5));
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        Assert.That(dbe.Realm0Grid.GetCell(cellKey).EntityCount, Is.EqualTo(5));
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -372,7 +372,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        ref var cellAfter = ref dbe.SpatialGrid.GetCell(cellKey);
+        ref var cellAfter = ref dbe.Realm0Grid.GetCell(cellKey);
         Assert.That(cellAfter.EntityCount, Is.EqualTo(4));
         Assert.That(cellAfter.ClusterCount, Is.EqualTo(1), "cluster still contains other entities, must stay");
     }
@@ -425,8 +425,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
                 tx.Commit();
             }
 
-            cellKey1 = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
-            cellKey2 = dbe.SpatialGrid.WorldToCellKey(550f, 750f, 0f);
+            cellKey1 = dbe.Realm0Grid.WorldToCellKey(150f, 250f, 0f);
+            cellKey2 = dbe.Realm0Grid.WorldToCellKey(550f, 750f, 0f);
 
             var meta = Archetype<ClCohUnit>.Metadata;
             var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
@@ -458,10 +458,10 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
                 "cluster 2 must re-attach to its original cell");
 
             // Each cell has one cluster with one entity after rebuild
-            Assert.That(dbe.SpatialGrid.GetCell(cellKey1).ClusterCount, Is.EqualTo(1));
-            Assert.That(dbe.SpatialGrid.GetCell(cellKey1).EntityCount, Is.EqualTo(1));
-            Assert.That(dbe.SpatialGrid.GetCell(cellKey2).ClusterCount, Is.EqualTo(1));
-            Assert.That(dbe.SpatialGrid.GetCell(cellKey2).EntityCount, Is.EqualTo(1));
+            Assert.That(dbe.Realm0Grid.GetCell(cellKey1).ClusterCount, Is.EqualTo(1));
+            Assert.That(dbe.Realm0Grid.GetCell(cellKey1).EntityCount, Is.EqualTo(1));
+            Assert.That(dbe.Realm0Grid.GetCell(cellKey2).ClusterCount, Is.EqualTo(1));
+            Assert.That(dbe.Realm0Grid.GetCell(cellKey2).EntityCount, Is.EqualTo(1));
         }
     }
 
@@ -494,8 +494,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
-        ref var cell = ref dbe.SpatialGrid.GetCell(cellKey);
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(150f, 250f, 0f);
+        ref var cell = ref dbe.Realm0Grid.GetCell(cellKey);
 
         // Global aggregation: both entities live in the same cell, cluster count is the sum across archetypes.
         Assert.That(cell.EntityCount, Is.EqualTo(2), "CellState.EntityCount is the sum across archetypes");
@@ -506,8 +506,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
         var meta2 = Archetype<ClCohUnit2>.Metadata;
         var cs1 = dbe._archetypeStates[meta1.ArchetypeId].ClusterState;
         var cs2 = dbe._archetypeStates[meta2.ArchetypeId].ClusterState;
-        Assert.That(cs1.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(1), "Archetype 1 pool sees its own cluster");
-        Assert.That(cs2.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(1), "Archetype 2 pool sees its own cluster");
+        Assert.That(cs1.Realm0Spatial.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(1), "Archetype 1 pool sees its own cluster");
+        Assert.That(cs2.Realm0Spatial.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(1), "Archetype 2 pool sees its own cluster");
 
         // Query isolation: querying each archetype returns only its own entity. WhereInAABB takes
         // (minX, minY, minZ, maxX, maxY, maxZ) for both dimensions; the Z arguments are ignored for a 2D component. It used to be packed
@@ -534,11 +534,11 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        ref var cellAfter = ref dbe.SpatialGrid.GetCell(cellKey);
+        ref var cellAfter = ref dbe.Realm0Grid.GetCell(cellKey);
         Assert.That(cellAfter.EntityCount, Is.EqualTo(1), "Destroying one entity decrements the global count");
         Assert.That(cellAfter.ClusterCount, Is.EqualTo(1), "Archetype 1's cluster emptied and detached; archetype 2's cluster remains");
-        Assert.That(cs1.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(0), "Archetype 1 pool is now empty for this cell");
-        Assert.That(cs2.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(1), "Archetype 2 pool is untouched by the unrelated destroy");
+        Assert.That(cs1.Realm0Spatial.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(0), "Archetype 1 pool is now empty for this cell");
+        Assert.That(cs2.Realm0Spatial.CellClusterPool.GetClusterCount(cellKey), Is.EqualTo(1), "Archetype 2 pool is untouched by the unrelated destroy");
     }
 
     [Test]
@@ -555,8 +555,8 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             tx.Commit();
         }
 
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
-        Assert.That(dbe.SpatialGrid.GetCell(cellKey).EntityCount, Is.EqualTo(1));
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(150f, 250f, 0f);
+        Assert.That(dbe.Realm0Grid.GetCell(cellKey).EntityCount, Is.EqualTo(1));
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
         int chunkId = cs.ActiveClusterIds[0];
@@ -568,7 +568,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             var accessor = cs.ClusterSegment.CreateChunkAccessor(changeSet);
             try
             {
-                cs.ReleaseSlot(ref accessor, chunkId, slotIndex: 5, changeSet, dbe.SpatialGrid);
+                cs.ReleaseSlot(ref accessor, chunkId, slotIndex: 5, changeSet, dbe.Realm0Grid);
             }
             finally
             {
@@ -577,7 +577,7 @@ class ClusterSpatialCoherenceTests : TestBase<ClusterSpatialCoherenceTests>
             }
         }
 
-        Assert.That(dbe.SpatialGrid.GetCell(cellKey).EntityCount, Is.EqualTo(1),
+        Assert.That(dbe.Realm0Grid.GetCell(cellKey).EntityCount, Is.EqualTo(1),
             "releasing a never-occupied slot must not decrement EntityCount");
     }
 

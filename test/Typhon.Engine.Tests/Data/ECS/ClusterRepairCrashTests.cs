@@ -172,10 +172,10 @@ class ClusterRepairCrashTests : TestBase<ClusterRepairCrashTests>
         // — which is precisely what an empty destination cluster left behind by an interrupted repair would cause.
         var state = reopened._archetypeStates[ArchetypeId]?.ClusterState;
         Assert.That(state, Is.Not.Null, "the reopened engine has no cluster state for the archetype, so the rebuild never ran");
-        ref var cell = ref reopened.SpatialGrid.GetCell(0);
+        ref var cell = ref reopened.Realm0Grid.GetCell(0);
         Assert.That(cell.EntityCount, Is.EqualTo(Population), "the rebuilt cell entity count disagrees with cluster storage");
 
-        var pooled = state.CellClusterPool.GetClusters(0);
+        var pooled = state.Realm0Spatial.CellClusterPool.GetClusters(0);
         Assert.That(cell.ClusterCount, Is.EqualTo(pooled.Length), "the rebuilt cluster count disagrees with the per-cell pool");
         for (var i = 0; i < pooled.Length; i++)
         {

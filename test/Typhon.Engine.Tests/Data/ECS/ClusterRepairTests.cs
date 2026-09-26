@@ -133,7 +133,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
     private static (double mean, int clusters) MeanClusterExtent(DatabaseEngine dbe)
     {
         var state = ClusterStateOf(dbe);
-        var clusters = state.CellClusterPool.GetClusters(0);
+        var clusters = state.Realm0Spatial.CellClusterPool.GetClusters(0);
         var total = 0d;
         var counted = 0;
         for (var i = 0; i < clusters.Length; i++)
@@ -516,7 +516,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
             Assert.That(y, Is.EqualTo(by).Within(0.001f), $"EntityMap resolved entity {i} to the wrong position");
         }
 
-        Assert.That(dbe.SpatialGrid.GetCell(0).EntityCount, Is.EqualTo(Population),
+        Assert.That(dbe.Realm0Grid.GetCell(0).EntityCount, Is.EqualTo(Population),
             "CellState.EntityCount drifted from the population the re-pack moved");
     }
 
@@ -673,7 +673,7 @@ class ClusterRepairTests : TestBase<ClusterRepairTests>
     private static long TotalZoneMapWidth(DatabaseEngine dbe, out int clustersCounted)
     {
         var state = ClusterStateOf(dbe);
-        var clusters = state.CellClusterPool.GetClusters(0);
+        var clusters = state.Realm0Spatial.CellClusterPool.GetClusters(0);
         var total = 0L;
         clustersCounted = 0;
 

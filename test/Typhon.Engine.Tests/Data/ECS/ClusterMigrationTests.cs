@@ -142,8 +142,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        int dstCell = dbe.SpatialGrid.WorldToCellKey(150f, 250f, 0f);
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        int dstCell = dbe.Realm0Grid.WorldToCellKey(150f, 250f, 0f);
         Assert.That(srcCell, Is.Not.EqualTo(dstCell));
 
         var (preChunk, preSlot) = ReadLocation(dbe, id);
@@ -161,8 +161,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         dbe.WriteTickFence(1);
 
         // Post-migration assertions: source cell empty, dest cell holds the entity.
-        ref var srcCellRef = ref dbe.SpatialGrid.GetCell(srcCell);
-        ref var dstCellRef = ref dbe.SpatialGrid.GetCell(dstCell);
+        ref var srcCellRef = ref dbe.Realm0Grid.GetCell(srcCell);
+        ref var dstCellRef = ref dbe.Realm0Grid.GetCell(dstCell);
         Assert.That(srcCellRef.EntityCount, Is.EqualTo(0), "source cell entity count must drop to zero");
         Assert.That(dstCellRef.EntityCount, Is.EqualTo(1), "destination cell entity count must become 1");
         Assert.That(dstCellRef.ClusterCount, Is.EqualTo(1), "destination cell must own one cluster");
@@ -204,8 +204,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         }
 
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        int cursorBefore = cs.CellClusterPool.GetScanCursor(srcCell);
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        int cursorBefore = cs.Realm0Spatial.CellClusterPool.GetScanCursor(srcCell);
         Assert.That(cursorBefore, Is.GreaterThan(0), "cursor advanced during the spawn");
 
         // Migrate one entity out of srcCell — the release runs on the deferFinalize migration path.
@@ -218,7 +218,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         }
         dbe.WriteTickFence(1);
 
-        Assert.That(cs.CellClusterPool.GetScanCursor(srcCell), Is.EqualTo(cursorBefore),
+        Assert.That(cs.Realm0Spatial.CellClusterPool.GetScanCursor(srcCell), Is.EqualTo(cursorBefore),
             "a migration release must leave the source cell's cursor untouched (no thrash)");
     }
 
@@ -254,7 +254,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        int dstCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+        int dstCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
 
         // Tick 1: migrate one entity OUT of the dst cell — frees a slot in its cluster 0; the deferFinalize release leaves the cursor advanced (stale-high).
         using (var tx = dbe.CreateQuickTransaction())
@@ -266,7 +266,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         }
         dbe.WriteTickFence(1);
 
-        Assert.That(dbe.SpatialGrid.GetCell(dstCell).ClusterCount, Is.EqualTo(3),
+        Assert.That(dbe.Realm0Grid.GetCell(dstCell).ClusterCount, Is.EqualTo(3),
             "dst cell still owns its 3 clusters (one now has a freed slot)");
 
         // Tick 2: migrate the migrant INTO the dst cell — must reuse the freed slot via phase 2, not allocate a 4th cluster.
@@ -279,7 +279,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         }
         dbe.WriteTickFence(2);
 
-        ref var dstAfter = ref dbe.SpatialGrid.GetCell(dstCell);
+        ref var dstAfter = ref dbe.Realm0Grid.GetCell(dstCell);
         Assert.That(dstAfter.ClusterCount, Is.EqualTo(3),
             "phase-2 must reclaim the freed slot — no new cluster allocated despite the stale-high cursor");
         Assert.That(dstAfter.EntityCount, Is.EqualTo(clusterSize * 3),
@@ -305,7 +305,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(95f, 50f, 0f);
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(95f, 50f, 0f);
 
         // Move just 7 units across the boundary (to x=102). Raw cell is (1, 0) — a boundary crossing — but
         // the position is only 2 world units into the new cell, far less than the 5-unit hysteresis margin.
@@ -326,7 +326,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         Assert.That(cs.LastTickHysteresisAbsorbedCount, Is.EqualTo(1), "crossing should be counted as absorbed");
 
         // The entity is still in the source cell
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).EntityCount, Is.EqualTo(1));
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).EntityCount, Is.EqualTo(1));
     }
 
     [Test]
@@ -359,8 +359,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         Assert.That(cs.LastTickMigrationCount, Is.EqualTo(1), "crossing beyond margin must migrate");
         Assert.That(cs.LastTickHysteresisAbsorbedCount, Is.EqualTo(0));
 
-        int dstCell = dbe.SpatialGrid.WorldToCellKey(110f, 50f, 0f);
-        Assert.That(dbe.SpatialGrid.GetCell(dstCell).EntityCount, Is.EqualTo(1));
+        int dstCell = dbe.Realm0Grid.WorldToCellKey(110f, 50f, 0f);
+        Assert.That(dbe.Realm0Grid.GetCell(dstCell).EntityCount, Is.EqualTo(1));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -385,8 +385,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).EntityCount, Is.EqualTo(3));
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).EntityCount, Is.EqualTo(3));
 
         // Move all three entities to three different cells
         (float x, float y)[] destPositions =
@@ -418,11 +418,11 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         Assert.That(cs.LastTickMigrationCount, Is.EqualTo(3));
 
         // Source cell is empty; each destination cell has 1 entity
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).EntityCount, Is.EqualTo(0));
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).EntityCount, Is.EqualTo(0));
         foreach (var (x, y) in destPositions)
         {
-            int dst = dbe.SpatialGrid.WorldToCellKey(x, y, 0f);
-            Assert.That(dbe.SpatialGrid.GetCell(dst).EntityCount, Is.EqualTo(1), $"cell at ({x}, {y}) should have 1 entity");
+            int dst = dbe.Realm0Grid.WorldToCellKey(x, y, 0f);
+            Assert.That(dbe.Realm0Grid.GetCell(dst).EntityCount, Is.EqualTo(1), $"cell at ({x}, {y}) should have 1 entity");
         }
     }
 
@@ -444,8 +444,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).ClusterCount, Is.EqualTo(1));
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).ClusterCount, Is.EqualTo(1));
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -457,9 +457,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
 
         dbe.WriteTickFence(1);
 
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).ClusterCount, Is.EqualTo(0),
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).ClusterCount, Is.EqualTo(0),
             "empty source cluster must detach from cell");
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).EntityCount, Is.EqualTo(0));
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).EntityCount, Is.EqualTo(0));
     }
 
     [Test]
@@ -483,8 +483,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).EntityCount, Is.EqualTo(4));
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).EntityCount, Is.EqualTo(4));
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -496,9 +496,9 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
 
         dbe.WriteTickFence(1);
 
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).EntityCount, Is.EqualTo(3),
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).EntityCount, Is.EqualTo(3),
             "source cell still has the three stayers");
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).ClusterCount, Is.EqualTo(1),
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).ClusterCount, Is.EqualTo(1),
             "source cluster must remain because it still has occupied slots");
     }
 
@@ -520,7 +520,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
 
         // Update position (dirty bit set) AND destroy in the same transaction.
         using (var tx = dbe.CreateQuickTransaction())
@@ -538,7 +538,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
         Assert.That(cs.LastTickMigrationCount, Is.EqualTo(0),
             "destroyed entity must not be migrated — occupancy mask filters it before detection");
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).EntityCount, Is.EqualTo(0));
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).EntityCount, Is.EqualTo(0));
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -639,7 +639,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                     ClMigUnit.Scratch.Set(ScratchOf(0, 0f)));
                 tx.Commit();
             }
-            srcCellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+            srcCellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
 
             using (var tx = dbe.CreateQuickTransaction())
             {
@@ -648,13 +648,13 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
                 pos.Bounds = new AABB2F { MinX = 550f, MinY = 750f, MaxX = 550f, MaxY = 750f };
                 tx.Commit();
             }
-            dstCellKey = dbe.SpatialGrid.WorldToCellKey(550f, 750f, 0f);
+            dstCellKey = dbe.Realm0Grid.WorldToCellKey(550f, 750f, 0f);
 
             dbe.WriteTickFence(1);
 
             // Sanity: post-migration cell state in session 1
-            Assert.That(dbe.SpatialGrid.GetCell(srcCellKey).EntityCount, Is.EqualTo(0));
-            Assert.That(dbe.SpatialGrid.GetCell(dstCellKey).EntityCount, Is.EqualTo(1));
+            Assert.That(dbe.Realm0Grid.GetCell(srcCellKey).EntityCount, Is.EqualTo(0));
+            Assert.That(dbe.Realm0Grid.GetCell(dstCellKey).EntityCount, Is.EqualTo(1));
         }
 
         // Session 2: reopen — RebuildCellState reads the cluster's first-occupied entity position,
@@ -669,7 +669,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             // Session 1's keys are NOT reusable here. A cell key is a pool slot handed out when a cell is first occupied (#872 step 8), so a rebuild
             // renumbers them from zero — session 1's srcCellKey happens to be slot 0, and after this reopen slot 0 is the DESTINATION. Reading it would
             // have asserted the destination's count against the source's expectation and passed or failed for reasons unrelated to migration.
-            var grid = dbe.SpatialGrid;
+            var grid = dbe.Realm0Grid;
             Assert.That(grid.TryGetCellKeyAt(50f, 50f, 0f, out _), Is.False,
                 "the source cell must not even exist after the rebuild — nothing occupies it, and a sparse grid does not create empty cells");
 
@@ -1131,15 +1131,15 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        int dstCell = dbe.SpatialGrid.WorldToCellKey(550f, 750f, 0f);
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        int dstCell = dbe.Realm0Grid.WorldToCellKey(550f, 750f, 0f);
 
         var meta = Archetype<ClMigUnit>.Metadata;
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(2),
             "2 clusters: one for source cell, one for destination cell");
-        Assert.That(dbe.SpatialGrid.GetCell(dstCell).ClusterCount, Is.EqualTo(1));
-        Assert.That(dbe.SpatialGrid.GetCell(dstCell).EntityCount, Is.EqualTo(2));
+        Assert.That(dbe.Realm0Grid.GetCell(dstCell).ClusterCount, Is.EqualTo(1));
+        Assert.That(dbe.Realm0Grid.GetCell(dstCell).EntityCount, Is.EqualTo(2));
 
         // Move migrant into the destination cell
         using (var tx = dbe.CreateQuickTransaction())
@@ -1153,12 +1153,12 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         dbe.WriteTickFence(1);
 
         // Destination cell absorbs the migrant into its EXISTING cluster — still 1 cluster, now 3 entities.
-        Assert.That(dbe.SpatialGrid.GetCell(dstCell).ClusterCount, Is.EqualTo(1),
+        Assert.That(dbe.Realm0Grid.GetCell(dstCell).ClusterCount, Is.EqualTo(1),
             "existing cluster absorbs the migrant — no new cluster allocated");
-        Assert.That(dbe.SpatialGrid.GetCell(dstCell).EntityCount, Is.EqualTo(3));
+        Assert.That(dbe.Realm0Grid.GetCell(dstCell).EntityCount, Is.EqualTo(3));
         // Source cell is now empty
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).ClusterCount, Is.EqualTo(0));
-        Assert.That(dbe.SpatialGrid.GetCell(srcCell).EntityCount, Is.EqualTo(0));
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).ClusterCount, Is.EqualTo(0));
+        Assert.That(dbe.Realm0Grid.GetCell(srcCell).EntityCount, Is.EqualTo(0));
 
         // Overall archetype now has 1 cluster (the destination), not 2
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(1));
@@ -1225,7 +1225,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
 
         var meta = Archetype<ClMigUnit>.Metadata;
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int dstCell = dbe.SpatialGrid.WorldToCellKey(450f, 550f, 0f);
+        int dstCell = dbe.Realm0Grid.WorldToCellKey(450f, 550f, 0f);
         Assert.That(cs.ClusterCellMap[postChunk], Is.EqualTo(dstCell));
     }
 
@@ -1357,8 +1357,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
             tx.Commit();
         }
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        int dstCell = dbe.SpatialGrid.WorldToCellKey(250f, 250f, 0f);
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        int dstCell = dbe.Realm0Grid.WorldToCellKey(250f, 250f, 0f);
         Assert.That(srcCell, Is.Not.EqualTo(dstCell));
 
         var meta = Archetype<ClMigUnit>.Metadata;
@@ -1389,8 +1389,8 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         // Fence drains the flagged migration → entity ends up in dest cell.
         dbe.WriteTickFence(1);
 
-        ref var srcCellRef = ref dbe.SpatialGrid.GetCell(srcCell);
-        ref var dstCellRef = ref dbe.SpatialGrid.GetCell(dstCell);
+        ref var srcCellRef = ref dbe.Realm0Grid.GetCell(srcCell);
+        ref var dstCellRef = ref dbe.Realm0Grid.GetCell(dstCell);
         Assert.That(srcCellRef.EntityCount, Is.EqualTo(0), "source cell drained");
         Assert.That(dstCellRef.EntityCount, Is.EqualTo(1), "destination cell holds the migrated entity");
         Assert.That(cs.LastTickMigrationCount, Is.EqualTo(1), "telemetry counter records 1 migration");
@@ -1422,7 +1422,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         }
 
         dbe.WriteTickFence(1);
-        var homeCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+        var homeCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
         var cs = dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState;
         var (chunkId, slot) = ReadLocation(dbe, id);
 
@@ -1451,7 +1451,7 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         Assert.Multiple(() =>
         {
             Assert.That(cs.ClusterCellMap[chunkAfter], Is.EqualTo(homeCell), "migrated on a destination the entity no longer has");
-            Assert.That(dbe.SpatialGrid.GetCell(homeCell).EntityCount, Is.EqualTo(1));
+            Assert.That(dbe.Realm0Grid.GetCell(homeCell).EntityCount, Is.EqualTo(1));
             Assert.That(cs.LastTickMigrationCount, Is.Zero, "a stale flag is dropped at the drain, not executed");
         });
     }
@@ -1492,11 +1492,11 @@ class ClusterMigrationTests : TestBase<ClusterMigrationTests>
         dbe.WriteTickFence(2);
         var cs = dbe._archetypeStates[Archetype<ClMigUnit>.Metadata.ArchetypeId].ClusterState;
         var (chunkAfter, _) = ReadLocation(dbe, id);
-        var whereItIs = dbe.SpatialGrid.WorldToCellKey(150f, 50f, 0f);
+        var whereItIs = dbe.Realm0Grid.WorldToCellKey(150f, 50f, 0f);
         Assert.Multiple(() =>
         {
             Assert.That(cs.ClusterCellMap[chunkAfter], Is.EqualTo(whereItIs));
-            Assert.That(dbe.SpatialGrid.GetCell(whereItIs).EntityCount, Is.EqualTo(1));
+            Assert.That(dbe.Realm0Grid.GetCell(whereItIs).EntityCount, Is.EqualTo(1));
             Assert.That(cs.LastTickMigrationCount, Is.EqualTo(1));
         });
     }

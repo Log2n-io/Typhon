@@ -411,13 +411,13 @@ public sealed partial class SimBridge
     private unsafe (double Cells, double Scanned, double Overlapping, double Tested, double Pages) CountPortWork(ArchetypeClusterState cs,
         (float X, float Z) port)
     {
-        var perCell = cs?.PerCellIndex;
+        var perCell = cs?.Realm0Spatial?.PerCellIndex;
         if (perCell == null)
         {
             return default;
         }
 
-        var grid = Dbe.SpatialGrid;
+        var grid = Dbe.Realm0Grid;
         long cells = 0;
         long scanned = 0;
         long overlapping = 0;
@@ -497,7 +497,7 @@ public sealed partial class SimBridge
             return;
         }
 
-        var cellKey = Dbe.SpatialGrid.WorldToCellKey(port.X, port.Z, 0d);
+        var cellKey = Dbe.Realm0Grid.WorldToCellKey(port.X, port.Z, 0d);
         var (clusters, toBound, _, _) = SpatialCensus.CellTightness(Dbe, cs, cellKey);
         if (clusters > 0)
         {

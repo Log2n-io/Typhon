@@ -47,7 +47,7 @@ class DispatchSelectionTests : TestBase<DispatchSelectionTests>
 
         for (var i = 0; i < n; i++)
         {
-            dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(5f + 10f * i, 5f, 0f), tier);
+            dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(5f + 10f * i, 5f, 0f), tier);
         }
 
         return ids;
@@ -58,7 +58,7 @@ class DispatchSelectionTests : TestBase<DispatchSelectionTests>
     private static int ChunkOf(DatabaseEngine dbe, float x, float y)
     {
         var cs = ClusterState(dbe);
-        var cellKey = dbe.SpatialGrid.WorldToCellKey(x, y, 0f);
+        var cellKey = dbe.Realm0Grid.WorldToCellKey(x, y, 0f);
         for (var i = 0; i < cs.ActiveClusterCount; i++)
         {
             var cid = cs.ActiveClusterIds[i];
@@ -149,7 +149,7 @@ class DispatchSelectionTests : TestBase<DispatchSelectionTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(55f, 55f, 0f), SimTier.Tier3);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(55f, 55f, 0f), SimTier.Tier3);
 
         using var txView = dbe.CreateQuickTransaction();
         using var view = txView.Query<TierUnit>().ToView();
@@ -283,7 +283,7 @@ class DispatchSelectionTests : TestBase<DispatchSelectionTests>
             tx.Commit();
         }
 
-        dbe.SpatialGrid.SetCellTier(dbe.SpatialGrid.WorldToCellKey(55f, 55f, 0f), SimTier.Tier1);
+        dbe.Realm0Grid.SetCellTier(dbe.Realm0Grid.WorldToCellKey(55f, 55f, 0f), SimTier.Tier1);
 
         using var txView = dbe.CreateQuickTransaction();
         using var view = txView.Query<TierUnit>().ToView();

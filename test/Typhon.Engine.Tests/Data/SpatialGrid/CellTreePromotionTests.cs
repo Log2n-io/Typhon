@@ -112,13 +112,13 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         var hits = new HashSet<long>();
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity))
             {
                 hits.Add(unchecked((long)r.Entity.RawValue));
             }
         }
 
-        return (hits, cs.PromotedCellCount);
+        return (hits, cs.Realm0Spatial.PromotedCellCount);
     }
 
     /// <summary>
@@ -180,7 +180,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must be promoted before demotion can be tested");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must be promoted before demotion can be tested");
 
         // Destroy most of the population so the cell falls below the demote threshold.
         using (var tx = dbe.CreateQuickTransaction())
@@ -196,13 +196,14 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         int survivors = 0;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
             {
                 survivors++;
             }
         }
 
-        TestContext.Out.WriteLine($"PROMOTE after destroy: promotedCells={cs.PromotedCellCount} survivorsFound={survivors} expected={ids.Count - (ids.Count - 200)}");
+        TestContext.Out.WriteLine(
+            $"PROMOTE after destroy: promotedCells={cs.Realm0Spatial.PromotedCellCount} survivorsFound={survivors} expected={ids.Count - (ids.Count - 200)}");
         Assert.That(survivors, Is.EqualTo(200), "every surviving entity must still be reachable after the cell changed structure");
     }
 
@@ -236,7 +237,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: nothing is owed a refit if nothing was promoted");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: nothing is owed a refit if nothing was promoted");
 
         // Move a slice of the population a little — enough to drive in-place updates through the tree.
         using (var tx = dbe.CreateQuickTransaction())
@@ -254,9 +255,9 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         dbe.WriteTickFence(2);
 
         int owed = 0;
-        for (int i = 0; i < cs.PerCellIndex.Length; i++)
+        for (int i = 0; i < cs.Realm0Spatial.PerCellIndex.Length; i++)
         {
-            var slot = cs.PerCellIndex[i];
+            var slot = cs.Realm0Spatial.PerCellIndex[i];
             owed += slot?.DynamicTree?.LooseLeafCount ?? 0;
             owed += slot?.StaticTree?.LooseLeafCount ?? 0;
         }
@@ -295,15 +296,15 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
     /// <summary>Sum of every tree's mutation counter across an archetype — a real write counter, not an absence of evidence.</summary>
     private static int TotalTreeMutations(ArchetypeClusterState cs)
     {
-        if (cs.PerCellIndex == null)
+        if (cs.Realm0Spatial.PerCellIndex == null)
         {
             return 0;
         }
 
         int total = 0;
-        for (int i = 0; i < cs.PerCellIndex.Length; i++)
+        for (int i = 0; i < cs.Realm0Spatial.PerCellIndex.Length; i++)
         {
-            var slot = cs.PerCellIndex[i];
+            var slot = cs.Realm0Spatial.PerCellIndex[i];
             total += slot?.DynamicTree?.Tree.MutationVersion ?? 0;
             total += slot?.StaticTree?.Tree.MutationVersion ?? 0;
         }
@@ -350,8 +351,10 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(dynamicState.PromotedCellCount, Is.GreaterThan(0), "the dynamic half must be promoted, or the churn below exercises no tree at all");
-            Assert.That(staticState.PromotedCellCount, Is.GreaterThan(0), "the static half must be promoted, or there is no static tree to leave untouched");
+            Assert.That(dynamicState.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
+                "the dynamic half must be promoted, or the churn below exercises no tree at all");
+            Assert.That(staticState.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
+                "the static half must be promoted, or there is no static tree to leave untouched");
         });
 
         int staticBefore = TotalTreeMutations(staticState);
@@ -418,27 +421,29 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: a rebuild of an unpromoted archetype would not exercise a tree");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: a rebuild of an unpromoted archetype would not exercise a tree");
 
         var before = QueryAll(dbe, cs);
-        int promotedBefore = cs.PromotedCellCount;
+        int promotedBefore = cs.Realm0Spatial.PromotedCellCount;
 
         // Rebuild from cluster data, exactly as a reopen would.
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildCellState(dbe.SpatialGrid);
-            cs.RebuildClusterAabbs(dbe.SpatialGrid);
+            cs.RebuildCellState(dbe.Realm0Grid);
+            cs.RebuildClusterAabbs(dbe.Realm0Grid);
         }
 
         var after = QueryAll(dbe, cs);
 
-        TestContext.Out.WriteLine($"PROMOTE AC-9.5 before={before.Count} after={after.Count} promotedCells {promotedBefore} -> {cs.PromotedCellCount}");
+        TestContext.Out.WriteLine(
+            $"PROMOTE AC-9.5 before={before.Count} after={after.Count} promotedCells {promotedBefore} -> {cs.Realm0Spatial.PromotedCellCount}");
 
         Assert.Multiple(() =>
         {
             Assert.That(before, Is.Not.Empty, "the population must be queryable before the rebuild, or the comparison is between two empty sets");
             Assert.That(after, Is.EquivalentTo(before), "the rebuild changed what the trees answer");
-            Assert.That(cs.PromotedCellCount, Is.EqualTo(promotedBefore), "the rebuild must re-promote the same cells it found above the threshold");
+            Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.EqualTo(promotedBefore),
+                "the rebuild must re-promote the same cells it found above the threshold");
         });
     }
 
@@ -447,7 +452,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
     {
         var found = new HashSet<string>();
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
-        foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, 4_000f, 4_000f, float.PositiveInfinity))
+        foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, 4_000f, 4_000f, float.PositiveInfinity))
         {
             // Entity AND bounds: an entity that survived into the wrong cluster, or with a bound the rebuild recomputed differently, must not compare equal.
             found.Add($"{r.Entity}:{r.MinX:R},{r.MinY:R},{r.MaxX:R},{r.MaxY:R}");
@@ -494,7 +499,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must be promoted, or UpdateAt never reaches the tree");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must be promoted, or UpdateAt never reaches the tree");
 
         // Two live clusters in the promoted cell: the aggressor whose handle we corrupt, and the victim its handle will point at.
         int aggressor = -1;
@@ -518,7 +523,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         Assert.That(victim, Is.GreaterThanOrEqualTo(0), "the fixture needs two live clusters to distinguish 'threw' from 'threw without eating the victim'");
 
         int victimHandle = cs.ClusterSpatialIndexSlot[victim];
-        var slot = cs.PerCellIndex[cs.ClusterCellMap[aggressor]];
+        var slot = cs.Realm0Spatial.PerCellIndex[cs.ClusterCellMap[aggressor]];
 
         // Point the aggressor at the victim's slot — the exact shape an ST-05 gap would produce.
         cs.ClusterSpatialIndexSlot[aggressor] = victimHandle;
@@ -591,7 +596,8 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "the population must promote, or neither enumerator descends a tree and the test proves nothing");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
+            "the population must promote, or neither enumerator descends a tree and the test proves nothing");
 
         // Two DIFFERENT boxes over the same promoted cell: identical boxes would let a clobbered outer stack still produce the right answer by accident.
         var outerAlone = QueryHits(dbe, cs, 100f, 600f);
@@ -609,7 +615,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
 
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var outerHit in cs.QueryAabb(dbe.SpatialGrid, 100f, 100f, float.NegativeInfinity, 600f, 600f, float.PositiveInfinity))
+            foreach (var outerHit in cs.QueryAabb(dbe.Realm0Grid, 100f, 100f, float.NegativeInfinity, 600f, 600f, float.PositiveInfinity))
             {
                 outerNested.Add(unchecked((long)outerHit.Entity.RawValue));
 
@@ -620,7 +626,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
 
                 // Begun and fully drained while the outer enumerator is suspended mid-descent — the whole point.
                 var inner = new HashSet<long>();
-                foreach (var innerHit in cs.QueryAabb(dbe.SpatialGrid, 400f, 400f, float.NegativeInfinity, 900f, 900f, float.PositiveInfinity))
+                foreach (var innerHit in cs.QueryAabb(dbe.Realm0Grid, 400f, 400f, float.NegativeInfinity, 900f, 900f, float.PositiveInfinity))
                 {
                     inner.Add(unchecked((long)innerHit.Entity.RawValue));
                 }
@@ -680,7 +686,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0),
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
             "without a promoted cell no query descends a tree, so neither the pool nor the depth is exercised");
 
         long overflowsBefore = Interlocked.Read(ref SpatialRTreeDiagnostics.DfsStackOverflowCount);
@@ -691,7 +697,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
             long warmHits = 0;
             for (int i = 0; i < 8; i++)
             {
-                foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 200f, 200f, float.NegativeInfinity, 500f, 500f, float.PositiveInfinity))
+                foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 200f, 200f, float.NegativeInfinity, 500f, 500f, float.PositiveInfinity))
                 {
                     warmHits += r.Entity.EntityKey;
                 }
@@ -713,7 +719,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
                 long before = GC.GetAllocatedBytesForCurrentThread();
                 for (int i = 0; i < MeasuredQueries; i++)
                 {
-                    foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 200f, 200f, float.NegativeInfinity, 500f, 500f, float.PositiveInfinity))
+                    foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 200f, 200f, float.NegativeInfinity, 500f, 500f, float.PositiveInfinity))
                     {
                         hits += r.Entity.EntityKey;
                     }
@@ -741,7 +747,7 @@ class CellTreePromotionTests : TestBase<CellTreePromotionTests>
     {
         var hits = new HashSet<long>();
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
-        foreach (var r in cs.QueryAabb(dbe.SpatialGrid, qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity))
+        foreach (var r in cs.QueryAabb(dbe.Realm0Grid, qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity))
         {
             hits.Add(unchecked((long)r.Entity.RawValue));
         }

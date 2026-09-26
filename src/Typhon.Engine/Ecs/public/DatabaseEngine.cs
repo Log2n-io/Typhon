@@ -1142,15 +1142,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal bool HasPendingRealm0Grid => _pendingGridConfig.HasValue;
 
     /// <summary>
-    /// Realm 0's spatial grid — the single world of an application that never names a realm — or <c>null</c> if no grid was configured. Set by
-    /// <see cref="InitializeArchetypes"/> from the pending config (if any).
-    /// </summary>
-    [Obsolete(ArchetypeClusterState.Realm0Shortcut, DiagnosticId = "TYRLM001")]
-    internal SpatialGrid SpatialGrid => _realms?.Default?.Grid;
-
-    /// <summary>
     /// Realm 0's grid, named as such: the engine sites that are single-realm today say so here, and each is on the Realms plan's list of what the
-    /// multi-realm steps replace (SP-5 fence and open paths, RT-3 dispatch, F1 replication). <see cref="SpatialGrid"/> is the test-facing alias.
+    /// multi-realm steps replace (SP-5 fence and open paths, RT-3 dispatch, F1 replication).
     /// </summary>
     internal SpatialGrid Realm0Grid => _realms?.Default?.Grid;
 

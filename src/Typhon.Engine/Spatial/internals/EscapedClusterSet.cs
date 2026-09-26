@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// The few clusters of one archetype whose box reaches further outside their own cell than <see cref="ArchetypeClusterState.ClusterReach"/> covers — the
+/// The few clusters of one archetype whose box reaches further outside their own cell than <see cref="RealmArchetypeSpatial.ClusterReach"/> covers — the
 /// outliers a cell-walking query visits by name instead of widening every walk to reach them (SQ-01).
 /// </summary>
 /// <remarks>

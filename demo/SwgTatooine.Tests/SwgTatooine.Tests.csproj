@@ -7,7 +7,6 @@
     <IsTestProject>true</IsTestProject>
     <LangVersion>default</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <NoWarn>$(NoWarn);TYRLM001</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="NUnit" Version="4.6.1" />

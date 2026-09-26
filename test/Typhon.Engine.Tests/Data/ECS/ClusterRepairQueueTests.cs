@@ -187,13 +187,13 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
     private static double[] MeanExtentPerCell(DatabaseEngine dbe)
     {
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         var result = new double[CellCount];
 
         for (var c = 0; c < CellCount; c++)
         {
             var cellKey = grid.WorldToCellKey((c * CellSize) + 50f, 50f, 0f);
-            var clusters = state.CellClusterPool.GetClusters(cellKey);
+            var clusters = state.Realm0Spatial.CellClusterPool.GetClusters(cellKey);
             var total = 0d;
             var counted = 0;
             for (var i = 0; i < clusters.Length; i++)
@@ -248,7 +248,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         using var dbe = SetupEngine(budgetMs: 1.0f);
         SpawnDegradedCells(dbe);
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
 
         var queue = new CellRepairQueue(maxCells: 4096, agingRatePerTick: 0.05f);
         var cellKeys = new int[CellCount];
@@ -312,7 +312,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         using var dbe = SetupEngine(budgetMs: 1.0f);
         SpawnDegradedCells(dbe);
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
 
         var queue = new CellRepairQueue(maxCells: 4096, agingRatePerTick: 0f);
         var cellKeys = new int[CellCount];
@@ -372,7 +372,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         using var dbe = SetupEngine(budgetMs: 1.0f);
         SpawnDegradedCells(dbe);
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         var held = grid.WorldToCellKey(50f, 50f, 0f);
         var quiet = grid.WorldToCellKey(CellSize + 50f, 50f, 0f);
 
@@ -430,7 +430,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         using var dbe = SetupEngine(budgetMs: 1.0f);
         SpawnDegradedCells(dbe);
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         var a = grid.WorldToCellKey(50f, 50f, 0f);
         var b = grid.WorldToCellKey(CellSize + 50f, 50f, 0f);
         var nominations = new List<ArchetypeClusterState.RepairNomination> { new(0, a, 0.9f) };
@@ -565,7 +565,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         using var dbe = SetupEngine(budgetMs: 1.0f);
         SpawnDegradedCells(dbe);
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
 
         const float Critical = 0.5f;
         var queue = new CellRepairQueue(maxCells: 4096, agingRatePerTick: 0f);
@@ -610,7 +610,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         using var dbe = SetupEngine(budgetMs: 1.0f);
         SpawnDegradedCells(dbe);
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
 
         var queue = new CellRepairQueue(maxCells: 4096, agingRatePerTick: 0f);
         var nominations = new List<ArchetypeClusterState.RepairNomination>();
@@ -738,7 +738,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         using var dbe = SetupEngine(budgetMs: 1.0f, agingRate: 0f, queueMaxCells: 3);
         SpawnDegradedCells(dbe);
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
 
         var cellKeys = new int[CellCount];
         for (var c = 0; c < CellCount; c++)
@@ -795,7 +795,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         using var dbe = SetupEngine(budgetMs: 1.0f);
         SpawnDegradedCells(dbe);
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
 
         var cellKeys = new int[CellCount];
         for (var c = 0; c < CellCount; c++)
@@ -848,7 +848,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
 
         var before = MeanExtentPerCell(dbe);
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
 
         // Rank is proportional to cluster count, and every cell here holds the same population — so the tier is the lever that makes one cell the
         // unambiguous head. Tier0 is the highest interest and therefore weight 1; the rest are pushed down to a third.

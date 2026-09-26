@@ -232,13 +232,13 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         var east = (long)Spawn(dbe, new AABB2F { MinX = 960f, MinY = 520f, MaxX = 1_020f, MaxY = 580f }).RawValue;
         var west = (long)Spawn(dbe, new AABB2F { MinX = -20f, MinY = 430f, MaxX = 40f, MaxY = 470f }).RawValue;
         var cs = ClusterStateOf(dbe);
-        Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.ClusterReach), Is.Zero, "the spawns' overhang is all outside the world, so it raises nothing");
+        Assert.That(Volatile.Read(ref cs.Realm0Spatial.ClusterReach), Is.Zero, "the spawns' overhang is all outside the world, so it raises nothing");
 
         dbe.WriteTickFence(1);
         Assert.Multiple(() =>
         {
-            Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.ClusterReach), Is.Zero, "the fence's recompute counts only the in-world part, which is none");
-            Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.EscapedClusters).Count, Is.Zero, "nor is anything named");
+            Assert.That(Volatile.Read(ref cs.Realm0Spatial.ClusterReach), Is.Zero, "the fence's recompute counts only the in-world part, which is none");
+            Assert.That(Volatile.Read(ref cs.Realm0Spatial.EscapedClusters).Count, Is.Zero, "nor is anything named");
         });
         AssertCovered(dbe, "after the fence");
 
@@ -289,11 +289,11 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         var id = (long)Spawn(dbe, new AABB2F { MinX = 240f, MinY = 240f, MaxX = 300f, MaxY = 260f }).RawValue;
         dbe.WriteTickFence(1);
         var cs = ClusterStateOf(dbe);
-        Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.ClusterReach), Is.Zero, "precondition: nothing reaches past a cell");
+        Assert.That(Volatile.Read(ref cs.Realm0Spatial.ClusterReach), Is.Zero, "precondition: nothing reaches past a cell");
 
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var rayBuffer = new (long entityId, double distance)[2];
-        int rayHits = cs.QueryRay(dbe.SpatialGrid, 300d, 250d, 0d, 1d, 0d, 0d, 50d, rayBuffer, categoryMask: 0);
+        int rayHits = cs.QueryRay(dbe.Realm0Grid, 300d, 250d, 0d, 1d, 0d, 0d, 50d, rayBuffer, categoryMask: 0);
         Assert.Multiple(() =>
         {
             Assert.That(AabbHits(dbe, new AABB2F { MinX = 300f, MinY = 245f, MaxX = 310f, MaxY = 255f }), Is.EqualTo(new[] { id }), "AABB");
@@ -316,8 +316,9 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         var cs = ClusterStateOf(dbe);
         Assert.Multiple(() =>
         {
-            Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.EscapedClusters).Count, Is.EqualTo(1), "one cluster reaches past its cell, far beyond a hysteresis margin");
-            Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.ClusterReach), Is.Zero, "and every other box is a point, so the walks do not widen at all");
+            Assert.That(Volatile.Read(ref cs.Realm0Spatial.EscapedClusters).Count, Is.EqualTo(1),
+                "one cluster reaches past its cell, far beyond a hysteresis margin");
+            Assert.That(Volatile.Read(ref cs.Realm0Spatial.ClusterReach), Is.Zero, "and every other box is a point, so the walks do not widen at all");
         });
         AssertCovered(dbe, "after the fence");
 
@@ -326,13 +327,13 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var box = new AABB2F { MinX = 410f, MinY = 410f, MaxX = 420f, MaxY = 420f };
         var rayBuffer = new (long entityId, double distance)[4];
-        int rayHits = cs.QueryRay(dbe.SpatialGrid, 410d, 415d, 0d, 1d, 0d, 0d, 15d, rayBuffer, categoryMask: 0);
+        int rayHits = cs.QueryRay(dbe.Realm0Grid, 410d, 415d, 0d, 1d, 0d, 0d, 15d, rayBuffer, categoryMask: 0);
         double[] planes = [1d, 0d, -410d, -1d, 0d, 420d, 0d, 1d, -410d, 0d, -1d, 420d];
         var frustumBuffer = new long[4];
-        int frustumHits = cs.QueryFrustum(dbe.SpatialGrid, planes, 4, new Vector3Like(410d, 410d, 0d), new Vector3Like(420d, 420d, 0d), frustumBuffer,
+        int frustumHits = cs.QueryFrustum(dbe.Realm0Grid, planes, 4, new Vector3Like(410d, 410d, 0d), new Vector3Like(420d, 420d, 0d), frustumBuffer,
             categoryMask: 0);
         var knnBuffer = new (long entityId, double distSq)[1];
-        int knnHits = cs.QueryNearest(dbe.SpatialGrid, 425d, 425d, 0d, k: 1, knnBuffer, categoryMask: 0);
+        int knnHits = cs.QueryNearest(dbe.Realm0Grid, 425d, 425d, 0d, k: 1, knnBuffer, categoryMask: 0);
 
         Assert.Multiple(() =>
         {
@@ -365,7 +366,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         Assert.That(AabbHits(dbe, new AABB2F { MinX = 240f, MinY = 240f, MaxX = 420f, MaxY = 420f }).Count(h => h == id), Is.EqualTo(1),
             "reached by the walk and named, reported once");
         var knn5 = new (long entityId, double distSq)[5];
-        int n5 = cs.QueryNearest(dbe.SpatialGrid, 425d, 425d, 0d, k: 5, knn5, categoryMask: 0);
+        int n5 = cs.QueryNearest(dbe.Realm0Grid, 425d, 425d, 0d, k: 5, knn5, categoryMask: 0);
         Assert.That(knn5.Take(n5).Select(r => r.entityId).Distinct().Count(), Is.EqualTo(n5), "kNN reports every entity once");
     }
 
@@ -378,7 +379,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         var id = (long)Spawn(dbe, Box(250f, 250f, 180f)).RawValue;
         dbe.WriteTickFence(1);
         var cs = ClusterStateOf(dbe);
-        Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.EscapedClusters).Count, Is.EqualTo(1), "precondition: named");
+        Assert.That(Volatile.Read(ref cs.Realm0Spatial.EscapedClusters).Count, Is.EqualTo(1), "precondition: named");
 
         // The planes select [410, 420] on both axes, but the caller's bounding box starts at (200, 200) — over-generous, as a camera frustum's box is. The
         // walk then covers the outlier's home cell (2, 2) and REJECTS it, since that cell grown by a reach of zero lies outside the planes. The name must
@@ -386,7 +387,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         double[] planes = [1d, 0d, -410d, -1d, 0d, 420d, 0d, 1d, -410d, 0d, -1d, 420d];
         var buffer = new long[4];
-        int n = cs.QueryFrustum(dbe.SpatialGrid, planes, 4, new Vector3Like(200d, 200d, 0d), new Vector3Like(420d, 420d, 0d), buffer, categoryMask: 0);
+        int n = cs.QueryFrustum(dbe.Realm0Grid, planes, 4, new Vector3Like(200d, 200d, 0d), new Vector3Like(420d, 420d, 0d), buffer, categoryMask: 0);
         Assert.Multiple(() =>
         {
             Assert.That(n, Is.EqualTo(1));
@@ -404,7 +405,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         var outlier = Spawn(dbe, new AABB2F { MinX = -40f, MinY = 245f, MaxX = 540f, MaxY = 255f });
         dbe.WriteTickFence(1);
         var cs = ClusterStateOf(dbe);
-        Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.EscapedClusters).Count, Is.EqualTo(1), "precondition: named");
+        Assert.That(Volatile.Read(ref cs.Realm0Spatial.EscapedClusters).Count, Is.EqualTo(1), "precondition: named");
 
         // No fence from here. E joins the named cluster — same cell, first fit — and widens its box up to y = 290; F is alone in cell (2, 3).
         var e = Spawn(dbe, Box(250f, 290f, 0f));
@@ -415,7 +416,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         // F, and the rings would declare the search covered before opening it.
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var buffer = new (long entityId, double distSq)[1];
-        int n = cs.QueryNearest(dbe.SpatialGrid, 250d, 301d, 0d, k: 1, buffer, categoryMask: 0);
+        int n = cs.QueryNearest(dbe.Realm0Grid, 250d, 301d, 0d, k: 1, buffer, categoryMask: 0);
         Assert.Multiple(() =>
         {
             Assert.That(n, Is.EqualTo(1));
@@ -434,7 +435,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.EscapedClusters).Count, Is.EqualTo(1), "precondition: the outlier is named");
+        Assert.That(Volatile.Read(ref cs.Realm0Spatial.EscapedClusters).Count, Is.EqualTo(1), "precondition: the outlier is named");
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -445,8 +446,8 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         dbe.WriteTickFence(2);
         Assert.Multiple(() =>
         {
-            Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.EscapedClusters).Count, Is.Zero, "recomputed at the very next fence, not remembered");
-            Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.ClusterReach), Is.Zero);
+            Assert.That(Volatile.Read(ref cs.Realm0Spatial.EscapedClusters).Count, Is.Zero, "recomputed at the very next fence, not remembered");
+            Assert.That(Volatile.Read(ref cs.Realm0Spatial.ClusterReach), Is.Zero);
         });
         AssertCovered(dbe, "after the destroy's fence");
 
@@ -486,8 +487,8 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         // The 17 largest are 125 ... 45; the base is the 17th, 45, and 50 lies within one margin of it, so it folds: reach 50, and 125 ... 55 are named.
         Assert.Multiple(() =>
         {
-            Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.EscapedClusters).Count, Is.EqualTo(15));
-            Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.ClusterReach), Is.EqualTo(50f).Within(1e-3f));
+            Assert.That(Volatile.Read(ref cs.Realm0Spatial.EscapedClusters).Count, Is.EqualTo(15));
+            Assert.That(Volatile.Read(ref cs.Realm0Spatial.ClusterReach), Is.EqualTo(50f).Within(1e-3f));
         });
         AssertCovered(dbe, "after the fence");
 
@@ -513,7 +514,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
 
             var nearest = boxes.Values.Select(b => DistSq(b, x, y)).OrderBy(d => d).Take(5).ToArray();
             var knn = new (long entityId, double distSq)[5];
-            int n = cs.QueryNearest(dbe.SpatialGrid, x, y, 0d, k: 5, knn, categoryMask: 0);
+            int n = cs.QueryNearest(dbe.Realm0Grid, x, y, 0d, k: 5, knn, categoryMask: 0);
             Assert.That(knn.Take(n).Select(r => r.distSq).ToArray(), Is.EqualTo(nearest).Within(1e-6), $"kNN query {q} at ({x}, {y})");
         }
     }
@@ -536,7 +537,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         // No fence after this spawn: nothing has recomputed the reach, so the spawn itself must have raised it before the index made the entity visible.
         var id = (long)Spawn(dbe, Box(250f, 250f, 180f)).RawValue;
         var cs = ClusterStateOf(dbe);
-        Assert.That(Volatile.Read(ref cs.DefaultRealmSpatial.ClusterReach), Is.GreaterThanOrEqualTo(130f), "raised by the spawn's own in-world overhang");
+        Assert.That(Volatile.Read(ref cs.Realm0Spatial.ClusterReach), Is.GreaterThanOrEqualTo(130f), "raised by the spawn's own in-world overhang");
         AssertCovered(dbe, "after the spawn, before any fence");
 
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
@@ -678,7 +679,7 @@ class ClusterReachTests : TestBase<ClusterReachTests>
         Assert.That(spawned.Any(s => s.Count == MaxSpawnsPerWriter), Is.False, "a writer reached its safety bound before the grows published");
 
         var clusterOf = ClustersByEntity(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         var aabbs = cs.ClusterAabbs;
         Assert.Multiple(() =>
         {

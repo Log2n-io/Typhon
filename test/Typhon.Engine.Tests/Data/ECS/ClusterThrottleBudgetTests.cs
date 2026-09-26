@@ -192,7 +192,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
                     + $"the migrant loop alone ({t.MigrationExecuteMs:F4} ms) — the index and EntityMap apply phases are not being timed");
             }
 
-            Assert.That(dbe.SpatialGrid.GetCell(0).EntityCount, Is.EqualTo(Population),
+            Assert.That(dbe.Realm0Grid.GetCell(0).EntityCount, Is.EqualTo(Population),
                 $"tick {tick}: entities have left cell (0,0), so this tick carries CROSSINGS and the bound above is no longer a statement about "
                 + "relocations alone");
 
@@ -344,7 +344,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     {
         using var dbe = SetupEngine(budgetMs: 1.0f);
         var cs = ClusterStateOf(dbe);
-        var cfg = dbe.SpatialGrid.Config;
+        var cfg = dbe.Realm0Grid.Config;
         void Tick(long candidates, long hits, int times) => FeedTally(cs, in cfg, candidates, hits, times);
 
         // A steady two candidates per hit: the best, so next to nothing is granted — but never zero, which would read as no enforcement.
@@ -383,7 +383,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     {
         using var dbe = SetupEngine(budgetMs: 1.0f);
         var cs = ClusterStateOf(dbe);
-        var cfg = dbe.SpatialGrid.Config;
+        var cfg = dbe.Realm0Grid.Config;
         FeedTally(cs, in cfg, 2_000, 1_000, 200);
         Assert.That(cs.MaintenanceBudgetScale, Is.EqualTo(ArchetypeClusterState.MinMaintenanceBudgetScale), "precondition: the queries at their best");
 
@@ -414,7 +414,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     {
         using var dbe = SetupEngine(budgetMs: 1.0f);
         var cs = ClusterStateOf(dbe);
-        var cfg = dbe.SpatialGrid.Config;
+        var cfg = dbe.Realm0Grid.Config;
         FeedTally(cs, in cfg, 2_000, 1_000, 200);
         ReachTheWholeBudget(cs, in cfg);
 
@@ -458,7 +458,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     {
         using var dbe = SetupEngine(budgetMs: 1.0f);
         var cs = ClusterStateOf(dbe);
-        var cfg = dbe.SpatialGrid.Config;
+        var cfg = dbe.Realm0Grid.Config;
         FeedTally(cs, in cfg, 2_000, 1_000, 200);
         var span = ArchetypeClusterState.EfficiencyRebaseTicks / 2;
 
@@ -493,7 +493,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     {
         using var dbe = SetupEngine(budgetMs: 1.0f);
         var cs = ClusterStateOf(dbe);
-        var cfg = dbe.SpatialGrid.Config;
+        var cfg = dbe.Realm0Grid.Config;
         FeedTally(cs, in cfg, 2_000, 1_000, 200);
 
         // The signal fades, lost after about 150 ticks, and the budget stays whole by fall-back for longer than the window.
@@ -545,7 +545,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     {
         using var dbe = SetupEngine(budgetMs: 1.0f);
         var cs = ClusterStateOf(dbe);
-        var cfg = dbe.SpatialGrid.Config;
+        var cfg = dbe.Realm0Grid.Config;
         FeedTally(cs, in cfg, 0, 0, 100);
         Assert.Multiple(() =>
         {
@@ -584,7 +584,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     {
         using var dbe = SetupEngine(budgetMs: 1.0f, queryEfficiencyTolerance: 0f);
         var cs = ClusterStateOf(dbe);
-        var cfg = dbe.SpatialGrid.Config;
+        var cfg = dbe.Realm0Grid.Config;
         FeedTally(cs, in cfg, 2_000, 1_000, 200);
         Assert.Multiple(() =>
         {
@@ -600,7 +600,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
     {
         using var dbe = SetupEngine(budgetMs: 0f, repairExtentRatio: 0.75f);
         var cs = ClusterStateOf(dbe);
-        var cfg = dbe.SpatialGrid.Config;
+        var cfg = dbe.Realm0Grid.Config;
         FeedTally(cs, in cfg, 2_000, 1_000, 200);
         Assert.Multiple(() =>
         {
@@ -731,7 +731,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
                 sawRelocations = true;
             }
 
-            sawCrossings |= t.MigrationCount > 0 && dbe.SpatialGrid.GetCell(0).EntityCount < Population;
+            sawCrossings |= t.MigrationCount > 0 && dbe.Realm0Grid.GetCell(0).EntityCount < Population;
             previousDetected = t.DriftersDetected;
             previousUnplaced = t.DriftersUnplaced;
         }
@@ -834,7 +834,7 @@ class ClusterThrottleBudgetTests : TestBase<ClusterThrottleBudgetTests>
             state.EnqueueMigration(new MigrationRequest(12, 4, 0, 6));
             state.EnqueueMigration(new MigrationRequest(14, 5, 0, 0, 15, MigrationRequest.AnySlot, MigrationKind.Relocation));
 
-            state.ApplyMigrationThrottle(dbe.SpatialGrid);
+            state.ApplyMigrationThrottle(dbe.Realm0Grid);
             var admitted = Snapshot(state);
 
             if (reference == null)

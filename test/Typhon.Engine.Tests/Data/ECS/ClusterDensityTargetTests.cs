@@ -64,7 +64,7 @@ class ClusterDensityTargetTests : TestBase<ClusterDensityTargetTests>
 
     /// <summary>Live entity count of the cell at grid coordinate (<paramref name="cellX"/>, 0), or 0 when the sparse grid never materialised it.</summary>
     private static int EntitiesInCell(DatabaseEngine dbe, int cellX) =>
-        dbe.SpatialGrid.TryGetCellKey(cellX, 0, 0, out var key) ? dbe.SpatialGrid.GetCell(key).EntityCount : 0;
+        dbe.Realm0Grid.TryGetCellKey(cellX, 0, 0, out var key) ? dbe.Realm0Grid.GetCell(key).EntityCount : 0;
 
     /// <summary>Spawn <paramref name="perCell"/> entities into each of <paramref name="cells"/> cells along x, out of geometric order, so every cluster is born wide.</summary>
     private static void SpawnScattered(DatabaseEngine dbe, int cells, int perCell, int firstCell = 0, int spread = 92, bool fence = true)
@@ -352,7 +352,7 @@ class ClusterDensityTargetTests : TestBase<ClusterDensityTargetTests>
     {
         using var dbe = SetupEngine(budgetMs: 1.0f);
         var state = ClusterStateOf(dbe);
-        ref readonly var cfg = ref dbe.SpatialGrid.Config;
+        ref readonly var cfg = ref dbe.Realm0Grid.Config;
         const float Step = ArchetypeClusterState.DriftTargetBoostStep;
         Assert.That(state.DriftTargetBoost, Is.EqualTo(1f));
 
@@ -500,7 +500,7 @@ class ClusterDensityTargetTests : TestBase<ClusterDensityTargetTests>
     {
         using var dbe = SetupEngine(budgetMs: 1.0f);
         var state = ClusterStateOf(dbe);
-        ref readonly var cfg = ref dbe.SpatialGrid.Config;
+        ref readonly var cfg = ref dbe.Realm0Grid.Config;
 
         state.LastTickMigrationCount = 1000;
         state.LastTickMigrationExecuteMs = 4.0d;   // 4 000 ns of summed CPU per entity

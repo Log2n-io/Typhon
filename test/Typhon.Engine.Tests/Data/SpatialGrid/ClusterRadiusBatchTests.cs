@@ -366,9 +366,9 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
             {
                 Assert.Multiple(() =>
                 {
-                    Assert.That(StateOf<ClBatchUnit>(dbe).PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote");
-                    Assert.That(StateOf<ClBatchWideUnit>(dbe).PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote");
-                    Assert.That(StateOf<ClBatchSphereUnit>(dbe).PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote");
+                    Assert.That(StateOf<ClBatchUnit>(dbe).Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote");
+                    Assert.That(StateOf<ClBatchWideUnit>(dbe).Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote");
+                    Assert.That(StateOf<ClBatchSphereUnit>(dbe).Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote");
                 });
             }
 
@@ -419,7 +419,7 @@ class ClusterRadiusBatchTests : TestBase<ClusterRadiusBatchTests>
         }
 
         dbe.WriteTickFence(1);
-        Assert.That(Volatile.Read(ref StateOf<ClBatchUnit>(dbe).DefaultRealmSpatial.EscapedClusters).Count, Is.EqualTo(1), "precondition: the outlier is named");
+        Assert.That(Volatile.Read(ref StateOf<ClBatchUnit>(dbe).Realm0Spatial.EscapedClusters).Count, Is.EqualTo(1), "precondition: the outlier is named");
 
         BSphere2F[] members =
         [

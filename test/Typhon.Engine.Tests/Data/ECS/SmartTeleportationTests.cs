@@ -182,7 +182,7 @@ class SmartTeleportationTests : TestBase<SmartTeleportationTests>
 
         Assert.Multiple(() =>
         {
-            Assert.That(landedIn, Is.EqualTo(dbe.SpatialGrid.WorldToCellKey(50f, 550f, 0f)), "clamping is unchanged: the entity lands in the edge cell");
+            Assert.That(landedIn, Is.EqualTo(dbe.Realm0Grid.WorldToCellKey(50f, 550f, 0f)), "clamping is unchanged: the entity lands in the edge cell");
             Assert.That(first.ClampedDestinations, Is.EqualTo(1));
             Assert.That(first.JumpCrossings, Is.EqualTo(1), "(5,5) → (0,5) is five cells");
             Assert.That(second.ClampedDestinations, Is.EqualTo(1));
@@ -316,7 +316,7 @@ class SmartTeleportationTests : TestBase<SmartTeleportationTests>
             Assert.That(drained.CrossingsExecuted, Is.EqualTo(1), "and executes in the next");
             Assert.That(drained.JumpCrossings, Is.Zero, "not counted again when drained");
             Assert.That(drained.LargestArrivalRun, Is.EqualTo(1), "grouped when drained");
-            Assert.That(cs.ClusterCellMap[Locate(dbe, ids[1]).ChunkId], Is.EqualTo(dbe.SpatialGrid.WorldToCellKey(320f, 50f, 0f)));
+            Assert.That(cs.ClusterCellMap[Locate(dbe, ids[1]).ChunkId], Is.EqualTo(dbe.Realm0Grid.WorldToCellKey(320f, 50f, 0f)));
         });
     }
 
