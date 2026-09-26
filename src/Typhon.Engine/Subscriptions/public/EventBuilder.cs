@@ -29,6 +29,9 @@ public enum EventRouting
 
     /// <summary>The one session the emitter names (<see cref="SubscriptionsCommands.EmitTo{T}"/>).</summary>
     ToSession = 5,
+
+    /// <summary>Every session in one realm — or, with a subtree, in it and every realm below it in the parent tree (12-realms § 3).</summary>
+    ToRealm = 6,
 }
 
 /// <summary>
@@ -41,7 +44,7 @@ public enum EventRouting
 /// message still learns the creature is dead from its next record.
 /// </para>
 /// <para>
-/// <b>Routing costs are per event, not per session.</b> <see cref="RouteNear"/> buckets events by grid cell and each session collects the cells it overlaps,
+/// <b>Routing costs are per event, not per session.</b> <see cref="RouteNear(Func{T, Vector3D}, double)"/> buckets events by grid cell and each session collects the cells it overlaps,
 /// so a hundred sessions and a thousand events cost O(events + Σ cells) rather than their product.
 /// </para>
 /// <para>
@@ -78,6 +81,39 @@ public sealed partial class EventBuilder<T> where T : unmanaged
 
         // Built here, where T is known: the encoder holds the payload's bytes, not a T, and reads the point through this without boxing.
         _event.RoutingPointReader = payload => point(System.Runtime.InteropServices.MemoryMarshal.Read<T>(payload));
+        return this;
+    }
+
+    /// <summary>
+    /// Routes the event to sessions of <paramref name="realm"/>'s realm whose interest contains the point it carries (12-realms § 3): the point is a place
+    /// in that realm, and a session of another realm never hears it, whatever its local coordinates.
+    /// </summary>
+    /// <param name="point">Reads the event's position in its realm. Called once per event, never per session.</param>
+    /// <param name="realm">Reads the realm the point is in — an emitter has it cheaply from the cluster or entity it acts on (<c>ClusterRef.Realm</c>).</param>
+    /// <param name="radiusM">When above zero, only sessions whose viewpoint lies within this radius of the point hear it.</param>
+    /// <returns>This builder.</returns>
+    public EventBuilder<T> RouteNear(Func<T, Vector3D> point, Func<T, RealmId> realm, double radiusM = 0)
+    {
+        ArgumentNullException.ThrowIfNull(realm);
+        RouteNear(point, radiusM);
+        _event.RoutingRealmReader = payload => realm(System.Runtime.InteropServices.MemoryMarshal.Read<T>(payload)).Value;
+        return this;
+    }
+
+    /// <summary>
+    /// Routes the event to every session in <paramref name="realm"/>'s realm — with <paramref name="subtree"/>, also to every session in a realm below it
+    /// in the parent tree (<see cref="RealmConfig.Parent"/>): a planet-wide message that reaches the players in its interiors (12-realms § 3). The parent
+    /// tree routes; it grants no visibility.
+    /// </summary>
+    /// <param name="realm">Reads the realm the event is addressed to.</param>
+    /// <param name="subtree">Whether realms below it hear it too.</param>
+    /// <returns>This builder.</returns>
+    public EventBuilder<T> RouteToRealm(Func<T, RealmId> realm, bool subtree = false)
+    {
+        ArgumentNullException.ThrowIfNull(realm);
+        _event.SetRouting(EventRouting.ToRealm);
+        _event.RoutingRealmReader = payload => realm(System.Runtime.InteropServices.MemoryMarshal.Read<T>(payload)).Value;
+        _event.RoutingSubtree = subtree;
         return this;
     }
 
@@ -258,6 +294,12 @@ public sealed class EventDeclaration
 
     /// <summary>The same, over the event's bytes: what the encoder calls.</summary>
     internal EventPointReader RoutingPointReader { get; set; }
+
+    /// <summary>The realm a <see cref="EventRouting.Near"/> point or a <see cref="EventRouting.ToRealm"/> event is in, over the event's bytes; null for realm 0.</summary>
+    internal EventRealmReader RoutingRealmReader { get; set; }
+
+    /// <summary>A <see cref="EventRouting.ToRealm"/> event reaches the realms below its realm too.</summary>
+    internal bool RoutingSubtree { get; set; }
 
     /// <summary>The CLR enum a defaulted field's value set comes from, or <see langword="null"/>. An overridden field carries its own on the codec.</summary>
     internal IReadOnlyDictionary<string, Type> DefaultEnumTypes

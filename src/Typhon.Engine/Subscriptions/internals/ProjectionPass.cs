@@ -736,7 +736,7 @@ internal static unsafe class ProjectionPass
         push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + push.PositionOffset(archetype), out var x, out var y,
             out var z);
         push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, z, 0f, 0f, 0f);
-        leases.Depart(worker, entity, netId, x, y, z);
+        leases.Depart(worker, entity, netId, x, y, z, push.ServedRealm);
     }
 
     // ── Entry helpers ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -853,10 +853,13 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         public float X;
         public float Y;
         public float Z;
+
+        /// <summary>The realm it was last in, whose frame X, Y, Z are in.</summary>
+        public ushort Realm;
     }
 
     /// <summary>Records, from <paramref name="worker"/>'s chunk, the entity whose identity it released and where it was last.</summary>
-    public void Depart(int worker, EntityId entity, uint netId, float x, float y, float z)
+    public void Depart(int worker, EntityId entity, uint netId, float x, float y, float z, ushort realm = 0)
     {
         ref var lease = ref _leases[worker];
         if (lease.DepartedCount == lease.DepartedCapacity)
@@ -866,7 +869,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
             lease.DepartedCapacity = capacity;
         }
 
-        lease.Departed[lease.DepartedCount++] = new DepartedEntity { Entity = entity, NetId = netId, X = x, Y = y, Z = z };
+        lease.Departed[lease.DepartedCount++] = new DepartedEntity { Entity = entity, NetId = netId, X = x, Y = y, Z = z, Realm = realm };
     }
 
     /// <summary>This tick's departed entities, every worker's: read serially, in the frame prologue, before the next tick's <see cref="BeginTick"/>.</summary>

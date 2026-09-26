@@ -295,6 +295,7 @@ internal static class CatalogBuilder
         EventRouting.ToOwner => "owner",
         EventRouting.Broadcast => "broadcast",
         EventRouting.ToSession => BuiltInEvents.SessionScope,
+        EventRouting.ToRealm => "realm",
         _ => throw new InvalidOperationException(
             $"Event '{declaration.Name}' declares no routing, so it would reach no session and the catalog would name a scope that means nothing. " +
             "Declare RouteNear, RouteToKnown, RouteToOwner, RouteToSession or Broadcast."),

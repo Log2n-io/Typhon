@@ -265,7 +265,7 @@ internal sealed unsafe partial class FrameAssembler
             var netIds = new BoundViewpoint(Engine) { Push = Push };
             try
             {
-                Events.EncodeTick((uint)_tick, ref netIds, Push);
+                Events.EncodeTick((uint)_tick, ref netIds, Push.Hub);
             }
             finally
             {
@@ -815,7 +815,9 @@ internal sealed unsafe partial class FrameAssembler
         var lost = 0L;
         if (events != null)
         {
-            var nowhere = default(NoEventGeometry);
+            // No view, so no geometric route; a ToRealm announcement of its realm still reaches it (12-realms § 3).
+            var nowhere = new NoEventGeometry(state.PendingRealm is >= 0 and < RealmId.NoneValue ? (ushort)state.PendingRealm : RealmId.NoneValue,
+                Engine?.RealmTable);
             events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, EntityId.Null, session, ref nowhere, out count, out bytes, out lost);
             if (bytes > _maxFrameBytes / 2)
             {
@@ -1188,20 +1190,10 @@ internal sealed unsafe partial class FrameAssembler
         var eventsLost = 0L;
         if (events != null)
         {
-            // Geometric routes are filed by realm 0's cells until events are realm-aware (R4.7): a session of another realm, where the same local
-            // coordinates mean another place, hears the session-addressed routes only (SUB-28).
-            if (ReferenceEquals(push, Push))
-            {
-                var geometry = new SessionEventGeometry(push, session, _pushWorld[index]);
-                events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, out eventCount,
-                    out eventBytes, out eventsLost);
-            }
-            else
-            {
-                var nowhere = default(NoEventGeometry);
-                events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, _sessions.ControlledOf(session), session, ref nowhere, out eventCount,
-                    out eventBytes, out eventsLost);
-            }
+            // The session's realm's filings only (SUB-28): a geometric route is filed in its point's realm, by that realm's cells.
+            var geometry = new SessionEventGeometry(push, session, _pushWorld[index], Engine?.RealmTable);
+            events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, out eventCount,
+                out eventBytes, out eventsLost);
 
             // Events take at most half a frame: past it they are counted, not sent, so a burst cannot make every frame oversize and starve the session.
             if (eventBytes > _maxFrameBytes / 2)
@@ -1463,15 +1455,21 @@ internal readonly ref struct SessionEventGeometry : IEventGeometry
 {
     private readonly PushReplication _push;
     private readonly SessionId _session;
+    private readonly RealmTable _realms;
 
-    public SessionEventGeometry(PushReplication push, SessionId session, bool world)
+    public SessionEventGeometry(PushReplication push, SessionId session, bool world, RealmTable realms = null)
     {
         _push = push;
         _session = session;
+        _realms = realms;
         World = world;
     }
 
     public bool World { get; }
+
+    public ushort Realm => _push.ServedRealm;
+
+    public bool InRealm(ushort realm, bool subtree) => RealmTree.Reaches(_realms, _push.ServedRealm, realm, subtree);
 
     public void CellBox(out int minCx, out int maxCx, out int minCy, out int maxCy, out int minCz, out int maxCz) =>
         _push.SessionCellBox(_session, out minCx, out maxCx, out minCy, out maxCy, out minCz, out maxCz);
@@ -1483,7 +1481,22 @@ internal readonly ref struct SessionEventGeometry : IEventGeometry
 /// <summary>No geometry: a session with no profile sees no point, so the geometric routes never match it (09 § 11).</summary>
 internal readonly ref struct NoEventGeometry : IEventGeometry
 {
+    private readonly ushort _realm;
+    private readonly RealmTable _realms;
+
+    public NoEventGeometry(ushort realm, RealmTable realms = null)
+    {
+        _realm = realm;
+        _realms = realms;
+    }
+
+    public NoEventGeometry() => _realm = RealmId.NoneValue;
+
     public bool World => false;
+
+    public ushort Realm => _realm;
+
+    public bool InRealm(ushort realm, bool subtree) => RealmTree.Reaches(_realms, _realm, realm, subtree);
 
     public void CellBox(out int minCx, out int maxCx, out int minCy, out int maxCy, out int minCz, out int maxCz)
     {
@@ -1492,4 +1505,49 @@ internal readonly ref struct NoEventGeometry : IEventGeometry
     }
 
     public bool Sees(float x, float y, float z, float viewRadius) => false;
+}
+
+/// <summary>The realm parent tree, for <see cref="EventRouting.ToRealm"/> (12-realms § 3): routing only, never visibility.</summary>
+internal static class RealmTree
+{
+    /// <summary>The deepest a parent chain is walked: a realm tree is shallow (galaxy → planet → interior).</summary>
+    public const int MaxDepth = 8;
+
+    /// <summary>Whether a session in <paramref name="session"/>'s realm hears an event addressed to <paramref name="target"/> (and its subtree).</summary>
+    public static bool Reaches(RealmTable realms, ushort session, ushort target, bool subtree)
+    {
+        if (session == RealmId.NoneValue)
+        {
+            return false;
+        }
+
+        if (session == target)
+        {
+            return true;
+        }
+
+        if (!subtree || realms == null)
+        {
+            return false;
+        }
+
+        var at = session;
+        for (var depth = 0; depth < MaxDepth; depth++)
+        {
+            var parent = realms.TryGet(at)?.Config?.Parent ?? RealmId.None;
+            if (parent.IsNone)
+            {
+                return false;
+            }
+
+            if (parent.Value == target)
+            {
+                return true;
+            }
+
+            at = parent.Value;
+        }
+
+        return false;
+    }
 }

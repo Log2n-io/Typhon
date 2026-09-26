@@ -293,6 +293,18 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             {
                 Events.Realm = Realm0Frame;
 
+                // With several realms a point is a place only with its realm (12-realms § 2.7): a realm-less RouteNear would file every point in realm 0.
+                for (var i = 0; engine.ConfiguredMaxRealms > 1 && i < registry.Events.Count; i++)
+                {
+                    var declaration = registry.Events[i];
+                    if (declaration.Routing == EventRouting.Near && declaration.RoutingRealmReader == null)
+                    {
+                        throw new NotSupportedException(
+                            $"Event '{declaration.Name}' routes Near without a realm, and this engine holds several: declare RouteNear(point, realm) " +
+                            "(12-realms § 2.7).");
+                    }
+                }
+
                 // A position field is realm-framed (SUB-30): with no spatial world there is no frame to encode it over, and every emission would be
                 // rejected on the tick. Refused here instead.
                 for (var i = 0; Realm0Frame == null && i < registry.Events.Count; i++)
