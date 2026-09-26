@@ -117,6 +117,34 @@ internal sealed class SelfTracker
         }
     }
 
+    /// <summary>
+    /// The first session slot whose controlled entity is <paramref name="entityRaw"/>, or -1; <see cref="NextControlling"/> walks the others. Serial, after
+    /// <see cref="Refresh"/>.
+    /// </summary>
+    public int FirstControlling(ulong entityRaw)
+    {
+        if (entityRaw == 0)
+        {
+            return -1;
+        }
+
+        var i = Hash(entityRaw);
+        while (_keys[i] != 0)
+        {
+            if (_keys[i] == entityRaw)
+            {
+                return _heads[i];
+            }
+
+            i = (i + 1) & _mask;
+        }
+
+        return -1;
+    }
+
+    /// <summary>The next session slot controlling the same entity as <paramref name="slot"/>, or -1.</summary>
+    public int NextControlling(int slot) => _next[slot];
+
     /// <summary>ORs <paramref name="groups"/> into the pending mask of every session that controls <paramref name="entity"/>. Thread-safe.</summary>
     /// <param name="entity">The entity whose owner groups changed.</param>
     /// <param name="groups">The owner groups that changed, as the projection's mask.</param>

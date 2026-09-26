@@ -64,6 +64,14 @@ unsafe class RealmReplicationTests : TestBase<RealmReplicationTests>
         return ids;
     }
 
+    // An engine with several realms puts a session in none until it is placed (12-realms § 1.2): these World sessions enter realm 0.
+    private static SessionId OpenInRealm0(FrameHarness harness)
+    {
+        var session = harness.OpenSessions(1, Profile)[0];
+        Assert.That(harness.Subscriptions.Commands.Enter(session, RealmId.Default), Is.True);
+        return session;
+    }
+
     private static void Run(FrameHarness harness, SessionId session, int ticks)
     {
         for (var i = 0; i < ticks; i++)
@@ -143,7 +151,7 @@ unsafe class RealmReplicationTests : TestBase<RealmReplicationTests>
     {
         using var dbe = SetupEngine();
         using var harness = CreateHarness(dbe);
-        var session = harness.OpenSessions(1, Profile)[0];
+        var session = OpenInRealm0(harness);
 
         // Same local coordinates in both realms: geometry cannot hide a leak.
         var inZero = Spawn(dbe, 0, 3);
@@ -170,7 +178,7 @@ unsafe class RealmReplicationTests : TestBase<RealmReplicationTests>
     {
         using var dbe = SetupEngine();
         using var harness = CreateHarness(dbe);
-        var session = harness.OpenSessions(1, Profile)[0];
+        var session = OpenInRealm0(harness);
         var ids = Spawn(dbe, 0, 3);
         Run(harness, session, 4);
         Assert.That(Held(harness, session), Is.EqualTo(3));
@@ -208,7 +216,7 @@ unsafe class RealmReplicationTests : TestBase<RealmReplicationTests>
     {
         using var dbe = SetupEngine();
         using var harness = CreateHarness(dbe);
-        var session = harness.OpenSessions(1, Profile)[0];
+        var session = OpenInRealm0(harness);
 
         Spawn(dbe, 0, 2);
         harness.RunTick(1);
@@ -235,7 +243,7 @@ unsafe class RealmReplicationTests : TestBase<RealmReplicationTests>
         using var harness = CreateHarness(dbe);
         var hub = harness.Subscriptions.Hub;
         hub.ValidateClustersPerTick = 64;
-        var session = harness.OpenSessions(1, Profile)[0];
+        var session = OpenInRealm0(harness);
 
         // Only realm 1 — not served — has clusters: a validator walking them would count slots it can never push, and forgotten pushes it never saw.
         Spawn(dbe, 1, 3);

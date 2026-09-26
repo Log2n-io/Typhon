@@ -185,18 +185,14 @@ internal static unsafe class EntitiesEncoder
     /// <summary>The largest <c>varu</c> a netId gap can spend.</summary>
     public const int MaxGapBytes = 5;
 
-    /// <summary>Writes the frame header.</summary>
-    /// <param name="w">The writer.</param>
-    /// <param name="tick">The frame's tick, truncated to the wire's <c>u32</c>.</param>
-    /// <param name="flags">The frame's flags.</param>
-    /// <param name="realm">
-    /// The session's realm frame: a <c>RESET</c> frame carries it as its first block (<c>typhon.3</c>, 12-realms § 5.2) — every reset, so a client that lost
-    /// its store also re-learns its frame. <see langword="null"/> writes none, which only a runtime without a spatial grid does.
-    /// </param>
-    public static void WriteHeader(ref WireWriter w, uint tick, TickFlags flags, RealmFrame realm = null)
+    /// <summary>
+    /// Writes a <c>TICK</c> header, and — on a <c>RESET</c> with <paramref name="realmBlock"/> — the session's <c>REALM</c> as its first block (typhon.3): its
+    /// frame, or <c>REALM(NONE)</c> when <paramref name="realm"/> is <see langword="null"/>.
+    /// </summary>
+    public static void WriteHeader(ref WireWriter w, uint tick, TickFlags flags, bool realmBlock = false, RealmFrame realm = null)
     {
         TickWriter.WriteHeader(ref w, tick, flags);
-        if ((flags & TickFlags.Reset) != 0 && realm != null)
+        if ((flags & TickFlags.Reset) != 0 && realmBlock)
         {
             TickWriter.WriteRealm(ref w, realm);
         }

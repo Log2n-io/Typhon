@@ -257,6 +257,10 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _frames.Ingress = _ingress;
             _ingress.Frames = _frames;
             _ingress.Realm = Realm0Frame;
+            _ingress.Realms = engine.RealmTable;
+            _ingress.Profiles = Profiles;
+            _ingress.MultiRealm = engine.ConfiguredMaxRealms > 1;
+            _frames.MultiRealm = _ingress.MultiRealm;
             _ingress.ReplicationStates = _replicationStates;
 
             // netId → entity for a command's entity references (SUB-26): the projection binds each identity it assigns, and every release unbinds it.
@@ -532,9 +536,15 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     public RealmFrame Realm0Frame { get; }
 
     /// <summary>Realm 0's frame: its grid's bounds, the replication cell, the default width, flat when the replication grid is one cell deep.</summary>
-    internal static RealmFrame BuildRealm0Frame(DatabaseEngine engine, SubscriptionsOptions options)
+    internal static RealmFrame BuildRealm0Frame(DatabaseEngine engine, SubscriptionsOptions options) => BuildRealmFrame(engine, options, RealmId.Default.Value);
+
+    /// <summary>
+    /// The frame a <c>REALM</c> block carries for <paramref name="realm"/>: its grid's bounds, the replication cell and the default position width. Every
+    /// realm takes <see cref="SubscriptionsOptions.ReplicationCellM"/> until realms declare their own replication (R4.3b).
+    /// </summary>
+    internal static RealmFrame BuildRealmFrame(DatabaseEngine engine, SubscriptionsOptions options, ushort realm)
     {
-        var spatial = engine.Realm0Grid;
+        var spatial = realm == RealmId.Default.Value ? engine.Realm0Grid : engine.RealmTable?.TryGet(realm)?.Grid;
         if (spatial == null)
         {
             return null;
@@ -542,10 +552,10 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
         ref readonly var config = ref spatial.Config;
         var cellM = options.ReplicationCellM > 0 ? options.ReplicationCellM : config.CellSize;
-        var generation = engine.PersistedRealmCatalog != null && engine.PersistedRealmCatalog.TryGetValue(RealmId.Default.Value, out var row)
+        var generation = engine.PersistedRealmCatalog != null && engine.PersistedRealmCatalog.TryGetValue(realm, out var row)
             ? (ushort)row.Row.Generation
             : (ushort)0;
-        return new RealmFrame(RealmId.Default.Value, generation, kindIdx: 0, appTag: 0, Codec.DefaultPositionBits, cellM,
+        return new RealmFrame(realm, generation, kindIdx: 0, appTag: 0, Codec.DefaultPositionBits, cellM,
             deep: !ReplicationGrid.IsFlat(config, cellM), [config.WorldMin.X, config.WorldMin.Y, config.WorldMin.Z],
             [config.WorldMax.X, config.WorldMax.Y, config.WorldMax.Z]);
     }

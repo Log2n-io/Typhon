@@ -60,6 +60,9 @@ internal sealed unsafe partial class FrameAssembler
     private bool[] _pushWorld = [];
     private bool[] _pushRegion = [];
     private int[] _pushDivisor = [];
+
+    // Per push session this tick: the replication of its realm (R4.3).
+    private PushReplication[] _pushReplication = [];
     private int _pushSessionCount;
     private int _pushCursor;
 
@@ -67,7 +70,6 @@ internal sealed unsafe partial class FrameAssembler
     private SessionId[] _eventSessions = [];
     private int _eventSessionCount;
     private int _eventCursor;
-    private readonly uint[] _eventsLastTick = [];
 
     // Aggregates (09 § 8), by slot, committed with the frame: the tick of the session's last AGG, the anchor it was centred on, and the generation they
     // belong to (0: none sent yet, so the next is a RESET).
@@ -82,7 +84,6 @@ internal sealed unsafe partial class FrameAssembler
     // A ClientRegion session's aggregate region at its last AGG, sorted (09 § 8): its hull less what its near tier held.
     private readonly uint[][] _aggRegion = [];
     private readonly int[] _aggRegionCount = [];
-    private readonly ushort[] _eventsLastGeneration = [];
 
     /// <summary>Serial: collects this tick's push sessions and their viewpoints, prepares their rows, and indexes the push events.</summary>
     private void BeginPushTick()
@@ -106,27 +107,67 @@ internal sealed unsafe partial class FrameAssembler
         var overload = multiplier > 1 ? 1 : 0;
         Push.OverloadStep = overload;
         var n = 0;
+        var tick = (uint)_tick;
+        var hub = Push.Hub;
+        NoteRealmMoves();
         foreach (var session in _sessions)
         {
-            if (!Profiles.TryGetProfile(session, out var profile, out var world, out var divisor))
+            var hasProfile = Profiles.TryGetProfile(session, out var profile, out var world, out var divisor);
+
+            // The session's realm this tick (R4.3, 12-realms § 1.3): its followed entity's for Bind and AroundControlled — after this tick's fence, so a
+            // teleport moves its sessions in the same tick — realm 0 for At, and otherwise where the application placed it.
+            var source = hasProfile ? Profiles.SourceOf(profile) : ViewpointSource.Placed;
+            var follow = EntityId.Null;
+            int realm;
+            switch (source)
             {
-                // No profile, no view: but a broadcast or an EmitTo still reaches it (09 § 11), and so do its SELF and its acknowledgements (11 § 2), in
-                // a frame of those alone.
+                case ViewpointSource.Fixed:
+                    realm = RealmId.Default.Value;
+                    break;
+                case ViewpointSource.Bound:
+                    follow = Profiles.BoundEntityOf(profile);
+                    realm = AnchorRealm(session, follow, _anyRealmMoves);
+                    break;
+                case ViewpointSource.Controlled:
+                    follow = _sessions.ControlledOf(session);
+                    realm = AnchorRealm(session, follow, _anyRealmMoves && Self == null);
+                    break;
+                default:
+                    realm = PlacedRealm(session);
+                    break;
+            }
+
+            PrepareSession(session);
+            var state = StateOf(session);
+            PushReplication replication = null;
+            if (hasProfile && realm != RealmId.NoneValue)
+            {
+                // Its realm-local slot and link state. A new slot while the client still holds frames: what it holds is another realm's, or this realm's
+                // from before the slot went back — only a RESET says what it holds now (SUB-29).
+                replication = hub.Place(session, (ushort)realm, tick, out var joined);
+                if (joined && state != null && state.FramesProduced > 0)
+                {
+                    state.PendingReset = true;
+                }
+            }
+            else
+            {
+                hub.Leave(session.Slot);
+            }
+
+            NoteRealm(session, state, realm);
+            if (replication == null)
+            {
+                // No profile, no realm or one replication does not serve: no view. A broadcast or an EmitTo still reaches it (09 § 11), and so do its SELF
+                // and its acknowledgements (11 § 2), in a frame of those alone — which carries its REALM on a switch.
                 if (_eventSessionCount == _eventSessions.Length)
                 {
                     Array.Resize(ref _eventSessions, Math.Max(16, _eventSessionCount * 2));
                 }
 
                 _eventSessions[_eventSessionCount++] = session;
-                PrepareSession(session);
-
-                // No view, so no realm-local geometry: a slot it held (a profile it had) goes back.
-                Push.Hub.Leave(session.Slot);
                 continue;
             }
-
-            // Its realm-local slot and link state (R4.3): every push session is in realm 0 until sessions are placed in realms.
-            Push.Hub.Place(session, RealmId.Default.Value, (uint)_tick);
 
             divisor = Math.Min(divisor << overload, 4);
 
@@ -142,26 +183,24 @@ internal sealed unsafe partial class FrameAssembler
                 Array.Resize(ref _pushWorld, grown);
                 Array.Resize(ref _pushRegion, grown);
                 Array.Resize(ref _pushDivisor, grown);
+                Array.Resize(ref _pushReplication, grown);
             }
 
             _pushWorld[n] = world;
             _pushRegion[n] = Profiles.RegionOf(profile);
             _pushDivisor[n] = divisor;
-            _pushFollow[n] = EntityId.Null;
-            switch (Profiles.SourceOf(profile))
+            _pushFollow[n] = follow;
+            _pushReplication[n] = replication;
+            switch (source)
             {
                 case ViewpointSource.Fixed:
                     _pushPlaced[n] = true;
                     _pushViewpoints[n] = Profiles.PlacementOf(profile);
                     break;
                 case ViewpointSource.Bound:
-                    _pushPlaced[n] = false;
-                    _pushFollow[n] = Profiles.BoundEntityOf(profile);
-                    break;
                 case ViewpointSource.Controlled:
-                    // A session that controls nothing yet is nowhere, as an unplaced one is.
+                    // Placed once its entity is read, in the session's chunk; a session that follows nothing yet is nowhere, as an unplaced one is.
                     _pushPlaced[n] = false;
-                    _pushFollow[n] = _sessions.ControlledOf(session);
                     break;
                 default:
                     _pushPlaced[n] = _sessions.TryGetViewpoint(session, out var viewpoint);
@@ -175,19 +214,18 @@ internal sealed unsafe partial class FrameAssembler
             var radius = _sessions.Radius(session);
             _pushRadius[n] = radius > 0 ? radius : Profiles.RadiusOf(profile);
             _pushSessions[n++] = session;
-            PrepareSession(session);
             // Only a World session served this tick can fill: a rate class skips the others (the check the frame stage repeats below).
             if (world && (divisor <= 1 || ((_tick + session.Slot) % (uint)divisor) == 0))
             {
-                var sessionState = StateOf(session);
-                Push.NoteWorldSession(session, sessionState != null && sessionState.PendingReset);
+                replication.NoteWorldSession(session, state != null && state.PendingReset);
             }
         }
 
         _pushSessionCount = n;
 
-        // Slots of sessions that closed or lost their profile since the last sweep go back.
-        Push.Hub.SweepUnplaced((uint)_tick);
+        // Slots of sessions that closed or lost their profile since the last sweep go back, and so do their realm observations.
+        hub.SweepUnplaced(tick);
+        SweepObservers(tick);
 
         // Every tick the track runs is indexed, sessions bound or not: the index is the tick's log slot, and its cell changes are the occupancy's only
         // input (SUB-24). A tick left unindexed would leave the occupancy short of its spawns and crossings.
@@ -322,7 +360,7 @@ internal sealed unsafe partial class FrameAssembler
                 if (published >= 0 && !_pushWorld[i] && !_pushRegion[i])
                 {
                     var session = _pushSessions[i];
-                    Push.Pace(session, published, _sessions.BudgetOf(session), Volatile.Read(ref _tickSeconds));
+                    _pushReplication[i].Pace(session, published, _sessions.BudgetOf(session), Volatile.Read(ref _tickSeconds));
                 }
             }
         }
@@ -361,6 +399,268 @@ internal sealed unsafe partial class FrameAssembler
         Interlocked.Add(ref Push.Enters, enters);
         Interlocked.Add(ref Push.Leaves, leaves);
         Interlocked.Add(ref Push.Updates, updates);
+    }
+
+    // ══ Sessions in realms (R4.3, 12-realms § 1) ══════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>The engine holds more than one realm: a session is then in none until placed, entered or anchored (12-realms § 1.2).</summary>
+    internal bool MultiRealm;
+
+    // Per session slot: the entity a Bind or AroundControlled session followed at its last placement, the realm that entity was in, and for which session
+    // generation — the anchor's realm, kept in step by the fence's realm moves rather than read per session per tick.
+    private EntityId[] _anchorEntity = [];
+    private int[] _anchorRealm = [];
+    private ushort[] _anchorGeneration = [];
+
+    // This tick: the fence moved some entity across realms; and every anchor must be read again (the first tick, or one after a tick the track missed).
+    private bool _anyRealmMoves;
+    private bool _anchorsStale;
+    private long _realmTick;
+
+    // Per session slot: the realm the session observes for the realm policy (RLM-03), for which generation, and the last tick it was seen doing so.
+    private int[] _observedRealm = [];
+    private ushort[] _observedGeneration = [];
+    private uint[] _observedSeen = [];
+
+    // Realm frames by realm id, built once per registered realm (the Realm object is the identity: an id reused after an Unregister is a new frame).
+    private RealmFrame[] _realmFrames = [];
+    private object[] _realmFrameOwners = [];
+
+    private void EnsureRealmSlots()
+    {
+        if (_anchorEntity.Length == _states.Length)
+        {
+            return;
+        }
+
+        var n = _states.Length;
+        _anchorEntity = new EntityId[n];
+        _anchorRealm = new int[n];
+        _anchorGeneration = new ushort[n];
+        _observedRealm = new int[n];
+        _observedGeneration = new ushort[n];
+        _observedSeen = new uint[n];
+        Array.Fill(_observedRealm, -1);
+    }
+
+    /// <summary>The realm the application placed a session in; unplaced, realm 0 on an engine with one realm and none on one with several.</summary>
+    private int PlacedRealm(SessionId session)
+    {
+        var realm = _sessions.RealmOf(session);
+        return realm >= 0 ? realm : MultiRealm ? RealmId.NoneValue : RealmId.Default.Value;
+    }
+
+    /// <summary>
+    /// The fence's realm moves this tick (C4): a controlled entity that crossed takes its sessions along in this tick — one pass over the moves, through the
+    /// Control map, never over the sessions. A tick the track did not run for lost its moves, so every anchor is read again.
+    /// </summary>
+    private void NoteRealmMoves()
+    {
+        EnsureRealmSlots();
+        _anchorsStale = _realmTick == 0 || _tick != _realmTick + 1;
+        _realmTick = _tick;
+        _anyRealmMoves = false;
+        var states = MultiRealm ? Engine?._stateByRouting : null;
+        if (states == null)
+        {
+            return;
+        }
+
+        foreach (var engineState in states)
+        {
+            var clusters = engineState?.ClusterState;
+            if (clusters == null || clusters.LastTickRealmChanges == 0)
+            {
+                continue;
+            }
+
+            _anyRealmMoves = true;
+            foreach (var move in clusters.LastFenceRealmChanges)
+            {
+                var raw = (ulong)move.EntityId;
+                for (var slot = Self?.FirstControlling(raw) ?? -1; slot >= 0; slot = Self.NextControlling(slot))
+                {
+                    if (_anchorEntity[slot].RawValue == raw)
+                    {
+                        _anchorRealm[slot] = move.ToRealm;
+                    }
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The realm of the entity a session follows: read when the session, its entity or <paramref name="stale"/> says so, kept in step by
+    /// <see cref="NoteRealmMoves"/> otherwise. An entity never read is nowhere; one that is gone leaves the session in its last realm (09 § 6).
+    /// </summary>
+    private int AnchorRealm(SessionId session, EntityId entity, bool stale)
+    {
+        if (!MultiRealm)
+        {
+            return RealmId.Default.Value;
+        }
+
+        var slot = session.Slot;
+        var fresh = _anchorGeneration[slot] != session.Generation || _anchorEntity[slot] != entity;
+        if (fresh || stale || _anchorsStale)
+        {
+            var found = entity.IsNull ? -1 : ProbeRealm(entity);
+            if (found >= 0)
+            {
+                _anchorRealm[slot] = found;
+            }
+            else if (fresh)
+            {
+                _anchorRealm[slot] = RealmId.NoneValue;
+            }
+
+            _anchorGeneration[slot] = session.Generation;
+            _anchorEntity[slot] = entity;
+        }
+
+        return _anchorRealm[slot];
+    }
+
+    // One EntityMap probe: a session's entity changed, or the anchors are stale. Rare by construction, so the reader is made per probe.
+    private int ProbeRealm(EntityId entity)
+    {
+        using var epoch = EpochGuard.Enter(Engine.EpochManager);
+        var probe = new BoundViewpoint(Engine);
+        try
+        {
+            return probe.TryRealm(entity, out var realm) ? realm : -1;
+        }
+        finally
+        {
+            probe.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The session's realm this tick, and what its next frame says about it: a switch away from a realm its client holds entities of forces a RESET now
+    /// (SUB-29); one from nothing rides the first frame that has something to say. The session observes its realm for the realm policy.
+    /// </summary>
+    private void NoteRealm(SessionId session, SessionFrameState state, int realm)
+    {
+        if (state == null || Realm == null)
+        {
+            return;
+        }
+
+        state.PendingRealm = realm;
+        state.PendingFrame = FrameOf(realm);
+        var held = state.CommittedRealm;
+        if (realm != held && held >= 0 && held != RealmId.NoneValue)
+        {
+            state.PendingReset = true;
+        }
+
+        Observe(session, realm);
+    }
+
+    /// <summary>A published <c>RESET</c> carried the session's pending realm: it is what its client holds now.</summary>
+    private void CommitRealm(SessionFrameState state)
+    {
+        if (Realm == null)
+        {
+            return;
+        }
+
+        if (state.CommittedRealm != state.PendingRealm)
+        {
+            state.PreviousRealm = state.CommittedRealm;
+            state.RealmSwitchTick = (uint)_tick;
+        }
+
+        state.CommittedRealm = state.PendingRealm;
+    }
+
+    /// <summary>The <c>REALM</c> block's frame for <paramref name="realm"/>; <see langword="null"/> for none, which the block writes as <c>REALM(NONE)</c>.</summary>
+    private RealmFrame FrameOf(int realm)
+    {
+        if (realm < 0 || realm == RealmId.NoneValue)
+        {
+            return null;
+        }
+
+        if (realm == RealmId.Default.Value || !MultiRealm)
+        {
+            return Realm;
+        }
+
+        var owner = Engine?.RealmTable?.TryGet((ushort)realm);
+        if (realm >= _realmFrames.Length)
+        {
+            Array.Resize(ref _realmFrames, Math.Max(realm + 1, _realmFrames.Length * 2));
+            Array.Resize(ref _realmFrameOwners, _realmFrames.Length);
+        }
+
+        if (!ReferenceEquals(_realmFrameOwners[realm], owner) || _realmFrames[realm] == null)
+        {
+            _realmFrames[realm] = owner == null ? null : SubscriptionsRuntime.BuildRealmFrame(Engine, _options, (ushort)realm);
+            _realmFrameOwners[realm] = owner;
+        }
+
+        return _realmFrames[realm];
+    }
+
+    // A session observes the realm it is in (RLM-03): the realm policy keeps an observed realm active. Counted once per session, moved with it.
+    private void Observe(SessionId session, int realm)
+    {
+        var table = MultiRealm ? Engine?.RealmTable : null;
+        if (table == null)
+        {
+            return;
+        }
+
+        var slot = session.Slot;
+        if (_observedGeneration[slot] != session.Generation)
+        {
+            Unobserve(table, slot);
+            _observedGeneration[slot] = session.Generation;
+        }
+
+        _observedSeen[slot] = (uint)_tick;
+        var target = realm == RealmId.NoneValue || !table.IsRegistered((ushort)realm) ? -1 : realm;
+        if (target == _observedRealm[slot])
+        {
+            return;
+        }
+
+        Unobserve(table, slot);
+        if (target >= 0)
+        {
+            table.AddObserver((ushort)target);
+            _observedRealm[slot] = target;
+        }
+    }
+
+    private void Unobserve(RealmTable table, int slot)
+    {
+        var observed = _observedRealm[slot];
+        _observedRealm[slot] = -1;
+        if (observed >= 0 && table.IsRegistered((ushort)observed))
+        {
+            table.RemoveObserver((ushort)observed);
+        }
+    }
+
+    // Every 64 ticks: a session no longer seen (closed) stops observing. Serial, after the tick's sessions.
+    private void SweepObservers(uint tick)
+    {
+        var table = MultiRealm ? Engine?.RealmTable : null;
+        if (table == null || tick % 64 != 0)
+        {
+            return;
+        }
+
+        for (var slot = 0; slot < _observedRealm.Length; slot++)
+        {
+            if (_observedRealm[slot] >= 0 && _observedSeen[slot] != tick)
+            {
+                Unobserve(table, slot);
+            }
+        }
     }
 
     /// <summary>
@@ -420,7 +720,7 @@ internal sealed unsafe partial class FrameAssembler
     {
         var state = StateOf(session);
         var slot = session.Slot;
-        if (state == null || state.Generation != session.Generation || (uint)slot >= (uint)_eventsLastTick.Length)
+        if (state == null || state.Generation != session.Generation || (uint)slot >= (uint)_states.Length)
         {
             return;
         }
@@ -431,9 +731,8 @@ internal sealed unsafe partial class FrameAssembler
         var lost = 0L;
         if (events != null)
         {
-            var last = _eventsLastGeneration[slot] == session.Generation ? _eventsLastTick[slot] : 0u;
             var nowhere = default(NoEventGeometry);
-            events.Collect(scratch.EventPicks, last, (uint)_tick, EntityId.Null, session, ref nowhere, out count, out bytes, out lost);
+            events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, EntityId.Null, session, ref nowhere, out count, out bytes, out lost);
             if (bytes > _maxFrameBytes / 2)
             {
                 EventHub.Shed(scratch.EventPicks, ref count, ref bytes, ref lost);
@@ -442,13 +741,13 @@ internal sealed unsafe partial class FrameAssembler
 
         var reset = state.PendingReset;
 
-        // A session's first published frame is a RESET carrying its REALM (typhon.3) — decided before SELF, which sends every owner group on a RESET.
-        var first = !state.RealmSent && Realm != null;
+        // A session's first published frame in a realm — its first, or after a switch — is a RESET carrying its REALM (typhon.3, SUB-29): decided before
+        // SELF, which sends every owner group on a RESET.
+        var first = Realm != null && state.PendingRealm != state.CommittedRealm;
         PrepareSelf(session, state, reset || first, scratch, ref locator, out var self);
         if (count == 0 && !reset && !self.Write && self.Acks == 0)
         {
-            _eventsLastTick[slot] = (uint)_tick;
-            _eventsLastGeneration[slot] = session.Generation;
+            state.EventsCursor = (uint)_tick;
             CommitSelf(session, state, in self, -1, ref counters);
             return;
         }
@@ -467,7 +766,7 @@ internal sealed unsafe partial class FrameAssembler
 
         var buffer = scratch.Bytes(64 + RealmBlockBound + bytes + SelfBound(in self));
         var writer = new WireWriter(buffer);
-        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, reset ? TickFlags.Reset : TickFlags.None, Realm);
+        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, reset ? TickFlags.Reset : TickFlags.None, Realm != null, state.PendingFrame);
         WriteSelf(ref writer, in self, scratch);
         if (count > 0)
         {
@@ -489,10 +788,13 @@ internal sealed unsafe partial class FrameAssembler
         send->PublishFrame(sequence, block, length, _tick);
         events?.NoteDelivered(count, lost);
         CommitSelf(session, state, in self, -1, ref counters);
-        _eventsLastTick[slot] = (uint)_tick;
-        _eventsLastGeneration[slot] = session.Generation;
+        state.EventsCursor = (uint)_tick;
         state.PendingReset = false;
-        state.RealmSent |= reset;
+        if (reset)
+        {
+            CommitRealm(state);
+        }
+
         state.BytesPublished += length;
         state.FramesProduced++;
         state.FramesSinceDegrade++;
@@ -603,7 +905,8 @@ internal sealed unsafe partial class FrameAssembler
     /// A ClientRegion session's <c>AGG</c> rows (09 § 8): the tiles of its aggregate region — its hull less the cells its near tier delivered — that changed
     /// since its last AGG or that the region did not cover then; every non-empty one on a reset. The region's tiles are kept, sorted, for the next AGG.
     /// </summary>
-    private int SelectRegionAggregateRows(SessionId session, AggregateCounts counts, FrameWorkerScratch scratch, bool reset, uint last)
+    private int SelectRegionAggregateRows(PushReplication push, SessionId session, AggregateCounts counts, FrameWorkerScratch scratch, bool reset,
+        uint last)
     {
         var slot = session.Slot;
         var previous = reset || _aggRegion[slot] == null ? [] : new ReadOnlySpan<uint>(_aggRegion[slot], 0, _aggRegionCount[slot]);
@@ -613,7 +916,7 @@ internal sealed unsafe partial class FrameAssembler
         for (var r = 0; r < counts.Rows; r++)
         {
             var tile = counts.Tiles[r];
-            if (!Push.RegionAggregates(session, counts, tile))
+            if (!push.RegionAggregates(session, counts, tile))
             {
                 continue;
             }
@@ -697,6 +1000,9 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
+        // The replication of the session's realm: its geometry, its aggregates and its grid (R4.3).
+        var push = _pushReplication[index];
+
         // A rate class: not this session's tick. Not a skip — nothing was refused — and the log carries the union on its next one. Staggered by slot so a
         // profile's sessions do not all land on the same tick.
         var divisor = _pushDivisor[index];
@@ -709,7 +1015,7 @@ internal sealed unsafe partial class FrameAssembler
         if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick))
         {
             NoteSkip(state);
-            Push.NoteNotPublished(session);
+            push.NoteNotPublished(session);
             return;
         }
 
@@ -717,14 +1023,14 @@ internal sealed unsafe partial class FrameAssembler
         {
             send->NoteSkipped();
             NoteSkip(state);
-            Push.NoteNotPublished(session);
+            push.NoteNotPublished(session);
             return;
         }
 
         if (!send->TryBeginFrame(out var sequence, out var recycled))
         {
             NoteSkip(state);
-            Push.NoteNotPublished(session);
+            push.NoteNotPublished(session);
             return;
         }
 
@@ -746,17 +1052,17 @@ internal sealed unsafe partial class FrameAssembler
             var hasRegion = row is { HasRegion: true };
             var profile = _pushProfiles[index];
             var (nearBudget, nearCounts) = Profiles.NearOf(profile);
-            reset = Push.GatherRegion(session, hasRegion, in hasRegion ? ref row.Region : ref NoRegion, Profiles.MaxEdgeOf(profile), nearBudget, nearCounts,
+            reset = push.GatherRegion(session, hasRegion, in hasRegion ? ref row.Region : ref NoRegion, Profiles.MaxEdgeOf(profile), nearBudget, nearCounts,
                 Volatile.Read(ref _tickSeconds), state.PendingReset, in Profiles.SetOf(profile), scratch, EnterBudget(0), ref enters, ref leaves,
                 ref updates, out complete);
         }
         else
         {
             reset = _pushWorld[index]
-                ? Push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, EnterBudget(0), ref enters, ref leaves,
+                ? push.GatherWorld(session, state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, EnterBudget(0), ref enters, ref leaves,
                     ref updates, out complete)
-                : Push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], Profiles.BandsOf(_pushProfiles[index]),
-                    state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, _encodePlans, EnterBudget(Push.TargetLevelOf(session)), ref enters,
+                : push.Gather(session, _pushPlaced[index], _pushViewpoints[index], _pushRadius[index], Profiles.BandsOf(_pushProfiles[index]),
+                    state.PendingReset, in Profiles.SetOf(_pushProfiles[index]), scratch, _encodePlans, EnterBudget(push.TargetLevelOf(session)), ref enters,
                     ref leaves, ref updates, out complete);
         }
 
@@ -771,7 +1077,7 @@ internal sealed unsafe partial class FrameAssembler
         if (reset)
         {
             flags |= TickFlags.Reset;
-            Interlocked.Increment(ref Push.Resets);
+            Interlocked.Increment(ref push.Resets);
         }
 
         if (complete)
@@ -794,8 +1100,8 @@ internal sealed unsafe partial class FrameAssembler
         var eventsLost = 0L;
         if (events != null)
         {
-            var geometry = new SessionEventGeometry(Push, session, _pushWorld[index]);
-            events.Collect(scratch.EventPicks, Push.LastTickOf(session), (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, out eventCount,
+            var geometry = new SessionEventGeometry(push, session, _pushWorld[index]);
+            events.Collect(scratch.EventPicks, state.EventsCursor, (uint)_tick, _sessions.ControlledOf(session), session, ref geometry, out eventCount,
                 out eventBytes, out eventsLost);
 
             // Events take at most half a frame: past it they are counted, not sent, so a burst cannot make every frame oversize and starve the session.
@@ -815,15 +1121,15 @@ internal sealed unsafe partial class FrameAssembler
         AggregateCounts aggCounts = null;
         if (aggGrid >= 0 && (uint)session.Slot < (uint)_aggLastTick.Length)
         {
-            aggCounts = Push.Aggregates[aggGrid];
+            aggCounts = push.Aggregates[aggGrid];
             var sent = _aggGeneration[session.Slot] == session.Generation;
             aggDue = !sent || reset || ((_tick + session.Slot) % aggPeriod) == 0;
             if (aggDue)
             {
                 aggReset = !sent || reset;
-                aggAnchor = aggRadius > 0 ? Push.PendingAnchorOf(session) : default;
+                aggAnchor = aggRadius > 0 ? push.PendingAnchorOf(session) : default;
                 aggRows = _pushRegion[index]
-                    ? SelectRegionAggregateRows(session, aggCounts, scratch, aggReset, sent ? _aggLastTick[session.Slot] : 0u)
+                    ? SelectRegionAggregateRows(push, session, aggCounts, scratch, aggReset, sent ? _aggLastTick[session.Slot] : 0u)
                     : SelectAggregateRows(aggCounts, scratch, aggReset, sent ? _aggLastTick[session.Slot] : 0u, aggRadius, aggAnchor,
                         _aggAnchor[session.Slot]);
             }
@@ -843,7 +1149,7 @@ internal sealed unsafe partial class FrameAssembler
         {
             var profile = _pushProfiles[index];
             var shape = _pushRegion[index] ? PushShape.Region : _pushWorld[index] ? PushShape.World : PushShape.Sphere;
-            debugGeometry = Push.WriteDebugGeometry(session, shape, Profiles.SlackOf(profile), Profiles.NearOf(profile).Budget, complete,
+            debugGeometry = push.WriteDebugGeometry(session, shape, Profiles.SlackOf(profile), Profiles.NearOf(profile).Budget, complete,
                 scratch.DebugGeometry);
             var hash = CanonicalHashBuilder.Create();
             hash.AddBytes(scratch.DebugGeometry.AsSpan(0, debugGeometry));
@@ -859,7 +1165,7 @@ internal sealed unsafe partial class FrameAssembler
 
         // SELF and ACKS (11 § 2): the controlled entity's owner groups changed since the last published frame, lastSeq, and the rejections since then.
         // The first-frame RESET (below) decided before SELF, which sends every owner group on a RESET.
-        var first = !reset && !state.RealmSent && Realm != null;
+        var first = !reset && Realm != null && state.PendingRealm != state.CommittedRealm;
         PrepareSelf(session, state, reset || first, scratch, ref follow, out var self);
         if (records == 0 && eventCount == 0 && !aggWrite && !reset && !emitStats && !newlyComplete && !debugWrite && !self.Write && self.Acks == 0)
         {
@@ -868,7 +1174,8 @@ internal sealed unsafe partial class FrameAssembler
             send->AbandonIdleFrame(sequence);
             ReturnIfValid(recycled);
             NoteSkip(state, counted: false);
-            Push.Commit(session);
+            push.Commit(session);
+            state.EventsCursor = (uint)_tick;
             CommitSelf(session, state, in self, _pushProfiles[index], ref counters);
             if (aggDue)
             {
@@ -893,7 +1200,7 @@ internal sealed unsafe partial class FrameAssembler
             + SelfBound(in self) + RealmBlockBound;
         var buffer = scratch.Bytes(bound);
         var writer = new WireWriter(buffer);
-        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags, Realm);
+        EntitiesEncoder.WriteHeader(ref writer, (uint)_tick, flags, Realm != null, state.PendingFrame);
         for (var a = 0; a < _plans.Length; a++)
         {
             if (scratch.Count(a, FrameListKind.Enter) == 0 && scratch.Count(a, FrameListKind.Segment) == 0 && scratch.Count(a, FrameListKind.State) == 0
@@ -924,7 +1231,7 @@ internal sealed unsafe partial class FrameAssembler
 
         if (debugWrite)
         {
-            WriteDebug(ref writer, debugGrid, scratch.DebugGeometry.AsSpan(0, debugGeometry));
+            WriteDebug(ref writer, push, debugGrid, scratch.DebugGeometry.AsSpan(0, debugGeometry));
         }
 
         var length = writer.Position;
@@ -941,7 +1248,7 @@ internal sealed unsafe partial class FrameAssembler
             send->AbandonFrame(sequence);
             ReturnIfValid(recycled);
             NoteSkip(state);
-            Push.NoteNotPublished(session);
+            push.NoteNotPublished(session);
             return;
         }
 
@@ -951,7 +1258,7 @@ internal sealed unsafe partial class FrameAssembler
             ReturnIfValid(block);
             send->AbandonFrame(sequence);
             NoteSkip(state);
-            Push.NoteNotPublished(session);
+            push.NoteNotPublished(session);
             return;
         }
 
@@ -965,16 +1272,17 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         // COMMIT — the anchor and the delivered cells move with the frame that describes them, and so do the owner state and the acknowledgements.
-        Push.Commit(session);
+        push.Commit(session);
+        state.EventsCursor = (uint)_tick;
         CommitSelf(session, state, in self, _pushProfiles[index], ref counters);
         if (aggDue)
         {
             CommitAggregate(session, aggAnchor, _pushRegion[index] ? scratch : null);
         }
 
-        if (Push.Shadow)
+        if (push.Shadow)
         {
-            Push.ShadowApply(session, scratch, _plans.Length, reset);
+            push.ShadowApply(session, scratch, _plans.Length, reset);
         }
         if (newlyComplete)
         {
@@ -1006,7 +1314,11 @@ internal sealed unsafe partial class FrameAssembler
 
         state.BytesPublished += length;
         state.PendingReset = false;
-        state.RealmSent |= reset;
+        if (reset)
+        {
+            CommitRealm(state);
+        }
+
         state.FramesProduced++;
         state.FramesSinceDegrade++;
         scratch.AddReady(session);
@@ -1022,14 +1334,14 @@ internal sealed unsafe partial class FrameAssembler
     }
 
     /// <summary>Writes a <c>DEBUG</c> block (03 § 3, 09 § 15): the <c>GRID</c> sub-block when asked, then the <c>PUSH_GEOMETRY</c> payload when there is one.</summary>
-    private void WriteDebug(ref WireWriter w, bool grid, ReadOnlySpan<byte> geometry)
+    private static void WriteDebug(ref WireWriter w, PushReplication push, bool grid, ReadOnlySpan<byte> geometry)
     {
         var mark = TickWriter.BeginBlock(ref w, BlockTypes.Debug);
         if (grid)
         {
             Span<byte> payload = stackalloc byte[DebugGrid.MaxBytes];
             var g = new WireWriter(payload);
-            Push.DebugGrid.Write(ref g);
+            push.DebugGrid.Write(ref g);
             w.WriteU8(DebugSubTypes.Grid);
             w.WriteVaru((uint)g.Position);
             w.WriteBytes(g.Written);

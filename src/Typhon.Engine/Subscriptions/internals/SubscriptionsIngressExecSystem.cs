@@ -173,6 +173,15 @@ internal sealed class SubscriptionsIngress : IDisposable
     /// <summary>The frame assembler, for diagnostics only. Set by the runtime once both exist; nothing on the tick path reads it.</summary>
     internal FrameAssembler Frames;
 
+    /// <summary>The engine's realms, which <see cref="SubscriptionsCommands.Place(SessionId, RealmId, Vector3D)"/> checks a realm against; set at Start.</summary>
+    internal RealmTable Realms;
+
+    /// <summary>The compiled profiles, whose anchors decide who may move a session between realms; set at Start.</summary>
+    internal SubscriptionProfiles Profiles;
+
+    /// <summary>The engine is configured for more than one realm: a session is then in no realm until placed, entered or anchored (12-realms § 1.2).</summary>
+    internal bool MultiRealm;
+
     /// <summary>Bytes of a ring record before the command itself.</summary>
     internal const int RecordHeaderBytes = 8;
 

@@ -638,6 +638,25 @@
     SelfBlockTests.LastSeqAndRejectionsReachTheClient for the rate and application paths.
 
 
+### SUB-29: A session is in one realm at a time, and a realm switch is one published RESET|REALM frame `[fatal][silent]`
+  invariant realm(s) ∈ {None} ∪ RealmId is one value per tick: the application's (Place(realm, pos) / Enter / Leave), the followed entity's after this
+    tick's fence (Bind, AroundControlled — a teleport switches its sessions in the same tick), or realm 0 (At); a session nobody placed is in realm 0
+    on an engine with one realm and in none on an engine with several, where it holds nothing positioned
+  invariant s's committed realm changes only when a frame with RESET whose FIRST block is REALM(realm(s)) is published; a switch not published is
+    retried as a RESET until one is (SUB-03); a switch away from a realm the client holds entities of is sent at once, one from nothing rides the first
+    frame that has something to say
+  invariant across a switch the link state (budget level, radius shrink, rate), the events cursor, SELF's pending owner mask, the ack cursor and netIds
+    are preserved; the realm-local geometry is given back and taken anew, and a new realm-local slot under a client that holds frames is a RESET
+  invariant an entity-anchored session is never moved explicitly (Place(realm) / Enter / Leave throw); a realm-less Place on an engine with several
+    realms throws; a session observes its realm for the realm policy (RLM-03) while it is in it
+  scope: FrameAssembler.NoteRealm, FrameAssembler.CommitRealm, FrameAssembler.AnchorRealm, FrameAssembler.NoteRealmMoves, SessionFrameState.CommittedRealm,
+    PushHub.Place, SessionTable.SetRealm, SubscriptionsCommands.Enter, SubscriptionsCommands.Leave
+  on_violation: silent. A client applies records of one realm over another's store — entities of a world it is not in, at coordinates that mean
+    another place — or keeps a store the server believes cleared.
+  verified: RealmSessionTests.PlacingIntoAnotherRealmIsOneResetRealmFrame, RealmSessionTests.ASwitchAndBackRefillsFromAResetAndLeavingIsAResetRealmNone,
+    RealmSessionTests.ASkippedRealmSwitchIsRetriedAsAReset, RealmSessionTests.AControlledSessionFollowsItsEntityIntoAnotherRealmInTheSameTick
+    (unplaced sessions, the link state kept and realm observation: the fixture's other tests)
+
 ### SUB-30: A realm-framed value is encoded and decoded with exactly one realm's frame `[fatal][silent]`
   invariant a position (pos2/pos3: ENTITIES records, event and command fields, a region's vertices) and an AGG cell index are quantized over the
     frame of the realm they belong to — its bounds, its width (REALM.posBits), its replication cell — never over the catalog, which carries the

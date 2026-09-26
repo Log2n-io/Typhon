@@ -128,6 +128,20 @@ internal unsafe ref struct BoundViewpoint : IDisposable, IEventEntities
         return true;
     }
 
+    /// <summary>The realm a live entity is in — its cluster's (<c>ClusterRealmMap</c>), realm 0 on an engine with one realm.</summary>
+    public bool TryRealm(EntityId entity, out ushort realm)
+    {
+        realm = RealmId.NoneValue;
+        if (!TryLocate(entity, out var clusters, out var chunk, out _))
+        {
+            return false;
+        }
+
+        var map = System.Threading.Volatile.Read(ref clusters.ClusterRealmMap);
+        realm = map != null && (uint)chunk < (uint)map.Length ? map[chunk] : RealmId.Default.Value;
+        return true;
+    }
+
     /// <summary>The push replication an event's entity field is resolved against; set by the frame prologue.</summary>
     public PushReplication Push;
 

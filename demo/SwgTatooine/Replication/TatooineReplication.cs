@@ -176,6 +176,13 @@ public static class TatooineReplication
                 {
                     request.SetBudget(PlayerBudgetBytesPerSecond);
                 }
+
+                // A player's session is in its player's realm (AroundControlled). A god camera has no entity to follow: with several realms it is in none
+                // until placed, so it starts on planet 0 (12-realms § 1.3).
+                if (!player)
+                {
+                    subs.Enter(e.Session, RealmId.Default);
+                }
             }
         }
     }

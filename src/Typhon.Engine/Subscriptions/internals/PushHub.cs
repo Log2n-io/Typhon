@@ -197,8 +197,9 @@ internal sealed unsafe class PushHub
     /// and kept after (leaving any other realm's), and the session's link state, kept across realms. Returns the replication, or <see langword="null"/>
     /// when the realm is not served — the session then holds no realm's slot. Serial (the frame prologue).
     /// </summary>
-    internal PushReplication Place(SessionId session, ushort realm, uint tick)
+    internal PushReplication Place(SessionId session, ushort realm, uint tick, out bool joined)
     {
+        joined = false;
         var slot = session.Slot;
         ref var link = ref Links[slot];
         if (link.Generation != session.Generation)
@@ -223,6 +224,7 @@ internal sealed unsafe class PushHub
         }
 
         local = replication.Join(session);
+        joined = true;
         replication.Touch(local, tick);
         _placement[slot] = ((ulong)(uint)local << 32) | ((ulong)realm << 16) | session.Generation;
         return replication;

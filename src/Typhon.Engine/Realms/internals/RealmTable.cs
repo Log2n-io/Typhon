@@ -232,6 +232,9 @@ internal sealed class RealmTable
         Interlocked.Increment(ref _observers[id]);
     }
 
+    /// <summary>How many sessions and pins observe <paramref name="id"/> now.</summary>
+    internal int ObserverCount(ushort id) => Volatile.Read(ref _observers[id]);
+
     /// <summary>An observer of <paramref name="id"/> leaves. Any thread; takes effect at the next tick start.</summary>
     internal void RemoveObserver(ushort id)
     {

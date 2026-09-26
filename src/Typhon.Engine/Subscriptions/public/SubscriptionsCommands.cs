@@ -367,7 +367,108 @@ public sealed class SubscriptionsCommands
     /// silently giving everyone a sphere around it is worse than giving them nothing.
     /// </para>
     /// </remarks>
-    public bool Place(SessionId session, Vector3D position) => _ingress.Sessions.SetViewpoint(session, position);
+    /// <exception cref="InvalidOperationException">
+    /// The engine holds several realms and the session is in none: say which, with <see cref="Place(SessionId, RealmId, Vector3D)"/> (12-realms § 1.3).
+    /// </exception>
+    public bool Place(SessionId session, Vector3D position)
+    {
+        if (_ingress.MultiRealm && _ingress.Sessions.RealmOf(session) is < 0 or RealmId.NoneValue)
+        {
+            throw new InvalidOperationException(
+                $"{session} is in no realm, and this engine holds several: place it with Place(session, realm, position) (12-realms § 1.3).");
+        }
+
+        return _ingress.Sessions.SetViewpoint(session, position);
+    }
+
+    /// <summary>
+    /// Places a session in <paramref name="realm"/>, looking from <paramref name="position"/>, for THIS tick (R4.3, 12-realms § 2.2). A realm change is one
+    /// <c>RESET</c> frame carrying the new realm's <c>REALM</c> block, published this tick or retried until it is (SUB-29).
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="realm">A registered realm, not closing.</param>
+    /// <param name="position">Where it is looking from, in the realm's space.</param>
+    /// <returns><see langword="false"/> when the session is closing or gone.</returns>
+    /// <exception cref="ArgumentException">The realm is not registered, or is <see cref="RealmId.None"/> — use <see cref="Leave"/>.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The realm is closing, or the session's profile follows an entity — its realm is that entity's, and two writers of one field is a bug.
+    /// </exception>
+    public bool Place(SessionId session, RealmId realm, Vector3D position)
+    {
+        CheckRealmTarget(session, realm);
+        return _ingress.Sessions.SetRealm(session, realm.Value, placed: true, position);
+    }
+
+    /// <summary>
+    /// Puts a session in <paramref name="realm"/> with no viewpoint (12-realms § 2.2): what a World, ClientRegion or Aggregate-only session needs; a Sphere sees
+    /// nothing there until placed. Applied this tick, as <see cref="Place(SessionId, RealmId, Vector3D)"/>, with the same refusals.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="realm">A registered realm, not closing.</param>
+    /// <returns><see langword="false"/> when the session is closing or gone.</returns>
+    public bool Enter(SessionId session, RealmId realm)
+    {
+        CheckRealmTarget(session, realm);
+        return _ingress.Sessions.SetRealm(session, realm.Value, placed: false, default);
+    }
+
+    /// <summary>
+    /// Takes a session out of every realm (12-realms § 1.6): its client is told with a <c>RESET</c> carrying <c>REALM(NONE)</c>, and it hears only the events
+    /// addressed to it. Applied this tick.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <returns><see langword="false"/> when the session is closing or gone.</returns>
+    /// <exception cref="InvalidOperationException">The session's profile follows an entity, whose realm is its own.</exception>
+    public bool Leave(SessionId session)
+    {
+        CheckNotAnchored(session);
+        return _ingress.Sessions.SetRealm(session, RealmId.NoneValue, placed: false, default);
+    }
+
+    /// <summary>
+    /// The realm a session's client holds: the realm of its last published <c>RESET</c> (12-realms § 2.2), <see cref="RealmId.None"/> before its first and
+    /// while it is in none.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The committed realm.</returns>
+    public RealmId RealmOf(SessionId session)
+    {
+        var state = _ingress.Frames?.StateOf(session);
+        var realm = state != null && state.Generation == session.Generation ? state.CommittedRealm : -1;
+        return realm < 0 ? RealmId.None : new RealmId((ushort)realm);
+    }
+
+    private void CheckRealmTarget(SessionId session, RealmId realm)
+    {
+        if (realm.IsNone)
+        {
+            throw new ArgumentException("RealmId.None is no realm to be in: take the session out of every realm with Leave(session).", nameof(realm));
+        }
+
+        var table = _ingress.Realms;
+        if (table != null || realm.Value != RealmId.Default.Value)
+        {
+            var target = table?.TryGet(realm.Value)
+                         ?? throw new ArgumentException($"{realm} is not registered: register it with Realms.Register first.", nameof(realm));
+            if (target.Closing)
+            {
+                throw new InvalidOperationException($"{realm} is closing: nothing enters a realm being unregistered (RLM-06).");
+            }
+        }
+
+        CheckNotAnchored(session);
+    }
+
+    private void CheckNotAnchored(SessionId session)
+    {
+        var profiles = _ingress.Profiles;
+        var profile = _ingress.Sessions.ProfileIndex(session);
+        if (profiles != null && profile >= 0 && profiles.SourceOf(profile) is ViewpointSource.Bound or ViewpointSource.Controlled)
+        {
+            throw new InvalidOperationException(
+                $"{session} follows an entity (profile '{_ingress.Sessions.ProfileName(session)}'): its realm is that entity's, and moves with it (12-realms § 1.3).");
+        }
+    }
 
     /// <summary>
     /// Changes a session's Sphere radius from this tick on, within the range its profile declares — <c>Sphere(r, max: m)</c> (09 § 4).
@@ -386,7 +487,7 @@ public sealed class SubscriptionsCommands
     /// it grows, leaves when it shrinks — with no reset, so the client keeps everything it already holds.
     /// </para>
     /// <para>
-    /// <b>It applies now, like <see cref="Place"/>,</b> and holds until the session's profile changes, which returns it to the new profile's own radius.
+    /// <b>It applies now, like <see cref="Place(SessionId, Vector3D)"/>,</b> and holds until the session's profile changes, which returns it to the new profile's own radius.
     /// It is checked against the profile applied NOW: a profile requested through <see cref="Session"/> is applied by the next tick's prologue, so a
     /// radius for that profile is set from the next tick on.
     /// </para>
