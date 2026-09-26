@@ -10,7 +10,7 @@ description: 'Spatial indexing in Typhon answers "which entities are near this p
 
 Spatial indexing in Typhon answers "which entities are near this point / inside this box / hit by this ray?" — the kinds of queries games, simulations, and geospatial workloads run thousands of times per tick. There is exactly **one** spatial index, built from two levels of the same structure:
 
-- A **shared coarse cell grid** — engine-wide, one cell size, three axes, sparse. Per-archetype cluster storage hangs off this grid so a cluster's entities can be located in O(1) from its `(x, y, z)` centre.
+- A **coarse cell grid per realm** — one cell size, three axes, sparse; realm 0 unless the application registers more ([§8](#8-realms)). Per-archetype cluster storage hangs off this grid so a cluster's entities can be located in O(1) from its `(x, y, z)` centre.
 - A **per-cell cluster broadphase** — inside each occupied cell, one array of cluster bounding boxes per archetype, split into a static and a dynamic half. A query scans those boxes and opens only the clusters that overlap, then tests entities individually. A cell dense enough to make that scan the cost promotes its half to an R-Tree over the same boxes ([§3](#3-the-per-cell-cluster-index)).
 
 That broadphase is the whole index. Every spatial query resolves through it, and it is held to one home — a second index anywhere is a violation with a test that fails on it, not a design choice left open.
@@ -31,7 +31,7 @@ Three structures, one index:
 | **`CellSpatialIndex`** ([`Spatial/internals/CellSpatialIndex.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellSpatialIndex.cs)) | One entry per cluster in one cell half | Broadphase: a linear SoA scan over cluster bounding boxes and category masks |
 | **`CellClusterTree`** ([`Spatial/internals/CellClusterTree.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/CellClusterTree.cs)) | The same cluster boxes, as a `SpatialRTree<TStore>` | What a cell half is promoted to when the linear scan stops paying — `O(log C)` instead of `O(C)` |
 
-The grid is **one per `DatabaseEngine`** — configured once at startup via `DatabaseEngine.ConfigureSpatialGrid(SpatialGridConfig)` before archetypes are initialized. All spatial archetypes share it. Per-archetype differences (tier filters, category masks) are layered above; the grid itself is uniform. It is required, not optional: an archetype that declares a `[SpatialIndex]` field and finds no configured grid throws at `InitializeArchetypes`, naming the archetype.
+The grid is **one per realm** — realm 0's configured once at startup via `DatabaseEngine.ConfigureSpatialGrid(SpatialGridConfig)` before archetypes are initialized, any other realm's by its `RealmConfig` ([§8](#8-realms)). All spatial archetypes of a realm share it. Per-archetype differences (tier filters, category masks) are layered above; the grid itself is uniform. It is required, not optional: an archetype that declares a `[SpatialIndex]` field and finds no configured grid throws at `InitializeArchetypes`, naming the archetype.
 
 The per-cell index is **per archetype, per cell, per mode**. [`ArchetypeClusterState`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.cs) holds one [`PerCellSpatialSlot`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Spatial/internals/PerCellSpatialSlot.cs) per cell the archetype occupies, and each slot carries a static and a dynamic half — `SpatialMode` on the `[SpatialIndex]` field decides which one an archetype's clusters go into. A half is **either** a linear `CellSpatialIndex` **or** a promoted `CellClusterTree`, never both, and every reader must consult `HasDynamicTree`/`HasStaticTree` rather than assuming the array: a reader that assumes reads a promoted cell as *empty* — a silent false negative rather than an error. Which of the two a half holds is decided by the engine from that half's own cluster count, and changes as the count does.
 
@@ -64,7 +64,7 @@ Immutable, validated at construction:
 | `CellCount` | Derived. `GridWidth × GridHeight × GridDepth`; must fit a 32-bit key. |
 | `InverseCellSize` | Precomputed `1 / CellSize`. |
 
-Cell keys are **pool slots** in a sparse structure: a root hash map from packed block coordinates to a block, a dense per-block `int[]` of cell-slot indices, and a chunked pool holding one 64-byte `CellState` per *occupied* cell. A cell exists only once something occupies it; an empty region costs one absent hash entry rather than a descriptor per cell. Keys are handed out in creation order, so they renumber across a rebuild and must not be cached across one.
+Cell keys are **pool slots** in a sparse structure: a root directory from packed block coordinates to a block (a dense `int[]` over every block of the world up to 16 384 blocks, a hash map beyond — [§8](#8-realms)), a dense per-block `int[]` of cell-slot indices, and a chunked pool holding one 64-byte `CellState` per *occupied* cell. A cell exists only once something occupies it; an empty region costs one absent hash entry rather than a descriptor per cell. Keys are handed out in creation order, so they renumber across a rebuild and must not be cached across one.
 
 The block extent is derived per axis as `clamp(nextPow2(extentInCells), 1, 16)`, so a flat world's blocks are `16 × 16 × 1` and a cubic world's are `16³`. Within a block a neighbour is index arithmetic; only a step across a block face costs a root lookup.
 
@@ -339,7 +339,7 @@ It is lazily created on first use (`GetOrCreateTriggerSystem` on `SpatialIndexSt
 
 ## 7. Intra-cell drift, relocation and repair
 
-§6's cluster migration handles an entity that leaves its **cell**. This section covers the slower failure that happens when nothing leaves at all — an entity moves *within* its cell, and its cluster's bound grows to follow it.
+[§6](#6-spawn--write--destroy-flows)'s cluster migration handles an entity that leaves its **cell**. This section covers the slower failure that happens when nothing leaves at all — an entity moves *within* its cell, and its cluster's bound grows to follow it.
 
 **Why the layout decays.** Slot placement happens once, when the slot is claimed, and `ClaimSlotInCell` takes the first cluster with a free slot — with no AABB awareness at all. Under motion that decays until a cluster's bound covers most of its cell, at which point a narrow query opens every cluster in the cell instead of the two or three it geometrically overlaps. The write-time CAS in `ClusterRef.MaybeGrowAndFlagShrink` cannot detect this, because it *grows* the bound to contain every entity the cluster holds: "outside my own cluster's AABB" is never true of anything.
 
@@ -382,7 +382,7 @@ Relocation is a per-tick **delta**: it moves what drifted and leaves the rest al
 
 Repair is the other mechanism. It discards a unit's layout entirely, sorts its entities by position and re-packs them in sort order ([`ArchetypeClusterState.Repair.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Ecs/internals/ArchetypeClusterState.Repair.cs)). It is the only thing in the engine that **shrinks a zone map**.
 
-- **The sort key is an intra-cell Morton code** — three axes at 21 bits, filling 63 of a `ulong`'s 64. It is not a cell key — no level of the grid addresses cells by Morton code (§2). This one orders entities *within* a single cell, where the coordinate range is one cell wide by construction, so the 10-bits-per-axis ceiling that rules a 32-bit 3D Morton key out for cell addressing does not apply. 21 bits resolves a cell into ~2.1 M steps per axis, far below the quantisation a float position could distinguish.
+- **The sort key is an intra-cell Morton code** — three axes at 21 bits, filling 63 of a `ulong`'s 64. It is not a cell key — no level of the grid addresses cells by Morton code ([§2](#2-spatial-grid)). This one orders entities *within* a single cell, where the coordinate range is one cell wide by construction, so the 10-bits-per-axis ceiling that rules a 32-bit 3D Morton key out for cell addressing does not apply. 21 bits resolves a cell into ~2.1 M steps per axis, far below the quantisation a float position could distinguish.
 - **A unit is a cell's N worst clusters**, `RepairWorstClustersPerUnit` (default 8), where "worst" is the largest maximum axis extent. Finer than a whole cell, still internally coherent, and it targets the clusters actually costing selectivity rather than spending a whole cell's budget to fix eight bad bounds.
 - **It reuses the ordinary migration pipeline.** A re-pack knows its own destinations, so it could write them directly and claim no slot; instead it emits normal `MigrationRequest`s carrying a pinned cluster *and* a pinned slot. The extra cost is one uncontended CAS on a cache line the copy is about to touch anyway; what it buys is that entity-map keying, cell-relative rebase, index element ids, zone maps, dirty-bit deltas and orphan rollback are not duplicated for a path that runs rarely.
 
@@ -407,9 +407,54 @@ How much budget there is to spend follows what spending buys. Each tick an arche
 
 ---
 
+## 8. Realms
+
+A **realm** is an isolated world in the same engine — a planet, a building interior, space, an instanced dungeon. Everything in [§2](#2-spatial-grid)–[§7](#7-intra-cell-drift-relocation-and-repair) is per realm:
+each owns its `SpatialGrid` (bounds, cell size, 2D or 3D), and each spatial archetype holds one `RealmArchetypeSpatial` per realm it lives in — the
+per-cell index, cluster pool, reach and escape lists that [§3](#3-the-per-cell-cluster-index)–[§7](#7-intra-cell-drift-relocation-and-repair) describe. Code lives in
+[`Realms/`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Realms/); the feature page is
+[Realms — Several Worlds in One Engine](../feature-set/Spatial/realms.md).
+
+**Identity.** Realms are registered in a `RealmTable` (`ConfigureRealms(n)` sizes the id range; `ConfigureSpatialGrid` registers realm 0). Every
+realm owns its grid instance, and the grid carries its `RealmId`: `SpatialOf(grid)` is `RealmSpatial[grid.Realm]`, one load per call. A method
+holding a grid therefore works in exactly that grid's realm. There is no realm-0 shortcut: realm 0's state is reached by naming it
+(`Realm0Spatial`, `Realm0Grid`), so no code can read realm 0's state implicitly.
+
+**Where an entity is.** An archetype with a `[RealmKey]` field (a `ushort`, beside the spatial field or in a component of its own) places each entity
+in the realm its key names; without one, every entity is in realm 0. A cluster holds one realm's entities, and `ClusterRealmMap` (a `ushort` per
+cluster, parallel to `ClusterCellMap`) records which, so the fence, the queries and the runtime resolve a cluster's realm with one load. A realm
+change (`Transaction.Teleport`) is a mandatory cell crossing handled by the fence's migration path: the entity keeps its `EntityId`, leaves its
+source realm's cluster and is placed in the destination realm's grid.
+
+**Queries** answer in one realm (SQ-08): the cell walk runs over that realm's grid and the narrowphase filters on the realm (RM-04), so entities at
+the same coordinates in another realm never match. `EcsQuery.InRealm` scopes the spatial predicate only, and is refused on a query without one.
+
+**Per-realm cluster lists.** Each realm's `CellClusterPool` keeps, beside its per-cell lists, a flat list of every cluster it holds — the realm's
+clusters of the archetype, joined when a cluster joins a cell of the pool (claim, repair, rebuild) and left when it leaves it (drain), published like
+the active list (count acquired first). `GetClusterEnumerator(realm)` walks it: O(clusters in the realm). The list lives in the pool, so it resets with
+the pool at rebuild; a removal is a vectorized `IndexOf` over the realm's list, the cost the archetype-wide active list already pays per drain (RM-07).
+
+**Sizing.** A realm's structures are sized from its own config. The grid's block directory — packed block coordinates to a block — is a dense
+`int[]` over every block of the world when the world has at most 16 384 blocks (one load per lookup), a hash map beyond; a realm's state for an
+archetype is created on its first cluster there. A one-cell realm costs ~1.2 KB, so thousands of interiors are affordable.
+
+**Policy.** `RealmTable` holds each realm's run state, decided once per tick before any dispatch (RLM-03): observed (a client session in it, or an
+application pin) ⇒ `Active`; unobserved ⇒ `Simulated` at `UnobservedTickDivisor`, or `Dormant` after `SleepAfterTicks` for a `Sleep` realm.
+Each spatial archetype keeps a `RealmDispatchIndex` of runnable clusters, rebuilt only when the policy or the cluster set changed; a dormant realm's
+clusters reach no system and take no maintenance (RLM-04), a divided realm's clusters run once every N runs of a system (RLM-05). With every realm
+runnable, none of this filters: dispatch is the single-realm path. Repair keys its queue by (realm, cell) and plans each candidate in its own grid.
+A system declared `InRealms(...)` carries a realm mask: its selection is its runnable realms' own cluster lists (or the tier selection filtered by the
+mask), and the change-filter dirty scans skip clusters outside it (RLM-07).
+
+**Persistence.** Each realm's identity (bounds, cell size, hysteresis) is a row of the realm catalog (`RealmR1`), written synchronously at its first
+registration and checked at every open (RLM-01); the spatial rebuild files each cluster in the realm its entities name and checks every slot (RM-06).
+Run-time `Unregister` marks the realm `Closing`; it is removed once empty, and its id returns only after an open proves it empty (RLM-06).
+
+---
+
 ## See also
 
-- [01-foundation](01-foundation.md) — `OlcLatch` (used in the node headers of a promoted cell's tree), epoch model (every spatial query and mutation enters `EpochGuard`), `SpatialTypes` live in the sibling `Typhon.Schema.Definition` project (§9)
+- [01-foundation](01-foundation.md) — `OlcLatch` (used in the node headers of a promoted cell's tree), epoch model (every spatial query and mutation enters `EpochGuard`), `SpatialTypes` live in the sibling `Typhon.Schema.Definition` project ([01-foundation §9](01-foundation.md#9-schema-definition-types-sibling-project))
 - [03-indexing](03-indexing.md) — B+Tree contrast: same OLC philosophy, but B+Tree uses a two-phase `SpinWriteLock` tuned for longer lock holds (the R-Tree uses a plain `SpinWait` loop instead)
 - [06-ecs](06-ecs.md) — cluster storage and `ArchetypeClusterState`, where per-archetype spatial bookkeeping (cluster AABBs, cell links, migration flags) lives
 - [09-querying](09-querying.md) — `EcsQuery` and the dispatch from `WhereInAABB` / `WhereNearby` / `WhereRay` / `WhereFrustum` into the cluster walk

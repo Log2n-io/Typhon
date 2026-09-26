@@ -14,6 +14,7 @@ import {
   type MessagePlan,
   type MetricPlan,
   type TickSink,
+  type RealmFrame,
 } from '../src/index.js';
 import { goldenBin, goldenJson } from './golden-support.js';
 
@@ -45,6 +46,10 @@ class RecordingSink implements TickSink {
     this.calls = [`beginTick ${tick}`];
     this.ticks.push(tick);
     this.flags.push(flags);
+  }
+
+  realm(frame: RealmFrame | null): void {
+    this.calls.push(frame === null ? 'realm none' : `realm ${frame.realmId}`);
   }
 
   beginEntities(archetype: ArchetypePlan): void {

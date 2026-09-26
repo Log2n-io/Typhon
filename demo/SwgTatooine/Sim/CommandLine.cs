@@ -31,6 +31,49 @@ public static class CommandLine
         c.ShuttleIntervalS = Float(args, "--shuttle-interval", c.ShuttleIntervalS);
         c.BoardingWindowS = Float(args, "--boarding-window", c.BoardingWindowS);
         c.Shuttles = Array.IndexOf(args, "--no-shuttles") < 0;
+        c.Planets = Int(args, "--planets", c.Planets);
+        if (c.Planets < 1)
+        {
+            throw new ArgumentException($"--planets takes 1 or more, not {c.Planets}");
+        }
+
+        c.Interiors = Array.IndexOf(args, "--interiors") >= 0;
+        c.InteriorNpcs = Int(args, "--interior-npcs", c.InteriorNpcs);
+        c.InteriorShare = Float(args, "--interior-share", c.InteriorShare);
+        c.InteriorStayS = Float(args, "--interior-stay", c.InteriorStayS);
+        c.InterPlanetShare = Float(args, "--interplanet-share", c.InterPlanetShare);
+        if (!(c.InteriorStayS > 0f) || c.InterPlanetShare is < 0f or > 1f)
+        {
+            throw new ArgumentException($"--interior-stay takes a positive value and --interplanet-share one in [0, 1], not {c.InteriorStayS} / "
+                + $"{c.InterPlanetShare}");
+        }
+
+        c.Space = Array.IndexOf(args, "--space") >= 0;
+        c.InteriorSleepS = Float(args, "--interior-sleep", c.InteriorSleepS);
+        c.PlanetDivisor = Int(args, "--planet-divisor", c.PlanetDivisor);
+        c.SpaceDivisor = Int(args, "--space-divisor", c.SpaceDivisor);
+        c.Dungeons = Int(args, "--dungeons", c.Dungeons);
+        c.DungeonIntervalS = Float(args, "--dungeon-interval", c.DungeonIntervalS);
+        c.DungeonStayS = Float(args, "--dungeon-stay", c.DungeonStayS);
+        c.DungeonParty = Int(args, "--dungeon-party", c.DungeonParty);
+        c.DungeonMobs = Int(args, "--dungeon-mobs", c.DungeonMobs);
+        if (c.InteriorSleepS < 0f || c.PlanetDivisor < 1 || c.SpaceDivisor < 1 || c.Dungeons < 0 || !(c.DungeonIntervalS > 0f) || !(c.DungeonStayS > 0f)
+            || c.DungeonParty < 1 || c.DungeonMobs < 0)
+        {
+            throw new ArgumentException("--interior-sleep >= 0, --planet-divisor/--space-divisor >= 1, --dungeons >= 0, positive dungeon interval and stay, "
+                + "--dungeon-party >= 1, --dungeon-mobs >= 0");
+        }
+
+        c.Starships = Int(args, "--starships", c.Starships);
+        if (c.Starships < 0)
+        {
+            throw new ArgumentException($"--starships takes 0 or more, not {c.Starships}");
+        }
+
+        if (c.InteriorNpcs < 0 || c.InteriorShare is < 0f or > 1f)
+        {
+            throw new ArgumentException($"--interior-npcs takes 0 or more and --interior-share a value in [0, 1], not {c.InteriorNpcs} / {c.InteriorShare}");
+        }
         c.ShuttleBurst = Array.IndexOf(args, "--shuttle-burst") >= 0;
         c.Probe = Array.IndexOf(args, "--probe") >= 0;
         c.WorkProbe = Array.IndexOf(args, "--work-probe") >= 0;

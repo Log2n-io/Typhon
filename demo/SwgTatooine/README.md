@@ -278,8 +278,28 @@ Useful flags:
 | `--eff-tol <r>` / `--repair-cooldown <n>` | 0.1 / 50 | The two maintenance knobs above; `0` disables either |
 | `--promote <n>` / `--tightness <r>` | off / 1 | Turn per-cell R-tree promotion on |
 | `--no-shuttles` | shuttles on | Drop the shuttle systems and the mass-arrival traffic they produce |
+| `--planets N` | 1 | Realms: N planets, each a realm with the same grid; planet 0 is Tatooine, a further one its twin (same map, own seed). Every entity carries a realm key and every query is scoped to its cluster's realm |
+| `--interiors` | off | Every enterable city building of every planet is a one-cell realm (64 m) with a portal pair and NPCs inside; players walk in and out through the serial Teleport system |
+| `--interior-npcs N` | 3 | NPCs standing in each interior |
+| `--interior-share F` | 0.25 | Share of in-city idle decisions that walk into a building |
+| `--interior-stay S` | 30 | Shortest stay inside, seconds; a stay lasts 1–4× this |
+| `--interplanet-share F` | 0.2 | With `--planets` ≥ 2, share of shuttle boardings bound for the same city on another planet (a realm change) |
+| `--space` | off | A space realm after the interiors: a deep 3D grid (16 km cube, 500 m cells) of AI starships with f64 bounds, flying waypoints and scanning 1 km around them |
+| `--starships N` | 250 | Starships at population scale 1 |
+| `--interior-sleep S` | 10 | Interiors go dormant after S unobserved seconds (no system, no maintenance); a player walking in wakes one and pins it while inside. 0 = always simulated |
+| `--planet-divisor N` | 1 | Planets after the first run each cluster once every N ticks, over N ticks' delta time |
+| `--space-divisor N` | 1 | The same for the space realm |
+| `--dungeons N` | 0 | Dungeon instances over the run: a realm registered at run time for a party, emptied and unregistered when it leaves |
+| `--dungeon-interval S` / `--dungeon-stay S` | 10 / 20 | Seconds between openings / seconds a party stays |
+| `--dungeon-party N` / `--dungeon-mobs N` | 8 / 24 | Players per party / mobs per dungeon |
 | `--tick-log <path>` | — | Every measured tick's duration, one per line |
 | `--seed <n>` | fixed | Every random decision, so two runs build the same world |
+
+Served (`--serve`), each kind of realm is replicated at its own scale (Realms G3): planets at the planet cell, an interior or a dungeon as one cell
+whose player sessions see everything in it, space at its 500 m cell. A player's session follows its player through doors, shuttles and dungeons, each
+switch one `RESET` over the new realm. Interiors and dungeons sit under their planet in the realm tree, so a planet's `RealmNews` (a dungeon opening or
+closing) reaches the players inside its buildings too. A god camera starts on planet 0 and moves with the `ViewRealm` command; `SwgTatooine.Bots
+--kind god --god-tour S --planets N` tours the planets every S seconds and reports the switches applied and the news heard.
 
 A run prints the census, the grid, the tick distribution, the workload counters, the per-system table above, and a
 per-archetype maintenance table — drifters nominated, relocations admitted, cells repaired, migrations — which is where

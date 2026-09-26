@@ -23,8 +23,20 @@ import {
   writeNumber,
   writeSection,
   type CatalogCodec,
+  type RealmFrame,
 } from '../src/index.js';
-import { bitsOf, fromBits, fromHex, goldenBin, goldenJson, goldenNames, hex, RecordingSink } from './golden-support.js';
+import {
+  bitsOf,
+  fromBits,
+  fromHex,
+  goldenBin,
+  goldenJson,
+  goldenNames,
+  hex,
+  RecordingSink,
+  frameFromJson,
+  type FrameJson,
+} from './golden-support.js';
 
 /*
  * codec-*: every codec at its boundaries (W1–W10). Per case, decoding the byte range must yield the committed IEEE bits
@@ -45,8 +57,10 @@ interface CodecCase {
 interface CodecVector {
   readonly codec: CatalogCodec;
   readonly frameTick: number;
-  /** For a velocity: the linked position's step per axis. */
-  readonly positionStep?: string[];
+  /** For a velocity: the unit exponent it decodes with (also in the codec). */
+  readonly unitExp?: number;
+  /** For a realm-framed codec: the frame it is quantized over (typhon.3). */
+  readonly frame?: FrameJson;
   readonly cases: CodecCase[];
 }
 
@@ -54,17 +68,25 @@ interface CodecVector {
  * The same range through the exported `math.ts` decoder, when the kind has one: `readNumber` writes its arithmetic out
  * rather than calling it, so both copies are held to the vector's bits.
  */
-function decodeWithMath(bytes: Uint8Array, f: FieldPlan, frameTick: number, out: Float64Array): boolean {
+function decodeWithMath(
+  bytes: Uint8Array,
+  f: FieldPlan,
+  frameTick: number,
+  out: Float64Array,
+  frame: RealmFrame | null,
+): boolean {
   const r = new WireReader(bytes);
   switch (f.kind) {
     case CodecKind.F16:
       out[0] = decodeF16(r.u16());
       return true;
     case CodecKind.Quant:
+      out[0] = decodeQuant(r.unsigned(f.bits), f.min[0]!, f.step[0]!);
+      return true;
     case CodecKind.Pos2:
     case CodecKind.Pos3:
       for (let i = 0; i < f.components; i++) {
-        out[i] = decodeQuant(r.unsigned(f.bits), f.min[i]!, f.step[i]!);
+        out[i] = decodeQuant(r.unsigned(frame!.positionBits), frame!.min[i]!, frame!.step[i]!);
       }
 
       return true;
@@ -78,7 +100,7 @@ function decodeWithMath(bytes: Uint8Array, f: FieldPlan, frameTick: number, out:
     case CodecKind.Vel2:
     case CodecKind.Vel3:
       for (let i = 0; i < f.components; i++) {
-        out[i] = decodeVel(r.signed(f.bits), f.velocityStep[i]!, f.quantaDiv, f.limit);
+        out[i] = decodeVel(r.signed(f.bits), f.velocityUnit, f.limit);
       }
 
       return true;
@@ -103,8 +125,7 @@ function decodeWithMath(bytes: Uint8Array, f: FieldPlan, frameTick: number, out:
 }
 
 function planOf(vector: CodecVector): FieldPlan {
-  const velocityStep = vector.positionStep === undefined ? undefined : Float64Array.from(vector.positionStep, fromBits);
-  return new FieldPlan('v', 0, { name: 'v', codec: vector.codec }, vector.codec, {}, velocityStep);
+  return new FieldPlan('v', 0, { name: 'v', codec: vector.codec }, vector.codec, {});
 }
 
 describe('golden codec vectors', () => {
@@ -127,6 +148,7 @@ describe('golden codec vectors', () => {
       const section = new SectionPlan([plan]);
       const reader = new WireReader();
       const writer = new WireWriter();
+      const frame = frameFromJson(vector.frame);
       let covered = 0;
 
       for (const c of vector.cases) {
@@ -152,28 +174,28 @@ describe('golden codec vectors', () => {
             writeSection(writer, section, { v: fromHex(c.bytes!) });
             break;
           case CodecKind.List:
-            readSection(reader, section, vector.frameTick, sink);
+            readSection(reader, section, vector.frameTick, sink, false, frame);
             expect(sink.log, at).toEqual([{ call: 'list', field: 'v', count: c.count, values: c.decoded }]);
             if (c.input === undefined) {
               encoded = false;
             } else {
-              writeSection(writer, section, { v: Float64Array.from(c.input, fromBits) });
+              writeSection(writer, section, { v: Float64Array.from(c.input, fromBits) }, false, frame);
             }
 
             break;
           default: {
             const out = new Float64Array(4);
-            readNumber(reader, plan, vector.frameTick, out, 0);
+            readNumber(reader, plan, vector.frameTick, out, 0, frame);
             expect(bitsOf(out, plan.components), `${at}: decoded bits`).toEqual(c.decoded);
             const viaMath = new Float64Array(4);
-            if (decodeWithMath(range, plan, vector.frameTick, viaMath)) {
+            if (decodeWithMath(range, plan, vector.frameTick, viaMath, frame)) {
               expect(bitsOf(viaMath, plan.components), `${at}: math.ts decoder bits`).toEqual(c.decoded);
             }
 
             if (c.input === undefined) {
               encoded = false;
             } else {
-              writeNumber(writer, plan, Float64Array.from(c.input, fromBits));
+              writeNumber(writer, plan, Float64Array.from(c.input, fromBits), 0, frame);
             }
 
             break;

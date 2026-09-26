@@ -54,8 +54,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     public int QueryNearest(SpatialGrid grid, double centerX, double centerY, double centerZ, int k, Span<(long entityId, double distSq)> results,
         out int clustersOpened, uint categoryMask = uint.MaxValue)
     {
+        var rs = SpatialOf(grid);
         clustersOpened = 0;
-        if (k <= 0 || results.Length == 0 || !SpatialSlot.HasSpatialIndex || PerCellIndex == null || ClusterSegment == null || ClusterAabbs == null)
+        if (k <= 0 || results.Length == 0 || !SpatialSlot.HasSpatialIndex || rs.PerCellIndex == null || ClusterSegment == null || ClusterAabbs == null)
         {
             return 0;
         }
@@ -80,13 +81,13 @@ internal sealed unsafe partial class ArchetypeClusterState
         // the rings cannot be trusted to collect them in time. Skipped when a ring reaches their home cell. Only CURRENT entries are named: one whose chunk
         // id was freed and reused elsewhere is left to the rings, which see it like any other. Reach and set are read once, so the whole search uses
         // one consistent pair.
-        double reach = Volatile.Read(ref ClusterReach);
-        var escaped = Volatile.Read(ref EscapedClusters);
+        double reach = Volatile.Read(ref rs.ClusterReach);
+        var escaped = Volatile.Read(ref rs.EscapedClusters);
         Span<int> named = stackalloc int[EscapedClusterSet.Capacity];
         int namedCount = 0;
         for (int e = 0; e < escaped.Count; e++)
         {
-            if (!escaped.IsCurrent(e, ClusterCellMap))
+            if (!escaped.IsCurrent(e, ClusterCellMap, ClusterRealmMap, rs.Realm))
             {
                 continue;
             }
@@ -149,6 +150,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     private void CollectRingCandidates(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D, double px, double py, 
         double pz, uint categoryMask, scoped ReadOnlySpan<int> skip, ref KnnCandidateHeap heap)
     {
+        var rs = SpatialOf(grid);
         int zLo = is3D ? originCellZ - ring : originCellZ;
         int zHi = is3D ? originCellZ + ring : originCellZ;
 
@@ -171,12 +173,12 @@ internal sealed unsafe partial class ArchetypeClusterState
 
                     // TryGetCellKey, never ComputeCellKey — a kNN sweep crosses mostly empty space, and resolving-with-create would materialise a cell for
                     // every coordinate it touches.
-                    if (!grid.TryGetCellKey(cx, cy, cz, out int cellKey) || cellKey >= PerCellIndex.Length)
+                    if (!grid.TryGetCellKey(cx, cy, cz, out int cellKey) || cellKey >= rs.PerCellIndex.Length)
                     {
                         continue;
                     }
 
-                    var slot = PerCellIndex[cellKey];
+                    var slot = rs.PerCellIndex[cellKey];
                     if (slot == null)
                     {
                         continue;
@@ -348,6 +350,13 @@ internal sealed unsafe partial class ArchetypeClusterState
         byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
         ulong occupancy = *(ulong*)clusterBase;
 
+        // RM-04: a slot whose realm key names another realm (changed this tick, moved at the next fence) is not this realm's.
+        var realmKeyColumn = RealmKeyColumn;
+        if (realmKeyColumn >= 0)
+        {
+            occupancy = SlotsInRealm(clusterBase, occupancy, realmKeyColumn, RealmKeyStride, ClusterRealmMap[clusterChunkId]);
+        }
+
         Span<double> entityCoords = stackalloc double[6];
         while (occupancy != 0UL)
         {
@@ -444,11 +453,11 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// out, so the loop may only stop once the k-th distance fits inside the covered region. A face that coincides with the world bound is treated as
     /// unbounded — there is nothing beyond it to find.</para>
     /// <para><b>The shell of cells is NOT the region those cells cover.</b> A cluster is filed by its entities' CENTRES, so its box reaches up to
-    /// <see cref="ClusterReach"/> outside its own cell — the few that reach further are named and put on the heap before the first ring — and a cluster
-    /// one shell out can therefore hold an entity nearer than the face distance. Taking
-    /// the face distance as covered is what dropped true nearest neighbours: with 100-unit cells, a query at (150,150), a point at (190,150) and a 50-wide box
-    /// centred at (205,150) reaching x=180, ring 0 declared 50 units covered, 50^2 beat the point's 40^2, and the nearer box was never opened. Subtracting the
-    /// overhang is what makes the stopping rule true again; it costs breadth, and only where extended entities actually exist.</para>
+    /// <see cref="RealmArchetypeSpatial.ClusterReach"/> outside its own cell — the few that reach further are named and put on the heap before the first ring —
+    /// and a cluster one shell out can therefore hold an entity nearer than the face distance. Taking the face distance as covered is what dropped true
+    /// nearest neighbours: with 100-unit cells, a query at (150,150), a point at (190,150) and a 50-wide box centred at (205,150) reaching x=180, ring 0
+    /// declared 50 units covered, 50^2 beat the point's 40^2, and the nearer box was never opened. Subtracting the overhang is what makes the stopping
+    /// rule true again; it costs breadth, and only where extended entities actually exist.</para>
     /// </remarks>
     private static double CoveredRadiusSq(SpatialGrid grid, int ring, int originCellX, int originCellY, int originCellZ, bool is3D,
         double px, double py, double pz, double reach)

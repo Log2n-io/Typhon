@@ -25,7 +25,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 {
     // Rows per window copy, and the deep implementation's slab: per session slot, the committed rows then the pending ones.
     private readonly int _windowRows;
-    private readonly ushort[] _slab = [];
+    private ushort[] _slab = [];
 
     // The z cell the plane z = 0 lies in: the only one a 2D-position archetype can occupy in a deep grid.
     private readonly int _zeroCz;
@@ -66,7 +66,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     {
         var w = new WireWriter(into);
         var flags = (complete ? PushGeometryFlags.ViewComplete : PushGeometryFlags.None) | (TEvent.Deep ? PushGeometryFlags.Deep : PushGeometryFlags.None);
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         switch (shape)
         {
             case PushShape.World:
@@ -78,7 +78,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             default:
             {
                 PushGeometry.WriteSphere(ref w, flags, st.PAnchorX, st.PAnchorY, st.PAnchorZ, st.PRadius, slackM, st.PLevel);
-                ReadOnlySpan<ushort> pending = Pending(ref st, session.Slot);
+                ReadOnlySpan<ushort> pending = Pending(ref st, L(session));
                 Span<ulong> rows = stackalloc ulong[pending.Length];
                 for (var i = 0; i < rows.Length; i++)
                 {
@@ -94,8 +94,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     }
 
     public PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic, ReplicationGrid grid,
-        int maxSessions, bool shadow)
-        : base(plans, states, isPush, automatic, grid, maxSessions, shadow, TEvent.Deep)
+        int maxSessions, bool shadow, ushort realm = 0, RealmCodecs codecs = null)
+        : base(plans, states, isPush, automatic, grid, maxSessions, shadow, TEvent.Deep, realm, codecs)
     {
         if (TEvent.Deep)
         {
@@ -119,6 +119,15 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             _bitsY = BitsFor(_gridH);
             _sortBits = _bitsX + _bitsY + 1;
             _windowRows = Window;
+        }
+    }
+
+    private protected override void GrowSessions(int length)
+    {
+        base.GrowSessions(length);
+        if (TEvent.Deep)
+        {
+            Array.Resize(ref _slab, length * 2 * _windowRows);
         }
     }
 
@@ -418,7 +427,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         st.Generation = session.Generation;
         if (TEvent.Deep)
         {
-            Array.Clear(_slab, session.Slot * 2 * _windowRows, 2 * _windowRows);
+            Array.Clear(_slab, L(session) * 2 * _windowRows, 2 * _windowRows);
         }
     }
 
@@ -462,7 +471,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
     public override bool SeesPoint(SessionId session, float x, float y, float z, float viewRadius)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         if (!st.Bound || st.Generation != session.Generation)
         {
             return false;
@@ -481,18 +490,18 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
         var key = CellKey(x, y, pz);
         if (st.Anchored && st.Radius > 0 && Within(st.AnchorX, st.AnchorY, st.AnchorZ, x, y, pz, st.Radius * st.Radius)
-            && Held(Committed(ref st, session.Slot), st.OriginX, st.OriginY, st.OriginZ, key))
+            && Held(Committed(ref st, L(session)), st.OriginX, st.OriginY, st.OriginZ, key))
         {
             return true;
         }
 
         return st.PRadius > 0 && Within(st.PAnchorX, st.PAnchorY, st.PAnchorZ, x, y, pz, st.PRadius * st.PRadius)
-               && Held(Pending(ref st, session.Slot), st.POriginX, st.POriginY, st.POriginZ, key);
+               && Held(Pending(ref st, L(session)), st.POriginX, st.POriginY, st.POriginZ, key);
     }
 
     public override bool HoldsCommitted(SessionId session, PushShape shape, float x, float y, float z)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         if (!st.Bound || st.Generation != session.Generation)
         {
             return false;
@@ -505,13 +514,13 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             PushShape.World => key < st.Cursor,
             PushShape.Region => RegionHoldsCommitted(session, x, y, pz, key),
             _ => st.Anchored && st.Radius > 0 && Within(st.AnchorX, st.AnchorY, st.AnchorZ, x, y, pz, st.Radius * st.Radius)
-                 && Held(Committed(ref st, session.Slot), st.OriginX, st.OriginY, st.OriginZ, key),
+                 && Held(Committed(ref st, L(session)), st.OriginX, st.OriginY, st.OriginZ, key),
         };
     }
 
     public override bool WorldSeesPoint(SessionId session, float x, float y, float z)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         if (!st.Bound || st.Generation != session.Generation)
         {
             return false;
@@ -529,7 +538,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             return;
         }
 
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         var r = st.PRadius;
         double x0 = st.PAnchorX - r, x1 = st.PAnchorX + r, y0 = st.PAnchorY - r, y1 = st.PAnchorY + r, z0 = st.PAnchorZ - r, z1 = st.PAnchorZ + r;
         if (st.Anchored && st.Radius > 0)
@@ -554,7 +563,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     public override void Commit(SessionId session)
     {
         CommitRegion(session);
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         st.AnchorX = st.PAnchorX;
         st.AnchorY = st.PAnchorY;
         st.AnchorZ = st.PAnchorZ;
@@ -565,7 +574,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         CommitLevel(ref st);
         if (TEvent.Deep)
         {
-            Pending(ref st, session.Slot).CopyTo(Committed(ref st, session.Slot));
+            Pending(ref st, L(session)).CopyTo(Committed(ref st, L(session)));
         }
         else
         {
@@ -925,9 +934,9 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             return;
         }
 
-        if (ValidateClustersPerTick > 0 && hot != null)
+        if (_validating && hot != null)
         {
-            NoteIfForgotten(archetype, block, slot, flags, groups);
+            Hub.NoteIfForgotten(archetype, block, slot, flags, groups);
         }
 
         if (hot != null)
@@ -987,6 +996,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             {
                 case 0: OrphanRelease++; break;
                 case 1: OrphanMigrate++; break;
+                case 3: OrphanRealm++; break;
                 default: OrphanDrain++; break;
             }
         }
@@ -1535,11 +1545,13 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 continue;
             }
 
-            var ids = cs.ReadActiveClusterList(out var active);
+            // This realm's clusters only (RM-07): O(clusters here), not every realm's filtered.
+            var ids = cs.ReadRealmClusterList(ServedRealm, out var active);
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {
-                if (!state.Directory.TryGetBlock(ids[i], out var block))
+                // The active cluster list is engine-wide: another realm's entities are counted by its own replication, in its own frame.
+                if (!state.Directory.TryGetBlock(ids[i], out var block) || block->Realm != ServedRealm)
                 {
                     continue;
                 }
@@ -1586,11 +1598,13 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 continue;
             }
 
-            var ids = cs.ReadActiveClusterList(out var active);
+            // This realm's clusters only (RM-07): O(clusters here), not every realm's filtered.
+            var ids = cs.ReadRealmClusterList(ServedRealm, out var active);
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {
-                if (!state.Directory.TryGetBlock(ids[i], out var block))
+                // The active cluster list is engine-wide: another realm's entities are counted by its own replication, in its own frame.
+                if (!state.Directory.TryGetBlock(ids[i], out var block) || block->Realm != ServedRealm)
                 {
                     continue;
                 }
@@ -1962,7 +1976,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
     {
         complete = true;
         var from = Stopwatch.GetTimestamp();
-        var slotIndex = session.Slot;
+        var slotIndex = L(session);
         ref var st = ref _sessions[slotIndex];
         if (!st.Bound || st.Generation != session.Generation)
         {
@@ -1980,9 +1994,10 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
         // The budget's last resort (09 § 10): sixteenths of the radius off it, down to half. A shrink is a radius change like SetRadius's — a shell
         // sweep of leaves — and commits with the frame.
-        if (st.Shrink > 0)
+        ref var link = ref LinkOf(session);
+        if (link.Shrink > 0)
         {
-            rNew *= 1d - (Math.Min((int)st.Shrink, MaxShrink) / (double)ShrinkSteps);
+            rNew *= 1d - (Math.Min((int)link.Shrink, MaxShrink) / (double)ShrinkSteps);
         }
 
         var rOld = st.Radius > 0 ? st.Radius : rNew;
@@ -1997,8 +2012,8 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         // wider window for a while after it fell — and the frame moves to the budget loop's target, committed with it. An update to an entity far from the
         // session before and after is sent only on the entity's far flush (BeginFarFold).
         var aBands = bands.AtLevel(st.Level, Widened(in st, tick) ? st.WideLevel : 0);
-        var nBands = bands.AtLevel(st.TargetLevel, 0);
-        st.PLevel = st.TargetLevel;
+        var nBands = bands.AtLevel(link.TargetLevel, 0);
+        st.PLevel = link.TargetLevel;
         var lod = (aBands.Count > 0 || nBands.Count > 0) && placed;
 
         // A level moves periods, not boundaries — except a bandless profile's implicit band, which appears at level 1 and goes at 0: only then can an
@@ -2366,14 +2381,14 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
         ref long leaves, ref long updates, out bool complete)
     {
         var from = Stopwatch.GetTimestamp();
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         if (!st.Bound || st.Generation != session.Generation)
         {
             Bind(ref st, session);
         }
 
         // No LOD for a World session: a session switched from a Sphere at a level goes back to 0 with this frame, and leaves the census.
-        st.TargetLevel = 0;
+        LinkOf(session).TargetLevel = 0;
         st.PLevel = 0;
 
         var tick = _tick;
@@ -3039,7 +3054,14 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             var margin = _pruneMargin[arch];
             double bz0 = 0, bz1 = 0;
             QueryBox(cx, cy, cz, hasZ, _queryPad[arch], out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
-            using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
+            // This realm's spatial index (R4.4): an archetype with no state here has nothing to deliver.
+            var realmGrid = RealmGridOf(cs);
+            if (realmGrid == null)
+            {
+                continue;
+            }
+
+            using var e = cs.QueryAabb(realmGrid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))
@@ -3494,7 +3516,14 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             var hasZ = TEvent.Deep && _hasZ[a];
             double bz0 = 0, bz1 = 0;
             QueryBox(cx, cy, cz, hasZ, _queryPad[a], out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
-            using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
+            // This realm's spatial index (R4.4): an archetype with no state here has nothing to deliver.
+            var realmGrid = RealmGridOf(cs);
+            if (realmGrid == null)
+            {
+                continue;
+            }
+
+            using var e = cs.QueryAabb(realmGrid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))
@@ -3585,7 +3614,14 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             var hasZ = TEvent.Deep && _hasZ[arch];
             double bz0 = 0, bz1 = 0;
             QueryBox(cx, cy, cz, hasZ, _queryPad[arch], out var qx0, out var qy0, out var qz0, out var qx1, out var qy1, out var qz1);
-            using var e = cs.QueryAabb(cs.Grid, qx0, qy0, qz0, qx1, qy1, qz1);
+            // This realm's spatial index (R4.4): an archetype with no state here has nothing to deliver.
+            var realmGrid = RealmGridOf(cs);
+            if (realmGrid == null)
+            {
+                continue;
+            }
+
+            using var e = cs.QueryAabb(realmGrid, qx0, qy0, qz0, qx1, qy1, qz1);
             while (hasZ
                        ? e.MoveNextClusterUnopened(out var chunkId, out var bx0, out var by0, out bz0, out var bx1, out var by1, out bz1)
                        : e.MoveNextClusterUnopened(out chunkId, out bx0, out by0, out bx1, out by1))
@@ -3658,7 +3694,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
     public override void ShadowCheck(SessionId session, in ArchetypeSet archetypes)
     {
-        var slotIndex = session.Slot;
+        var slotIndex = L(session);
         ref var st = ref _sessions[slotIndex];
         var set = _shadow[slotIndex];
         if (set == null || _shadowGen[slotIndex] != session.Generation || !st.Anchored || st.NeedsReset)
@@ -3691,11 +3727,13 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 continue;
             }
 
-            var ids = cs.ReadActiveClusterList(out var active);
+            // This realm's clusters only (RM-07): O(clusters here), not every realm's filtered.
+            var ids = cs.ReadRealmClusterList(ServedRealm, out var active);
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {
-                if (!state.Directory.TryGetBlock(ids[i], out var block))
+                // The active cluster list is engine-wide: another realm's entities are counted by its own replication, in its own frame.
+                if (!state.Directory.TryGetBlock(ids[i], out var block) || block->Realm != ServedRealm)
                 {
                     continue;
                 }

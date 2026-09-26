@@ -89,7 +89,50 @@ public partial class DatabaseEngine
     [PublicAPI]
     public SpatialGridOccupancy GetSpatialGridOccupancy()
     {
-        var grid = _spatialGrid;
+        // Realms D6 (RT-8): every realm's grid summed — blocks, cells and bytes; the block shape is the primary realm's (one realm: exactly its grid),
+        // and the fill is occupied cells over the summed capacity of the allocated blocks, whose shape may differ realm to realm.
+        var primary = PrimaryGrid;
+        var realms = _realms;
+        if (primary == null || realms == null)
+        {
+            return default;
+        }
+
+        var blocks = 0;
+        var cells = 0;
+        long capacity = 0;
+        long resident = 0;
+        long dense = 0;
+        foreach (var realm in realms.Registered)
+        {
+            var grid = realm.Grid;
+            blocks += grid.BlockCount;
+            cells += grid.CellCount;
+            capacity += (long)grid.BlockCount * grid.BlockCellCapacity;
+            resident += grid.ResidentBytes;
+            dense += grid.DenseEquivalentBytes;
+        }
+
+        var (bx, by, bz) = primary.BlockDimensions;
+        return new SpatialGridOccupancy
+        {
+            BlockCount = blocks,
+            OccupiedCellCount = cells,
+            BlockCellCapacity = primary.BlockCellCapacity,
+            BlockDimX = bx,
+            BlockDimY = by,
+            BlockDimZ = bz,
+            IntraBlockFill = capacity == 0 ? 0d : (double)cells / capacity,
+            ResidentBytes = resident,
+            DenseEquivalentBytes = dense,
+        };
+    }
+
+    /// <summary>One realm's grid occupancy (Realms D6). An unregistered realm yields an all-zero snapshot.</summary>
+    [PublicAPI]
+    public SpatialGridOccupancy GetSpatialGridOccupancy(RealmId realm)
+    {
+        var grid = _realms?.TryGet(realm.Value)?.Grid;
         if (grid == null)
         {
             return default;
@@ -201,8 +244,8 @@ public partial class DatabaseEngine
             ArrivalCellsTouched = clusterState.LastTickArrivalCellsTouched,
             RelocationSpendNs = clusterState.LastTickRelocationSpendNs,
             RepairBudgetStarvedNs = clusterState.LastTickRepairBudgetStarvedNs,
-            ClusterReach = Volatile.Read(ref clusterState.ClusterReach),
-            EscapedClusterCount = Volatile.Read(ref clusterState.EscapedClusters).Count,
+            ClusterReach = clusterState.MaxClusterReachAcrossRealms,
+            EscapedClusterCount = clusterState.EscapedClusterCountAcrossRealms,
             CellTreePromotions = clusterState.LastTickCellTreePromotions,
             CellTreeDemotions = clusterState.LastTickCellTreeDemotions,
             TightnessSampleCount = samples,
@@ -412,13 +455,13 @@ public partial class DatabaseEngine
 
             // MAXED, not summed — see SpatialMigrationTelemetry.ClusterReach. It is a bound every walk widens by, and the engine-wide bound is the largest
             // any archetype needs, not the sum of what each needs separately. The named outliers, by contrast, are distinct clusters and do add.
-            var reach = Volatile.Read(ref clusterState.ClusterReach);
+            var reach = clusterState.MaxClusterReachAcrossRealms;
             if (reach > maxReach)
             {
                 maxReach = reach;
             }
 
-            escapedClusters += Volatile.Read(ref clusterState.EscapedClusters).Count;
+            escapedClusters += clusterState.EscapedClusterCountAcrossRealms;
 
             // Summed as NUMERATORS, divided once at the end: a mean of the per-archetype means would weight a quiet archetype that scanned one cluster
             // equally with a busy one that scanned ten thousand. Read the sample count once for the same reason the per-archetype accessor does.

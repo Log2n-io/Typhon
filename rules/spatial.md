@@ -168,10 +168,11 @@
     not yet migrated — then cost every later query of the archetype ~50x its cells for the rest of the process, SWG Tatooine's whole-run slow
     mode and its x128 multi-second ticks; and the out-of-world half of edge-cell boxes widened every Creature query by ~930 m from tick 0
   invariant a named cluster whose chunk id was freed and reused in another cell is skipped (EscapedClusterSet.IsCurrent) — opened, it would
-    report the reused cluster's entities a second time
+    report the reused cluster's entities a second time. "Another cell" includes the same key in ANOTHER REALM (Realms C1): IsCurrent tests the
+    realm map too, or a query would answer with another world's entities (SQ-08)
   scope: SpatialRTree.Query.cs (all enumerators), CountInAABB, AabbClusterEnumerator, ArchetypeClusterState.QueryRay,
     ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest, ArchetypeClusterState.CoveredRadiusSq,
-    ArchetypeClusterState.ClusterReach, ArchetypeClusterState.EscapedClusters, ArchetypeClusterState.RefreshClusterReach,
+    RealmArchetypeSpatial.ClusterReach, RealmArchetypeSpatial.EscapedClusters, ArchetypeClusterState.RefreshClusterReach,
     ArchetypeClusterState.RaiseClusterReachForSpawn, ArchetypeClusterState.CellReachFrame, ArchetypeClusterState.FoldReach,
     ArchetypeClusterState.RejectBounds, ArchetypeClusterState.BeginClusterAabbsWrite, ArchetypeClusterState.ClusterAabbsWriteLanded,
     ClusterRef.ApplySpatialWrite,
@@ -498,6 +499,28 @@
 
 ---
 
+### SQ-08: A spatial query answers in exactly one realm `[fatal][silent]`
+  invariant every spatial query names ONE realm r (EcsQuery.InRealm, ClusterSpatialQuery(engine, realm); realm 0
+    when unnamed) and walks only realm r's grid: ∀ hit h: ClusterRealmMap[h.ClusterChunkId] == r. Two realms
+    share coordinates and, with the same geometry, cell keys — a query keyed by cell alone would answer with
+    another world's entities, plausibly and wrongly
+  invariant an entity is placed in the realm its [RealmKey] names (realm 0 without one) — the key in the spatial component or in a SingleVersion
+    component of its own (one per archetype) — in THAT realm's grid and cell geometry; the batch spawn sort orders by (archetype, realm, cell), never
+    by cell alone
+  invariant a realm that is not registered is an application error at the call (spawn, query), never an empty
+    answer. A registered realm the archetype has no cluster in answers empty
+  never resolve a query's grid from Realm0Grid on a path that takes a realm
+  scope: EcsQuery`1.InRealm, EcsQuery`1.ExecuteSpatial, ClusterSpatialQueryExtensions.ClusterSpatialQuery,
+    DatabaseEngine.RealmGridForQuery, DatabaseEngine.RealmGridForEntry, ArchetypeClusterState.SpatialOf
+  verified: RealmKeyTests.EveryQueryShape_AnswersOnlyItsRealm_BruteForceOracle — one population, coordinate for
+    coordinate, in three realms (two sharing a cell geometry); AABB, radius, batched radius, ray, frustum, kNN and
+    the EcsQuery predicates, each against a brute-force answer or the other realms' identical answer
+  on_violation:
+    a query returns another realm's entities: interior NPCs answer an overworld aggro query, silently
+  requires: SQ-01
+
+---
+
 ## Module: Fat AABB Updates
 
 > 🔴 **RETIRED by #872 step 13, kept as a record of what the rules used to constrain.** `SF-01` and `SF-02`
@@ -742,12 +765,17 @@
     creation order, so nothing may cache a key across either
   invariant creation is monotonic: a cell, once created, is never removed or renumbered while the grid
     lives (step 8 ships no destruction path; §3.5's windowed sweep is deferred)
+  invariant the block directory has two forms chosen once from the world's extent (Realms SP-4): a DENSE int[]
+    directory (one entry per block, -1 = absent) for a world of at most DenseBlockDirectoryMax blocks, the packed-key
+    hash map above it. Both publish a block the same way — its cell array and count first, the directory entry last
+    with a release store, under _creationLock — and both answer every read identically, absent included
   scope: SpatialGrid.ComputeCellKey, SpatialGrid.TryGetCellKey, SpatialGrid.TryGetNeighbourCellKey,
-    SpatialGrid.CellKeyToCoords, SpatialGrid.ResetCellState, VdbBlockKey.Pack
+    SpatialGrid.CellKeyToCoords, SpatialGrid.ResetCellState, VdbBlockKey.Pack, SpatialGrid.TryGetBlock
   verified: VdbSpatialGridTests (AC82_NeighbourAcrossAnAbsentBlockBoundary_IsAbsentThenAppears carries the
     attribute; ResetCellState_InvalidatesTheBlockCacheOnEveryThread and AC84_RebuildFromTheSamePopulation
     cover the stability and monotonicity clauses). VdbBlockKeyTests covers the packing clause but carries no
-    attribute of its own — the packing is reached through every one of these.
+    attribute of its own — the packing is reached through every one of these. RealmFootprintTests.BlockDirectory_ReadPathsDoNotCreate_AndNeighboursResolveAcrossAbsentBlocks
+    runs the absent, neighbour and reset clauses against both directory forms.
   on_violation:
     a remembered "absent" that later has a cell → query misses every cluster in it → SQ-01 false negative
     a block key that truncates an axis → two regions alias one block → each query returns the other's clusters
@@ -886,7 +914,7 @@
     AnyCluster (-1). It is computed a whole phase before the drain, so between the two the pinned cluster can
     fill up, or be drained and freed and its chunk id reallocated to a DIFFERENT cell
   invariant the claim must therefore validate identity, not bounds:
-    TryClaimPinnedSlot requires ClusterCellMap[pin] == the request's DestCellKey before claiming
+    TryClaimPinnedSlot requires ClusterCellMap[pin] == the request's DestCellKey AND ClusterRealmMap[pin] == its DestRealm before claiming
     on failure it falls back to the first-fit ClaimSlotInCell — it must NOT refuse the migration, which would
       strand the entity in a cluster it no longer belongs to
   invariant a pinned claim is a FOURTH success site for CellState.EntityCount. TryClaimSlotInCluster
@@ -1455,6 +1483,16 @@
   on_violation: a fixed budget spent on a partition the queries already find tight — the churn RP-07 stops, paid for again; or, the other way, a
     world whose queries the tally cannot see starved of maintenance
 
+### RP-08: Repair runs in every realm through one queue per archetype, keyed by (realm, cell) `[silent]`
+  invariant the AABB refresh nominates a degraded cluster's cell in the cluster's OWN realm; the queue key is (realm, cell) — a cell key names a
+    cell in every realm, so a bare key would merge two worlds' candidates
+  invariant a candidate is scored against its realm's grid (tier weight) and its realm's cell cluster pool (cluster count), and planned in that
+    realm's grid; the budget, the controllers, the cap and the cooldown stay per archetype (D-6) — the total is bounded whatever the realm count
+  invariant a candidate of a realm that is not runnable waits (DM-04); a candidate whose realm holds no state for the archetype is dropped
+  scope: CellRepairQueue.Key, CellRepairQueue.Absorb, ArchetypeClusterState.PlanCellRepairs, ArchetypeClusterState.RepairNomination
+  verified: RealmRepairTests.RepairRunsInEveryRealm_AndADormantRealmsCandidatesWait (nominating in the primary realm only fails it)
+  on_violation: every realm but the primary loses its clusters' tightness for good — queries there slow down as the world moves
+
 ### RP-07: A repaired cell is not repaired again until its cooldown ends, and what it is nominated for meanwhile is held `[perf][silent]`
   invariant a unit that MOVED entities starts its cell's cooldown: RepairCooldownTicks ticks during which the cell
     is not a queue candidate — not ranked, not serviced, not offered the valve, not counted against
@@ -1638,13 +1676,22 @@
     documents as a known residual) all leave a flag whose destination is not where the entity is. The drain
     (DatabaseEngine.DrainPreFlaggedMigrations) therefore re-reads the position and decides from it — dropping the
     flag when the entity is home (LastTickStaleFlagsDropped) — exactly as the dirty-bits scan does
+  invariant at a rebuild (RebuildSpatialStateFromData) a cluster takes its FIRST occupied slot's cell, and every other
+    slot is checked against it: a slot whose centre lies outside that cell by more than the hysteresis band is filed
+    as a crossing for the first fence (FileForeignCellSlots) — the cluster stays whole and its AABB keeps covering the
+    slot (CA-01) until it moves. A recovery or schema-migration claim (ClaimSlot) is cell-agnostic, so without the check
+    a mixed-cell cluster survived until its entities were next written. The check is O(1) per cluster whose box fits
+    the cell plus the band; only the others scan their slots (Realms P0.2)
   invariant CellClusterPool's per-cell (head, count) pair and its backing array are published and read in a fixed
     order (release: pool → head → entry → count; acquire: count → head → pool). A reader pairing a new count with
     an old head runs past its cell's segment into the next cell's, and a claim lands in a cluster of another cell
   scope: ArchetypeClusterState.AddClusterToPerCellIndex, ArchetypeClusterState.AddClusterToPerCellIndexLocked,
     ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.TryClaimPinnedSlot, ArchetypeClusterState.ClusterCellMap,
-    DatabaseEngine.DrainPreFlaggedMigrations, CellClusterPool.GetClusters, CellClusterPool.AddCluster
-  verified: ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell — eight writers spawning
+    DatabaseEngine.DrainPreFlaggedMigrations, CellClusterPool.GetClusters, CellClusterPool.AddCluster,
+    ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.FileForeignCellSlots
+  verified: RecoverySpatialRebuildTests.MixedCellClusterFromRecoveryClaim_FiledAtRebuild_FixedAtFirstFence (the replay packs
+    four cells into shared clusters; the rebuild files exactly the slots outside their cluster's cell and none survives the
+    first fence). ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell — eight writers spawning
     into two adjacent cells race eight writers moving entities across their boundary; after the fence every
     occupied slot resolves to its cluster's mapped cell and the two cells count what was spawned (7 of 30 runs
     failed before the latch and the occupancy-before-publish ordering; about 1 cold launch in 10 before the drain
@@ -1797,8 +1844,11 @@
         array just as well as the pre-size does
     structurally unreachable, and so deliberately unverified: the Finalize-slice gate on a null list. Branch 1
       returns before Finalize's emit, so FinalizeSliceable is never set for an archetype without a change list
-  invariant the drain prefix is sorted by DestCellKey (OrderDrainAndMeasureArrivals) in Prep's serial tail,
-    before Migrate dispatches, so each worker slice owns disjoint dst cells
+  invariant the drain prefix is sorted by the destination cell's IDENTITY, (DestRealm, DestCellKey) — MigrationRequest.DestCellIdentity —
+    (OrderDrainAndMeasureArrivals) in Prep's serial tail, before Migrate dispatches, and sliced on the same identity, so each worker slice owns
+    disjoint dst cells. A cell key alone names one cell in every realm (Realms C1); with one realm the realm half is zero and costs no radix pass
+  invariant every destination realm's state exists and its per-cell index covers its grid before Migrate dispatches
+    (PreSizeMigrationBuffers → PreSizeDestinationRealms): a Migrate slice may neither create a realm's state nor grow its index
   invariant PendingMigrationCount = 0 reset happens once per fence in FinalizeArchetypeFence
     AFTER all Migrate-phase slices complete, never inside ExecuteMigrationsSlice
   scope: DatabaseEngine.ExecuteMigrations, DatabaseEngine.FinalizeArchetypeFence,
@@ -1939,6 +1989,20 @@
   scope: ArchetypeClusterState.SleepThresholdTicks (property), DormancySweep
   on_violation: counter wraps to 0 → cluster oscillates between Active and Sleeping every 65536 ticks
     instead of staying asleep
+
+### DM-04: Every fence sweeps; dormancy — of a cluster or of a realm — freezes elective work only, never mandatory work `[fatal][silent]`
+  invariant every fence of an archetype with dormancy enabled runs DormancySweep, on every branch — the clean-spatial branch (path 1, nothing
+    written) included: nothing written means every active cluster is one tick quieter (Realms §9.3-3; that branch used to return before it)
+  invariant TransitionWakePendingToActive walks the active list only when a cluster was set WakePending since the last transition
+  invariant a cluster of a Dormant realm (RLM-03) is frozen: its sleep counter does not advance and no heartbeat fires; its repair candidates wait in
+    the archetype's queue, ageing, and are planned once the realm runs (D-6)
+  never skip MANDATORY work for dormancy: a write to an entity of a dormant realm or a sleeping cluster is still detected, migrated, refreshed,
+    WAL-logged and indexed, and wakes what it touches (DM-01; an entry wakes a realm, RLM-03)
+  scope: DatabaseEngine.WriteClusterTickFence, ArchetypeClusterState.DormancySweep, ArchetypeClusterState.TransitionWakePendingToActive,
+    ArchetypeClusterState.PlanCellRepairs, CellRepairQueue.TryFindCritical
+  verified: DormancyTests.IdleDynamicArchetype_TheFenceStillSweeps_AndTheHeartbeatWakes (fails with path 1's early return restored);
+    RealmRepairTests.RepairRunsInEveryRealm_AndADormantRealmsCandidatesWait (planning a dormant realm's candidates fails it)
+  on_violation: a fully idle archetype whose clusters never sleep, or sleep and never heartbeat; a dormant interior tidied every tick for nobody
 
 ---
 
@@ -2187,3 +2251,177 @@
     returns each redden them
   on_violation: the maintenance controller that reads candidates per hit steers on a number the queries did not produce — a copied query read
     twice, a batch read as cheaper than the queries it answers, the same world read differently on two machines
+
+---
+
+## Module: Realms — catalog and open (Realms C2, decision D-1)
+
+### RLM-01: Every realm the data names is known at open, from the catalog if not from the application `[fatal][silent]`
+  invariant every named realm's identity (bounds, cell size, hysteresis) is persisted in the realm catalog (RealmR1) at its first registration,
+    SYNCHRONOUSLY: the spatial rebuild at the next open runs before the WAL is replayed, so a realm known only to the WAL would be unknown
+    exactly when its clusters are filed
+  invariant at open, a catalog realm the application did not register is registered from the catalog (a generic opener rebuilds every realm);
+    a registration whose identity differs from the catalog's is refused — the identity decides which cell every entity of the realm is in
+  invariant a cluster NONE of whose entities names a realm that is registered (or catalogued) refuses the open, naming the realm — it is never filed
+    elsewhere; the refusal is recoverable (register that id, open, move the entity). A single entity with an invalid key in a cluster whose other keys
+    are valid is a stray write, reverted (RM-05/RM-06), not a lost realm
+  invariant the catalog is written only after the open has validated every archetype (a failed open leaves no identity behind), pages before the
+    bootstrap key (the meta flip is the commit point); a duplicate or out-of-range row refuses the load as corruption
+  never let an open proceed with a realm's clusters unfiled: every spatial query of that realm would answer empty, silently
+  scope: DatabaseEngine.MergeRealmCatalog, DatabaseEngine.PersistRealmCatalogEntries, ArchetypeClusterState.RebuildSpatialStateFromData, RealmR1
+  verified: RealmCatalogTests (a generic opener reconstructs every realm; a differing identity is refused; a catalog that lost realm 2 refuses
+    the open) and RealmCatalogCrashTests.HardCrashBeforeAnyCheckpoint_TheCatalogStillNamesTheRealm (dropping the synchronous save fails it)
+  on_violation: a reopened realm answers every query with nothing, or files its entities in cells another geometry chose
+
+### RLM-02: The realm count is the application's, never clamped `[fatal]`
+  invariant ConfigureRealms(n) accepts n in [1, 65 535] and refuses anything else; below the catalog's highest id + 1 it refuses the open
+  invariant an application that never configured the count is a generic opener and gets the catalog's highest id + 1 — the file's own
+    requirement, not a value derived from a workload
+  never clamp the count up or down: a clamped count silently drops realms or silently sizes every archetype's per-realm table for realms that
+    do not exist
+  scope: DatabaseEngine.ConfigureRealms, DatabaseEngine.MergeRealmCatalog
+  verified: RealmRegistrationTests.ConfigureRealms_OutOfRange_Refused, RealmCatalogTests.ConfigureRealms_BelowTheCatalogsHighestId_IsRefused_NeverClamped
+  on_violation: realms missing after a reopen, or memory sized to a count nobody asked for
+
+### RM-03: A realm change is a mandatory crossing, whatever the hysteresis band `[fatal][silent]`
+  invariant a slot whose [RealmKey] differs from its cluster's realm at the fence is filed as a crossing into (key, the new realm's cell for its
+    position) — never absorbed by the band, never refused by the throttle (it is a CellCrossing); after the fence every occupied slot's key is its
+    cluster's realm (CC-02 per realm)
+  invariant a write whose key is not the CLUSTER's realm (WriteSpatial, OpenMut, Teleport — a first change or any later write this tick) never grows
+    the source cluster's box with the new coordinates — they are another realm's frame (CA-01 holds: the box still covers where the entity was); a
+    write back to the cluster's realm is an ordinary write. A realm change is validated (registered, compatible, finite position) before any store,
+    and refused on a Static archetype, whose fence runs no detector
+  invariant ExecuteMigrations claims in the destination realm's grid, releases in the source cluster's, and records one RealmChange per move
+  scope: ClusterRef.WriteSpatial, EntityAccessor.Teleport, DatabaseEngine.DrainPreFlaggedMigrations, DatabaseEngine.DetectClusterMigrationsRange,
+    DatabaseEngine.ExecuteMigrations, ArchetypeClusterState.RecordRealmChange
+  verified: CrossRealmMigrationTests (WriteSpatial, inside the band, OpenMut, Teleport incl. barrier-only, change-and-undo, source box not grown);
+    RealmFenceTests.RotatingRealms_EveryEntityChangesRealmEachRound_TheRealmsStayConsistent (serial and W = 2, 8; both write paths)
+  on_violation: an entity whose key names one realm lives in another's cluster: invisible to both realms' queries, silently
+
+### RM-04: The narrowphase answers only entities of the query's realm `[fatal][silent]`
+  invariant between a realm change's write and the fence that moves it, the entity is still in its old realm's cluster; every query path that opens
+    a cluster of a realm-keyed archetype masks out the slots whose key is not the cluster's realm (ArchetypeClusterState.SlotsInRealm) — the
+    enumerator, the batched radius query, ray, frustum and kNN
+  scope: AabbClusterEnumerator, ClusterRadiusBatch, ArchetypeClusterState.SlotsInRealm, ArchetypeClusterState.QueryRay,
+    ArchetypeClusterState.QueryFrustum, ArchetypeClusterState.QueryNearest
+  verified: CrossRealmMigrationTests.RealmChange_ViaOpenMut_IsFoundByTheDirtyScan and WriteSpatial_RealmChange_MigratesAtTheFence_AndIsLogged
+    (the old realm answers nothing before the fence)
+  on_violation: an entity that left a realm answers that realm's queries with coordinates of another frame (SQ-08 broken for one tick)
+
+### RM-05: An invalid realm key is reverted at the fence, never thrown there `[fatal]`
+  invariant validated paths (Spawn, WriteSpatial, Teleport) throw at the call for an unregistered or incompatible realm; a raw write (OpenMut's ref,
+    GetSpan, or an in-place write into a pending spawn) has no pre-store check, so the fence rewrites such a key to the cluster's realm, marks the page
+    modified (the checkpoint writes it) and the slot dirty (the WAL carries it), counts
+    LastTickRealmKeyReverts — and never throws (a throw would leave migrations and WAL publication half done). Decision D-2
+  scope: ArchetypeClusterState.ResolveSlotRealmAtFence, ArchetypeClusterState.ValidateRealmEntry
+  verified: CrossRealmMigrationTests.InvalidRealmThroughARawWrite_IsRevertedAtTheFence_NeverThrown,
+    CrossRealmMigrationTests.WriteSpatial_IntoAnUnregisteredRealm_Throws_AndStoresNothing
+  on_violation: a stranded entity no query can see (and, with D-1, a reopen that refuses the database), or a fence that throws mid-way
+
+### RM-06: The rebuild checks every slot's realm, not only the first `[fatal][silent]`
+  invariant a realm-keyed cluster is filed in the realm of its first slot whose key is valid, and that slot gives its cell; a slot whose valid key
+    names another realm (a recovery claim mixes realms as it mixes cells; a realm change committed but never fenced) is left out of the cluster's box
+    and its cell check, and filed as a crossing for the first fence — flagged on a Dynamic archetype, queued with its destination on a Static one
+  invariant a slot whose key is not a valid realm is rewritten to its cluster's realm, marked dirty and counted (RM-05, at rebuild); a cluster with no
+    valid key at all is in a realm the engine does not know and refuses the open (RLM-01)
+  invariant after the first fence following an open, no cluster holds a slot of another realm (CC-02 per realm)
+  scope: ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.FileForeignRealmSlots
+  verified: RecoveryRealmTests (interleaved spawns replayed after a crash are split at the first fence; a committed, never-fenced teleport moves at
+    the first fence after reopen; an invalid key in the file is rewritten at rebuild)
+  on_violation: after a crash, entities answer the wrong realm's queries, or a cluster's box spans two worlds' coordinates
+
+### RM-07: A realm's cluster list holds exactly that realm's clusters, and a realm scope is never silently dropped `[fatal][silent]`
+  invariant a realm's clusters of an archetype are its realm pool's list: a cluster joins it when it joins a cell of that pool (claim, repair, rebuild)
+    and leaves it when it leaves the pool (drain); after every fence, ∀ realm R: list(R) = { active clusters whose ClusterRealmMap is R }, each once
+  invariant an archetype with no spatial state is wholly in realm 0: its list there is the active list, and empty in every other realm
+  invariant the list is published like the active list (CLUSTERWALK-02): a grown array before the count that indexes it; a walk reads the count first
+  invariant a per-realm walk or count naming an unregistered realm throws; an EcsQuery that names a realm (InRealm) without a spatial predicate throws
+    at execution, rather than answering every realm's entities
+  scope: CellClusterPool.ReadClusterList, ArchetypeClusterState.ReadRealmClusterList, DatabaseEngine.CheckRealmRegistered, EcsQuery.InRealm
+  verified: RealmClusterListTests.ARealmsClusterWalkYieldsThatRealmsEntitiesOnly_AndFollowsMovesAndDrains (red when a drain leaves the list or a
+    claim does not join it), RealmClusterListTests.AnUnkeyedArchetypeIsWhollyInRealm0, RealmClusterListTests.AnUnregisteredRealmIsRefused,
+    RealmClusterListTests.InRealmWithoutASpatialPredicateIsRefused_AndWithOneIsScoped (red without the guard)
+  on_violation: a per-realm system walks another realm's clusters or misses its own; a query believed realm-scoped answers every realm
+
+## Module: Realms — policy and dispatch (Realms D)
+
+### RLM-03: A realm's policy is decided once per tick, at tick start, before any dispatch `[fatal][silent]`
+  invariant RealmTable.EvaluatePolicy runs once per tick on the tick thread, before the per-archetype runnable sets and the tier indexes are rebuilt
+    and before any system is dispatched; every dispatch, scan and fence stage of the tick reads the state it decided
+  invariant observed (a session or an application pin) ⇒ Active at divisor 1; unobserved ⇒ Simulated at the realm's UnobservedTickDivisor, except a
+    Sleep realm unobserved for more than SleepAfterTicks evaluations, which is Dormant; an entry (a cross-realm migration) or Wake restarts the hold
+  invariant observers, wake requests and Unregister's Closing flag arrive from any thread and take effect at the next evaluation — never mid-tick;
+    the evaluation maps a Closing realm to state Closing at divisor 1 (the flag itself refuses entries at once)
+  never re-evaluate from a worker, or between two systems of one tick: two systems of the tick would dispatch different realm sets, and a tier index
+    rebuilt mid-dispatch zeroes the arrays a parallel system is walking (TI-01)
+  scope: RealmTable.EvaluatePolicy, TyphonRuntime.UpdateRealmPolicyAtTickStart, RealmDispatchIndex.Update
+  verified: RealmPolicyTests (a Sleep realm runs for its hold, then its clusters reach no system; the hold counts evaluations; an entry wakes it
+    at the next evaluation, not at the fence)
+  on_violation: a realm half-dispatched within one tick, or a dormant realm's entities integrated by one system and not the next
+
+### RLM-04: With every realm runnable, dispatch is the pre-realm path; a dormant realm's clusters reach no QuerySystem on any path `[fatal][silent]`
+  invariant NonRunnableCount == 0 ⇒ no runnable index filters (RealmDispatchIndex.Filtering false) and every selection is what it was before realms —
+    the one-realm and all-awake cost is one branch per tick
+  invariant a Dormant realm's clusters are in no selection (parallel or not, whole-archetype or tier), in no tier list, and in no change-filtered
+    delivery; CallbackSystems are not realm-filtered (they choose with realm-scoped queries)
+  never filter by realm with a per-system copy of the active list every tick: the runnable set is rebuilt at tick start only when the policy or the
+    cluster set changed
+  scope: TyphonRuntime.SelectDispatchClusters, TierClusterIndex.Rebuild, TyphonRuntime.ScanClusterDirtyEntities, TyphonRuntime.ScanClusterDirtyEntitiesIntoSet
+  verified: RealmPolicyTests.DormantRealm_ZeroClustersDispatched (parallel, non-parallel, tier) and ChangeFilter_DirtyInDormantRealm_NotDelivered —
+    disabling the selection or the scan filter reddens them (run by hand 2026-09-26); Observer_KeepsTheRealmActive (no index ever built)
+  on_violation: dormant interiors simulated anyway (the cost realms exist to remove), or changes delivered for entities no system runs
+
+### RLM-05: A divided realm's clusters are strided on the system's run count and the chunk id — each exactly once every N runs `[fatal][silent]`
+  invariant for a RealmRate.Divided QuerySystem without a change filter, a cluster of a realm at divisor N > 1 is selected on run r iff
+    (r + PhaseOf(realm) + chunkId) mod N == 0 — so over any N consecutive runs every such cluster is selected exactly once, and the realm's load is
+    spread over the N runs rather than landing on one
+  invariant keyed on the SYSTEM's run count, never the tick number: a TickDivisor would otherwise alias it and starve every cluster off its parity;
+    with cellAmortize A the key is run / A (bucket visits), or gcd(A, N) > 1 starves clusters
+  invariant only a run whose dispatch was strided multiplies: ctx.Realms.DeltaTime and TicksPerVisit give N for it, 1 for a change-filtered, Full or
+    unstrided run; descendant archetypes of the view are narrowed the same way
+  known limit time is not conserved across a divisor CHANGE (1 -> N: the next visit may integrate up to N - 1 ticks too many; N -> 1: up to N - 1
+    too few) — observer churn is where it shows; a per-cluster last-visit stamp would fix it at a per-cluster cost, not paid today
+  invariant ctx.Realms.DeltaTime(realm) = AmortizedDeltaTime × the realm's divisor for a Divided system, AmortizedDeltaTime for a Full one
+  invariant a change-filtered system and a RealmRate.Full system are not strided; an observed realm is at divisor 1; no divided realm ⇒ one branch
+  scope: TyphonRuntime.SelectDispatchClusters, RealmTable.PhaseOf, RealmTable.DividedCount, RealmsAccessor.DeltaTime, SystemBuilder.RealmRate
+  verified: RealmDivisorTests (exactly twice in 8 runs, parallel and not; no starvation under TickDivisor 2 — keying the stride on the tick fails it;
+    Full and observed realms every run; per-realm delta time)
+  on_violation: a planet's creatures integrated twice in some windows and never in others, or at the wrong delta time — visible as jumps
+
+### RLM-06: A realm leaves only empty, and its id returns only after an open proves it empty `[fatal][silent]`
+  invariant a run-time Register grows every archetype's per-realm table, writes its catalog row synchronously (RLM-01) and marks the archetypes the
+    realm cannot hold, all BEFORE publishing it — no entity can enter a half-built realm, nor one the next open would not know
+  invariant Unregister marks the catalog row Closing synchronously, then the realm: from then on no entity may enter it (spawn and teleport throw; a
+    raw key write naming it is reverted at the fence, D-2); entities already in it stay and still answer its queries
+  invariant the first fence that finds a Closing realm holding no cluster removes it: every archetype's state for it, then its table slot
+  invariant an id unregistered this session is not registrable again in it. Closing is never carried across an open: after recovery a Closing
+    realm that something still names — a cluster in it, ANY entity's [RealmKey] (replay claims slots cell- and realm-agnostically), or the
+    application's registration at this open — is live again (row Live); one nothing names is retired (row Retired, id free, reused at the next
+    generation). Kept Closing, a replayed entity's key would be refused as an entry and reverted into another realm
+  invariant a spawn validated before Unregister and committed after it lands in the primary realm, its key rewritten (D-2); the commit never throws
+  never remove a realm that holds a cluster, and never free its id on the strength of in-memory state alone: a crash before the destroys are
+    checkpointed leaves their entities in the data pages, and a realm id reused by then would receive them on replay
+  scope: DatabaseEngine.RegisterRealmAtRuntime, DatabaseEngine.UnregisterRealm, DatabaseEngine.RemoveEmptyClosingRealms,
+    DatabaseEngine.ResolveClosingRealmsAtOpen, RealmTable.MarkClosing, RealmTable.Remove, ArchetypeClusterState.EnsureRealmSpatialCapacity
+  verified: RealmLifecycleTests (a run-time realm reopens from the catalog; a closing realm refuses entries and keeps its entities; an emptied one is
+    removed with its state and its id quarantined until an open retires it; a crash after unregistering never resurrects it — skipping the
+    synchronous Closing mark, or the entry refusal, fails them, run by hand 2026-09-26)
+  on_violation: entities of a realm the application destroyed reappear in a new realm on the same id, or a realm vanishes with entities in it
+
+### RLM-07: A QuerySystem narrowed to realms is dispatched their runnable clusters only, and a narrowed change filter their changes only `[fatal][silent]`
+  invariant a system declared InRealm(s) / InRealms(...) is dispatched, each run, exactly the clusters of those realms that are runnable this tick —
+    from the realms' own cluster lists (RM-07) when nothing selected before, or the tier / amortization selection filtered by realm; a realm not
+    runnable, or not (yet) registered, gives it nothing; a divided realm is strided (RLM-05) and sleeping clusters leave, as for any system
+  invariant a narrowed change-filtered system sees the dirty entities of those realms only, on every scan path (full snapshot, tier-scoped,
+    single- and multi-table), and a descendant archetype's clusters are narrowed the same way; entities of an archetype without realm state are in
+    realm 0
+  invariant a narrowing is refused when the runtime is built on a system that selects no clusters (not a QuerySystem over a cluster archetype) or
+    names a realm id beyond the engine's realm count; an empty set or RealmId.None is refused at declaration
+  scope: SystemBuilder.InRealms, SystemDefinition.RealmMask, TyphonRuntime.SelectRealmClusters, TyphonRuntime.ScanClusterDirtyEntities
+  verified: RealmSystemNarrowingTests.ANarrowedSystemSeesItsRealmsEntitiesOnly (red without the selection narrowing),
+    RealmSystemNarrowingTests.ADormantRealmGivesANarrowedSystemNothing (red when a non-runnable realm's list is taken),
+    RealmSystemNarrowingTests.ANarrowedChangeFilterOverTheDirtySetSeesItsRealmsChangesOnly (red when the dirty scan ignores the realm),
+    RealmSystemNarrowingTests.ATierFilterAndARealmNarrowingIntersect, RealmSystemNarrowingTests.ANarrowingOnACallbackSystemOrBeyondTheRealmCountIsRefused
+  on_violation: a system written for one realm acts on another's entities — an interior's logic runs on the planet — or reacts to another realm's
+    changes
+

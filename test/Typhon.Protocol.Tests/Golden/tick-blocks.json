@@ -1,12 +1,34 @@
 {
-  "description": "Every non-ENTITIES block in stream order, with PERIOD and OVERLOAD set: EVENTS (a list of 2, a UTF-8 chat, an empty list), SELF with both owner groups and lastSeq 65535, ACKS, SOURCES (applied and error), AGG with RESET, STATS (labelled, server and session), DEBUG (known and unknown sub-types), EXT, and an unknown block 0x42 skipped by its length.",
+  "description": "RESET and REALM, then every non-ENTITIES block in stream order, with PERIOD and OVERLOAD set: EVENTS (a list of 2, a UTF-8 chat, an empty list), SELF with both owner groups and lastSeq 65535, ACKS, SOURCES (applied and error), AGG with RESET, STATS (labelled, server and session), DEBUG (known and unknown sub-types), EXT, and an unknown block 0x42 skipped by its length.",
   "catalog": "catalog-kitchen-sink",
   "log": [
     {
       "call": "beginTick",
       "tick": 70001,
-      "flags": 12,
+      "flags": 14,
       "periodUs": 150000
+    },
+    {
+      "call": "realm",
+      "frame": {
+        "realmId": 3,
+        "generation": 7,
+        "kindIdx": 1,
+        "appTag": 12648430,
+        "posBits": 24,
+        "cellM": "4070000000000000",
+        "deep": true,
+        "min": [
+          "c0c0000000000000",
+          "c0c0000000000000",
+          "c050000000000000"
+        ],
+        "max": [
+          "40c0000000000000",
+          "40c0000000000000",
+          "4050000000000000"
+        ]
+      }
     },
     {
       "call": "event",

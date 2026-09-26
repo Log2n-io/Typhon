@@ -15,10 +15,57 @@ public class FrameApplierTests
 
     private static ArchetypePlan Beacon => Plan.ArchetypeByName("Beacon");
 
+    /// <summary>
+    /// typhon.3: a REALM re-lays the aggregate grids over its frame and raises <see cref="WorldStore.RealmChanged"/> once per change, before the records
+    /// it frames apply; REALM(NONE) leaves the session in no realm.
+    /// </summary>
+    [Test]
+    public void ARealmBlockReframesTheGridsAndRaisesRealmChangedOnce()
+    {
+        var store = new WorldStore(Plan);
+        var applier = new FrameApplier(store);
+        var changes = new System.Collections.Generic.List<(int? Previous, int? Current)>();
+        store.RealmChanged += (previous, current) => changes.Add((previous?.RealmId, current?.RealmId));
+        var small = new RealmFrame(4, 1, 0, 7, 16, 64, deep: false, [0, 0, 0], [1024, 512, 64]);
+
+        byte[] Realm(uint tick, RealmFrame realm)
+        {
+            var w = new WireWriter(new byte[4096]);
+            TickWriter.WriteHeader(ref w, tick, TickFlags.Reset);
+            TickWriter.WriteRealm(ref w, realm);
+            if (realm != null)
+            {
+                TickWriter.WriteEntities(ref w, tick, Beacon, [new EnterRecord { NetId = 1, Position = [10, 20], Values = Values(1, 0.5, -2) }], [], [],
+                    [], realm);
+            }
+
+            return w.Written.ToArray();
+        }
+
+        applier.Apply(Realm(1, small));
+        var grid = store.Aggregates[0];
+        Assert.Multiple(() =>
+        {
+            Assert.That(store.Realm?.RealmId, Is.EqualTo((ushort)4));
+            Assert.That(grid.Dims, Is.EqualTo(new[] { 4, 2, 1 }), "1024 x 512 m in 4-cell tiles of 64 m, one cell deep in a flat realm");
+            Assert.That(grid.CellCount, Is.EqualTo(8));
+            Assert.That(store.Archetypes[Beacon.Idx].LiveCount, Is.EqualTo(1));
+        });
+
+        applier.Apply(Realm(2, small));
+        applier.Apply(Realm(3, null));
+        Assert.Multiple(() =>
+        {
+            Assert.That(changes, Is.EqualTo(new (int?, int?)[] { (null, 4), (4, null) }), "once per change, not per REALM block");
+            Assert.That(store.Realm, Is.Null);
+            Assert.That(store.Archetypes[Beacon.Idx].LiveCount, Is.Zero);
+        });
+    }
+
     [Test]
     public void AFreedSlotIsReusedOnlyInALaterFrame()
     {
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var applier = new FrameApplier(store);
         applier.Apply(Frame(1, TickFlags.None, enters: [1, 2]));
         store.TryLocate(1, out _, out var slotOf1);
@@ -42,7 +89,7 @@ public class FrameApplierTests
     [Test]
     public void AnEnterForALiveNetIdReplacesItsHolderAndCountsAnAnomaly()
     {
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var applier = new FrameApplier(store);
         applier.Apply(Frame(1, TickFlags.None, enters: [5]));
         applier.Apply(Frame(2, TickFlags.None, enters: [5]));
@@ -62,7 +109,7 @@ public class FrameApplierTests
     [Test]
     public void ALeaveAppliesToTheHolderOnceTheFramesEntersAreIn()
     {
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var applier = new FrameApplier(store);
         applier.Apply(Frame(1, TickFlags.None, enters: [5], leaves: [5]));
 
@@ -80,7 +127,7 @@ public class FrameApplierTests
     [Test]
     public void AnEventSeesTheEntersAndLeavesOfItsFrameWhateverTheBlockOrder()
     {
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var handler = new ResolvingHandler(store);
         var applier = new FrameApplier(store, handler);
         applier.Apply(Frame(1, TickFlags.None, enters: [9]));
@@ -99,13 +146,13 @@ public class FrameApplierTests
     [Test]
     public void ALeaveInAnotherArchetypesBlockIsAnAnomaly()
     {
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var applier = new FrameApplier(store);
         applier.Apply(Frame(1, TickFlags.None, enters: [9]));
 
         var w = new WireWriter(new byte[4096]);
         TickWriter.WriteHeader(ref w, 2, TickFlags.None);
-        TickWriter.WriteEntities(ref w, 2, Plan.ArchetypeByName("Ledger"), [], [], [], [9]);
+        TickWriter.WriteEntities(ref w, 2, Plan.ArchetypeByName("Ledger"), [], [], [], [9], TestFrames.Kitchen);
         applier.Apply(w.Written.ToArray());
 
         Assert.Multiple(() =>
@@ -120,19 +167,19 @@ public class FrameApplierTests
     public void OwnerStateResetsWhenTheControlledNetIdChanges()
     {
         var drone = Plan.ArchetypeByName("Drone");
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var applier = new FrameApplier(store);
 
         var w = new WireWriter(new byte[4096]);
         TickWriter.WriteHeader(ref w, 1, TickFlags.None);
-        TickWriter.WriteSelf(ref w, drone, 100, 1, 0b10, new RecordValues { ["pin"] = FieldValue.Of(42), ["vault"] = FieldValue.Of(1) });
+        TickWriter.WriteSelf(ref w, drone, 100, 1, 0b10, new RecordValues { ["pin"] = FieldValue.Of(42), ["vault"] = FieldValue.Of(1) }, TestFrames.Kitchen);
         applier.Apply(w.Written.ToArray());
         var pin = Array.FindIndex(drone.OwnerFields, f => f.Name == "pin");
         var heldBefore = store.Self.Numbers[pin] != null;
 
         w = new WireWriter(new byte[4096]);
         TickWriter.WriteHeader(ref w, 2, TickFlags.None);
-        TickWriter.WriteSelf(ref w, drone, 101, 2, 0, new RecordValues());
+        TickWriter.WriteSelf(ref w, drone, 101, 2, 0, new RecordValues(), TestFrames.Kitchen);
         applier.Apply(w.Written.ToArray());
 
         Assert.Multiple(() =>
@@ -148,12 +195,12 @@ public class FrameApplierTests
     public void OwnerStateIsDroppedWhenTheSessionControlsNoEntity()
     {
         var drone = Plan.ArchetypeByName("Drone");
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var applier = new FrameApplier(store);
 
         var w = new WireWriter(new byte[4096]);
         TickWriter.WriteHeader(ref w, 1, TickFlags.None);
-        TickWriter.WriteSelf(ref w, drone, 100, 1, 0b10, new RecordValues { ["pin"] = FieldValue.Of(42), ["vault"] = FieldValue.Of(1) });
+        TickWriter.WriteSelf(ref w, drone, 100, 1, 0b10, new RecordValues { ["pin"] = FieldValue.Of(42), ["vault"] = FieldValue.Of(1) }, TestFrames.Kitchen);
         applier.Apply(w.Written.ToArray());
 
         w = new WireWriter(new byte[4096]);
@@ -174,7 +221,7 @@ public class FrameApplierTests
     [Test]
     public void UnknownNetIdsAreCountedNotThrown()
     {
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var applier = new FrameApplier(store);
         applier.Apply(Frame(1, TickFlags.None, states: [42], leaves: [43]));
 
@@ -184,7 +231,7 @@ public class FrameApplierTests
     [Test]
     public void ANetIdAboveTheMapLimitIsAnAnomalyNotAnAllocation()
     {
-        var store = new WorldStore(Plan, maxNetId: 1000);
+        var store = TestFrames.InKitchen(new WorldStore(Plan, maxNetId: 1000));
         var applier = new FrameApplier(store);
         applier.Apply(Frame(1, TickFlags.None, enters: [1001]));
 
@@ -198,7 +245,7 @@ public class FrameApplierTests
     [Test]
     public void ResetClearsBeforeTheFrameApplies()
     {
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var applier = new FrameApplier(store);
         applier.Apply(Frame(1, TickFlags.None, enters: [1, 2, 3]));
         applier.Apply(Frame(2, TickFlags.Reset, enters: [2]));
@@ -242,7 +289,7 @@ public class FrameApplierTests
         var events = new (MessagePlan, RecordValues)[100];
         Array.Fill(events, Ping(1));
 
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var applier = new FrameApplier(store, new ResolvingHandler(store));
         applier.Apply(Frame(1, TickFlags.None, enters: netIds));
         var arrive = Frame(2, TickFlags.None, enters: churn, states: netIds, events: events);
@@ -270,7 +317,7 @@ public class FrameApplierTests
     [Test]
     public void ATickThatDoesNotAdvanceIsAnAnomalyUnlessTheFrameResets()
     {
-        var store = new WorldStore(Plan);
+        var store = TestFrames.InKitchen(new WorldStore(Plan));
         var applier = new FrameApplier(store);
         applier.Apply(Frame(5, TickFlags.None));
         applier.Apply(Frame(5, TickFlags.None));
@@ -321,7 +368,7 @@ public class FrameApplierTests
         TickWriter.WriteHeader(ref w, tick, flags);
         if (events != null)
         {
-            TickWriter.WriteEvents(ref w, events);
+            TickWriter.WriteEvents(ref w, events, TestFrames.Kitchen);
         }
 
         var enterRecords = Array.ConvertAll(enters ?? [], id => new EnterRecord
@@ -329,7 +376,7 @@ public class FrameApplierTests
             NetId = id, Position = [id % 100, -(double)(id % 100)], Values = Values(1, 0.5, -2),
         });
         var stateRecords = Array.ConvertAll(states ?? [], id => new StateRecord { NetId = id, GroupMask = 1, Values = Values(1, tick, (int)tick) });
-        TickWriter.WriteEntities(ref w, tick, Beacon, enterRecords, [], stateRecords, leaves ?? []);
+        TickWriter.WriteEntities(ref w, tick, Beacon, enterRecords, [], stateRecords, leaves ?? [], TestFrames.Kitchen);
         return w.Written.ToArray();
     }
 

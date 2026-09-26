@@ -251,7 +251,7 @@ static class QueryPhaseProfile
         // Micro-arm: WorldToCellRange alone — the node the walkthrough labels "query box, world space".
         if (armIndex == kCount * 2 + Densities.Length)
         {
-            var grid = dbe.SpatialGrid;
+            var grid = dbe.Realm0Grid;
             var sink = 0;
             for (var it = 0; it < iters; it++)
             {

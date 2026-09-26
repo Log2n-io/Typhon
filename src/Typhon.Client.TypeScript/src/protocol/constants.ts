@@ -3,11 +3,14 @@
  * before it has received any catalog.
  */
 export const ProtocolConstants = {
-  /** The protocol major this library speaks: WebSocket subprotocol `typhon.2`, TCP preamble `TYP2`. */
-  major: 2,
+  /**
+   * The protocol major this library speaks: WebSocket subprotocol `typhon.3`, TCP preamble `TYP3`. Major 3 (Realms D-4):
+   * an absolute velocity unit and realm-framed positions, which an older client would decode wrongly without noticing.
+   */
+  major: 3,
   /** The protocol minor this library speaks; the lower minor of the two sides wins. */
   minor: 0,
-  webSocketSubprotocol: 'typhon.2',
+  webSocketSubprotocol: 'typhon.3',
   /** Largest `HELLO` message, in bytes: the first message's own limit, before `limits.clientMessageBytes` applies. */
   helloMaxBytes: 16 * 1024,
   /**
@@ -35,10 +38,20 @@ export const ProtocolConstants = {
   maxGridCells: 1 << 24,
   /** The largest event, command or metric index: wire indices are dense from their reserved base (W27). */
   maxMessageIndex: 0xffff,
+  /** The legal range of a velocity codec's `unitExp` (W5): 2^-40 to 2^16 metres per tick. */
+  minVelocityUnitExp: -40,
+  maxVelocityUnitExp: 16,
+  /** The most realm kinds a catalog declares: a `REALM` block's `varu kindIdx` stays one byte. */
+  maxRealmKinds: 128,
+  /**
+   * Bits per axis of a realm-framed field a client SENDS: always 32, whatever the realm's own width, because the
+   * server's transport parses a command without reading the session's realm (SUB-05).
+   */
+  commandPositionBits: 32,
 } as const;
 
-/** The 4-byte TCP preamble, ASCII `TYP2`: each side writes its own, and a mismatch closes without a `KICK` (W31). */
-export const TCP_PREAMBLE: readonly number[] = [0x54, 0x59, 0x50, 0x32];
+/** The 4-byte TCP preamble, ASCII `TYP3`: each side writes its own, and a mismatch closes without a `KICK` (W31). */
+export const TCP_PREAMBLE: readonly number[] = [0x54, 0x59, 0x50, 0x33];
 
 /** The first byte of every message. Client-to-server types have the high bit set. */
 export const MessageType = {
@@ -62,6 +75,8 @@ export const BlockType = {
   Debug: 0x06,
   Acks: 0x07,
   Sources: 0x08,
+  /** The session's realm frame (`typhon.3`): only in a `RESET` frame, and always its first block. */
+  Realm: 0x09,
   Ext: 0x7f,
 } as const;
 
@@ -96,6 +111,8 @@ export const AckReason = {
   RateLimited: 1,
   Rejected: 2,
   RegionInvalid: 3,
+  /** A command with a realm-framed field, built in a realm the session has since left (12-realms § 2.5). */
+  RealmChanged: 5,
   /** The session's role may not send this command type (the catalog's `roles`). */
   Forbidden: 4,
   FirstApplicationReason: 128,

@@ -71,6 +71,12 @@ internal struct ReplicationBlockHeader
     /// self-linked free list. Two owners, two fields.
     /// </remarks>
     public byte PoolState;
+
+    /// <summary>
+    /// The realm of the cluster this block describes (Realms R4.2): set when the block is attached, fixed while it is — a cluster's realm does not change
+    /// between its claim and its drain. What selects the frame the block's positions are quantized over.
+    /// </summary>
+    public ushort Realm;
 }
 
 /// <summary>

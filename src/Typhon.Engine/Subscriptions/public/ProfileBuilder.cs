@@ -55,6 +55,45 @@ public sealed class ProfileBuilder
     }
 
     /// <summary>
+    /// The profile's variant for realms of <paramref name="kind"/> (12-realms § 1.4): in such a realm its sessions are served by the observers declared
+    /// here instead of the profile's own — one profile name for every scale, and a realm switch that changes the variant is still one reset.
+    /// </summary>
+    /// <param name="kind">A kind declared with <c>SubscriptionsRegistry.RealmKinds</c>.</param>
+    /// <param name="variant">Declares the variant's observers, as a profile's.</param>
+    /// <returns>This builder.</returns>
+    public ProfileBuilder In(string kind, Action<ProfileBuilder> variant)
+    {
+        ArgumentNullException.ThrowIfNull(kind);
+        ArgumentNullException.ThrowIfNull(variant);
+        if (_profile.Variants.ContainsKey(kind))
+        {
+            throw new InvalidOperationException($"Profile '{_profile.Name}' already has a variant for realm kind '{kind}'.");
+        }
+
+        var declaration = new ProfileDeclaration(_profile.Name) { PushDetection = _profile.PushDetection, TickDivisor = _profile.TickDivisor };
+        variant(new ProfileBuilder(declaration));
+        _profile.Variants[kind] = declaration;
+        return this;
+    }
+
+    /// <summary>
+    /// Realms of these kinds serve this profile's sessions nothing (12-realms § 1.4): a session in one holds nothing positioned there — counted, never
+    /// refused.
+    /// </summary>
+    /// <param name="kinds">Kinds declared with <c>SubscriptionsRegistry.RealmKinds</c>.</param>
+    /// <returns>This builder.</returns>
+    public ProfileBuilder NotIn(params string[] kinds)
+    {
+        ArgumentNullException.ThrowIfNull(kinds);
+        foreach (var kind in kinds)
+        {
+            _profile.Excluded.Add(kind ?? throw new ArgumentNullException(nameof(kinds)));
+        }
+
+        return this;
+    }
+
+    /// <summary>
     /// Serves this profile's sessions one tick in <paramref name="ticks"/>, staggered by session; each frame carries everything since the session's last
     /// one, replayed from the push log.
     /// </summary>
@@ -206,6 +245,12 @@ public sealed class ProfileDeclaration
 
     /// <summary>This profile's sessions are served one tick in this many. See <see cref="ProfileBuilder.Every"/>.</summary>
     public int TickDivisor { get; internal set; } = 1;
+
+    /// <summary>The profile's variants by realm kind (<see cref="ProfileBuilder.In"/>).</summary>
+    internal Dictionary<string, ProfileDeclaration> Variants { get; } = new(StringComparer.Ordinal);
+
+    /// <summary>The realm kinds that serve this profile nothing (<see cref="ProfileBuilder.NotIn"/>).</summary>
+    internal HashSet<string> Excluded { get; } = new(StringComparer.Ordinal);
 
     /// <inheritdoc/>
     public override string ToString() => $"{Name}: {_observers.Count} observer(s)";

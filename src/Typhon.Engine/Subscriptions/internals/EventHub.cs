@@ -64,10 +64,14 @@ internal readonly struct EventFieldBinding
 /// <summary>Reads a <see cref="EventRouting.Near"/> event's point from its payload; built once, in the declaring generic context.</summary>
 internal delegate Vector3D EventPointReader(ReadOnlySpan<byte> payload);
 
+/// <summary>Reads the realm an event's point, or the event itself, is in, from its bytes.</summary>
+internal delegate ushort EventRealmReader(ReadOnlySpan<byte> payload);
+
 /// <summary>Resolves a live entity an event names: its netId and v̂ (09 § 11).</summary>
 internal interface IEventEntities
 {
-    bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z);
+    /// <summary>An entity's identity and v̂ in its realm, and that realm (12-realms § 3: ToKnown files in the entity's realm).</summary>
+    bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm);
 }
 
 /// <summary>A session's geometry for the geometric routes: the cells it spans, and whether it sees a point (09 § 11).</summary>
@@ -79,6 +83,12 @@ internal interface IEventGeometry
     void CellBox(out int minCx, out int maxCx, out int minCy, out int maxCy, out int minCz, out int maxCz);
 
     bool Sees(float x, float y, float z, float viewRadius);
+
+    /// <summary>The session's realm: a geometric filing of another realm never matches, whatever its coordinates (SUB-28).</summary>
+    ushort Realm { get; }
+
+    /// <summary>Whether a <see cref="EventRouting.ToRealm"/> filing for <paramref name="realm"/> reaches the session (with its subtree, when asked).</summary>
+    bool InRealm(ushort realm, bool subtree);
 }
 
 /// <summary>A worker's scratch for one session's events: the (tick slot, event) pairs it will write.</summary>
@@ -120,8 +130,10 @@ internal sealed class EventPicks
 internal sealed class EventTypeInfo
 {
     public EventTypeInfo(string name, int index, int wireIdx, EventRouting routing, int[] entityOffsets, EventPointReader point, float nearRadius,
-        int payloadSize, SectionPlan body, EventFieldBinding[] bindings)
+        int payloadSize, SectionPlan body, EventFieldBinding[] bindings, EventRealmReader realm = null, bool subtree = false)
     {
+        RealmOf = realm;
+        Subtree = subtree;
         Name = name;
         Index = index;
         WireIdx = wireIdx;
@@ -158,6 +170,12 @@ internal sealed class EventTypeInfo
 
     /// <summary>A <see cref="EventRouting.Near"/> event's viewpoint radius; 0 for none.</summary>
     public float NearRadius { get; }
+
+    /// <summary>The realm of a <see cref="EventRouting.Near"/> point or a <see cref="EventRouting.ToRealm"/> event; null for realm 0.</summary>
+    public EventRealmReader RealmOf { get; }
+
+    /// <summary>A <see cref="EventRouting.ToRealm"/> event reaches the realms below its realm too.</summary>
+    public bool Subtree { get; }
 
     public int PayloadSize { get; }
 
@@ -198,6 +216,15 @@ internal sealed class EventTypeInfo
 /// </remarks>
 internal sealed class EventHub
 {
+    /// <summary>The served realm's frame, which an event's realm-framed field is quantized over (SUB-30); set by the runtime.</summary>
+    internal RealmFrame Realm { get; set; }
+
+    /// <summary>A realm's frame, for an event whose point or entity is in another realm than 0 (SUB-30); set by the runtime. Called in the prologue.</summary>
+    internal Func<ushort, RealmFrame> RealmFrames { get; set; }
+
+    // The frame this tick's event being encoded is framed by: its realm's.
+    private RealmFrame _encodeFrame;
+
     /// <summary>How many ticks the loss count reaches back.</summary>
     public const int SummaryDepth = 256;
 
@@ -319,7 +346,7 @@ internal sealed class EventHub
         }
 
         return new EventTypeInfo(declaration.Name, declaration.Index, message.Idx, declaration.Routing, entities, declaration.RoutingPointReader,
-            (float)declaration.RoutingRadiusM, declaration.PayloadSize, message.Body, bindings);
+            (float)declaration.RoutingRadiusM, declaration.PayloadSize, message.Body, bindings, declaration.RoutingRealmReader, declaration.RoutingSubtree);
     }
 
     /// <summary>The most bytes an event's leading bit pack may take.</summary>
@@ -489,7 +516,7 @@ internal sealed class EventHub
     /// <param name="tick">The tick.</param>
     /// <param name="entities">Resolves a live entity.</param>
     /// <param name="push">The push replication: this tick's departed entities, and the cell a point lies in.</param>
-    public void EncodeTick<TEntities>(uint tick, ref TEntities entities, PushReplication push) where TEntities : IEventEntities, allows ref struct
+    public void EncodeTick<TEntities>(uint tick, ref TEntities entities, PushHub push) where TEntities : IEventEntities, allows ref struct
     {
         var from = System.Diagnostics.Stopwatch.GetTimestamp();
         var slot = _log[tick % PushReplication.LogDepth];
@@ -503,7 +530,7 @@ internal sealed class EventHub
         if (any)
         {
             _departed.Clear();
-            push.CollectDeparted(_departed);
+            push.Realm0.CollectDeparted(_departed);
             Array.Clear(_memo);
             Span<double> one = stackalloc double[4];
             Span<byte> pack = stackalloc byte[64];
@@ -530,6 +557,9 @@ internal sealed class EventHub
                         // The routing point is the application's code: whatever it throws drops its event, not the tick.
                         try
                         {
+                            // A position field is framed by the event's realm (SUB-30) — its point's, its entity's or its addressee's — where its hearers are.
+                            var realm = EventRealm(info, payload, ref entities);
+                            _encodeFrame = realm == RealmId.Default.Value || RealmFrames == null ? Realm : RealmFrames(realm) ?? Realm;
                             if (Encode(slot, info, payload, ref entities, one, pack))
                             {
                                 Route(slot, info, payload, target, ref entities, push);
@@ -575,9 +605,10 @@ internal sealed class EventHub
         public float X;
         public float Y;
         public float Z;
+        public ushort Realm;
     }
 
-    private bool Resolve<TEntities>(ref TEntities entities, EntityId entity, out uint netId, out float x, out float y, out float z)
+    private bool Resolve<TEntities>(ref TEntities entities, EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm)
         where TEntities : IEventEntities, allows ref struct
     {
         var raw = entity.RawValue;
@@ -586,24 +617,24 @@ internal sealed class EventHub
             ref var m = ref _memo[i];
             if (m.Entity == raw && raw != 0)
             {
-                (netId, x, y, z) = (m.NetId, m.X, m.Y, m.Z);
+                (netId, x, y, z, realm) = (m.NetId, m.X, m.Y, m.Z, m.Realm);
                 return m.Found;
             }
         }
 
-        var found = entities.TryResolve(entity, out netId, out x, out y, out z);
+        var found = entities.TryResolve(entity, out netId, out x, out y, out z, out realm);
         if (!found && _departed.TryGetValue((long)raw, out var gone))
         {
-            (netId, x, y, z) = (gone.NetId, gone.X, gone.Y, gone.Z);
+            (netId, x, y, z, realm) = (gone.NetId, gone.X, gone.Y, gone.Z, gone.Realm);
             found = true;
         }
 
-        _memo[_memoNext] = new Memo { Entity = raw, Found = found, NetId = netId, X = x, Y = y, Z = z };
+        _memo[_memoNext] = new Memo { Entity = raw, Found = found, NetId = netId, X = x, Y = y, Z = z, Realm = realm };
         _memoNext = (_memoNext + 1) & (_memo.Length - 1);
         return found;
     }
 
-    private void Route<TEntities>(Tick slot, EventTypeInfo info, ReadOnlySpan<byte> payload, ulong target, ref TEntities entities, PushReplication push)
+    private void Route<TEntities>(Tick slot, EventTypeInfo info, ReadOnlySpan<byte> payload, ulong target, ref TEntities entities, PushHub hub)
         where TEntities : IEventEntities, allows ref struct
     {
         var near = info.Routing == EventRouting.Near ? info.Point(payload) : default;
@@ -621,31 +652,68 @@ internal sealed class EventHub
                 break;
             case EventRouting.Near:
             {
-                push.CellOf(near.X, near.Y, near.Z, out var cx, out var cy, out var cz);
-                slot.AddGeo(CellKey(cx, cy, cz), e, (float)near.X, (float)near.Y, (float)near.Z, info.NearRadius);
+                // Filed in the point's realm, by that realm's cells (12-realms § 3); a realm nobody serves has no session to hear it.
+                var realm = info.RealmOf?.Invoke(payload) ?? RealmId.Default.Value;
+                var push = hub.For(realm);
+                if (push != null)
+                {
+                    push.CellOf(near.X, near.Y, near.Z, out var cx, out var cy, out var cz);
+                    slot.AddGeo(CellKey(cx, cy, cz), e, (float)near.X, (float)near.Y, (float)near.Z, info.NearRadius, realm);
+                }
+
                 break;
             }
+
+            case EventRouting.ToRealm:
+                slot.AddRealm(info.RealmOf?.Invoke(payload) ?? RealmId.Default.Value, info.Subtree, e);
+                break;
 
             case EventRouting.ToKnown:
                 foreach (var offset in info.EntityOffsets)
                 {
                     var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[offset..]));
-                    if (!entity.IsNull && Resolve(ref entities, entity, out var netId, out var x, out var y, out var z))
+                    if (!entity.IsNull && Resolve(ref entities, entity, out var netId, out var x, out var y, out var z, out var realm)
+                        && hub.For(realm) is { } push)
                     {
+                        // Filed in the entity's realm (12-realms § 3), where its sessions knew it.
                         push.CellOf(x, y, z, out var cx, out var cy, out var cz);
-                        slot.AddGeo(CellKey(cx, cy, cz), e, x, y, z, 0f);
+                        slot.AddGeo(CellKey(cx, cy, cz), e, x, y, z, 0f, realm);
 
                         // was ∨ is: an entity this tick moved to another cell is filed where it was too, so a session that knew it there hears of it
                         // — "X killed Y" as Y leaves the view. The match is deduplicated.
                         if (netId != 0 && push.TryOldVisibility(netId, x, y, z, out var ox, out var oy, out var oz))
                         {
                             push.CellOf(ox, oy, oz, out cx, out cy, out cz);
-                            slot.AddGeo(CellKey(cx, cy, cz), e, ox, oy, oz, 0f);
+                            slot.AddGeo(CellKey(cx, cy, cz), e, ox, oy, oz, 0f, realm);
                         }
                     }
                 }
 
                 break;
+        }
+    }
+
+    // The realm an event is heard in: a Near point's or a ToRealm addressee's, a ToKnown's first entity's; realm 0 for a session-addressed route.
+    private ushort EventRealm<TEntities>(EventTypeInfo info, ReadOnlySpan<byte> payload, ref TEntities entities) where TEntities : IEventEntities, allows ref struct
+    {
+        switch (info.Routing)
+        {
+            case EventRouting.Near:
+            case EventRouting.ToRealm:
+                return info.RealmOf?.Invoke(payload) ?? RealmId.Default.Value;
+            case EventRouting.ToKnown:
+                foreach (var offset in info.EntityOffsets)
+                {
+                    var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[offset..]));
+                    if (!entity.IsNull && Resolve(ref entities, entity, out _, out _, out _, out _, out var realm))
+                    {
+                        return realm;
+                    }
+                }
+
+                return RealmId.Default.Value;
+            default:
+                return RealmId.Default.Value;
         }
     }
 
@@ -681,14 +749,14 @@ internal sealed class EventHub
                 if (f.Entity)
                 {
                     var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[f.Offset..]));
-                    one[0] = !entity.IsNull && Resolve(ref entities, entity, out var netId, out _, out _, out _) ? netId : 0u;
+                    one[0] = !entity.IsNull && Resolve(ref entities, entity, out var netId, out _, out _, out _, out _) ? netId : 0u;
                 }
                 else
                 {
                     f.Load(payload, one);
                 }
 
-                FieldCodec.WriteNumber(ref w, f.Field, one);
+                FieldCodec.WriteNumber(ref w, f.Field, one, _encodeFrame);
             }
         }
         catch (ArgumentException)
@@ -835,7 +903,7 @@ internal sealed class EventHub
         public void Exit() => System.Threading.Volatile.Write(ref _gate, 0);
     }
 
-    /// <summary>A geometric route's point: the event, the cell, the point and the event's viewpoint radius.</summary>
+    /// <summary>A geometric route's point: the event, the cell, the point, the event's viewpoint radius and the realm the point is in.</summary>
     private struct Geo
     {
         public ulong Key;
@@ -844,6 +912,7 @@ internal sealed class EventHub
         public float Y;
         public float Z;
         public float Radius;
+        public ushort Realm;
     }
 
     /// <summary>
@@ -869,6 +938,11 @@ internal sealed class EventHub
         public int DirectCount;
         public Geo[] Geos = new Geo[16];
         public int GeoCount;
+
+        // ToRealm filings (12-realms § 3): (realm << 1) | subtree, and the event.
+        public ulong[] RealmKeys = new ulong[4];
+        public int[] RealmEvents = new int[4];
+        public int RealmCount;
         private int _pendingStart;
 
         public void Reset(uint tick)
@@ -881,6 +955,7 @@ internal sealed class EventHub
             OwnerCount = 0;
             DirectCount = 0;
             GeoCount = 0;
+            RealmCount = 0;
         }
 
         public void EnsureArena(int bytes)
@@ -923,15 +998,17 @@ internal sealed class EventHub
 
         public void AddDirect(ulong key, int e) => Append(ref DirectKeys, ref DirectEvents, ref DirectCount, key, e);
 
-        public void AddGeo(ulong key, int e, float x, float y, float z, float radius)
+        public void AddGeo(ulong key, int e, float x, float y, float z, float radius, ushort realm)
         {
             if (GeoCount == Geos.Length)
             {
                 Array.Resize(ref Geos, GeoCount * 2);
             }
 
-            Geos[GeoCount++] = new Geo { Key = key, Event = e, X = x, Y = y, Z = z, Radius = radius };
+            Geos[GeoCount++] = new Geo { Key = key, Event = e, X = x, Y = y, Z = z, Radius = radius, Realm = realm };
         }
+
+        public void AddRealm(ushort realm, bool subtree, int e) => Append(ref RealmKeys, ref RealmEvents, ref RealmCount, ((ulong)realm << 1) | (subtree ? 1UL : 0UL), e);
 
         private static void Append(ref ulong[] keys, ref int[] events, ref int count, ulong key, int e)
         {
@@ -993,6 +1070,9 @@ internal sealed class EventHub
             OwnerCount = from.OwnerCount;
             DirectCount = from.DirectCount;
             GeoCount = from.GeoCount;
+            RealmCount = from.RealmCount;
+            Copy(from.RealmKeys, ref RealmKeys, RealmCount);
+            Copy(from.RealmEvents, ref RealmEvents, RealmCount);
             Copy(from.Broadcast, ref Broadcast, BroadcastCount);
             Copy(from.OwnerKeys, ref OwnerKeys, OwnerCount);
             Copy(from.OwnerEvents, ref OwnerEvents, OwnerCount);
@@ -1029,6 +1109,19 @@ internal sealed class EventHub
             sources += picks.TempCount > before ? 1 : 0;
             before = picks.TempCount;
 
+            // ToRealm (12-realms § 3): announcements, few per tick — walked, each tested against the session's realm and, for a subtree, its ancestors.
+            for (var i = 0; i < RealmCount; i++)
+            {
+                if (geometry.InRealm((ushort)(RealmKeys[i] >> 1), (RealmKeys[i] & 1) != 0))
+                {
+                    picks.AddTemp(RealmEvents[i]);
+                }
+            }
+
+            sources += picks.TempCount > before ? 1 : 0;
+            before = picks.TempCount;
+            var realm = geometry.Realm;
+
             if (GeoCount > 0)
             {
                 if (geometry.World)
@@ -1036,7 +1129,7 @@ internal sealed class EventHub
                     for (var i = 0; i < GeoCount; i++)
                     {
                         ref var g = ref Geos[i];
-                        if (geometry.Sees(g.X, g.Y, g.Z, g.Radius))
+                        if (g.Realm == realm && geometry.Sees(g.X, g.Y, g.Z, g.Radius))
                         {
                             picks.AddTemp(g.Event);
                         }
@@ -1060,7 +1153,7 @@ internal sealed class EventHub
                             for (var i = LowerBound(CellKey(minCx, cy, cz)); i < GeoCount && Geos[i].Key <= hi; i++)
                             {
                                 ref var g = ref Geos[i];
-                                if (geometry.Sees(g.X, g.Y, g.Z, g.Radius))
+                                if (g.Realm == realm && geometry.Sees(g.X, g.Y, g.Z, g.Radius))
                                 {
                                     picks.AddTemp(g.Event);
                                 }

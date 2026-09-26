@@ -27,17 +27,6 @@ namespace Typhon.Engine.Internals;
 /// </remarks>
 internal static class ProjectionCompiler
 {
-    /// <summary>
-    /// The finest divisor a <c>vel</c> codec may apply to the position quantum: a displacement code counts position quanta ÷ <c>quantaDiv</c> (W5), and
-    /// <c>quantaDiv</c> is derived per archetype in <c>[1, 16]</c>.
-    /// </summary>
-    /// <remarks>
-    /// Always a power of two, so a decode is exact whenever the position step is dyadic — which it is, being an extent divided by 2ᵇ. Sixteen is the ceiling
-    /// rather than the value: a sixteenth of a position quantum is already far below any simulation's own precision, so buying more resolution than that
-    /// would be paying wire bytes for noise.
-    /// </remarks>
-    internal const int MaxVelocityQuantaDiv = 16;
-
     /// <summary>The widths a quantizing codec may take, in ascending order (W2).</summary>
     private static readonly int[] CodecWidths = [8, 16, 24, 32];
 
@@ -94,54 +83,48 @@ internal static class ProjectionCompiler
     }
 
     /// <summary>
-    /// Derives a <c>vel</c> codec's width <b>and</b> its divisor together: the narrowest of 8, 16, 24 and 32 bits that can carry the widest displacement one
-    /// tick allows below the teleport threshold, and within that width the largest power-of-two <c>quantaDiv</c> ≤ 16 that still fits (D2, W5).
+    /// Derives a <c>vel</c> codec (W5, <c>typhon.3</c>, Realms D-3): its absolute unit <c>2^unitExp</c> metres per tick from the drift the motion rule
+    /// tolerates, then the narrowest of 8, 16, 24 and 32 bits that carries the widest displacement one tick allows below the teleport threshold.
     /// </summary>
     /// <param name="maxSpeedMps">The teleport threshold, in metres per second.</param>
     /// <param name="nominalTickPeriodSeconds">The nominal tick period.</param>
     /// <param name="tickMultiplier">The tick multiplier the width must cover: the runtime's largest allowed one, or 1 under the per-archetype opt-out.</param>
-    /// <param name="positionStepMetres">The finest position quantum across the axes — the one that produces the largest code.</param>
-    /// <returns>The width in bits and the divisor, which travel together in the catalog and are meaningless apart.</returns>
+    /// <param name="toleranceMetres">The motion rule's tolerance (<c>MotionBuilder.Tolerance</c>).</param>
+    /// <param name="maxAgeSeconds">The motion rule's heartbeat (<c>MotionBuilder.MaxAge</c>).</param>
+    /// <returns>The width in bits and the unit's exponent, which travel together in the catalog.</returns>
     /// <remarks>
     /// <para>
-    /// <c>L ≥ ⌈maxSpeed × period × multiplier / posStep × quantaDiv⌉</c>, with <c>L = 2ᵇ⁻¹ − 1</c> — exactly the inequality W5 states, evaluated
-    /// left to right so the intermediate is a displacement in metres, then in position quanta, then in codes. The search runs widths outermost and divisors
-    /// inside them, so a byte is never spent to buy resolution: <b>bytes first, then the finest velocity quantum that width affords.</b>
+    /// <b>The unit is physical, not a fraction of a position step.</b> The velocity quantum bounds how far extrapolation drifts between two segments: over
+    /// <c>MaxAge</c> ticks a half-unit error accrues <c>(u/2)·MaxAge</c>, so <c>u</c> is the largest power of two ≤ <c>Tolerance / MaxAge</c> (ticks at the
+    /// nominal period) — the drift then stays within half the tolerance. Derived once per archetype, it is the same in every realm: a realm registered at run
+    /// time never changes it, and a cross-realm move re-encodes only the position. SWG's players (5 cm, 5 s at 50 Hz → 250 ticks) get 2⁻¹³ m per tick,
+    /// exactly the unit the position-relative codec gave them (2⁻¹⁰ m ÷ 8), so their bytes are unchanged.
     /// </para>
     /// <para>
-    /// <b>Why the divisor is derived rather than fixed at 16.</b> Fixing it made the divisor the constant and the width the variable, which is the expensive
-    /// way round — SWG's 20 m/s at 10 Hz over a 2⁻¹⁰ m quantum needs 32 768 codes at <c>quantaDiv = 16</c>, exactly one past what 16 bits carries, so every
-    /// creature segment paid 2 B forever to keep a resolution nothing could use. Halving the divisor instead costs an eighth of a position quantum of
-    /// velocity resolution — 0.12 mm per tick — which is orders below the float32 jitter the measurement already lives with.
-    /// </para>
-    /// <para>
-    /// <b>The multiplier is in there because the teleport test uses the CURRENT tick period.</b> Under overload the engine ticks less often and each tick
-    /// covers more ground, so a displacement-per-tick codec sized for the nominal rate would saturate exactly while the server is overloaded — emitting a
-    /// segment per tick for every fast mover at the moment traffic must not grow. An archetype whose movement is bounded per tick rather than per second says
-    /// so with <see cref="MotionBuilder.IgnoreTickDilation"/> and pays the nominal width.
+    /// <b>The multiplier is in the width because the teleport test uses the CURRENT tick period.</b> Under overload the engine ticks less often and each
+    /// tick covers more ground, so a displacement-per-tick codec sized for the nominal rate would saturate exactly while the server is overloaded. An
+    /// archetype whose movement is bounded per tick rather than per second says so with <see cref="MotionBuilder.IgnoreTickDilation"/>.
     /// </para>
     /// </remarks>
-    internal static (int Bits, int QuantaDiv) VelocityCodec(double maxSpeedMps, double nominalTickPeriodSeconds, int tickMultiplier,
-        double positionStepMetres)
+    internal static (int Bits, int UnitExp) VelocityCodec(double maxSpeedMps, double nominalTickPeriodSeconds, int tickMultiplier, double toleranceMetres,
+        double maxAgeSeconds)
     {
-        var displacementPerTick = maxSpeedMps * nominalTickPeriodSeconds * tickMultiplier;
-        var quanta = displacementPerTick / positionStepMetres;
+        var ageTicks = Math.Max(1d, Math.Round(maxAgeSeconds / nominalTickPeriodSeconds, MidpointRounding.AwayFromZero));
+        var exp = Math.ILogB(toleranceMetres / ageTicks);   // floor(log2): 2^exp <= tolerance / ageTicks
+        exp = Math.Clamp(exp, ProtocolConstants.MinVelocityUnitExp, ProtocolConstants.MaxVelocityUnitExp);
+        var codes = Math.Ceiling(Math.ScaleB(maxSpeedMps * nominalTickPeriodSeconds * tickMultiplier, -exp));
         foreach (var bits in CodecWidths)
         {
-            var limit = WireMath.SymmetricLimit(bits);
-            for (var quantaDiv = MaxVelocityQuantaDiv; quantaDiv >= 1; quantaDiv >>= 1)
+            if (WireMath.SymmetricLimit(bits) >= codes)
             {
-                if (limit >= Math.Ceiling(quanta * quantaDiv))
-                {
-                    return (bits, quantaDiv);
-                }
+                return (bits, exp);
             }
         }
 
         throw new InvalidOperationException(
-            $"A teleport threshold of {maxSpeedMps} m/s over a {nominalTickPeriodSeconds} s tick at multiplier {tickMultiplier} needs " +
-            $"{Math.Ceiling(quanta)} velocity codes on a {positionStepMetres} m position quantum even at quantaDiv 1, and 32 bits carries " +
-            $"{WireMath.SymmetricLimit(32)}. Lower the threshold, or widen the position quantum by shrinking the world.");
+            $"A teleport threshold of {maxSpeedMps} m/s over a {nominalTickPeriodSeconds} s tick at multiplier {tickMultiplier} needs {codes} velocity codes "
+            + $"at a 2^{exp} m unit (tolerance {toleranceMetres} m over {ageTicks} ticks), and 32 bits carries {WireMath.SymmetricLimit(32)}. Lower the "
+            + "threshold, or raise the tolerance or shorten MaxAge.");
     }
 
     /// <summary>
@@ -483,7 +466,7 @@ internal static class ProjectionCompiler
             return null;
         }
 
-        var grid = engine.SpatialGrid;
+        var grid = engine.Realm0Grid;
         if (grid == null)
         {
             throw new InvalidOperationException(
@@ -502,21 +485,13 @@ internal static class ProjectionCompiler
         }
 
         var dims = spatial.SpatialFieldType.Is3D() ? 3 : 2;
+        // Realm 0's frame (R4.2): the catalog codec still carries its bounds, and the two are one computation so they cannot disagree.
         var bits = Codec.DefaultPositionBits;
-        var min = new double[dims];
-        var max = new double[dims];
-        var step = new double[dims];
-        var finest = double.MaxValue;
-        ref readonly var config = ref grid.Config;
-        for (var axis = 0; axis < dims; axis++)
+        var frame = PositionFrame.Over(in grid.Config, dims, bits);
+        var pos = new CatalogCodec
         {
-            min[axis] = axis == 0 ? config.WorldMin.X : axis == 1 ? config.WorldMin.Y : config.WorldMin.Z;
-            max[axis] = axis == 0 ? config.WorldMax.X : axis == 1 ? config.WorldMax.Y : config.WorldMax.Z;
-            step[axis] = WireMath.QuantStep(min[axis], max[axis], bits);
-            finest = Math.Min(finest, step[axis]);
-        }
-
-        var pos = new CatalogCodec { Kind = dims == 3 ? CodecKind.Pos3 : CodecKind.Pos2, Bits = bits, Min = min, Max = max };
+            Kind = dims == 3 ? CodecKind.Pos3 : CodecKind.Pos2, Bits = bits, Min = (double[])frame.Min.Clone(), Max = (double[])frame.Max.Clone(),
+        };
         var moving = declared.IsMotion;
         var motion = declared.Motion;
         CatalogCodec vel = null;
@@ -532,8 +507,10 @@ internal static class ProjectionCompiler
             }
 
             multiplier = motion.IgnoresTickDilation ? 1 : largestTickMultiplier;
-            var (velBits, quantaDiv) = VelocityCodec(motion.TeleportMaxSpeedMps, nominalTickPeriodSeconds, multiplier, finest);
-            vel = new CatalogCodec { Kind = dims == 3 ? CodecKind.Vel3 : CodecKind.Vel2, Bits = velBits, QuantaDiv = quantaDiv };
+            var tolerance = motion.ToleranceMetres <= 0 ? DefaultToleranceMetres : motion.ToleranceMetres;
+            var maxAge = motion.MaxAgeSeconds <= 0 ? DefaultMaxAgeSeconds : motion.MaxAgeSeconds;
+            var (velBits, unitExp) = VelocityCodec(motion.TeleportMaxSpeedMps, nominalTickPeriodSeconds, multiplier, tolerance, maxAge);
+            vel = new CatalogCodec { Kind = dims == 3 ? CodecKind.Vel3 : CodecKind.Vel2, Bits = velBits, UnitExp = unitExp };
         }
 
         var velocitySlot = NoSlot;
@@ -563,8 +540,9 @@ internal static class ProjectionCompiler
             SpatialFieldType = spatial.SpatialFieldType,
             Pos = pos,
             Vel = vel,
-            PositionStep = step,
-            FinestPositionStep = finest,
+            Frame = frame,
+            PositionStep = frame.Step,
+            FinestPositionStep = frame.FinestStep,
             ToleranceMetres = motion == null || motion.ToleranceMetres <= 0 ? DefaultToleranceMetres : motion.ToleranceMetres,
             TeleportMaxSpeedMps = motion?.TeleportMaxSpeedMps ?? 0d,
             MaxAgeSeconds = motion == null || motion.MaxAgeSeconds <= 0 ? DefaultMaxAgeSeconds : motion.MaxAgeSeconds,

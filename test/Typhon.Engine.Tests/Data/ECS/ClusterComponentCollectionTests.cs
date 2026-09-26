@@ -154,8 +154,8 @@ class ClusterComponentCollectionTests : TestBase<ClusterComponentCollectionTests
         using var dbe = SetupEngineWithGrid();
         var id = SpawnWithItems(dbe, 50f, 50f, 10, out _);
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        int dstCell = dbe.SpatialGrid.WorldToCellKey(350f, 350f, 0f);
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        int dstCell = dbe.Realm0Grid.WorldToCellKey(350f, 350f, 0f);
         Assert.That(srcCell, Is.Not.EqualTo(dstCell), "positions must be in different cells");
 
         // Move the entity into a new cell (writes only the SV Pos), then run the tick fence to migrate it.

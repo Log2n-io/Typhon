@@ -103,7 +103,7 @@ public sealed partial class SimBridge
                 var lx = places[idx].X;
                 var lz = places[idx].Z;
                 var sphere = new BSphere2F { CenterX = lx, CenterY = lz, Radius = seek };
-                var e = Dbe.ClusterSpatialQuery<Player>().Radius(in sphere);
+                var e = Dbe.ClusterSpatialQuery<Player>(cluster.Realm).Radius(in sphere);
                 var foundPlayer = false;
                 float px = 0f, pz = 0f;
                 try

@@ -441,6 +441,8 @@
           href: Spatial/checkerboard-dispatch.md
         - name: Cluster Dormancy (Sleep / Wake)
           href: Spatial/cluster-dormancy.md
+    - name: 'Realms — Several Worlds in One Engine'
+      href: Spatial/realms.md
     - name: 'Spatial Grid Configuration & Tier Control'
       href: Spatial/spatial-grid-config.md
       items:
@@ -510,6 +512,8 @@
       href: Subscriptions/client-sdks.md
     - name: 'Wire Protocol & Catalog'
       href: Subscriptions/wire-protocol.md
+    - name: 'Sessions in Realms'
+      href: Subscriptions/realms.md
     - name: 'Replication Diagnostics'
       href: Subscriptions/diagnostics.md
 - name: Transactions

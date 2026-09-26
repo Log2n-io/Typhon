@@ -199,9 +199,12 @@ public sealed class TyphonClient : IAsyncDisposable
             return 0;
         }
 
-        var seq = unchecked(++_commandSeq);
+        // The seq is spent only once the command encodes: one that cannot (a realm-framed field while the session holds no realm) leaves no gap.
+        var seq = unchecked((ushort)(_commandSeq + 1));
         var tick = LastAppliedTick;
-        var message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(plan, seq, values)]));
+        var frame = Store?.Realm;
+        var message = Encode((ref WireWriter w) => CommandsMessage.Write(ref w, tick, [(plan, seq, values)], frame));
+        _commandSeq = seq;
         await transport.SendAsync(message, ct).ConfigureAwait(false);
         return seq;
     }
@@ -337,7 +340,7 @@ public sealed class TyphonClient : IAsyncDisposable
             // may not even be able to describe.
             Plan = CatalogPlan.Compile(CatalogSerializer.FromUtf8(welcome.CatalogJson));
             Store = new WorldStore(Plan, _options.SegmentHistory);
-            _applier = new FrameApplier(Store);
+            _applier = new FrameApplier(Store, _options.Events);
             return;
         }
 
@@ -348,7 +351,7 @@ public sealed class TyphonClient : IAsyncDisposable
         }
 
         // The catalog was skipped because the hash matched. The store is kept; the server will send whatever the session needs to be told.
-        _applier ??= new FrameApplier(Store);
+        _applier ??= new FrameApplier(Store, _options.Events);
     }
 
     private async Task ReceiveLoopAsync(CancellationToken ct)

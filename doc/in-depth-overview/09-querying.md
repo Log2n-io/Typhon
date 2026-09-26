@@ -117,7 +117,7 @@ FK-join query. Created from `EcsQuery.NavigateField<TSource, TTarget>(fkSelector
 2. Apply DNF rewrite (distribute `&&` over `||`).
 3. Collect leaves into `FieldPredicate[][]` — outer = OR branches, inner = AND predicates per branch.
 
-**Branch cap:** `MaxDnfBranches = 16` ([`ExpressionParser.cs:23`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/ExpressionParser.cs)). DNF normalization can blow up exponentially — `(A||B) && (C||D) && (E||F)` produces 2×2×2 = 8 branches; five ANDed pairs would explode past 16. Hit the cap → `InvalidOperationException` with a message telling you to split the query or reduce ANDed OR pairs. The cap aligns with the OR-mode view's 16-bit branch bitmap (see §5).
+**Branch cap:** `MaxDnfBranches = 16` ([`ExpressionParser.cs:23`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Querying/internals/ExpressionParser.cs)). DNF normalization can blow up exponentially — `(A||B) && (C||D) && (E||F)` produces 2×2×2 = 8 branches; five ANDed pairs would explode past 16. Hit the cap → `InvalidOperationException` with a message telling you to split the query or reduce ANDed OR pairs. The cap aligns with the OR-mode view's 16-bit branch bitmap (see [§5](#5-view-system)).
 
 ### `PlanBuilder`
 
@@ -412,7 +412,7 @@ A transaction can `Spawn` an entity and then immediately query — the query mus
 ## 8. Subscriptions — pushing state to external clients
 
 Replication to remote clients has its own chapter: **[15-subscriptions](15-subscriptions.md)**. It does not read views: it is built from
-declared projections and answered from geometry, so the view machinery in §5 is unaffected by it.
+declared projections and answered from geometry, so the view machinery in [§5](#5-view-system) is unaffected by it.
 
 
 ---

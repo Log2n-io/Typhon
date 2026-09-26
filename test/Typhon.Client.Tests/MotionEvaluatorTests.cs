@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using NUnit.Framework;
 using Typhon.Protocol;
@@ -406,7 +406,7 @@ public class MotionEvaluatorTests
     /// <summary>The five-archetype world of <c>motion.test.ts</c>, at its 10 Hz tick period.</summary>
     private static WorldStore World() => new(CatalogPlan.Compile(new Catalog
     {
-        Protocol = new CatalogProtocolVersion { Major = 2, Minor = 0 },
+        Protocol = new CatalogProtocolVersion { Major = 3, Minor = 0 },
         App = new CatalogApp { Name = "Motion", Revision = 1 },
         Tick = new CatalogTick { PeriodUs = 100_000, PingHz = 4 },
         Limits = new CatalogLimits { FrameBytes = 262_144, ClientMessageBytes = 1024, ResumeGraceMs = 60_000 },
@@ -430,22 +430,12 @@ public class MotionEvaluatorTests
         Model = model,
         Pos = Pos(dims),
         Vel = model == CatalogPosition.LinearModel
-            ? new CatalogCodec { Kind = dims == 2 ? CodecKind.Vel2 : CodecKind.Vel3, Bits = 8, QuantaDiv = 4 }
+            ? new CatalogCodec { Kind = dims == 2 ? CodecKind.Vel2 : CodecKind.Vel3, Bits = 8, UnitExp = -12 }
             : null,
     };
 
     private static CatalogPosition Static(int dims) => new() { Kind = CatalogPosition.StaticKind, Pos = Pos(dims) };
 
-    private static CatalogCodec Pos(int dims)
-    {
-        var min = new double[dims];
-        var max = new double[dims];
-        for (var i = 0; i < dims; i++)
-        {
-            min[i] = -8192;
-            max[i] = 8192;
-        }
-
-        return new CatalogCodec { Kind = dims == 2 ? CodecKind.Pos2 : CodecKind.Pos3, Bits = 24, Min = min, Max = max };
-    }
+    // Realm-framed (typhon.3): the catalog names the kind; width and bounds are a REALM block's.
+    private static CatalogCodec Pos(int dims) => new() { Kind = dims == 2 ? CodecKind.Pos2 : CodecKind.Pos3 };
 }

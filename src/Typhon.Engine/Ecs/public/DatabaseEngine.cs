@@ -51,6 +51,10 @@ public struct FieldR1
     /// <summary><c>true</c> when the field's index permits multiple entries per key (multi-value index).</summary>
     public bool IndexAllowMultiple;
 
+    /// <summary>True when the field is its component's <c>[RealmKey]</c> (Realms C2). Persisted so removing or moving the key is a breaking schema change:
+    /// the realm is what places every entity, and losing it silently would merge every realm's clusters into realm 0. Occupies what was padding.</summary>
+    public bool IsRealmKey;
+
     /// <summary>Element count when the field is a fixed-length array; 0 for scalar fields (see <see cref="IsArray"/>).</summary>
     public int ArrayLength;
 
@@ -407,6 +411,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     internal const string BK_SysSchemaHistory       = "sys.SchemaHistory";
     internal const string BK_SysAssemblyR1          = "sys.AssemblyR1";
     internal const string BK_SpatialGridConfig      = "spatial.GridConfig";
+    internal const string BK_SysRealmR1             = "sys.RealmR1";
 
     /// <summary>
     /// Values in the persisted <see cref="SpatialGridConfig"/> record: <c>WorldMin.xyz</c>, <c>WorldMax.xyz</c> and the cell size as doubles (two int slots
@@ -508,6 +513,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     private ComponentTable _componentsTable;
     private ComponentTable _schemaHistoryTable;
     private ComponentTable _assembliesTable;
+
+    // The persisted realm catalog (Realms D-1): every NAMED realm's identity. Null until a realm other than 0 is first registered on this database.
+    private ComponentTable _realmsTable;
+    private Dictionary<ushort, (int ChunkId, RealmR1 Row)> _persistedRealms;
     private ConcurrentDictionary<Type, ComponentTable> _componentTableByType;
 
     // ─── ArchetypeRegistry lifecycle tracking ───────────────────────────────────────────────────────────
@@ -776,8 +785,12 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     // Spatial grid (issue #229 — Phase 1+2). One global grid shared by every spatial archetype.
     // Configured once via ConfigureSpatialGrid before InitializeArchetypes.
     // ══════════════════════════════════════════════════════════════════════════════
-    private SpatialGrid _spatialGrid;
+    // The engine's realms (Realms SP-1). Null until InitializeArchetypes builds it; with a single-world configuration it holds realm 0 only.
+    private RealmTable _realms;
     private SpatialGridConfig? _pendingGridConfig;
+    private int _maxRealms = 1;
+    private bool _maxRealmsConfigured;
+    private RealmRegistry _realmRegistry;
 
     /// <summary>
     /// CPU-to-span ratio of the previous fence's migration phases (Migrate + IndexMassUpdate + EntityMapUpdate). <c>1</c> until the parallel runtime
@@ -838,7 +851,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     [PublicAPI]
     public void ConfigureSpatialGrid(SpatialGridConfig config)
     {
-        if (_spatialGrid != null)
+        if (_realms != null)
         {
             throw new InvalidOperationException("ConfigureSpatialGrid must be called before InitializeArchetypes. The spatial grid has already been constructed.");
         }
@@ -846,14 +859,302 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         {
             throw new InvalidOperationException("ConfigureSpatialGrid was already called. Configuration cannot be changed after the first call.");
         }
+        if (_realmRegistry != null && _realmRegistry.Pending.ContainsKey(RealmId.Default.Value))
+        {
+            throw new InvalidOperationException("Realm 0 was already registered through Realms.Register; ConfigureSpatialGrid would configure it twice.");
+        }
         _pendingGridConfig = config;
     }
 
     /// <summary>
-    /// Engine-wide spatial grid, or <c>null</c> if no grid was configured. Set by
-    /// <see cref="InitializeArchetypes"/> from the pending config (if any).
+    /// Sizes the engine's realm table: realm ids are <c>[0, maxRealms)</c>. Must be called before <see cref="InitializeArchetypes"/> and before any
+    /// <see cref="RealmRegistry.Register"/> of a realm other than 0. Without it the engine hosts one realm — the single-world form.
     /// </summary>
-    internal SpatialGrid SpatialGrid => _spatialGrid;
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="maxRealms"/> is not in <c>[1, 65 535]</c> (0xFFFF is <see
+    /// cref="RealmId.None"/>).</exception>
+    [PublicAPI]
+    public void ConfigureRealms(int maxRealms)
+    {
+        if (_realms != null)
+        {
+            throw new InvalidOperationException("ConfigureRealms must be called before InitializeArchetypes. The realm table has already been built.");
+        }
+        if (_maxRealmsConfigured)
+        {
+            throw new InvalidOperationException("ConfigureRealms was already called.");
+        }
+        if (maxRealms < 1 || maxRealms > RealmId.MaxCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxRealms), maxRealms,
+                $"The realm count must be between 1 and {RealmId.MaxCount} ({RealmId.NoneValue} is reserved for RealmId.None). No value is clamped.");
+        }
+
+        _maxRealms = maxRealms;
+        _maxRealmsConfigured = true;
+    }
+
+    /// <summary>The engine's realms: <see cref="RealmRegistry.Register"/> before <see cref="InitializeArchetypes"/>, and what is registered.</summary>
+    [PublicAPI]
+    public RealmRegistry Realms => _realmRegistry ??= new RealmRegistry(this);
+
+    /// <summary>
+    /// Merges the application's realm registrations with the persisted catalog (Realms D-1), at <see cref="InitializeArchetypes"/>. Returns the
+    /// registrations to build the realm table from; <paramref name="toPersist"/> receives the named realms the catalog does not hold yet.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>A catalog realm the application did not register is registered from the catalog</b>, simulated always: a generic opener (Workbench,
+    /// <c>typhon check</c>) or an application that does not name every realm still rebuilds every realm's spatial layer — the data is in it.</para>
+    /// <para><b>A registration whose identity differs from the catalog's is refused</b>: bounds, cell size or hysteresis decide which cell every entity
+    /// of the realm is filed in, so accepting it would silently misfile the realm (the C13 failure, per realm).</para>
+    /// <para><b>The realm count is the application's, never clamped</b> (RLM-02): below the catalog's highest id it is refused. An application that
+    /// never called <see cref="ConfigureRealms"/> is a generic opener, and gets exactly what the file needs — the count is the file's, not a guess.</para>
+    /// </remarks>
+    private Dictionary<ushort, RealmConfig> MergeRealmCatalog(IReadOnlyDictionary<ushort, RealmConfig> registered, out List<ushort> toPersist)
+    {
+        toPersist = null;
+        var merged = registered != null ? new Dictionary<ushort, RealmConfig>(registered) : null;
+        if (_persistedRealms is { Count: > 0 })
+        {
+            var needed = 0;
+            foreach (var id in _persistedRealms.Keys)
+            {
+                needed = Math.Max(needed, id + 1);
+            }
+
+            if (needed > _maxRealms)
+            {
+                if (_maxRealmsConfigured)
+                {
+                    throw new InvalidOperationException(
+                        $"ConfigureRealms({_maxRealms}) is below what this database holds: its realm catalog names realm {needed - 1}. Configure at least "
+                        + $"{needed} realms. The count is never clamped.");
+                }
+
+                _maxRealms = needed;
+            }
+
+            merged ??= [];
+            foreach (var (id, (_, row)) in _persistedRealms)
+            {
+                var persisted = GridConfigOf(in row);
+                if (merged.TryGetValue(id, out var app))
+                {
+                    if (!SameRealmIdentity(in persisted, app.Grid))
+                    {
+                        throw new InvalidOperationException(
+                            $"Realm {id} is registered with a grid that differs from the one this database was written with (bounds "
+                            + $"{app.Grid.WorldMin}..{app.Grid.WorldMax}, cell {app.Grid.CellSize}, hysteresis {app.Grid.MigrationHysteresisRatio}; "
+                            + $"the catalog holds {persisted.WorldMin}..{persisted.WorldMax}, cell {persisted.CellSize}, "
+                            + $"hysteresis {persisted.MigrationHysteresisRatio}). "
+                            + "A realm's identity decides which cell every entity of it is filed in, so it cannot change under existing data.");
+                    }
+                }
+                else
+                {
+                    merged[id] = RealmConfig.SimulatedAlways(persisted);
+                }
+            }
+        }
+
+        if (registered != null)
+        {
+            foreach (var id in registered.Keys)
+            {
+                if (id != RealmId.Default.Value && (_persistedRealms == null || !_persistedRealms.ContainsKey(id)))
+                {
+                    (toPersist ??= []).Add(id);
+                }
+            }
+        }
+
+        return merged;
+    }
+
+    /// <summary>
+    /// Writes the catalog entries of newly registered named realms, synchronously: the spatial rebuild at the next open runs before the WAL is
+    /// replayed, so a realm known only to the WAL would be unknown exactly when its clusters are filed (02-runtime-lifecycle §3, "ordering trap").
+    /// Creates the catalog table on first use.
+    /// </summary>
+    private void PersistRealmCatalogEntries(List<ushort> ids)
+    {
+        var rows = new List<(ushort, SpatialGridConfig)>(ids.Count);
+        foreach (var id in ids)
+        {
+            rows.Add((id, _realms.Get(id).GridConfig));
+        }
+
+        PersistRealmCatalogRows(rows);
+    }
+
+    /// <summary>The body of <see cref="PersistRealmCatalogEntries"/>, from identities directly — a run-time registration persists before it publishes.</summary>
+    private void PersistRealmCatalogRows(List<(ushort Id, SpatialGridConfig Grid)> rowsToWrite)
+    {
+        var cs = MMF.CreateChangeSet();
+        if (_realmsTable == null)
+        {
+            RegisterComponentFromAccessor<RealmR1>(cs);
+            _realmsTable = GetComponentTable<RealmR1>();
+            MMF.Bootstrap.Set(BK_SysRealmR1, BootstrapDictionary.Value.FromInt2(
+                _realmsTable.ComponentSegment.RootPageIndex,
+                _realmsTable.CompRevTableSegment.RootPageIndex));
+        }
+
+        _persistedRealms ??= [];
+        foreach (var (id, gridConfig) in rowsToWrite)
+        {
+            var row = RowOf(id, in gridConfig);
+            int chunkId;
+            if (_retiredRealmRows != null && _retiredRealmRows.Remove(id, out var retired))
+            {
+                // A retired id registered again (Realms D5): its row, next incarnation.
+                row.Generation = retired.Row.Generation + 1;
+                chunkId = retired.ChunkId;
+                SystemCrud.Update(_realmsTable, chunkId, ref row, EpochManager, cs);
+            }
+            else
+            {
+                chunkId = SystemCrud.Create(_realmsTable, ref row, EpochManager, cs);
+            }
+
+            _persistedRealms[id] = (chunkId, row);
+        }
+
+        // The pages first, the bootstrap key last: SaveBootstrap fsyncs the meta slot at once, so saving it first would leave, across a crash, a key that
+        // points at a table never written. The meta flip is the commit point.
+        cs.SaveChanges();
+        MMF.SaveBootstrap();
+    }
+
+    /// <summary>The catalog row of realm <paramref name="id"/>: its identity fields.</summary>
+    private static RealmR1 RowOf(ushort id, in SpatialGridConfig grid) => new()
+    {
+        Id = id,
+        Generation = 0,
+        WorldMinX = grid.WorldMin.X,
+        WorldMinY = grid.WorldMin.Y,
+        WorldMinZ = grid.WorldMin.Z,
+        WorldMaxX = grid.WorldMax.X,
+        WorldMaxY = grid.WorldMax.Y,
+        WorldMaxZ = grid.WorldMax.Z,
+        CellSize = grid.CellSize,
+        MigrationHysteresisRatio = grid.MigrationHysteresisRatio,
+    };
+
+    /// <summary>The grid a catalog row describes: its identity, every tuning knob at its default (they move no entity).</summary>
+    private static SpatialGridConfig GridConfigOf(in RealmR1 row) =>
+        new(new Vector3D(row.WorldMinX, row.WorldMinY, row.WorldMinZ), new Vector3D(row.WorldMaxX, row.WorldMaxY, row.WorldMaxZ), row.CellSize,
+            row.MigrationHysteresisRatio);
+
+    /// <summary>True when two grids file every position in the same cell: same bounds, cell size and hysteresis band.</summary>
+    private static bool SameRealmIdentity(in SpatialGridConfig a, in SpatialGridConfig b) =>
+        a.WorldMin == b.WorldMin && a.WorldMax == b.WorldMax && a.CellSize == b.CellSize && a.MigrationHysteresisRatio == b.MigrationHysteresisRatio;
+
+    /// <summary>Test hook: the catalog's persisted rows (null when the database has none).</summary>
+    internal IReadOnlyDictionary<ushort, (int ChunkId, RealmR1 Row)> PersistedRealmCatalog => _persistedRealms;
+
+    /// <summary>
+    /// Test hook: rewrites catalog entry <paramref name="id"/> to claim id <paramref name="newId"/> instead — the shape of a catalog that lost an
+    /// entry, which a reopen must refuse rather than open with that realm's clusters unfiled (RLM-01).
+    /// </summary>
+    internal void RenumberRealmCatalogEntryForTest(ushort id, ushort newId)
+    {
+        var (chunkId, row) = _persistedRealms[id];
+        row.Id = newId;
+        var cs = MMF.CreateChangeSet();
+        SystemCrud.Update(_realmsTable, chunkId, ref row, EpochManager, cs);
+        cs.SaveChanges();
+    }
+
+    /// <summary>True when one of the archetype's components carries a <c>[RealmKey]</c> field.</summary>
+    private static bool ArchetypeHasRealmKey(ComponentTable[] slotToTable)
+    {
+        foreach (var table in slotToTable)
+        {
+            if (table?.Definition.RealmKeyField != null)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The grid of realm <paramref name="realm"/> for an entity of archetype <paramref name="archetypeId"/> entering it. Throws when the realm is not
+    /// registered or cannot hold the archetype — at the call, in application code (decision D-2: validated paths throw, the fence never does).
+    /// </summary>
+    internal SpatialGrid RealmGridForEntry(ushort realm, int archetypeId, string archetypeName)
+    {
+        var r = _realms?.TryGet(realm);
+        if (r == null)
+        {
+            throw new InvalidOperationException(
+                $"Realm {realm} is not registered: an entity of '{archetypeName}' cannot be placed in it. Register the realm (Realms.Register) first.");
+        }
+
+        if (r.Closing)
+        {
+            throw new InvalidOperationException($"Realm {realm} is closing (unregistered): an entity of '{archetypeName}' cannot be placed in it.");
+        }
+
+        if (!r.IsCompatible(archetypeId))
+        {
+            throw new InvalidOperationException($"Realm {realm} cannot hold '{archetypeName}': {r.IncompatibilityOf(archetypeId)}");
+        }
+
+        return r.Grid;
+    }
+
+    /// <summary>
+    /// The grid a spatial query in realm <paramref name="realm"/> walks. Throws when the realm is not registered: a query naming a realm that does not
+    /// exist is an application error, never an empty answer. An archetype with no cluster in a registered realm answers empty.
+    /// </summary>
+    /// <summary>
+    /// Refuses a realm that is not registered, for a per-realm cluster walk: naming a realm that does not exist is an application error, never an empty
+    /// answer. With no realm table (no spatial grid, no realm), realm 0 alone exists.
+    /// </summary>
+    internal void CheckRealmRegistered(RealmId realm)
+    {
+        var known = _realms == null ? realm == RealmId.Default : !realm.IsNone && _realms.TryGet(realm.Value) != null;
+        if (!known)
+        {
+            throw new InvalidOperationException($"Realm {realm.Value} is not registered: a per-realm walk must name a registered realm.");
+        }
+    }
+
+    internal SpatialGrid RealmGridForQuery(RealmId realm)
+    {
+        var r = realm.IsNone ? null : _realms?.TryGet(realm.Value);
+        if (r == null)
+        {
+            throw new InvalidOperationException(
+                $"Realm {realm.Value} is not registered: a spatial query must name a registered realm (realm 0 unless ConfigureSpatialGrid or "
+                + "Realms.Register created it).");
+        }
+
+        return r.Grid;
+    }
+
+    /// <summary>The realm count <see cref="ConfigureRealms"/> set (1 when it was never called).</summary>
+    internal int ConfiguredMaxRealms => _maxRealms;
+
+    /// <summary>True while <see cref="ConfigureSpatialGrid"/>'s realm-0 configuration waits for <see cref="InitializeArchetypes"/>.</summary>
+    internal bool HasPendingRealm0Grid => _pendingGridConfig.HasValue;
+
+    /// <summary>
+    /// Realm 0's grid, named as such: the engine sites that are single-realm today say so here, and each is on the Realms plan's list of what the
+    /// multi-realm steps replace (SP-5 fence and open paths, RT-3 dispatch, F1 replication).
+    /// </summary>
+    internal SpatialGrid Realm0Grid => _realms?.Default?.Grid;
+
+    /// <summary>
+    /// The primary realm's grid (<see cref="RealmTable.Primary"/>) — the one whose configuration carries archetype-level spatial knobs (budgets, cost
+    /// model, repair). Not a substitute for a cluster's own realm: per-cluster work resolves <c>SpatialOfCluster</c>.
+    /// </summary>
+    internal SpatialGrid PrimaryGrid => _realms?.Primary?.Grid;
+
+    /// <summary>The engine's realm table, or <c>null</c> before <see cref="InitializeArchetypes"/> or when no realm was configured.</summary>
+    internal RealmTable RealmTable => _realms;
 
     /// <summary>
     /// Mark a single entity slot as dirty in the cluster dirty bitmap. Call from game systems that use the direct
@@ -2061,6 +2362,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     IsStatic = field.IsStatic,
                     HasIndex = field.HasIndex,
                     IndexAllowMultiple = field.IndexAllowMultiple,
+                    IsRealmKey = field.IsRealmKey,
                     OffsetInComponentStorage = field.OffsetInComponentStorage,
                     SizeInComponentStorage = field.SizeInComponentStorage,
                 };
@@ -2191,6 +2493,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     IsStatic = field.IsStatic,
                     HasIndex = field.HasIndex,
                     IndexAllowMultiple = field.IndexAllowMultiple,
+                    IsRealmKey = field.IsRealmKey,
                     OffsetInComponentStorage = field.OffsetInComponentStorage,
                     SizeInComponentStorage = field.SizeInComponentStorage,
                 };
@@ -2361,6 +2664,49 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     var id = (ushort)chunkId;
                     _persistedAssemblies[id] = (chunkId, asm);
                     _assemblyIdByName[asm.SimpleName.AsString] = id;
+                }
+            }
+        }
+
+        // RealmR1 — the realm catalog (Realms D-1). Absent until a named realm was first registered; loaded eagerly so a generic opener rebuilds every
+        // realm's spatial layer at InitializeArchetypes, before any entity is readable.
+        if (bootstrap.ContainsKey(BK_SysRealmR1))
+        {
+            DBD.CreateFromAccessor<RealmR1>();
+            var realmDef = DBD.GetComponent(RealmR1.SchemaName, 1);
+            var realmSPIs = bootstrap.Get(BK_SysRealmR1);
+            _realmsTable = new ComponentTable(this, realmDef, this, realmSPIs.GetInt(), realmSPIs.GetInt(1));
+            _componentTableByType.TryAdd(typeof(RealmR1), _realmsTable);
+
+            var realmWalTypeId = (ushort)_realmsTable.ComponentSegment.RootPageIndex;
+            _realmsTable.WalTypeId = realmWalTypeId;
+            _componentTableByWalTypeId.TryAdd(realmWalTypeId, _realmsTable);
+
+            _persistedRealms = [];
+            var realmSeg = _realmsTable.ComponentSegment;
+            for (var chunkId = 1; chunkId < realmSeg.ChunkCapacity; chunkId++)
+            {
+                if (realmSeg.IsChunkAllocated(chunkId) && SystemCrud.Read(_realmsTable, chunkId, out RealmR1 realm, EpochManager))
+                {
+                    // A retired row names no realm (Realms D5): its id is free, and a later registration reuses the row.
+                    if (realm.State == RealmR1.StateRetired && realm.Id > 0 && realm.Id < RealmId.MaxCount)
+                    {
+                        (_retiredRealmRows ??= [])[(ushort)realm.Id] = (chunkId, realm);
+                        continue;
+                    }
+
+                    // Realm 0 keeps its own record, and None (0xFFFF) is no realm: an id outside [1, 65 535) or a duplicate is a corrupt catalog, which
+                    // would otherwise silently give a realm another's identity.
+                    if (realm.Id <= 0 || realm.Id >= RealmId.MaxCount || !_persistedRealms.TryAdd((ushort)realm.Id, (chunkId, realm)))
+                    {
+                        throw new InvalidOperationException(
+                            $"The realm catalog is corrupt: row {chunkId} names realm {realm.Id}, which is out of range or already catalogued.");
+                    }
+
+                    if (realm.State == RealmR1.StateClosing)
+                    {
+                        (_closingRealmsAtOpen ??= []).Add((ushort)realm.Id);
+                    }
                 }
             }
         }
@@ -3233,10 +3579,37 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // Construct the engine-wide spatial grid. A grid is only required when at least one cluster-eligible archetype has a spatial component (checked
         // per-archetype below). The config is persisted so a generic opener (e.g. the Workbench) that never calls ConfigureSpatialGrid can still reconstruct
         // the grid and fully initialize the cluster-spatial archetypes — otherwise their cluster / entity-map segments stay unattributed in introspection.
+        // Realms (C1): realm 0 comes from ConfigureSpatialGrid, from a Realms.Register(0, …), or — for a generic opener — from the persisted realm-0
+        // record; every other realm from its registration. The table is sized by ConfigureRealms (one realm without it).
+        // A fresh table on every call: a repeat InitializeArchetypes (#790) rebuilds realms from the registry and the catalog, as it rebuilt the grid.
+        _realms = null;
+        var pendingRealms = MergeRealmCatalog(_realmRegistry?.Pending, out var realmsToPersist);
+        RealmConfig realm0 = null;
         if (_pendingGridConfig.HasValue)
         {
-            var gridConfig = _pendingGridConfig.Value;
-            _spatialGrid = new SpatialGrid(gridConfig);
+            realm0 = RealmConfig.SimulatedAlways(_pendingGridConfig.Value);
+        }
+        else if (pendingRealms != null && pendingRealms.TryGetValue(RealmId.Default.Value, out var registered0))
+        {
+            realm0 = registered0;
+        }
+
+        if (realm0 != null || pendingRealms is { Count: > 0 })
+        {
+            _realms = new RealmTable(_maxRealms);
+            foreach (var (id, config) in pendingRealms ?? new Dictionary<ushort, RealmConfig>())
+            {
+                if (id != RealmId.Default.Value)
+                {
+                    _realms.Register(new RealmId(id), new SpatialGrid(config.Grid), config);
+                }
+            }
+        }
+
+        if (realm0 != null)
+        {
+            var gridConfig = realm0.Grid;
+            _realms.Register(RealmId.Default, new SpatialGrid(gridConfig), realm0);
             _pendingGridConfig = null;
 
             // Rewrite whenever the stored record is absent OR the wrong width. A pre-#872 database holds a six-value record; an app that calls
@@ -3250,7 +3623,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         }
         else if (TryLoadSpatialGridConfig(out var persistedGridConfig))
         {
-            _spatialGrid = new SpatialGrid(persistedGridConfig);
+            _realms ??= new RealmTable(_maxRealms);
+            _realms.Register(RealmId.Default, new SpatialGrid(persistedGridConfig), RealmConfig.SimulatedAlways(persistedGridConfig));
         }
 
         // Ensure ArchetypeR1 is registered in this session. On a new database CreateSystemSchemaR1 already registered it; on reopen LoadSystemSchemaR1 stops
@@ -3725,13 +4099,23 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                     }
                 }
 
+                // A realm key names the frame of the archetype's spatial field: without one, it would be a ushort nothing reads (Realms).
+                if (!meta.HasClusterSpatial && ArchetypeHasRealmKey(slotToTable))
+                {
+                    throw new InvalidOperationException(
+                        $"Archetype '{meta.ArchetypeType?.Name}' carries a [RealmKey] but no [SpatialIndex] component: the realm key names the frame of the "
+                        + "archetype's spatial field.");
+                }
+
                 // Initialize per-archetype spatial state for cluster archetypes with spatial fields.
                 if (meta.HasClusterSpatial)
                 {
                     // Issue #230 Phase 3 Option B: ConfigureSpatialGrid() is REQUIRED for cluster spatial archetypes. The pre-Option-B fallback to the legacy
                     // per-entity R-Tree is gone; the per-cell cluster index is the single source of truth. Surface misconfiguration at engine startup rather
                     // than at the first spawn, when the user can still do something about it.
-                    if (_spatialGrid == null)
+                    // Realms: an archetype WITHOUT a realm key lives in realm 0, which must therefore exist; a realm-keyed one needs realms, not realm 0.
+                    var realmKeyed = ArchetypeHasRealmKey(slotToTable);
+                    if (realmKeyed ? _realms == null : Realm0Grid == null)
                     {
                         throw new InvalidOperationException(
                             $"Archetype '{meta.ArchetypeType?.Name ?? meta.ArchetypeId.ToString()}' declares a [SpatialIndex] field and is cluster-eligible, " +
@@ -3751,7 +4135,33 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                                 // #919 AC-9. Separate from the type check above because it asks a different question: not "can the grid decode this
                                 // field?" but "can this field's own precision address the world the game configured?". It runs HERE rather than in
                                 // ConfigureSpatialGrid because it needs both halves — the grid is configured before any archetype is known.
-                                SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType, in _spatialGrid.Config, archName);
+                                if (!realmKeyed)
+                                {
+                                    SpatialGrid.ValidateWorldExtentForFieldType(spatialTable.SpatialIndex.FieldInfo.FieldType, in Realm0Grid.Config, archName);
+                                }
+                                else
+                                {
+                                    // A realm-keyed archetype need not fit EVERY realm (f32 creatures never enter the f64 galaxy): the check is per realm, and
+                                    // an incompatible realm refuses the archetype's entities at entry (spawn, teleport) with this same message.
+                                    var keyFieldType = spatialTable.SpatialIndex.FieldInfo.FieldType;
+                                    foreach (var realm in _realms.Registered)
+                                    {
+                                        // No exception on the common path: only a realm the field cannot address runs the throwing check, for its message.
+                                        if (SpatialGrid.IsWorldExtentAddressable(keyFieldType, in realm.GridConfig))
+                                        {
+                                            continue;
+                                        }
+
+                                        try
+                                        {
+                                            SpatialGrid.ValidateWorldExtentForFieldType(keyFieldType, in realm.GridConfig, archName);
+                                        }
+                                        catch (InvalidOperationException e)
+                                        {
+                                            realm.MarkIncompatible(meta.ArchetypeId, e.Message);
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -3767,7 +4177,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // Issue #230 Phase 3 Option B: no per-archetype R-Tree + back-pointer CBS segments to allocate or load. The per-cell cluster index
                         // is transient and is rebuilt from cluster data at startup by RebuildCellState + RebuildClusterAabbs below.
                         // Issue #229 Q10: InitializeSpatial now also allocates this archetype's own CellClusterPool sized to the grid's cell count.
-                        clusterState.InitializeSpatial(slotToTable, _spatialGrid, meta.ArchetypeId);
+                        clusterState.InitializeSpatial(slotToTable, _realms, meta.ArchetypeId);
 
                         // Register with the per-table spatial state, which the trigger system reads
                         for (var slot = 0; slot < meta.ComponentCount; slot++)
@@ -3786,7 +4196,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         // the grid is persisted, so every reopen reconstructs it from the data. No-op on a fresh database.
                         // Issue #230 Phase 3 Option B: the legacy `RebuildSpatialFromData` call that used to re-insert every entity into the per-archetype
                         // R-Tree has been removed. RebuildCellState + RebuildClusterAabbs below are the single source of truth for per-cell index
-                        // reconstruction on reopen. _spatialGrid is guaranteed non-null here (the grid-required gate runs before this block).
+                        // reconstruction on reopen. SpatialGrid is guaranteed non-null here (the grid-required gate runs before this block).
                         if (clusterState.ActiveClusterCount > 0)
                         {
                             using var cellEpoch = EpochGuard.Enter(EpochManager);
@@ -3800,7 +4210,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                             // zero and the whole cost lands in clusterAabbTicks. Kept as two fields rather than collapsed to one so the open-time log line and
                             // the step-1 telemetry accessors keep their shape.
                             var rebuildStart = Stopwatch.GetTimestamp();
-                            clusterState.RebuildSpatialStateFromData(_spatialGrid, EpochManager);
+                            clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);
                             clusterAabbTicks += Stopwatch.GetTimestamp() - rebuildStart;
                         }
                     }
@@ -3908,10 +4318,22 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             _registeredWithRegistry = true;
         }
 
+        // The realm catalog's new entries, once every archetype has been validated against the realms (Realms D-1): an open that throws above leaves no
+        // identity behind to refuse the corrected configuration next time. Before the WAL replay, which names no realm registered this session.
+        if (realmsToPersist != null)
+        {
+            PersistRealmCatalogEntries(realmsToPersist);
+        }
+
         // WAL v2 crash recovery (P1.2): replay committed records that postdate the last checkpoint, now that archetypes,
         // EntityMaps, and the page cache are online — the correct place, unlike the never-wired in-ctor WalRecovery(dbe:null)
         // that runs before component metadata exists (TXW-1). No-op on a clean reopen (the WAL window is empty).
         RunWalV2Recovery();
+
+        // Realms D5: a realm closing when the engine last stopped is retired now when nothing names it, live again otherwise (RLM-06). Then the
+        // primary realm is fixed for the session: a run-time registration of a lower id must not move the archetype-level knobs.
+        ResolveClosingRealmsAtOpen(_realmRegistry?.Pending);
+        _realms?.PinPrimary();
 
         // Recovery is now complete — restore the configured CRC verification mode (deferred to RecoveryOnly at open on the crash path, see
         // InitializeCheckpointManager) so normal operation gets on-load corruption detection again.
@@ -4003,6 +4425,13 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // a torn cluster-index node page was neither loud-failed nor rebuilt, but silently served.
         RebuildClusterIndexes();
 
+        // Phase 5b — SPATIAL (RB-01, #1054). The cell layer is derived exactly like the indexes, and the only rebuild so far — InitializeArchetypes' — saw
+        // the clusters as they were BEFORE this window was applied. Replayed spawns claim cell-agnostic slots (RecoveryApplier), often into clusters that
+        // rebuild never saw at all (a crash before the first checkpoint leaves the cluster segment empty at open), so the reopened database answered every
+        // spatial query with nothing. Rebuilt from scratch now that cluster data is final; its per-slot check files any mixed-cell cluster's strays for
+        // the first fence (Realms P0.2).
+        RebuildSpatialLayerAfterRecovery();
+
         // Phase 6 — SUSPECT RESOLUTION (03-recovery.md §9, RB-04): now that derived structures are rebuilt and chains scrubbed, classify every page that failed
         // CRC during recovery (RecoverySuspect mode). Derived/orphaned suspects are already healed (rebuilt / freed by scrub); a suspect page still holding a live
         // primary chunk is unhealable torn data → fail the open loudly. Before the seal so a loud failure aborts before the data file is rewritten.
@@ -4016,6 +4445,41 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         // final only afterwards. The corrected bitmap is held dirty (DC > 0, so it can't be evicted stale) and consolidated by the next checkpoint / clean shutdown;
         // if this session crashes again first, recovery simply re-derives (idempotent).
         RederiveOccupancyOnCrash();
+    }
+
+    /// <summary>
+    /// Recovery's spatial phase: drop the whole cell layer and rebuild it from the recovered cluster data, for every cluster-spatial archetype. The same
+    /// fresh-grid, fresh-pool precondition <see cref="ArchetypeClusterState.RebuildSpatialStateFromData"/> documents; every realm's grid is shared by
+    /// the archetypes in it, so each is reset once and every archetype refilled.
+    /// </summary>
+    private void RebuildSpatialLayerAfterRecovery()
+    {
+        if (_realms == null)
+        {
+            return;
+        }
+
+        var start = Stopwatch.GetTimestamp();
+        using var guard = EpochGuard.Enter(EpochManager);
+        foreach (var realm in _realms.Registered)
+        {
+            realm.Grid.ResetCellState();
+        }
+
+        foreach (var es in _archetypeStates)
+        {
+            var clusterState = es?.ClusterState;
+            if (clusterState == null || !clusterState.SpatialSlot.HasSpatialIndex)
+            {
+                continue;
+            }
+
+            clusterState.ResetRealmCellPools();
+            // Realm 0's grid for an unkeyed archetype; a realm-keyed one files each cluster in the realm its first entity names (Realms C1d).
+            clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);
+        }
+
+        _openClusterAabbRebuildMs += (Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency;
     }
 
     /// <summary>
@@ -4883,10 +5347,10 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         // Spatial state is the third derived structure over cluster data, and its normal rebuild runs inside InitializeArchetypes — before this method has
         // placed anything, so it would have seen an empty cluster. Redo it here or the archetype reopens with entities present and every spatial query empty.
-        if (meta.HasClusterSpatial && _spatialGrid != null && clusterState.ActiveClusterCount > 0)
+        if (meta.HasClusterSpatial && _realms != null && clusterState.ActiveClusterCount > 0)
         {
             // One walk, same as InitializeArchetypes — the ordering constraint that used to force cell state first is internal to it now (#872 step 2).
-            clusterState.RebuildSpatialStateFromData(_spatialGrid, EpochManager);
+            clusterState.RebuildSpatialStateFromData(Realm0Grid, EpochManager);
         }
 
         cs.SaveChanges();

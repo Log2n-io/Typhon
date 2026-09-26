@@ -40,6 +40,15 @@ public sealed class BotSwarmOptions
 
     /// <summary>How many connects go out between two staggers. One by default; a measurement run raises it to shorten a thousand-bot ramp.</summary>
     public int ConnectBatch { get; init; } = 1;
+
+    /// <summary>
+    /// Every this many seconds each god camera asks for the next planet (<c>ViewRealm</c>, Realms G3); 0, the default, never. Needs a server that
+    /// declares the command.
+    /// </summary>
+    public int TourEverySeconds { get; init; }
+
+    /// <summary>How many planets the tour cycles through: the server's <c>--planets</c>.</summary>
+    public int Planets { get; init; } = 1;
 }
 
 /// <summary>
@@ -406,6 +415,25 @@ public sealed class BotSwarm : IAsyncDisposable
     /// <summary>How many times the shared timer has fired.</summary>
     public long Ticks { get; private set; }
 
+    /// <summary>
+    /// Realms G3, across the population: the tours asked for, the realm switches the sessions applied (each a <c>RESET</c> carrying a new <c>REALM</c>),
+    /// and the <c>RealmNews</c> announcements heard.
+    /// </summary>
+    public (long Asked, long Switches, long News, int InRealm) Realms()
+    {
+        long asked = 0, switches = 0, news = 0;
+        var inRealm = 0;
+        foreach (var bot in _bots)
+        {
+            asked += Volatile.Read(ref bot.ToursAsked);
+            switches += Volatile.Read(ref bot.RealmSwitches);
+            news += bot.News.Count;
+            inRealm += bot.Client.Store?.Realm != null ? 1 : 0;
+        }
+
+        return (asked, switches, news, inRealm);
+    }
+
     private readonly Dictionary<ushort, int> _disconnects = [];
     private readonly Lock _reportLock = new();
     private int _faults;
@@ -430,6 +458,7 @@ public sealed class BotSwarm : IAsyncDisposable
             try
             {
                 await bot.Client.ConnectAsync(ct).ConfigureAwait(false);
+                bot.WatchRealm();
                 _bots.Add(bot);
             }
             catch (Exception)
@@ -523,9 +552,13 @@ public sealed class BotSwarm : IAsyncDisposable
         {
             Ticks++;
             var moveRegions = _options.RegionEveryTicks > 0 && Ticks % _options.RegionEveryTicks == 0;
+            var tourPeriod = (long)_options.TourEverySeconds * Math.Max(1, _options.TickHz);
+            var touring = _options.TourEverySeconds > 0 && _options.Planets > 1 && _options.Kind != "player";
+            var index = 0;
 
             foreach (var bot in _bots)
             {
+                index++;
                 if (!bot.Client.IsConnected)
                 {
                     continue;
@@ -535,6 +568,12 @@ public sealed class BotSwarm : IAsyncDisposable
                 {
                     // The ping first: it is what keeps the session alive, and a region update that threw would otherwise take the ping with it.
                     await bot.Client.SendPingAsync(ct).ConfigureAwait(false);
+
+                    // Staggered by bot: every camera switching on one tick would be N whole-planet RESETs in one server tick.
+                    if (touring && (Ticks + index) % tourPeriod == 0)
+                    {
+                        await bot.SendNextPlanetAsync(_options, ct).ConfigureAwait(false);
+                    }
 
                     if (moveRegions)
                     {
@@ -565,12 +604,49 @@ public sealed class BotSwarm : IAsyncDisposable
         }
     }
 
+    /// <summary>Counts the <c>RealmNews</c> events a session hears; every other event is dropped. On the session's receive loop.</summary>
+    private sealed class NewsCounter : IEventHandler
+    {
+        private long _count;
+
+        public long Count => Volatile.Read(ref _count);
+
+        public void Event(MessagePlan type)
+        {
+            if (type.Name == "RealmNews")
+            {
+                Interlocked.Increment(ref _count);
+            }
+        }
+
+        public void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
+        {
+        }
+
+        public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
+        {
+        }
+
+        public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes)
+        {
+        }
+
+        public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
+        {
+        }
+    }
+
     /// <summary>One scripted camera: a client, an orbit centre and a phase.</summary>
     private sealed class Bot
     {
         private readonly double _centreX;
         private readonly double _centreY;
         private readonly double _phase;
+        private int _planet;
+
+        public long ToursAsked;
+        public long RealmSwitches;
+        public readonly NewsCounter News = new();
 
         public Bot(int index, BotSwarmOptions options)
         {
@@ -598,10 +674,40 @@ public sealed class BotSwarm : IAsyncDisposable
                 // STATS is opt-in per session (W23): a server emits the block only to a client that asked for it, so a load generator that does not ask
                 // reports the run with every server number reading zero — which is what the first AC-1 run did.
                 Caps = Capabilities.Stats,
+                Events = News,
             });
         }
 
         public TyphonClient Client { get; }
+
+        /// <summary>Counts the realm switches the session applies. After the connect, when the store exists; the swarm does not reconnect.</summary>
+        public void WatchRealm()
+        {
+            if (Client.Store != null)
+            {
+                Client.Store.RealmChanged += (previous, current) =>
+                {
+                    if (previous != null && current != null && previous.RealmId != current.RealmId)
+                    {
+                        Interlocked.Increment(ref RealmSwitches);
+                    }
+                };
+            }
+        }
+
+        /// <summary>Asks for the next planet (Realms G3): the server moves the camera, and its next frame is a RESET over that planet's REALM.</summary>
+        public async Task SendNextPlanetAsync(BotSwarmOptions options, CancellationToken ct)
+        {
+            if (Client.Plan?.CommandByName("ViewRealm") == null)
+            {
+                return;
+            }
+
+            _planet = (_planet + 1) % options.Planets;
+            var values = new RecordValues { ["Realm"] = FieldValue.Of((double)_planet) };
+            await Client.SendCommandAsync("ViewRealm", values, ct).ConfigureAwait(false);
+            Interlocked.Increment(ref ToursAsked);
+        }
 
         public async Task SendRegionAsync(long tick, BotSwarmOptions options, CancellationToken ct)
         {
@@ -617,10 +723,18 @@ public sealed class BotSwarm : IAsyncDisposable
 
             // A square footprint around the camera: four points is the minimum a quad needs and the minimum the wire accepts is three, so this is the
             // smallest honest region rather than the smallest legal one.
+            // Vertices are list<pos3> over the session's realm (typhon.3): a flat realm's quad at z 0, a deep realm's as a box half as tall as it is wide.
             var half = options.RegionRadiusM * 0.5;
+            double[] vertices = Client.Store?.Realm?.Deep == true
+                ?
+                [
+                    x - half, y - half, -half, x + half, y - half, -half, x + half, y + half, -half, x - half, y + half, -half,
+                    x - half, y - half, half, x + half, y - half, half, x + half, y + half, half, x - half, y + half, half,
+                ]
+                : [x - half, y - half, 0, x + half, y - half, 0, x + half, y + half, 0, x - half, y + half, 0];
             var values = new RecordValues
             {
-                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(x - half, y - half, x + half, y - half, x + half, y + half, x - half, y + half),
+                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(vertices),
                 [BuiltInCommands.RegionAltitudeField] = FieldValue.Of(120.0),
                 [BuiltInCommands.RegionBudgetField] = FieldValue.Of(options.BudgetKiBps),
             };

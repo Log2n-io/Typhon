@@ -74,7 +74,7 @@ class EntityRefMutTests : TestBase<EntityRefMutTests>
         string[] readSurface =
         [
             "Id", "get_Id", "ArchetypeId", "get_ArchetypeId", "IsValid", "get_IsValid", "ComponentCount", "get_ComponentCount", "Read", "TryRead",
-            "IsEnabled", "GetComponentName", "ReadRaw", "Equals", "GetHashCode", "ToString", "GetType",
+            "IsEnabled", "GetComponentName", "ReadRaw", "Equals", "GetHashCode", "ToString", "GetType", "Realm", "get_Realm",
         ];
         Assert.That(roMembers.Except(readSurface), Is.Empty, "EntityRef's public surface is read-only; review any new member here first");
         Assert.That(mutMembers, Is.SupersetOf(new[] { "Write", "Enable", "Disable" }));

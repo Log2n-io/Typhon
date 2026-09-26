@@ -7,7 +7,7 @@
     <Platforms>AnyCPU</Platforms>
     <LangVersion>default</LangVersion>
     <Nullable>disable</Nullable>
-  </PropertyGroup>
+    </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>

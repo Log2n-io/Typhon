@@ -1,0 +1,56 @@
+{
+  "description": "pos3 over a deep frame at 32 bits, 12 bytes per value: codes at and past 2\u00B3\u00B9.",
+  "codec": {
+    "t": "pos3"
+  },
+  "frameTick": 70000,
+  "frame": {
+    "realmId": 9,
+    "generation": 2,
+    "kindIdx": 0,
+    "appTag": 0,
+    "posBits": 32,
+    "cellM": "4050000000000000",
+    "deep": true,
+    "min": [
+      "c1cdcd6500000000",
+      "c1cdcd6500000000",
+      "c1cdcd6500000000"
+    ],
+    "max": [
+      "41cdcd6500000000",
+      "41cdcd6500000000",
+      "41cdcd6500000000"
+    ]
+  },
+  "cases": [
+    {
+      "input": [
+        "0000000000000000",
+        "41cdcd64ffc00000",
+        "c1cdcd6500000000"
+      ],
+      "offset": 0,
+      "length": 12,
+      "decoded": [
+        "0000000000000000",
+        "41cdcd64ffc46536",
+        "c1cdcd6500000000"
+      ]
+    },
+    {
+      "input": [
+        "405edd2f1a9fbe77",
+        "bf50624dd2f1a9fc",
+        "41cdcd6500000000"
+      ],
+      "offset": 12,
+      "length": 12,
+      "decoded": [
+        "405ed99d8d000000",
+        "0000000000000000",
+        "41cdcd64ffc46536"
+      ]
+    }
+  ]
+}

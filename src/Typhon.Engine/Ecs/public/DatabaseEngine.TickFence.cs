@@ -96,6 +96,9 @@ public partial class DatabaseEngine
         // Cluster tick fence: serialize dirty cluster-backed entity data to WAL
         WriteClusterTickFence(tickNumber, ref highestLSN, changeSet);
 
+        // Realms D5: a Closing realm this fence emptied goes now.
+        RemoveEmptyClosingRealms();
+
         if (highestLSN > 0)
         {
             Interlocked.Exchange(ref _lastTickFenceLSN, highestLSN);
@@ -689,7 +692,7 @@ public partial class DatabaseEngine
         var accessor = clusterState.ClusterSegment.CreateChunkAccessor();
         try
         {
-            clusterState.RecomputeDirtyClusterAabbs(clusterState.FenceDirtyBits, ref accessor, _spatialGrid);
+            clusterState.RecomputeDirtyClusterAabbs(clusterState.FenceDirtyBits, ref accessor, PrimaryGrid);
             spatialScope.MigrationsExecuted = clusterState.LastTickMigrationCount;
         }
         finally
@@ -736,18 +739,18 @@ public partial class DatabaseEngine
         outlierBuffer.Clear();
         // Worker-local deferral buffer for promoted cells, same shape and lifetime as the outlier buffer above and merged the same way. Only when this
         // archetype actually has a promoted cell — the overwhelmingly common case is none.
-        var promotedBuffer = clusterState.PromotedCellCount > 0 ? ArchetypeClusterState.PromotedScratch ??= [] : null;
+        var promotedBuffer = clusterState.HasPromotedCells ? ArchetypeClusterState.PromotedScratch ??= [] : null;
         promotedBuffer?.Clear();
         // Worker-local repair nominations (#872 step 12), merged the same way as the outlier buffer above — but held PER WORKER rather than allocated per
         // slice. With ReclusterBudgetMs at its default of 1.0 this path is live out of the box, so a fresh List per slice per tick is a real per-tick
         // allocation on the fence; step 11 also doubled the element width, so each growth doubling costs twice what it did. EnqueueRepairNominationsBulk
         // clears it after the merge, so a reused list starts every slice empty. Still gated on the budget: with repair switched off the planner discards
         // nominations unread, and producing them would be pure cost on the detection path.
-        var repairBuffer = _spatialGrid != null && _spatialGrid.Config.ReclusterBudgetMs > 0f
+        var repairBuffer = PrimaryGrid != null && PrimaryGrid.Config.ReclusterBudgetMs > 0f
             ? ArchetypeClusterState.NominationScratch ??= [] : null;
         try
         {
-            clusterState.RecomputeDirtyClusterAabbsSlice(sliceStart, sliceCount, ref accessor, _spatialGrid, promotedBuffer, outlierBuffer, repairBuffer,
+            clusterState.RecomputeDirtyClusterAabbsSlice(sliceStart, sliceCount, ref accessor, PrimaryGrid, promotedBuffer, outlierBuffer, repairBuffer,
                 out var aabbsChanged, out var slotsScanned, out var outlierGuardFires, out var clustersScanned, out var driftersDetected,
                 out var driftAbsorbed, out var driftersUnplaced, out var driftGatedClusters, out var driftSuppressedByDensity,
                 out var driftersUnplacedNoCandidate, out var driftersSpilled, out var tightness);
@@ -855,15 +858,15 @@ public partial class DatabaseEngine
         // every migration-heavy tick (#872).
         // #872 step 11: BEFORE the counters below are zeroed, because it reads them. One sample per tick, folded into the per-entity cost model the repair
         // budget is spent against — which is what makes RepairNsPerEntity a seed rather than the operative constant.
-        if (_spatialGrid != null)
+        if (PrimaryGrid != null)
         {
-            clusterState.ObserveMigrationCost(in _spatialGrid.Config, _lastFenceMigrationParallelism);
+            clusterState.ObserveMigrationCost(in PrimaryGrid.Config, _lastFenceMigrationParallelism);
         }
 
         // Step 14 (D2): last tick's throttle verdict raises or decays the intra-cell target before the counters it reads are zeroed.
-        if (_spatialGrid != null)
+        if (PrimaryGrid != null)
         {
-            clusterState.UpdateDriftTargetBoost(in _spatialGrid.Config);
+            clusterState.UpdateDriftTargetBoost(in PrimaryGrid.Config);
         }
         clusterState.ResetThrottleTickState();
         clusterState.ResetPrepSubSpans();
@@ -871,9 +874,9 @@ public partial class DatabaseEngine
         // SO-02: the tick's range queries ran in its systems, all of which have finished; this reset runs once per archetype on every Prep path. TH-04: the
         // budget follows them, set here, before the planner, the throttle and the drift scan spend it.
         clusterState.TakeQueryTallyDelta();
-        if (_spatialGrid != null)
+        if (PrimaryGrid != null)
         {
-            clusterState.UpdateMaintenanceBudgetScale(in _spatialGrid.Config);
+            clusterState.UpdateMaintenanceBudgetScale(in PrimaryGrid.Config);
         }
         clusterState.PreviousTickMigrationCount = clusterState.LastTickMigrationCount;
         clusterState.LastTickMigrationCount = 0;
@@ -892,6 +895,7 @@ public partial class DatabaseEngine
         clusterState.LastTickCrossingsExecuted = 0;
         clusterState.LastTickJumpCrossings = 0;
         clusterState.LastTickClampedDestinations = 0;
+        clusterState.ResetRealmChangeTickState();
         clusterState.LastTickLargestArrivalRun = 0;
         clusterState.LastTickArrivalCellsTouched = 0;
         clusterState.LastTickRelocationsExecuted = 0;
@@ -948,12 +952,9 @@ public partial class DatabaseEngine
         // trivial. On-demand grow under _finalizeLock (ArchetypeClusterState.GrowFenceDirtyBitsForChunkId) remains as a safety net for pathological cases.
         var existingLen = clusterState.FenceDirtyBits?.Length ?? 0;
         var upperBound = Math.Max(clusterState.PrimarySegmentCapacity, existingLen) + 2 * clusterState.PendingMigrationCount + 64;
-        // PerCellIndex is indexed by CELL key, so its bound comes from the grid rather than the segment. A migration's destination cell was created by
-        // crossing detection back in Prep, so the current cell count already covers every key the Migrate phase can name; the doubling is the same kind of
-        // slack the cluster bound carries, and it is what keeps AddClusterToPerCellIndex off the growth path when it runs from a worker.
-        var cellUpperBound = _spatialGrid != null ? 2 * _spatialGrid.CellCount + 64 : 0;
+        // The per-cell indexes are sized per destination realm inside, from each realm's grid (Realms C1).
         var preSizeStart = Stopwatch.GetTimestamp();
-        clusterState.PreSizeMigrationBuffers(upperBound, cellUpperBound);
+        clusterState.PreSizeMigrationBuffers(upperBound);
 
         // #926. On the SAME bound as the arrays above, and for a stronger reason than theirs. A Migrate slice now holds one zone-map batch per indexed field
         // for its whole run — one latch acquire instead of one per migrant — and a batch pins one Store generation, so a destination chunk id past that
@@ -1040,8 +1041,8 @@ public partial class DatabaseEngine
         if (hasWork)
         {
             var tailStart = Stopwatch.GetTimestamp();
-            var budgetNs = _spatialGrid != null ? pending.MaintenanceBudgetNs(in _spatialGrid.Config) : 0d;
-            var crossingsNs = _spatialGrid != null ? pending.PendingMandatoryCostNs(in _spatialGrid.Config) : 0d;
+            var budgetNs = PrimaryGrid != null ? pending.MaintenanceBudgetNs(in PrimaryGrid.Config) : 0d;
+            var crossingsNs = PrimaryGrid != null ? pending.PendingMandatoryCostNs(in PrimaryGrid.Config) : 0d;
             var repairCommittedNs = 0d;
             // Zeroed here, not inside the planner: PlanArchetypeRepairs returns early on an empty queue without touching it, and a stale value from the
             // last tick that DID plan would be pre-charged to a throttle that owes nothing.
@@ -1061,7 +1062,7 @@ public partial class DatabaseEngine
             var planEnd = Stopwatch.GetTimestamp();
             pending.PrepPlanTicks += planEnd - tailStart;
 
-            pending.ApplyMigrationThrottle(_spatialGrid, repairCommittedNs);
+            pending.ApplyMigrationThrottle(PrimaryGrid, repairCommittedNs);
             pending.PrepThrottleTicks += Stopwatch.GetTimestamp() - planEnd;
         }
         else
@@ -1069,7 +1070,7 @@ public partial class DatabaseEngine
             // The LIST is per-tick even though the QUEUE is not: it describes the tick that produced it. Absorbed into the
             // persistent queue first — that is exactly the "refused or unplannable nomination is no longer lost" half above
             // — and only then cleared.
-            pending.AbsorbRepairNominations(_spatialGrid, tickNumber);
+            pending.AbsorbRepairNominations(PrimaryGrid, tickNumber);
         }
 
         pending.PendingMigrationDrainCount = hasWork ? pending.PendingMigrationCount : 0;
@@ -1348,7 +1349,7 @@ public partial class DatabaseEngine
         // null cluster segment implies FenceBranchPath == 0 and therefore no AabbRefresh producer — an accidental guarantee, not a designed one.
         if (clusterState.ClusterSegment == null)
         {
-            clusterState.AbsorbRepairNominations(_spatialGrid, tickNumber);
+            clusterState.AbsorbRepairNominations(PrimaryGrid, tickNumber);
             return;
         }
 
@@ -1364,7 +1365,7 @@ public partial class DatabaseEngine
         var plannerStart = Stopwatch.GetTimestamp();
         try
         {
-            var planned = clusterState.PlanCellRepairs(_spatialGrid, ref accessor, tickNumber, remainingBudgetNs, out var budgetUsedMs);
+            var planned = clusterState.PlanCellRepairs(PrimaryGrid, ref accessor, tickNumber, remainingBudgetNs, out var budgetUsedMs, _realms);
             clusterState.LastTickReclusterBudgetUsedMs = budgetUsedMs;
 
             // Timed here rather than inside the planner so the bracket covers the accessor rent too, and fed back on the NEXT tick — the planner's own
@@ -1934,7 +1935,7 @@ public partial class DatabaseEngine
         {
             // No fence work on this path — a pure-Transient archetype, or a Static one nobody wrote — but its queries still ran and the budget controller
             // still moved, and a trace that skipped the record would sum to less than the accessors do.
-            EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, _spatialGrid);
+            EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, PrimaryGrid);
 
             // The changed-cluster list is published on THIS branch too (#205). A GetSpan write to a non-spatial column raises nothing the branch
             // selection looks at, so an archetype can reach here with content bits set; skipping the publish would leave them to be drained by some later
@@ -1961,7 +1962,7 @@ public partial class DatabaseEngine
 
         // Drain pending cluster finalizations (review C-1 fix): ReleaseSlot during Migrate only records the chunkId; actual finalize + FreeChunk happens here,
         // after the Migrate/AabbRefresh phase barriers. By this point no concurrent ClaimSlotInCell can race with us — safe to free clean clusters.
-        clusterState.DrainPendingClusterFinalizations(_spatialGrid);
+        clusterState.DrainPendingClusterFinalizations();
 
         // AABB recompute moved out of Finalize into the parallel AabbRefresh phase (FenceAabbRefreshExecSystem). Finalize is now responsible only for
         // the post-AABB bookkeeping clear + dormancy sweep + WAL emit. The serial WriteTickFence wrapper (no-WAL path) calls RecomputeDirtyClusterAabbs
@@ -1989,6 +1990,14 @@ public partial class DatabaseEngine
         // The membership signal, from the same window: after the finalization drain, so a slot released and a cluster retired this tick are both in it.
         clusterState.PublishStructureChanges(tickNumber);
 
+        // Clean-spatial-refresh branch (path 1): nothing was written through the dirty bitmap, but WriteSpatial may have moved clusters — the barrier's
+        // process bitmap says which, and they are not quiet. Swept HERE, before the bookkeeping below clears that bitmap (Realms §9.3-3; review #4: an
+        // archetype moved only by WriteSpatial must not fall asleep while it moves). Every other active cluster is one tick quieter.
+        if (clusterState.FenceBranchPath == 1)
+        {
+            clusterState.DormancySweep(Array.Empty<long>(), tickNumber, clusterState.ClusterProcessBitmap);
+        }
+
         if (clusterState.SpatialSlot.HasSpatialIndex && clusterState.SpatialSlot.FieldInfo.Mode == SpatialMode.Dynamic)
         {
             clusterState.ClearAabbRefreshBookkeeping();
@@ -2011,9 +2020,9 @@ public partial class DatabaseEngine
         // the coming tick's queries must reach past a cell, and which outliers they visit by name instead (SQ-01). It may FALL — the reason it exists.
         clusterState.RefreshClusterReach();
 
-        EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, _spatialGrid);
+        EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, PrimaryGrid);
 
-        // Clean-spatial-refresh branch (path 1) stops here — no dormancy sweep change (already swept clean), no WAL emit.
+        // Clean-spatial-refresh branch (path 1) stops here — no WAL emit; it was swept above, before the process bitmap was cleared.
         if (clusterState.FenceBranchPath == 1)
         {
             return false;

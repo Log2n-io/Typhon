@@ -7,7 +7,7 @@ const p0 = new Float64Array(2);
 const v = new Float64Array(2);
 
 /**
- * Applies one mock frame to the SDK store, in the order a `typhon.2` decoder applies a `TICK`
+ * Applies one mock frame to the SDK store, in the order a `typhon.3` decoder applies a `TICK`
  * (`03-wire-protocol.md` § 5): enters and updates of every archetype, then events, then leaves, then aggregates.
  */
 export function applyTick(world: WorldStore, grid: AggregateGrid, message: TickMessage, sink: EventSink): void {

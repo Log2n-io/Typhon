@@ -212,9 +212,9 @@ class ClusterCategoryFilterTests : TestBase<ClusterCategoryFilterTests>
         {
             Assert.Multiple(() =>
             {
-                Assert.That(StateOf<CatAlphaUnit>(dbe).PromotedCellCount, Is.GreaterThan(0),
+                Assert.That(StateOf<CatAlphaUnit>(dbe).Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
                     "precondition: the Alpha cell must promote, or this is the linear arm again");
-                Assert.That(StateOf<CatBetaUnit>(dbe).PromotedCellCount, Is.GreaterThan(0),
+                Assert.That(StateOf<CatBetaUnit>(dbe).Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
                     "precondition: the Beta cell must promote, or this is the linear arm again");
             });
         }
@@ -275,7 +275,8 @@ class ClusterCategoryFilterTests : TestBase<ClusterCategoryFilterTests>
         using (var dbe = OpenEngine(scope.ServiceProvider, 0))
         {
             Spawn(dbe);
-            Assert.That(StateOf<CatAlphaUnit>(dbe).PromotedCellCount, Is.Zero, "precondition: this arm must NOT promote, or both arms are the same arm");
+            Assert.That(StateOf<CatAlphaUnit>(dbe).Realm0Spatial.PromotedCellCount, Is.Zero,
+                "precondition: this arm must NOT promote, or both arms are the same arm");
             foreach (var mask in Masks())
             {
                 linear[mask] = Aabb<CatAlphaUnit>(dbe, mask);
@@ -286,7 +287,7 @@ class ClusterCategoryFilterTests : TestBase<ClusterCategoryFilterTests>
         using var promotedScope = ServiceProvider.CreateScope();
         using var promoted = OpenEngine(promotedScope.ServiceProvider, PromoteAt);
         Spawn(promoted);
-        Assert.That(StateOf<CatAlphaUnit>(promoted).PromotedCellCount, Is.GreaterThan(0),
+        Assert.That(StateOf<CatAlphaUnit>(promoted).Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
             "precondition: this arm must promote, or it proves nothing about trees");
 
         Assert.Multiple(() =>
@@ -319,12 +320,12 @@ class ClusterCategoryFilterTests : TestBase<ClusterCategoryFilterTests>
         // paths — the shapes' own preconditions below prove only that they reach entities, which the linear arm satisfies just as well.
         if (promoteThreshold > 0)
         {
-            Assert.That(StateOf<CatAlphaUnit>(dbe).PromotedCellCount, Is.GreaterThan(0),
+            Assert.That(StateOf<CatAlphaUnit>(dbe).Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
                 "precondition: the cell must promote, or this case proves nothing about the shapes' tree paths");
         }
 
         var cs = StateOf<CatAlphaUnit>(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         // Each shape opens a ChunkAccessor on the cluster segment for its narrowphase (#909).
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
 

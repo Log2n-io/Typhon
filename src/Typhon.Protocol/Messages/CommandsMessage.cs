@@ -29,7 +29,11 @@ public static class CommandsMessage
     /// <param name="w">The writer.</param>
     /// <param name="clientTick">The client's tick for the batch.</param>
     /// <param name="commands">At least one command: its type, sequence and field values.</param>
-    public static void Write(ref WireWriter w, uint clientTick, IReadOnlyList<(MessagePlan Type, ushort Seq, RecordValues Values)> commands)
+    /// <param name="frame">
+    /// The session's realm frame: a realm-framed field travels over its bounds at <see cref="RealmFrame.CommandPositionBits"/> (<see cref="RealmFrame.ForCommands"/>).
+    /// </param>
+    public static void Write(ref WireWriter w, uint clientTick, IReadOnlyList<(MessagePlan Type, ushort Seq, RecordValues Values)> commands,
+        RealmFrame frame = null)
     {
         if (commands.Count == 0)
         {
@@ -43,7 +47,7 @@ public static class CommandsMessage
         {
             w.WriteVaru((uint)type.Idx);
             w.WriteU16(seq);
-            FieldCodec.WriteSection(ref w, type.Body, values.For);
+            FieldCodec.WriteSection(ref w, type.Body, values.For, frame?.ForCommands);
         }
     }
 
@@ -52,16 +56,18 @@ public static class CommandsMessage
     /// <param name="message">The message.</param>
     /// <param name="plan">The session's compiled catalog.</param>
     /// <param name="sink">Receives the commands, only once the whole message has been validated.</param>
+    /// <param name="frame">The realm frame a realm-framed field decodes over, at <see cref="RealmFrame.CommandPositionBits"/>.</param>
     /// <exception cref="WireFormatException">The message is malformed; nothing reached <paramref name="sink"/>.</exception>
-    public static void Read<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink)
+    public static void Read<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink, RealmFrame frame = null)
         where TSink : ICommandSink, allows ref struct
     {
         var check = default(ValidatingSink);
-        Decode(message, plan, ref check);
-        Decode(message, plan, ref sink);
+        var commandFrame = frame?.ForCommands;
+        Decode(message, plan, ref check, commandFrame);
+        Decode(message, plan, ref sink, commandFrame);
     }
 
-    private static void Decode<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink)
+    private static void Decode<TSink>(ReadOnlySpan<byte> message, CatalogPlan plan, ref TSink sink, RealmFrame frame)
         where TSink : ICommandSink, allows ref struct
     {
         var r = new WireReader(message);
@@ -84,7 +90,7 @@ public static class CommandsMessage
             sink.Command(type, seq, clientTick);
 
             // A tickLo command field rebuilds against the client's claimed tick, the only frame a command has.
-            FieldCodec.ReadSection(ref r, type.Body, clientTick, ref sink);
+            FieldCodec.ReadSection(ref r, type.Body, clientTick, ref sink, frame);
         }
 
         r.ExpectEnd("COMMANDS");

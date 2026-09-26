@@ -180,7 +180,7 @@ class ClusterSpatialTests : TestBase<ClusterSpatialTests>
             // The two healthy entities span 9..21 in world space on every axis; the stored bound is cell-relative and rounded OUTWARD, so it must contain
             // that span rather than equal it exactly.
             var cellKey = cs.ClusterCellMap[chunkId];
-            dbe.SpatialGrid.CellOrigin(cellKey, out var ox, out var oy, out var oz);
+            dbe.Realm0Grid.CellOrigin(cellKey, out var ox, out var oy, out var oz);
             const string Contains = "the bound must still contain the surviving entities";
             Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MinX, ox), Is.LessThanOrEqualTo(9d), Contains);
             Assert.That(ClusterSpatialAabb.ToWorldExact(aabb.MaxX, ox), Is.GreaterThanOrEqualTo(21d), Contains);

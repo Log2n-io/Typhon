@@ -242,12 +242,51 @@ public sealed class SystemDefinition
     public SimTier TierFilter { get; internal set; } = SimTier.All;
 
     /// <summary>
-    /// Cell-level amortization denominator (issue #231). When greater than 0, this system processes only <c>1/N</c> of the tier's clusters per tick,
-    /// rotating through buckets as <c>tickNumber % N</c>. The callback's <see cref="TickContext.AmortizedDeltaTime"/> is set to <c>DeltaTime × CellAmortize</c>
+    /// Cell-level amortization denominator (issue #231). When greater than 0, this system processes only <c>1/N</c> of the tier's clusters per run,
+    /// rotating through buckets as <c>runCount % N</c> — the system's own run count, so a <c>TickDivisor</c> cannot alias it (DSEL-02).
+    /// The callback's <see cref="TickContext.AmortizedDeltaTime"/> is set to <c>DeltaTime × CellAmortize</c>
     /// so integrations over the full elapsed time happen in one step. Must be paired with a non-<see cref="SimTier.All"/> <see cref="TierFilter"/>; amortizing
     /// the full cluster set without tier scoping is rejected at <c>RuntimeSchedule.Build</c>.
     /// </summary>
     public int CellAmortize { get; internal set; }
+
+    /// <summary>How this QuerySystem runs over realms simulated at a divisor (Realms D4, RLM-05). See <see cref="Engine.RealmRate"/>.</summary>
+    public RealmRate RealmRate { get; internal set; }
+
+    /// <summary>The realms this QuerySystem is narrowed to (<see cref="SystemBuilder.InRealms"/>), or <see langword="null"/> for every runnable realm.</summary>
+    public System.Collections.Generic.IReadOnlyList<RealmId> Realms { get; private set; }
+
+    // One bit per realm id of Realms, for the dispatch's membership test; null when the system is not narrowed.
+    internal ulong[] RealmMask { get; private set; }
+
+    internal void SetRealms(RealmId[] realms)
+    {
+        Realms = realms;
+        RealmMask = null;
+        if (realms == null)
+        {
+            return;
+        }
+
+        var max = 0;
+        foreach (var realm in realms)
+        {
+            max = Math.Max(max, realm.Value);
+        }
+
+        var mask = new ulong[(max >> 6) + 1];
+        foreach (var realm in realms)
+        {
+            mask[realm.Value >> 6] |= 1UL << (realm.Value & 63);
+        }
+
+        RealmMask = mask;
+    }
+
+    /// <summary>True when <paramref name="realm"/> is one this system runs in: always, when it is not narrowed.</summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+    internal static bool InMask(ulong[] mask, ushort realm) =>
+        mask == null || ((realm >> 6) < mask.Length && (mask[realm >> 6] & (1UL << (realm & 63))) != 0);
 
     /// <summary>
     /// When true, this parallel QuerySystem uses two-phase checkerboard dispatch (issue #234). Clusters are split into Red

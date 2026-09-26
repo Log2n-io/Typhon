@@ -50,12 +50,13 @@ class ClusterOverhangTests : TestBase<ClusterOverhangTests>
 
         // The premise, so a passing test cannot mean the scenario quietly stopped straddling: the home cell is outside the query's own rows, and the
         // overhang the fence noted covers the reach.
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         grid.WorldToCellCoords((EntityBox.MinX + EntityBox.MaxX) * 0.5, (EntityBox.MinY + EntityBox.MaxY) * 0.5, 0d, out _, out int homeRow, out _);
         grid.WorldToCellCoords(0d, QueryMinY, 0d, out _, out int queryRow, out _);
         Assert.That(homeRow, Is.LessThan(queryRow), "the entity must be filed in a row the queries do not cover");
-        var cs = ClusterStateOf(dbe);
-        Assert.That(Volatile.Read(ref cs.ClusterReach) >= EntityBox.MaxY - ((homeRow + 1) * CellSize) || Volatile.Read(ref cs.EscapedClusters).Count > 0,
+        var spatial = ClusterStateOf(dbe).Realm0Spatial;
+        Assert.That(Volatile.Read(ref spatial.ClusterReach) >= EntityBox.MaxY - ((homeRow + 1) * CellSize)
+            || Volatile.Read(ref spatial.EscapedClusters).Count > 0,
             Is.True, "the reach covers the overhang, or the cluster is named");
         return dbe;
     }
@@ -149,7 +150,7 @@ class ClusterOverhangTests : TestBase<ClusterOverhangTests>
 
         // Horizontal, at y = 802.2: its bounding box is one row tall, and that row is not the entity's.
         var buffer = new (long entityId, double distance)[4];
-        int n = ClusterStateOf(dbe).QueryRay(dbe.SpatialGrid, 300d, QueryMinY, 0d, 1d, 0d, 0d, 200d, buffer, categoryMask: 0);
+        int n = ClusterStateOf(dbe).QueryRay(dbe.Realm0Grid, 300d, QueryMinY, 0d, 1d, 0d, 0d, 200d, buffer, categoryMask: 0);
 
         Assert.That(n, Is.EqualTo(1));
         Assert.That(buffer[0].entityId, Is.EqualTo(id));
@@ -172,7 +173,7 @@ class ClusterOverhangTests : TestBase<ClusterOverhangTests>
             0d, -1d, 900d,
         ];
         var buffer = new long[4];
-        int n = ClusterStateOf(dbe).QueryFrustum(dbe.SpatialGrid, planes, 4, new Vector3Like(300d, QueryMinY, 0d), new Vector3Like(500d, 900d, 0d), buffer,
+        int n = ClusterStateOf(dbe).QueryFrustum(dbe.Realm0Grid, planes, 4, new Vector3Like(300d, QueryMinY, 0d), new Vector3Like(500d, 900d, 0d), buffer,
             categoryMask: 0);
 
         Assert.That(n, Is.EqualTo(1));

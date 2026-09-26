@@ -1,21 +1,23 @@
 ---
 uid: feature-spatial-spatial-grid-config
 title: 'Spatial Grid Configuration & Tier Control'
-description: 'One global grid, one cell size, and a per-cell simulation-tier control surface for multi-resolution worlds.'
+description: 'A grid per realm — one cell size each — and a per-cell simulation-tier control surface for multi-resolution worlds.'
 ---
 
 # Spatial Grid Configuration & Tier Control
-> One global grid, one cell size, and a per-cell simulation-tier control surface for multi-resolution worlds.
+> A grid per realm — one cell size each — and a per-cell simulation-tier control surface for multi-resolution worlds.
 
 **Status:** ✅ Implemented · **Visibility:** Public · **Level:** 🔵 Core · **Category:** [Spatial](./README.md)
 
 ## 🎯 What it solves
 
+> **Realms.** Everything on this page is per realm. `ConfigureSpatialGrid` configures realm 0, the default world; an engine can hold several isolated worlds, each with its own grid and cell size — see [Realms](./realms.md).
+
 Large worlds can't afford to simulate every entity at full frequency every tick — a 10M-entity world needs the few thousand entities near a player to run physics at 60 Hz while everything else runs coarser or not at all. Doing this with per-entity distance checks costs O(N) every frame and collapses well before six figures. Spatial Grid Configuration sets up the engine-wide coordinate grid every spatial archetype shares, and the tier control surface lets game code assign a simulation tier (full / reduced / coarse / dormant) per cell — cheaply, once per tick — instead of per entity.
 
 ## ⚙️ How it works (in brief)
 
-`SpatialGridConfig` is computed once: world bounds and a single cell size derive the grid dimensions, and the config is handed to `DatabaseEngine.ConfigureSpatialGrid` before `InitializeArchetypes` — it cannot change afterward. All spatial archetypes share this one grid; there's no per-archetype sizing. At runtime, a `TierAssignment`-style callback system (run with `SystemPriority.High` so it executes before other systems) reads `TickContext.SpatialGrid` — an `SpatialGridAccessor` — and assigns each cell a `SimTier` flag (`Tier0`..`Tier3`). The engine consumes these per-cell tiers downstream to filter which clusters a system or query touches (see tier-filtered system dispatch in the Runtime category) — assignment itself is entirely game-owned policy; Typhon only provides storage and the helper methods below.
+`SpatialGridConfig` is computed once: world bounds and a single cell size derive the grid dimensions, and the config is handed to `DatabaseEngine.ConfigureSpatialGrid` before `InitializeArchetypes` — it cannot change afterward. All spatial archetypes of a realm share its grid; there's no per-archetype sizing. `ConfigureSpatialGrid` is realm 0's grid; another realm brings its own through `RealmConfig.Grid` ([Realms](./realms.md)), and `TickContext.SpatialGrid` — the tier surface below — is realm 0's. At runtime, a `TierAssignment`-style callback system (run with `SystemPriority.High` so it executes before other systems) reads `TickContext.SpatialGrid` — an `SpatialGridAccessor` — and assigns each cell a `SimTier` flag (`Tier0`..`Tier3`). The engine consumes these per-cell tiers downstream to filter which clusters a system or query touches (see tier-filtered system dispatch in the Runtime category) — assignment itself is entirely game-owned policy; Typhon only provides storage and the helper methods below.
 
 ## 💻 Usage
 

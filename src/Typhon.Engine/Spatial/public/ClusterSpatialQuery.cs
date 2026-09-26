@@ -414,7 +414,7 @@ public readonly struct ClusterSpatialQueryResult
 }
 
 /// <summary>
-/// Construction helpers for <see cref="ClusterSpatialQuery{TArch}"/>. Exposed on <see cref="DatabaseEngine"/> so callers can write
+/// Construction helpers for <see cref="T:Typhon.Engine.ClusterSpatialQuery`1"/>. Exposed on <see cref="DatabaseEngine"/> so callers can write
 /// <c>dbe.ClusterSpatialQuery{TArch}().AABB(...)</c>.
 /// </summary>
 public static class ClusterSpatialQueryExtensions
@@ -429,6 +429,20 @@ public static class ClusterSpatialQueryExtensions
     /// Thrown when the archetype is not cluster-eligible or has no spatial component.
     /// </exception>
     public static ClusterSpatialQuery<TArch> ClusterSpatialQuery<TArch>(this DatabaseEngine engine)
+        where TArch : Archetype<TArch>, new() => ClusterSpatialQuery<TArch>(engine, RealmId.Default);
+
+    /// <summary>
+    /// Create a per-cell cluster query for the given archetype in realm <paramref name="realm"/>: it sees only that realm's entities, however their
+    /// coordinates compare with another realm's.
+    /// </summary>
+    /// <typeparam name="TArch">The archetype type.</typeparam>
+    /// <param name="engine">The database engine.</param>
+    /// <param name="realm">The realm to query. Must be registered.</param>
+    /// <returns>A zero-allocation query handle.</returns>
+    /// <exception cref="InvalidOperationException">
+    /// Thrown when the archetype is not cluster-eligible, has no spatial component, or the realm is not registered.
+    /// </exception>
+    public static ClusterSpatialQuery<TArch> ClusterSpatialQuery<TArch>(this DatabaseEngine engine, RealmId realm)
         where TArch : Archetype<TArch>, new()
     {
         var meta = Archetype<TArch>.Metadata;
@@ -443,6 +457,6 @@ public static class ClusterSpatialQueryExtensions
             throw new InvalidOperationException(
                 $"ClusterSpatialQuery<{typeof(TArch).Name}>: archetype has no cluster state.");
         }
-        return new ClusterSpatialQuery<TArch>(state, engine.SpatialGrid);
+        return new ClusterSpatialQuery<TArch>(state, engine.RealmGridForQuery(realm));
     }
 }

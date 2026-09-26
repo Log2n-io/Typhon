@@ -46,7 +46,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
 
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildClusterAabbs(dbe.SpatialGrid);
+            cs.RebuildClusterAabbs(dbe.Realm0Grid);
         }
 
         // No clusters → no AABBs allocated.
@@ -73,7 +73,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         // entity (it re-derives the same AABB from the same position).
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildClusterAabbs(dbe.SpatialGrid);
+            cs.RebuildClusterAabbs(dbe.Realm0Grid);
         }
 
         Assert.That(cs.ClusterAabbs, Is.Not.Null, "ClusterAabbs should be allocated after rebuild");
@@ -107,7 +107,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         var cs = GetClusterState(dbe);
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildClusterAabbs(dbe.SpatialGrid);
+            cs.RebuildClusterAabbs(dbe.Realm0Grid);
         }
 
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(1),
@@ -140,21 +140,21 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         var cs = GetClusterState(dbe);
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildClusterAabbs(dbe.SpatialGrid);
+            cs.RebuildClusterAabbs(dbe.Realm0Grid);
         }
 
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(3),
             "three distinct cells → three clusters");
-        Assert.That(cs.PerCellIndex, Is.Not.Null);
+        Assert.That(cs.Realm0Spatial.PerCellIndex, Is.Not.Null);
 
         int nonNullSlots = 0;
         int totalClustersInIndex = 0;
-        for (int i = 0; i < cs.PerCellIndex.Length; i++)
+        for (int i = 0; i < cs.Realm0Spatial.PerCellIndex.Length; i++)
         {
-            if (cs.PerCellIndex[i] != null && cs.PerCellIndex[i].DynamicIndex != null)
+            if (cs.Realm0Spatial.PerCellIndex[i] != null && cs.Realm0Spatial.PerCellIndex[i].DynamicIndex != null)
             {
                 nonNullSlots++;
-                totalClustersInIndex += cs.PerCellIndex[i].DynamicIndex.ClusterCount;
+                totalClustersInIndex += cs.Realm0Spatial.PerCellIndex[i].DynamicIndex.ClusterCount;
             }
         }
         Assert.That(nonNullSlots, Is.EqualTo(3), "three cells should have per-cell spatial slots");
@@ -176,7 +176,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         var cs = GetClusterState(dbe);
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            cs.RebuildClusterAabbs(dbe.SpatialGrid);
+            cs.RebuildClusterAabbs(dbe.Realm0Grid);
         }
 
         // For each active cluster, verify the back-pointer correctly locates it in its cell's DynamicIndex.
@@ -188,7 +188,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
                 $"cluster {chunkId} must have a valid back-pointer into its cell's DynamicIndex");
 
             int cellKey = cs.ClusterCellMap[chunkId];
-            var dynamicIndex = cs.PerCellIndex[cellKey].DynamicIndex;
+            var dynamicIndex = cs.Realm0Spatial.PerCellIndex[cellKey].DynamicIndex;
             Assert.That(dynamicIndex.ClusterIds[backPointer], Is.EqualTo(chunkId),
                 $"back-pointer must resolve to the same cluster id " +
                 $"(chunkId={chunkId}, backPointer={backPointer})");
@@ -264,7 +264,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         Assert.That(after.MaxY, Is.EqualTo(15f), "max Y tightened — Phase 2 primary assertion");
 
         // The per-cell index SoA entry must reflect the tightened AABB.
-        var idx = cs.PerCellIndex[cellKey].DynamicIndex;
+        var idx = cs.Realm0Spatial.PerCellIndex[cellKey].DynamicIndex;
         Assert.That(idx.MinX[indexSlot], Is.EqualTo(10f));
         Assert.That(idx.MinY[indexSlot], Is.EqualTo(10f));
         Assert.That(idx.MaxX[indexSlot], Is.EqualTo(15f));
@@ -425,7 +425,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
 
         // Sanity: two clusters (A and B), cell B's stored AABB is the wide union of m1 and m2.
         Assert.That(cs.ActiveClusterCount, Is.EqualTo(2));
-        int cellB = dbe.SpatialGrid.WorldToCellKey(110f, 10f, 0f);
+        int cellB = dbe.Realm0Grid.WorldToCellKey(110f, 10f, 0f);
         int cbChunkId = -1;
         for (int i = 0; i < cs.ActiveClusterCount; i++)
         {
@@ -437,7 +437,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         // so a raw `before.MinX == 110f` reads the offset 10 and fails. The sibling assertions elsewhere in this fixture happen to survive the change only
         // because their clusters live in cell (0,0,0), where the origin is zero and the two frames coincide. Converting here keeps the test saying what it
         // means rather than what the storage happens to hold.
-        dbe.SpatialGrid.CellOrigin(cellB, out double cbOriginX, out double cbOriginY, out _);
+        dbe.Realm0Grid.CellOrigin(cellB, out double cbOriginX, out double cbOriginY, out _);
         var before = cs.ClusterAabbs[cbChunkId];
         Assert.That(ClusterSpatialAabb.ToWorldExact(before.MinX, cbOriginX), Is.EqualTo(110f).Within(0.001f));
         Assert.That(ClusterSpatialAabb.ToWorldExact(before.MaxX, cbOriginX), Is.EqualTo(190f).Within(0.001f));
@@ -476,7 +476,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         // The per-cell index row must mirror the tightened AABB — in the SAME frame, which is what makes this a mirror check rather than a second
         // world-space assertion.
         int indexSlot = cs.ClusterSpatialIndexSlot[cbChunkId];
-        var idx = cs.PerCellIndex[cellB].DynamicIndex;
+        var idx = cs.Realm0Spatial.PerCellIndex[cellB].DynamicIndex;
         Assert.That(idx.MaxX[indexSlot], Is.EqualTo(after.MaxX));
         Assert.That(idx.MaxY[indexSlot], Is.EqualTo(after.MaxY));
     }
@@ -538,7 +538,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         // Per-cell index SoA entry mirrors the tightened bounds.
         int cellKey = cs.ClusterCellMap[chunkId];
         int indexSlot = cs.ClusterSpatialIndexSlot[chunkId];
-        var idx = cs.PerCellIndex[cellKey].DynamicIndex;
+        var idx = cs.Realm0Spatial.PerCellIndex[cellKey].DynamicIndex;
         Assert.That(idx.MaxX[indexSlot], Is.EqualTo(50f));
         Assert.That(idx.MaxY[indexSlot], Is.EqualTo(50f));
     }
@@ -568,7 +568,7 @@ class ClusterSpatialAabbRecomputeTests : TestBase<ClusterSpatialAabbRecomputeTes
         int chunkId = cs.ActiveClusterIds[0];
         int cellKey = cs.ClusterCellMap[chunkId];
         int indexSlot = cs.ClusterSpatialIndexSlot[chunkId];
-        var idx = cs.PerCellIndex[cellKey].DynamicIndex;
+        var idx = cs.Realm0Spatial.PerCellIndex[cellKey].DynamicIndex;
 
         // Stamp a custom mask directly — simulating what Phase 3's archetype-level attribute will do.
         const uint customMask = 0xABCD_1234u;

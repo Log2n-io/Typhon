@@ -67,7 +67,7 @@ export interface DataSource {
 }
 
 export interface TyphonSourceOptions {
-  /** The server's WebSocket URL, which must speak `typhon.2`. */
+  /** The server's WebSocket URL, which must speak `typhon.3`. */
   readonly url: string;
   /** The clock render time comes from; the source feeds it every frame. */
   readonly clock: Clock;
@@ -218,6 +218,11 @@ export class TyphonSource implements DataSource {
       onEvent: (event) => {
         this.onEvent(event);
       },
+      // The server drops the region it held on a realm change: the sender forgets it and the camera's goes out again.
+      onRealmChanged: () => {
+        this.region?.realmChanged();
+        this.sendRegion();
+      },
     });
     this.attack = plan.eventByName('Attack');
     this.commands = new CommandQueue({ plan });
@@ -227,6 +232,8 @@ export class TyphonSource implements DataSource {
         : new RegionSender({
             plan,
             send: (type, values) => this.commands?.enqueue(type, values),
+            // The session's realm (typhon.3): a region is a polygon in a flat realm, a polyhedron in a deep one.
+            realm: () => this.applier?.realmFrame ?? null,
             onRejected: () => {
               // The server kept the previous region, so the NEXT identical request is the one not worth sending — which is a fact about what was last
               // sent, not a reason to forget where the camera is. Clearing pendingRegion also zeroed the reported effective radius and made the
@@ -283,9 +290,14 @@ export class TyphonSource implements DataSource {
     region?.poll();
     const connection = this.client.connection;
     if (connection !== null) {
-      this.commands?.flush(applier.tick, (bytes) => {
-        connection.send(bytes);
-      });
+      // Realm-framed fields (a region's vertices) travel over the session's realm frame (typhon.3).
+      this.commands?.flush(
+        applier.tick,
+        (bytes) => {
+          connection.send(bytes);
+        },
+        applier.realmFrame,
+      );
     }
   }
 
@@ -322,11 +334,13 @@ export class TyphonSource implements DataSource {
     }
 
     const { x, z, radius } = pending;
-    this.region.setRegion(
-      [x - radius, z - radius, x + radius, z - radius, x + radius, z + radius, x - radius, z + radius],
-      this.options.altitudeM ?? radius,
-      this.options.budgetKiBps ?? 256,
-    );
+    const quad = [x - radius, z - radius, x + radius, z - radius, x + radius, z + radius, x - radius, z + radius];
+    // A deep realm takes a polyhedron: the quad as a box, radius deep on each side of the ground plane.
+    const vertices =
+      this.region.dims === 3
+        ? [-radius, radius].flatMap((y) => [0, 2, 4, 6].flatMap((i) => [quad[i], quad[i + 1], y]))
+        : quad;
+    this.region.setRegion(vertices, this.options.altitudeM ?? radius, this.options.budgetKiBps ?? 256);
   }
 
   private wireBytesPerSec(): number {

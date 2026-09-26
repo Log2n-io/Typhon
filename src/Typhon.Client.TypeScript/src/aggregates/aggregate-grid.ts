@@ -28,9 +28,10 @@ const EMPTY = new Uint32Array(0);
  * At 64 × 64 cells a full re-read is a few kilobytes.
  */
 export class AggregateGrid {
-  readonly schema: GridSchema;
+  /** The grid's geometry over the session's realm; replaced by {@link reframe} when the realm changes. */
+  schema: GridSchema;
   readonly index: number;
-  readonly cellCount: number;
+  cellCount: number;
   readonly archetypeCount: number;
 
   /** `cellCount × archetypeCount` counts; empty until the first `AGG` for this grid. */
@@ -48,32 +49,38 @@ export class AggregateGrid {
   private frame = 1;
 
   constructor(schema: GridSchema) {
-    const axes = schema.dims.length;
-    if ((axes !== 2 && axes !== 3) || schema.origin.length !== axes) {
-      throw new Error(`Grid ${schema.index} needs 2 or 3 axes, with one origin per axis`);
-    }
+    this.schema = schema;
+    this.index = schema.index;
+    this.cellCount = cellsOf(schema);
+    this.archetypeCount = schema.archetypes.length;
+  }
 
-    if (!(schema.cell > 0 && Number.isFinite(schema.cell)) || !schema.origin.every((o) => Number.isFinite(o))) {
-      throw new Error(`Grid ${schema.index} needs a finite origin and a positive finite cell`);
-    }
-
-    let cells = 1;
-    for (const d of schema.dims) {
-      if (!(Number.isInteger(d) && d >= 1)) {
-        throw new Error(`Grid ${schema.index}: every dimension must be an integer of at least 1`);
-      }
-
-      cells = Math.min(cells * d, ProtocolConstants.maxGridCells + 1);
-    }
-
-    if (cells > ProtocolConstants.maxGridCells) {
-      throw new Error(`Grid ${schema.index} has more than ${ProtocolConstants.maxGridCells} cells`);
+  /**
+   * Lays the grid over a new realm's geometry (`typhon.3`: a grid's origin and dimensions are the realm frame's): every
+   * count is dropped, and {@link version} moves so a renderer re-reads it. The buffers are kept when the cell count is
+   * unchanged — every `RESET` carries a `REALM`, and a grid of 2²⁴ cells is not reallocated for one.
+   */
+  reframe(schema: GridSchema): void {
+    const cells = cellsOf(schema);
+    if (schema.index !== this.index || schema.archetypes.length !== this.archetypeCount) {
+      throw new Error(`Grid ${this.index}: a new realm changes its geometry, never its index or archetypes`);
     }
 
     this.schema = schema;
-    this.index = schema.index;
+    if (this.allocated && cells === this.cellCount) {
+      this.counts.fill(0);
+      this.stamps.fill(0);
+    } else {
+      this.counts = EMPTY;
+      this.changed = EMPTY;
+      this.stamps = EMPTY;
+      this.allocated = false;
+    }
+
     this.cellCount = cells;
-    this.archetypeCount = schema.archetypes.length;
+    this.changedCount = 0;
+    this.wasReset = true;
+    this.version++;
   }
 
   beginFrame(): void {
@@ -171,4 +178,30 @@ export class AggregateGrid {
 
     return i0 + dims[0]! * (i1 + dims[1]! * i2);
   }
+}
+
+function cellsOf(schema: GridSchema): number {
+  const axes = schema.dims.length;
+  if ((axes !== 2 && axes !== 3) || schema.origin.length !== axes) {
+    throw new Error(`Grid ${schema.index} needs 2 or 3 axes, with one origin per axis`);
+  }
+
+  if (!(schema.cell > 0 && Number.isFinite(schema.cell)) || !schema.origin.every((o) => Number.isFinite(o))) {
+    throw new Error(`Grid ${schema.index} needs a finite origin and a positive finite cell`);
+  }
+
+  let cells = 1;
+  for (const d of schema.dims) {
+    if (!(Number.isInteger(d) && d >= 1)) {
+      throw new Error(`Grid ${schema.index}: every dimension must be an integer of at least 1`);
+    }
+
+    cells = Math.min(cells * d, ProtocolConstants.maxGridCells + 1);
+  }
+
+  if (cells > ProtocolConstants.maxGridCells) {
+    throw new Error(`Grid ${schema.index} has more than ${ProtocolConstants.maxGridCells} cells`);
+  }
+
+  return cells;
 }

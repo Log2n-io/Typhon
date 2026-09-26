@@ -118,16 +118,16 @@ public static class WireMath
     // ---- vel (W5) ----------------------------------------------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Encodes one <c>vel</c> axis: displacement per tick in units of the axis' position step ÷ <paramref name="quantaDiv"/>, signed, symmetric clamp.
+    /// Encodes one <c>vel</c> axis (W5, <c>typhon.3</c>): displacement per tick in units of <c>2^unitExp</c> metres per tick — an absolute unit, the same
+    /// in every realm — rounded half away from zero, signed, symmetric clamp.
     /// </summary>
     /// <param name="d">Displacement per tick, in world units; NaN encodes as 0.</param>
-    /// <param name="posStep">The linked position codec's step on this axis.</param>
-    /// <param name="quantaDiv">The divisor, an integer ≥ 1.</param>
+    /// <param name="unitExp">The unit's binary exponent.</param>
     /// <param name="bits">8, 16, 24 or 32.</param>
     /// <returns>The signed code.</returns>
-    public static int EncodeVel(double d, double posStep, int quantaDiv, int bits)
+    public static int EncodeVel(double d, int unitExp, int bits)
     {
-        var x = d / posStep * quantaDiv;
+        var x = Math.ScaleB(d, -unitExp);
         if (double.IsNaN(x))
         {
             return 0;
@@ -136,13 +136,12 @@ public static class WireMath
         return ClampSymmetric(RoundHalfAwayFromZero(x), bits);
     }
 
-    /// <summary>Decodes one <c>vel</c> axis to world units per tick: <c>(q × posStep) / quantaDiv</c>.</summary>
+    /// <summary>Decodes one <c>vel</c> axis to world units per tick: <c>q × 2^unitExp</c>, exact in binary64 (the unit is dyadic).</summary>
     /// <param name="q">The signed code.</param>
-    /// <param name="posStep">The linked position codec's step on this axis.</param>
-    /// <param name="quantaDiv">The divisor.</param>
+    /// <param name="unitExp">The unit's binary exponent.</param>
     /// <param name="bits">8, 16, 24 or 32.</param>
     /// <returns>Displacement per tick.</returns>
-    public static double DecodeVel(int q, double posStep, int quantaDiv, int bits) => ClampLow(q, bits) * posStep / quantaDiv;
+    public static double DecodeVel(int q, int unitExp, int bits) => Math.ScaleB(ClampLow(q, bits), unitExp);
 
     // ---- unorm, snorm (W6) ------------------------------------------------------------------------------------------------------------------------
 

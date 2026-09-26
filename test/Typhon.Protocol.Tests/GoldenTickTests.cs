@@ -25,12 +25,16 @@ public class GoldenTickTests
 
     private static readonly CatalogPlan Plan = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.KitchenSink()));
 
+    private static readonly RealmFrame Frame = CatalogSamples.KitchenFrame;
+
     [Test]
     public void Entities()
     {
         var buffer = new byte[8192];
         var w = new WireWriter(buffer);
-        TickWriter.WriteHeader(ref w, Tick, TickFlags.ViewComplete);
+        // RESET and a REALM first (typhon.3): the vector carries its own frame, so a decoder starting from nothing decodes every position.
+        TickWriter.WriteHeader(ref w, Tick, TickFlags.ViewComplete | TickFlags.Reset);
+        TickWriter.WriteRealm(ref w, Frame);
 
         TickWriter.WriteEntities(ref w, Tick, Plan.ArchetypeByName("Beacon"),
             [
@@ -39,7 +43,7 @@ public class GoldenTickTests
             ],
             [],
             [new StateRecord { NetId = 4, GroupMask = 1, Values = Values(("strength", -2.25), ("drift", 0)) }],
-            [9]);
+            [9], Frame);
 
         TickWriter.WriteEntities(ref w, Tick, Plan.ArchetypeByName("Buoy"),
             [new EnterRecord { NetId = 10, Position = [12.5, -7.25], T0 = Tick - 3, Epoch = 255, Values = Values(("depth", -12), ("reading", -100000)) }],
@@ -48,7 +52,7 @@ public class GoldenTickTests
                 new SegmentRecord { NetId = 11, Position = [100, 100], T0 = 65535, Epoch = 1 },
             ],
             [],
-            []);
+            [], Frame);
 
         var drone = new RecordValues
         {
@@ -77,7 +81,7 @@ public class GoldenTickTests
                 new StateRecord { NetId = 101, GroupMask = 0b101, Values = drone },
                 new StateRecord { NetId = 102, GroupMask = 0b010, Values = drone },
             ],
-            [5, 6, 200_000]);
+            [5, 6, 200_000], Frame);
 
         TickWriter.WriteEntities(ref w, Tick, Plan.ArchetypeByName("Ledger"),
             [new EnterRecord { NetId = 7, Values = Ledger(4_000_000_000, -128) }],
@@ -92,7 +96,7 @@ public class GoldenTickTests
         {
             Assert.That(enter["position"]!.AsArray().Select(n => n!.GetValue<string>()),
                 Is.EqualTo(new[] { Golden.Bits(10), Golden.Bits(20), Golden.Bits(-30) }),
-                "these positions are exact at the Drone's 1/32 m step");
+                "these positions are exact at the frame's 2^-10 m step");
             Assert.That(log.Where(e => e["call"]!.GetValue<string>() == "leave").Select(e => e["netId"]!.GetValue<uint>()),
                 Is.EqualTo(new uint[] { 9, 5, 6, 200_000 }));
             Assert.That(log.Count(e => e["call"]!.GetValue<string>() == "number" && e["field"]!.GetValue<string>() == "future"), Is.Zero,
@@ -100,8 +104,40 @@ public class GoldenTickTests
         });
 
         Golden.Assert("tick-entities", w.Written.ToArray(), Expectation(
-            "ENTITIES for every position kind: static Beacon, none-model Buoy, linear 3D Drone with packs and every group, non-spatial Ledger with an unknown "
-            + "codec skipped by fixedBytes. Epoch 255, t0 low bits wrapping, netId gaps up to 200 000.", log));
+            "RESET, then REALM (deep, 24 bits), then ENTITIES for every position kind over its frame: static Beacon, none-model Buoy, linear 3D Drone with "
+            + "packs and every group, non-spatial Ledger with an unknown codec skipped by fixedBytes. Epoch 255, t0 low bits wrapping, netId gaps up to "
+            + "200 000.", log));
+    }
+
+    /// <summary>
+    /// typhon.3's REALM block (12-realms § 5.2): a flat realm at 16 bits whose positions decode over it, then REALM(NONE), after which only unpositioned
+    /// content may follow.
+    /// </summary>
+    [Test]
+    public void RealmBlocks()
+    {
+        var flat = new RealmFrame(41, 3, 2, 0xDEADBEEF, 16, 8, deep: false, [0, 0, 0], [64, 64, 8]);
+        var buffer = new byte[512];
+        var w = new WireWriter(buffer);
+        TickWriter.WriteHeader(ref w, Tick, TickFlags.Reset);
+        TickWriter.WriteRealm(ref w, flat);
+        TickWriter.WriteEntities(ref w, Tick, Plan.ArchetypeByName("Beacon"),
+            [new EnterRecord { NetId = 1, Position = [32, 63.999], Values = Values(("channel", 1), ("strength", 1), ("drift", 0)) }], [], [], [], flat);
+        var log = Record(w.Written);
+        var enter = log.First(e => e["call"]!.GetValue<string>() == "enter");
+        Assert.That(enter["position"]!.AsArray().Select(n => n!.GetValue<string>()), Is.EqualTo(new[] { Golden.Bits(32), Golden.Bits(64 - (64.0 / 65536)) }),
+            "a 16-bit position over [0, 64) steps by 2^-10 and clamps to the top code");
+        Golden.Assert("tick-realm", w.Written.ToArray(), Expectation(
+            "RESET, REALM (flat, 16 bits, kind 2, app tag 0xDEADBEEF, cell 8 m over [0, 64)²), then a Beacon enter decoded over that frame.", log));
+
+        w = new WireWriter(buffer);
+        TickWriter.WriteHeader(ref w, Tick + 1, TickFlags.Reset);
+        TickWriter.WriteRealm(ref w, null);
+        TickWriter.WriteEntities(ref w, Tick + 1, Plan.ArchetypeByName("Ledger"), [new EnterRecord { NetId = 7, Values = Ledger(1, 2) }], [], [], []);
+        log = Record(w.Written);
+        Assert.That(log[1]!["frame"], Is.Null, "REALM(NONE) delivers no frame");
+        Golden.Assert("tick-realm-none", w.Written.ToArray(), Expectation(
+            "RESET, REALM(NONE): the session is in no realm, and only unpositioned content (a Ledger enter) may follow.", log));
     }
 
     [Test]
@@ -109,7 +145,8 @@ public class GoldenTickTests
     {
         var buffer = new byte[8192];
         var w = new WireWriter(buffer);
-        TickWriter.WriteHeader(ref w, Tick + 1, TickFlags.Overload, periodUs: 150_000);
+        TickWriter.WriteHeader(ref w, Tick + 1, TickFlags.Overload | TickFlags.Reset, periodUs: 150_000);
+        TickWriter.WriteRealm(ref w, Frame);
 
         TickWriter.WriteEvents(ref w,
         [
@@ -122,12 +159,12 @@ public class GoldenTickTests
             {
                 ["from"] = FieldValue.Of(0), ["path"] = new FieldValue { Numbers = [] }, ["loud"] = FieldValue.Of(0),
             }),
-        ]);
+        ], Frame);
 
         TickWriter.WriteSelf(ref w, Plan.ArchetypeByName("Drone"), 100, 65535, 0b11, new RecordValues
         {
             ["manifest"] = FieldValue.Of([1, 2, 3]), ["fuel"] = FieldValue.Of(0.1), ["pin"] = FieldValue.Of(4321), ["vault"] = FieldValue.Of(1),
-        });
+        }, Frame);
         TickWriter.WriteAcks(ref w, [(65534, AckReasons.RegionInvalid), (3, (byte)200)]);
         TickWriter.WriteSources(ref w, [(1, SourceStatus.Applied, 0), (2, SourceStatus.Error, 404)]);
         TickWriter.WriteAggregate(ref w, Plan.Grids[0], reset: true, [(0u, [1u, 0u]), (17u, [3u, 400u]), (255u, [0u, 9u])]);
@@ -156,7 +193,7 @@ public class GoldenTickTests
         });
 
         Golden.Assert("tick-blocks", w.Written.ToArray(), Expectation(
-            "Every non-ENTITIES block in stream order, with PERIOD and OVERLOAD set: EVENTS (a list of 2, a UTF-8 chat, an empty list), SELF with both owner "
+            "RESET and REALM, then every non-ENTITIES block in stream order, with PERIOD and OVERLOAD set: EVENTS (a list of 2, a UTF-8 chat, an empty list), SELF with both owner "
             + "groups and lastSeq 65535, ACKS, SOURCES (applied and error), AGG with RESET, STATS (labelled, server and session), DEBUG (known and unknown "
             + "sub-types), EXT, and an unknown block 0x42 skipped by its length.", log));
     }
@@ -261,7 +298,8 @@ public class GoldenTickTests
     private static JsonArray Record(ReadOnlySpan<byte> message)
     {
         var sink = new RecordingSink();
-        TickReader.Read(message, Plan, ref sink);
+        RealmFrame frame = null;
+        TickReader.Read(message, Plan, ref frame, ref sink);
         return sink.Log;
     }
 

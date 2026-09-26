@@ -47,8 +47,9 @@ internal static class SchemaValidator
 
             if (!runtimeById.TryGetValue(fieldId, out var rField))
             {
-                // Field removed in runtime
-                fieldChanges.Add(new FieldChange(FieldChangeKind.Removed, pName, fieldId, CompatibilityLevel.Compatible, pField.Type));
+                // Field removed in runtime — breaking when it was the realm key: every realm's entities would reopen in realm 0 (Realms C2).
+                fieldChanges.Add(new FieldChange(FieldChangeKind.Removed, pName, fieldId,
+                    pField.IsRealmKey ? CompatibilityLevel.Breaking : CompatibilityLevel.Compatible, pField.Type));
                 continue;
             }
 
@@ -79,6 +80,12 @@ internal static class SchemaValidator
                 var sizeLevel = pField.ArrayLength != rField.ArrayLength ? CompatibilityLevel.Breaking : CompatibilityLevel.Compatible;
                 fieldChanges.Add(new FieldChange(FieldChangeKind.SizeChanged, rField.Name, fieldId, sizeLevel, 
                     oldSize: pField.SizeInComponentStorage, newSize: rField.SizeInComponentStorage));
+            }
+
+            // Realm key moved off (or onto) a persisted field: the realm places every entity, so its field cannot change under existing data.
+            if (pField.IsRealmKey != rField.IsRealmKey)
+            {
+                fieldChanges.Add(new FieldChange(FieldChangeKind.RealmKeyChanged, rField.Name, fieldId, CompatibilityLevel.Breaking));
             }
 
             // Index changes

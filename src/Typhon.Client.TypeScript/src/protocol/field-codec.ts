@@ -1,7 +1,7 @@
 import { ValueKind, type FieldPlan, type SectionPlan } from './catalog.js';
 import { CodecKind } from './codec-kinds.js';
 import { ProtocolConstants } from './constants.js';
-import { malformed } from './errors.js';
+import { malformed, protocolError } from './errors.js';
 import {
   decodeQuat3Halves,
   encodeAngle,
@@ -14,6 +14,7 @@ import {
   TAU,
 } from './math.js';
 import type { WireReader } from './reader.js';
+import type { RealmFrame } from './realm-frame.js';
 import type { WireWriter } from './writer.js';
 
 /**
@@ -58,6 +59,7 @@ export function readSection(
   frameTick: number,
   sink: FieldSink,
   strictEnums = false,
+  frame: RealmFrame | null = null,
 ): void {
   const fields = section.fields;
   const packedCount = section.packedCount;
@@ -79,7 +81,7 @@ export function readSection(
     const f = fields[i]!;
     switch (f.valueKind) {
       case ValueKind.Number:
-        readNumber(r, f, frameTick, scalar, 0);
+        readNumber(r, f, frameTick, scalar, 0, frame);
         if (strictEnums) {
           checkEnum(f, scalar[0]!);
         }
@@ -95,7 +97,7 @@ export function readSection(
         break;
       }
       case ValueKind.List:
-        readList(r, f, frameTick, sink);
+        readList(r, f, frameTick, sink, frame);
         break;
       default:
         r.skip(f.fixedBytes);
@@ -112,7 +114,14 @@ export function readSection(
  * call. So wide codes are read into `out` and dequantized in place, with the arithmetic of `math.ts`'s `decode*`
  * functions written out here. The golden codec test runs every case through both and holds each to the vector's bits.
  */
-export function readNumber(r: WireReader, f: FieldPlan, frameTick: number, out: Float64Array, offset: number): void {
+export function readNumber(
+  r: WireReader,
+  f: FieldPlan,
+  frameTick: number,
+  out: Float64Array,
+  offset: number,
+  frame: RealmFrame | null = null,
+): void {
   switch (f.kind) {
     case CodecKind.U8:
       out[offset] = r.u8();
@@ -146,15 +155,27 @@ export function readNumber(r: WireReader, f: FieldPlan, frameTick: number, out: 
       r.f16Into(out, offset);
       break;
     case CodecKind.Quant:
-    case CodecKind.Pos2:
-    case CodecKind.Pos3:
       // decodeQuant: min + q × step.
+      r.unsignedInto(f.bits, out, offset);
+      out[offset] = f.min[0]! + out[offset]! * f.step[0]!;
+      break;
+    case CodecKind.Pos2:
+    case CodecKind.Pos3: {
+      // Realm-framed (typhon.3, SUB-30): width, bounds and step are the session's frame's.
+      if (frame === null) {
+        throw noRealm(f);
+      }
+
+      const bits = frame.positionBits;
+      const min = frame.min;
+      const step = frame.step;
       for (let i = 0; i < f.components; i++) {
-        r.unsignedInto(f.bits, out, offset + i);
-        out[offset + i] = f.min[i]! + out[offset + i]! * f.step[i]!;
+        r.unsignedInto(bits, out, offset + i);
+        out[offset + i] = min[i]! + out[offset + i]! * step[i]!;
       }
 
       break;
+    }
     case CodecKind.Vec2:
     case CodecKind.Vec3:
       // decodeVec: max(q, −limit) × scale.
@@ -167,11 +188,11 @@ export function readNumber(r: WireReader, f: FieldPlan, frameTick: number, out: 
       break;
     case CodecKind.Vel2:
     case CodecKind.Vel3:
-      // decodeVel: max(q, −limit) × posStep ÷ quantaDiv.
+      // decodeVel: max(q, −limit) × 2^unitExp.
       for (let i = 0; i < f.components; i++) {
         r.signedInto(f.bits, out, offset + i);
         const q = out[offset + i]!;
-        out[offset + i] = ((q < -f.limit ? -f.limit : q) * f.velocityStep[i]!) / f.quantaDiv;
+        out[offset + i] = (q < -f.limit ? -f.limit : q) * f.velocityUnit;
       }
 
       break;
@@ -208,7 +229,7 @@ export function readNumber(r: WireReader, f: FieldPlan, frameTick: number, out: 
   }
 }
 
-function readList(r: WireReader, f: FieldPlan, frameTick: number, sink: FieldSink): void {
+function readList(r: WireReader, f: FieldPlan, frameTick: number, sink: FieldSink, frame: RealmFrame | null): void {
   const count = r.varuAtMost(f.maxCount, 'list count');
   if (count < f.minCount) {
     throw malformed(`list '${f.name}' has ${count} element(s); at least ${f.minCount} required`);
@@ -217,10 +238,15 @@ function readList(r: WireReader, f: FieldPlan, frameTick: number, sink: FieldSin
   const element = f.element!;
   const stride = f.components;
   for (let e = 0; e < count; e++) {
-    readNumber(r, element, frameTick, listValues, e * stride);
+    readNumber(r, element, frameTick, listValues, e * stride, frame);
   }
 
   sink.list(f, count, listValues);
+}
+
+/** A position decoded while the session holds no realm: the server sent it before any `REALM` (12-realms § 5.2), 1002. */
+function noRealm(f: FieldPlan): Error {
+  return protocolError(`position '${f.name}' arrived while the session holds no realm`);
 }
 
 function checkEnum(f: FieldPlan, value: number): void {
@@ -262,7 +288,13 @@ export function writePackedBits(bytes: Uint8Array, at: number, offset: number, c
  * Encodes a section from `values`, by field name. `strictEnums` refuses an enum value outside its names — what a client
  * must never send (W13). Values that cannot be represented throw a `RangeError`: a bug on this side, never peer input.
  */
-export function writeSection(w: WireWriter, section: SectionPlan, values: FieldValues, strictEnums = false): void {
+export function writeSection(
+  w: WireWriter,
+  section: SectionPlan,
+  values: FieldValues,
+  strictEnums = false,
+  frame: RealmFrame | null = null,
+): void {
   const fields = section.fields;
   if (section.packBytes > 0) {
     const at = w.zeroes(section.packBytes);
@@ -292,7 +324,7 @@ export function writeSection(w: WireWriter, section: SectionPlan, values: FieldV
           refuseEnum(f, numberOf(value, f, 0));
         }
 
-        writeNumber(w, f, componentsOf(value, f));
+        writeNumber(w, f, componentsOf(value, f), 0, frame);
         break;
       case ValueKind.Text:
         if (typeof value !== 'string') {
@@ -318,7 +350,7 @@ export function writeSection(w: WireWriter, section: SectionPlan, values: FieldV
 
         break;
       case ValueKind.List:
-        writeList(w, f, componentsOf(value, f));
+        writeList(w, f, componentsOf(value, f), frame);
         break;
       default:
         // A codec newer than this library: only its width is known, so the caller supplies the encoded bytes verbatim.
@@ -333,7 +365,13 @@ export function writeSection(w: WireWriter, section: SectionPlan, values: FieldV
 }
 
 /** Encodes one numeric value of a byte-aligned field (or list element, or position codec) from `c[offset ..]`. */
-export function writeNumber(w: WireWriter, f: FieldPlan, c: ArrayLike<number>, offset = 0): void {
+export function writeNumber(
+  w: WireWriter,
+  f: FieldPlan,
+  c: ArrayLike<number>,
+  offset = 0,
+  frame: RealmFrame | null = null,
+): void {
   if (c.length - offset < f.components) {
     throw new RangeError(`field '${f.name}' needs ${f.components} component(s), got ${c.length - offset}`);
   }
@@ -375,12 +413,19 @@ export function writeNumber(w: WireWriter, f: FieldPlan, c: ArrayLike<number>, o
       w.bits(encodeQuant(v, f.min[0]!, f.step[0]!, f.top), f.bits);
       break;
     case CodecKind.Pos2:
-    case CodecKind.Pos3:
+    case CodecKind.Pos3: {
+      if (frame === null) {
+        throw new Error(
+          `position '${f.name}' is realm-framed (typhon.3) and no realm frame was given to encode it over`,
+        );
+      }
+
       for (let i = 0; i < f.components; i++) {
-        w.bits(encodeQuant(c[offset + i]!, f.min[i]!, f.step[i]!, f.top), f.bits);
+        w.bits(encodeQuant(c[offset + i]!, frame.min[i]!, frame.step[i]!, frame.top), frame.positionBits);
       }
 
       break;
+    }
     case CodecKind.Vec2:
     case CodecKind.Vec3:
       for (let i = 0; i < f.components; i++) {
@@ -391,7 +436,7 @@ export function writeNumber(w: WireWriter, f: FieldPlan, c: ArrayLike<number>, o
     case CodecKind.Vel2:
     case CodecKind.Vel3:
       for (let i = 0; i < f.components; i++) {
-        w.bits(encodeVel(c[offset + i]!, f.velocityStep[i]!, f.quantaDiv, f.limit), f.bits);
+        w.bits(encodeVel(c[offset + i]!, f.velocityUnit, f.limit), f.bits);
       }
 
       break;
@@ -415,7 +460,7 @@ export function writeNumber(w: WireWriter, f: FieldPlan, c: ArrayLike<number>, o
   }
 }
 
-function writeList(w: WireWriter, f: FieldPlan, flattened: ArrayLike<number>): void {
+function writeList(w: WireWriter, f: FieldPlan, flattened: ArrayLike<number>, frame: RealmFrame | null): void {
   const stride = f.components;
   if (stride === 0 || flattened.length % stride !== 0) {
     throw new RangeError(`list '${f.name}' needs a multiple of ${stride} numbers`);
@@ -429,7 +474,7 @@ function writeList(w: WireWriter, f: FieldPlan, flattened: ArrayLike<number>): v
   const element = f.element!;
   w.varu(count);
   for (let e = 0; e < count; e++) {
-    writeNumber(w, element, flattened, e * stride);
+    writeNumber(w, element, flattened, e * stride, frame);
   }
 }
 

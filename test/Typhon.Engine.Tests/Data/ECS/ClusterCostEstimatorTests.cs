@@ -170,7 +170,7 @@ class ClusterCostEstimatorTests : TestBase<ClusterCostEstimatorTests>
         using var dbe = SetupEngine(seedNsPerEntity: 1500f);
         Spawn(dbe);
         var cs = dbe._archetypeStates[ArchetypeId].ClusterState;
-        ref readonly var cfg = ref dbe.SpatialGrid.Config;
+        ref readonly var cfg = ref dbe.Realm0Grid.Config;
 
         var samples = new double[40];
         for (var i = 0; i < samples.Length; i++)

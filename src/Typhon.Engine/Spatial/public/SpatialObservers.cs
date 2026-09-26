@@ -41,8 +41,10 @@ public readonly struct SpatialTriggerVolumes
     /// </param>
     /// <param name="categoryMask">Category bits the region reacts to; <c>0</c> means "no filter".</param>
     /// <param name="evaluationFrequency">Minimum ticks between real evaluations; calls in between return <see cref="SpatialTriggerResult.Skipped"/>.</param>
-    public SpatialRegionHandle CreateRegion(ReadOnlySpan<double> bounds, uint categoryMask = 0, byte evaluationFrequency = 1)
-        => Checked().CreateRegion(bounds, categoryMask, evaluationFrequency);
+    /// <param name="realm">The realm the region is in: it reports only that realm's entities. Realm 0 by default; must be registered.</param>
+    /// <exception cref="InvalidOperationException"><paramref name="realm"/> is not registered.</exception>
+    public SpatialRegionHandle CreateRegion(ReadOnlySpan<double> bounds, uint categoryMask = 0, byte evaluationFrequency = 1, RealmId realm = default)
+        => Checked().CreateRegion(bounds, categoryMask, evaluationFrequency, realm);
 
     /// <summary>Remove a region. The handle is invalid afterwards.</summary>
     public void DestroyRegion(SpatialRegionHandle handle) => Checked().DestroyRegion(handle);

@@ -55,18 +55,30 @@ internal struct PushSessionState
     public double PRadius;
     public WindowRows P;
 
-    // The LOD level (09 § 10), committed with the frame like the anchor: Level is what every change held back so far was scheduled by, TargetLevel is
-    // where the budget loop wants the session, PLevel what this frame's gather moved it to.
+    // The LOD level (09 § 10), committed with the frame like the anchor: Level is what every change held back so far was scheduled by, PLevel what this
+    // frame's gather moved it to (towards the link's TargetLevel).
     public byte Level;
     public byte PLevel;
-    public byte TargetLevel;
 
     /// <summary>After the level fell: the level whose periods a flush's history still spans, until <see cref="WideUntil"/> (<see cref="LodBands.AtLevel"/>).</summary>
     public byte WideLevel;
     public uint WideUntil;
+}
 
-    // The budget loop: the level it asked for and the steps (a ShrinkSteps-th of the radius each) it took off the radius at the last level (09 § 10; TargetLevel adds the overload step),
-    // the bytes/s EWMA, ticks spent over the budget and under its lower mark, and the last tick it was fed.
+/// <summary>
+/// What the budget loop (09 § 10) remembers about a session's link: engine-wide, by session slot, so a realm switch — a door — keeps a congested session's
+/// level and rate (R4.3, 12-realms § 1.5). The geometry a level applies to is the realm's (<see cref="PushSessionState"/>).
+/// </summary>
+internal struct PushLinkState
+{
+    /// <summary>The session generation this state belongs to; 0 before the session's first placement.</summary>
+    public ushort Generation;
+
+    /// <summary>Where the budget loop wants the session's LOD level: its own level plus the overload step.</summary>
+    public byte TargetLevel;
+
+    // The level the budget loop asked for and the steps (a ShrinkSteps-th of the radius each) it took off the radius at the last level, the bytes/s EWMA,
+    // ticks spent over the budget and under its lower mark, and the last tick it was fed.
     public byte BudgetLevel;
     public byte Shrink;
     public float Rate;
@@ -95,7 +107,18 @@ internal abstract unsafe partial class PushReplication
     private protected readonly CompiledProjectionPlan[] _plans;
     private protected readonly ArchetypeReplicationState[] _states;
     private protected readonly int[] _pushIndices;
-    private readonly bool[] _bootstrapped;
+
+    /// <summary>The hub that collects this realm's blocks and routes them here (R4.1); set when the hub starts serving the realm.</summary>
+    internal PushHub Hub;
+
+    /// <summary>Per plan index: this realm's live entities of the archetype have all been pushed once — its bootstrap (R4.1: per realm).</summary>
+    internal readonly bool[] Bootstrapped;
+
+    /// <summary>Per plan index, this tick: every live entity of the archetype in this realm is pushed (bootstrap, a gap, or an undescribed fence).</summary>
+    internal readonly bool[] EverythingThisTick;
+
+    /// <summary>Whether this realm's blocks step follows a tick its track did not run for (<see cref="BeginRealmTick"/>).</summary>
+    internal bool ResumedThisTick { get; private set; }
 
     // Per plan index: the cold-entry offset of the entity's last projected position.
     private protected readonly int[] _positionOffset;
@@ -103,31 +126,6 @@ internal abstract unsafe partial class PushReplication
     /// <summary>The cold-entry offset of a push archetype's last projected position.</summary>
     public int PositionOffset(int archetype) => _positionOffset[archetype];
 
-    // Per plan index: the engine, not the application, detects this archetype's changes. Every live entity is pushed every tick and the byte compare
-    // keeps only those that changed.
-    private readonly bool[] _automatic;
-
-    // ── The forgotten-push validator (explicit detection) ──
-    //
-    // A few clusters of each explicit archetype are projected whole every tick, round-robin. A slot among them that the application did not push and
-    // that still produces an event changed without a push: counted by group, and sent anyway, so the validator heals what it finds.
-
-    /// <summary>How many clusters per explicit archetype the validator projects whole each tick; zero turns it off.</summary>
-    public int ValidateClustersPerTick = int.TryParse(Environment.GetEnvironmentVariable("TYPHON_PUSH_VALIDATE"), out var v) ? v : 0;
-
-    private readonly int[] _validateCursor;
-    private readonly Dictionary<int, ulong>[] _validating;
-
-    /// <summary>Slots the validator found changed without a push, and of those, how many had moved (a segment) — cumulative.</summary>
-    public long ForgottenPushes;
-    public long ForgottenMotion;
-    public long ValidatedSlots;
-    private readonly long[][] _forgottenGroups;
-
-    /// <summary>Per plan index and change group, how many forgotten pushes changed it.</summary>
-    public long ForgottenGroups(int archetype, int group) =>
-        (uint)archetype < (uint)_forgottenGroups.Length && _forgottenGroups[archetype] != null && (uint)group < (uint)_forgottenGroups[archetype].Length
-            ? Interlocked.Read(ref _forgottenGroups[archetype][group]) : 0;
 
     // Position decode per archetype: axes 0 and 1, and axis 2 where the grid is deep and the codec has it — in a flat grid, or for a 2D codec, the
     // geometric z is 0 (10 § 3.4).
@@ -149,6 +147,15 @@ internal abstract unsafe partial class PushReplication
     // to h_A from them, so the cell query pads by 1 m + h_A and the pruning margin by 1 cm + h_A.
     private protected readonly double[] _queryPad;
     private protected readonly double[] _skipMargin;
+
+    /// <summary>
+    /// The realm this replication serves (Realms R4.2): realm 0 until sessions are placed in realms (R4.3). A cluster of any other realm is never pushed,
+    /// so nothing of it is ever known to a session here (SUB-28).
+    /// </summary>
+    public readonly ushort ServedRealm;
+
+    /// <summary>The served realm's codecs: the frame each archetype's positions are quantized over and decoded with (SUB-30).</summary>
+    public readonly RealmCodecs Codecs;
 
     /// <summary>The visibility radius: the largest a session takes, which sizes its window.</summary>
     public readonly double Radius;
@@ -177,13 +184,6 @@ internal abstract unsafe partial class PushReplication
     private protected readonly int _gridH;
     private protected readonly int _gridD;
 
-    // Per archetype, this tick's push set as (chunk, mask) pairs.
-    private readonly int[][] _pushChunks;
-    private readonly ulong[][] _pushMasks;
-    private readonly int[] _pushCount;
-
-    // Per archetype, by chunk id: slots to push again next tick — still extrapolating, or denied an identity.
-    private readonly long[][] _repush;
 
     /// <summary>
     /// Distance LOD (09 § 9–10): the fold's phase — the smallest period any session is gathered with, whose flush ticks are every band's — and its window,
@@ -307,7 +307,7 @@ internal abstract unsafe partial class PushReplication
         for (var i = 0; i < count; i++)
         {
             var session = sessions[i];
-            ref var st = ref _sessions[session.Slot];
+            ref var st = ref _sessions[L(session)];
             if (st.Bound && st.Generation == session.Generation)
             {
                 census[st.Level]++;
@@ -350,22 +350,26 @@ internal abstract unsafe partial class PushReplication
     /// <returns>The level, 0 for an unbound session.</returns>
     public int TargetLevelOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
-        return st.Bound && st.Generation == session.Generation ? st.TargetLevel : 0;
+        ref var link = ref LinkOf(session);
+        return link.Generation == session.Generation ? link.TargetLevel : 0;
     }
+
+    /// <summary>A session's link state (engine-wide, by session slot); the caller checks its generation.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected ref PushLinkState LinkOf(SessionId session) => ref Hub.Links[session.Slot];
 
     /// <summary>Tests only: a session's committed LOD level.</summary>
     internal int LevelOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         return st.Bound && st.Generation == session.Generation ? st.Level : 0;
     }
 
     /// <summary>Tests only: a session's bytes/s EWMA.</summary>
     internal double RateOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
-        return st.Bound && st.Generation == session.Generation ? st.Rate : 0d;
+        ref var link = ref LinkOf(session);
+        return link.Generation == session.Generation ? link.Rate : 0d;
     }
 
     /// <summary>
@@ -389,24 +393,24 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Tests only: the steps a session's radius is short of its own, as the budget loop left them.</summary>
     internal int ShrinkOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
-        return st.Bound && st.Generation == session.Generation ? st.Shrink : 0;
+        ref var link = ref LinkOf(session);
+        return link.Generation == session.Generation ? link.Shrink : 0;
     }
 
     /// <summary>Tests only: a session's committed radius — its own, less any last-resort shrink.</summary>
     internal double RadiusOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         return st.Bound && st.Generation == session.Generation ? st.Radius : 0d;
     }
 
     /// <summary>Tests only: sets the steps taken off a session's radius, as the budget loop would at its last level.</summary>
     internal void SetShrink(SessionId session, int steps)
     {
-        ref var st = ref _sessions[session.Slot];
-        if (st.Bound && st.Generation == session.Generation)
+        ref var link = ref LinkOf(session);
+        if (link.Generation == session.Generation)
         {
-            st.Shrink = (byte)Math.Clamp(steps, 0, MaxShrink);
+            link.Shrink = (byte)Math.Clamp(steps, 0, MaxShrink);
         }
     }
 
@@ -417,10 +421,10 @@ internal abstract unsafe partial class PushReplication
     internal void SetTargetLevel(SessionId session, int level)
     {
         ArgumentOutOfRangeException.ThrowIfGreaterThan((uint)level, (uint)MaxLevel, nameof(level));
-        ref var st = ref _sessions[session.Slot];
-        if (st.Bound && st.Generation == session.Generation)
+        ref var link = ref LinkOf(session);
+        if (link.Generation == session.Generation)
         {
-            st.TargetLevel = (byte)level;
+            link.TargetLevel = (byte)level;
         }
     }
 
@@ -438,8 +442,8 @@ internal abstract unsafe partial class PushReplication
     /// <param name="tickSeconds">The live tick period.</param>
     public void Pace(SessionId session, int bytes, int budget, double tickSeconds)
     {
-        ref var st = ref _sessions[session.Slot];
-        if (!st.Bound || st.Generation != session.Generation || LevelsPinned)
+        ref var st = ref LinkOf(session);
+        if (st.Generation != session.Generation || LevelsPinned)
         {
             return;
         }
@@ -535,7 +539,114 @@ internal abstract unsafe partial class PushReplication
     public long LogTooOld;
     public long LogAmbiguous;
 
-    private protected readonly PushSessionState[] _sessions;
+    // By realm-local slot (R4.3): slot 0 is a sentinel no session ever holds — never bound, never written — so a session not placed in this realm reads an
+    // unbound state wherever it is looked up. The others are handed out by Join and given back by Release; the arrays grow ×2 from a few.
+    private protected PushSessionState[] _sessions;
+    private SessionId[] _slotOwners;
+    private uint[] _slotSeen;
+    private int[] _freeSlots;
+    private int _freeCount;
+    private int _slotHigh = 1;
+
+    /// <summary>The realm-local slots a new replication starts with, the sentinel included; ×2 on demand.</summary>
+    internal const int InitialSessionSlots = 8;
+
+    /// <summary>The realm-local slot <paramref name="session"/> holds here, or 0 (the unbound sentinel) when it is not placed in this realm.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected int L(SessionId session) => Hub.LocalSlot(session, ServedRealm);
+
+    /// <summary>Tests only: the realm-local session slots allocated, the sentinel included.</summary>
+    internal int SessionSlotCapacity => _sessions.Length;
+
+    /// <summary>Tests only: the realm-local slots in use.</summary>
+    internal int SessionsHere => _slotHigh - 1 - _freeCount;
+
+    /// <summary>A realm-local slot for <paramref name="session"/>, reset: nothing of a previous occupant survives. Serial (the frame prologue).</summary>
+    internal int Join(SessionId session)
+    {
+        int local;
+        if (_freeCount > 0)
+        {
+            local = _freeSlots[--_freeCount];
+        }
+        else
+        {
+            local = _slotHigh++;
+            if (local == _sessions.Length)
+            {
+                GrowSessions(_sessions.Length * 2);
+            }
+        }
+
+        ResetSlot(local);
+        _slotOwners[local] = session;
+        return local;
+    }
+
+    /// <summary>Gives a realm-local slot back. Serial (the frame prologue).</summary>
+    internal void Release(int local)
+    {
+        Debug.Assert(local > 0 && local < _slotHigh, "only a slot Join handed out is released");
+        ResetSlot(local);
+        _slotOwners[local] = default;
+        _freeSlots[_freeCount++] = local;
+    }
+
+    /// <summary>Stamps a realm-local slot as in use this tick (<see cref="ReleaseUnseen"/>).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void Touch(int local, uint tick) => _slotSeen[local] = tick;
+
+    /// <summary>
+    /// Gives back every slot no session was placed in this tick — a session that closed, or lost its profile — and tells <paramref name="hub"/>. Serial,
+    /// after the tick's placements.
+    /// </summary>
+    internal void ReleaseUnseen(uint tick, PushHub hub)
+    {
+        for (var local = 1; local < _slotHigh; local++)
+        {
+            if (_slotSeen[local] == tick || !_slotOwners[local].IsValid)
+            {
+                continue;
+            }
+
+            hub.Forget(_slotOwners[local], ServedRealm);
+            Release(local);
+        }
+    }
+
+    // A slot handed to a new session: its geometry, region and shadow belong to nobody (generation 0 is no session's).
+    private protected virtual void ResetSlot(int local)
+    {
+        _sessions[local] = default;
+        if (local < _regions.Length && _regions[local] != null)
+        {
+            _regions[local].Generation = 0;
+        }
+
+        if (Shadow)
+        {
+            _shadowGen[local] = 0;
+            _shadow[local]?.Clear();
+        }
+    }
+
+    private protected virtual void GrowSessions(int length)
+    {
+        Array.Resize(ref _sessions, length);
+        Array.Resize(ref _slotOwners, length);
+        Array.Resize(ref _slotSeen, length);
+        Array.Resize(ref _freeSlots, length);
+        if (_regions.Length > 0)
+        {
+            Array.Resize(ref _regions, length);
+        }
+
+        if (Shadow)
+        {
+            Array.Resize(ref _shadow, length);
+            Array.Resize(ref _shadowGen, length);
+        }
+    }
     private protected uint _tick;
 
     /// <summary>The most rows a window can have: <see cref="ReplicationGrid.MaxWindow"/> in the flat implementation, 13² in the deep one (10 § 4.3).</summary>
@@ -556,12 +667,9 @@ internal abstract unsafe partial class PushReplication
     /// <summary>The frame stage's encode plans, whose group tick slots decide what an update carries.</summary>
     public void AttachEncodePlans(ArchetypeEncodePlan[] plans) => _encodePlans = plans;
 
-    // Per archetype, this tick's push set's blocks, parallel to _pushChunks — looked up once in PrepareBlocks.
-    private readonly nint[][] _pushBlocks;
 
     // Counters, cumulative.
     public long Events;
-    public long SlotsPushed;
     public long Enters;
     public long Leaves;
     public long Updates;
@@ -575,7 +683,6 @@ internal abstract unsafe partial class PushReplication
     public long SortTicks;
     public long MergeTicks;
     public long FinishTicks;
-    public long PrepareTicks;
     public long GatherTicks;
 
     // -- The shadow oracle (TYPHON_PUSH_SHADOW=1) --
@@ -584,8 +691,8 @@ internal abstract unsafe partial class PushReplication
     // of a held id, no state, segment or leave of an unheld one), and every few ticks it must equal the geometric known-set recomputed from the blocks.
     // Either failing is a divergence a client would carry for good. Off by default: it is a HashSet per session.
     public readonly bool Shadow;
-    private protected readonly HashSet<uint>[] _shadow = [];
-    private protected readonly ushort[] _shadowGen = [];
+    private protected HashSet<uint>[] _shadow = [];
+    private protected ushort[] _shadowGen = [];
     public long ShadowIllegal;
     public long ShadowMissing;
     public long ShadowExtra;
@@ -603,6 +710,7 @@ internal abstract unsafe partial class PushReplication
     public long OrphanRelease;
     public long OrphanMigrate;
     public long OrphanDrain;
+    public long OrphanRealm;
 
     private protected readonly ReplicationOccupancy _occupancy = new();
 
@@ -682,20 +790,19 @@ internal abstract unsafe partial class PushReplication
     /// <c>forceDeep</c>, which only tests set, since on a flat grid both must agree.
     /// </summary>
     public static PushReplication Create(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic,
-        ReplicationGrid grid, int maxSessions, bool shadow = false, bool forceDeep = false)
+        ReplicationGrid grid, int maxSessions, bool shadow = false, bool forceDeep = false, ushort realm = 0, RealmCodecs codecs = null)
     {
         return grid == null || (grid.Flat && !forceDeep)
-            ? new PushReplication<PushEvent>(plans, states, isPush, automatic, grid, maxSessions, shadow)
-            : new PushReplication<PushEvent3>(plans, states, isPush, automatic, grid, maxSessions, shadow);
+            ? new PushReplication<PushEvent>(plans, states, isPush, automatic, grid, maxSessions, shadow, realm, codecs)
+            : new PushReplication<PushEvent3>(plans, states, isPush, automatic, grid, maxSessions, shadow, realm, codecs);
     }
 
     private protected PushReplication(CompiledProjectionPlan[] plans, ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic,
-        ReplicationGrid grid, int maxSessions, bool shadow, bool deep)
+        ReplicationGrid grid, int maxSessions, bool shadow, bool deep, ushort realm = 0, RealmCodecs codecs = null)
     {
         Shadow = shadow || Environment.GetEnvironmentVariable("TYPHON_PUSH_SHADOW") == "1";
         _plans = plans;
         _states = states;
-        _automatic = automatic;
         var count = 0;
         for (var a = 0; a < isPush.Length; a++)
         {
@@ -712,15 +819,10 @@ internal abstract unsafe partial class PushReplication
             }
         }
 
-        _bootstrapped = new bool[plans.Length];
-        _validateCursor = new int[plans.Length];
-        _validating = new Dictionary<int, ulong>[plans.Length];
-        _forgottenGroups = new long[plans.Length][];
-        for (var a = 0; a < plans.Length; a++)
-        {
-            _validating[a] = [];
-            _forgottenGroups[a] = new long[8];
-        }
+        ServedRealm = realm;
+        Codecs = codecs ?? RealmCodecs.FromPlans(plans);
+        Bootstrapped = new bool[plans.Length];
+        EverythingThisTick = new bool[plans.Length];
 
         _minX = new double[plans.Length];
         _minY = new double[plans.Length];
@@ -734,11 +836,6 @@ internal abstract unsafe partial class PushReplication
         _queryPad = new double[plans.Length];
         _skipMargin = new double[plans.Length];
         _positionOffset = new int[plans.Length];
-        _pushChunks = new int[plans.Length][];
-        _pushBlocks = new nint[plans.Length][];
-        _pushMasks = new ulong[plans.Length][];
-        _pushCount = new int[plans.Length];
-        _repush = new long[plans.Length][];
 
         foreach (var a in _pushIndices)
         {
@@ -766,18 +863,18 @@ internal abstract unsafe partial class PushReplication
             var slack = position.Moving ? plans[a].VisibilitySlackM : 0d;
             _queryPad[a] = 1d + slack;
 
-            var pos = position.Pos;
-            _minX[a] = pos.Min[0];
-            _minY[a] = pos.Min[1];
-            _stepX[a] = WireMath.QuantStep(pos.Min[0], pos.Max[0], pos.Bits);
-            _stepY[a] = WireMath.QuantStep(pos.Min[1], pos.Max[1], pos.Bits);
+            var frame = Codecs.ByPlan[a];
+            _minX[a] = frame.Min[0];
+            _minY[a] = frame.Min[1];
+            _stepX[a] = frame.Step[0];
+            _stepY[a] = frame.Step[1];
             // In a flat grid every geometric z is 0 (10 § 3.4), whichever implementation serves it.
             _hasZ[a] = deep && position.Dims == 3 && grid != null && !grid.Flat;
             _pruneMargin[a] = 0.01 + Math.Max(_stepX[a], _stepY[a]);
             if (_hasZ[a])
             {
-                _minZ[a] = pos.Min[2];
-                _stepZ[a] = WireMath.QuantStep(pos.Min[2], pos.Max[2], pos.Bits);
+                _minZ[a] = frame.Min[2];
+                _stepZ[a] = frame.Step[2];
                 _pruneMargin[a] = Math.Max(_pruneMargin[a], 0.01 + _stepZ[a]);
             }
 
@@ -786,11 +883,7 @@ internal abstract unsafe partial class PushReplication
             // The cell delivery and sweep prune against v̂, which is quantized: the same centimetre, quantum and slack as the far sweep.
             _skipMargin[a] = _pruneMargin[a];
 
-            _axisBytes[a] = pos.Bits / 8;
-            _pushChunks[a] = new int[64];
-            _pushBlocks[a] = new nint[64];
-            _pushMasks[a] = new ulong[64];
-            _repush[a] = [];
+            _axisBytes[a] = frame.AxisBytes;
         }
 
         // Null only without a spatial grid, where every observed archetype was refused above for having no position.
@@ -809,7 +902,10 @@ internal abstract unsafe partial class PushReplication
         _gridH = grid.DimY;
         _gridD = grid.DimZ;
 
-        _sessions = new PushSessionState[Math.Max(1, maxSessions)];
+        _sessions = new PushSessionState[InitialSessionSlots];
+        _slotOwners = new SessionId[InitialSessionSlots];
+        _slotSeen = new uint[InitialSessionSlots];
+        _freeSlots = new int[InitialSessionSlots];
         if (Shadow)
         {
             _shadow = new HashSet<uint>[_sessions.Length];
@@ -837,7 +933,7 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Shadow oracle: applies one published frame's records to the session's shadow of its client, counting every illegal record.</summary>
     public void ShadowApply(SessionId session, FrameWorkerScratch scratch, int archetypes, bool reset)
     {
-        var slot = session.Slot;
+        var slot = L(session);
         var set = _shadow[slot];
         if (set == null || _shadowGen[slot] != session.Generation)
         {
@@ -917,7 +1013,7 @@ internal abstract unsafe partial class PushReplication
             var state = _states[a];
             var cs = state.ClusterState;
             var active = 0;
-            var ids = cs?.ReadActiveClusterList(out active);
+            var ids = cs?.ReadRealmClusterList(ServedRealm, out active);
             var layout = state.Layout;
             for (var i = 0; ids != null && i < active; i++)
             {
@@ -1121,7 +1217,7 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Tests only: a ClientRegion session's committed near-budget estimate — the counted entities of its delivered cells.</summary>
     internal int RegionHeldOf(SessionId session)
     {
-        var r = (uint)session.Slot < (uint)_regions.Length ? _regions[session.Slot] : null;
+        var r = (uint)L(session) < (uint)_regions.Length ? _regions[L(session)] : null;
         return r != null && r.Generation == session.Generation && r.Anchored ? r.Held : 0;
     }
 
@@ -1152,7 +1248,7 @@ internal abstract unsafe partial class PushReplication
     /// <summary>A session's pending anchor, after its gather: where an aggregate's radius is centred.</summary>
     public Vector3D PendingAnchorOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         return st.Bound && st.Generation == session.Generation ? new Vector3D(st.PAnchorX, st.PAnchorY, st.PAnchorZ) : default;
     }
 
@@ -1192,7 +1288,7 @@ internal abstract unsafe partial class PushReplication
     /// <summary>The tick of a session's last committed frame; 0 before its first.</summary>
     public uint LastTickOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         return st.Bound && st.Generation == session.Generation && st.Anchored ? st.LastTick : 0;
     }
 
@@ -1203,26 +1299,26 @@ internal abstract unsafe partial class PushReplication
         return (uint)chunkId < (uint)table.Length ? (ReplicationBlockHeader*)table[chunkId] : null;
     }
 
-    // ══ Blocks step (serial) ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+    // ══ Blocks step (serial): this realm's half; the collector is the hub's ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// Before the parked drain: drops last tick's push marks, collects this tick's push set, and gives every cluster in it a block — so an entity that
-    /// migrated into a cluster with no block is drained into one this tick rather than dropped.
+    /// The start of this realm's blocks step (R4.1): its own gap detection. A tick the track did not run for, or ran without finishing its index, lost
+    /// this realm's cell changes; the next finish recounts, and every live entity of the realm is re-pushed (<see cref="ResumedThisTick"/>).
     /// </summary>
-    public void PrepareBlocks(uint tick)
+    internal void BeginRealmTick(uint tick)
     {
-        var from = Stopwatch.GetTimestamp();
         _tick = tick;
         var resumed = _preparedTick != 0 && tick != _preparedTick + 1;
 
         // A tick the track ran whose index was never finished (a stage fault between the projection and the frames) lost its cell changes as surely as a
-        // tick it skipped. _indexedTick still names the last finished tick here: MarkPushed resets it later in this step.
+        // tick it skipped. _indexedTick still names the last finished tick here: BeginMark resets it later in this step.
         var unindexed = _preparedTick != 0 && !resumed && _indexedTick != _preparedTick;
         _preparedTick = tick;
 
         // Either way the occupancy missed changes. It is recounted when this tick's index is finished, not now: the fence has yet to place this tick's
         // carried and parked entries, and only the projection makes the blocks' occupancy words describe them (SUB-24).
         _recountAtFinish |= resumed || unindexed;
+        ResumedThisTick = resumed;
         if (resumed)
         {
             GapRepushes++;
@@ -1231,207 +1327,57 @@ internal abstract unsafe partial class PushReplication
             // one connected since holds nothing. Dropped rather than kept, because with no session connected nothing else ever empties the list.
             _orphanCount = 0;
         }
-
-        foreach (var a in _pushIndices)
-        {
-            var state = _states[a];
-            var list = state.WatchedBlocks;
-            for (var i = 0; i < list.Count; i++)
-            {
-                list[i]->WatchedMask = 0;
-            }
-
-            _pushCount[a] = 0;
-            var cs = state.ClusterState;
-            if (cs == null)
-            {
-                continue;
-            }
-
-            var capacity = cs.ClusterAabbs?.Length ?? 0;
-            if (_repush[a].Length < capacity)
-            {
-                Array.Resize(ref _repush[a], capacity);
-            }
-
-            var slotMask = state.Layout.SlotCount >= 64 ? ulong.MaxValue : (1UL << state.Layout.SlotCount) - 1;
-            var everything = _automatic[a] || !_bootstrapped[a] || resumed || (Volatile.Read(ref cs.StructureTick) == tick && cs.StructureCoversAll);
-            if (everything)
-            {
-                // First tick, a tick after a gap, or a tick the fence could not describe: every live entity is pushed, which is what gives every entity of a
-                // push archetype an identity and an encoded state before any session asks — the geometric known-set assumes a described entity for every
-                // position. Every slot of an active cluster is visited, so a slot emptied during a gap gives its identity back too.
-                var ids = cs.ReadActiveClusterList(out var active);
-                for (var i = 0; ids != null && i < active; i++)
-                {
-                    AddPush(a, ids[i], slotMask);
-                }
-
-                _bootstrapped[a] = true;
-            }
-            else if (Volatile.Read(ref cs.StructureTick) == tick)
-            {
-                var words = cs.StructureWords;
-                for (var c = 0; c < words.Length; c++)
-                {
-                    var w = (ulong)words[c];
-                    if (w != 0UL)
-                    {
-                        AddPush(a, c, w & slotMask);
-                    }
-                }
-            }
-
-            // The validator: a few whole clusters, noting which of their slots nobody pushed. Before the repush list is consumed, which it reads.
-            _validating[a].Clear();
-            if (!everything && ValidateClustersPerTick > 0)
-            {
-                Validate(a, cs, tick, slotMask);
-            }
-
-            // Slots still extrapolating or denied an identity last tick: the engine's own pushes. A client dead-reckons a mover until told it stopped, so a
-            // mover that stops without a write must still be visited, and an entity with no identity is invisible until it gets one.
-            var repush = _repush[a];
-            for (var c = 0; c < repush.Length; c++)
-            {
-                var w = (ulong)repush[c];
-                if (w != 0UL)
-                {
-                    AddPush(a, c, w & slotMask);
-                    repush[c] = 0;
-                }
-            }
-
-            // Blocks for every cluster pushed into. Serial by contract (pool and directory are single-threaded here).
-            if (_pushBlocks[a].Length < _pushChunks[a].Length)
-            {
-                Array.Resize(ref _pushBlocks[a], _pushChunks[a].Length);
-            }
-
-            for (var i = 0; i < _pushCount[a]; i++)
-            {
-                var chunk = _pushChunks[a][i];
-                var block = BlockOf(a, chunk);
-                if (block == null && !state.TryAttachBlock(chunk, out block))
-                {
-                    block = null;
-                }
-
-                _pushBlocks[a][i] = (nint)block;
-            }
-        }
-
-        PrepareTicks += Stopwatch.GetTimestamp() - from;
     }
 
-    /// <summary>Adds the validator's clusters for this tick to the push set, remembering which of their slots were not pushed otherwise.</summary>
-    private void Validate(int a, ArchetypeClusterState cs, uint tick, ulong slotMask)
+    /// <summary>
+    /// Brings a replication the hub activated in the frame prologue (R4.4) to this tick: an empty index stands for it, and every live entity of the realm is
+    /// pushed from the next tick on — a reactivated one's missed ticks are a gap, so its occupancy and counts are recounted as after any gap. Serial.
+    /// </summary>
+    internal void PrimeForTick(uint tick, int workers)
     {
-        var ids = cs.ReadActiveClusterList(out var active);
-        if (ids == null || active == 0)
-        {
-            return;
-        }
+        Array.Clear(Bootstrapped);
+        BeginRealmTick(tick);
+        BeginMark(workers, countInProject: false);
+        BuildIndex();
 
-        var words = Volatile.Read(ref cs.StructureTick) == tick ? cs.StructureWords : default;
-        var repush = _repush[a];
-        var count = Math.Min(ValidateClustersPerTick, active);
-        for (var i = 0; i < count; i++)
-        {
-            var cursor = _validateCursor[a]++ % active;
-            var chunk = ids[cursor];
-            var pushed = ((uint)chunk < (uint)words.Length ? (ulong)words[chunk] : 0UL) | ((uint)chunk < (uint)repush.Length ? (ulong)repush[chunk] : 0UL);
-            var unpushed = slotMask & ~pushed;
-            if (unpushed == 0UL || !_validating[a].TryAdd(chunk, unpushed))
-            {
-                continue;
-            }
-
-            AddPush(a, chunk, unpushed);
-            ValidatedSlots += BitOperations.PopCount(unpushed);
-        }
+        // Its blocks were not projected while it slept: only the next tick's projection makes their occupancy words describe them (SUB-24), so the
+        // recount is carried to that tick's index finish — the one BuildIndex just ran counted what the realm last saw.
+        _recountAtFinish = true;
     }
 
-    /// <summary>Called by a projecting worker for an event: counts it as a forgotten push when only the validator asked for the slot.</summary>
-    private protected void NoteIfForgotten(int archetype, ReplicationBlockHeader* block, int slot, byte flags, int groups)
+    /// <summary>The spatial grid this realm's entities of an archetype are indexed in, or null when the archetype has none in this realm.</summary>
+    private protected SpatialGrid RealmGridOf(ArchetypeClusterState cs)
     {
-        var validating = _validating[archetype];
-        if (validating.Count == 0 || !validating.TryGetValue(block->ChunkId, out var mask) || (mask & (1UL << slot)) == 0)
-        {
-            return;
-        }
-
-        Interlocked.Increment(ref ForgottenPushes);
-        if ((flags & PushEvent.Segment) != 0)
-        {
-            Interlocked.Increment(ref ForgottenMotion);
-        }
-
-        var perGroup = _forgottenGroups[archetype];
-        for (var g = 0; g < perGroup.Length; g++)
-        {
-            if ((groups & (1 << g)) != 0)
-            {
-                Interlocked.Increment(ref perGroup[g]);
-            }
-        }
+        var byRealm = cs.RealmSpatial;
+        return byRealm != null && ServedRealm < byRealm.Length ? Volatile.Read(ref byRealm[ServedRealm])?.Grid : null;
     }
 
-    private void AddPush(int a, int chunk, ulong mask)
+    /// <summary>A replicated entity's v̂ (or enter position), decoded over this realm's frame: the point its sessions' geometry is tested against.</summary>
+    internal void DecodeVisibility(int archetype, nint block, int slot, out float x, out float y, out float z)
     {
-        if (mask == 0UL || chunk < 0)
-        {
-            return;
-        }
-
-        var n = _pushCount[a];
-        if (n == _pushChunks[a].Length)
-        {
-            Array.Resize(ref _pushChunks[a], n * 2);
-            Array.Resize(ref _pushMasks[a], n * 2);
-        }
-
-        // Adjacent duplicates (the repush list following the structure words) are merged; others are merged by the block's mask OR below.
-        _pushChunks[a][n] = chunk;
-        _pushMasks[a][n] = mask;
-        _pushCount[a] = n + 1;
+        var layout = _states[archetype].Layout;
+        Decode(archetype, (byte*)block + layout.ColdOffset + (slot * layout.ColdStride) + PositionOffset(archetype), out x, out y, out z);
     }
 
-    /// <summary>After the watched lists were reset: marks the push set and lists each block once, so the projection pass visits exactly it.</summary>
-    public void MarkPushed(int workers, bool countInProject = false)
+    /// <summary>After the hub marked the push set: this realm's projection bookkeeping for the tick.</summary>
+    // The hub's validator runs this tick: read once per tick here rather than through the hub per event.
+    private protected bool _validating;
+
+    internal void BeginMark(int workers, bool countInProject)
     {
         // The parallel index (BeginParallelIndex): the projection's chunks sort their own events as they finish.
         _countInProject = countInProject && ParallelIndex;
+        _validating = Hub.ValidateClustersPerTick > 0;
         _indexedTick = uint.MaxValue;
-
-        foreach (var a in _pushIndices)
-        {
-            var state = _states[a];
-            var list = state.WatchedBlocks;
-            for (var i = 0; i < _pushCount[a]; i++)
-            {
-                var block = (ReplicationBlockHeader*)_pushBlocks[a][i];
-                if (block == null)
-                {
-                    continue;
-                }
-
-                var before = block->WatchedMask;
-                block->WatchedMask = before | _pushMasks[a][i];
-                if (before == 0UL)
-                {
-                    list.Add(block);
-                }
-
-                SlotsPushed += BitOperations.PopCount(_pushMasks[a][i]);
-            }
-        }
-
         ResetWorkers(workers);
     }
 
     /// <summary>Sizes and empties the per-worker event lists for this tick's projection.</summary>
     private protected abstract void ResetWorkers(int workers);
+
+    /// <summary>The codecs of <paramref name="realm"/> when this replication serves it, otherwise <see langword="null"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public RealmCodecs CodecsFor(ushort realm) => realm == ServedRealm ? Codecs : null;
 
     // ══ Projection (parallel, one worker per block) ══════════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1479,16 +1425,6 @@ internal abstract unsafe partial class PushReplication
 
     /// <summary>Records an entry that is about to vanish at the fence, so every session holding it is told to drop it. Rare; locked.</summary>
     public abstract void Orphan(int archetype, ReplicationBlockHeader* block, byte* cold, in ReplicationBlockLayout layout, uint netId, int cause);
-
-    /// <summary>Marks slots of a cluster to be pushed again next tick. Called by the worker that owns the block — one writer per chunk.</summary>
-    public void Repush(int archetype, int chunkId, ulong slots)
-    {
-        var r = _repush[archetype];
-        if ((uint)chunkId < (uint)r.Length)
-        {
-            r[chunkId] |= (long)slots;
-        }
-    }
 
     // ══ The push index (design/Subscriptions/10 § 2.3) ═══════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -1547,7 +1483,7 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Whether a session slot is in a state that needs a RESET before anything else is sent.</summary>
     public bool NeedsReset(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         return !st.Bound || st.Generation != session.Generation ? false : st.NeedsReset;
     }
 
@@ -1588,7 +1524,7 @@ internal abstract unsafe partial class PushReplication
     /// </summary>
     public void NoteWorldSession(SessionId session, bool forceReset)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
 
         // Frames missed that the log covers are caught up without a fill; only a gap it does not cover resets. A reset the catch-up decides for a reused
         // identity is not foreseen: that fill finds no order, delivers nothing, and the next tick's prologue takes the order for it.

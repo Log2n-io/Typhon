@@ -1,10 +1,11 @@
-import type { CatalogCodec, CatalogCommand, CatalogPlan, MessagePlan } from '../protocol/catalog.js';
+import type { CatalogCommand, CatalogPlan, MessagePlan } from '../protocol/catalog.js';
 import { AckReason, BuiltInCommand } from '../protocol/constants.js';
 import type { FieldValues } from '../protocol/field-codec.js';
+import type { RealmFrame } from '../protocol/realm-frame.js';
 
-/** The fewest vertices a flat world's region may carry: a triangle. */
+/** The fewest vertices a region may carry: a flat realm's triangle (the wire's `minCount`). */
 export const REGION_MIN_VERTICES = 3;
-/** The fewest vertices a deep world's region may carry: a tetrahedron. */
+/** The fewest vertices a deep realm's region may carry: a tetrahedron, which the engine checks when it hulls it. */
 export const REGION_MIN_VERTICES_3D = 4;
 /** The most: a horizon-clipped frustum needs 5–8, and 16 is headroom (W28). */
 export const REGION_MAX_VERTICES = 16;
@@ -12,12 +13,12 @@ export const REGION_MAX_VERTICES = 16;
 export const REGION_RATE = { perSec: 5, burst: 5 } as const;
 
 /**
- * The built-in `ClientRegion` command for a world whose positions use `position`, matching what the engine builds
- * (`BuiltInCommands.CreateClientRegion`). Its vertices are quantized exactly like the archetypes' positions, so a
- * decoded region can never leave the world, and its fields are in canonical wire order (W11, W28). A `pos2` world's
- * region is a polygon of 3–16 points; a `pos3` world's a polyhedron of 4–16.
+ * The built-in `ClientRegion` command, matching what the engine builds (`BuiltInCommands.CreateClientRegion`): its
+ * vertices are always `list<pos3>` over the session's realm frame (`typhon.3`, D-8), so a decoded region can never
+ * leave the realm, and its fields are in canonical wire order (W11, W28). A flat realm ignores z: its region is a polygon
+ * of 3–16 points; a deep realm's a polyhedron of 4–16.
  */
-export function createClientRegion(position: CatalogCodec): CatalogCommand {
+export function createClientRegion(): CatalogCommand {
   return {
     idx: BuiltInCommand.ClientRegionIdx,
     name: BuiltInCommand.ClientRegion,
@@ -29,12 +30,7 @@ export function createClientRegion(position: CatalogCodec): CatalogCommand {
       { name: BuiltInCommand.regionBudgetField, codec: { t: 'u16' } },
       {
         name: BuiltInCommand.regionVerticesField,
-        codec: {
-          t: 'list',
-          of: position,
-          minCount: position.t === 'pos3' ? REGION_MIN_VERTICES_3D : REGION_MIN_VERTICES,
-          maxCount: REGION_MAX_VERTICES,
-        },
+        codec: { t: 'list', of: { t: 'pos3' }, minCount: REGION_MIN_VERTICES, maxCount: REGION_MAX_VERTICES },
       },
     ],
   };
@@ -54,6 +50,11 @@ export interface RegionOptions {
    */
   readonly onRejected?: (seq: number) => void;
   readonly now?: () => number;
+  /**
+   * The session's realm frame (`typhon.3`): `FrameApplier.realmFrame` fits. A deep realm takes `x, y, z` triples, a flat
+   * one `x, y` pairs, which travel with z = 0. Without it, regions are flat.
+   */
+  readonly realm?: () => RealmFrame | null;
   /** The shortest interval between two regions. Default 200 ms — the built-in's 5 Hz. */
   readonly minIntervalMs?: number;
   /** A vertex must move this far, in world units, for a region to be worth sending. Default 4. */
@@ -81,11 +82,12 @@ export class RegionSender {
   private readonly moveThreshold: number;
   private readonly altitudeThreshold: number;
   private readonly command: MessagePlan;
-  /** 2 for a flat world's polygon, 3 for a deep world's polyhedron: the vertex codec's axes. */
-  private readonly dims: number;
+  private readonly realm: () => RealmFrame | null;
 
   /** The region last handed to {@link setRegion}, flattened `x, y` pairs. */
   private desired: Float64Array = new Float64Array(0);
+  /** The axes {@link desired} was given in: the realm's when {@link setRegion} was called. */
+  private desiredDims = 2;
   private desiredAltitude = 0;
   private desiredBudget = 0;
   /** The region last sent, to compare against. */
@@ -108,13 +110,17 @@ export class RegionSender {
 
     this.options = options;
     this.command = command;
-    const vertices = command.body.fields.find((f) => f.name === BuiltInCommand.regionVerticesField);
-    this.dims = vertices?.components === 3 ? 3 : 2;
+    this.realm = options.realm ?? (() => null);
     this.now = options.now ?? Date.now;
     const rate = options.plan.catalog.commands.find((c) => c.idx === BuiltInCommand.ClientRegionIdx)?.rate;
     this.minIntervalMs = options.minIntervalMs ?? (rate === undefined ? 200 : 1000 / rate.perSec);
     this.moveThreshold = options.moveThreshold ?? 4;
     this.altitudeThreshold = options.altitudeThreshold ?? 4;
+  }
+
+  /** 2 in a flat realm, whose region is a polygon; 3 in a deep one, whose region is a polyhedron. */
+  get dims(): number {
+    return this.realm()?.deep === true ? 3 : 2;
   }
 
   /** Regions sent. */
@@ -158,11 +164,12 @@ export class RegionSender {
   }
 
   /**
-   * Offers a new region: `vertices` is flattened `x, y` pairs (3–16) in a flat world, `x, y, z` triples (4–16) in a
-   * deep one, in the grid's units. Returns whether it went out now; otherwise it is either dropped as too similar, or
+   * Offers a new region: `vertices` is flattened `x, y` pairs (3–16) in a flat realm, `x, y, z` triples (4–16) in a
+   * deep one, in the realm's units. Returns whether it went out now; otherwise it is either dropped as too similar, or
    * kept for {@link poll}.
    */
   setRegion(vertices: ArrayLike<number>, altitudeM: number, budgetKiBps: number): boolean {
+    this.desiredDims = this.dims;
     const count = vertices.length / this.dims;
     const min = this.dims === 3 ? REGION_MIN_VERTICES_3D : REGION_MIN_VERTICES;
     if (!Number.isInteger(count) || count < min || count > REGION_MAX_VERTICES) {
@@ -197,15 +204,42 @@ export class RegionSender {
     return this.poll();
   }
 
-  /** Sends the waiting region once the rate allows it. Returns whether one went out. */
+  /**
+   * The session changed realm (`FrameApplier` `onRealmChanged`): the server dropped the region it held, so the last one
+   * sent is forgotten and the desired one goes out again. A region given in the other dimensionality is dropped — the
+   * caller sets the new realm's.
+   */
+  realmChanged(): void {
+    this.sentVertices = new Float64Array(0);
+    this.sentAltitude = Number.NaN;
+    this.sentBudget = -1;
+    this.pendingSeq = -1;
+    if (this.desired.length === 0 || this.desiredDims !== this.dims) {
+      this.desired = new Float64Array(0);
+      this.waiting = false;
+      return;
+    }
+
+    this.waiting = true;
+  }
+
+  /** Sends the waiting region once the rate allows it and the session is in a realm. Returns whether one went out. */
   poll(nowMs: number = this.now()): boolean {
-    if (!this.waiting || nowMs - this.lastSentMs < this.minIntervalMs) {
+    if (!this.waiting || nowMs - this.lastSentMs < this.minIntervalMs || this.realm() === null) {
       return false;
     }
 
+    // Given in another dimensionality than the realm's (set before its REALM arrived): never sent as a degenerate hull.
+    if (this.desiredDims !== this.dims) {
+      this.waiting = false;
+      return false;
+    }
+
+    // Always pos3 on the wire (D-8): a flat realm's pairs travel with z = 0.
     const vertices: number[] = [];
-    for (let i = 0; i < this.desired.length; i++) {
-      vertices.push(this.desired[i]!);
+    const dims = this.desiredDims;
+    for (let i = 0; i < this.desired.length; i += dims) {
+      vertices.push(this.desired[i]!, this.desired[i + 1]!, dims === 3 ? this.desired[i + 2]! : 0);
     }
 
     const values: FieldValues = {

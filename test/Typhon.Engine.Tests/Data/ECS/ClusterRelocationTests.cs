@@ -512,7 +512,7 @@ class ClusterRelocationTests : TestBase<ClusterRelocationTests>
             int cellKey = cs.ClusterCellMap[r.chunk];
             if (cellKey >= 0 && countedCells.Add(cellKey))
             {
-                cellTotal += dbe.SpatialGrid.GetCell(cellKey).EntityCount;
+                cellTotal += dbe.Realm0Grid.GetCell(cellKey).EntityCount;
             }
         }
 

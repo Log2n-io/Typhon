@@ -80,6 +80,7 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
     /// Every frame the assembler produced decodes in <c>Typhon.Client</c>'s applier, and the replica it fills equals the values the engine holds.
     /// </summary>
     [Test]
+    [VerifiesRule("SUB-30")]
     public void TheProducedBytesDecodeIntoTheClientsReplica()
     {
         using var harness = Create();
@@ -208,7 +209,7 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
             {
                 Append(stream, frame);
                 var log = new FrameLog();
-                log.Decode(frame, harness.CatalogPlan);
+                log.Decode(frame, harness.CatalogPlan, harness.Subscriptions.Realm0Frame);
                 expectation.Add(Render(log));
             }
         }

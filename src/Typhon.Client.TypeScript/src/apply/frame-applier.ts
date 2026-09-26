@@ -10,6 +10,7 @@ import {
   type MetricPlan,
 } from '../protocol/catalog.js';
 import { TickFlags } from '../protocol/constants.js';
+import type { RealmFrame } from '../protocol/realm-frame.js';
 import { catalogHashToHex } from '../protocol/messages.js';
 import {
   BlockMask,
@@ -56,6 +57,18 @@ export interface FrameApplierOptions {
   readonly decoders?: GeneratedDecoders;
   /** The session's catalog hash (`SessionInfo.catalogHash`), which {@link decoders} must have been generated from. */
   readonly catalogHash?: Uint8Array;
+  /**
+   * Called when a `REALM` block changes the session's realm (`typhon.3`): the previous frame (or `null`) and the new one
+   * (or `null` for `REALM(NONE)`). Called once, after the `RESET` that carried it cleared the store and before any of the
+   * frame's records apply — the moment to load the new realm's scene, by its {@link RealmFrame.appTag}.
+   */
+  readonly onRealmChanged?: (previous: RealmFrame | null, current: RealmFrame | null) => void;
+  /**
+   * The realm the session is already in, for an applier that starts mid-stream — a recording replayed from a later
+   * frame, a test — whose first frame will not carry the `REALM` that placed it. Normally absent: a session's first
+   * frame is a `RESET` that carries its `REALM`.
+   */
+  readonly initialRealm?: RealmFrame;
 }
 
 /** A numeric column's element type, as {@link storeColumn} dispatches on it. */
@@ -129,6 +142,8 @@ export class FrameApplier implements TickSink, EntitiesTarget {
   private leaves = new Uint32Array(256);
   private leaveArchetypes = new Uint8Array(256);
   private leaveCount = 0;
+  /** The realm the last `REALM` block set, for {@link FrameApplierOptions.onRealmChanged}. */
+  private heldRealm: RealmFrame | null = null;
 
   constructor(plan: CatalogPlan, options: FrameApplierOptions = {}) {
     this.plan = plan;
@@ -150,7 +165,8 @@ export class FrameApplier implements TickSink, EntitiesTarget {
         return kind === undefined || kind === 'text' || kind === 'bytes' ? -1 : COLUMN_KIND[kind];
       });
     });
-    this.grids = plan.grids.map((g) => new AggregateGrid(gridSchemaFromCatalog(g.grid)));
+    // Placeholders until the first REALM lays each grid over its realm (typhon.3): an AGG before one is refused.
+    this.grids = plan.grids.map((g) => new AggregateGrid(gridSchemaFromCatalog(g.grid, null)));
     this.stats = new StatsState(plan);
     const decoders = options.decoders;
     if (decoders !== undefined) {
@@ -159,6 +175,13 @@ export class FrameApplier implements TickSink, EntitiesTarget {
 
     this.reader = decoders === undefined ? new TickReader(plan) : new TickReader(plan, { decoders, target: this });
     this.eventPass = new EventPass(plan, options.onEvent);
+    if (options.initialRealm !== undefined) {
+      this.reader.realm = options.initialRealm;
+      this.heldRealm = options.initialRealm;
+      for (let i = 0; i < this.grids.length; i++) {
+        this.grids[i]!.reframe(gridSchemaFromCatalog(plan.grids[i]!.grid, options.initialRealm));
+      }
+    }
   }
 
   /**
@@ -194,6 +217,34 @@ export class FrameApplier implements TickSink, EntitiesTarget {
       if (recvMs !== undefined) {
         clock.onFrame(this.tick, recvMs);
       }
+    }
+  }
+
+  /**
+   * The session's realm (`typhon.3`): the frame every position the store holds was decoded over, or `null` before the
+   * first `REALM` and after a `REALM(NONE)`.
+   */
+  get realmFrame(): RealmFrame | null {
+    return this.reader.realm;
+  }
+
+  /** The name of {@link realmFrame}'s kind, from the catalog's `realmKinds`; `null` in no realm. */
+  get realmKind(): string | null {
+    const frame = this.reader.realm;
+    return frame === null ? null : (this.plan.realmKinds[frame.kindIdx] ?? null);
+  }
+
+  realm(frame: RealmFrame | null): void {
+    this.target = Target.None;
+    const previous = this.heldRealm;
+    this.heldRealm = frame;
+    const grids = this.grids;
+    for (let i = 0; i < grids.length; i++) {
+      grids[i]!.reframe(gridSchemaFromCatalog(this.plan.grids[i]!.grid, frame));
+    }
+
+    if (frame === null ? previous !== null : !frame.equals(previous)) {
+      this.options.onRealmChanged?.(previous, frame);
     }
   }
 
@@ -453,6 +504,10 @@ function checkDecoders(
 /** The second pass: reads only `EVENTS` blocks, fills each type's reused record and dispatches it once complete. */
 class EventPass implements TickSink {
   tick = 0;
+
+  /** The first pass applied the REALM; the reader already holds it for this pass's positions. */
+  realm(): void {}
+
   private readonly records: readonly (EventRecord | undefined)[];
   private readonly handler: ((event: EventRecord) => void) | undefined;
   private pending: EventRecord | null = null;

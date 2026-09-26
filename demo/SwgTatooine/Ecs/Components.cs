@@ -34,6 +34,85 @@ namespace SwgTatooine;
 // that decides per archetype, and a real game server has never had one durability policy.
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+// ── Realm keys (Realms G1) ──────────────────────────────────────────────────────────────────────────────────────────
+//
+// The realm an entity is in — which planet, and later which interior or space. In a component of its OWN rather than
+// beside Bounds: a 2D AABB placement stays 16 bytes, the stride the engine's SIMD narrowphase needs, and losing that
+// kernel measured ~20 % of a tick here. One type per archetype for the same reason the placements are split: the
+// scheduler's write-conflict test is per component type, and TeleportSystem writes the player's.
+
+/// <summary>The realm a building, house or prop is in.</summary>
+[Component("Swg.StructureRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct StructureRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public StructureRealm(ushort value) => Value = value;
+}
+
+/// <summary>The realm a lair is in.</summary>
+[Component("Swg.LairRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct LairRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public LairRealm(ushort value) => Value = value;
+}
+
+/// <summary>The realm a city NPC is in.</summary>
+[Component("Swg.NpcRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct NpcRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public NpcRealm(ushort value) => Value = value;
+}
+
+/// <summary>The realm a creature is in.</summary>
+[Component("Swg.CreatureRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct CreatureRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public CreatureRealm(ushort value) => Value = value;
+}
+
+/// <summary>The realm a starship is in: the space realm (Realms G1c).</summary>
+[Component("Swg.ShipRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct ShipRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public ShipRealm(ushort value) => Value = value;
+}
+
+/// <summary>The realm a player is in.</summary>
+[Component("Swg.PlayerRealm", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PlayerRealm
+{
+    [Field]
+    [RealmKey]
+    public ushort Value;
+
+    public PlayerRealm(ushort value) => Value = value;
+}
+
 // ── Placement ───────────────────────────────────────────────────────────────────────────────────────────────────────
 //
 // Two dimensions, not three, and that is the faithful choice: SWG's own server indexes a planet with a 2D QuadTree over
@@ -74,6 +153,50 @@ public struct LairPlacement
     public readonly float HalfExtent => (Bounds.MaxX - Bounds.MinX) * 0.5f;
 
     public void SetAt(float x, float z, float halfExtent) => Place.At(ref Bounds, x, z, halfExtent);
+}
+
+/// <summary>
+/// A starship (Realms G1c): the demo's one 3D, f64 placement — the space realm is a deep grid, and a ship's bounds are an <see cref="AABB3D"/>.
+/// </summary>
+[Component("Swg.ShipPlacement", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct ShipPlacement
+{
+    [Field]
+    [SpatialIndex(1.0f)]
+    public AABB3D Bounds;
+
+    public readonly double X => (Bounds.MinX + Bounds.MaxX) * 0.5;
+
+    public readonly double Y => (Bounds.MinY + Bounds.MaxY) * 0.5;
+
+    public readonly double Z => (Bounds.MinZ + Bounds.MaxZ) * 0.5;
+
+    public readonly double HalfExtent => (Bounds.MaxX - Bounds.MinX) * 0.5;
+
+    public void SetAt(double x, double y, double z, double h)
+    {
+        Bounds.MinX = x - h;
+        Bounds.MinY = y - h;
+        Bounds.MinZ = z - h;
+        Bounds.MaxX = x + h;
+        Bounds.MaxY = y + h;
+        Bounds.MaxZ = z + h;
+    }
+}
+
+/// <summary>A starship's flight: its velocity per tick and the waypoint it flies to.</summary>
+[Component("Swg.ShipMotion", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct ShipMotion
+{
+    [Field] public double VelX;
+    [Field] public double VelY;
+    [Field] public double VelZ;
+    [Field] public double DestX;
+    [Field] public double DestY;
+    [Field] public double DestZ;
+    [Field] public float SpeedMps;
 }
 
 /// <summary>A city NPC. Densely packed inside a city, and overwhelmingly stationary.</summary>
@@ -378,7 +501,8 @@ public struct PlayerState
     /// <summary>The city whose shuttleport this player is walking to or queued at (#910). Meaningful only while taking a shuttle.</summary>
     [Field] public int ShuttleFrom;
 
-    /// <summary>The city the shuttle takes this player to.</summary>
+    /// <summary>The city the shuttle takes this player to — or, while <see cref="PlayerActivity.ToPortal"/>, the portal it walks to (reused rather
+    /// than a new field: a wider PlayerState would change every run's layout, interiors or not).</summary>
     [Field] public int ShuttleDest;
 }
 
@@ -407,6 +531,12 @@ public static class PlayerActivity
 
     /// <summary>Queued at the shuttleport; the Shuttle system boards it while the shuttle is down.</summary>
     public const int AwaitingShuttle = 5;
+
+    /// <summary>Walking to a building's door (Realms G1b). <see cref="PlayerState.ShuttleDest"/> holds the portal, in its city's planet.</summary>
+    public const int ToPortal = 6;
+
+    /// <summary>In a building's interior realm; leaves through the same door when the timer runs out.</summary>
+    public const int Inside = 7;
 }
 
 /// <summary>A creature lair: the object that spawns and owns a population, and what a destroy mission sends a player to break.</summary>

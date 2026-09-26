@@ -102,12 +102,12 @@ class ClusterRebuildMergeTests : TestBase<ClusterRebuildMergeTests>
             {
                 continue;
             }
-            ref var cell = ref dbe.SpatialGrid.GetCell(cellKey);
+            ref var cell = ref dbe.Realm0Grid.GetCell(cellKey);
             snap.Cells[cellKey] = (cell.ClusterCount, cell.EntityCount);
 
-            if (cs.PerCellIndex != null && cellKey < cs.PerCellIndex.Length && cs.PerCellIndex[cellKey] != null)
+            if (cs.Realm0Spatial.PerCellIndex != null && cellKey < cs.Realm0Spatial.PerCellIndex.Length && cs.Realm0Spatial.PerCellIndex[cellKey] != null)
             {
-                var slot = cs.PerCellIndex[cellKey];
+                var slot = cs.Realm0Spatial.PerCellIndex[cellKey];
                 snap.PerCellIndexCounts[cellKey] = (slot.DynamicIndex?.ClusterCount ?? 0) + (slot.StaticIndex?.ClusterCount ?? 0);
 
                 // The bounds STORED IN the index, not just how many entries it has — AC-2.1 asks for identical contents, and an index holding the right
@@ -166,12 +166,12 @@ class ClusterRebuildMergeTests : TestBase<ClusterRebuildMergeTests>
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
 
         ResetSpatialState(dbe);
-        cs.RebuildCellState(dbe.SpatialGrid);
-        cs.RebuildClusterAabbs(dbe.SpatialGrid);
+        cs.RebuildCellState(dbe.Realm0Grid);
+        cs.RebuildClusterAabbs(dbe.Realm0Grid);
         var oracle = Capture(dbe);
 
         ResetSpatialState(dbe);
-        cs.RebuildSpatialStateFromData(dbe.SpatialGrid, dbe.EpochManager, maxWorkers);
+        cs.RebuildSpatialStateFromData(dbe.Realm0Grid, dbe.EpochManager, maxWorkers);
         var merged = Capture(dbe);
 
         return (oracle, merged);
@@ -185,8 +185,8 @@ class ClusterRebuildMergeTests : TestBase<ClusterRebuildMergeTests>
     /// </remarks>
     private static void ResetSpatialState(DatabaseEngine dbe)
     {
-        dbe.SpatialGrid.ResetCellState();
-        ClusterState(dbe).CellClusterPool = new CellClusterPool(dbe.SpatialGrid.CellCount);
+        dbe.Realm0Grid.ResetCellState();
+        ClusterState(dbe).Realm0Spatial.CellClusterPool = new CellClusterPool(dbe.Realm0Grid.CellCount);
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -342,13 +342,13 @@ class ClusterRebuildMergeTests : TestBase<ClusterRebuildMergeTests>
 
         ResetSpatialState(dbe);
         cs.RebuildSegmentPassCount = 0;
-        cs.RebuildCellState(dbe.SpatialGrid);
-        cs.RebuildClusterAabbs(dbe.SpatialGrid);
+        cs.RebuildCellState(dbe.Realm0Grid);
+        cs.RebuildClusterAabbs(dbe.Realm0Grid);
         var twoPassReads = cs.RebuildSegmentPassCount;
 
         ResetSpatialState(dbe);
         cs.RebuildSegmentPassCount = 0;
-        cs.RebuildSpatialStateFromData(dbe.SpatialGrid, dbe.EpochManager, workers);
+        cs.RebuildSpatialStateFromData(dbe.Realm0Grid, dbe.EpochManager, workers);
         var mergedReads = cs.RebuildSegmentPassCount;
 
         Assert.Multiple(() =>
@@ -374,13 +374,13 @@ class ClusterRebuildMergeTests : TestBase<ClusterRebuildMergeTests>
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
 
         ResetSpatialState(dbe);
-        cs.RebuildSpatialStateFromData(dbe.SpatialGrid, dbe.EpochManager, maxWorkers: 1);
+        cs.RebuildSpatialStateFromData(dbe.Realm0Grid, dbe.EpochManager, maxWorkers: 1);
         var once = Capture(dbe);
 
-        cs.RebuildSpatialStateFromData(dbe.SpatialGrid, dbe.EpochManager, maxWorkers: 1);   // deliberately no reset
+        cs.RebuildSpatialStateFromData(dbe.Realm0Grid, dbe.EpochManager, maxWorkers: 1);   // deliberately no reset
         var twice = Capture(dbe);
 
-        var cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+        var cellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
         Assert.Multiple(() =>
         {
             Assert.That(twice.Cells[cellKey].EntityCount, Is.EqualTo(once.Cells[cellKey].EntityCount * 2),

@@ -25,7 +25,17 @@ import {
   type CommandInput,
   type FieldValue,
 } from '../src/index.js';
-import { fromBits, fromHex, goldenBin, goldenJson, hex, RecordingSink, type LogEntry } from './golden-support.js';
+import {
+  fromBits,
+  fromHex,
+  goldenBin,
+  goldenJson,
+  hex,
+  RecordingSink,
+  type LogEntry,
+  frameFromJson,
+  type FrameJson,
+} from './golden-support.js';
 
 /*
  * message-*: every message decodes to the committed object, and — both directions being implemented — re-encodes to the
@@ -157,6 +167,7 @@ describe('golden messages', () => {
       catalog: string;
       clientTick: number;
       inputs: { type: string; seq: number; values: Record<string, string[] | string> }[];
+      frame?: FrameJson;
       log: LogEntry[];
     };
     const plan = CatalogPlan.compile(parseCatalog(goldenBin(vector.catalog)));
@@ -176,12 +187,12 @@ describe('golden messages', () => {
     });
 
     const w = new WireWriter();
-    writeCommands(w, vector.clientTick, commands);
+    writeCommands(w, vector.clientTick, commands, frameFromJson(vector.frame));
     const bin = goldenBin('message-commands');
     expect(hex(w.written())).toBe(hex(bin));
 
     const sink = new RecordingSink();
-    readCommands(bin, plan, sink);
+    readCommands(bin, plan, sink, frameFromJson(vector.frame));
     expect(sink.log).toEqual(vector.log);
   });
 });

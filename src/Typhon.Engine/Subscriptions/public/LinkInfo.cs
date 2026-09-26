@@ -28,7 +28,7 @@ public readonly struct LinkInfo
     /// <summary>The wire this connection came in on: <c>tcp</c>, <c>ws</c>, <c>webtransport</c>, <c>fake</c>. It reaches the admission hook verbatim.</summary>
     public string Transport { get; init; }
 
-    /// <summary>The negotiated subprotocol — <c>typhon.2</c> on WebSocket — or <see langword="null"/> on a wire that has none.</summary>
+    /// <summary>The negotiated subprotocol — <c>typhon.3</c> on WebSocket — or <see langword="null"/> on a wire that has none.</summary>
     public string SubProtocol { get; init; }
 
     /// <summary>

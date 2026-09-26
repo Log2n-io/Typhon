@@ -1,0 +1,45 @@
+{
+  "description": "RESET, REALM(NONE): the session is in no realm, and only unpositioned content (a Ledger enter) may follow.",
+  "catalog": "catalog-kitchen-sink",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 70001,
+      "flags": 2,
+      "periodUs": 0
+    },
+    {
+      "call": "realm",
+      "frame": null
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "Ledger"
+    },
+    {
+      "call": "enter",
+      "netId": 7,
+      "position": [],
+      "velocity": [],
+      "t0": 0,
+      "epoch": 0
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "amount",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "endTick"
+    }
+  ]
+}

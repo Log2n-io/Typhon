@@ -14,7 +14,7 @@ Both pipelines run on dedicated background threads. Commit-time work on the appl
 
 > **The WAL carries logical records.** Each one is an `(EntityId, slot)` pair — the per-archetype component slot under the EntityId's routing id — plus a value, never a page or a chunk id. A single `RecordCodec` writes them, recovery re-applies them through the engine's own write primitives (`RecoveryApplier`), and derived structures are then **rebuilt** rather than repaired page by page. There are no Full-Page Images. The full design lives in `claude/design/Durability/MinimalWal/`; correctness is gated on invariant rules (`rules/durability.md`), a crash-sim sweep, and TLA+ specs.
 >
-> **The persisted UoW Registry does not decide commit fate.** For logical records that is the WAL commit marker's job, so the registry is redundant for fate, though the registry and the `WalRecovery` scan that consults it both run at open (§7, §8). Removing them is a pending cleanup.
+> **The persisted UoW Registry does not decide commit fate.** For logical records that is the WAL commit marker's job, so the registry is redundant for fate, though the registry and the `WalRecovery` scan that consults it both run at open ([§7](#7-recovery), [§8](#8-uow-state-machine)). Removing them is a pending cleanup.
 
 This doc covers the WAL (writer, segments, wire format), the checkpoint (cycle, staging pool, A/B meta-pair), recovery (the segment scan plus `RecoveryDriver`), torn-page safety without full-page images, and the durability invariants that hold across all of them.
 
@@ -67,7 +67,7 @@ The WAL writer is a single dedicated OS thread:
 
 It is the single consumer of an MPSC (multi-producer, single-consumer) commit buffer ([`WalCommitBuffer`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/WalCommitBuffer.cs)). Application threads commit a transaction by claiming space via an atomic tail-increment (`TryClaim` → `Interlocked.Add`, which maps to `LOCK XADD` on x64), writing the record batch into the claimed span, then publishing a frame. The writer drains published frames, copies them into a 4096-byte-aligned staging buffer, patches the chunk CRC chain over the **whole drained batch at once**, and writes that buffer to the active segment file with `RandomAccess.Write`. (Patching the entire batch in one shot is what keeps a chunk straddling a 256 KB write-slice boundary from being left with a zero footer CRC.)
 
-The transport is the MPSC buffer, the dedicated writer thread, segment management and FUA I/O. The record *format* (§3) and the recovery/checkpoint logic (§5, §7) sit above it.
+The transport is the MPSC buffer, the dedicated writer thread, segment management and FUA I/O. The record *format* ([§3](#3-wire-format)) and the recovery/checkpoint logic ([§5](#5-checkpoint-v2), [§7](#7-recovery)) sit above it.
 
 ### Ring buffer sizing
 
@@ -128,7 +128,7 @@ Every WAL chunk has the same envelope:
 
 | Value | Type | Body |
 |---|---|---|
-| `1` | `Transaction` | one or more logical records (a `RecordBatch`) — see §3.1 |
+| `1` | `Transaction` | one or more logical records (a `RecordBatch`) — see [§3.1](#31-logical-records-recordcodec--recordformat) |
 | `2` | *(gap)* | **permanently reserved** — never allocate it. A chunk carrying type 2 is skipped as an unknown type rather than mis-parsed |
 | `3` | `TickFence` | `TickFenceHeader (24 B)` + N entries of `(ChunkId:4 B, ComponentData:PayloadStride B)` |
 | `4` | `ClusterTickFence` | `ClusterTickFenceHeader (24 B)` + N entries of `(EntityIndex:4 B, AllComponentData)` |
@@ -242,13 +242,13 @@ The cycle never persists never-durable bytes (CK-02) and never advances past a p
 | 5 | **Advance `CheckpointLSN`** — `DurabilityWatermarks.UpdateCheckpointLsn(_mmf, barrierLsn)` writes the watermark block to the meta-pair's **alternate** slot (gen+1, CRC, fsync); the generation flip is the cycle's atomic commit point. | CK-05 |
 | 6 | **Recycle** — `SegmentManager.MarkReclaimable(trimLsn)` deletes sealed segments below the persisted checkpoint, where `trimLsn = Min(checkpointLsn, lastTickFenceLsn)` so TickFence-only data isn't lost. | CK-04 |
 
-There is **no FPI-bitmap reset step**, because Typhon writes no full-page images (§6). The cycle also calls `_uowRegistry.TransitionWalDurableToCommitted()` (§8).
+There is **no FPI-bitmap reset step**, because Typhon writes no full-page images ([§6](#6-torn-page-safety-no-fpi)). The cycle also calls `_uowRegistry.TransitionWalDurableToCommitted()` ([§8](#8-uow-state-machine)).
 
 A **flush-only cycle** (`FlushOnlyCycle` — capture + write + DC-decrement, *no* barrier/gate/meta-flip/recycle) keeps the page cache drainable during a large recovery window without advancing `CheckpointLSN` (CK-08).
 
 ### A/B slot-pairing — the doublewrite-free torn-write net (CK-05)
 
-The meta page (root header + bootstrap dictionary + the `DurabilityWatermarks` block) and every segment-directory page occupy **two physical slots**. A write always targets the *non-current* slot with `PairGeneration = current+1` + a fresh CRC, fsyncs, then flips the in-memory current pointer. The current-valid slot is **never** overwritten, so a torn write can't destroy the only good copy — reopen selects the highest-generation CRC-valid slot; both-invalid fails the open loudly. This is what protects the structural pages that rebuild (§6) can't re-derive.
+The meta page (root header + bootstrap dictionary + the `DurabilityWatermarks` block) and every segment-directory page occupy **two physical slots**. A write always targets the *non-current* slot with `PairGeneration = current+1` + a fresh CRC, fsyncs, then flips the in-memory current pointer. The current-valid slot is **never** overwritten, so a torn write can't destroy the only good copy — reopen selects the highest-generation CRC-valid slot; both-invalid fails the open loudly. This is what protects the structural pages that rebuild ([§6](#6-torn-page-safety-no-fpi)) can't re-derive.
 
 ### [`DurabilityWatermarks`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/DurabilityWatermarks.cs)
 
@@ -259,7 +259,7 @@ The watermark block persisted in the meta-pair carries:
 | `CheckpointLSN` | highest LSN consolidated into the data file (stored as lo32/hi32) |
 | `CleanShutdown` | set on graceful shutdown; a missing/false flag at open ⇒ crash path |
 
-`UpdateCheckpointLsn` advances the LSN and flips the meta pair atomically; `Read` / `ReadCheckpointLsn` / `ReadCleanShutdown` are used at open. (`NextFreeTSN` is *not* persisted here — it is restored from the recovered records, RB-05, §7.)
+`UpdateCheckpointLsn` advances the LSN and flips the meta pair atomically; `Read` / `ReadCheckpointLsn` / `ReadCleanShutdown` are used at open. (`NextFreeTSN` is *not* persisted here — it is restored from the recovered records, RB-05, [§7](#7-recovery).)
 
 ### [`StagingBufferPool`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Durability/internals/StagingBufferPool.cs)
 
@@ -289,7 +289,7 @@ Typhon's 8 KB pages span two 4 KB device blocks; consumer NVMe makes 8 KB writes
 | **Derived** (Occupancy) | Usually healed — `RederiveOccupancyOnCrash` rebuilds the bitmap from actual segment ownership. Exception: if a persisted archetype or component segment pointer cannot be read during reconstruction, it throws rather than adopting a partial bitmap (partial ⇒ live pages marked free). That throw manifests as a loud open failure, not a silent bad rebuild. | CK-09 |
 | **Primary** (component/revision content, EntityMap, cluster, collections, string table, system) | **Heal-or-loud-fail**: recorded *suspect* during recovery; resolved after rebuild — if the page no longer backs a live chunk (entity re-created in-window, scrub freed the old) → healed; if it still backs a live primary chunk → **the open FAILS LOUDLY** naming the page (`ResolveSuspectPrimaryPages`). | RB-04 |
 
-This is the defining safety property: a torn primary page is never silently served as if intact. Because every primary segment is a `ChunkBasedSegment`, `ResolveSuspectPrimaryPages` (`IsDerivedSegmentKind` = `Index | Spatial | Occupancy`) loud-fails uniformly — there is no silent-corruption path. The A/B slot-pairing (§5) covers the structural meta/directory pages that rebuild can't re-derive.
+This is the defining safety property: a torn primary page is never silently served as if intact. Because every primary segment is a `ChunkBasedSegment`, `ResolveSuspectPrimaryPages` (`IsDerivedSegmentKind` = `Index | Spatial | Occupancy`) loud-fails uniformly — there is no silent-corruption path. The A/B slot-pairing ([§5](#5-checkpoint-v2)) covers the structural meta/directory pages that rebuild can't re-derive.
 
 > CRC checking is what *detects* the tear; the *response* is rebuild or loud-fail, never page repair. An uncovered torn primary page is genuinely lost data, and failing the open is the honest outcome.
 
@@ -311,7 +311,7 @@ Recovery runs at engine open, before any transaction is accepted, as **two coope
 | 6 — TickFence replay | Apply `TickFence` (per-SV-table) and `ClusterTickFence` (per-archetype) entries — SingleVersion / cluster state that has no per-record WAL trail. |
 | 7 — Finalize | Emit stats. |
 
-> The phase numbers skip 4 and 5 by design: this pass performs no torn-page repair and no record replay of its own. `RecoveryDriver` (§7.2) owns logical-record apply, and rebuilding derived structures covers what a full-page image would otherwise repair. This pass and the persisted `UowRegistry` it consults are slated for removal in a pending cleanup.
+> The phase numbers skip 4 and 5 by design: this pass performs no torn-page repair and no record replay of its own. `RecoveryDriver` ([§7.2](#72-logical-apply--recoverydriver--recoveryapplier)) owns logical-record apply, and rebuilding derived structures covers what a full-page image would otherwise repair. This pass and the persisted `UowRegistry` it consults are slated for removal in a pending cleanup.
 
 ### 7.2 Logical apply — `RecoveryDriver` + `RecoveryApplier`
 
@@ -335,7 +335,7 @@ After apply, `DatabaseEngine.RunWalV2Recovery` completes the base:
 
 1. **Scrub (RB-03)** — collapse every Versioned revision chain to its single committed HEAD; free non-head revision / overflow chunks; sweep orphaned chunks.
 2. **Rebuild (RB-01)** — rebuild every derived structure from the scrubbed primary data: secondary B+Trees (`RebuildSecondaryIndexes`), EntityMap, occupancy bitmap (`RederiveOccupancyOnCrash`, CK-09).
-3. **Suspect resolution (RB-04)** — classify pages that failed CRC during recovery (§6): derived/orphaned suspects are already healed; a suspect still backing a live primary chunk fails the open loudly.
+3. **Suspect resolution (RB-04)** — classify pages that failed CRC during recovery ([§6](#6-torn-page-safety-no-fpi)): derived/orphaned suspects are already healed; a suspect still backing a live primary chunk fails the open loudly.
 4. **Seal** — a final checkpoint cycle persists the recovered base; `CheckpointLSN` advances; WAL becomes recyclable.
 
 ### Page checksum verification
@@ -373,10 +373,10 @@ Free → Pending → Void → Free                          (crash recovery)
 ```
 
 - `Pending → WalDurable` after `WaitForDurable` confirms the LSN is durable.
-- `WalDurable → Committed` via `UowRegistry.TransitionWalDurableToCommitted()`, invoked by the checkpoint (§5).
+- `WalDurable → Committed` via `UowRegistry.TransitionWalDurableToCommitted()`, invoked by the checkpoint ([§5](#5-checkpoint-v2)).
 - `Pending → Void` during recovery's cross-reference phase (`VoidRemainingPending`); a committed bitmap then filters ghost revisions for post-crash visibility.
 
-> **The registry is redundant for commit fate.** Commit fate is the WAL `TxCommit` marker (§7.2); the registry's one live role is post-crash ghost-visibility filtering. It is slated to be **demoted to a volatile in-memory id allocator** — dropping the persistence, the `Void` state, and the committed bitmap — as a pending cleanup. The states above are documented because the current code holds and runs them.
+> **The registry is redundant for commit fate.** Commit fate is the WAL `TxCommit` marker ([§7.2](#72-logical-apply--recoverydriver--recoveryapplier)); the registry's one live role is post-crash ghost-visibility filtering. It is slated to be **demoted to a volatile in-memory id allocator** — dropping the persistence, the `Void` state, and the committed bitmap — as a pending cleanup. The states above are documented because the current code holds and runs them.
 
 ---
 

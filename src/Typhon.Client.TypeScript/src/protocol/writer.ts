@@ -144,6 +144,19 @@ export class WireWriter {
     this.pos += 4;
   }
 
+  /** A little-endian IEEE double; NaN as `0x7FF8000000000000`, the canonical pattern the C# writer emits. */
+  f64(value: number): void {
+    this.ensure(8);
+    if (value !== value) {
+      this.view.setUint32(this.pos, 0, true);
+      this.view.setUint32(this.pos + 4, 0x7ff80000, true);
+    } else {
+      this.view.setFloat64(this.pos, value, true);
+    }
+
+    this.pos += 8;
+  }
+
   /** An IEEE half converted directly from `value` (W10). */
   f16(value: number): void {
     this.u16(encodeF16(value));

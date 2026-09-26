@@ -207,7 +207,7 @@ public struct StructureOwner
 
 Links can be self-referential — the sample's resource taxonomy is a tree built from `EntityLink<ResourceTypeArch> Parent` on `ResourceType`.
 
-> ⚠️ **Don't chase links in a hot loop.** A foreign key is an *indirection*: resolving one is a random lookup that defeats the contiguous-memory bet §1 is built on. In the sample, every link models a genuine ownership/membership/taxonomy edge that gets walked at event cadence (a player logs in, a structure is placed) — **none** is dereferenced per-entity per-tick. If you find yourself following a link inside a per-tick system over thousands of entities, that's usually a signal to denormalise the value you need into the entity itself.
+> ⚠️ **Don't chase links in a hot loop.** A foreign key is an *indirection*: resolving one is a random lookup that defeats the contiguous-memory bet [§1](#1-the-shape-components-archetypes-entities) is built on. In the sample, every link models a genuine ownership/membership/taxonomy edge that gets walked at event cadence (a player logs in, a structure is placed) — **none** is dereferenced per-entity per-tick. If you find yourself following a link inside a per-tick system over thousands of entities, that's usually a signal to denormalise the value you need into the entity itself.
 
 ### `ComponentCollection<T>` — a variable number of child rows
 
@@ -285,6 +285,10 @@ Three spatial predicates cover the common needs:
 - `WhereRay<T>(origin…, dir…, maxDist)` — first hits along a ray (line of sight, scans).
 
 That's the user-facing surface, and it is where the *free* part ends. Keeping the index live as thousands of characters move every tick costs real per-tick work — the fence recomputes cluster bounds, migrates entities across cells, and re-packs cells whose layout has decayed — and the size you gave `cellSize` above is the single number that most changes that bill. Read [What Spatial Costs You](../feature-set/Spatial/spatial-cost-model.md) before you declare a second spatial archetype; it covers the four cost centres and the rule for choosing a cell size. [07-spatial](../in-depth-overview/07-spatial.md) is the mechanism underneath, if you want it.
+
+> **Several worlds?** The grid you just configured is realm 0, the default world, and everything above works without ever naming a realm. When one
+> server hosts isolated worlds at different scales — planets, building interiors, space — register each as a realm with its own grid, give the
+> archetypes that travel between them a `[RealmKey]`, and query with `.InRealm(realm)`: [Realms — Several Worlds in One Engine](../feature-set/Spatial/realms.md).
 
 ---
 

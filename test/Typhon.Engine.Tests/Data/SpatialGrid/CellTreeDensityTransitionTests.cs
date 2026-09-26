@@ -83,13 +83,14 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
     /// <summary>The dynamic half of the cell containing (x, y): its cluster count and whether a tree is holding it.</summary>
     private static ShapePerTick ObserveCell(DatabaseEngine dbe, ArchetypeClusterState cs, int tick, float x, float y)
     {
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(x, y, 0f);
-        if (cellKey < 0 || cs.PerCellIndex == null || cellKey >= cs.PerCellIndex.Length || cs.PerCellIndex[cellKey] == null)
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(x, y, 0f);
+        var perCell = cs.Realm0Spatial.PerCellIndex;
+        if (cellKey < 0 || perCell == null || cellKey >= perCell.Length || perCell[cellKey] == null)
         {
             return new ShapePerTick(tick, 0, false);
         }
 
-        var slot = cs.PerCellIndex[cellKey];
+        var slot = cs.Realm0Spatial.PerCellIndex[cellKey];
         return slot.HasDynamicTree
             ? new ShapePerTick(tick, slot.DynamicTree.ClusterCount, true)
             : new ShapePerTick(tick, slot.DynamicIndex?.ClusterCount ?? 0, false);
@@ -258,7 +259,7 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
         }
         dbe.WriteTickFence(1);
 
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0),
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
             "the seed population did not promote any cell, so the run below would exercise the parallel fence against linear indexes only");
 
         const int motionTicks = 40;
@@ -303,7 +304,7 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
                     {
                         maxMigrateChunks = plan.ChunkCount;
                     }
-                    if (items >= 2 && plan.ChunkCount >= 2 && migrations > lastMigrations && cs.PromotedCellCount > 0)
+                    if (items >= 2 && plan.ChunkCount >= 2 && migrations > lastMigrations && cs.Realm0Spatial.PromotedCellCount > 0)
                     {
                         concurrentTicks++;
                     }
@@ -354,7 +355,8 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
         Assert.That(Volatile.Read(ref ticks), Is.GreaterThanOrEqualTo(motionTicks), "the runtime did not complete the motion ticks");
         Assert.That(cs.TotalMigrationCount, Is.GreaterThan(0),
             "no cluster ever changed cell, so the Migrate phase never ran and this test proves nothing about it");
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "promotion was undone during the run, so the assertions below are about linear indexes");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0),
+            "promotion was undone during the run, so the assertions below are about linear indexes");
         Assert.That(concurrentTicks, Is.GreaterThan(0),
             $"no single tick migrated clusters across >=2 Migrate work items in >=2 chunks while a cell was promoted (peak {maxMigrateItems} items, "
             + $"{maxMigrateChunks} chunks) — the Migrate phase never fanned out alongside a live tree, so nothing here exercised the hazard");
@@ -605,7 +607,7 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
             // The production callers (InitializeArchetypes, RebuildClusterFromChains) run inside an epoch scope; the method assumes one and asserts on it.
             using (EpochGuard.Enter(dbe.EpochManager))
             {
-                cs.RebuildSpatialStateFromData(dbe.SpatialGrid, dbe.EpochManager);
+                cs.RebuildSpatialStateFromData(dbe.Realm0Grid, dbe.EpochManager);
             }
 
             Assert.That(ObserveCell(dbe, cs, pass, 1f, 1f).IsTree, Is.True, $"pass {pass}: the rebuild did not re-promote, so later passes discard nothing");
@@ -652,7 +654,7 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
         using var scope = ServiceProvider.CreateScope();
         using var dbe = SetupEngine(scope, int.MaxValue);
         var cs = ClusterStateOf(dbe);
-        var cellKey = dbe.SpatialGrid.WorldToCellKey(1f, 1f, 0f);
+        var cellKey = dbe.Realm0Grid.WorldToCellKey(1f, 1f, 0f);
 
         var rng = new Random(917);
         using (var tx = dbe.CreateQuickTransaction())
@@ -681,7 +683,7 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
                 var stage = $"round {round}, forced onto the {(tree ? "tree" : "linear scan")}";
                 Assert.That(switched, Is.True, $"{stage}: the switch was refused");
                 Assert.That(ObserveCell(dbe, cs, round, 1f, 1f).IsTree, Is.EqualTo(tree), $"{stage}: the half is on the other structure");
-                Assert.That(cs.PromotedCellCount, Is.EqualTo(tree ? 1 : 0), $"{stage}: the promoted-cell count does not match the structure");
+                Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.EqualTo(tree ? 1 : 0), $"{stage}: the promoted-cell count does not match the structure");
                 AssertQueryMatchesStorage(dbe, cs, stage);
             }
         }
@@ -754,9 +756,9 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
         }
 
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
-        for (int cellKey = 0; cellKey < cs.PerCellIndex.Length; cellKey++)
+        for (int cellKey = 0; cellKey < cs.Realm0Spatial.PerCellIndex.Length; cellKey++)
         {
-            var tree = cs.PerCellIndex[cellKey]?.DynamicTree;
+            var tree = cs.Realm0Spatial.PerCellIndex[cellKey]?.DynamicTree;
             if (tree == null)
             {
                 continue;
@@ -809,7 +811,7 @@ class CellTreeDensityTransitionTests : TestBase<CellTreeDensityTransitionTests>
         var actual = new HashSet<long>();
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, WorldExtent, WorldExtent, float.PositiveInfinity))
             {
                 actual.Add(SlotKey(r.ClusterChunkId, r.SlotIndex));
             }

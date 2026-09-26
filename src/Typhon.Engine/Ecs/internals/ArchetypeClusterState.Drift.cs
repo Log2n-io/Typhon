@@ -322,7 +322,8 @@ internal sealed unsafe partial class ArchetypeClusterState
                 destCluster = MigrationRequest.FreshCluster;
             }
 
-            driftBuffer.Add(new MigrationRequest(clusterChunkId, slotIndex, cellKey, destCluster, MigrationRequest.AnySlot, MigrationKind.Relocation));
+            driftBuffer.Add(new MigrationRequest(clusterChunkId, slotIndex, grid.Realm.Value, cellKey, destCluster, MigrationRequest.AnySlot,
+                MigrationKind.Relocation));
         }
     }
 
@@ -547,15 +548,16 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal void BuildRelocationCandidates(int cellKey, int sourceClusterChunkId, ref ChunkAccessor<PersistentStore> accessor,
         List<RelocationCandidate> candidates)
     {
+        var rs = SpatialOfCluster(sourceClusterChunkId);
         candidates.Clear();
-        if (CellClusterPool == null || ClusterAabbs == null)
+        if (rs.CellClusterPool == null || ClusterAabbs == null)
         {
             return;
         }
 
         var excludeDraining = _repairSourceExclusions.Count > 0;
 
-        var clusters = CellClusterPool.GetClusters(cellKey);
+        var clusters = rs.CellClusterPool.GetClusters(cellKey);
         for (var i = 0; i < clusters.Length; i++)
         {
             var candidate = clusters[i];

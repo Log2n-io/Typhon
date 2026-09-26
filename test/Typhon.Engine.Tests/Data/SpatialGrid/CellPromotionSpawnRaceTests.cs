@@ -106,7 +106,7 @@ class CellPromotionSpawnRaceTests : TestBase<CellPromotionSpawnRaceTests>
         // promotion retires, making "not indexed" the correct answer and leaving nothing to corrupt. Landing the racer in an EXISTING cluster puts its
         // back-pointer among the retired handles, which is the read #940 is about.
         SpawnInto(dbe, (64 * (PromoteAt - 1)) - 1, 10f, 10f);
-        Assert.That(cs.PromotedCellCount, Is.Zero, "precondition: the cell must not have promoted yet");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.Zero, "precondition: the cell must not have promoted yet");
         var indexedBefore = 0;
         for (var i = 0; i < cs.ActiveClusterCount; i++)
         {
@@ -228,7 +228,7 @@ class CellPromotionSpawnRaceTests : TestBase<CellPromotionSpawnRaceTests>
                 Assert.That(float.IsPositiveInfinity(box.MinX), Is.False,
                     $"cluster {chunkId} holds entities but its bound was reset to Empty — a spawn acted on the retired back-pointers (CA-01)");
 
-                dbe.SpatialGrid.CellOrigin(cellKey, out var originX, out var originY, out _);
+                dbe.Realm0Grid.CellOrigin(cellKey, out var originX, out var originY, out _);
 #pragma warning disable TYPHON009
                 var positions = cluster.GetSpan(PcpUnit.Pos);
 #pragma warning restore TYPHON009

@@ -19,7 +19,7 @@ Everything starts from `tx.Query<TArchetype>()`.
 
 ## 1. Building a query
 
-`Query<Character>()` returns a builder you refine with chainable filters. Nothing runs until a terminal call (§2).
+`Query<Character>()` returns a builder you refine with chainable filters. Nothing runs until a terminal call ([§2](#2-running-a-query)).
 
 ### Which entities — by component shape
 
@@ -53,7 +53,7 @@ tx.Query<Character>().WhereField<Faction>(f => f.Value == Factions.Imperial)
 tx.Query<Character>().Where<Ham>(h => h.Health < h.MaxHealth)
 ```
 
-> 💡 **`Where` vs `WhereField` — pick deliberately.** `Where<T>(lambda)` takes any C# predicate and runs it against *every* entity the rest of the query admits — total freedom, linear cost. `WhereField<T>(expression)` is restricted to an **indexed** field and a comparable expression, which lets the engine narrow the candidates *through the index* instead of scanning, and is the form that backs an **incremental** live view (§3) — a free `Where` can still back a *pull* view that recomputes on refresh. Rule of thumb: filter on an indexed field with `WhereField`; use `Where` for computed or non-indexed conditions (like `Health < MaxHealth`, which compares two fields and can't be a simple index lookup). You can chain both — `WhereField` to narrow, `Where` to refine.
+> 💡 **`Where` vs `WhereField` — pick deliberately.** `Where<T>(lambda)` takes any C# predicate and runs it against *every* entity the rest of the query admits — total freedom, linear cost. `WhereField<T>(expression)` is restricted to an **indexed** field and a comparable expression, which lets the engine narrow the candidates *through the index* instead of scanning, and is the form that backs an **incremental** live view ([§3](#3-live-views--results-that-stay-current)) — a free `Where` can still back a *pull* view that recomputes on refresh. Rule of thumb: filter on an indexed field with `WhereField`; use `Where` for computed or non-indexed conditions (like `Health < MaxHealth`, which compares two fields and can't be a simple index lookup). You can chain both — `WhereField` to narrow, `Where` to refine.
 
 ### Which entities — by geometry
 
@@ -151,7 +151,7 @@ When the consumer is remote (a connected game client, a browser, another process
 
 You declare what each archetype exposes and which profile a session follows — the whole world, a radius around an entity, or a footprint the client sends — and after each write you want seen, your system calls `ctx.Subscriptions.Replicate(…)`. The engine compares and encodes each changed entity once, gives every session the changes around it, and drains typed commands from clients into the next tick, where ordinary systems validate them. Clients decode against a catalog rather than C# type layouts, so browsers and native clients share one wire.
 
-Subscriptions don't read views: they're built from declared projections and answered from geometry. They have a chapter of their own — **[ch.7, serving remote clients](07-subscriptions.md)**. Everything in §3 above is unaffected.
+Subscriptions don't read views: they're built from declared projections and answered from geometry. They have a chapter of their own — **[ch.7, serving remote clients](07-subscriptions.md)**. Everything in [§3](#3-live-views--results-that-stay-current) above is unaffected.
 
 ---
 

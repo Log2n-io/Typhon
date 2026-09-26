@@ -131,8 +131,24 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             Plans = ProjectionCompiler.Compile(registry, engine, NominalTickPeriodSeconds, LargestTickMultiplier, Options.ReplicationCellM,
                 Options.VisibilitySlackMForTest);
 
-            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames,
-                engine.SpatialGrid?.Config);
+            Catalog = CatalogBuilder.Build(registry, Plans, CatalogBuilder.DefaultAppName, appRevision: 0, (int)NominalTickPeriodUs, systemNames);
+
+            // The served realm's frame (typhon.3): what every position a session of it receives, and every position it sends, is quantized over.
+            // Every registered realm's kind must be declared (12-realms § 2.7): a kind nobody declared picks no variant.
+            var kinds = Catalog.Canonical.RealmKinds ?? [""];
+            var registered = engine.RealmTable != null ? engine.RealmTable.Registered : [];
+            foreach (var realm in registered)
+            {
+                var kind = realm.Config?.Replication?.Kind;
+                if (kind != null && Array.IndexOf(kinds, kind) < 0)
+                {
+                    throw new InvalidOperationException(
+                        $"Realm {realm.Id.Value} is of kind '{kind}', which Subscriptions.RealmKinds does not declare (12-realms § 2.7).");
+                }
+            }
+
+            Realm0Frame = BuildRealm0Frame(engine, Options, Math.Max(0, Array.IndexOf(kinds,
+                engine.RealmTable?.TryGet(RealmId.Default.Value)?.Config?.Replication?.Kind ?? "")));
 
             _sessions = new SessionTable("Subscriptions.Sessions", parent, engine.MemoryAllocator, Options, registry.Sessions.SessionEvents);
 
@@ -140,7 +156,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
             // Built after the session table, whose rows name each session's profile. It resolves every profile to plan indices here, so the tick path never
             // looks an archetype up by Type.
-            Profiles = new SubscriptionProfiles(Plans, registry, _sessions);
+            Profiles = new SubscriptionProfiles(Plans, registry, _sessions, Catalog.Canonical.RealmKinds);
 
             // S2b (P1-13b). It owns the frame pool and the per-slot hand-off counters, so a frame's whole lifetime — gathered, encoded, published, released —
             // lives behind one field here rather than spread across the tick-scoped context.
@@ -148,6 +164,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 NominalTickPeriodUs);
             _frames.Profiles = Profiles;
             _frames.Engine = engine;
+            _frames.Realm = Realm0Frame;
 
             // The push path (ADR-067): every archetype some profile observes is served by it.
             var observed = Profiles.ObservedArchetypes;
@@ -184,10 +201,34 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             if (Array.IndexOf(observed, true) >= 0)
             {
                 // Null only when no spatial grid is configured, and then an observed archetype has no position, which the push path refuses by name first.
-                var spatial = engine.SpatialGrid;
-                Grid = spatial == null ? null : ReplicationGrid.Resolve(Options.ReplicationCellM, spatial.Config, Profiles.MaxRadius);
+                var spatial = engine.Realm0Grid;
+                // Sized for the variants that serve realm 0's kind (12-realms § 1.4), not for every kind's: a space variant's radius does not bound a planet.
+                Grid = spatial == null ? null : ReplicationGrid.Resolve(Options.ReplicationCellM, spatial.Config, Profiles.MaxRadiusFor(Realm0Frame?.KindIdx ?? 0));
                 Push = PushReplication.Create(Plans, _replicationStates, observed, automatic, Grid, Options.MaxSessions, Options.PushShadow,
                     Options.ForceDeepReplicationForTest);
+
+                // The engine-wide collector (R4.1), serving realm 0's replication; the stages below loop over its served realms as they are added.
+                Hub = new PushHub(_replicationStates, observed, automatic, Push, Options.MaxSessions);
+
+                // SUB-30: what the projection quantizes with (the plans' frames) and what every RESET tells a client (the REALM block) are two computations
+                // from the same grid; they must agree to the bit.
+                for (var a = 0; a < Plans.Length; a++)
+                {
+                    var own = Plans[a].Position?.Frame;
+                    if (own == null || Realm0Frame == null)
+                    {
+                        continue;
+                    }
+
+                    for (var axis = 0; axis < own.Dims; axis++)
+                    {
+                        if (own.Bits != Realm0Frame.PositionBits || own.Min[axis] != Realm0Frame.Min[axis] || own.Step[axis] != Realm0Frame.Step[axis])
+                        {
+                            throw new InvalidOperationException(
+                                $"Plan {a}'s position frame and realm 0's REALM block disagree on axis {axis}: a client would decode other places (SUB-30).");
+                        }
+                    }
+                }
                 for (var a = 0; a < observed.Length; a++)
                 {
                     if (observed[a])
@@ -198,17 +239,20 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 }
 
                 _frames.Push = Push;
-                var (farPhase, farWindow) = Profiles.FarFold;
-                Push.ConfigureFar(farPhase, farWindow);
-                var encodePlans = new ArchetypeEncodePlan[Plans.Length];
+                _engine = engine;
+                _observed = observed;
+                _automatic = automatic;
+                _encodePlans = new ArchetypeEncodePlan[Plans.Length];
                 for (var a = 0; a < Plans.Length; a++)
                 {
-                    encodePlans[a] = _frames.EncodePlanOf(a);
+                    _encodePlans[a] = _frames.EncodePlanOf(a);
                 }
 
-                Push.AttachEncodePlans(encodePlans);
-                ConfigureAggregates(observed);
-                ConfigureRegions();
+                ConfigureRealm(Push, Grid, Realm0Frame, Realm0Frame?.KindIdx ?? 0, first: true);
+
+                // Every other realm is served the first time a session is placed in it (R4.4), from its own grid and replication config.
+                Hub.Factory = CreateRealmReplication;
+                Hub.RealmIdentity = id => _engine.RealmTable?.TryGet(id);
             }
 
             // The send side (P1-14b). It holds no memory of its own beyond one view and one work item per slot; what it carries is the rule that a frame
@@ -230,6 +274,11 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 Options.MaxSessions, _sendPump);
             _frames.Ingress = _ingress;
             _ingress.Frames = _frames;
+            _ingress.Realm = Realm0Frame;
+            _ingress.Realms = engine.RealmTable;
+            _ingress.Profiles = Profiles;
+            _ingress.MultiRealm = engine.ConfiguredMaxRealms > 1;
+            _frames.MultiRealm = _ingress.MultiRealm;
             _ingress.ReplicationStates = _replicationStates;
 
             // netId → entity for a command's entity references (SUB-26): the projection binds each identity it assigns, and every release unbinds it.
@@ -242,6 +291,53 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             }
             // Events (09 § 11): compiled against the catalog, and one commands view per worker slot, so Emit records into the worker's own buffer.
             Events = EventHub.Build(registry, CatalogPlan);
+            if (Events != null)
+            {
+                Events.Realm = Realm0Frame;
+                Events.RealmFrames = _frames.RealmFrameFor;
+
+                // With several realms a point is a place only with its realm (12-realms § 2.7): a realm-less RouteNear would file every point in realm 0.
+                for (var i = 0; engine.ConfiguredMaxRealms > 1 && i < registry.Events.Count; i++)
+                {
+                    var declaration = registry.Events[i];
+                    if (declaration.Routing == EventRouting.Near && declaration.RoutingRealmReader == null)
+                    {
+                        throw new NotSupportedException(
+                            $"Event '{declaration.Name}' routes Near without a realm, and this engine holds several: declare RouteNear(point, realm) " +
+                            "(12-realms § 2.7).");
+                    }
+
+                    // A position is a place only in one realm's frame (SUB-30); a session-addressed event reaches sessions of every realm.
+                    if (declaration.Routing is EventRouting.Broadcast or EventRouting.ToOwner or EventRouting.ToSession)
+                    {
+                        foreach (var field in CatalogPlan.EventByName(declaration.Name)?.Body.Fields ?? [])
+                        {
+                            if (field.Kind is CodecKind.Pos2 or CodecKind.Pos3)
+                            {
+                                throw new NotSupportedException(
+                                    $"Event '{declaration.Name}' carries position '{field.Name}' and reaches sessions of every realm ({declaration.Routing}): a " +
+                                    "position means a place in one realm only. Route it to a realm (RouteNear, RouteToKnown, RouteToRealm) (SUB-30).");
+                            }
+                        }
+                    }
+                }
+
+                // A position field is realm-framed (SUB-30): with no spatial world there is no frame to encode it over, and every emission would be
+                // rejected on the tick. Refused here instead.
+                for (var i = 0; Realm0Frame == null && i < registry.Events.Count; i++)
+                {
+                    var body = CatalogPlan.EventByName(registry.Events[i].Name)?.Body;
+                    foreach (var field in body?.Fields ?? [])
+                    {
+                        if (field.Kind is CodecKind.Pos2 or CodecKind.Pos3)
+                        {
+                            throw new NotSupportedException(
+                                $"Event '{registry.Events[i].Name}' carries position '{field.Name}', which needs a spatial world: configure a spatial grid.");
+                        }
+                    }
+                }
+            }
+
             _frames!.Events = Events;
             var workerSlots = (parent as DagScheduler)?.WorkerSlotCount ?? 0;
             Events?.BindWorkerSlots(workerSlots);
@@ -355,30 +451,85 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// ClientRegion sessions (09 § 7): one window width, sized for the widest extent any profile accepts, bounded like a Sphere's window, and the archetype
     /// sets the near budgets count.
     /// </summary>
-    private void ConfigureRegions()
+    // What every realm's replication is built from (R4.4): the engine, the plans' push flags and encode plans, and the near budgets' archetype sets.
+    private DatabaseEngine _engine;
+    private bool[] _observed;
+    private bool[] _automatic;
+    private ArchetypeEncodePlan[] _encodePlans;
+    private ArchetypeSet[] _nearSets;
+
+    /// <summary>Why the last realm whose replication could not be built was refused; diagnostics only.</summary>
+    internal string LastUnservableRealm { get; private set; }
+
+    // A realm's replication: far fold, encode plans, aggregates over its frame and region windows over its grid. The first (realm 0's, at Start) also binds
+    // the profiles' aggregates and near budgets, which are realm-independent.
+    private void ConfigureRealm(PushReplication push, ReplicationGrid grid, RealmFrame frame, int kind, bool first)
     {
-        // ClientRegion (09 § 7): one window width for every region session, sized for the widest extent any profile accepts, and bounded like a Sphere's
-        // window — the cells a gather pays for.
-        var edge = Profiles.MaxRegionEdgeM;
+        var (farPhase, farWindow) = Profiles.FarFold;
+        push.ConfigureFar(farPhase, farWindow);
+        push.AttachEncodePlans(_encodePlans);
+        ConfigureAggregates(push, frame, first);
+        ConfigureRegions(push, grid, kind);
+    }
+
+    /// <summary>
+    /// Builds <paramref name="realm"/>'s replication the first time a session is placed in it (R4.4): its grid at its declared cell, its codecs over its
+    /// bounds and width, its aggregates and region windows. Null when the realm declares no replication, or when its grid cannot serve the declared
+    /// profiles — refused, counted by the hub, never thrown: this runs in the frame prologue.
+    /// </summary>
+    private PushReplication CreateRealmReplication(ushort realm)
+    {
+        var entry = _engine?.RealmTable?.TryGet(realm);
+        var config = entry?.Config?.Replication;
+        if (entry == null || config == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            // Sized for the variants that serve the realm's kind, not for every profile's (12-realms § 1.4).
+            var grid = ReplicationGrid.Resolve(config.CellM, entry.GridConfig, Profiles.MaxRadiusFor(Profiles.KindIndex(config.Kind)));
+            var codecs = RealmCodecs.Create(realm, in entry.GridConfig, Plans, config.PositionBits);
+            var push = PushReplication.Create(Plans, _replicationStates, _observed, _automatic, grid, Options.MaxSessions, Options.PushShadow,
+                Options.ForceDeepReplicationForTest, realm, codecs);
+            var kind = Math.Max(0, Profiles.KindIndex(config.Kind));
+            var frame = BuildRealmFrame(_engine, Options, realm, kind);
+            ConfigureRealm(push, grid, frame, kind, first: false);
+            return push;
+        }
+        catch (Exception e) when (e is NotSupportedException or InvalidOperationException or ArgumentException)
+        {
+            LastUnservableRealm = $"realm {realm}: {e.Message}";
+            return null;
+        }
+    }
+
+    private void ConfigureRegions(PushReplication push, ReplicationGrid grid, int kind)
+    {
+        // ClientRegion (09 § 7): one window width for every region session of the realm, sized for the widest extent a variant serving its kind accepts,
+        // and bounded like a Sphere's window — the cells a gather pays for.
+        var edge = Profiles.MaxRegionEdgeFor(kind);
         if (edge <= 0)
         {
             return;
         }
 
         // The implementation's depth, not the grid's: the deep one (a flat grid served deep only in tests) keeps W² rows of W cells.
-        var window = (long)Math.Ceiling(edge / Grid.CellM) + 5;
-        var cells = window * window * (Push.Deep ? window : 1);
+        var window = (long)Math.Ceiling(edge / grid.CellM) + 5;
+        var cells = window * window * (push.Deep ? window : 1);
         if (window > 64 || cells > ReplicationGrid.MaxWindowCells)
         {
-            var widest = Push.Deep ? 9 : 48;
+            var widest = push.Deep ? 9 : 48;
             throw new InvalidOperationException(
-                $"A ClientRegion accepts regions {edge} m wide, and with SubscriptionsOptions.ReplicationCellM = {Grid.CellM} its sessions' window would be " +
+                $"A ClientRegion accepts regions {edge} m wide, and with a replication cell of {grid.CellM} m its sessions' window would be " +
                 $"{window} cells per axis (⌈maxEdgeM / c⌉ + 5), {cells} cells, past the bound of {ReplicationGrid.MaxWindowCells}. In a " +
-                $"{(Push.Deep ? "deep" : "flat")} grid maxEdgeM is at most {widest} cells, {widest * Grid.CellM} m: lower it, or raise the cell side to at " +
+                $"{(push.Deep ? "deep" : "flat")} grid maxEdgeM is at most {widest} cells, {widest * grid.CellM} m: lower it, or raise the cell side to at " +
                 $"least {Math.Ceiling(edge / widest * 1000d) / 1000d} m.");
         }
 
-        Push.ConfigureRegions((int)window, Profiles.BindNearCounts().ToArray());
+        _nearSets ??= Profiles.BindNearCounts().ToArray();
+        push.ConfigureRegions((int)window, _nearSets);
     }
 
     /// <summary>
@@ -386,8 +537,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// cells over the same origin — the counts follow cell changes, so a tile edge inside a cell would let a move cross it unseen — and every archetype a grid
     /// counts must be one push replication serves.
     /// </summary>
-    private void ConfigureAggregates(bool[] observed)
+    private void ConfigureAggregates(PushReplication push, RealmFrame realmFrame, bool bindProfiles)
     {
+        var observed = _observed;
         var canonical = Catalog.Canonical.Grids ?? [];
         if (canonical.Length == 0)
         {
@@ -404,13 +556,6 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         for (var g = 0; g < canonical.Length; g++)
         {
             var grid = canonical[g];
-            var cells = grid.Cell / Grid.CellM;
-            if (Math.Abs(cells - Math.Round(cells)) > 1e-9 || Math.Round(cells) < 1)
-            {
-                throw new NotSupportedException(
-                    $"An Aggregate's tile of {grid.Cell} m is not a whole number of the {Grid.CellM} m replication cells: tile counts follow cell changes, so a tile " +
-                    "edge inside a cell would let a move cross it unseen. Declare a multiple of the cell.");
-            }
 
             var columns = new int[Plans.Length];
             Array.Fill(columns, -1);
@@ -427,16 +572,38 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                 columns[plan] = j;
             }
 
-            grids[g] = new AggregateCounts(grid.Idx, grid.Origin[0], grid.Origin[1], grid.Origin.Length > 2 ? grid.Origin[2] : 0d, grid.Cell, grid.Dims[0],
-                grid.Dims[1], grid.Dims.Length > 2 ? grid.Dims[2] : 1, columns, grid.Archetypes.Length);
+            // Laid over the realm's frame (typhon.3, 12-realms § 5.3): the same origin and dimensions a client derives from the REALM block.
+            var frame = realmFrame ?? throw new NotSupportedException("An Aggregate needs a spatial world: configure a spatial grid.");
+            var tiles = grid.TileCells;
+
+            // A client refuses a grid past the catalog's cell limit when it reads the REALM (1007): refused here, at Start, not on every session's first
+            // frame.
+            if (frame.AggregateCellCount(tiles) > CatalogValidator.MaxGridCells)
+            {
+                throw new NotSupportedException(
+                    $"Aggregate grid {grid.Idx}: tiles of {tiles} cells of {frame.CellM} m over this world make {frame.AggregateCellCount(tiles)} tiles, " +
+                    $"above the {CatalogValidator.MaxGridCells} a client accepts. Declare a larger tile.");
+            }
+
+            grids[g] = new AggregateCounts(grid.Idx, frame.Min[0], frame.Min[1], frame.Min[2], tiles * frame.CellM, frame.AggregateDim(0, tiles),
+                frame.AggregateDim(1, tiles), frame.AggregateDim(2, tiles), columns, grid.Archetypes.Length);
         }
 
-        Push.ConfigureAggregates(grids);
+        push.ConfigureAggregates(grids);
+        if (!bindProfiles)
+        {
+            return;
+        }
+
+        // Matched by the tile in cells, as the catalog built it: the metres the grid stores are cells × cellM, which need not equal the declared tile
+        // bit for bit (0.3 m over 0.1 m cells is 3 cells, stored as 0.30000000000000004 m).
+        var cellM = Realm0Frame.CellM;
         Profiles.BindAggregates((tileM, archetypes) =>
         {
+            var tileCells = (long)Math.Round(tileM / cellM);
             for (var g = 0; g < grids.Length; g++)
             {
-                if (grids[g].TileM != tileM)
+                if (canonical[g].TileCells != tileCells)
                 {
                     continue;
                 }
@@ -464,6 +631,46 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     /// <summary>The declared events' hub, or <see langword="null"/> when no event is declared.</summary>
     public EventHub Events { get; }
+
+    /// <summary>
+    /// Realm 0's frame (<c>typhon.3</c>), or <see langword="null"/> without a spatial grid: the <c>REALM</c> block every session's first frame carries, and
+    /// the frame its positions — records, events, commands, regions, aggregate grids — are quantized over (SUB-30).
+    /// </summary>
+    /// <summary>The engine-wide half of push replication: the collector and the served realms' replications (R4.1); null without a push path.</summary>
+    public PushHub Hub { get; private set; }
+
+    public RealmFrame Realm0Frame { get; }
+
+    /// <summary>Realm 0's frame: its grid's bounds, the replication cell, the default width, flat when the replication grid is one cell deep.</summary>
+    internal static RealmFrame BuildRealm0Frame(DatabaseEngine engine, SubscriptionsOptions options, int kindIdx = 0) =>
+        BuildRealmFrame(engine, options, RealmId.Default.Value, kindIdx);
+
+    /// <summary>
+    /// The frame a <c>REALM</c> block carries for <paramref name="realm"/> (12-realms § 2.1): its grid's bounds and its replication's cell, position width
+    /// and tag. Realm 0 is replicated over <see cref="SubscriptionsOptions.ReplicationCellM"/> — the grid its replication was built on — whatever its
+    /// config says; its kind and tag are the config's.
+    /// </summary>
+    internal static RealmFrame BuildRealmFrame(DatabaseEngine engine, SubscriptionsOptions options, ushort realm, int kindIdx)
+    {
+        var entry = engine.RealmTable?.TryGet(realm);
+        var spatial = realm == RealmId.Default.Value ? engine.Realm0Grid : entry?.Grid;
+        if (spatial == null)
+        {
+            return null;
+        }
+
+        var replication = entry?.Config?.Replication;
+
+        ref readonly var config = ref spatial.Config;
+        var cellM = realm != RealmId.Default.Value && replication != null ? replication.CellM
+            : options.ReplicationCellM > 0 ? options.ReplicationCellM : config.CellSize;
+        var generation = engine.PersistedRealmCatalog != null && engine.PersistedRealmCatalog.TryGetValue(realm, out var row)
+            ? (ushort)row.Row.Generation
+            : (ushort)0;
+        return new RealmFrame(realm, generation, kindIdx, replication?.AppTag ?? 0, replication?.PositionBits ?? Codec.DefaultPositionBits, cellM,
+            deep: !ReplicationGrid.IsFlat(config, cellM), [config.WorldMin.X, config.WorldMin.Y, config.WorldMin.Z],
+            [config.WorldMax.X, config.WorldMax.Y, config.WorldMax.Z]);
+    }
 
     /// <summary>The per-archetype replication state, parallel to <see cref="Plans"/>. Empty on an inactive runtime.</summary>
     public ArchetypeReplicationState[] ReplicationStates => _replicationStates;

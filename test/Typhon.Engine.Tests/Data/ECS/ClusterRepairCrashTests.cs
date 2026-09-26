@@ -28,7 +28,8 @@ namespace Typhon.Engine.Tests;
 /// <c>SpatialGrid.GetCell(0)</c> throws a <see cref="NullReferenceException"/> because no cell chunk was ever allocated.
 /// Four arms were run (clean/crash x repair-on/repair-off); the two crash arms failed identically and the two clean arms
 /// passed, so the fault is independent of everything step 12 introduced. Shipping it red would attribute a pre-existing
-/// gap to this step; asserting the broken behaviour would freeze it. It is reported separately instead.</para>
+/// gap to this step; asserting the broken behaviour would freeze it. It was reported separately as #1054, fixed by the recovery's
+/// own spatial rebuild (Realms P0.2), and is covered by <see cref="RecoverySpatialRebuildTests"/>.</para>
 /// </remarks>
 [TestFixture]
 [NonParallelizable]
@@ -171,10 +172,10 @@ class ClusterRepairCrashTests : TestBase<ClusterRepairCrashTests>
         // — which is precisely what an empty destination cluster left behind by an interrupted repair would cause.
         var state = reopened._archetypeStates[ArchetypeId]?.ClusterState;
         Assert.That(state, Is.Not.Null, "the reopened engine has no cluster state for the archetype, so the rebuild never ran");
-        ref var cell = ref reopened.SpatialGrid.GetCell(0);
+        ref var cell = ref reopened.Realm0Grid.GetCell(0);
         Assert.That(cell.EntityCount, Is.EqualTo(Population), "the rebuilt cell entity count disagrees with cluster storage");
 
-        var pooled = state.CellClusterPool.GetClusters(0);
+        var pooled = state.Realm0Spatial.CellClusterPool.GetClusters(0);
         Assert.That(cell.ClusterCount, Is.EqualTo(pooled.Length), "the rebuilt cluster count disagrees with the per-cell pool");
         for (var i = 0; i < pooled.Length; i++)
         {

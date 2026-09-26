@@ -98,7 +98,7 @@ public sealed partial class SimBridge
     /// A travel decision in a city takes the shuttle with probability <see cref="SimConfig.ShuttleShare"/>: point the player at its own city's port and
     /// remember where it is going. False leaves the decision to the ordinary travel branch, untouched.
     /// </summary>
-    private bool TryTakeShuttle(ref PlayerState state, ref PlayerMotion move, float x, float z, uint shareSalt, uint destSalt)
+    private bool TryTakeShuttle(ref PlayerState state, ref PlayerMotion move, float x, float z, ushort planet, uint shareSalt, uint destSalt)
     {
         if (!ShuttlesActive || Hash01(shareSalt) >= _config.ShuttleShare)
         {
@@ -117,7 +117,7 @@ public sealed partial class SimBridge
             dest = (dest + 1) % _index.Cities.Count;
         }
 
-        var (portX, portZ) = _index.Shuttleports[from];
+        var (portX, portZ) = PortsOf(planet)[from];
         move.DestX = portX;
         move.DestZ = portZ;
         move.SpeedMps = TatooineData.PlayerRunSpeedMps;
@@ -128,6 +128,11 @@ public sealed partial class SimBridge
         Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
         return true;
     }
+
+    /// <summary>A planet's shuttleports: the map's cities are every planet's, the ports' coordinates are each planet's own draw.</summary>
+    private List<(float X, float Z)> PortsOf(ushort planet) => PlanetIndexes != null && planet < PlanetIndexes.Length
+        ? PlanetIndexes[planet].Shuttleports
+        : _index.Shuttleports;
 
     /// <summary>The city whose disc contains the point, or -1.</summary>
     private int CityAt(float x, float z)
@@ -198,6 +203,9 @@ public sealed partial class SimBridge
             var motions = cluster.GetSpan(Player.Move);
             var places = cluster.GetReadOnlySpan(Player.Bounds);
             var chunk = cluster.ChunkId;
+            var planet = cluster.Realm.Value;
+            var planetPorts = PortsOf(planet);
+            var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: a divided planet's cluster is seen once in k ticks
             while (queued != 0)
             {
                 var idx = BitOperations.TrailingZeroCount(queued);
@@ -222,21 +230,33 @@ public sealed partial class SimBridge
 
                 // Burst: the whole queue on the landing tick. Trickle: each passenger with probability 1 / (ticks left in the window), which is uniform
                 // over what remains and certain on the last tick, so nobody queued before the window closes misses the shuttle.
+                // At divisor k a visit stands for k ticks: the landing tick falls inside it when phase < k, and a trickle boarding is k times as likely
+                // (review #4: `phase == 0` let a divided planet's burst passengers miss nearly every shuttle).
                 var board = _config.ShuttleBurst
-                    ? phase == 0
-                    : Hash01(Salt(tick, chunk, idx, 0x5A17EE21u)) * (window - phase) < 1f;
+                    ? phase < k
+                    : Hash01(Salt(tick, chunk, idx, 0x5A17EE21u)) * (window - phase) < k;
                 if (!board)
                 {
                     continue;
                 }
 
                 var h = places[idx].HalfExtent;
-                var (portX, portZ) = ports[dest];
-                var r = ArrivalScatterM * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0x2F9B1D63u)));
-                var a = Hash01(Salt(tick, chunk, idx, 0x6C8E9CF5u)) * MathF.PI * 2f;
-                var nb = default(PlayerPlacement);
-                nb.SetAt(Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h), Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h), h);
-                cluster.WriteSpatial(Player.Bounds, idx, nb);
+                var interPlanet = _config.Planets > 1 && planet < _config.Planets && Hash01(Salt(tick, chunk, idx, 0x0B4E1A37u)) < _config.InterPlanetShare;
+                if (interPlanet)
+                {
+                    // Bound for another planet: a realm change, applied by TeleportSystem after this system.
+                    BoardInterPlanet(cluster.GetEntityId(idx), planet, dest, h, Salt(tick, chunk, idx, 0x5D2A0C8Fu));
+                }
+                else
+                {
+                    var (portX, portZ) = planetPorts[dest];
+                    var r = ArrivalScatterM * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0x2F9B1D63u)));
+                    var a = Hash01(Salt(tick, chunk, idx, 0x6C8E9CF5u)) * MathF.PI * 2f;
+                    var nb = default(PlayerPlacement);
+                    nb.SetAt(Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h), Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h),
+                        h);
+                    cluster.WriteSpatial(Player.Bounds, idx, nb);
+                }
 
                 ref var move = ref motions[idx];
                 move.VelX = 0f;
@@ -245,7 +265,12 @@ public sealed partial class SimBridge
                 state.ActivityTicks = (20 * _config.TickRateHz) + (int)(Hash01(Salt(tick, chunk, idx, 0x1B56C4E9u)) * 100 * _config.TickRateHz);
                 TatooineReplication.Replicate(in cluster, idx);
                 boardings++;
-                Interlocked.Increment(ref _portArrivals[dest]);
+
+                // The port probe reads planet 0's ports: only arrivals there count (review #4).
+                if (planet == 0 && !interPlanet)
+                {
+                    Interlocked.Increment(ref _portArrivals[dest]);
+                }
             }
         }
 
@@ -361,7 +386,7 @@ public sealed partial class SimBridge
         {
             var (x, y) = ProbeCentre(port, q);
             var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = AwarenessRadius };
-            hits += CountInRadius<Player>(in sphere);
+            hits += CountInRadius<Player>(in sphere, RealmId.Default);   // the probe watches planet 0's ports
         }
 
         var cold = Stopwatch.GetTimestamp();
@@ -369,7 +394,7 @@ public sealed partial class SimBridge
         {
             var (x, y) = ProbeCentre(port, q);
             var sphere = new BSphere2F { CenterX = x, CenterY = y, Radius = AwarenessRadius };
-            CountInRadius<Player>(in sphere);
+            CountInRadius<Player>(in sphere, RealmId.Default);
         }
 
         var warm = Stopwatch.GetTimestamp();
@@ -386,13 +411,13 @@ public sealed partial class SimBridge
     private unsafe (double Cells, double Scanned, double Overlapping, double Tested, double Pages) CountPortWork(ArchetypeClusterState cs,
         (float X, float Z) port)
     {
-        var perCell = cs?.PerCellIndex;
+        var perCell = cs?.Realm0Spatial?.PerCellIndex;
         if (perCell == null)
         {
             return default;
         }
 
-        var grid = Dbe.SpatialGrid;
+        var grid = Dbe.Realm0Grid;
         long cells = 0;
         long scanned = 0;
         long overlapping = 0;
@@ -472,7 +497,7 @@ public sealed partial class SimBridge
             return;
         }
 
-        var cellKey = Dbe.SpatialGrid.WorldToCellKey(port.X, port.Z, 0d);
+        var cellKey = Dbe.Realm0Grid.WorldToCellKey(port.X, port.Z, 0d);
         var (clusters, toBound, _, _) = SpatialCensus.CellTightness(Dbe, cs, cellKey);
         if (clusters > 0)
         {

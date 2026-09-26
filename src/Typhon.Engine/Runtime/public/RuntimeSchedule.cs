@@ -509,6 +509,8 @@ public sealed class RuntimeSchedule
             systems[sysIdx].WritesVersioned = reg.WritesVersioned;
             systems[sysIdx].TierFilter = reg.TierFilter;
             systems[sysIdx].CellAmortize = reg.CellAmortize;
+            systems[sysIdx].RealmRate = reg.RealmRate;
+            systems[sysIdx].SetRealms(reg.Realms);
             systems[sysIdx].IsCheckerboard = reg.Checkerboard;
             systems[sysIdx].ChunksPerWorker = reg.ChunksPerWorker;
             systems[sysIdx].MinChunkSize = reg.MinChunkSize;
@@ -717,6 +719,15 @@ public sealed class RuntimeSchedule
                 "is not supported — amortization is a per-tier policy (typically used with coarse tiers like SimTier.Tier2).");
         }
 
+        // RT-1: a change filter's input is the previous tick's dirty set, delivered once. Striding it by cellAmortize would drop the changes of every
+        // cluster outside this run's bucket for good — the next run sees the next tick's dirty set, not these.
+        if (reg.CellAmortize > 0 && reg.ChangeFilter is { Length: > 0 })
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': cellAmortize is incompatible with a change filter. A change filter delivers each tick's dirty entities once; " +
+                "amortizing would drop the changes of every cluster outside the current bucket.");
+        }
+
         if (reg.TierFilter != SimTier.All && reg.TierFilter != SimTier.None && reg.Type != SystemType.QuerySystem)
         {
             throw new InvalidOperationException(
@@ -726,6 +737,14 @@ public sealed class RuntimeSchedule
         if (reg.Checkerboard && !reg.Parallel)
         {
             throw new InvalidOperationException($"System '{reg.Name}': checkerboard dispatch requires parallel: true. Add b.Parallel() or parallel: true.");
+        }
+
+        // RT-1 (DSEL-01): a checkerboard system runs its dispatch twice, once per half, but a change filter's input is an entity list with no half —
+        // both phases would process every dirty entity. Nothing uses the pair, so it is refused rather than split per entity.
+        if (reg.Checkerboard && reg.ChangeFilter is { Length: > 0 })
+        {
+            throw new InvalidOperationException(
+                $"System '{reg.Name}': checkerboard dispatch is incompatible with a change filter — both phases would process every dirty entity.");
         }
     }
 

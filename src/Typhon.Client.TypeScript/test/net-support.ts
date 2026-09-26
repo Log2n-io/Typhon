@@ -70,7 +70,7 @@ export class FakeSocket implements WebSocketLike {
   }
 
   /** The server accepted the upgrade. */
-  open(protocol = 'typhon.2'): void {
+  open(protocol = 'typhon.3'): void {
     this.protocol = protocol;
     this.readyState = SocketState.Open;
     this.onopen?.();
@@ -176,7 +176,7 @@ export interface WelcomeParts {
 export function welcomeMessage(parts: WelcomeParts = {}): Uint8Array {
   const w = new WireWriter(1 << 16);
   writeWelcome(w, {
-    major: parts.major ?? 2,
+    major: parts.major ?? 3,
     minor: 0,
     capsGranted: parts.capsGranted ?? 0,
     sessionId: parts.sessionId ?? 7,

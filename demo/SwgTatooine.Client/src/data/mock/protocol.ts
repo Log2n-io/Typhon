@@ -1,7 +1,7 @@
 /**
  * Messages between the main thread and the mock server worker.
  *
- * This is NOT the `typhon.2` wire: it is the mock's in-process shortcut, carrying the same content a decoded `TICK` has
+ * This is NOT the `typhon.3` wire: it is the mock's in-process shortcut, carrying the same content a decoded `TICK` has
  * (`claude/design/Subscriptions/V2/03-wire-protocol.md` § 3–9) as flat typed arrays, so the apply step on the main thread
  * does the same store writes a real decoder will — though not at the same cost: these are doubles, not varints, so the
  * apply time here is no evidence for M1. When the live server arrives, this file and the worker go; the store and
@@ -44,7 +44,7 @@ export interface ServerStats {
   readonly replicationMs: number;
   readonly watched: number;
   readonly effectiveRadius: number;
-  /** Estimated `typhon.2` bytes of this frame on the wire, transport overhead included. */
+  /** Estimated `typhon.3` bytes of this frame on the wire, transport overhead included. */
   readonly wireBytes: number;
   readonly worldEntities: number;
 }

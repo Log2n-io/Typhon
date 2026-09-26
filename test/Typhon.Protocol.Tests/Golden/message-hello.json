@@ -2,7 +2,7 @@
   "description": "HELLO with every optional field present.",
   "type": 129,
   "message": {
-    "major": 2,
+    "major": 3,
     "minor": 0,
     "caps": 3,
     "kind": "player",

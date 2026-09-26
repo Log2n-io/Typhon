@@ -8,7 +8,7 @@ description: 'Indexing in Typhon is one mechanism: a B+Tree specialised at compi
 
 **Code:** [`src/Typhon.Engine/Indexing/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Indexing)
 
-Indexing in Typhon is one mechanism: a **B+Tree** specialised at compile time for the key width. There is no separate "primary key index", "secondary index" or "uniqueness constraint" implementation — the same `BTree<TKey, TStore>` powers all three. The variants (`L16BTree`, `L32BTree`, `L64BTree`, `String64BTree`) exist purely to size the node layout to the key width so that every numeric node is exactly **256 bytes** (`String64BTree` is the exception at **356 bytes** — see §2), keying capacity off the key size rather than off some configured fan-out.
+Indexing in Typhon is one mechanism: a **B+Tree** specialised at compile time for the key width. There is no separate "primary key index", "secondary index" or "uniqueness constraint" implementation — the same `BTree<TKey, TStore>` powers all three. The variants (`L16BTree`, `L32BTree`, `L64BTree`, `String64BTree`) exist purely to size the node layout to the key width so that every numeric node is exactly **256 bytes** (`String64BTree` is the exception at **356 bytes** — see [§2](#2-node-layout--256-b--4-cache-lines-numeric-variants)), keying capacity off the key size rather than off some configured fan-out.
 
 The tree is **concurrent** by design: readers descend lock-free via Optimistic Lock Coupling ([`OlcLatch`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Indexing/internals/OlcLatch.cs)), writers use a two-phase spin-then-yield lock that never pays the Windows 15 ms timer-tick penalty, and obsolete nodes are reclaimed via epoch deferral ([01-foundation §4](01-foundation.md)). It's also a **B-link tree** — every node carries a `HighKey` upper bound and a `NextChunk` pointer so a writer can split a node without coordinating with traversing readers; the readers follow the right-link to find the key that's now on the new sibling.
 
@@ -68,7 +68,7 @@ Key invariants and constants:
 | `MaxOptimisticRestarts` | 3 | OLC reader restart budget before falling back to pessimistic |
 | `ContentionSplitThreshold` | 3 | `ContentionHint` value at which a hot leaf gets proactively split |
 | `DirectoryChunkCount` | 4 | Reserved chunks at the start of the segment for the BTree directory |
-| `MaxDirectoryEntriesFor(stride)` | 84 at stride 256 | Hard cap on B+Trees per shared segment. Stride-dependent, not a constant — see §7 |
+| `MaxDirectoryEntriesFor(stride)` | 84 at stride 256 | Hard cap on B+Trees per shared segment. Stride-dependent, not a constant — see [§7](#7-multi-tree-segments--the-btree-directory) |
 
 ---
 

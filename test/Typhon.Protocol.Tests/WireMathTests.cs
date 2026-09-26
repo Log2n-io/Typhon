@@ -180,17 +180,21 @@ public class WireMathTests
     public void TickLoRebuildsAPastTick(ushort low, uint frameTick, uint expected) =>
         Assert.That(WireMath.DecodeTickLo(low, frameTick), Is.EqualTo(expected));
 
-    /// <summary>W5: velocity is exact at a dyadic step and a power-of-two divisor.</summary>
+    /// <summary>W5 (<c>typhon.3</c>): velocity is exact in its absolute dyadic unit, independent of any position step.</summary>
     [Test]
-    public void VelocityDecodesExactlyInPositionSteps()
+    public void VelocityDecodesExactlyInItsUnit()
     {
-        var step = WireMath.QuantStep(-8192, 8192, 24);
+        var unit = Math.ScaleB(1.0, -13);
 
         Assert.Multiple(() =>
         {
-            Assert.That(WireMath.EncodeVel(step, step, 16, 16), Is.EqualTo(16));
-            Assert.That(WireMath.DecodeVel(16, step, 16, 16), Is.EqualTo(step));
-            Assert.That(WireMath.EncodeVel(1e9, step, 16, 16), Is.EqualTo(32767));
+            Assert.That(WireMath.EncodeVel(16 * unit, -13, 16), Is.EqualTo(16));
+            Assert.That(WireMath.DecodeVel(16, -13, 16), Is.EqualTo(16 * unit));
+            Assert.That(WireMath.EncodeVel(0.5 * unit, -13, 16), Is.EqualTo(1), "a tie rounds away from zero");
+            Assert.That(WireMath.EncodeVel(-0.5 * unit, -13, 16), Is.EqualTo(-1));
+            Assert.That(WireMath.EncodeVel(1e9, -13, 16), Is.EqualTo(32767));
+            Assert.That(WireMath.DecodeVel(-32768, -13, 16), Is.EqualTo(-32767 * unit), "the wire-only code decodes as -L");
+            Assert.That(WireMath.EncodeVel(double.NaN, -13, 16), Is.Zero);
         });
     }
 }

@@ -1,7 +1,7 @@
 ---
 uid: feature-subscriptions-wire-protocol
 title: 'Wire Protocol & Catalog'
-description: 'typhon.2: a handshake that carries a canonical, self-describing catalog; tick frames of typed blocks; quantized codecs with bit-exact arithmetic; and close codes an SDK acts on.'
+description: 'typhon.3: a handshake that carries a canonical, self-describing catalog; tick frames of typed blocks; quantized codecs with bit-exact arithmetic; and close codes an SDK acts on.'
 ---
 
 # Wire Protocol & Catalog
@@ -16,7 +16,7 @@ self-describing, versioned independently of the server's code, and exact across 
 
 ## ⚙️ How it works (in brief)
 
-**Messages** — one WebSocket binary message, or `u32 len | message` on TCP after a `TYP2` preamble; the first byte is the type:
+**Messages** — one WebSocket binary message, or `u32 len | message` on TCP after a `TYP3` preamble; the first byte is the type:
 
 | Message | Direction | Carries |
 |---|---|---|
@@ -53,7 +53,7 @@ TypeScript.
 
 ## ⚠️ Guarantees & limits
 
-- **Versioned**: `typhon.2` + a minor + capability bits; a client ignores unknown blocks and unknown fixed-size fields.
+- **Versioned**: `typhon.3` + a minor + capability bits; a client ignores unknown blocks and unknown fixed-size fields.
 - **No 64-bit integer on the wire** implicitly; strings and blobs are length-capped by the catalog.
 - **Records are absolute**: a frame never depends on a frame the client might have missed.
 - `resumeToken` is always 0 until resume is built.

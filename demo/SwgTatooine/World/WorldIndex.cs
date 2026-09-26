@@ -28,4 +28,13 @@ public sealed class WorldIndex
 
     /// <summary>Point-of-interest discs — where a player roams to when it is not in a city or on a mission.</summary>
     public List<(float X, float Z, float Radius)> Pois { get; } = [];
+
+    /// <summary>
+    /// Every enterable city building's door, in spawn order — portal <c>j</c> of planet <c>p</c> leads to interior realm
+    /// <c>Planets + p · InteriorsPerPlanet + j</c> (Realms G1b). Recorded whether or not interiors are on: it draws nothing from the RNG.
+    /// </summary>
+    public List<(float X, float Z)> Portals { get; } = [];
+
+    /// <summary>Each city's run in <see cref="Portals"/>, index-aligned with <see cref="Cities"/>.</summary>
+    public List<(int First, int Count)> CityPortals { get; } = [];
 }

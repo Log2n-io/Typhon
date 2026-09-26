@@ -108,6 +108,16 @@ public sealed partial class TyphonRuntime : IDisposable
     // Issue #231 BUG-2 fix: per-system grow-on-demand buffer for amortized cluster ids. Owned exclusively by OnParallelQueryPrepare → ExecuteChunkWith*. Reused
     // across ticks; doubles on overflow. Null until the first amortized dispatch.
     private readonly int[][] _systemAmortizationBuffers;
+    // RT-1 (Realms): how many times each system has run — incremented once per run at its entry point (OnParallelQueryPrepare's first call of a tick,
+    // OnSystemStartInternal), never for a tick the scheduler skipped. The cellAmortize bucket is keyed on it rather than on the tick number, so a
+    // TickDivisor sharing a factor with cellAmortize cannot starve a bucket (tick % 2 is always 0 for a system that runs every other tick).
+    private readonly long[] _systemRunCount;
+
+    // Realms (review #4), per system, set by each run's selection: whether the divisor stride applied (ctx.Realms.DeltaTime multiplies only then),
+    // whether any realm narrowing applied (dormant filter or stride — descendants must then be narrowed the same way), and the run key the stride used.
+    private readonly bool[] _systemStrided;
+    private readonly bool[] _systemRealmNarrowed;
+    private readonly ulong[] _systemStrideRun;
     // Issue #231: per-system cluster-range entity view, allocated lazily the first time a tier-filtered system runs Path 1 (full non-versioned). Reused across
     // ticks. [sysIdx][workerIdx]. Null slot = not allocated yet.
     private readonly ClusterRangeEntityView[][] _tierRangeViews;
@@ -315,6 +325,10 @@ public sealed partial class TyphonRuntime : IDisposable
         _dispatchClusterIds = new int[scheduler.AllSystemCount][];
         _dispatchClusterCount = new int[scheduler.AllSystemCount];
         _systemAmortizationBuffers = new int[scheduler.AllSystemCount][];
+        _systemRunCount = new long[scheduler.AllSystemCount];
+        _systemStrided = new bool[scheduler.AllSystemCount];
+        _systemRealmNarrowed = new bool[scheduler.AllSystemCount];
+        _systemStrideRun = new ulong[scheduler.AllSystemCount];
         _tierRangeViews = new ClusterRangeEntityView[scheduler.AllSystemCount][];
         _checkerboardPhase = new int[scheduler.AllSystemCount];
         _checkerboardRedIds = new int[scheduler.AllSystemCount][];
@@ -438,7 +452,7 @@ public sealed partial class TyphonRuntime : IDisposable
             _subscriptionsRuntime = built;
             if (built.Grid is { } grid)
             {
-                LogReplicationGrid(grid.CellM, Engine.SpatialGrid.Config.CellSize, grid.DimX, grid.DimY, grid.DimZ, grid.Window, grid.Radius,
+                LogReplicationGrid(grid.CellM, Engine.Realm0Grid.Config.CellSize, grid.DimX, grid.DimY, grid.DimZ, grid.Window, grid.Radius,
                     grid.Flat ? "flat" : "deep");
             }
 
@@ -520,7 +534,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 CreateSideTransaction = _createSideTxDelegate,
                 Entities = PooledEntityList.Empty,
                 TierBudgetMetrics = _previousTickMetrics,
-                SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Subscriptions = _subscriptionsRuntime?.Commands,
                 // Runs on whichever thread called Shutdown()/FatalStop() — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
@@ -604,13 +618,16 @@ public sealed partial class TyphonRuntime : IDisposable
                 }
 
                 _systemViews[i].IsSystemInput = true;
+                ThrowIfTierFiltersDisjoint(sys, _systemViews[i]);
 
                 // Resolve the cluster state for parallel cluster dispatch from THIS system's own input view. It feeds ctx.ClusterIds /
                 // ctx.StartClusterIndex / ctx.EndClusterIndex, the tier index and the checkerboard split, so binding the wrong archetype hands a system
                 // another archetype's cluster ids — a page-index-out-of-range throw when the counts differ, or silent double/zero processing when they
                 // happen to match. This previously scanned the global ArchetypeRegistry and took the FIRST cluster-eligible archetype, which is correct
                 // only in a world with exactly one; every multi-archetype schema using parallel cluster-native systems was broken.
-                if (sys.IsParallelQuery && Engine != null)
+                // RT-1: bound for EVERY QuerySystem, not only parallel ones. The non-parallel path reads the same binding for its tier scope and its sleep
+                // filter; unbound, a non-parallel tier system silently processed every entity of every tier, and with cellAmortize N did so with N× dt.
+                if (sys.Type == SystemType.QuerySystem && Engine != null)
                 {
                     var viewArchetypeId = _systemViews[i].QueriedArchetypeId;
                     foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
@@ -648,6 +665,26 @@ public sealed partial class TyphonRuntime : IDisposable
                 if (sys.TierFilter != SimTier.All && _systemClusterStates[i] != null)
                 {
                     _systemClusterStates[i].TierIndex ??= new TierClusterIndex();
+                }
+            }
+
+            // A realm narrowing is a cluster selection: it needs a QuerySystem over a cluster archetype, and realm ids the engine can hold.
+            if (sys.RealmMask != null)
+            {
+                if (_systemClusterStates[i] == null)
+                {
+                    throw new InvalidOperationException(
+                        $"System '{sys.Name}' is narrowed to realms (InRealm/InRealms), which selects clusters: it must be a QuerySystem over a cluster archetype.");
+                }
+
+                var maxRealms = Engine?.RealmTable?.MaxRealms ?? 1;
+                foreach (var realm in sys.Realms)
+                {
+                    if (realm.Value >= maxRealms)
+                    {
+                        throw new InvalidOperationException(
+                            $"System '{sys.Name}' is narrowed to realm {realm.Value}, beyond the engine's {maxRealms} realm ids (ConfigureRealms).");
+                    }
                 }
             }
 
@@ -793,8 +830,9 @@ public sealed partial class TyphonRuntime : IDisposable
         var span = list.AsSpan();
         int count = 0;
 
-        // Non-cluster path: scan ComponentTable dirty bitmap
-        if (bitmap.Length > 0)
+        // Non-cluster path: scan ComponentTable dirty bitmap. Those entities are in realm 0.
+        var realmMask = Scheduler.Systems[sysIdx].RealmMask;
+        if (bitmap.Length > 0 && SystemDefinition.InMask(realmMask, RealmId.Default.Value))
         {
             var accessor = table.ComponentSegment.CreateChunkAccessor();
             try
@@ -831,7 +869,7 @@ public sealed partial class TyphonRuntime : IDisposable
         // Issue #231: tier-filtered systems scope the scan to the tier's clusters (Q9) instead of walking the full snapshot bitmap.
         var sys = Scheduler.Systems[sysIdx];
         var effectiveTier = (SimTier)((byte)sys.TierFilter & (byte)view.TierFilter);
-        count = ScanClusterDirtyEntities(table, view, effectiveTier, span, count);
+        count = ScanClusterDirtyEntities(table, view, effectiveTier, span, count, realmMask);
 
         if (count == 0)
         {
@@ -848,10 +886,11 @@ public sealed partial class TyphonRuntime : IDisposable
     /// When <paramref name="effectiveTier"/> is non-<see cref="SimTier.All"/> and the archetype has a configured spatial grid, the scan walks only the
     /// tier's clusters (issue #231 Q9). Returns the updated count.
     /// </summary>
-    private unsafe int ScanClusterDirtyEntities(ComponentTable table, ViewBase view, SimTier effectiveTier, Span<EntityId> span, int count)
+    private unsafe int ScanClusterDirtyEntities(ComponentTable table, ViewBase view, SimTier effectiveTier, Span<EntityId> span, int count,
+        ulong[] realmMask)
     {
         int maxArchId = Math.Min(ArchetypeRegistry.MaxArchetypeId, Engine._archetypeStates.Length - 1);
-        bool tierFiltered = effectiveTier != SimTier.All && Engine.SpatialGrid != null;
+        bool tierFiltered = effectiveTier != SimTier.All && Engine.PrimaryGrid != null;
 
         for (int archId = 0; archId <= maxArchId; archId++)
         {
@@ -885,6 +924,12 @@ public sealed partial class TyphonRuntime : IDisposable
                         {
                             continue;
                         }
+
+                        // InRealms: a narrowed change filter sees its realms' changes only.
+                        if (realmMask != null && !SystemDefinition.InMask(realmMask, RealmOfCluster(cs, chunkId)))
+                        {
+                            continue;
+                        }
                         if (chunkId >= snapshot.Length)
                         {
                             continue;
@@ -909,15 +954,27 @@ public sealed partial class TyphonRuntime : IDisposable
                 }
                 else
                 {
+                    // RT-1: sleeping clusters are skipped on this branch too, as on the tier branch above (issue #233) and on every other dispatch path.
+                    var sleepStates = cs.SleepingClusterCount > 0 ? cs.SleepStates : null;
+                    // Realms D1: and so are the clusters of dormant realms — a change made there is DROPPED for change-filtered systems, not deferred:
+                    // the snapshot is per tick, and a wake does not replay it (a dormant realm's systems do not run; its changes are its own business).
+                    var dormant = cs.RealmDispatch is { Filtering: true } dispatch ? dispatch : null;
                     for (int wordIdx = 0; wordIdx < snapshot.Length; wordIdx++)
                     {
                         long word = snapshot[wordIdx];
+                        if (word == 0 || (sleepStates != null && wordIdx < sleepStates.Length && sleepStates[wordIdx] == ClusterSleepState.Sleeping)
+                            || (dormant != null && dormant.IsExcluded(wordIdx))
+                        || (realmMask != null && !SystemDefinition.InMask(realmMask, RealmOfCluster(cs, wordIdx))))
+                        {
+                            continue;
+                        }
+
+                        byte* clusterBase = clusterAccessor.GetChunkAddress(wordIdx);
                         while (word != 0)
                         {
                             int bit = BitOperations.TrailingZeroCount((ulong)word);
                             word &= word - 1;
 
-                            byte* clusterBase = clusterAccessor.GetChunkAddress(wordIdx);
                             long entityPK = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + bit * 8);
                             if (view.Contains(entityPK))
                             {
@@ -956,11 +1013,12 @@ public sealed partial class TyphonRuntime : IDisposable
             return false;
         }
 
-        // Non-cluster path
+        // Non-cluster path: those entities are in realm 0.
+        var realmMask = Scheduler.Systems[sysIdx].RealmMask;
         var accessor = table.ComponentSegment.CreateChunkAccessor();
         try
         {
-            for (var wordIdx = 0; wordIdx < bitmap.Length; wordIdx++)
+            for (var wordIdx = 0; wordIdx < (SystemDefinition.InMask(realmMask, RealmId.Default.Value) ? bitmap.Length : 0); wordIdx++)
             {
                 var word = bitmap[wordIdx];
                 while (word != 0)
@@ -988,7 +1046,7 @@ public sealed partial class TyphonRuntime : IDisposable
         }
 
         // Cluster path (Phase 4a): scan cluster dirty bitmaps for archetypes referencing this table
-        ScanClusterDirtyEntitiesIntoSet(table, view, dirtyInView);
+        ScanClusterDirtyEntitiesIntoSet(table, view, dirtyInView, realmMask);
 
         return true;
     }
@@ -997,7 +1055,7 @@ public sealed partial class TyphonRuntime : IDisposable
     /// Scan cluster dirty bitmaps for all archetypes referencing the given table, adding matching entities to the dedup set.
     /// Multi-table variant that adds to HashMap instead of Span.
     /// </summary>
-    private unsafe void ScanClusterDirtyEntitiesIntoSet(ComponentTable table, ViewBase view, HashMap<long> dirtyInView)
+    private unsafe void ScanClusterDirtyEntitiesIntoSet(ComponentTable table, ViewBase view, HashMap<long> dirtyInView, ulong[] realmMask)
     {
         int maxArchId = Math.Min(ArchetypeRegistry.MaxArchetypeId, Engine._archetypeStates.Length - 1);
         for (int archId = 0; archId <= maxArchId; archId++)
@@ -1018,15 +1076,25 @@ public sealed partial class TyphonRuntime : IDisposable
             var clusterAccessor = cs.ClusterSegment.CreateChunkAccessor();
             try
             {
+                // RT-1: sleeping clusters are skipped, as on every other dispatch path (issue #233) — and, Realms D1, those of dormant realms.
+                var sleepStates = cs.SleepingClusterCount > 0 ? cs.SleepStates : null;
+                var dormant = cs.RealmDispatch is { Filtering: true } dispatch ? dispatch : null;
                 for (int wordIdx = 0; wordIdx < snapshot.Length; wordIdx++)
                 {
                     long word = snapshot[wordIdx];
+                    if (word == 0 || (sleepStates != null && wordIdx < sleepStates.Length && sleepStates[wordIdx] == ClusterSleepState.Sleeping)
+                        || (dormant != null && dormant.IsExcluded(wordIdx))
+                        || (realmMask != null && !SystemDefinition.InMask(realmMask, RealmOfCluster(cs, wordIdx))))
+                    {
+                        continue;
+                    }
+
+                    byte* clusterBase = clusterAccessor.GetChunkAddress(wordIdx);
                     while (word != 0)
                     {
                         int bit = BitOperations.TrailingZeroCount((ulong)word);
                         word &= word - 1;
 
-                        byte* clusterBase = clusterAccessor.GetChunkAddress(wordIdx);
                         long entityPK = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + bit * 8);
                         if (view.Contains(entityPK))
                         {
@@ -1072,23 +1140,15 @@ public sealed partial class TyphonRuntime : IDisposable
             return PooledEntityList.Empty;
         }
 
-        var sys = Scheduler.Systems[sysIdx];
-        var effectiveTier = (SimTier)((byte)sys.TierFilter & (byte)view.TierFilter);
-        var cs = _systemClusterStates[sysIdx];
-
-        // Detect a system tier filter and a view tier filter that are mutually exclusive (e.g. system declares Tier0 and the view was created via
-        // WithTier(Tier1)). Their bit-AND is None, which would otherwise silently materialize an empty entity set.
-        if (effectiveTier == SimTier.None && sys.TierFilter != SimTier.None && view.TierFilter != SimTier.None)
+        // RT-1: materialize exactly what this run dispatches — the selection its entry point made (OnSystemStartInternal, or the parallel Prepare, whose
+        // checkerboard half it is) — never a selection of its own: a second one would rewrite the buffer the dispatch already handed out, and could rebuild
+        // the tier index from a worker (TI-01). No selection: the whole view.
+        if (_systemTierClusterIds[sysIdx] != null)
         {
-            throw new InvalidOperationException(
-                $"System '{sys.Name}': system tier filter '{sys.TierFilter}' and view tier filter '{view.TierFilter}' have no overlap. " +
-                "Their intersection is SimTier.None, which would dispatch zero entities. Make the filters compatible " +
-                "(e.g. system Tier0 + view Near, where view's tier set is a superset of the system's).");
-        }
-
-        if (effectiveTier != SimTier.All && cs != null && Engine != null && Engine.SpatialGrid != null)
-        {
-            return BuildTierScopedEntityList(cs, effectiveTier, view);
+            var sys = Scheduler.Systems[sysIdx];
+            var cs = _systemClusterStates[sysIdx];
+            return BuildClusterScopedEntityList(cs, _dispatchClusterIds[sysIdx], _dispatchClusterCount[sysIdx], view,
+                WithDescendants(sys, cs, EffectiveTier(sysIdx)), sysIdx);
         }
 
         var list = PooledEntityList.Rent(view.Count);
@@ -1105,39 +1165,171 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
-    /// Materialize an entity list by walking only the tier's clusters (issue #231 Q9 pattern). Each cluster's occupancy bitmap is decoded via TZCNT to emit
-    /// entity ids in cluster order. Cost is proportional to the tier's actual entity count (popcount-summed), not an upper bound or the full view.
+    /// The view's entities of the bound archetype's descendants, walked through each descendant's own clusters so the realm narrowing of this run applies
+    /// to them too: clusters of non-runnable realms skipped, those of divided realms kept only on this run's stride. A descendant without realm state is
+    /// appended from the view unfiltered, as before.
     /// </summary>
-    private PooledEntityList BuildTierScopedEntityList(ArchetypeClusterState cs, SimTier tier, ViewBase view)
+    private unsafe void AppendRealmScopedDescendants(ArchetypeClusterState parent, ViewBase view, Span<EntityId> span, ref int count, int sysIdx)
     {
-        // TierIndex is pre-created in ResolveChangeFilters and rebuilt at TickStart. Here we only READ. The fallback path (TierIndex == null)
-        // covers archetypes that gained a tier-using system after construction — safe because BuildTierScopedEntityList runs from a single-threaded context
-        // (OnSystemStartInternal or PrepareVersionedFallback, both of which are serialized by the scheduler).
-        if (cs.TierIndex == null)
+        var realms = Engine.RealmTable;
+        var strided = _systemStrided[sysIdx];
+        var run = _systemStrideRun[sysIdx];
+        var realmMask = Scheduler.Systems[sysIdx].RealmMask;
+        var subtree = ArchetypeRegistry.GetMetadata((ushort)parent.ArchetypeId)?.SubtreeArchetypeIds;
+        if (subtree == null)
         {
-            cs.TierIndex = new TierClusterIndex();
+            return;
         }
-        cs.TierIndex.RebuildIfStale(Engine.SpatialGrid, cs);
-        var tierClusters = cs.TierIndex.GetClustersArray(tier, out int tierCount);
-        if (tierCount == 0)
+
+        using var guard = EpochGuard.Enter(Engine.EpochManager);
+        foreach (var archetypeId in subtree)
+        {
+            if (archetypeId == parent.ArchetypeId)
+            {
+                continue;
+            }
+
+            var cs = archetypeId < Engine._archetypeStates.Length ? Engine._archetypeStates[archetypeId]?.ClusterState : null;
+            var map = cs?.ClusterRealmMap;
+            if (cs?.ClusterSegment == null || map == null || realms == null)
+            {
+                // No realm state: the archetype's entities are in realm 0.
+                if (!SystemDefinition.InMask(realmMask, RealmId.Default.Value))
+                {
+                    continue;
+                }
+
+                foreach (var pk in view.EntityIdsInternal)
+                {
+                    if (EntityId.FromRaw(pk).ArchetypeId == archetypeId)
+                    {
+                        span[count++] = EntityId.FromRaw(pk);
+                    }
+                }
+
+                continue;
+            }
+
+            var accessor = cs.ClusterSegment.CreateChunkAccessor();
+            try
+            {
+                var active = cs.ReadActiveClusterList(out var activeCount);
+                for (var i = 0; i < activeCount; i++)
+                {
+                    var chunkId = active[i];
+                    var realm = chunkId < map.Length ? map[chunkId] : (ushort)0;
+                    if (!realms.IsRunnable(realm) || !SystemDefinition.InMask(realmMask, realm))
+                    {
+                        continue;
+                    }
+
+                    var divisor = (uint)realms.DivisorOf(realm);
+                    if (strided && divisor > 1 && (run + (ulong)RealmTable.PhaseOf(realm) + (ulong)chunkId) % divisor != 0)
+                    {
+                        continue;
+                    }
+
+                    var clusterBase = accessor.GetChunkAddress(chunkId);
+                    for (var bits = *(ulong*)clusterBase; bits != 0; bits &= bits - 1)
+                    {
+                        var pk = *(long*)(clusterBase + cs.Layout.EntityIdsOffset + (BitOperations.TrailingZeroCount(bits) * 8));
+                        if (view.Contains(pk))
+                        {
+                            span[count++] = EntityId.FromRaw(pk);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                accessor.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
+    /// True when a materialized selection must also carry the view's entities of other archetypes than the bound one. A view over an archetype with
+    /// descendants holds their entities too, but the selection walks only the bound archetype's clusters. Carried — unfiltered, as before RT-1 — only when
+    /// the selection is a sleep filter alone: a tier or checkerboard selection never included them (the bound archetype's grid cells decide both).
+    /// </summary>
+    private static bool WithDescendants(SystemDefinition sys, ArchetypeClusterState cs, SimTier tier) =>
+        tier == SimTier.All && !sys.IsCheckerboard && ArchetypeRegistry.GetMetadata((ushort)cs.ArchetypeId)?.SubtreeArchetypeIds is { Length: > 1 };
+
+    /// <summary>
+    /// Materialize the entities of the selected clusters (issue #231 Q9 pattern, RT-1): each cluster's occupancy bitmap is decoded via TZCNT to emit entity
+    /// ids in cluster order, kept when the view holds them. Cost is proportional to the selected clusters' entities, not to the view. With
+    /// <paramref name="withDescendants"/> the view's entities of other archetypes follow (see <see cref="WithDescendants"/>).
+    /// </summary>
+    private PooledEntityList BuildClusterScopedEntityList(ArchetypeClusterState cs, int[] clusterIds, int clusterCount, ViewBase view, bool withDescendants,
+        int sysIdx)
+    {
+        var extra = 0;
+        if (withDescendants)
+        {
+            foreach (var pk in view.EntityIdsInternal)
+            {
+                if (EntityId.FromRaw(pk).ArchetypeId != cs.ArchetypeId)
+                {
+                    extra++;
+                }
+            }
+        }
+
+        if (clusterCount == 0 && extra == 0)
         {
             return PooledEntityList.Empty;
         }
 
         // Support pure-Transient archetypes (ClusterSegment == null) by falling back to TransientSegment.
         // Layout.EntityIdsOffset is the same in both stores — chunk ids are synchronized via lockstep allocation.
+        PooledEntityList list;
+        int count;
         if (cs.ClusterSegment != null)
         {
-            return BuildTierScopedEntityListPersistent(cs, view, tierClusters, tierCount);
+            list = BuildTierScopedEntityListPersistent(cs, view, clusterIds, clusterCount, extra, out count);
         }
-        if (cs.TransientSegment != null)
+        else if (cs.TransientSegment != null)
         {
-            return BuildTierScopedEntityListTransient(cs, view, tierClusters, tierCount);
+            list = BuildTierScopedEntityListTransient(cs, view, clusterIds, clusterCount, extra, out count);
         }
-        return PooledEntityList.Empty;
+        else
+        {
+            list = extra > 0 ? PooledEntityList.Rent(extra) : PooledEntityList.Empty;
+            count = 0;
+        }
+
+        if (extra > 0)
+        {
+            var span = list.AsSpan();
+            if (_systemRealmNarrowed[sysIdx])
+            {
+                // Realm narrowing applied to the bound archetype: descendants get the same — their clusters in dormant realms left out, those of divided
+                // realms strided on the same run key (review #4: appended unfiltered they bypassed RLM-04 and RLM-05).
+                AppendRealmScopedDescendants(cs, view, span, ref count, sysIdx);
+            }
+            else
+            {
+                foreach (var pk in view.EntityIdsInternal)
+                {
+                    if (EntityId.FromRaw(pk).ArchetypeId != cs.ArchetypeId)
+                    {
+                        span[count++] = EntityId.FromRaw(pk);
+                    }
+                }
+            }
+        }
+
+        if (count == 0)
+        {
+            list.Return();
+            return PooledEntityList.Empty;
+        }
+
+        return new PooledEntityList(list.BackingArray, count);
     }
 
-    private unsafe PooledEntityList BuildTierScopedEntityListPersistent(ArchetypeClusterState cs, ViewBase view, int[] tierClusters, int tierCount)
+    private unsafe PooledEntityList BuildTierScopedEntityListPersistent(ArchetypeClusterState cs, ViewBase view, int[] tierClusters, int tierCount, int extra,
+        out int count)
     {
         // ChunkAccessor construction asserts an epoch scope is active. The Versioned tier path (PrepareVersionedFallback → BuildFullViewEntitySet → here) runs
         // from the scheduler thread without an outer scope, so we enter one explicitly. The non-Versioned change-filter path piggybacks on the outer EpochGuard
@@ -1155,14 +1347,15 @@ public sealed partial class TyphonRuntime : IDisposable
                 byte* clusterBase = accessor.GetChunkAddress(tierClusters[i]);
                 exactCount += BitOperations.PopCount(*(ulong*)clusterBase);
             }
-            if (exactCount == 0)
+            count = 0;
+            if (exactCount + extra == 0)
             {
                 return PooledEntityList.Empty;
             }
 
-            var list = PooledEntityList.Rent(exactCount);
+            // Returned rented, not trimmed: the caller appends up to `extra` more and trims (BuildClusterScopedEntityList).
+            var list = PooledEntityList.Rent(exactCount + extra);
             var span = list.AsSpan();
-            int count = 0;
             for (int i = 0; i < tierCount; i++)
             {
                 byte* clusterBase = accessor.GetChunkAddress(tierClusters[i]);
@@ -1179,12 +1372,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 }
             }
 
-            if (count == 0)
-            {
-                list.Return();
-                return PooledEntityList.Empty;
-            }
-            return new PooledEntityList(list.BackingArray, count);
+            return list;
         }
         finally
         {
@@ -1192,7 +1380,8 @@ public sealed partial class TyphonRuntime : IDisposable
         }
     }
 
-    private unsafe PooledEntityList BuildTierScopedEntityListTransient(ArchetypeClusterState cs, ViewBase view, int[] tierClusters, int tierCount)
+    private unsafe PooledEntityList BuildTierScopedEntityListTransient(ArchetypeClusterState cs, ViewBase view, int[] tierClusters, int tierCount, int extra,
+        out int count)
     {
         // EpochGuard supports nesting (only the outermost scope advances the global epoch). Always enter to keep semantics simple — the cost is one atomic
         // increment/decrement when already inside a scope.
@@ -1206,14 +1395,15 @@ public sealed partial class TyphonRuntime : IDisposable
                 byte* clusterBase = accessor.GetChunkAddress(tierClusters[i]);
                 exactCount += BitOperations.PopCount(*(ulong*)clusterBase);
             }
-            if (exactCount == 0)
+            count = 0;
+            if (exactCount + extra == 0)
             {
                 return PooledEntityList.Empty;
             }
 
-            var list = PooledEntityList.Rent(exactCount);
+            // Returned rented, not trimmed: the caller appends up to `extra` more and trims (BuildClusterScopedEntityList).
+            var list = PooledEntityList.Rent(exactCount + extra);
             var span = list.AsSpan();
-            int count = 0;
             for (int i = 0; i < tierCount; i++)
             {
                 byte* clusterBase = accessor.GetChunkAddress(tierClusters[i]);
@@ -1230,12 +1420,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 }
             }
 
-            if (count == 0)
-            {
-                list.Return();
-                return PooledEntityList.Empty;
-            }
-            return new PooledEntityList(list.BackingArray, count);
+            return list;
         }
         finally
         {
@@ -1254,11 +1439,339 @@ public sealed partial class TyphonRuntime : IDisposable
     // ═══════════════════════════════════════════════════════════════
 
     /// <summary>
+    /// The tier a system runs over: its own filter AND its input view's (<see cref="ViewBase.TierFilter"/>, a materialization scope). A tier is a
+    /// property of grid cells, so without a grid it is not applied — on every path alike. A disjoint pair yields <see cref="SimTier.None"/> (nothing
+    /// dispatched): it is refused at construction (<see cref="ThrowIfTierFiltersDisjoint"/>), and the dispatch path, which must not throw, only meets it
+    /// when a view's <c>WithTier</c> changed afterwards.
+    /// </summary>
+    private SimTier EffectiveTier(int sysIdx)
+    {
+        var sys = Scheduler.Systems[sysIdx];
+        var view = _systemViews[sysIdx];
+        var tier = view == null ? sys.TierFilter : (SimTier)((byte)sys.TierFilter & (byte)view.TierFilter);
+        return Engine?.PrimaryGrid == null ? SimTier.All : tier;
+    }
+
+    /// <summary>
+    /// Refuses a system tier filter and a view tier filter that are mutually exclusive (e.g. system Tier0, view <c>WithTier(Tier1)</c>): their AND is
+    /// <see cref="SimTier.None"/>, which would silently dispatch zero entities.
+    /// </summary>
+    private static void ThrowIfTierFiltersDisjoint(SystemDefinition sys, ViewBase view)
+    {
+        if (view == null || sys.TierFilter == SimTier.None || view.TierFilter == SimTier.None
+            || ((byte)sys.TierFilter & (byte)view.TierFilter) != 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"System '{sys.Name}': system tier filter '{sys.TierFilter}' and view tier filter '{view.TierFilter}' have no overlap. " +
+            "Their intersection is SimTier.None, which would dispatch zero entities. Make the filters compatible " +
+            "(e.g. system Tier0 + view Near, where view's tier set is a superset of the system's).");
+    }
+
+    /// <summary>
+    /// RT-1 — the one cluster selection every QuerySystem path dispatches from: the clusters of <paramref name="tier"/> (the archetype's whole active
+    /// list for <see cref="SimTier.All"/>), strided to this run's <c>cellAmortize</c> bucket, minus sleeping clusters.
+    /// </summary>
+    /// <returns>
+    /// The selected chunk ids (the first <paramref name="count"/> entries), or null when nothing narrows the system: it then covers its whole view, which
+    /// is the zero-copy path and the only one taken when no tier, no amortization and no sleeping cluster apply.
+    /// </returns>
+    /// <remarks>
+    /// Reads only what tick start prepared single-threaded (TI-01) and writes only this system's own buffer, so the Prepares of different systems may run
+    /// concurrently. The caller advances <see cref="_systemRunCount"/> for the run first.
+    /// </remarks>
+    private int[] SelectDispatchClusters(int sysIdx, SimTier tier, out int count)
+    {
+        count = 0;
+        _systemStrided[sysIdx] = false;
+        _systemRealmNarrowed[sysIdx] = false;
+        var cs = _systemClusterStates[sysIdx];
+        if (cs == null)
+        {
+            return null;
+        }
+
+        var sys = Scheduler.Systems[sysIdx];
+        int[] ids = null;
+        if (tier != SimTier.All && cs.TierIndex != null)
+        {
+            // Prepared at tick start (TI-01). A multi-tier set tick start did not prepare — a view whose WithTier changed mid-tick — is merged into this
+            // system's own buffer rather than into the index's shared cache, which concurrent Prepares would otherwise fill together.
+            if (!cs.TierIndex.TryGetPreparedClusters(tier, out var tierIds, out var tierCount))
+            {
+                tierIds = EnsureSelectionBuffer(sysIdx, cs.TierIndex.CountClusters(tier));
+                tierCount = cs.TierIndex.CopyClusters(tier, tierIds);
+            }
+
+            if (sys.CellAmortize > 0)
+            {
+                // Stride the tier list by index, which spreads it evenly whatever the cell-key encoding (Morton or row-major). The bucket is keyed on the
+                // system's run count, not the tick: under TickDivisor 2 the tick is always even, and a tick-keyed cellAmortize 2 never left bucket 0.
+                var amortize = sys.CellAmortize;
+                var startOffset = (int)((ulong)Math.Max(0, _systemRunCount[sysIdx] - 1) % (uint)amortize);
+                var bucketCount = tierCount > startOffset ? (tierCount - startOffset + amortize - 1) / amortize : 0;
+                // In place when the tier list already is this buffer (merged just above): the write cursor never overtakes the read cursor.
+                var buf = ReferenceEquals(tierIds, _systemAmortizationBuffers[sysIdx]) ? tierIds : EnsureSelectionBuffer(sysIdx, bucketCount);
+                for (var i = startOffset; i < tierCount; i += amortize)
+                {
+                    buf[count++] = tierIds[i];
+                }
+                ids = buf;
+            }
+            else
+            {
+                // Zero-copy into the TierClusterIndex buffer: rebuilt at tick start, and not again before every system of this tick has run.
+                ids = tierIds;
+                count = tierCount;
+            }
+        }
+
+        // Realms D1: a system nothing else narrowed selects its archetype's runnable clusters — zero-copy, the index is rebuilt only at tick start. The tier
+        // lists above already leave dormant realms out. Filtering false (one realm, or none dormant) keeps the pre-realm path (RLM-04).
+        // A system narrowed to realms (InRealms): its realms' own cluster lists — O(clusters there) — or, after a tier selection, that selection filtered
+        // by realm. Non-runnable realms give nothing (RLM-04), so the runnable-set filter below is not needed.
+        if (sys.RealmMask is { } realmMask)
+        {
+            _systemRealmNarrowed[sysIdx] = true;
+            ids = SelectRealmClusters(sysIdx, cs, realmMask, ids, ref count);
+        }
+
+        if (ids == null && tier == SimTier.All && cs.RealmDispatch is { Filtering: true } dispatch)
+        {
+            _systemRealmNarrowed[sysIdx] = true;
+            if (dispatch.BuiltClusterSetVersion == cs.ClusterSetVersion)
+            {
+                ids = dispatch.Ids;
+                count = dispatch.Count;
+            }
+            else
+            {
+                // A system earlier in this tick changed the cluster set (a destroy commit frees a cluster inline, CLUSTERWALK-01, and its chunk id can be
+                // reused at once): the tick-start list may name a freed or reused chunk. Filter the live list into this system's own buffer (review #4).
+                var live = ReadActiveClusterList(cs, out var liveCount);
+                var buf = EnsureSelectionBuffer(sysIdx, liveCount);
+                var map = cs.ClusterRealmMap;
+                var table = Engine.RealmTable;
+                for (var i = 0; i < liveCount; i++)
+                {
+                    var chunkId = live[i];
+                    if (chunkId >= map.Length || table.IsRunnable(map[chunkId]))
+                    {
+                        buf[count++] = chunkId;
+                    }
+                }
+
+                ids = buf;
+            }
+        }
+
+        // Realms D4 (RLM-05): a realm simulated at divisor N contributes each of its clusters once every N runs of the system — keyed on the system's own
+        // run count, the realm's phase and the chunk id, so the realm's load spreads over the N runs and a TickDivisor cannot alias it. Not for a
+        // change-filtered system (its input is already the dirty set) nor a RealmRate.Full one. No divided realm: one branch.
+        var realms = Engine?.RealmTable;
+        if (realms is { DividedCount: > 0 } && sys.RealmRate == RealmRate.Divided && _systemChangeFilterTables[sysIdx] == null
+            && cs.ClusterRealmMap != null && (ids != null || tier == SimTier.All))
+        {
+            if (ids == null)
+            {
+                ids = ReadActiveClusterList(cs, out count);
+            }
+
+            var buf = ReferenceEquals(ids, _systemAmortizationBuffers[sysIdx]) ? ids : EnsureSelectionBuffer(sysIdx, count);
+            var realmMap = cs.ClusterRealmMap;
+
+            // With cellAmortize A the list is already one bucket in A, rotating on the run count: the realm stride counts BUCKET visits (run / A), or with
+            // gcd(A, N) > 1 some clusters would never meet both conditions (review #4).
+            var run = (ulong)Math.Max(0, _systemRunCount[sysIdx] - 1);
+            if (sys.CellAmortize > 0)
+            {
+                run /= (ulong)sys.CellAmortize;
+            }
+
+            _systemStrided[sysIdx] = true;
+            _systemRealmNarrowed[sysIdx] = true;
+            _systemStrideRun[sysIdx] = run;
+            var written = 0;
+            for (var i = 0; i < count; i++)
+            {
+                var chunkId = ids[i];
+                var realm = chunkId < realmMap.Length ? realmMap[chunkId] : (ushort)0;
+                var divisor = (uint)realms.DivisorOf(realm);
+                if (divisor <= 1 || (run + (ulong)RealmTable.PhaseOf(realm) + (ulong)chunkId) % divisor == 0)
+                {
+                    buf[written++] = chunkId;
+                }
+            }
+
+            ids = buf;
+            count = written;
+        }
+
+        // Issue #233: sleeping clusters leave the selection. A system nothing else narrowed is "promoted" to a filtered copy of its archetype's active
+        // list, so the dispatch walks clusters from here on. SleepingClusterCount == 0 skips it all (DM-02's fast path).
+        if (cs.SleepingClusterCount > 0 && cs.SleepStates != null)
+        {
+            if (ids == null && tier == SimTier.All)
+            {
+                ids = ReadActiveClusterList(cs, out count);
+            }
+
+            if (ids != null)
+            {
+                // Filtered into this system's buffer; in place when the source already is that buffer (an amortized bucket) — compaction never overtakes
+                // the read cursor.
+                var buf = ReferenceEquals(ids, _systemAmortizationBuffers[sysIdx]) ? ids : EnsureSelectionBuffer(sysIdx, count);
+                var sleepStates = cs.SleepStates;
+                var written = 0;
+                for (var i = 0; i < count; i++)
+                {
+                    var chunkId = ids[i];
+                    if (chunkId >= sleepStates.Length || sleepStates[chunkId] != ClusterSleepState.Sleeping)
+                    {
+                        buf[written++] = chunkId;
+                    }
+                }
+
+                ids = buf;
+                count = written;
+            }
+        }
+
+        return ids;
+    }
+
+    /// <summary>
+    /// The clusters of the realms <paramref name="mask"/> names that are runnable this tick. From the realms' own lists when nothing selected before
+    /// (<paramref name="ids"/> null) — one runnable realm's list is taken as it is, several are gathered into this system's buffer — or
+    /// <paramref name="ids"/> filtered by realm. An archetype without realm state is wholly in realm 0.
+    /// </summary>
+    private int[] SelectRealmClusters(int sysIdx, ArchetypeClusterState cs, ulong[] mask, int[] ids, ref int count)
+    {
+        var table = Engine.RealmTable;
+        var map = System.Threading.Volatile.Read(ref cs.ClusterRealmMap);
+        if (ids != null)
+        {
+            var buf = ReferenceEquals(ids, _systemAmortizationBuffers[sysIdx]) ? ids : EnsureSelectionBuffer(sysIdx, count);
+            var written = 0;
+            for (var i = 0; i < count; i++)
+            {
+                var chunkId = ids[i];
+                var realm = map != null && chunkId < map.Length ? map[chunkId] : RealmId.Default.Value;
+                if (SystemDefinition.InMask(mask, realm) && (table == null || table.IsRunnable(realm)))
+                {
+                    buf[written++] = chunkId;
+                }
+            }
+
+            count = written;
+            return buf;
+        }
+
+        // The realms to gather, runnable and registered, in id order.
+        int[] single = null;
+        var singleCount = 0;
+        var realms = 0;
+        var total = 0;
+        for (var word = 0; word < mask.Length; word++)
+        {
+            for (var bits = mask[word]; bits != 0; bits &= bits - 1)
+            {
+                var realm = (ushort)((word << 6) + BitOperations.TrailingZeroCount(bits));
+                if (table != null && (table.TryGet(realm) == null || !table.IsRunnable(realm)))
+                {
+                    continue;
+                }
+
+                var list = cs.ReadRealmClusterList(realm, out var n);
+                if (n == 0)
+                {
+                    continue;
+                }
+
+                realms++;
+                total += n;
+                single = list;
+                singleCount = n;
+            }
+        }
+
+        if (realms <= 1)
+        {
+            // CD-02 holds as for the active list: an append leaves the list's first entries in place, so the pair read above tiles the dispatch.
+            count = singleCount;
+            return single ?? EnsureSelectionBuffer(sysIdx, 0);
+        }
+
+        var gathered = EnsureSelectionBuffer(sysIdx, total);
+        count = 0;
+        for (var word = 0; word < mask.Length; word++)
+        {
+            for (var bits = mask[word]; bits != 0; bits &= bits - 1)
+            {
+                var realm = (ushort)((word << 6) + BitOperations.TrailingZeroCount(bits));
+                if (table != null && (table.TryGet(realm) == null || !table.IsRunnable(realm)))
+                {
+                    continue;
+                }
+
+                var list = cs.ReadRealmClusterList(realm, out var n);
+                n = Math.Min(n, gathered.Length - count);
+                Array.Copy(list, 0, gathered, count, n);
+                count += n;
+            }
+        }
+
+        return gathered;
+    }
+
+    // A cluster's realm for the dispatch's realm tests: realm 0 for an archetype without realm state.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ushort RealmOfCluster(ArchetypeClusterState cs, int chunkId)
+    {
+        var map = cs.ClusterRealmMap;
+        return map != null && (uint)chunkId < (uint)map.Length ? map[chunkId] : RealmId.Default.Value;
+    }
+
+    /// <summary>This system's own selection buffer, grown (never shrunk) to hold at least <paramref name="needed"/> ids.</summary>
+    private int[] EnsureSelectionBuffer(int sysIdx, int needed)
+    {
+        var buf = _systemAmortizationBuffers[sysIdx];
+        if (buf == null || buf.Length < needed)
+        {
+            // Doubling, not an exact fit: a slowly growing active list would otherwise reallocate on every run.
+            buf = new int[Math.Max(Math.Max(16, needed), (buf?.Length ?? 0) * 2)];
+            _systemAmortizationBuffers[sysIdx] = buf;
+        }
+
+        return buf;
+    }
+
+    /// <summary>
     /// Prepare phase: selects the dispatch path based on WritesVersioned and change filter presence.
     /// For non-Versioned systems, creates/advances a long-lived PointInTimeAccessor.
     /// For the full non-Versioned path (Path 1), NO entity list is materialized — O(1).
     /// </summary>
     private int OnParallelQueryPrepare(int sysIdx)
+    {
+        // A chunked callback prepares nothing but a chunk count.
+        var epochs = Engine?.EpochManager;
+        if (epochs == null || Scheduler.Systems[sysIdx].ExplicitChunkCount > 0)
+        {
+            return OnParallelQueryPrepareCore(sysIdx);
+        }
+
+        // The prepare reads cluster pages — the change filter's dirty scan, the tier, sleep and descendant materializations — so it holds an epoch, as
+        // every chunk does (#1063). Outside one, a scan's accessor held pages nothing protected; in Debug it asserted, which hung the tick. Guards nest:
+        // inside another scope this is one atomic pair.
+        using (EpochGuard.Enter(epochs))
+        {
+            return OnParallelQueryPrepareCore(sysIdx);
+        }
+    }
+
+    private int OnParallelQueryPrepareCore(int sysIdx)
     {
         var sys = Scheduler.Systems[sysIdx];
 
@@ -1290,92 +1803,13 @@ public sealed partial class TyphonRuntime : IDisposable
             }
         }
 
-        // Issue #231: read the per-archetype tier cluster list. The rebuild itself was hoisted to BuildTierIndexesAtTickStart (runs single-threaded at
-        // TickStart, before any parallel system dispatch). Here we only READ the prepared per-tier buffer and, if amortized, slice it into a per-system bucket.
-        _systemTierClusterIds[sysIdx] = null;
-        _systemTierClusterCount[sysIdx] = 0;
-        if (sys.TierFilter != SimTier.All)
+        // RT-1: the one selection seam — tier ∩ this run's cellAmortize bucket ∩ awake clusters, null when none applies. Once per run: a checkerboard
+        // system's second Prepare of the tick serves the Black half of the selection its first one split (below), and must not select or count again.
+        if (!sys.IsCheckerboard || _checkerboardPhase[sysIdx] == 0)
         {
-            var cs = _systemClusterStates[sysIdx];
-            if (cs != null && cs.TierIndex != null)
-            {
-                var tierArr = cs.TierIndex.GetClustersArray(sys.TierFilter, out int tierCnt);
-                if (sys.CellAmortize > 0)
-                {
-                    // Per-system amortization bucket: stride the tier list by `cellAmortize`, starting at `tickNumber % cellAmortize`.
-                    // Index-based modulo gives perfectly uniform distribution regardless of cell-key encoding (Morton vs row-major). The bucket lives
-                    // in this system's own buffer — no shared mutable state.
-                    long tick = Scheduler.CurrentTickNumber;
-                    int amortize = sys.CellAmortize;
-                    int startOffset = (int)((ulong)tick % (uint)amortize);
-                    int bucketCount = tierCnt > startOffset ? (tierCnt - startOffset + amortize - 1) / amortize : 0;
-                    var buf = _systemAmortizationBuffers[sysIdx];
-                    if (buf == null || buf.Length < Math.Max(1, bucketCount))
-                    {
-                        buf = new int[Math.Max(16, bucketCount)];
-                        _systemAmortizationBuffers[sysIdx] = buf;
-                    }
-                    int written = 0;
-                    for (int i = startOffset; i < tierCnt; i += amortize)
-                    {
-                        buf[written++] = tierArr[i];
-                    }
-                    _systemTierClusterIds[sysIdx] = buf;
-                    _systemTierClusterCount[sysIdx] = written;
-                }
-                else
-                {
-                    // Direct zero-copy reference into the TierClusterIndex buffer. Safe because the rebuild was already done at TickStart and won't run again
-                    // until next TickStart (after all parallel systems for this tick have finished).
-                    _systemTierClusterIds[sysIdx] = tierArr;
-                    _systemTierClusterCount[sysIdx] = tierCnt;
-                }
-            }
-        }
-
-        // Issue #233: dormancy filter — remove sleeping clusters from the dispatch list.
-        // Handles both tier-filtered and non-tier-filtered systems. When SleepingClusterCount == 0 this block is skipped (zero overhead).
-        {
-            var cs = _systemClusterStates[sysIdx];
-            if (cs?.SleepingClusterCount > 0 && cs.SleepStates != null)
-            {
-                var srcIds = _systemTierClusterIds[sysIdx];
-                int srcCount = _systemTierClusterCount[sysIdx];
-
-                if (srcIds == null && sys.TierFilter == SimTier.All)
-                {
-                    // Non-tier-filtered system with sleeping clusters: "promote" to use a filtered copy of ActiveClusterIds
-                    // so the tier-filtered dispatch path in ExecuteChunkWithAccessor handles it.
-                    srcIds = ReadActiveClusterList(cs, out srcCount);
-                }
-
-                if (srcIds != null)
-                {
-                    // Always filter into the per-system amortization buffer (reusable, grows on demand).
-                    // When the source IS the amortization buffer (amortized tier), this filters in-place (safe: we only compact, never expand).
-                    var buf = _systemAmortizationBuffers[sysIdx];
-                    bool inPlace = ReferenceEquals(buf, srcIds);
-                    if (!inPlace && (buf == null || buf.Length < srcCount))
-                    {
-                        buf = new int[Math.Max(16, srcCount)];
-                        _systemAmortizationBuffers[sysIdx] = buf;
-                    }
-
-                    int written = 0;
-                    var sleepStates = cs.SleepStates;
-                    for (int i = 0; i < srcCount; i++)
-                    {
-                        int chunkId = srcIds[i];
-                        if (chunkId >= sleepStates.Length || sleepStates[chunkId] != ClusterSleepState.Sleeping)
-                        {
-                            buf[written++] = chunkId;
-                        }
-                    }
-
-                    _systemTierClusterIds[sysIdx] = buf;
-                    _systemTierClusterCount[sysIdx] = written;
-                }
-            }
+            _systemRunCount[sysIdx]++;
+            _systemTierClusterIds[sysIdx] = SelectDispatchClusters(sysIdx, EffectiveTier(sysIdx), out var selectedCount);
+            _systemTierClusterCount[sysIdx] = selectedCount;
         }
 
         // Issue #234: checkerboard two-phase dispatch. On first call (phase 0→1), split filtered cluster list into Red/Black and serve Red. On second call
@@ -1498,8 +1932,7 @@ public sealed partial class TyphonRuntime : IDisposable
             // independently build and store a full list in _parallelEntityLists[sysIdx], leaking (WorkerCount-1) pooled lists per tick.
             if (cs.ClusterSegment == null)
             {
-                var sys = Scheduler.Systems[sysIdx];
-                var entityList = BuildTierScopedEntityList(cs, sys.TierFilter, view);
+                var entityList = BuildClusterScopedEntityList(cs, _systemTierClusterIds[sysIdx], tierClusterCount, view, withDescendants: false, sysIdx);
                 _parallelEntityLists[sysIdx] = entityList;
                 metrics.EntitiesProcessed = entityList.Count;
                 return entityList.Count == 0 ? 0 : ComputeChunkCount(entityList.Count, sysIdx);
@@ -1548,6 +1981,8 @@ public sealed partial class TyphonRuntime : IDisposable
         }
         else if (_systemViews[sysIdx] != null)
         {
+            // RT-1: the clusters this dispatch covers — Prepare's selection, or its checkerboard half — not a fresh walk of the tier: that walk skipped
+            // neither sleeping clusters nor the cellAmortize bucket, and handed a checkerboard system the whole tier in both of its phases.
             entityList = BuildFullViewEntitySet(sysIdx);
         }
         else
@@ -1724,7 +2159,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks,
             TierBudgetMetrics = _previousTickMetrics,
-            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId)
         };
         ctx.DebugValidateWorkerId(Scheduler.WorkerSlotCount, sys.Name);
@@ -1855,7 +2290,8 @@ public sealed partial class TyphonRuntime : IDisposable
             EndClusterIndex = clusterEnd,
             ClusterIds = clusterIdArray,
             TierBudgetMetrics = _previousTickMetrics,
-            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
+            Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
@@ -1899,10 +2335,9 @@ public sealed partial class TyphonRuntime : IDisposable
         var srcIds = _systemTierClusterIds[sysIdx];
         int srcCount = _systemTierClusterCount[sysIdx];
         var cs = _systemClusterStates[sysIdx];
-        var grid = Engine?.SpatialGrid;
 
         // If no cluster data or no grid, Red = full list, Black = empty (degenerate: non-spatial archetype)
-        if (srcIds == null || cs?.ClusterCellMap == null || grid == null)
+        if (srcIds == null || cs?.ClusterCellMap == null || cs.ClusterRealmMap == null || Engine?.PrimaryGrid == null)
         {
             _checkerboardRedIds[sysIdx] = srcIds;
             _checkerboardRedCount[sysIdx] = srcCount;
@@ -1924,13 +2359,31 @@ public sealed partial class TyphonRuntime : IDisposable
         int redCount = 0, blackCount = 0;
         var redBuf = _checkerboardRedIds[sysIdx];
         var blackBuf = _checkerboardBlackIds[sysIdx];
-        var cellMap = cs.ClusterCellMap;
+        // The realm map is published before the cell map, so read the cell map FIRST: a realm map read after it is at least as long. Both are also
+        // bounded below, since srcIds predates both reads.
+        var cellMap = System.Threading.Volatile.Read(ref cs.ClusterCellMap);
+        var realmMap = System.Threading.Volatile.Read(ref cs.ClusterRealmMap);
+        var realmSpatial = cs.RealmSpatial;
+        var gridRealm = -1;
+        SpatialGrid grid = null;
 
         for (int i = 0; i < srcCount; i++)
         {
             int chunkId = srcIds[i];
-            int cellKey = (chunkId < cellMap.Length) ? cellMap[chunkId] : -1;
-            if (cellKey < 0)
+            int cellKey = (uint)chunkId < (uint)cellMap.Length && (uint)chunkId < (uint)realmMap.Length ? cellMap[chunkId] : -1;
+            if (cellKey >= 0)
+            {
+                // Each cluster coloured in its OWN realm's grid (Realms C1). Two realms never share a neighbour, so CB-01 (no two adjacent cells one
+                // colour) is a per-realm property and a per-realm parity keeps it.
+                var realm = realmMap[chunkId];
+                if (realm != gridRealm)
+                {
+                    gridRealm = realm;
+                    grid = realmSpatial[realm]?.Grid;
+                }
+            }
+
+            if (cellKey < 0 || grid == null)
             {
                 // Unmapped cluster — put in Red as fallback
                 redBuf[redCount++] = chunkId;
@@ -1999,7 +2452,8 @@ public sealed partial class TyphonRuntime : IDisposable
                 EndClusterIndex = clusterEnd,
                 ClusterIds = clusterIdArray,
                 TierBudgetMetrics = _previousTickMetrics,
-                SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
+                Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
                 Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
                 WorkerId = workerId,
                 ChunkIndex = chunkIndex,
@@ -2087,6 +2541,10 @@ public sealed partial class TyphonRuntime : IDisposable
         // read the view's entity set, and a set refreshed after them is a set the tier index does not know about.
         RefreshSystemInputViewsAtTickStart();
 
+        // Realms D1 (RLM-03): every realm's state and divisor for this tick, decided once, here, before anything is dispatched — then the per-archetype
+        // runnable sets the tier indexes and the dispatch below read.
+        UpdateRealmPolicyAtTickStart();
+
         // Rebuild per-archetype tier indexes ONCE per tick on the scheduler thread, before any parallel system dispatch. This eliminates the race where
         // multiple worker threads concurrently invoking OnParallelQueryPrepare for different systems on the same archetype would corrupt shared
         // TierClusterIndex buffers. After this point, every reader (parallel prepare callbacks, change-filter scans, view materialization) only READS the tier
@@ -2105,7 +2563,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 CreateSideTransaction = _createSideTxDelegate,
                 Entities = PooledEntityList.Empty,
                 TierBudgetMetrics = _previousTickMetrics,
-                SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+                SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Subscriptions = _subscriptionsRuntime?.Commands,
                 // Runs on the tick thread before any worker wakes — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
@@ -2179,17 +2637,59 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
+    /// Realms D1 (RT-3): evaluate the realm policy, then bring every spatial archetype's runnable set (<see cref="RealmDispatchIndex"/>) up to date. With
+    /// every realm runnable — one realm, or none dormant — the walk only clears indexes that were filtering, and is skipped outright once none is.
+    /// </summary>
+    private void UpdateRealmPolicyAtTickStart()
+    {
+        var realms = Engine?.RealmTable;
+        if (realms == null)
+        {
+            return;
+        }
+
+        realms.EvaluatePolicy();
+        if (realms.NonRunnableCount == 0 && !_realmFilteringActive)
+        {
+            return;
+        }
+
+        var filtering = false;
+        var states = Engine._archetypeStates;
+        for (var i = 0; i < states.Length; i++)
+        {
+            var cs = states[i]?.ClusterState;
+            if (cs?.ClusterRealmMap == null)
+            {
+                continue;
+            }
+
+            cs.RealmDispatch ??= new RealmDispatchIndex();
+            cs.RealmDispatch.Update(cs, realms);
+            filtering |= cs.RealmDispatch.Filtering;
+        }
+
+        _realmFilteringActive = filtering;
+    }
+
+    // True while some archetype's runnable set filters: the tick-start walk must then run even once every realm is runnable again, to clear it.
+    private bool _realmFilteringActive;
+
+    /// <summary>
     /// Walk every system that declares a tier filter, and rebuild the per-archetype <see cref="TierClusterIndex"/> once per tick on the scheduler thread.
     /// The version-skip in <see cref="TierClusterIndex.RebuildIfStale"/> means redundant calls (multiple systems on the same archetype) short-circuit on a
     /// two-int compare. The actual rebuild only runs when the grid tier version OR the archetype cluster set has changed since the previous tick.
     /// </summary>
     private void BuildTierIndexesAtTickStart()
     {
-        var grid = Engine?.SpatialGrid;
-        if (grid == null)
+        // One engine-wide tier version for every realm's grid (Realms C1): an archetype's tier index spans the realms it lives in.
+        var realms = Engine?.RealmTable;
+        if (realms == null)
         {
             return;
         }
+
+        var tierVersion = realms.TierVersion;
 
         // Issue #233: transition WakePending → Active for all archetypes BEFORE rebuilding tier indexes.
         // This ensures woken clusters appear in this tick's per-tier lists. The TransitionWakePendingToActive method is guarded by _lastWakeTransitionTick
@@ -2207,22 +2707,17 @@ public sealed partial class TyphonRuntime : IDisposable
         for (int i = 0; i < Scheduler.AllSystemCount; i++)
         {
             var sys = Scheduler.Systems[i];
-            if (sys.TierFilter == SimTier.All)
-            {
-                continue;
-            }
-
             var cs = _systemClusterStates[i];
 
             // Late-spawn recovery: if the archetype had no ClusterState at all when ResolveChangeFilters ran, _systemClusterStates[i] is null. Re-evaluate
-            // now — the state may have been created between construction and the first tick. This check runs once per tick per tier-filtered system with a
-            // null slot; the inner archetype scan is O(registered archetypes) ≈ O(10), negligible.
+            // now — the state may have been created between construction and the first tick. One registry lookup per tick per unbound QuerySystem.
+            // RT-1: for every QuerySystem, not only tier ones — the sleep filter reads the same binding.
             //
             // #662 again: this used to take the FIRST cluster-eligible archetype it found rather than the system's own view archetype — the exact defect
             // #662 fixed at the construction site, left behind in the recovery path. In any schema with more than one cluster archetype it hands the system
             // another archetype's cluster ids, which is a page-index-out-of-range throw when the counts differ and silent wrong work when they match. It
             // also never set `_systemArchetypeIds`, so a system rescued here kept gate 1 of the #327 touch rollup shut for the rest of the session.
-            if (cs == null && sys.IsParallelQuery && sys.InputFactory != null && _systemViews[i] != null)
+            if (cs == null && sys.Type == SystemType.QuerySystem && sys.InputFactory != null && _systemViews[i] != null)
             {
                 var viewArchetypeId = _systemViews[i].QueriedArchetypeId;
                 if (viewArchetypeId < Engine._archetypeStates.Length)
@@ -2232,18 +2727,30 @@ public sealed partial class TyphonRuntime : IDisposable
                     if (meta is { IsClusterEligible: true } && es?.ClusterState != null)
                     {
                         cs = es.ClusterState;
-                        cs.TierIndex ??= new TierClusterIndex();
                         _systemClusterStates[i] = cs;
                         _systemArchetypeIds[i] = viewArchetypeId;
                     }
                 }
             }
 
-            if (cs == null || cs.TierIndex == null)
+            if (cs == null || _systemViews[i] == null)
             {
                 continue;
             }
-            cs.TierIndex.RebuildIfStale(grid, cs);
+
+            // RT-1 / TI-01: every tier a system of this tick can select — its own AND its view's — is rebuilt and prepared HERE, single-threaded. Dispatch
+            // only reads: a rebuild from a worker would zero the per-tier arrays under a parallel system walking them zero-copy. A disjoint pair is left for
+            // the dispatch path to report (EffectiveTier throws there, as it always did); the tick path itself never throws.
+            var tier = (SimTier)((byte)sys.TierFilter & (byte)_systemViews[i].TierFilter);
+            if (tier == SimTier.All || tier == SimTier.None)
+            {
+                continue;
+            }
+
+            cs.TierIndex ??= new TierClusterIndex();
+            cs.TierIndex.RebuildIfStale(cs, tierVersion);
+            // A multi-tier set (SimTier.Near, …) is served from a merge cache the first read after a rebuild fills; fill it here so dispatch never does.
+            cs.TierIndex.GetClustersArray(tier, out _);
         }
     }
 
@@ -2477,6 +2984,9 @@ public sealed partial class TyphonRuntime : IDisposable
         // before replication's first stage starts — the stamp records the serial fence prep, and the barrier does the rest.
         _subscriptionsContext.NoteFence();
         scheduler.DispatchDeferredTracks();
+
+        // Realms D5: a Closing realm this fence emptied goes now — still inside EW-01's window, after every fence phase.
+        Engine.RemoveEmptyClosingRealms();
 
         ctx.HighestArchetypeLsn = _fenceFinalizeExec.HighestLsn;
         long overall = Math.Max(ctx.HighestTableLsn, ctx.HighestArchetypeLsn);
@@ -2732,6 +3242,17 @@ public sealed partial class TyphonRuntime : IDisposable
             _systemQueryPlanStartTicks[sysIdx] = Stopwatch.GetTimestamp();
         }
 
+        // RT-1: one run of this system, and its one selection — the cellAmortize bucket is keyed on the run count. Stored where the parallel path keeps its
+        // own, so every materialization (BuildFullViewEntitySet, the change-filter fallback) reads the same clusters.
+        _systemRunCount[sysIdx]++;
+        if (_systemViews[sysIdx] != null)
+        {
+            var selected = SelectDispatchClusters(sysIdx, EffectiveTier(sysIdx), out var selectedCount);
+            _systemTierClusterIds[sysIdx] = selected;
+            _dispatchClusterIds[sysIdx] = selected;
+            _dispatchClusterCount[sysIdx] = selected != null ? selectedCount : 0;
+        }
+
         // Create a Transaction on the CALLING THREAD (worker thread).
         // This respects Transaction's single-thread affinity constraint.
         var tx = _currentUow.CreateTransaction();
@@ -2778,7 +3299,8 @@ public sealed partial class TyphonRuntime : IDisposable
             Entities = entities,
             ConsumedQueues = _systemConsumedQueues[sysIdx],
             TierBudgetMetrics = _previousTickMetrics,
-            SpatialGrid = new SpatialGridAccessor(Engine?.SpatialGrid),
+            SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
+            Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             // Single-invocation system: one chunk, index 0. Left at the default 0 before #860, which made the documented slicing formula

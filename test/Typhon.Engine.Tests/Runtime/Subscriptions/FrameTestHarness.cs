@@ -199,7 +199,7 @@ sealed unsafe class FrameHarness : IDisposable
         }
 
         // The shadow oracle's checks queued by the previous tick, where the ingress drain runs them: before this tick's projection moves a block.
-        Subscriptions.Push?.RunQueuedShadowChecks();
+        Subscriptions.Hub?.RunQueuedShadowChecks();
 
         // The tick boundary the runtime drains the identity quarantine at: last tick's releases become reissuable.
         if (DrainNetIds)
@@ -324,7 +324,10 @@ sealed unsafe class FrameHarness : IDisposable
     {
         var sink = new DigestSink(Digest);
         sink.Fold($"s{session.Value}");
-        TickReader.Read(frame, CatalogPlan, ref sink);
+
+        // Every session is in the served realm (R4.2), so its held frame is realm 0's whether or not this frame carried the REALM that set it.
+        var held = Subscriptions.Realm0Frame;
+        TickReader.Read(frame, CatalogPlan, ref held, ref sink);
         Digest = sink.Hash;
         var fill = _fillFrames.GetValueOrDefault(session.Value);
         if (fill.CompleteAt == 0)
@@ -392,6 +395,9 @@ sealed unsafe class FrameHarness : IDisposable
             Mix(tick);
             Mix((ulong)flags);
         }
+
+        // A REALM block is folded by its identity: re-pinned digests change once for it, never again for its f64 bounds.
+        public void Realm(RealmFrame frame) => Fold(frame == null ? "r-" : $"r{frame.RealmId}.{frame.Generation}");
 
         public void BeginEntities(ArchetypePlan archetype) => Fold("e" + archetype.Name);
 
@@ -524,7 +530,7 @@ sealed unsafe class FrameHarness : IDisposable
 
         var log = new FrameLog();
         var bytes = new ReadOnlySpan<byte>(frame.Bytes, frame.Length);
-        log.Decode(bytes, CatalogPlan);
+        log.Decode(bytes, CatalogPlan, Subscriptions.Realm0Frame);
         send->CompleteSend(frame.Sequence);
         return log;
     }
@@ -561,7 +567,7 @@ sealed unsafe class FrameHarness : IDisposable
 
         // The runtime's order (SubscriptionsProjectExecSystem.BlocksStep): the push set and a block for every cluster in it, before the parked drain, so an
         // entity that migrated into a cluster with no block lands in one this tick.
-        push.PrepareBlocks(stamp);
+        Subscriptions.Hub.PrepareBlocks(stamp);
         Subscriptions.Self?.Refresh(Sessions);
         for (var a = 0; a < states.Length; a++)
         {
@@ -575,7 +581,7 @@ sealed unsafe class FrameHarness : IDisposable
 
         // The projection sorts its events for the parallel index, which the push index stage then merges (SubscriptionsPushIndexExecSystem).
         var lists = Math.Max(1, ProjectionWorkers);
-        push.MarkPushed(workers: lists, countInProject: !SerialIndex);
+        Subscriptions.Hub.MarkPushed(workers: lists, countInProject: !SerialIndex);
 
         // As the runtime: a tick with no watched block skips the projection's opening, and only flushes the identity releases that fall due.
         var watched = 0;
@@ -809,11 +815,15 @@ sealed class FrameLog : ITickSink
     /// <summary>Decodes one <c>TICK</c> message into this log.</summary>
     /// <param name="frame">The message.</param>
     /// <param name="plan">The compiled catalog.</param>
-    public void Decode(ReadOnlySpan<byte> frame, CatalogPlan plan)
+    /// <param name="realm">The realm frame the session holds before this message (its own REALM block, if any, replaces it).</param>
+    public void Decode(ReadOnlySpan<byte> frame, CatalogPlan plan, RealmFrame realm = null)
     {
         var sink = new Sink(this);
-        TickReader.Read(frame, plan, ref sink);
+        TickReader.Read(frame, plan, ref realm, ref sink);
     }
+
+    /// <inheritdoc />
+    public void Realm(RealmFrame frame) => Calls.Add(frame == null ? "realm none" : $"realm {frame.RealmId}");
 
     /// <inheritdoc />
     public void BeginTick(uint tick, TickFlags flags, uint periodUs)
@@ -936,6 +946,8 @@ sealed class FrameLog : ITickSink
         public Sink(FrameLog log) => _log = log;
 
         public void BeginTick(uint tick, TickFlags flags, uint periodUs) => _log.BeginTick(tick, flags, periodUs);
+
+        public void Realm(RealmFrame frame) => _log.Realm(frame);
 
         public void BeginEntities(ArchetypePlan archetype) => _log.BeginEntities(archetype);
 

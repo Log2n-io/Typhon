@@ -275,8 +275,8 @@ public class CatalogCanonicalizationTests
         var withPlayerOnly = new Catalog
         {
             Protocol = declared.Protocol, App = declared.App, Tick = declared.Tick, Limits = declared.Limits, Archetypes = declared.Archetypes,
-            Enums = declared.Enums, Events = declared.Events, Commands = declared.Commands, Metrics = declared.Metrics,
-            Grids = [new CatalogGrid { Origin = [-8192, -8192], Cell = 256, Dims = [64, 64], Archetypes = [0] }],
+            Enums = declared.Enums, Events = declared.Events, Commands = declared.Commands, Metrics = declared.Metrics, RealmKinds = declared.RealmKinds,
+            Grids = [new CatalogGrid { TileCells = 1, Archetypes = [0] }],
         };
 
         var canonical = CatalogSerializer.Canonicalize(withPlayerOnly);

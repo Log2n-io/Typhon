@@ -45,7 +45,8 @@ export interface CatalogCodec {
   readonly min?: readonly number[];
   readonly max?: readonly number[];
   readonly scale?: number;
-  readonly quantaDiv?: number;
+  /** A velocity's unit exponent: one code is 2^unitExp metres per tick (W5, `typhon.3`). */
+  readonly unitExp?: number;
   readonly n?: number;
   readonly maxBytes?: number;
   readonly of?: CatalogCodec;
@@ -121,9 +122,11 @@ export interface CatalogCommand {
 
 export interface CatalogGrid {
   readonly idx: number;
-  readonly origin: readonly number[];
-  readonly cell: number;
-  readonly dims: readonly number[];
+  /**
+   * The tile, in the realm's replication cells (`typhon.3`, 12-realms § 5.4): origin and dimensions are the realm
+   * frame's, so one grid is valid in every realm.
+   */
+  readonly tileCells: number;
   /** The archetype indices counted, in the order an `AGG` cell lists their counts. */
   readonly archetypes: readonly number[];
 }
@@ -147,6 +150,8 @@ export interface Catalog {
   readonly tick: CatalogTick;
   readonly limits: CatalogLimits;
   readonly sessionKinds: readonly string[];
+  /** The realm kinds, in canonical order: a `REALM` block names its kind by index. Absent means the default `""` alone. */
+  readonly realmKinds?: readonly string[];
   readonly archetypes: readonly CatalogArchetype[];
   readonly enums: Readonly<Record<string, readonly string[]>>;
   readonly events: readonly CatalogEvent[];
@@ -240,6 +245,7 @@ function readCatalog(raw: unknown, p: string[]): Catalog {
       resumeGraceMs: int(limits, 'resumeGraceMs', 'limits', p),
     },
     sessionKinds: stringArray(o.sessionKinds, 'sessionKinds', p),
+    ...(o.realmKinds === undefined ? {} : { realmKinds: stringArray(o.realmKinds, 'realmKinds', p) }),
     archetypes: list(o.archetypes, 'archetypes', p, (a, where) => readArchetype(a, where, p)),
     enums,
     events: list(o.events, 'events', p, (e, where) => ({
@@ -251,9 +257,7 @@ function readCatalog(raw: unknown, p: string[]): Catalog {
     commands: list(o.commands, 'commands', p, (c, where) => readCommand(c, where, p)),
     grids: list(o.grids, 'grids', p, (g, where) => ({
       idx: int(g, 'idx', where, p),
-      origin: numberArray(g.origin, `${where}.origin`, p),
-      cell: num(g, 'cell', where, p),
-      dims: intArray(g.dims, `${where}.dims`, p),
+      tileCells: int(g, 'tileCells', where, p),
       archetypes: intArray(g.archetypes, `${where}.archetypes`, p),
     })),
     metrics: list(o.metrics, 'metrics', p, (m, where) => readMetric(m, where, p)),
@@ -368,7 +372,7 @@ function readField(f: JsonObject, where: string, p: string[]): CatalogField {
   return field;
 }
 
-const CODEC_INTEGERS = ['bits', 'quantaDiv', 'n', 'maxBytes', 'minCount', 'maxCount', 'fixedBytes'] as const;
+const CODEC_INTEGERS = ['bits', 'unitExp', 'n', 'maxBytes', 'minCount', 'maxCount', 'fixedBytes'] as const;
 
 /**
  * A codec, and for a list its element. An element's own `of` is refused rather than read, so the recursion is one level
@@ -537,7 +541,6 @@ export const ValueKind = {
 export type ValueKind = (typeof ValueKind)[keyof typeof ValueKind];
 
 const MAX_MESSAGE_INDEX = ProtocolConstants.maxMessageIndex;
-const MAX_GRID_CELLS = ProtocolConstants.maxGridCells;
 
 const NO_AXES = new Float64Array(0);
 
@@ -583,9 +586,8 @@ export class FieldPlan {
   /** 2^(bits−1) − 1 (vec, vel, snorm). */
   readonly limit: number;
   readonly scale: number;
-  readonly quantaDiv: number;
-  /** For a `vel` codec, the linked position codec's step on each axis. */
-  readonly velocityStep: Float64Array;
+  /** For a `vel` codec, its absolute unit 2^unitExp metres per tick (W5, `typhon.3`); 0 otherwise. */
+  readonly velocityUnit: number;
   readonly n: number;
   readonly maxBytes: number;
   readonly fixedBytes: number;
@@ -594,14 +596,7 @@ export class FieldPlan {
   /** The enum's value names, or `null`. */
   readonly enumNames: readonly string[] | null;
 
-  constructor(
-    name: string,
-    index: number,
-    field: CatalogField | null,
-    codec: CatalogCodec,
-    enums: Catalog['enums'],
-    velocityStep: Float64Array = NO_AXES,
-  ) {
+  constructor(name: string, index: number, field: CatalogField | null, codec: CatalogCodec, enums: Catalog['enums']) {
     this.name = name;
     this.index = index;
     this.field = field;
@@ -612,13 +607,11 @@ export class FieldPlan {
     this.bitCount = kind === CodecKind.Bool ? 1 : kind === CodecKind.Bits ? (codec.n ?? 0) : 0;
     this.bits = codec.bits ?? 0;
     this.scale = codec.scale ?? 0;
-    this.quantaDiv = codec.quantaDiv ?? 0;
     this.n = codec.n ?? 0;
     this.maxBytes = codec.maxBytes ?? 0;
     this.fixedBytes = codec.fixedBytes ?? 0;
     this.minCount = codec.minCount ?? 0;
     this.maxCount = codec.maxCount ?? 0;
-    this.velocityStep = velocityStep;
     const enumName = field?.enum;
     this.enumNames =
       enumName !== undefined && Object.prototype.hasOwnProperty.call(enums, enumName) ? enums[enumName]! : null;
@@ -678,7 +671,8 @@ export class FieldPlan {
     this.valueKind = valueKind;
     this.components = components;
 
-    if (kind === CodecKind.Quant || kind === CodecKind.Pos2 || kind === CodecKind.Pos3) {
+    // A position's quantum is the realm frame's (typhon.3, SUB-30): RealmFrame.step, per frame.
+    if (kind === CodecKind.Quant) {
       const min = codec.min;
       const max = codec.max;
       if (min?.length !== components || max?.length !== components) {
@@ -696,9 +690,21 @@ export class FieldPlan {
     }
 
     if (kind === CodecKind.Vel2 || kind === CodecKind.Vel3) {
-      if (velocityStep.length !== components || !(this.quantaDiv >= 1)) {
-        throw refuse(`field '${name}': a velocity needs its position's step on every axis and quantaDiv ≥ 1`);
+      const e = codec.unitExp;
+      if (
+        e === undefined ||
+        !Number.isSafeInteger(e) ||
+        e < ProtocolConstants.minVelocityUnitExp ||
+        e > ProtocolConstants.maxVelocityUnitExp
+      ) {
+        throw refuse(
+          `field '${name}': a velocity needs unitExp in [${ProtocolConstants.minVelocityUnitExp}, ${ProtocolConstants.maxVelocityUnitExp}]`,
+        );
       }
+
+      this.velocityUnit = 2 ** e;
+    } else {
+      this.velocityUnit = 0;
     }
 
     const byteAligned = isByteWidth(this.bits);
@@ -710,8 +716,6 @@ export class FieldPlan {
   private checkWidths(kind: CodecKind): void {
     switch (kind) {
       case CodecKind.Quant:
-      case CodecKind.Pos2:
-      case CodecKind.Pos3:
       case CodecKind.Vec2:
       case CodecKind.Vec3:
       case CodecKind.Vel2:
@@ -812,7 +816,7 @@ export class PositionPlan {
         throw refuse('the linear model needs a vel2 or vel3 codec');
       }
 
-      this.vel = new FieldPlan('velocity', -1, null, vel, enums, this.pos.step);
+      this.vel = new FieldPlan('velocity', -1, null, vel, enums);
       if (this.vel.components !== this.dims) {
         throw refuse("the linear model needs a vel codec matching pos's dimensions");
       }
@@ -929,37 +933,23 @@ export class MetricPlan {
   }
 }
 
-/** A grid compiled: its cell count and a reusable buffer for one cell's counts. */
+/**
+ * A grid compiled: its tile and a reusable buffer for one cell's counts. Its origin and dimensions are the session's
+ * realm frame's (`RealmFrame.aggregateDim`), not the catalog's.
+ */
 export class GridPlan {
   readonly grid: CatalogGrid;
   readonly idx: number;
-  /** The product of its dims, at most `ProtocolConstants.maxGridCells`. */
-  readonly cellCount: number;
+  /** The tile, in replication cells. */
+  readonly tileCells: number;
   /** One count per archetype of {@link CatalogGrid.archetypes}; reused for every cell a decoder reads. */
   readonly counts: Uint32Array;
 
   constructor(grid: CatalogGrid, archetypeCount: number) {
     this.grid = grid;
     this.idx = grid.idx;
-    if ((grid.dims.length !== 2 && grid.dims.length !== 3) || grid.origin.length !== grid.dims.length) {
-      throw refuse(`grid ${grid.idx} needs 2 or 3 dims, with one origin per axis`);
-    }
-
-    if (!(grid.cell > 0 && Number.isFinite(grid.cell)) || !grid.origin.every((o) => Number.isFinite(o))) {
-      throw refuse(`grid ${grid.idx} needs a finite origin and a positive finite cell`);
-    }
-
-    let cells = 1;
-    for (const d of grid.dims) {
-      if (!(Number.isInteger(d) && d >= 1)) {
-        throw refuse(`grid ${grid.idx}: every dimension must be an integer of at least 1`);
-      }
-
-      cells = Math.min(cells * d, MAX_GRID_CELLS + 1);
-    }
-
-    if (cells > MAX_GRID_CELLS) {
-      throw refuse(`grid ${grid.idx} has more than ${MAX_GRID_CELLS} cells`);
+    if (!(Number.isInteger(grid.tileCells) && grid.tileCells >= 1)) {
+      throw refuse(`grid ${grid.idx} needs a tile of at least one replication cell`);
     }
 
     for (const a of grid.archetypes) {
@@ -968,7 +958,7 @@ export class GridPlan {
       }
     }
 
-    this.cellCount = cells;
+    this.tileCells = grid.tileCells;
     this.counts = new Uint32Array(grid.archetypes.length);
   }
 }
@@ -989,6 +979,8 @@ export class CatalogPlan {
   /** Values across every metric: the size of a flattened value table. */
   readonly metricValueCount: number;
   readonly grids: readonly GridPlan[];
+  /** The realm kinds: a `REALM` block's `kindIdx` indexes this. `[""]` for a catalog that declares none. */
+  readonly realmKinds: readonly string[];
 
   private readonly events: readonly (MessagePlan | undefined)[];
   private readonly commands: readonly (MessagePlan | undefined)[];
@@ -1033,6 +1025,7 @@ export class CatalogPlan {
     this.metricValueCount = offset;
     this.serverMetrics = all.filter((m) => !m.session);
     this.sessionMetrics = all.filter((m) => m.session);
+    this.realmKinds = catalog.realmKinds !== undefined && catalog.realmKinds.length > 0 ? catalog.realmKinds : [''];
     this.grids = catalog.grids.map((g, i) => {
       if (g.idx !== i) {
         throw refuse(`grid at position ${i} has index ${g.idx}`);

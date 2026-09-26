@@ -3,7 +3,7 @@ using JetBrains.Annotations;
 namespace Typhon.Engine;
 
 /// <summary>
-/// A snapshot of the sparse spatial grid's occupancy and memory (#872 step 8). Obtained from <see cref="DatabaseEngine.GetSpatialGridOccupancy"/>;
+/// A snapshot of the sparse spatial grid's occupancy and memory (#872 step 8). Obtained from <see cref="DatabaseEngine.GetSpatialGridOccupancy()"/>;
 /// all-zero when no grid is configured.
 /// </summary>
 /// <remarks>

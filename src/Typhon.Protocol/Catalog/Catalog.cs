@@ -85,6 +85,12 @@ public sealed class Catalog
     /// <summary>The session kinds the application declares (W21). Informational: the engine never interprets a kind.</summary>
     public string[] SessionKinds { get; init; }
 
+    /// <summary>
+    /// The realm kinds the application declares (<c>typhon.3</c>), in canonical order; a <c>REALM</c> block names its kind by index here. <c>""</c> is the
+    /// default kind; absent means it alone.
+    /// </summary>
+    public string[] RealmKinds { get; init; }
+
     /// <summary>The replicated archetypes, ordered so that each one's position is its <see cref="CatalogArchetype.Idx"/>.</summary>
     public CatalogArchetype[] Archetypes { get; init; }
 

@@ -86,10 +86,11 @@ export function decodeVec(q: number, scale: number, limit: number): number {
 // ---- vel (W5) -------------------------------------------------------------------------------------------------------
 
 /**
- * Encodes one `vel` axis: displacement per tick in units of the axis' position step ÷ `quantaDiv`. Server-side only.
+ * Encodes one `vel` axis (W5, `typhon.3`): displacement per tick in units of `unit` = 2^unitExp metres — absolute, the
+ * same in every realm — rounded half away from zero, symmetric clamp. Server-side only.
  */
-export function encodeVel(d: number, posStep: number, quantaDiv: number, limit: number): number {
-  const x = (d / posStep) * quantaDiv;
+export function encodeVel(d: number, unit: number, limit: number): number {
+  const x = d / unit;
   if (x !== x) {
     return 0;
   }
@@ -98,9 +99,9 @@ export function encodeVel(d: number, posStep: number, quantaDiv: number, limit: 
   return r > limit ? limit : r < -limit ? -limit : r;
 }
 
-/** Decodes one `vel` axis to world units per tick: `(q × posStep) / quantaDiv`. */
-export function decodeVel(q: number, posStep: number, quantaDiv: number, limit: number): number {
-  return ((q < -limit ? -limit : q) * posStep) / quantaDiv;
+/** Decodes one `vel` axis to world units per tick: `max(q, −limit) × unit`, exact (the unit is dyadic). */
+export function decodeVel(q: number, unit: number, limit: number): number {
+  return (q < -limit ? -limit : q) * unit;
 }
 
 // ---- unorm, snorm (W6) ----------------------------------------------------------------------------------------------

@@ -442,7 +442,7 @@ export class MockServer {
     return { reset, cellCount: changedCount, cells: cells.slice(0, changedCount), counts: out };
   }
 
-  /** `typhon.2` record costs (`03-wire-protocol.md` § 11): gap-coded ids, 24-bit positions, 16-bit velocities. */
+  /** `typhon.3` record costs (`03-wire-protocol.md` § 11): gap-coded ids, 24-bit positions, 16-bit velocities. */
   private estimateBlockBytes(a: number, block: ArchetypeBlock): number {
     const fieldBytes = a === Archetype.Creature || a === Archetype.Player ? 5 : a === Archetype.CreatureLair ? 3 : 1;
     const enterBytes = a === Archetype.WorldObject ? 1.5 + 6 + fieldBytes : 14.5 + fieldBytes;

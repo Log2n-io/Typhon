@@ -172,7 +172,7 @@ static class MassArrivalProfile
             dbe.InitializeArchetypes();
             var archetypeId = Archetype<MaUnit>.Metadata.ArchetypeId;
             var cs = dbe._archetypeStates[archetypeId].ClusterState;
-            var grid = dbe.SpatialGrid;
+            var grid = dbe.Realm0Grid;
             var destKey = grid.WorldToCellKey(DestMin + CellSize * 0.5f, DestMin + CellSize * 0.5f, 0f);
 
             // The round's world. Every seed below is a function of the round (and N), never of the arm.
@@ -425,7 +425,7 @@ static class MassArrivalProfile
                 // Every other cell, weighted by its clusters: the part of the world the arrival's repair could starve.
                 double weighted = 0;
                 double clusters = 0;
-                var perCell = cs.PerCellIndex;
+                var perCell = cs.Realm0Spatial.PerCellIndex;
                 for (var key = 0; perCell != null && key < perCell.Length; key++)
                 {
                     if (key == destKey || perCell[key] == null)
@@ -496,7 +496,7 @@ static class MassArrivalProfile
     private static unsafe (double Clusters, double Extent, double ToBound, double Occupancy) CellLayout(ArchetypeClusterState cs,
         ref ChunkAccessor<PersistentStore> accessor, int cellKey, int slots)
     {
-        var ids = cs.CellClusterPool.GetClusters(cellKey);
+        var ids = cs.Realm0Spatial.CellClusterPool.GetClusters(cellKey);
         if (ids.Length == 0)
         {
             return (0, 0, 0, 0);

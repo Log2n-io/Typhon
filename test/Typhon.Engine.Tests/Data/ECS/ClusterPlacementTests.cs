@@ -66,8 +66,8 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
     private static (double mean, double max, int clusters) ExtentsOfCell(DatabaseEngine dbe, int cellX)
     {
         var state = ClusterStateOf(dbe);
-        var cellKey = dbe.SpatialGrid.WorldToCellKey((cellX * CellSize) + 50f, 50f, 0f);
-        var clusters = state.CellClusterPool.GetClusters(cellKey);
+        var cellKey = dbe.Realm0Grid.WorldToCellKey((cellX * CellSize) + 50f, 50f, 0f);
+        var clusters = state.Realm0Spatial.CellClusterPool.GetClusters(cellKey);
         var total = 0d;
         var max = 0d;
         var counted = 0;
@@ -101,8 +101,8 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
     private static string DescribeCell(DatabaseEngine dbe, int cellX)
     {
         var state = ClusterStateOf(dbe);
-        var cellKey = dbe.SpatialGrid.WorldToCellKey((cellX * CellSize) + 50f, 50f, 0f);
-        var clusters = state.CellClusterPool.GetClusters(cellKey);
+        var cellKey = dbe.Realm0Grid.WorldToCellKey((cellX * CellSize) + 50f, 50f, 0f);
+        var clusters = state.Realm0Spatial.CellClusterPool.GetClusters(cellKey);
         var parts = new List<string>();
         for (var i = 0; i < clusters.Length; i++)
         {
@@ -120,7 +120,7 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
     }
 
     private static int EntitiesInCell(DatabaseEngine dbe, int cellX) =>
-        dbe.SpatialGrid.TryGetCellKey(cellX, 0, 0, out var key) ? dbe.SpatialGrid.GetCell(key).EntityCount : 0;
+        dbe.Realm0Grid.TryGetCellKey(cellX, 0, 0, out var key) ? dbe.Realm0Grid.GetCell(key).EntityCount : 0;
 
     /// <summary>The tags of the cluster holding <paramref name="tag"/>, in slot order — which entities share it, and in what order they were claimed.</summary>
     private static List<int> TagsSharingClusterOf(DatabaseEngine dbe, int tag)
@@ -466,7 +466,7 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
         dbe.WriteTickFence(2);
 
         var state = ClusterStateOf(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         var checkedEntities = 0;
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -509,8 +509,10 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
                     var sb = new System.Text.StringBuilder();
                     for (var c = 0; c < 2; c++)
                     {
-                        dbe.SpatialGrid.TryGetCellKey(c, 0, 0, out var key);
-                        sb.Append($"cell {key} list: [{string.Join(",", state.CellClusterPool.GetClusters(key).ToArray())}] cursor {state.CellClusterPool.GetScanCursor(key)} count {EntitiesInCell(dbe, c)}\n");
+                        dbe.Realm0Grid.TryGetCellKey(c, 0, 0, out var key);
+                        var pool = state.Realm0Spatial.CellClusterPool;
+                        sb.Append($"cell {key} list: [{string.Join(",", pool.GetClusters(key).ToArray())}] cursor {pool.GetScanCursor(key)} ")
+                            .Append($"count {EntitiesInCell(dbe, c)}\n");
                     }
 
                     foreach (var cluster in accessor.GetClusterEnumerator())
@@ -598,9 +600,9 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
         Assert.That(Task.WaitAll(tasks, 10_000), Is.True, "a writer hung");
 
         var state = ClusterStateOf(dbe);
-        var cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        var pooled = state.CellClusterPool.GetClusters(cellKey).ToArray();
-        var index = state.PerCellIndex[cellKey].DynamicIndex;
+        var cellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        var pooled = state.Realm0Spatial.CellClusterPool.GetClusters(cellKey).ToArray();
+        var index = state.Realm0Spatial.PerCellIndex[cellKey].DynamicIndex;
         var indexed = new List<int>();
         for (var i = 0; i < index.ClusterCount; i++)
         {
@@ -608,7 +610,7 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
         }
 
         Assert.That(indexed, Is.EquivalentTo(pooled), "the index and the cell's cluster list disagree — a cluster indexed twice, or not at all");
-        dbe.SpatialGrid.CellOrigin(cellKey, out var originX, out var originY, out _);
+        dbe.Realm0Grid.CellOrigin(cellKey, out var originX, out var originY, out _);
 
         var checkedEntities = 0;
         using var readTx = dbe.CreateQuickTransaction();
@@ -728,8 +730,8 @@ class ClusterPlacementTests : TestBase<ClusterPlacementTests>
     private static double MeanExtentOfClustersFrom(DatabaseEngine dbe, int cellX, int from)
     {
         var state = ClusterStateOf(dbe);
-        var cellKey = dbe.SpatialGrid.WorldToCellKey((cellX * CellSize) + 50f, 50f, 0f);
-        var clusters = state.CellClusterPool.GetClusters(cellKey);
+        var cellKey = dbe.Realm0Grid.WorldToCellKey((cellX * CellSize) + 50f, 50f, 0f);
+        var clusters = state.Realm0Spatial.CellClusterPool.GetClusters(cellKey);
         var total = 0d;
         var counted = 0;
         for (var i = from; i < clusters.Length; i++)

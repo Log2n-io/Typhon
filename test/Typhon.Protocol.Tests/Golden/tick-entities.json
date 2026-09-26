@@ -1,12 +1,34 @@
 {
-  "description": "ENTITIES for every position kind: static Beacon, none-model Buoy, linear 3D Drone with packs and every group, non-spatial Ledger with an unknown codec skipped by fixedBytes. Epoch 255, t0 low bits wrapping, netId gaps up to 200 000.",
+  "description": "RESET, then REALM (deep, 24 bits), then ENTITIES for every position kind over its frame: static Beacon, none-model Buoy, linear 3D Drone with packs and every group, non-spatial Ledger with an unknown codec skipped by fixedBytes. Epoch 255, t0 low bits wrapping, netId gaps up to 200 000.",
   "catalog": "catalog-kitchen-sink",
   "log": [
     {
       "call": "beginTick",
       "tick": 70000,
-      "flags": 1,
+      "flags": 3,
       "periodUs": 0
+    },
+    {
+      "call": "realm",
+      "frame": {
+        "realmId": 3,
+        "generation": 7,
+        "kindIdx": 1,
+        "appTag": 12648430,
+        "posBits": 24,
+        "cellM": "4070000000000000",
+        "deep": true,
+        "min": [
+          "c0c0000000000000",
+          "c0c0000000000000",
+          "c050000000000000"
+        ],
+        "max": [
+          "40c0000000000000",
+          "40c0000000000000",
+          "4050000000000000"
+        ]
+      }
     },
     {
       "call": "beginEntities",
@@ -284,11 +306,11 @@
       "position": [
         "c090000000000000",
         "404ffec000000000",
-        "408fffc000000000"
+        "404fffffc0000000"
       ],
       "velocity": [
         "3fefc00000000000",
-        "bfafc00000000000",
+        "bfefc00000000000",
         "0000000000000000"
       ],
       "t0": 4465,

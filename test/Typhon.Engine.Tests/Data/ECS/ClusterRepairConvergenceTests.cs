@@ -341,7 +341,7 @@ class ClusterRepairConvergenceTests : TestBase<ClusterRepairConvergenceTests>
         var dbe = SetupEngine(repairCooldownTicks: CooldownTicks);
         SpawnDegradedCell(dbe);
         SpawnTightCell(dbe);
-        var cell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
+        var cell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
 
         var repairTicks = new List<int>();
         var heldAtRelease = 0f;

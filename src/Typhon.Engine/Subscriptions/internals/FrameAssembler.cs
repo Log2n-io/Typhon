@@ -329,6 +329,33 @@ internal sealed class SessionFrameState
     /// <summary>Whether the next frame must carry <c>RESET</c> and refill the view from nothing.</summary>
     public bool PendingReset { get; set; }
 
+    /// <summary>
+    /// The realm of the session's last published <c>RESET</c> — what its client holds (<c>typhon.3</c>, SUB-29): -1 before its first, <see cref="RealmId.NoneValue"/>
+    /// for none. It moves only with a published frame, so a skipped switch is retried as a <c>RESET</c> rather than lost.
+    /// </summary>
+    public int CommittedRealm { get; set; } = -1;
+
+    /// <summary>Whether a frame carrying the session's <c>REALM</c> has been published.</summary>
+    public bool RealmSent => CommittedRealm != -1;
+
+    /// <summary>The session's realm this tick, as the frame prologue resolved it; its next <c>RESET</c> carries it.</summary>
+    public int PendingRealm { get; set; } = -1;
+
+    /// <summary>The <c>REALM</c> block's frame for <see cref="PendingRealm"/>; <see langword="null"/> for none.</summary>
+    public RealmFrame PendingFrame { get; set; }
+
+    /// <summary>The realm the client held before its last switch, -1 for none yet; with <see cref="RealmSwitchTick"/>, what a command built before it names.</summary>
+    public int PreviousRealm { get; set; } = -1;
+
+    /// <summary>The tick whose published frame switched the client's realm.</summary>
+    public uint RealmSwitchTick { get; set; }
+
+    /// <summary>
+    /// The tick of the session's last committed frame: its events are those after it (09 § 11). The session's, not a realm's, so a switch loses none of the
+    /// events addressed to it (12-realms § 3).
+    /// </summary>
+    public uint EventsCursor { get; set; }
+
     /// <summary>Whether the initial fill under the enter budget has completed — the <c>VIEW_COMPLETE</c> flag.</summary>
     public bool ViewComplete { get; set; }
 
@@ -380,6 +407,12 @@ internal sealed class SessionFrameState
         Generation = generation;
         Profile = null;
         PendingReset = false;
+        CommittedRealm = -1;
+        PendingRealm = -1;
+        PendingFrame = null;
+        PreviousRealm = -1;
+        RealmSwitchTick = 0;
+        EventsCursor = 0;
         ViewComplete = false;
         FramesProduced = 0;
         DegradeLevel = 0;
@@ -548,7 +581,6 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _followed = new Vector3D[options.MaxSessions];
         _followedGeneration = new uint[options.MaxSessions];
         _followedEntity = new EntityId[options.MaxSessions];
-        _eventsLastTick = new uint[options.MaxSessions];
         _ackHistory = new AckHistory(CommandTypeBuffers.AckCapacity(options.MaxSessions));
         _aggLastTick = new uint[options.MaxSessions];
         _aggGeneration = new ushort[options.MaxSessions];
@@ -557,7 +589,6 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _aggAnchor = new Vector3D[options.MaxSessions];
         _aggRegion = new uint[options.MaxSessions][];
         _aggRegionCount = new int[options.MaxSessions];
-        _eventsLastGeneration = new ushort[options.MaxSessions];
         _followedValid = new bool[options.MaxSessions];
         _encodePlans = BuildEncodePlans(plans, catalog);
         _lagBoundTicks = SkipPolicy.LagBoundTicks(options, tickPeriodUs);

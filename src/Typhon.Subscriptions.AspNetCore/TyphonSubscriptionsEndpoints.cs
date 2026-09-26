@@ -19,7 +19,7 @@ namespace Typhon.Subscriptions.AspNetCore;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Steps 1–6 of <c>design/Subscriptions/04-transport.md § 5</c>, in order: a WebSocket request, an allowed origin, the <c>typhon.2</c> subprotocol, an
+/// Steps 1–6 of <c>design/Subscriptions/04-transport.md § 5</c>, in order: a WebSocket request, an allowed origin, the <c>typhon.3</c> subprotocol, an
 /// accept with explicit keep-alive, an acceptor that may refuse, and a receive loop bounded by the protocol's caps. <b>Step 7 — capping kernel queueing
 /// through <c>TCP_NOTSENT_LOWAT</c> on the upgraded socket — is not built.</b> Without it a send can complete as soon as the bytes reach a kernel buffer,
 /// which tells the engine a slow client is keeping up and leaves the acknowledgement-based lag skip reading a backlog bounded by the OS rather than by us.

@@ -11,6 +11,10 @@ const single = new Float32Array(singleBytes.buffer);
 const LITTLE_ENDIAN = new Uint8Array(Uint16Array.of(1).buffer)[0] === 1;
 const scratch = new Float64Array(1);
 
+/** One float64's bytes, and the double they spell in the platform's byte order. */
+const doubleBytes = new Uint8Array(8);
+const double = new Float64Array(doubleBytes.buffer);
+
 /**
  * Reads the wire's primitives (`03-wire-protocol.md` § 2) from a byte array: little-endian fixed-width integers, LEB128
  * varints, half and single floats, and length-prefixed strings and blobs.
@@ -259,6 +263,18 @@ export class WireReader {
     }
 
     return value;
+  }
+
+  /** A little-endian IEEE double; any NaN pattern decodes as NaN. Used by the `REALM` block, not per record. */
+  f64(): number {
+    const at = this.take(8);
+    const b = this.message;
+    for (let i = 0; i < 8; i++) {
+      doubleBytes[LITTLE_ENDIAN ? i : 7 - i] = b[at + i]!;
+    }
+
+    const value = double[0]!;
+    return value === value ? value : NaN;
   }
 
   /** A little-endian IEEE single, widened exactly. */

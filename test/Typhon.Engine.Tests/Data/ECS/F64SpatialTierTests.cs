@@ -751,7 +751,7 @@ class F64SpatialTierTests : TestBase<F64SpatialTierTests>
     private static unsafe void AssertCa01(DatabaseEngine dbe, string what)
     {
         var cs = StateOf<F64Unit3>(dbe);
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var accessor = cs.ClusterSegment.CreateChunkAccessor();
         try
@@ -820,7 +820,7 @@ class F64SpatialTierTests : TestBase<F64SpatialTierTests>
         int n;
         using (EpochGuard.Enter(dbe.EpochManager))
         {
-            n = cs.QueryRay(dbe.SpatialGrid, FarOrigin, FarOrigin + 500d, FarOrigin + 500d, 1d, 0d, 0d, 4d * CellSize, buffer, categoryMask: 0);
+            n = cs.QueryRay(dbe.Realm0Grid, FarOrigin, FarOrigin + 500d, FarOrigin + 500d, 1d, 0d, 0d, 4d * CellSize, buffer, categoryMask: 0);
         }
 
         Assert.Multiple(() =>
@@ -858,7 +858,7 @@ class F64SpatialTierTests : TestBase<F64SpatialTierTests>
         int n;
         using (EpochGuard.Enter(dbe.EpochManager))
         {
-            n = StateOf<F64Unit3>(dbe).QueryFrustum(dbe.SpatialGrid, planes, 1,
+            n = StateOf<F64Unit3>(dbe).QueryFrustum(dbe.Realm0Grid, planes, 1,
                 new Vector3Like(FarOrigin + 3_400d, FarOrigin, FarOrigin),
                 new Vector3Like(FarOrigin + 3_600d, FarOrigin + WorldSpan, FarOrigin + WorldSpan),
                 results, categoryMask: 0);
@@ -892,7 +892,7 @@ class F64SpatialTierTests : TestBase<F64SpatialTierTests>
         int n;
         using (EpochGuard.Enter(dbe.EpochManager))
         {
-            n = StateOf<F64Unit3>(dbe).QueryNearest(dbe.SpatialGrid, FarOrigin + 500d, FarOrigin + 500d, FarOrigin + 500d, 3, buffer, categoryMask: 0);
+            n = StateOf<F64Unit3>(dbe).QueryNearest(dbe.Realm0Grid, FarOrigin + 500d, FarOrigin + 500d, FarOrigin + 500d, 3, buffer, categoryMask: 0);
         }
 
         Assert.Multiple(() =>

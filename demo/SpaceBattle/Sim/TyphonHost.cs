@@ -323,7 +323,7 @@ internal sealed class TyphonHost : IDisposable
     public ArchetypeClusterState ClusterStateOf(int archetypeId) =>
         DBE._archetypeStates[archetypeId].ClusterState;
 
-    public SpatialGrid Grid => DBE.SpatialGrid;
+    public SpatialGrid Grid => DBE.Realm0Grid;
 
     /// <summary>Per-cell entity count. Cross-archetype sum — ships, stations and shots all contribute.</summary>
     public int CellEntityCount(int cellKey) => Grid.GetCell(cellKey).EntityCount;

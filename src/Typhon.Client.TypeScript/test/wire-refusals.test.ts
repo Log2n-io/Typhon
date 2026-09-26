@@ -25,7 +25,7 @@ import {
   writeTickHeader,
   type CatalogCodec,
 } from '../src/index.js';
-import { fromHex, goldenBin, goldenJson, RecordingSink } from './golden-support.js';
+import { frameFromJson, fromHex, goldenBin, goldenJson, RecordingSink, type FrameJson } from './golden-support.js';
 
 /*
  * wire-refusals: byte sequences every decoder must reject, with the close code it must reject them with — the half a
@@ -39,6 +39,8 @@ interface RefusalCase {
   readonly type?: number;
   readonly hex: string;
   readonly closeCode: number;
+  /** A tick case decodes with the vector's frame held, unless this is false. */
+  readonly held?: boolean;
 }
 
 function closeCodeOf(action: () => void): number {
@@ -67,7 +69,8 @@ const parsers: Record<number, (message: Uint8Array) => unknown> = {
 };
 
 describe('golden wire-refusals', () => {
-  const vector = goldenJson('wire-refusals') as { catalog: string; cases: RefusalCase[] };
+  const vector = goldenJson('wire-refusals') as { catalog: string; frame: FrameJson; cases: RefusalCase[] };
+  const frame = frameFromJson(vector.frame);
 
   it('refers to the kitchen-sink catalog', () => {
     expect(vector.catalog).toBe('catalog-kitchen-sink');
@@ -84,11 +87,14 @@ describe('golden wire-refusals', () => {
             readSection(new WireReader(bytes), section, 0, sink);
             break;
           }
-          case 'tick':
-            new TickReader(kitchen).read(bytes, sink);
+          case 'tick': {
+            const reader = new TickReader(kitchen);
+            reader.realm = c.held === false ? null : frame;
+            reader.read(bytes, sink);
             break;
+          }
           case 'commands':
-            readCommands(bytes, kitchen, sink);
+            readCommands(bytes, kitchen, sink, frame);
             break;
           case 'message':
             parsers[c.type!]!(bytes);

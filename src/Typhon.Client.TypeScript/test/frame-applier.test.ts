@@ -8,6 +8,7 @@ import {
   endBlock,
   evaluateSlot,
   FrameApplier,
+  RealmFrame,
   MAX_MOTION_STRIDE,
   DEFAULT_MAX_RENDER_DELAY_MS,
   MOTION_CHANGE_BIT,
@@ -27,12 +28,14 @@ import {
   writeSelfNoneBlock,
   writeSourcesBlock,
   writeStatsBlock,
+  writeRealmBlock,
   writeTickHeader,
   type EnterRecord,
   type EventRecord,
   type StateRecord,
 } from '../src/index.js';
 import { goldenBin, goldenJson } from './golden-support.js';
+import { KITCHEN } from './frames.js';
 
 const plan = CatalogPlan.compile(parseCatalog(goldenBin('catalog-kitchen-sink')));
 const beacon = plan.archetypeByName('Beacon')!;
@@ -92,6 +95,7 @@ function beacons(tick: number, enters: number[], leaves: number[] = [], states: 
         [],
         states,
         leaves,
+        KITCHEN,
       );
     },
   });
@@ -133,7 +137,7 @@ describe('worldSchemaFromCatalog', () => {
 
 describe('FrameApplier', () => {
   it('keeps slots stable: a slot freed in a frame is reused only in a later one', () => {
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(beacons(1, [1, 2]));
     const of1 = slot(applier, 1);
     applier.apply(beacons(2, [3], [1]));
@@ -148,6 +152,7 @@ describe('FrameApplier', () => {
   it('applies events after enters and before leaves, whatever order the blocks travel in', () => {
     const seen: { from: number; fromHeld: boolean; loud: number; path: number[] }[] = [];
     const applier = new FrameApplier(plan, {
+      initialRealm: KITCHEN,
       onEvent: (event: EventRecord) => {
         const from = event.number('from');
         const path = event.fieldIndex('path');
@@ -166,11 +171,15 @@ describe('FrameApplier', () => {
       frame({
         tick: 2,
         write: (w) => {
-          writeEventsBlock(w, [
-            { type: ping, values: { from: 6, loud: 1, path: [0.5, -0.5] } },
-            { type: ping, values: { from: 5, loud: 0, path: [] } },
-          ]);
-          writeEntitiesBlock(w, 2, beacon, [beaconEnter(6)], [], [], [5]);
+          writeEventsBlock(
+            w,
+            [
+              { type: ping, values: { from: 6, loud: 1, path: [0.5, -0.5] } },
+              { type: ping, values: { from: 5, loud: 0, path: [] } },
+            ],
+            KITCHEN,
+          );
+          writeEntitiesBlock(w, 2, beacon, [beaconEnter(6)], [], [], [5], KITCHEN);
         },
       }),
     );
@@ -184,7 +193,7 @@ describe('FrameApplier', () => {
   });
 
   it('counts a tick that does not advance as an anomaly, except in a RESET frame', () => {
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(beacons(100, [1]));
     applier.apply(frame({ tick: 100, write: () => {} }));
     expect(applier.world.anomalies).toBe(1);
@@ -194,13 +203,13 @@ describe('FrameApplier', () => {
   });
 
   it('clears the world, the aggregates and the owner state on RESET, before the frame applies; metrics survive', () => {
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(
       frame({
         tick: 1,
         write: (w) => {
-          writeEntitiesBlock(w, 1, beacon, [beaconEnter(1), beaconEnter(2), beaconEnter(3)], [], [], []);
-          writeSelfBlock(w, drone, 9, 4, 0b01, { fuel: 2.5, manifest: Uint8Array.of(7) });
+          writeEntitiesBlock(w, 1, beacon, [beaconEnter(1), beaconEnter(2), beaconEnter(3)], [], [], [], KITCHEN);
+          writeSelfBlock(w, drone, 9, 4, 0b01, { fuel: 2.5, manifest: Uint8Array.of(7) }, KITCHEN);
           writeAggregateBlock(w, plan.grids[0]!, true, [{ cell: 3, counts: [1, 2] }]);
           writeStatsBlock(w, plan, {
             'typhon.tick.p50': [2.5],
@@ -220,7 +229,7 @@ describe('FrameApplier', () => {
         tick: 2,
         flags: TickFlags.Reset,
         write: (w) => {
-          writeEntitiesBlock(w, 2, beacon, [beaconEnter(2)], [], [], []);
+          writeEntitiesBlock(w, 2, beacon, [beaconEnter(2)], [], [], [], KITCHEN);
         },
       }),
     );
@@ -242,19 +251,19 @@ describe('FrameApplier', () => {
       frame({
         tick: 1,
         write: (w) => {
-          writeSelfBlock(w, drone, 0, 1, 0, {});
+          writeSelfBlock(w, drone, 0, 1, 0, {}, KITCHEN);
         },
       });
     }).toThrow(RangeError);
   });
 
   it('drops the owner state and keeps lastSeq on a SELF with no controlled entity (W17′)', () => {
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(
       frame({
         tick: 1,
         write: (w) => {
-          writeSelfBlock(w, drone, 9, 4, 0b01, { fuel: 2.5, manifest: Uint8Array.of(7) });
+          writeSelfBlock(w, drone, 9, 4, 0b01, { fuel: 2.5, manifest: Uint8Array.of(7) }, KITCHEN);
         },
       }),
     );
@@ -278,14 +287,23 @@ describe('FrameApplier', () => {
   });
 
   it('lets a netId come back as another archetype in a later frame, and replaces a live one inside a frame', () => {
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(beacons(1, [3]));
     applier.apply(beacons(2, [], [3]));
     applier.apply(
       frame({
         tick: 3,
         write: (w) => {
-          writeEntitiesBlock(w, 3, ledger, [{ netId: 3, values: { owner: 9, amount: 5, future: FUTURE } }], [], [], []);
+          writeEntitiesBlock(
+            w,
+            3,
+            ledger,
+            [{ netId: 3, values: { owner: 9, amount: 5, future: FUTURE } }],
+            [],
+            [],
+            [],
+            KITCHEN,
+          );
         },
       }),
     );
@@ -299,7 +317,7 @@ describe('FrameApplier', () => {
   });
 
   it('applies § 10 netId reuse: an enter for a live netId replaces it as an anomaly, and leaves apply last', () => {
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(beacons(1, [3, 4]));
 
     // No well-formed frame carries this: an enter for netId 3, which the Beacon still holds. The enter replaces it.
@@ -307,7 +325,16 @@ describe('FrameApplier', () => {
       frame({
         tick: 2,
         write: (w) => {
-          writeEntitiesBlock(w, 2, ledger, [{ netId: 3, values: { owner: 9, amount: 5, future: FUTURE } }], [], [], []);
+          writeEntitiesBlock(
+            w,
+            2,
+            ledger,
+            [{ netId: 3, values: { owner: 9, amount: 5, future: FUTURE } }],
+            [],
+            [],
+            [],
+            KITCHEN,
+          );
         },
       }),
     );
@@ -323,8 +350,17 @@ describe('FrameApplier', () => {
       frame({
         tick: 3,
         write: (w) => {
-          writeEntitiesBlock(w, 3, beacon, [], [], [], [4, 77]);
-          writeEntitiesBlock(w, 3, ledger, [{ netId: 4, values: { owner: 1, amount: 2, future: FUTURE } }], [], [], []);
+          writeEntitiesBlock(w, 3, beacon, [], [], [], [4, 77], KITCHEN);
+          writeEntitiesBlock(
+            w,
+            3,
+            ledger,
+            [{ netId: 4, values: { owner: 1, amount: 2, future: FUTURE } }],
+            [],
+            [],
+            [],
+            KITCHEN,
+          );
         },
       }),
     );
@@ -335,20 +371,20 @@ describe('FrameApplier', () => {
   });
 
   it('applies a leave to the entity its own block entered in the same frame', () => {
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(beacons(1, [5], [5]));
     expect(applier.world.locate(5)).toBe(NOT_FOUND);
     expect(applier.world.archetypeStore(beacon.idx).liveCount).toBe(0);
   });
 
   it('counts a leave in another archetype’s block as an anomaly, and changes nothing', () => {
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(beacons(1, [9]));
     applier.apply(
       frame({
         tick: 2,
         write: (w) => {
-          writeEntitiesBlock(w, 2, ledger, [], [], [], [9]);
+          writeEntitiesBlock(w, 2, ledger, [], [], [], [9], KITCHEN);
         },
       }),
     );
@@ -357,7 +393,7 @@ describe('FrameApplier', () => {
   });
 
   it('writes enters, state groups and segments into the store, in 3D, marking what changed', () => {
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(
       frame({
         tick: 1000,
@@ -379,6 +415,7 @@ describe('FrameApplier', () => {
             [],
             [],
             [],
+            KITCHEN,
           );
         },
       }),
@@ -406,6 +443,7 @@ describe('FrameApplier', () => {
             [{ netId: 100, position: [11, 21, -31], velocity: [0.25, 0, 0], t0: 1001, epoch: 1 }],
             [{ netId: 100, groupMask: 0b100, values: { ...droneValues(100), battery: 0.5, temperature: -40 } }],
             [],
+            KITCHEN,
           );
         },
       }),
@@ -420,12 +458,20 @@ describe('FrameApplier', () => {
   });
 
   it('accumulates owner groups across SELF blocks, and resets per-frame lists', () => {
-    const applier = new FrameApplier(plan);
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN });
     applier.apply(
       frame({
         tick: 1,
         write: (w) => {
-          writeSelfBlock(w, drone, 100, 5, 0b11, { fuel: 2.5, manifest: Uint8Array.of(1, 2), vault: 1, pin: 42 });
+          writeSelfBlock(
+            w,
+            drone,
+            100,
+            5,
+            0b11,
+            { fuel: 2.5, manifest: Uint8Array.of(1, 2), vault: 1, pin: 42 },
+            KITCHEN,
+          );
           writeAcksBlock(w, [{ seq: 5, reason: 2 }]);
           writeSourcesBlock(w, [{ requestId: 9, status: 1, code: 404 }]);
         },
@@ -440,7 +486,7 @@ describe('FrameApplier', () => {
       frame({
         tick: 2,
         write: (w) => {
-          writeSelfBlock(w, drone, 100, 6, 0b10, { vault: 0, pin: 43 });
+          writeSelfBlock(w, drone, 100, 6, 0b10, { vault: 0, pin: 43 }, KITCHEN);
         },
       }),
     );
@@ -457,7 +503,7 @@ describe('FrameApplier', () => {
       frame({
         tick: 3,
         write: (w) => {
-          writeSelfBlock(w, drone, 100, 6, 0b01, { fuel: 2.5, manifest: Uint8Array.of(1, 2) });
+          writeSelfBlock(w, drone, 100, 6, 0b01, { fuel: 2.5, manifest: Uint8Array.of(1, 2) }, KITCHEN);
         },
       }),
     );
@@ -466,7 +512,7 @@ describe('FrameApplier', () => {
       frame({
         tick: 4,
         write: (w) => {
-          writeSelfBlock(w, drone, 100, 6, 0b01, { fuel: 2.5, manifest: Uint8Array.of(1, 3) });
+          writeSelfBlock(w, drone, 100, 6, 0b01, { fuel: 2.5, manifest: Uint8Array.of(1, 3) }, KITCHEN);
         },
       }),
     );
@@ -481,7 +527,7 @@ describe('FrameApplier', () => {
       frame({
         tick: 6,
         write: (w) => {
-          writeSelfBlock(w, drone, 101, 7, 0b10, { vault: 1, pin: 1 });
+          writeSelfBlock(w, drone, 101, 7, 0b10, { vault: 1, pin: 1 }, KITCHEN);
         },
       }),
     );
@@ -491,6 +537,7 @@ describe('FrameApplier', () => {
 
   it('propagates a throwing event handler, leaving the frame partly applied: its leaves have not run', () => {
     const applier = new FrameApplier(plan, {
+      initialRealm: KITCHEN,
       onEvent: () => {
         throw new Error('handler bug');
       },
@@ -499,8 +546,8 @@ describe('FrameApplier', () => {
     const message = frame({
       tick: 2,
       write: (w) => {
-        writeEntitiesBlock(w, 2, beacon, [beaconEnter(6)], [], [], [5]);
-        writeEventsBlock(w, [{ type: ping, values: { from: 6, loud: 1, path: [] } }]);
+        writeEntitiesBlock(w, 2, beacon, [beaconEnter(6)], [], [], [5], KITCHEN);
+        writeEventsBlock(w, [{ type: ping, values: { from: 6, loud: 1, path: [] } }], KITCHEN);
       },
     });
 
@@ -512,12 +559,12 @@ describe('FrameApplier', () => {
   });
 
   it('throws 1007 for a malformed EVENTS block once the first pass has applied the rest of the frame', () => {
-    const applier = new FrameApplier(plan, { onEvent: () => {} });
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN, onEvent: () => {} });
     const message = frame({
       tick: 1,
       write: (w) => {
-        writeEventsBlock(w, [{ type: ping, values: { from: 8, loud: 0, path: [] } }]);
-        writeEntitiesBlock(w, 1, beacon, [beaconEnter(8)], [], [], []);
+        writeEventsBlock(w, [{ type: ping, values: { from: 8, loud: 0, path: [] } }], KITCHEN);
+        writeEntitiesBlock(w, 1, beacon, [beaconEnter(8)], [], [], [], KITCHEN);
         // One event of type 200, which the catalog does not declare.
         const mark = beginBlock(w, BlockType.Events);
         w.varu(1);
@@ -541,6 +588,7 @@ describe('FrameApplier', () => {
   it('grows an event’s bytes buffer on demand', () => {
     const received: [number[], string][] = [];
     const applier = new FrameApplier(plan, {
+      initialRealm: KITCHEN,
       onEvent: (event) => {
         const at = event.fieldIndex('attachment');
         received.push([
@@ -554,11 +602,15 @@ describe('FrameApplier', () => {
       frame({
         tick: 1,
         write: (w) => {
-          writeEventsBlock(w, [
-            { type: chat, values: { attachment: Uint8Array.of(9), text: 'm1' } },
-            { type: chat, values: { attachment: Uint8Array.from(long), text: 'm2' } },
-            { type: chat, values: { attachment: new Uint8Array(0), text: 'm3' } },
-          ]);
+          writeEventsBlock(
+            w,
+            [
+              { type: chat, values: { attachment: Uint8Array.of(9), text: 'm1' } },
+              { type: chat, values: { attachment: Uint8Array.from(long), text: 'm2' } },
+              { type: chat, values: { attachment: new Uint8Array(0), text: 'm3' } },
+            ],
+            KITCHEN,
+          );
         },
       }),
     );
@@ -570,12 +622,62 @@ describe('FrameApplier', () => {
     ]);
   });
 
-  it('applies AGG to a three-axis grid, whose counts exist only once a block arrived', () => {
+  it('a REALM re-lays the aggregate grids over its frame and fires onRealmChanged once, before the records it frames', () => {
+    const changes: [number | null, number | null][] = [];
+    // What the store held when each change fired: after the reset, before any record of the new realm.
+    const heldAtChange: number[] = [];
+    const applier: FrameApplier = new FrameApplier(plan, {
+      onRealmChanged: (previous, current) => {
+        changes.push([previous?.realmId ?? null, current?.realmId ?? null]);
+        heldAtChange.push(applier.world.entityCount);
+      },
+    });
+    const small = new RealmFrame(4, 1, 0, 7, 16, 64, false, [0, 0, 0], [1024, 512, 64]);
+    const realmFrame = (tick: number, realm: RealmFrame | null): Uint8Array =>
+      frame({
+        tick,
+        flags: TickFlags.Reset,
+        write: (w) => {
+          writeRealmBlock(w, realm);
+          if (realm !== null) {
+            writeEntitiesBlock(w, tick, beacon, [beaconEnter(1)], [], [], [], realm);
+          }
+        },
+      });
+
+    applier.apply(realmFrame(1, small));
+    // 1024 × 512 m in 4-cell tiles of 64 m: 4 × 2 cells, two axes in a flat realm.
+    expect([applier.realmFrame?.realmId, applier.grids[0]!.schema.dims, applier.grids[0]!.cellCount]).toEqual([
+      4,
+      [4, 2],
+      8,
+    ]);
+    expect(applier.world.entityCount).toBe(1);
+
+    applier.apply(realmFrame(2, small));
+    expect(changes).toEqual([[null, 4]]);
+
+    applier.apply(realmFrame(3, null));
+    expect([changes, applier.realmFrame, applier.world.entityCount]).toEqual([
+      [
+        [null, 4],
+        [4, null],
+      ],
+      null,
+      0,
+    ]);
+    expect(heldAtChange).toEqual([0, 0]);
+  });
+
+  it('applies AGG to a three-axis grid, laid over a deep realm, whose counts exist only once a block arrived', () => {
     const cube = CatalogPlan.compile({
       ...plan.catalog,
-      grids: [{ idx: 0, origin: [0, 0, 0], cell: 10, dims: [2, 3, 4], archetypes: [1, 2] }],
+      grids: [{ idx: 0, tileCells: 1, archetypes: [1, 2] }],
     });
-    const applier = new FrameApplier(cube);
+    // A deep realm of 20 × 30 × 40 m in 10 m cells: the grid is 2 × 3 × 4 cells (typhon.3: the frame's, not the catalog's).
+    const applier = new FrameApplier(cube, {
+      initialRealm: new RealmFrame(5, 0, 0, 0, 24, 10, true, [0, 0, 0], [20, 30, 40]),
+    });
     const grid = applier.grids[0]!;
     expect([grid.cellCount, grid.counts.length]).toEqual([24, 0]);
 
@@ -594,7 +696,7 @@ describe('FrameApplier', () => {
   });
 
   it('counts inconsistencies instead of throwing: unknown netIds, and an enter beyond maxNetId', () => {
-    const applier = new FrameApplier(plan, { maxNetId: 1000 });
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN, maxNetId: 1000 });
     applier.apply(beacons(1, [1001], [43], [{ netId: 42, groupMask: 1, values: { strength: 1, drift: 1 } }]));
     expect(applier.world.anomalies).toBe(3);
     expect(applier.world.entityCount).toBe(0);
@@ -602,7 +704,7 @@ describe('FrameApplier', () => {
 
   it('resets the clock on a RESET frame that goes back in time, so render time follows the restarted server', () => {
     const clock = new Clock({ tickPeriodMs: 50 });
-    const applier = new FrameApplier(plan, { clock });
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN, clock });
     let now = 0;
     for (let tick = 100_000; tick < 100_200; tick++, now += 50) {
       applier.apply(frame({ tick, write: () => {} }), now);
@@ -627,7 +729,7 @@ describe('FrameApplier', () => {
 
   it('reports PERIOD to the clock as the duration of the interval that just elapsed', () => {
     const clock = new Clock({ tickPeriodMs: 50 });
-    const applier = new FrameApplier(plan, { clock });
+    const applier = new FrameApplier(plan, { initialRealm: KITCHEN, clock });
     applier.apply(beacons(10, [1]), 1000);
     expect(clock.latestTick).toBe(10);
     applier.apply(frame({ tick: 11, periodUs: 150_000, write: () => {} }), 1150);
@@ -640,7 +742,7 @@ describe('FrameApplier', () => {
     const wide = CatalogPlan.compile(parseCatalog(goldenBin('catalog-wide')));
     const vector = goldenJson('tick-limits') as { log: Record<string, unknown>[] };
     const events: string[] = [];
-    const applier = new FrameApplier(wide, { onEvent: (event) => events.push(event.type.name) });
+    const applier = new FrameApplier(wide, { initialRealm: KITCHEN, onEvent: (event) => events.push(event.type.name) });
     applier.apply(goldenBin('tick-limits'));
 
     // The expected world, replayed from the decode log: an enter replaces (an anomaly when the netId is held or beyond
@@ -722,7 +824,7 @@ describe.each([
 
   /** Frames `first..last`: a Buoy (`none`) sampled at (k, −k/2), and a Drone (`linear`) at (k, 0, 0) moving 0.5 a tick. */
   function run(): FrameApplier {
-    const applier = new FrameApplier(rated);
+    const applier = new FrameApplier(rated, { initialRealm: KITCHEN });
     for (let tick = first; tick <= last; tick++) {
       const k = tick - first;
       const sample = { netId: 1, position: [k, -k / 2], t0: tick, epoch: 0 };
@@ -732,11 +834,11 @@ describe.each([
           tick,
           write: (w) => {
             if (tick === first) {
-              writeEntitiesBlock(w, tick, buoy, [{ ...sample, values: { depth: 1, reading: 2 } }], [], [], []);
-              writeEntitiesBlock(w, tick, drone, [{ ...segment, values: droneValues(2) }], [], [], []);
+              writeEntitiesBlock(w, tick, buoy, [{ ...sample, values: { depth: 1, reading: 2 } }], [], [], [], KITCHEN);
+              writeEntitiesBlock(w, tick, drone, [{ ...segment, values: droneValues(2) }], [], [], [], KITCHEN);
             } else {
-              writeEntitiesBlock(w, tick, buoy, [], [sample], [], []);
-              writeEntitiesBlock(w, tick, drone, [], [segment], [], []);
+              writeEntitiesBlock(w, tick, buoy, [], [sample], [], [], KITCHEN);
+              writeEntitiesBlock(w, tick, drone, [], [segment], [], [], KITCHEN);
             }
           },
         }),
@@ -759,13 +861,15 @@ describe.each([
     const clock = new Clock({ tickPeriodMs: periodUs / 1000, maxDelayMs: 600 });
     expect(clock.maxDelayMs).toBe(600);
     const history = (ms: number) => Math.min(255, Math.ceil((ms * 1000) / periodUs) + 2);
-    expect(new FrameApplier(rated, { clock }).world.archetypeStore(buoy.idx).segmentHistory).toBe(history(600));
-    const explicit = new FrameApplier(rated, { clock, maxRenderDelayMs: 400 });
+    expect(
+      new FrameApplier(rated, { initialRealm: KITCHEN, clock }).world.archetypeStore(buoy.idx).segmentHistory,
+    ).toBe(history(600));
+    const explicit = new FrameApplier(rated, { initialRealm: KITCHEN, clock, maxRenderDelayMs: 400 });
     expect(explicit.world.archetypeStore(buoy.idx).segmentHistory).toBe(history(400));
   });
 
   it('sizes the ring from a longer render delay when the applier is given one', () => {
-    const applier = new FrameApplier(rated, { maxRenderDelayMs: 500 });
+    const applier = new FrameApplier(rated, { initialRealm: KITCHEN, maxRenderDelayMs: 500 });
     const history = Math.ceil((500 * 1000) / periodUs) + 2;
     expect(applier.world.archetypeStore(buoy.idx).segmentHistory).toBe(Math.min(255, history));
   });

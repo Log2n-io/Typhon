@@ -39,11 +39,12 @@ public class EngineStreamGoldenTests
         var store = new WorldStore(plan);
         var applier = new FrameApplier(store);
         var sink = new RecordingSink();
+        RealmFrame held = null;
 
         foreach (var frame in messages.Skip(1))
         {
             applier.Apply(frame);
-            TickReader.Read(frame, plan, ref sink);
+            TickReader.Read(frame, plan, ref held, ref sink);
         }
 
         var expected = GoldenFiles.ReadJson("stream-engine")!["frames"]!.AsArray();
@@ -79,10 +80,11 @@ public class EngineStreamGoldenTests
         var store = new WorldStore(plan);
         var applier = new FrameApplier(store);
         var sink = new RecordingSink();
+        RealmFrame held = null;
         foreach (var frame in messages.Skip(1))
         {
             applier.Apply(frame);
-            TickReader.Read(frame, plan, ref sink);
+            TickReader.Read(frame, plan, ref held, ref sink);
         }
 
         var expected = GoldenFiles.ReadJson("stream-engine-3d")!["frames"]!.AsArray();
@@ -140,6 +142,8 @@ public class EngineStreamGoldenTests
             Frames ??= [];
             _calls = [$"beginTick {tick}"];
         }
+
+        public void Realm(RealmFrame frame) => _calls.Add(frame == null ? "realm none" : $"realm {frame.RealmId}");
 
         public void BeginEntities(ArchetypePlan archetype) => _calls.Add($"beginEntities {archetype.Name}");
 

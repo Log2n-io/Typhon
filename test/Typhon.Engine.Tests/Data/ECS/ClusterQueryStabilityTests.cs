@@ -125,7 +125,7 @@ class ClusterQueryStabilityTests : TestBase<ClusterQueryStabilityTests>
             var found = new HashSet<long>();
             using (var epoch = EpochGuard.Enter(dbe.EpochManager))
             {
-                foreach (var hit in clusterState.QueryRadius(dbe.SpatialGrid, 0d, 0d, 0d, Reach))
+                foreach (var hit in clusterState.QueryRadius(dbe.Realm0Grid, 0d, 0d, 0d, Reach))
                 {
                     var cx = (hit.MinX + hit.MaxX) * 0.5;
                     var cy = (hit.MinY + hit.MaxY) * 0.5;

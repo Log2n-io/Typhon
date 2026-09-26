@@ -11,7 +11,8 @@ namespace Typhon.Engine.Internals;
 /// + <see cref="SpatialGrid"/> cell tier bytes.
 /// </summary>
 /// <remarks>
-/// <para><b>Dual invalidation</b>: the rebuild is skipped when both (a) the grid's <see cref="SpatialGrid.TierVersion"/> hasn't changed since the last rebuild
+/// <para><b>Dual invalidation</b>: the rebuild is skipped when both (a) the engine-wide <see cref="RealmTable.TierVersion"/> (every realm grid bumps it)
+/// hasn't changed since the last rebuild
 /// (no <c>SetCellTier</c> call actually flipped a cell tier) AND (b) the archetype's own cluster-set version hasn't changed (no spawn, destroy, or migration
 /// added/removed clusters from the active list). In steady state (camera stationary, no cell-crossing migrations) the rebuild is a no-op and the tier query
 /// returns the cached result.</para>
@@ -40,6 +41,9 @@ internal sealed class TierClusterIndex
     private int _lastGridTierVersion = -1;
     private int _lastClusterSetVersion = -1;
 
+    // Realms D1: the runnable-set stamp (RealmDispatchIndex.Stamp) at the last rebuild; clusters of non-runnable realms are left out of every tier list.
+    private int _lastDispatchStamp = -1;
+
     // Telemetry — incremented each time a full rebuild runs. Tests read this to assert the version-skip fast path works.
     internal int RebuildCount { get; private set; }
 
@@ -49,9 +53,12 @@ internal sealed class TierClusterIndex
 
     /// <summary>Full rebuild from the archetype's active clusters — unconditional. Used by tests and by
     /// <see cref="RebuildIfStale"/> after the version check.</summary>
-    public void Rebuild(SpatialGrid grid, ArchetypeClusterState state)
+    /// <param name="state">The archetype whose clusters are grouped.</param>
+    /// <param name="tierVersion">The engine-wide tier version (<see cref="RealmTable.TierVersion"/>) read by the caller before this rebuild: every realm's
+    /// tier changes move it, and it is stamped as the version this list reflects.</param>
+    /// <remarks>Each cluster's tier is its cell's in the cluster's OWN realm (Realms C1): a cell key names a cell in every realm.</remarks>
+    public void Rebuild(ArchetypeClusterState state, int tierVersion)
     {
-        ArgumentNullException.ThrowIfNull(grid);
         ArgumentNullException.ThrowIfNull(state);
         Debug.Assert(Interlocked.CompareExchange(ref _rebuildInProgress, 1, 0) == 0,
             "TierClusterIndex.Rebuild called concurrently — this must run single-threaded from BuildTierIndexesAtTickStart.");
@@ -71,6 +78,10 @@ internal sealed class TierClusterIndex
             Array.Fill(_mergedCounts, -1);
 
             var cellMap = state.ClusterCellMap;
+            var realmMap = state.ClusterRealmMap;
+            var realmSpatial = state.RealmSpatial;
+            var gridRealm = -1;
+            SpatialGrid grid = null;
 
             // Read the version BEFORE the walk, and record THIS value at the end rather than re-reading it there. Recorded after, a spawn landing mid-walk
             // bumps the version, is absent from the list this rebuild produced, and is nonetheless covered by the version stamped against it — so
@@ -82,6 +93,8 @@ internal sealed class TierClusterIndex
             // CLUSTERWALK-02: count first, then the array, through the one reader. Loading the array first — which this did — pairs an old array with a
             // count a concurrent spawn has already grown past.
             var activeIds = state.ReadActiveClusterList(out var active);
+            var dispatch = state.RealmDispatch;
+            var excludeDormant = dispatch is { Filtering: true };
             for (int i = 0; i < active; i++)
             {
                 int chunkId = activeIds[i];
@@ -89,8 +102,27 @@ internal sealed class TierClusterIndex
                 {
                     continue;
                 }
+
+                // Realms D1: a cluster of a non-runnable realm is in no tier list, so no tier system dispatches it.
+                if (excludeDormant && dispatch.IsExcluded(chunkId))
+                {
+                    continue;
+                }
                 int cellKey = cellMap[chunkId];
                 if (cellKey < 0)
+                {
+                    continue;
+                }
+
+                // The realm map is published before the cell map and grown with it, so a chunk id bounded by the latter indexes the former.
+                var realm = realmMap[chunkId];
+                if (realm != gridRealm)
+                {
+                    gridRealm = realm;
+                    grid = realmSpatial[realm]?.Grid;
+                }
+
+                if (grid == null)
                 {
                     continue;
                 }
@@ -123,8 +155,9 @@ internal sealed class TierClusterIndex
                 _tierClusterCounts[tierIdx] = cnt + 1;
             }
 
-            _lastGridTierVersion = grid.TierVersion;
+            _lastGridTierVersion = tierVersion;
             _lastClusterSetVersion = versionAtWalk;
+            _lastDispatchStamp = dispatch?.Stamp ?? -1;
             RebuildCount++;
 
             // Sum cluster counts across all tiers for the span payload.
@@ -148,16 +181,17 @@ internal sealed class TierClusterIndex
 
     /// <summary>Rebuild only when the grid tier version or the archetype's cluster-set version has changed since the
     /// last rebuild. In steady state this is two int compares — effectively free.</summary>
-    public void RebuildIfStale(SpatialGrid grid, ArchetypeClusterState state)
+    public void RebuildIfStale(ArchetypeClusterState state, int tierVersion)
     {
-        if (grid.TierVersion == _lastGridTierVersion && state.ClusterSetVersion == _lastClusterSetVersion)
+        if (tierVersion == _lastGridTierVersion && state.ClusterSetVersion == _lastClusterSetVersion
+            && (state.RealmDispatch?.Stamp ?? -1) == _lastDispatchStamp)
         {
             // Phase 3: Spatial:TierIndex:VersionSkip instant — fast path, no rebuild needed.
             // reason: 0=both unchanged, 1=grid only, 2=cluster set only (here both unchanged).
             TyphonEvent.EmitSpatialTierIndexVersionSkip((ushort)Math.Min(state.ArchetypeId, ushort.MaxValue), _lastClusterSetVersion, 0);
             return;
         }
-        Rebuild(grid, state);
+        Rebuild(state, tierVersion);
     }
 
     /// <summary>
@@ -200,6 +234,65 @@ internal sealed class TierClusterIndex
     {
         var arr = GetClustersArray(tier, out int count);
         return new ReadOnlySpan<int>(arr, 0, count);
+    }
+
+    /// <summary>
+    /// The read-only form of <see cref="GetClustersArray"/> for dispatch (RT-1): a single tier, or a multi-tier set whose merged entry tick start already
+    /// built. Returns false — and fills nothing — for a multi-tier set not built since the last rebuild, so concurrent readers never write the shared cache.
+    /// </summary>
+    public bool TryGetPreparedClusters(SimTier tier, out int[] ids, out int count)
+    {
+        if (tier == SimTier.None || BitOperations.PopCount((byte)tier) == 1)
+        {
+            ids = GetClustersArray(tier, out count);
+            return true;
+        }
+
+        var key = (byte)tier;
+        count = _mergedCounts[key];
+        if (count < 0)
+        {
+            ids = null;
+            count = 0;
+            return false;
+        }
+
+        ids = _mergedCache[key] ?? [];
+        return true;
+    }
+
+    /// <summary>How many clusters <see cref="CopyClusters"/> writes for <paramref name="tier"/>.</summary>
+    public int CountClusters(SimTier tier)
+    {
+        var total = 0;
+        for (var t = 0; t < TierExtensions.TierCount; t++)
+        {
+            if ((((byte)tier >> t) & 1) != 0)
+            {
+                total += _tierClusterCounts[t];
+            }
+        }
+
+        return total;
+    }
+
+    /// <summary>Concatenates the per-tier lists of <paramref name="tier"/> into a caller-owned <paramref name="destination"/>; returns the count.</summary>
+    public int CopyClusters(SimTier tier, int[] destination)
+    {
+        var offset = 0;
+        for (var t = 0; t < TierExtensions.TierCount; t++)
+        {
+            var count = _tierClusterCounts[t];
+            if ((((byte)tier >> t) & 1) == 0 || count == 0)
+            {
+                continue;
+            }
+
+            Array.Copy(_tierClusters[t], 0, destination, offset, count);
+            offset += count;
+        }
+
+        return offset;
     }
 
     private void BuildMergedEntry(SimTier tier, int key)

@@ -79,6 +79,16 @@ internal sealed class CellClusterPool
     /// <summary>Managed thread id of the writer currently inside <see cref="AddCluster"/> or <see cref="RemoveCluster"/>; zero when there is none.</summary>
     private int _writerInFlight;
 
+    // Every cluster in the pool, flat (Realms: a realm's cluster list — the pool is one realm's). Appended and removed with the cell entry, under the same
+    // writer discipline; published like the archetype's active list — a grown array first, the count that indexes it second (CLUSTERWALK-02).
+    private int[] _clusters = [];
+    private int _clusterCount;
+
+    // Side-array chunk 0's length and the outer arrays' initial length (Realms SP-4): the whole world's cell count when it fits in one chunk, so a
+    // one-cell interior's pool holds four 1-int arrays rather than four 256-int ones. Every key of the pool's own grid is below that count; EnsureCell
+    // refuses one that is not (a key from another realm's grid), which would otherwise index past chunk 0 on the read side.
+    private readonly int _firstChunkLength;
+
     /// <summary>
     /// Build an empty pool. <paramref name="initialCellCapacity"/> is a sizing HINT, not a bound: cell keys are pool slots handed out lazily by the VDB grid
     /// (#872 step 8), so the pool cannot know how many cells will exist and grows a chunk at a time as new keys arrive.
@@ -89,8 +99,25 @@ internal sealed class CellClusterPool
     /// arrays are now CHUNKED rather than resized, because a resize hands a concurrent writer on another cell a stale array and silently loses its update.
     /// A chunk, once allocated, is never moved.
     /// </remarks>
-    public CellClusterPool(int initialCellCapacity = 0, int initialPoolCapacity = 256)
+    public CellClusterPool(int initialCellCapacity = 0, int initialPoolCapacity = 256) : this(initialCellCapacity, initialPoolCapacity, 0)
     {
+    }
+
+    /// <summary>
+    /// A pool for a grid of at most <paramref name="maxCellCount"/> cells (0 = unbounded). Below one chunk, chunk 0 and the pool start at the world's
+    /// size — a realm's structures are sized from its config (Realms SP-4).
+    /// </summary>
+    internal CellClusterPool(int initialCellCapacity, int initialPoolCapacity, int maxCellCount)
+    {
+        _firstChunkLength = maxCellCount is > 0 and < CellChunkSize ? (int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)maxCellCount) : CellChunkSize;
+        if (_firstChunkLength < CellChunkSize)
+        {
+            _cellHeads = new int[1][];
+            _cellCounts = new int[1][];
+            _cellCapacities = new int[1][];
+            _cellScanCursor = new int[1][];
+        }
+
         _pool = new int[Math.Max(initialPoolCapacity, 16)];
         _tail = 0;
         if (initialCellCapacity > 0)
@@ -110,6 +137,12 @@ internal sealed class CellClusterPool
         }
 
         int chunk = cellKey >> CellChunkShift;
+        if (chunk == 0 && cellKey >= _firstChunkLength)
+        {
+            throw new ArgumentOutOfRangeException(nameof(cellKey), cellKey,
+                $"Cell key {cellKey} is past this pool's world ({_firstChunkLength} cell slots): a key of another realm's grid reached this realm's pool.");
+        }
+
         var heads = Volatile.Read(ref _cellHeads);
         if ((uint)chunk < (uint)heads.Length && Volatile.Read(ref heads[chunk]) != null)
         {
@@ -131,11 +164,12 @@ internal sealed class CellClusterPool
 
         if (_cellHeads[chunk] == null)
         {
-            var newHeads = new int[CellChunkSize];
+            var length = chunk == 0 ? _firstChunkLength : CellChunkSize;
+            var newHeads = new int[length];
             Array.Fill(newHeads, -1);
-            _cellCounts[chunk] = new int[CellChunkSize];
-            _cellCapacities[chunk] = new int[CellChunkSize];
-            _cellScanCursor[chunk] = new int[CellChunkSize];
+            _cellCounts[chunk] = new int[length];
+            _cellCapacities[chunk] = new int[length];
+            _cellScanCursor[chunk] = new int[length];
 
             // Published LAST, and this is the whole release edge: HasCell tests `_cellHeads[chunk] != null` as its "this chunk is usable" signal, so the
             // three siblings and the -1 fill must already be in place when it turns non-null. Its acquire is HasCell's Volatile.Read of the same element.
@@ -174,6 +208,15 @@ internal sealed class CellClusterPool
         throw new InvalidOperationException(
             $"CellClusterPool.{site} ran concurrently with a structural mutation already in flight on thread {priorThreadId} (this is thread "
             + $"{Environment.CurrentManagedThreadId}). The pool is single-writer by contract — see its class remarks for who is supposed to serialise it.");
+
+    /// <summary>A pool sized for <paramref name="grid"/>: its existing cells, and — for a world smaller than one chunk — the world's cell count.</summary>
+    internal static CellClusterPool ForGrid(SpatialGrid grid)
+    {
+        var maxCells = grid.Config.CellCount;
+        // Pool ints: a few cluster ids per cell to start, doubling on demand; the 256-int default is for large worlds.
+        var poolCapacity = maxCells < CellChunkSize ? Math.Max(16, maxCells * 4) : 256;
+        return new CellClusterPool(grid.CellCount, poolCapacity, maxCells);
+    }
 
     private static int[][] Grow(int[][] outer, int newLength)
     {
@@ -306,6 +349,7 @@ internal sealed class CellClusterPool
 
             _pool[Head(cellKey) + count] = clusterChunkId;
             Volatile.Write(ref Count(cellKey), count + 1);   // release: the entry, the head and the pool are visible to a reader that sees this count
+            AppendCluster(clusterChunkId);
         }
         finally
         {
@@ -345,6 +389,7 @@ internal sealed class CellClusterPool
                 // a duplicate chunk id costs a redundant claim attempt, never a wrong cell.
                 span[i] = span[^1];
                 Volatile.Write(ref Count(cellKey), count - 1);
+                RemoveListedCluster(clusterChunkId);
                 return true;
             }
             return false;
@@ -353,6 +398,56 @@ internal sealed class CellClusterPool
         {
             ExitWriter();
         }
+    }
+
+    /// <summary>
+    /// Every cluster in the pool — its realm's clusters of this archetype — as a (list, count) pair: the count acquired first, then the list, so the list is
+    /// at least that long (CLUSTERWALK-02). Order is insertion order disturbed by swap-with-last removals. Any thread.
+    /// </summary>
+    internal int[] ReadClusterList(out int count)
+    {
+        count = Volatile.Read(ref _clusterCount);
+        var ids = Volatile.Read(ref _clusters);
+        if (count > ids.Length)
+        {
+            count = ids.Length;
+        }
+
+        return ids;
+    }
+
+    /// <summary>How many clusters the pool holds.</summary>
+    internal int ClusterListCount => Volatile.Read(ref _clusterCount);
+
+    private void AppendCluster(int clusterChunkId)
+    {
+        var n = _clusterCount;
+        var ids = _clusters;
+        if (n >= ids.Length)
+        {
+            // Release 1: the grown array, before the count that indexes it (the active list's protocol, AddToActiveList).
+            var grown = new int[Math.Max(4, ids.Length * 2)];
+            Array.Copy(ids, grown, n);
+            Volatile.Write(ref _clusters, grown);
+            ids = grown;
+        }
+
+        ids[n] = clusterChunkId;
+        Volatile.Write(ref _clusterCount, n + 1);   // release 2
+    }
+
+    // O(clusters in the realm), vectorized: removals are drains, and the archetype's own active list pays the same linear scan per drain.
+    private void RemoveListedCluster(int clusterChunkId)
+    {
+        var n = _clusterCount;
+        var at = _clusters.AsSpan(0, n).IndexOf(clusterChunkId);
+        if (at < 0)
+        {
+            return;
+        }
+
+        _clusters[at] = _clusters[n - 1];
+        Volatile.Write(ref _clusterCount, n - 1);
     }
 
     private void GrowCellSegment(int cellKey, ref int capacity)

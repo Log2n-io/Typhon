@@ -30,6 +30,8 @@ public sealed class TyphonOptions
     private readonly List<Action<DatabaseEngineOptions>> _engine = [];
     private readonly List<Action<DatabaseEngine>> _componentRegistrations = [];
     private SpatialGridConfig? _spatialGrid;
+    private int? _maxRealms;
+    private readonly List<(RealmId Id, RealmConfig Config)> _realms = [];
     private readonly List<(int Revision, Action<Transaction> Step)> _seedSteps = [];
 
     /// <summary>
@@ -125,6 +127,27 @@ public sealed class TyphonOptions
     }
 
     /// <summary>
+    /// Sizes the realm table (<see cref="DatabaseEngine.ConfigureRealms"/>): realm ids are <c>[0, maxRealms)</c>. Required before registering a realm
+    /// other than 0; never clamped.
+    /// </summary>
+    public TyphonOptions ConfigureRealms(int maxRealms)
+    {
+        _maxRealms = maxRealms;
+        return this;
+    }
+
+    /// <summary>
+    /// Registers a realm at open (<see cref="RealmRegistry.Register"/>). Its identity is written to the database's realm catalog the first time, and
+    /// checked against it on every later open; a realm the catalog holds but the application does not register is reconstructed from it.
+    /// </summary>
+    public TyphonOptions RegisterRealm(RealmId id, RealmConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        _realms.Add((id, config));
+        return this;
+    }
+
+    /// <summary>
     /// Registers a data-seeding step tagged with a monotonic <paramref name="revision"/>. On every open the engine applies each
     /// registered step whose revision is greater than the database's committed seed revision, in <b>ascending revision order</b>,
     /// each inside its own durable transaction — bringing the instance up to date. Call it once per revision as your app evolves:
@@ -194,9 +217,19 @@ public sealed class TyphonOptions
     /// <c>InitializeArchetypes</c> — the engine builds the grid + per-archetype spatial state during that call.</summary>
     internal void ApplySpatialGridConfig(DatabaseEngine engine)
     {
+        if (_maxRealms.HasValue)
+        {
+            engine.ConfigureRealms(_maxRealms.Value);   // refuses an out-of-range count, 0 included (RLM-02)
+        }
+
         if (_spatialGrid.HasValue)
         {
             engine.ConfigureSpatialGrid(_spatialGrid.Value);
+        }
+
+        foreach (var (id, config) in _realms)
+        {
+            engine.Realms.Register(id, config);
         }
     }
 

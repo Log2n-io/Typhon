@@ -111,7 +111,7 @@ class EntitiesEncoding3DTests : TestBase<EntitiesEncoding3DTests>
             {
                 Append(stream, frame);
                 var log = new FrameLog();
-                log.Decode(frame, harness.CatalogPlan);
+                log.Decode(frame, harness.CatalogPlan, harness.Subscriptions.Realm0Frame);
                 var calls = new JsonArray();
                 foreach (var call in log.Calls)
                 {

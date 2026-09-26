@@ -118,13 +118,13 @@ public readonly struct Codec : IEquatable<Codec>
     public static Codec Quat3 => new(new CatalogCodec { Kind = CodecKind.Quat3 });
 
     /// <summary>
-    /// A 2D world position at <see cref="DefaultPositionBits"/> bits per axis. The bounds are the spatial grid's and are filled in at <c>Start</c>: a
-    /// position declared here and a position the grid quantizes must be the same number or the client's world is not the server's.
+    /// A 2D world position, realm-framed (<c>typhon.3</c>, SUB-30): its width and bounds are the session's realm's, sent in the <c>REALM</c> block, so the
+    /// catalog carries the kind alone and a position declared here quantizes exactly as the grid's own.
     /// </summary>
-    public static Codec Pos2 => new(new CatalogCodec { Kind = CodecKind.Pos2, Bits = DefaultPositionBits });
+    public static Codec Pos2 => new(new CatalogCodec { Kind = CodecKind.Pos2 });
 
-    /// <summary>A 3D world position at <see cref="DefaultPositionBits"/> bits per axis. <inheritdoc cref="Pos2" path="/summary"/></summary>
-    public static Codec Pos3 => new(new CatalogCodec { Kind = CodecKind.Pos3, Bits = DefaultPositionBits });
+    /// <summary>A 3D world position, realm-framed. <inheritdoc cref="Pos2" path="/summary"/></summary>
+    public static Codec Pos3 => new(new CatalogCodec { Kind = CodecKind.Pos3 });
 
     /// <summary>
     /// The engine-measured 2D displacement of a motion segment. Its width and its divisor are derived at registration from the archetype's
@@ -136,8 +136,8 @@ public readonly struct Codec : IEquatable<Codec>
     public static Codec Vel3 => new(new CatalogCodec { Kind = CodecKind.Vel3 });
 
     /// <summary>
-    /// Bits per axis of a <see cref="Pos2"/> or <see cref="Pos3"/>: 24, which is sub-millimetre over a 16 km world and still three bytes per axis. It is a
-    /// property of the codec, not of any world — a smaller world gets finer steps from the same 24 bits, it does not want fewer of them.
+    /// A realm's default position width: 24 bits per axis, sub-millimetre over a 16 km world and three bytes per axis. The width is the realm's
+    /// (<c>REALM.posBits</c>, 12-realms § 5.5), never a codec's.
     /// </summary>
     public const int DefaultPositionBits = 24;
 
@@ -316,8 +316,8 @@ public readonly struct Codec : IEquatable<Codec>
             case CodecKind.EntityRef: return EntityRef;
             case CodecKind.TickLo: return TickLo;
             case CodecKind.Quat3: return Quat3;
-            case CodecKind.Pos2: return bits == 0 ? Pos2 : new Codec(new CatalogCodec { Kind = CodecKind.Pos2, Bits = CheckedBits(kind, bits) });
-            case CodecKind.Pos3: return bits == 0 ? Pos3 : new Codec(new CatalogCodec { Kind = CodecKind.Pos3, Bits = CheckedBits(kind, bits) });
+            case CodecKind.Pos2: return bits == 0 ? Pos2 : throw RealmWidth(kind);
+            case CodecKind.Pos3: return bits == 0 ? Pos3 : throw RealmWidth(kind);
             case CodecKind.Quant: return Quant(min, max, RequiredBits(kind, bits));
             case CodecKind.Unorm: return Unorm(RequiredBits(kind, bits));
             case CodecKind.Snorm: return Snorm(RequiredBits(kind, bits));
@@ -352,6 +352,9 @@ public readonly struct Codec : IEquatable<Codec>
 
     private static int RequiredBits(CodecKind kind, int bits)
         => bits != 0 ? bits : throw new ArgumentException($"CodecKind.{kind} needs its width: set Bits on the attribute.", nameof(bits));
+
+    private static ArgumentException RealmWidth(CodecKind kind) =>
+        new($"A {CodecTokens.ToToken(kind)} takes its width from the session's realm (typhon.3, REALM posBits); declare it without bits.");
 
     private static int CheckedBits(CodecKind kind, int bits)
     {

@@ -44,6 +44,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     private readonly Lock _parkLock = new();
     private ParkedEntryList _parked;
     private long _entriesMigrated;
+    private long _entriesLeftRealm;
     private long _entriesParked;
     private long _parkedDropped;
     private long _migrationsAbandoned;
@@ -364,6 +365,23 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return ReplicationMigrationOutcome.NothingToCarry;
         }
 
+        // A move across realms (R4.5). The entry is in the source realm's frame — its codes, its v̂ and its encoded bytes name places there — so it is not
+        // carried: the source realm's sessions are told the entity left (a leave in that realm, decoded with its frame), its identity goes back, and the
+        // destination initialises a fresh entry in its own frame the first time it is projected — an arrival like a spawn. A deviation from 03 § 2, which
+        // carries the identity across: re-issuing it costs a client nothing, since a session that follows the entity across switches with a RESET.
+        var realms = _attachedTo != null ? Volatile.Read(ref _attachedTo.ClusterRealmMap) : null;
+        if (realms != null && (uint)dstChunkId < (uint)realms.Length && realms[dstChunkId] != source->Realm)
+        {
+            if (Push != null)
+            {
+                Orphaned(source, coldSource, ((ReplicationHotEntry*)hotSource)->NetId, 3);
+            }
+
+            ClearEntry(srcBytes, srcSlot);
+            Interlocked.Increment(ref _entriesLeftRealm);
+            return ReplicationMigrationOutcome.NothingToCarry;
+        }
+
         if (Directory.TryGetBlock(dstChunkId, out var destination))
         {
             var dstBytes = (byte*)destination;
@@ -540,7 +558,10 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     var droppedId = ((ReplicationHotEntry*)bytes)->NetId;
                     if (droppedId != NetIdAllocator.NoNetId)
                     {
-                        Orphaned(null, bytes + Layout.HotStride, droppedId, 2);
+                        // A parked entry never crossed realms (R4.5 leaves those before they park): its realm is its destination cluster's.
+                        var map = _attachedTo == null ? null : Volatile.Read(ref _attachedTo.ClusterRealmMap);
+                        var realm = map != null && (uint)chunkId < (uint)map.Length ? map[chunkId] : RealmId.Default.Value;
+                        Orphaned(null, bytes + Layout.HotStride, droppedId, 2, realm);
                     }
                 }
 
@@ -554,6 +575,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
     /// <summary>Entries carried straight into a destination block that already existed.</summary>
     public long EntriesMigrated => Volatile.Read(ref _entriesMigrated);
+
+    /// <summary>Entries of entities that moved to another realm: left in their realm, re-initialised in the other (R4.5) — cumulative.</summary>
+    public long EntriesLeftRealm => Volatile.Read(ref _entriesLeftRealm);
 
     /// <summary>Entries copied aside because their destination had no block yet.</summary>
     public long EntriesParked => Volatile.Read(ref _entriesParked);
@@ -608,9 +632,12 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     }
 
     /// <summary>An entry vanished with no projection to see it go: every session holding it is told it left, and its identity goes back to the allocator.</summary>
-    private void Orphaned(ReplicationBlockHeader* block, byte* cold, uint netId, int cause)
+    private void Orphaned(ReplicationBlockHeader* block, byte* cold, uint netId, int cause, ushort parkedRealm = 0)
     {
-        Push.Orphan(PushArchetypeIndex, block, cold, Layout, netId, cause);
+        // Filed in the replication of the realm the entry was last described in; a realm nobody serves holds no session to tell. A parked drop has no
+        // block: its caller names the realm.
+        var push = Push.Hub == null ? Push : Push.Hub.For(block == null ? parkedRealm : block->Realm);
+        push?.Orphan(PushArchetypeIndex, block, cold, Layout, netId, cause);
         lock (_orphanedLock)
         {
             _orphaned.Add(netId);
@@ -862,6 +889,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             // rejects as a double release, from inside a parallel pass. One memset per newly watched cluster, on a path that has just rented a block, buys
             // the whole initialization path a known starting state.
             NativeMemory.Clear((byte*)rented + ReplicationBlockLayout.HeaderSize, (nuint)(Layout.BlockSize - ReplicationBlockLayout.HeaderSize));
+
+            // The cluster's realm, fixed from its claim to its drain (Realms C1), which is exactly this block's lifetime (R4.2).
+            rented->Realm = RealmOfCluster(chunkId);
             if (Push != null)
             {
                 if (chunkId >= BlockByChunk.Length)
@@ -883,6 +913,13 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
         block = rented;
         return true;
+    }
+
+    /// <summary>The realm cluster <paramref name="chunkId"/> is in: realm 0 for an unattached state or a single-realm archetype.</summary>
+    internal ushort RealmOfCluster(int chunkId)
+    {
+        var map = _attachedTo == null ? null : Volatile.Read(ref _attachedTo.ClusterRealmMap);
+        return map != null && (uint)chunkId < (uint)map.Length ? map[chunkId] : RealmId.Default.Value;
     }
 
     /// <summary>

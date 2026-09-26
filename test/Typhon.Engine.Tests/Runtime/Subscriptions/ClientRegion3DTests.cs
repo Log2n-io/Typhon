@@ -190,15 +190,19 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
             Subs.Sessions.Admit = static (in AdmissionRequest _) => Admission.Accept(SessionRole.Spectator);
             declare(Subs);
             var plans = ProjectionCompiler.Compile(Subs, engine, ProjectionTestSchema.TickPeriodSeconds, largestTickMultiplier: 1);
-            var export = CatalogBuilder.Build(Subs, plans, CatalogBuilder.DefaultAppName, appRevision: 0, tickPeriodUs: 10_000, systemNames: [],
-                engine.SpatialGrid.Config);
+            var export = CatalogBuilder.Build(Subs, plans, CatalogBuilder.DefaultAppName, appRevision: 0, tickPeriodUs: 10_000, systemNames: []);
             Plan = CatalogPlan.Compile(export.Canonical);
             SessionTable = new SessionTable("Sessions", Registry.Runtime, Allocator, options, Subs.Sessions.SessionEvents);
             CommandTypes = CommandRegistry.Build(Subs, Plan);
             Pool = new IngressRingPool("IngressRings", Registry.Runtime, Allocator, options);
             Ingress = new SubscriptionsIngress(SessionTable, Subs, CommandTypes, new CommandTypeBuffers(CommandTypes, options.MaxSessions), Pool,
                 options.MaxSessions);
+            Frame = SubscriptionsRuntime.BuildRealm0Frame(engine, options);
+            Ingress.Realm = Frame;
         }
+
+        /// <summary>The served realm's frame, which the region's vertices travel over (typhon.3).</summary>
+        public RealmFrame Frame { get; }
 
         public ResourceRegistry Registry { get; }
 
@@ -250,11 +254,12 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
             }
         }
 
+        /// <remarks>Vertices are pos3 on the wire (typhon.3, D-8): a flat realm's (x, y) pairs travel with z = 0.</remarks>
         public byte[] RegionMessage(ushort seq, double[] flattened)
         {
             var values = new RecordValues
             {
-                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(flattened),
+                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(Frame.Deep ? flattened : WithZeroZ(flattened)),
                 [BuiltInCommands.RegionAltitudeField] = FieldValue.Of(120.0),
                 [BuiltInCommands.RegionBudgetField] = FieldValue.Of(256),
             };
@@ -262,8 +267,20 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
             var buffer = new byte[4096];
             var writer = new WireWriter(buffer);
             CommandsMessage.Write(ref writer, clientTick: 1,
-                new List<(MessagePlan, ushort, RecordValues)> { (Plan.CommandByName(BuiltInCommands.ClientRegion), seq, values) });
+                new List<(MessagePlan, ushort, RecordValues)> { (Plan.CommandByName(BuiltInCommands.ClientRegion), seq, values) }, Frame);
             return writer.Written.ToArray();
+        }
+
+        private static double[] WithZeroZ(double[] pairs)
+        {
+            var triples = new double[pairs.Length / 2 * 3];
+            for (var i = 0; i < pairs.Length / 2; i++)
+            {
+                triples[3 * i] = pairs[2 * i];
+                triples[(3 * i) + 1] = pairs[(2 * i) + 1];
+            }
+
+            return triples;
         }
 
         public byte AckFor(SessionId session, ushort seq)
@@ -304,7 +321,7 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
         100, -100, -100, 100, 100, -100, 100, 100, 100, 100, -100, 100,
     ];
 
-    /// <summary>A deep world's catalog carries a pos3 region of 4–16 points, whose frustum arrives as six planes.</summary>
+    /// <summary>A deep realm's region of 4–16 pos3 points, whose frustum arrives as six planes.</summary>
     [Test]
     public void ADeepWorldTakesAPolyhedron()
     {
@@ -312,8 +329,8 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
         var vertices = Array.Find(deep.Plan.CommandByName(BuiltInCommands.ClientRegion).Body.Fields, f => f.Name == BuiltInCommands.RegionVerticesField);
         Assert.Multiple(() =>
         {
-            Assert.That(vertices.Element.Kind, Is.EqualTo(CodecKind.Pos3), "the codec comes from the grid: three axes in a deep world");
-            Assert.That(vertices.Codec.MinCount, Is.EqualTo(BuiltInCommands.MinRegionVertices3));
+            Assert.That(vertices.Element.Kind, Is.EqualTo(CodecKind.Pos3), "always pos3 (typhon.3, D-8): the realm decides the hull");
+            Assert.That(deep.Frame.Deep, Is.True, "a deep realm builds a polyhedron, which the hull refuses under four points");
             Assert.That(vertices.Codec.MaxCount, Is.EqualTo(BuiltInCommands.MaxRegionVertices));
         });
 
@@ -350,13 +367,13 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
         });
     }
 
-    /// <summary>A flat world's regions need no 2D archetype: the codec is the grid's (the refusal that took it from an archetype is gone).</summary>
+    /// <summary>A flat realm's regions need no 2D archetype: the vertices are pos3 over the realm's frame, whatever the archetypes' codecs.</summary>
     [Test]
     public void AFlatRuntimeWithNoTwoDimensionalArchetypeAcceptsRegions()
     {
         using var flat = new Deep(ProjectionTestSchema.SetupEngine(ServiceProvider), DeclareFlyerRegion);
         var vertices = Array.Find(flat.Plan.CommandByName(BuiltInCommands.ClientRegion).Body.Fields, f => f.Name == BuiltInCommands.RegionVerticesField);
-        Assert.That(vertices.Element.Kind, Is.EqualTo(CodecKind.Pos2), "a flat world's region is a polygon, whatever its archetypes' codecs");
+        Assert.That((vertices.Element.Kind, flat.Frame.Deep), Is.EqualTo((CodecKind.Pos3, false)), "pos3 on the wire, a polygon in a flat realm");
 
         var session = flat.Admit();
         flat.Ingress.OnCommands(session, flat.RegionMessage(1, [-100, -100, 100, -100, 100, 100, -100, 100]));
@@ -366,9 +383,9 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
     }
 
     /// <summary>
-    /// The region codec follows the replication grid's depth, not the spatial one's (10 § 3.1): a spatial world two cells deep (200 m in 100 m cells)
-    /// under a 256 m replication cell is one replication cell deep, so its regions are polygons — a footprint on the ground is accepted, where a pos3
-    /// codec would have refused it as coplanar.
+    /// The realm's depth follows the replication grid's, not the spatial one's (10 § 3.1): a spatial world two cells deep (200 m in 100 m cells) under a
+    /// 256 m replication cell is one replication cell deep, so its regions are polygons — a footprint on the ground is accepted, where a deep realm would
+    /// have refused it as coplanar.
     /// </summary>
     [Test]
     public void TheRegionCodecFollowsTheReplicationGridsDepth()
@@ -376,7 +393,7 @@ class ClientRegion3DTests : TestBase<ClientRegion3DTests>
         var spatial = new SpatialGridConfig(new Vector3D(-1024, -1024, 0), new Vector3D(1024, 1024, 200), 100);
         using var flat = new Deep(ProjectionTestSchema.SetupEngine(ServiceProvider, spatial), DeclareFlyerRegion, replicationCellM: 256);
         var vertices = Array.Find(flat.Plan.CommandByName(BuiltInCommands.ClientRegion).Body.Fields, f => f.Name == BuiltInCommands.RegionVerticesField);
-        Assert.That(vertices.Element.Kind, Is.EqualTo(CodecKind.Pos2));
+        Assert.That((vertices.Element.Kind, flat.Frame.Deep), Is.EqualTo((CodecKind.Pos3, false)), "the realm's depth is the replication grid's");
 
         var session = flat.Admit();
         flat.Ingress.OnCommands(session, flat.RegionMessage(1, [-100, -100, 100, -100, 100, 100, -100, 100]));

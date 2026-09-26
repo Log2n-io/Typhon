@@ -295,7 +295,7 @@ static class CellTreeCrossoverProfile
             Console.WriteLine($"  !! the layout did not settle in {SettleFenceCap} quiet fences");
         }
 
-        var clusters = arm.Do(() => arm.State.CellClusterPool.GetClusters(arm.CellKey).Length);
+        var clusters = arm.Do(() => arm.State.Realm0Spatial.CellClusterPool.GetClusters(arm.CellKey).Length);
         var slots = BitOperations.PopCount(arm.State.Layout.FullMask);
         Console.WriteLine($"  broadphase alone: {clusters:N0} clusters holding {spawned:N0} entities — "
             + $"{spawned / (double)Math.Max(1, clusters):F1} per cluster against {slots} slots");
@@ -324,7 +324,7 @@ static class CellTreeCrossoverProfile
     {
         Switch(arm, tree: false);
         var hits = RunPass(arm, boxes, edge);
-        var slot = arm.State.PerCellIndex[arm.CellKey];
+        var slot = arm.State.Realm0Spatial.PerCellIndex[arm.CellKey];
         var linear = slot.ReadIndex(isStatic: false);
         Switch(arm, tree: true);
         var tree = slot.ReadTree(isStatic: false);
@@ -498,7 +498,7 @@ static class CellTreeCrossoverProfile
     /// <remarks>Call with the half on the linear index.</remarks>
     private static double CandidatesPerQuery(Arm arm, (float X, float Y)[] boxes, float edge)
     {
-        var linear = arm.State.PerCellIndex[arm.CellKey].ReadIndex(isStatic: false);
+        var linear = arm.State.Realm0Spatial.PerCellIndex[arm.CellKey].ReadIndex(isStatic: false);
         var frame = CellFrame(arm, boxes, edge);
         long total = 0;
         for (var b = 0; b < boxes.Length; b++)
@@ -516,7 +516,7 @@ static class CellTreeCrossoverProfile
     /// <summary>The boxes in the cell's frame, rounded outward exactly as the query enumerator's <c>SetCellQueryFrame</c> does: four floats per box.</summary>
     private static float[] CellFrame(Arm arm, (float X, float Y)[] boxes, float edge)
     {
-        arm.Engine.SpatialGrid.CellOrigin(arm.CellKey, out var originX, out var originY, out _);
+        arm.Engine.Realm0Grid.CellOrigin(arm.CellKey, out var originX, out var originY, out _);
         var frame = new float[boxes.Length * 4];
         for (var b = 0; b < boxes.Length; b++)
         {
@@ -558,7 +558,7 @@ static class CellTreeCrossoverProfile
         dbe.ClusterCellTreePromoteThreshold = int.MaxValue;   // the half is switched by hand, never by the gate
         dbe.InitializeArchetypes();
         arm.State = dbe._archetypeStates[Archetype<CtxUnit>.Metadata.ArchetypeId].ClusterState;
-        arm.CellKey = dbe.SpatialGrid.WorldToCellKey(CellSize * 0.5f, CellSize * 0.5f, 0f);
+        arm.CellKey = dbe.Realm0Grid.WorldToCellKey(CellSize * 0.5f, CellSize * 0.5f, 0f);
 
         var capacity = BitOperations.PopCount(arm.State.Layout.FullMask);
         var count = clusters * capacity;
@@ -627,14 +627,14 @@ static class CellTreeCrossoverProfile
 
     private static bool IsTree(Arm arm)
     {
-        var slot = arm.State.PerCellIndex[arm.CellKey];
+        var slot = arm.State.Realm0Spatial.PerCellIndex[arm.CellKey];
         return slot != null && (slot.ReadTree(isStatic: false) != null || slot.ReadTree(isStatic: true) != null);
     }
 
     /// <summary>The cell's clusters and their bounds, hashed: two readings with equal fingerprints saw the same partition.</summary>
     private static (int Clusters, int Hash) Fingerprint(Arm arm)
     {
-        var ids = arm.State.CellClusterPool.GetClusters(arm.CellKey);
+        var ids = arm.State.Realm0Spatial.CellClusterPool.GetClusters(arm.CellKey);
         var hash = new HashCode();
         foreach (var id in ids)
         {
@@ -692,7 +692,7 @@ static class CellTreeCrossoverProfile
         for (var b = 0; b < boxes.Length; b++)
         {
             var (x, y) = boxes[b];
-            foreach (var hit in arm.State.QueryAabb(arm.Engine.SpatialGrid, x, y, float.NegativeInfinity, x + edge, y + edge, float.PositiveInfinity))
+            foreach (var hit in arm.State.QueryAabb(arm.Engine.Realm0Grid, x, y, float.NegativeInfinity, x + edge, y + edge, float.PositiveInfinity))
             {
                 found += hit.Entity.IsNull ? 0 : 1;
             }
@@ -703,7 +703,7 @@ static class CellTreeCrossoverProfile
 
     private static (double Extent, double ToBound, int Clusters) ReadLayout(Arm arm, int count, int capacity)
     {
-        var ids = arm.State.CellClusterPool.GetClusters(arm.CellKey);
+        var ids = arm.State.Realm0Spatial.CellClusterPool.GetClusters(arm.CellKey);
         var total = 0d;
         var counted = 0;
         foreach (var id in ids)

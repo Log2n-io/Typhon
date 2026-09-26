@@ -1,0 +1,73 @@
+{
+  "description": "RESET, REALM (flat, 16 bits, kind 2, app tag 0xDEADBEEF, cell 8 m over [0, 64)\u00B2), then a Beacon enter decoded over that frame.",
+  "catalog": "catalog-kitchen-sink",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 70000,
+      "flags": 2,
+      "periodUs": 0
+    },
+    {
+      "call": "realm",
+      "frame": {
+        "realmId": 41,
+        "generation": 3,
+        "kindIdx": 2,
+        "appTag": 3735928559,
+        "posBits": 16,
+        "cellM": "4020000000000000",
+        "deep": false,
+        "min": [
+          "0000000000000000",
+          "0000000000000000",
+          "0000000000000000"
+        ],
+        "max": [
+          "4050000000000000",
+          "4050000000000000",
+          "4020000000000000"
+        ]
+      }
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "Beacon"
+    },
+    {
+      "call": "enter",
+      "netId": 1,
+      "position": [
+        "4040000000000000",
+        "404fffe000000000"
+      ],
+      "velocity": [],
+      "t0": 0,
+      "epoch": 0
+    },
+    {
+      "call": "number",
+      "field": "channel",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "drift",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "strength",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "endTick"
+    }
+  ]
+}

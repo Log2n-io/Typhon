@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -145,8 +146,27 @@ internal static unsafe class ProjectionPass
         var arena = state.Scratch[worker];
 
         // A push-served archetype is projected only where pushed, and every slot projected here becomes one event the frame stage fans out.
+        // The replication of the block's realm (R4.1): a block describes one cluster, and a cluster is in one realm from its claim to its drain. The hub
+        // only ever pushes blocks of realms it serves.
+        var realm = block->Realm;
         var push = state.Push;
+        var hub = push?.Hub;
+        if (hub != null)
+        {
+            push = hub.For(realm);
+            if (push == null)
+            {
+                // Never listed (PrepareBlocks routes by realm): projecting it into another realm's replication would break SUB-28 and SUB-30 silently.
+                Debug.Assert(false, $"block of unserved realm {realm} was listed for projection");
+                return;
+            }
+        }
+
         var pushIndex = state.PushArchetypeIndex;
+
+        // The frame of the block's realm (R4.2, SUB-30): a block describes one cluster, and a cluster is in one realm from its claim to its drain, so the
+        // frame is hoisted per block.
+        var frame = push?.CodecsFor(realm)?.ByPlan[pushIndex] ?? plan.Position?.Frame;
 
         // ── 1. Slots that stopped being occupied give their identities back ─────────────────────────────────────────────────────────────────────────────
         var released = 0;
@@ -273,7 +293,7 @@ internal static unsafe class ProjectionPass
         // Everything the rule needs that is a property of the ARCHETYPE rather than of the entity: the tolerance and teleport thresholds pre-squared, the
         // heartbeat in ticks, and the four offsets a segment is written at. The scratch is carved once for the whole block, so the per-slot call allocates no
         // stack of its own and stays inlinable.
-        var motion = MotionPolicy.For(position, layout, state.TickPeriodSeconds);
+        var motion = MotionPolicy.For(position, frame, layout, state.TickPeriodSeconds);
         byte* velocityColumn = null;
         if (motion.Enabled && motion.VelocityDeclared)
         {
@@ -313,7 +333,7 @@ internal static unsafe class ProjectionPass
                         // demand — initializes it. Deferring an entity by a tick is the only failure available here that neither allocates on a worker nor
                         // hands two entities one identity; it is counted so a lease that is chronically too small is visible rather than inferred.
                         state.NoteNetIdStarvation();
-                        push?.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                        hub?.Repush(pushIndex, block->ChunkId, 1UL << slot);
                         continue;
                     }
 
@@ -337,7 +357,7 @@ internal static unsafe class ProjectionPass
             // ── Position: quantized, compared, stored; then the motion rule decides whether it becomes a SEGMENT (P1-10) ──────────────────────────────────
             if (position != null && positionBytes > 0)
             {
-                QuantizePosition(position, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
+                QuantizePosition(position, frame, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
                 var stored = coldBytes + layout.PrevPositionOffsetInColdEntry;
                 var visibility = coldBytes + layout.VisibilityPositionOffsetInColdEntry;
                 if (push != null)
@@ -390,14 +410,14 @@ internal static unsafe class ProjectionPass
                 // the one push a developer cannot be asked to make, because nothing the application writes marks a stop.
                 if (push != null && motion.Enabled && MotionTracker.IsExtrapolating(in motion, hotBytes))
                 {
-                    push.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                    hub.Repush(pushIndex, block->ChunkId, 1UL << slot);
                 }
             }
             else if (position != null && initialize && layout.EnterPositionBytes > 0)
             {
                 // A static position: no previous copy is kept and no segment is reserved, because it never changes and nothing extrapolates from it. It is
                 // read once, here, into the cold entry's enter cache — the one place an enter record can find it on a later tick.
-                QuantizePosition(position, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
+                QuantizePosition(position, frame, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
                 var staticBytes = layout.EnterPositionBytes;
                 quantizedPosition[..staticBytes].CopyTo(new Span<byte>(coldBytes + layout.EnterPositionOffsetInColdEntry, staticBytes));
                 if (push != null)
@@ -668,19 +688,18 @@ internal static unsafe class ProjectionPass
     // ── Position ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Quantizes one slot's position, axis by axis, into <paramref name="destination"/>: the archetype's <c>pos2</c>/<c>pos3</c> codec, little-endian, the
-    /// same bytes a segment or an enter carries.
+    /// Quantizes one slot's position, axis by axis, into <paramref name="destination"/>: the archetype's <c>pos2</c>/<c>pos3</c> codec over the realm's
+    /// <paramref name="frame"/>, little-endian, the same bytes a segment or an enter carries.
     /// </summary>
-    private static void QuantizePosition(CompiledPosition position, byte* clusterBase, byte* transientBase, ArchetypeClusterInfo clusterLayout, int slot,
-        Span<byte> destination)
+    private static void QuantizePosition(CompiledPosition position, PositionFrame frame, byte* clusterBase, byte* transientBase,
+        ArchetypeClusterInfo clusterLayout, int slot, Span<byte> destination)
     {
         var storeBase = StoreFor(clusterLayout, transientBase, clusterBase, position.ComponentSlot);
         var value = storeBase + position.ComponentOffsetInCluster + (slot * position.ComponentSize) + position.FieldOffsetInComponent;
-        var bytes = position.Pos.Bits / 8;
+        var bytes = frame.AxisBytes;
         for (var axis = 0; axis < position.Dims; axis++)
         {
-            var code = WireMath.EncodeQuant(Centre(position.SpatialFieldType, value, axis, position.Dims), position.Pos.Min[axis], position.Pos.Max[axis],
-                position.Pos.Bits);
+            var code = WireMath.EncodeQuant(Centre(position.SpatialFieldType, value, axis, position.Dims), frame.Min[axis], frame.Max[axis], frame.Bits);
             for (var i = 0; i < bytes; i++)
             {
                 destination[(axis * bytes) + i] = (byte)(code >> (8 * i));
@@ -717,7 +736,7 @@ internal static unsafe class ProjectionPass
         push.Decode(archetype, blockBytes + layout.ColdOffset + (slot * layout.ColdStride) + push.PositionOffset(archetype), out var x, out var y,
             out var z);
         push.AddEvent(worker, archetype, block, slot, null, netId, PushEvent.HasOld, x, y, z, 0f, 0f, 0f);
-        leases.Depart(worker, entity, netId, x, y, z);
+        leases.Depart(worker, entity, netId, x, y, z, push.ServedRealm);
     }
 
     // ── Entry helpers ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -834,10 +853,13 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         public float X;
         public float Y;
         public float Z;
+
+        /// <summary>The realm it was last in, whose frame X, Y, Z are in.</summary>
+        public ushort Realm;
     }
 
     /// <summary>Records, from <paramref name="worker"/>'s chunk, the entity whose identity it released and where it was last.</summary>
-    public void Depart(int worker, EntityId entity, uint netId, float x, float y, float z)
+    public void Depart(int worker, EntityId entity, uint netId, float x, float y, float z, ushort realm = 0)
     {
         ref var lease = ref _leases[worker];
         if (lease.DepartedCount == lease.DepartedCapacity)
@@ -847,7 +869,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
             lease.DepartedCapacity = capacity;
         }
 
-        lease.Departed[lease.DepartedCount++] = new DepartedEntity { Entity = entity, NetId = netId, X = x, Y = y, Z = z };
+        lease.Departed[lease.DepartedCount++] = new DepartedEntity { Entity = entity, NetId = netId, X = x, Y = y, Z = z, Realm = realm };
     }
 
     /// <summary>This tick's departed entities, every worker's: read serially, in the frame prologue, before the next tick's <see cref="BeginTick"/>.</summary>

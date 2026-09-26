@@ -128,16 +128,39 @@ internal unsafe ref struct BoundViewpoint : IDisposable, IEventEntities
         return true;
     }
 
+    /// <summary>The realm a live entity is in — its cluster's (<c>ClusterRealmMap</c>), realm 0 on an engine with one realm.</summary>
+    public bool TryRealm(EntityId entity, out ushort realm)
+    {
+        realm = RealmId.NoneValue;
+        if (!TryLocate(entity, out var clusters, out var chunk, out _))
+        {
+            return false;
+        }
+
+        var map = System.Threading.Volatile.Read(ref clusters.ClusterRealmMap);
+        realm = map != null && (uint)chunk < (uint)map.Length ? map[chunk] : RealmId.Default.Value;
+        return true;
+    }
+
     /// <summary>The push replication an event's entity field is resolved against; set by the frame prologue.</summary>
     public PushReplication Push;
 
     /// <inheritdoc />
-    public bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z)
+    public bool TryResolve(EntityId entity, out uint netId, out float x, out float y, out float z, out ushort realm)
     {
         netId = 0;
         x = y = z = 0f;
-        return Push != null && TryLocate(entity, out var clusters, out var chunk, out var slot) && Push.TryEntityAt(clusters, chunk, slot, entity, out netId,
-            out x, out y, out z);
+        realm = RealmId.Default.Value;
+        if (Push == null || !TryLocate(entity, out var clusters, out var chunk, out var slot))
+        {
+            return false;
+        }
+
+        // Decoded by the replication of the entity's realm: its identity is engine-wide, its position is a place in that realm only.
+        var map = System.Threading.Volatile.Read(ref clusters.ClusterRealmMap);
+        realm = map != null && (uint)chunk < (uint)map.Length ? map[chunk] : RealmId.Default.Value;
+        var owner = Push.Hub?.For(realm) ?? (realm == RealmId.Default.Value ? Push : null);
+        return owner != null && owner.TryEntityAt(clusters, chunk, slot, entity, out netId, out x, out y, out z);
     }
 
     /// <summary>Releases the accessors.</summary>

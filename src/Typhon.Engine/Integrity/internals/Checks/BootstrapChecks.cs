@@ -41,6 +41,7 @@ internal static class BootstrapChecks
         ["sys.ComponentR1"] = [0, 1],
         ["sys.SchemaHistory"] = [0, 1],
         ["sys.AssemblyR1"] = [0, 1],
+        ["sys.RealmR1"] = [0, 1],
         ["collection.FieldR1"] = [0]
     };
 

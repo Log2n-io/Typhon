@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using Typhon.Protocol;
 
@@ -39,8 +40,8 @@ internal readonly struct MotionPolicy
     /// <summary>The velocity codec's width in bits, or <c>0</c> for the <c>none</c> model.</summary>
     public int VelBits { get; }
 
-    /// <summary>The velocity codec's divisor: one velocity code is a position step over this (W5).</summary>
-    public int QuantaDiv { get; }
+    /// <summary>The velocity unit's binary exponent: one velocity code is <c>2^VelUnitExp</c> metres per tick (W5, absolute).</summary>
+    public int VelUnitExp { get; }
 
     /// <summary>Whether a segment carries a velocity to extrapolate from.</summary>
     public bool Linear { get; }
@@ -90,19 +91,20 @@ internal readonly struct MotionPolicy
     /// <summary>Byte offset of the declared velocity value inside its component.</summary>
     public int VelocityFieldOffset { get; }
 
-    private MotionPolicy(CompiledPosition position, in ReplicationBlockLayout layout, double tickPeriodSeconds)
+    private MotionPolicy(CompiledPosition position, PositionFrame frame, in ReplicationBlockLayout layout, double tickPeriodSeconds)
     {
         Position = position;
         Dims = position.Dims;
-        PosBytes = position.Pos.Bits / 8;
+        PosBytes = frame.AxisBytes;
         Linear = position.Linear && position.Vel != null;
         VelBits = Linear ? position.Vel.Bits : 0;
         VelBytes = Linear ? position.Vel.Bits / 8 : 0;
-        QuantaDiv = Linear ? position.Vel.QuantaDiv : 1;
+        Debug.Assert(!Linear || position.Vel.UnitExp.HasValue, "the compiler gives every linear motion's velocity codec its unit (D-3)");
+        VelUnitExp = Linear ? position.Vel.UnitExp ?? 0 : 0;
         VelocityDeclared = position.VelocityIsDeclared;
         VelocityComponentSize = position.VelocityComponentSize;
         VelocityFieldOffset = position.VelocityFieldOffsetInComponent;
-        Step = position.PositionStep;
+        Step = frame.Step;
         TickPeriodSeconds = tickPeriodSeconds;
 
         var tolerance = position.ToleranceMetres;
@@ -132,12 +134,13 @@ internal readonly struct MotionPolicy
     /// Derives the policy for one archetype, or a disabled one when it does not move.
     /// </summary>
     /// <param name="position">The compiled position, which may be <see langword="null"/>.</param>
+    /// <param name="frame">The frame of the realm the block's entities are in (R4.2); <see langword="null"/> takes the position's own, realm 0's.</param>
     /// <param name="layout">The archetype's block layout, which the segment and run-start offsets come from.</param>
     /// <param name="tickPeriodSeconds">
     /// The tick period in force, in seconds; a non-positive value takes <see cref="MotionTracker.DefaultTickPeriodSeconds"/>.
     /// </param>
     /// <returns>The policy.</returns>
-    public static MotionPolicy For(CompiledPosition position, in ReplicationBlockLayout layout, double tickPeriodSeconds)
+    public static MotionPolicy For(CompiledPosition position, PositionFrame frame, in ReplicationBlockLayout layout, double tickPeriodSeconds)
     {
         if (position == null || !position.Moving || layout.SegmentBytes <= 0)
         {
@@ -145,7 +148,7 @@ internal readonly struct MotionPolicy
         }
 
         var period = double.IsFinite(tickPeriodSeconds) && tickPeriodSeconds > 0 ? tickPeriodSeconds : MotionTracker.DefaultTickPeriodSeconds;
-        return new MotionPolicy(position, in layout, period);
+        return new MotionPolicy(position, frame ?? position.Frame, in layout, period);
     }
 }
 
@@ -328,12 +331,12 @@ internal static unsafe class MotionTracker
             if (policy.Linear)
             {
                 var code = ReadVelocity(segment + policy.SegmentVelocityOffset + (a * policy.VelBytes), policy.VelBytes);
-                velocity = WireMath.DecodeVel(code, axisStep, policy.QuantaDiv, policy.VelBits);
+                velocity = WireMath.DecodeVel(code, policy.VelUnitExp, policy.VelBits);
                 segmentMoving |= code != 0;
 
                 // The rejected trigger, evaluated beside the adopted one: it fires when the velocity the client holds is not the one this tick's step
                 // quantizes to — which is what a "send a segment when the quantized velocity changes" engine would have had to emit for it to hold it.
-                shadowFires |= WireMath.EncodeVel(step[a], axisStep, policy.QuantaDiv, policy.VelBits) != code;
+                shadowFires |= WireMath.EncodeVel(step[a], policy.VelUnitExp, policy.VelBits) != code;
             }
 
             var origin = ReadCode(segment + (a * posBytes), posBytes) * axisStep;
@@ -448,7 +451,7 @@ internal static unsafe class MotionTracker
             {
                 // Clamped by the codec, and the clamp is never reached in practice: the width was derived from the same teleport threshold that trigger 1
                 // refuses to let a step exceed (W5), so a displacement that would saturate has already been sent as a teleport.
-                var code = velocity.IsEmpty ? 0 : WireMath.EncodeVel(velocity[a], policy.Step[a], policy.QuantaDiv, policy.VelBits);
+                var code = velocity.IsEmpty ? 0 : WireMath.EncodeVel(velocity[a], policy.VelUnitExp, policy.VelBits);
                 WriteCode(at + (a * policy.VelBytes), policy.VelBytes, unchecked((uint)code));
             }
         }

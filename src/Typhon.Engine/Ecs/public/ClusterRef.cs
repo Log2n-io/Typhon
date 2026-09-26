@@ -48,6 +48,8 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     // to -1; migration moves ENTITIES between clusters, never a cluster between cells).
     private const int CellFrameUnresolved = -2;
     private int _cachedCellKey;
+    // The cluster's realm grid, resolved with the cell origin (once per cluster) so the per-entity write paths pay no realm resolution (Realms SP-3).
+    private SpatialGrid _cachedGrid;
     private double _cachedOriginX;
     private double _cachedOriginY;
     private double _cachedOriginZ;
@@ -61,6 +63,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         _chunkId = chunkId;
         _state = state;
         _cachedCellKey = CellFrameUnresolved;
+        _cachedGrid = null;
         _cachedOriginX = 0f;
         _cachedOriginY = 0f;
         _cachedOriginZ = 0f;
@@ -302,6 +305,16 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
     public readonly EntityId GetEntityId(int slotIndex) =>
         EntityId.FromRaw(*(long*)(_base + _layout.EntityIdsOffset + slotIndex * 8));
 
+    /// <summary>
+    /// The realm this cluster is in (Realms): every entity it holds is in that realm's frame, except one whose realm change awaits the next fence. A
+    /// system scopes its spatial queries by it — <c>dbe.ClusterSpatialQuery&lt;T&gt;(cluster.Realm)</c>. Realm 0 for an archetype without a realm key.
+    /// </summary>
+    public readonly RealmId Realm
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get => _state?.ClusterRealmMap is { } map && (uint)_chunkId < (uint)map.Length ? new RealmId(map[_chunkId]) : RealmId.Default;
+    }
+
     /// <summary>The chunk ID of this cluster within the archetype's segment.</summary>
     public readonly int ChunkId
     {
@@ -426,6 +439,13 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         var slotBytes = ResolveBase(slot) + _layout.ComponentOffset(slot) + slotIndex * sizeof(T);
         var fieldPtr = slotBytes + spatialSlot.FieldOffset;
 
+        // Realms C4: a write that changes the entity's [RealmKey] is a realm change, not a move within this cluster's frame. One hoisted test for an
+        // unkeyed archetype; a keyed one pays a two-byte compare, and only an actual change leaves the ordinary path.
+        if (spatialSlot.RealmKeyInSpatialComponent && WriteSpatialRealmChange(slotIndex, slotBytes, spatialSlot.RealmKeyOffset, in newValue))
+        {
+            return;
+        }
+
         var fieldType = spatialSlot.FieldInfo.FieldType;
         switch (fieldType)
         {
@@ -521,6 +541,20 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         var spatialSlot = _state.SpatialSlot;
         var column = ResolveBase(slot) + _layout.ComponentOffset(slot);
         var fieldOffset = spatialSlot.FieldOffset;
+
+        // Realms C4: a slot that changes realm leaves the batch's frame. Rare, so the whole call then takes the single writes, which handle it — the
+        // batch's shared bound and crossing test assume one frame for every slot.
+        if (spatialSlot.RealmKeyInSpatialComponent && AnySlotLeavesClusterRealm(spatialSlot.RealmKeyOffset, slots, newValues))
+        {
+            for (var rest = slots; rest != 0; rest &= rest - 1)
+            {
+                var i = BitOperations.TrailingZeroCount(rest);
+                WriteSpatial(comp, i, newValues[i]);
+            }
+
+            return;
+        }
+
         var fieldType = spatialSlot.FieldInfo.FieldType;
         switch (fieldType)
         {
@@ -551,6 +585,72 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
             default:
                 throw new NotSupportedException(
                     $"WriteSpatial: spatial field type {fieldType} has no specialization. Add one when a new SpatialFieldType variant is introduced.");
+        }
+    }
+
+    /// <summary>
+    /// A <c>WriteSpatial</c> whose value names another realm than the slot's (Realms C4): validated BEFORE anything is stored — an unregistered or
+    /// incompatible realm throws here, in application code (D-2) — then stored, and flagged as a mandatory crossing the fence moves into the new realm
+    /// whatever the hysteresis band says (RM-03). The cluster's bound is NOT grown with the new coordinates: they are another realm's frame, and would
+    /// widen this realm's box by the distance between two worlds (CA-01 still holds — the bound covers where the entity was, and the narrowphase realm
+    /// filter hides it from this realm's queries until it moves). Returns false, touching nothing, when the realm does not change.
+    /// </summary>
+    private bool WriteSpatialRealmChange<T>(int slotIndex, byte* slotBytes, int realmKeyOffset, in T newValue) where T : unmanaged
+    {
+        // Against the CLUSTER's realm, not the key the slot holds: a second write this tick that keeps an already-changed key is still another realm's
+        // frame, and must not grow this cluster's bound or be tested for a crossing in this cluster's grid. The cluster's realm is the ordinary path —
+        // which also serves a change undone within the tick, whose flag the fence drops once it finds the entity home.
+        var newRealm = Unsafe.ReadUnaligned<ushort>(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref Unsafe.AsRef(in newValue)), realmKeyOffset));
+        if (newRealm == _state.ClusterRealmMap[_chunkId])
+        {
+            return false;
+        }
+
+        if (newRealm != *(ushort*)(slotBytes + realmKeyOffset))
+        {
+            _state.ValidateRealmEntry(newRealm);
+        }
+
+        ThrowIfNonFiniteCentre(in newValue);
+        *(T*)slotBytes = newValue;
+        // The entity leaves this cluster: every axis may shrink, which the fence's recompute decides.
+        _state.FlagShrinkAxes(_chunkId, 0x3F);
+        _state.FlagMigration(_chunkId, 1UL << slotIndex, -1);
+        _state.MigrationHint++;
+        SetClusterProcessBit();
+        return true;
+    }
+
+    /// <summary>True when a value of <paramref name="newValues"/> names another realm than the cluster's — the batch then takes single writes.</summary>
+    private bool AnySlotLeavesClusterRealm<T>(int realmKeyOffset, ulong slots, scoped ReadOnlySpan<T> newValues) where T : unmanaged
+    {
+        var clusterRealm = _state.ClusterRealmMap[_chunkId];
+        for (var rest = slots; rest != 0; rest &= rest - 1)
+        {
+            var i = BitOperations.TrailingZeroCount(rest);
+            var newRealm = Unsafe.ReadUnaligned<ushort>(ref Unsafe.Add(ref Unsafe.As<T, byte>(ref Unsafe.AsRef(in newValues[i])), realmKeyOffset));
+            if (newRealm != clusterRealm)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Refuses a realm change to a non-finite position, at the call: the fence would have to place it in the new realm's grid, which cannot hold it
+    /// (the ordinary path's crossing test throws the same way, from the same grid call).
+    /// </summary>
+    internal void ThrowIfNonFiniteCentre<T>(in T newValue) where T : unmanaged
+    {
+        ref readonly var ss = ref _state.SpatialSlot;
+        // A copy on the stack: newValue may live in a managed array, and a pointer is taken only over the stack (never pin managed memory).
+        var copy = newValue;
+        SpatialGrid.ReadSpatialCenter3D((byte*)&copy + ss.FieldOffset, ss.FieldInfo.FieldType, out var x, out var y, out var z);
+        if (!double.IsFinite(x) || !double.IsFinite(y) || !double.IsFinite(z))
+        {
+            throw new InvalidOperationException($"A realm change to a non-finite position ({x}, {y}, {z}) cannot be placed in any grid.");
         }
     }
 
@@ -773,7 +873,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         var start = Volatile.Read(ref _state.ClusterAabbs)![_chunkId];
         float runMinX = start.MinX, runMinY = start.MinY, runMinZ = start.MinZ, runMaxX = start.MaxX, runMaxY = start.MaxY, runMaxZ = start.MaxZ;
 
-        var grid = _state.Grid;
+        var grid = _cachedGrid ?? _state.SpatialOfCluster(_chunkId).Grid;
         ref readonly var cfg = ref grid.Config;
         var cellSize = (float)cfg.CellSize;
         var hyster = cellSize * cfg.MigrationHysteresisRatio;
@@ -1056,7 +1156,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         originY = 0f;
         originZ = 0f;
 
-        var grid = _state?.Grid;
+        var grid = _state?.SpatialOfCluster(_chunkId).Grid;
         var clusterCellMap = _state?.ClusterCellMap;
         if (grid != null && clusterCellMap != null && (uint)_chunkId < (uint)clusterCellMap.Length)
         {
@@ -1074,6 +1174,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         if (cellKey >= 0)
         {
             _cachedCellKey = cellKey;
+            _cachedGrid = grid;
             _cachedOriginX = originX;
             _cachedOriginY = originY;
             _cachedOriginZ = originZ;
@@ -1091,7 +1192,7 @@ public unsafe ref struct ClusterRef<TArch> where TArch : class
         // The cell key and origin are PASSED IN rather than re-derived. The caller resolved both to convert the entity's bounds into the cluster's frame,
         // and this method used to repeat all of it — two array loads, a bounds check, CellKeyToCoords (itself two dependent loads into the cell's CellState)
         // and three multiplies — per entity per tick, inlined into the AntHill simulation barrier.
-        var grid = _state.Grid;
+        var grid = _cachedGrid ?? _state.SpatialOfCluster(_chunkId).Grid;
 
         ref readonly var cfg = ref grid.Config;
 
@@ -1277,6 +1378,11 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         result._endIndex = endIndex;
         return result;
     }
+
+    /// <summary>An enumerator over a (list, count) pair its caller read once, under the list's own protocol: a realm's cluster list (Realms).</summary>
+    [AllowCopy]
+    internal static ClusterEnumerator<TArch> CreateScoped(ArchetypeMetadata meta, ArchetypeClusterState state, int[] clusterIds, int count) =>
+        CreateScoped(state, meta, state.ClusterSegment, state.TransientSegment, clusterIds, 0, count);
 
     /// <summary>The chunk ID of the current cluster. Available after <see cref="MoveNext"/> returns true.</summary>
     public int CurrentChunkId

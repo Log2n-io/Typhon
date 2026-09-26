@@ -41,6 +41,9 @@ public unsafe ref struct EntityRefMut
     /// <inheritdoc cref="EntityRef.ArchetypeId"/>
     public readonly ushort ArchetypeId => _ref._id.ArchetypeId;
 
+    /// <summary>The realm the entity is in (<see cref="EntityRef.Realm"/>).</summary>
+    public readonly RealmId Realm => _ref.Realm;
+
     /// <inheritdoc cref="EntityRef.IsValid"/>
     public readonly bool IsValid => !_ref._id.IsNull;
 

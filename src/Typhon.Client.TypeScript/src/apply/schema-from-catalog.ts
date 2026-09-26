@@ -1,3 +1,4 @@
+import type { RealmFrame } from '../protocol/realm-frame.js';
 import type { GridSchema } from '../aggregates/aggregate-grid.js';
 import { CatalogPlan, type Catalog, type CatalogGrid, type FieldPlan } from '../protocol/catalog.js';
 import { CodecKind } from '../protocol/codec-kinds.js';
@@ -95,7 +96,20 @@ export function worldSchemaFromCatalog(catalog: Catalog | CatalogPlan): WorldSch
   };
 }
 
-/** The geometry of a catalog grid, as `AggregateGrid` takes it. */
-export function gridSchemaFromCatalog(grid: CatalogGrid): GridSchema {
-  return { index: grid.idx, origin: grid.origin, cell: grid.cell, dims: grid.dims, archetypes: grid.archetypes };
+/**
+ * The geometry of a catalog grid over a realm's frame, as `AggregateGrid` takes it (`typhon.3`, 12-realms § 5.3): the
+ * frame's origin, a tile of `tileCells × cellM`, and `⌈extent / tile⌉` cells per axis — three axes in a deep realm, two
+ * in a flat one. Before any realm, a one-cell placeholder: an `AGG` then is refused by the reader.
+ */
+export function gridSchemaFromCatalog(grid: CatalogGrid, frame: RealmFrame | null): GridSchema {
+  if (frame === null) {
+    return { index: grid.idx, origin: [0, 0], cell: 1, dims: [1, 1], archetypes: grid.archetypes };
+  }
+
+  const t = grid.tileCells;
+  const origin = frame.deep ? [frame.min[0]!, frame.min[1]!, frame.min[2]!] : [frame.min[0]!, frame.min[1]!];
+  const dims = frame.deep
+    ? [frame.aggregateDim(0, t), frame.aggregateDim(1, t), frame.aggregateDim(2, t)]
+    : [frame.aggregateDim(0, t), frame.aggregateDim(1, t)];
+  return { index: grid.idx, origin, cell: t * frame.cellM, dims, archetypes: grid.archetypes };
 }

@@ -541,7 +541,7 @@ class SpatialSetWriteTests : TestBase<SpatialSetWriteTests>
 
         dbe.WriteTickFence(2);
 
-        var grid = dbe.SpatialGrid;
+        var grid = dbe.Realm0Grid;
         using (var tx = dbe.CreateQuickTransaction())
         {
             var accessor = tx.For<TArch>();

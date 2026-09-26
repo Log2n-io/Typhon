@@ -6,7 +6,7 @@ description: 'Foundation is the pile of primitives every other engine subsystem 
 
 # 01 — Foundation
 
-**Code:** [`src/Typhon.Engine/Foundation/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Foundation) (+ [`src/Typhon.Engine/Hosting/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Hosting) helpers, folded in §9)
+**Code:** [`src/Typhon.Engine/Foundation/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Foundation) (+ [`src/Typhon.Engine/Hosting/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Hosting) helpers, folded in [§8](#8-hosting-helpers))
 
 Foundation is the pile of primitives every other engine subsystem stands on: locks, deadlines, epoch-based reclamation, concurrent collections, the memory allocator, and a handful of host-side helpers. Nothing here knows about ECS, MVCC, the WAL, or the scheduler — it's deliberately the bottom of the dependency graph.
 
@@ -16,7 +16,7 @@ You don't need to read this doc front-to-back to *use* Typhon. You'll want it wh
   <img src="assets/typhon-concurrency-overview.svg" width="1200" alt="Concurrency primitives overview">
 </a>
 <br>
-<sub>Concurrency primitives and their consumers: the three lock types (§1), the wait/cancellation model every blocking entry takes by <code>ref</code> (§2), the timer services that drive deadline-based cancellation (§3), and epoch-based reclamation (§4).</sub>
+<sub>Concurrency primitives and their consumers: the three lock types (<a href="#1-synchronization-primitives">§1</a>), the wait/cancellation model every blocking entry takes by <code>ref</code> (<a href="#2-wait--deadline-model">§2</a>), the timer services that drive deadline-based cancellation (<a href="#3-timers">§3</a>), and epoch-based reclamation (<a href="#4-epoch-based-reclamation">§4</a>).</sub>
 
 ---
 
@@ -53,7 +53,7 @@ if (lock.EnterSharedAccess(ref ctx)) {
 }
 ```
 
-All blocking entries take `ref WaitContext` (see §2). Pass `ref WaitContext.Null` for an infinite, zero-overhead wait. Non-blocking exits and `TryEnter*` don't need a context.
+All blocking entries take `ref WaitContext` (see [§2](#2-wait--deadline-model)). Pass `ref WaitContext.Null` for an infinite, zero-overhead wait. Non-blocking exits and `TryEnter*` don't need a context.
 
 ### `AccessControlSmall` — 32-bit, no waiter tracking
 

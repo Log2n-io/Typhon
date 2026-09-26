@@ -98,6 +98,10 @@ internal sealed unsafe class SessionTable : IDisposable
     private readonly object[] _appData;
     private readonly SessionViewpoint[] _viewpoints;
 
+    // Per slot: the realm an application placed the session in (Place / Enter / Leave, R4.3), -1 while it never did — which is realm 0 on an engine with one
+    // realm and no realm on one with several (12-realms § 1.2). Tick side, one writer, as the viewpoint.
+    private readonly int[] _realms;
+
     // Each slot's run-time Sphere radius (SetRadius), or 0 for its profile's own. Tick side, like the viewpoint; cleared when the slot opens and when its
     // profile changes, because a radius is valid only within the profile it was checked against.
     private readonly double[] _radii;
@@ -165,6 +169,8 @@ internal sealed unsafe class SessionTable : IDisposable
         _freeIds = (uint*)(_memory.DataAsPointer + HeaderBytes + rowBytes);
 
         _viewpoints = new SessionViewpoint[_capacity];
+        _realms = new int[_capacity];
+        Array.Fill(_realms, -1);
         _radii = new double[_capacity];
         _sessionKinds = new string[_capacity];
         _profileNames = new string[_capacity];
@@ -375,6 +381,7 @@ internal sealed unsafe class SessionTable : IDisposable
             row->ClientMessageBytes = Resolve(limits.ClientMessageBytes, _options.ClientMessageBytes);
             row->Controlled = EntityId.Null;
             _viewpoints[session.Slot] = default;
+            _realms[session.Slot] = -1;
             _radii[session.Slot] = 0d;
 
             _sessionKinds[slot] = sessionKind;
@@ -653,6 +660,40 @@ internal sealed unsafe class SessionTable : IDisposable
             Exit();
         }
     }
+
+    /// <summary>
+    /// Places a session in a realm for this tick (R4.3): <paramref name="realm"/> with a viewpoint when <paramref name="placed"/>, nowhere in it otherwise —
+    /// or no realm at all (<see cref="RealmId.NoneValue"/>). Tick side, one writer, applied immediately, as <see cref="SetViewpoint"/>.
+    /// </summary>
+    /// <returns><see langword="false"/> when the session is gone.</returns>
+    public bool SetRealm(SessionId session, ushort realm, bool placed, Vector3D position)
+    {
+        if (!TryEnter())
+        {
+            return false;
+        }
+
+        _affinity.Enter(nameof(SessionTable), nameof(SetRealm));
+        try
+        {
+            if (!TryGetRow(session, out _))
+            {
+                return false;
+            }
+
+            _realms[session.Slot] = realm;
+            _viewpoints[session.Slot] = placed ? new SessionViewpoint(position, true) : default;
+            return true;
+        }
+        finally
+        {
+            _affinity.Exit();
+            Exit();
+        }
+    }
+
+    /// <summary>The realm an application placed a session in, or -1 when it never did. Tick side; the slot is read without a generation check.</summary>
+    public int RealmOf(SessionId session) => session.Slot < (uint)_capacity ? _realms[session.Slot] : -1;
 
     /// <summary>
     /// Sets a session's Sphere radius for this tick on. Tick side, from <see cref="SubscriptionsCommands.SetRadius"/>, which checked it against the profile.

@@ -90,7 +90,7 @@ public static class CatalogSerializer
                 mapped[j] = canonicalIdxOfDeclared[g.Archetypes[j]];
             }
 
-            grids[i] = new CatalogGrid { Origin = g.Origin, Cell = g.Cell, Dims = g.Dims, Archetypes = mapped };
+            grids[i] = new CatalogGrid { TileCells = g.TileCells, Archetypes = mapped };
         }
 
         // Grids have no name to sort by, so they sort by every field that distinguishes them; the validator refuses exact duplicates, so the order is total.
@@ -98,7 +98,7 @@ public static class CatalogSerializer
         for (var i = 0; i < grids.Length; i++)
         {
             var g = grids[i];
-            grids[i] = new CatalogGrid { Idx = i, Origin = g.Origin, Cell = g.Cell, Dims = g.Dims, Archetypes = g.Archetypes };
+            grids[i] = new CatalogGrid { Idx = i, TileCells = g.TileCells, Archetypes = g.Archetypes };
         }
 
         return new Catalog
@@ -108,6 +108,7 @@ public static class CatalogSerializer
             Tick = catalog.Tick,
             Limits = catalog.Limits,
             SessionKinds = SortedStrings(catalog.SessionKinds),
+            RealmKinds = SortedStrings(catalog.RealmKinds),
             Archetypes = archetypes,
             Enums = SortedEnums(catalog.Enums),
             Events = events,
@@ -322,19 +323,7 @@ public static class CatalogSerializer
 
     private static int CompareGrids(CatalogGrid a, CatalogGrid b)
     {
-        var c = CompareSequences(a.Origin ?? [], b.Origin ?? []);
-        if (c != 0)
-        {
-            return c;
-        }
-
-        c = a.Cell.CompareTo(b.Cell);
-        if (c != 0)
-        {
-            return c;
-        }
-
-        c = CompareSequences(a.Dims ?? [], b.Dims ?? []);
+        var c = a.TileCells.CompareTo(b.TileCells);
         return c != 0 ? c : CompareSequences(a.Archetypes ?? [], b.Archetypes ?? []);
     }
 

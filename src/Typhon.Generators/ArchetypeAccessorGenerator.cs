@@ -505,6 +505,7 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
             bool isForeignKey = false;
             string fkTargetFqn = null;
             bool hasSpatial = false;
+            bool isRealmKey = false;
             string spatialCellSize = null;
             string spatialModeCast = null;
             string spatialCategory = null;
@@ -555,6 +556,10 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
                         }
                         break;
 
+                    case "RealmKeyAttribute":
+                        isRealmKey = true;
+                        break;
+
                     case "SpatialIndexAttribute":
                         hasSpatial = true;
                         if (ad.ConstructorArguments.Length >= 1)
@@ -598,7 +603,8 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
                 hasSpatialIndex: hasSpatial,
                 spatialCellSize: spatialCellSize,
                 spatialModeCast: spatialModeCast,
-                spatialCategory: spatialCategory));
+                spatialCategory: spatialCategory,
+                isRealmKey: isRealmKey));
         }
 
         if (fields.Count == 0)
@@ -849,6 +855,10 @@ public partial class ArchetypeAccessorGenerator : IIncrementalGenerator
                 {
                     sb.Append(", foreignKeyTargetType: typeof(").Append(f.ForeignKeyTargetFqn).Append(")");
                 }
+            }
+            if (f.IsRealmKey)
+            {
+                sb.Append(", isRealmKey: true");
             }
             if (f.HasSpatialIndex)
             {
@@ -1526,10 +1536,11 @@ internal sealed class ComponentFieldGenModel : IEquatable<ComponentFieldGenModel
     public string SpatialCellSize { get; }
     public string SpatialModeCast { get; }
     public string SpatialCategory { get; }
+    public bool IsRealmKey { get; }
 
     public ComponentFieldGenModel(string memberName, string schemaName, string fieldTypeFqn, string previousName, int? explicitFieldId,
         bool hasIndex, bool indexAllowMultiple, bool isForeignKey, string foreignKeyTargetFqn, bool hasSpatialIndex,
-        string spatialCellSize, string spatialModeCast, string spatialCategory)
+        string spatialCellSize, string spatialModeCast, string spatialCategory, bool isRealmKey = false)
     {
         MemberName = memberName;
         SchemaName = schemaName;
@@ -1544,6 +1555,7 @@ internal sealed class ComponentFieldGenModel : IEquatable<ComponentFieldGenModel
         SpatialCellSize = spatialCellSize;
         SpatialModeCast = spatialModeCast;
         SpatialCategory = spatialCategory;
+        IsRealmKey = isRealmKey;
     }
 
     public bool Equals(ComponentFieldGenModel other)
@@ -1563,6 +1575,7 @@ internal sealed class ComponentFieldGenModel : IEquatable<ComponentFieldGenModel
             && IsForeignKey == other.IsForeignKey
             && ForeignKeyTargetFqn == other.ForeignKeyTargetFqn
             && HasSpatialIndex == other.HasSpatialIndex
+            && IsRealmKey == other.IsRealmKey
             && SpatialCellSize == other.SpatialCellSize
             && SpatialModeCast == other.SpatialModeCast
             && SpatialCategory == other.SpatialCategory;

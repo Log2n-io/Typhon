@@ -5,17 +5,28 @@ namespace Typhon.Protocol;
 /// </summary>
 public static class ProtocolConstants
 {
-    /// <summary>The protocol major this library speaks. The WebSocket subprotocol is <c>typhon.2</c>; the TCP preamble is <see cref="TcpPreamble"/>.</summary>
-    public const ushort Major = 2;
+    /// <summary>The protocol major this library speaks. The WebSocket subprotocol is <c>typhon.3</c>; the TCP preamble is <see cref="TcpPreamble"/>.</summary>
+    /// <remarks>Major 3 (Realms, decision D-4): the velocity unit became absolute and positions realm-framed — an old client would decode them with
+    /// the wrong unit or bounds, silently, so the break is refused at the upgrade / preamble rather than after <c>WELCOME</c>.</remarks>
+    public const ushort Major = 3;
 
     /// <summary>The protocol minor this library speaks. The lower minor of the two sides wins.</summary>
     public const ushort Minor = 0;
 
     /// <summary>The WebSocket subprotocol name for <see cref="Major"/>.</summary>
-    public const string WebSocketSubprotocol = "typhon.2";
+    public const string WebSocketSubprotocol = "typhon.3";
 
-    /// <summary>The 4-byte TCP preamble, ASCII <c>TYP2</c>: each side writes its own; a mismatch closes the connection without a <c>KICK</c> (W31).</summary>
-    public static System.ReadOnlySpan<byte> TcpPreamble => "TYP2"u8;
+    /// <summary>The 4-byte TCP preamble, ASCII <c>TYP3</c>: each side writes its own; a mismatch closes the connection without a <c>KICK</c> (W31).</summary>
+    public static System.ReadOnlySpan<byte> TcpPreamble => "TYP3"u8;
+
+    /// <summary>The most realm kinds a catalog declares: a <c>REALM</c> block's <c>varu kindIdx</c> stays one byte.</summary>
+    public const int MaxRealmKinds = 128;
+
+    /// <summary>Smallest velocity unit exponent a catalog may declare: <c>2^-40</c> m per tick, far below any float32 position jitter.</summary>
+    public const int MinVelocityUnitExp = -40;
+
+    /// <summary>Largest velocity unit exponent a catalog may declare: <c>2^16</c> m per tick.</summary>
+    public const int MaxVelocityUnitExp = 16;
 
     /// <summary>Largest <c>HELLO</c> message, in bytes: the first message's own limit, before <c>limits.clientMessageBytes</c> applies.</summary>
     public const int HelloMaxBytes = 16 * 1024;

@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { BlockMask, CatalogPlan, parseCatalog, TickReader } from '../src/index.js';
-import { goldenBin, goldenJson, goldenNames, RecordingSink, type LogEntry } from './golden-support.js';
+import {
+  frameFromJson,
+  goldenBin,
+  goldenJson,
+  goldenNames,
+  RecordingSink,
+  type FrameJson,
+  type LogEntry,
+} from './golden-support.js';
 
 /* tick-*: the decoder's call log equals the C# RecordingSink's, call for call. */
 
@@ -13,8 +21,10 @@ describe('golden ticks', () => {
 
   for (const name of names) {
     it(name, () => {
-      const vector = goldenJson(name) as { catalog: string; log: LogEntry[] };
+      const vector = goldenJson(name) as { catalog: string; frame?: FrameJson; log: LogEntry[] };
       const reader = new TickReader(CatalogPlan.compile(parseCatalog(goldenBin(vector.catalog))));
+      // A vector whose message does not carry its own REALM names the frame the session held before it.
+      reader.realm = frameFromJson(vector.frame);
       const sink = new RecordingSink();
       reader.read(goldenBin(name), sink);
       expect(sink.log).toEqual(vector.log);

@@ -105,6 +105,9 @@ public sealed partial class SimBridge
 
     public EcsView<CityNpc> NpcView { get; set; }
 
+    /// <summary>The starships (Realms G1c); null without <c>--space</c>.</summary>
+    public EcsView<Starship> ShipView { get; set; }
+
     public EcsView<CreatureLair> LairView { get; set; }
 
     public EcsView<WorldObject> StructureView { get; set; }
@@ -123,6 +126,8 @@ public sealed partial class SimBridge
         MissionsCompleted = Interlocked.Exchange(ref _missionsCompleted, 0),
         CreaturesRespawned = Interlocked.Exchange(ref _creaturesRespawned, 0),
         ShuttleBoardings = Interlocked.Exchange(ref _shuttleBoardings, 0),
+        PortalEntries = Interlocked.Exchange(ref _portalEntriesTick, 0),
+        PortalExits = Interlocked.Exchange(ref _portalExitsTick, 0),
     };
 
     // ── A per-worker-safe random ────────────────────────────────────────────────────────────────────────────────────
@@ -163,6 +168,8 @@ public struct TickStats
     public long MissionsCompleted;
     public long CreaturesRespawned;
     public long ShuttleBoardings;
+    public long PortalEntries;
+    public long PortalExits;
 
     /// <summary>Mean objects returned by one interest query — the number that says how expensive awareness is.</summary>
     public readonly double HitsPerAwarenessQuery => AwarenessQueries == 0 ? 0d : (double)AwarenessHits / AwarenessQueries;

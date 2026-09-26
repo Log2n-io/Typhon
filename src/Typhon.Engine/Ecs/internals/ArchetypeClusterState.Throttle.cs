@@ -247,7 +247,7 @@ internal sealed partial class ArchetypeClusterState
         // releasing keeps RepairCellsCooling from reporting cells whose cooldown has ended as still cooling.
         if (RepairQueue != null && grid != null)
         {
-            RepairQueue.ReleaseCooled(grid, this, tickNumber);
+            RepairQueue.ReleaseCooled(this, tickNumber);
         }
 
         var nominations = RepairNominations;
@@ -257,10 +257,10 @@ internal sealed partial class ArchetypeClusterState
         }
 
         var queue = EnsureRepairQueue(grid);
-        if (queue != null && CellClusterPool != null)
+        if (queue != null)
         {
             var start = Stopwatch.GetTimestamp();
-            queue.Absorb(nominations, grid, this, tickNumber);
+            queue.Absorb(nominations, this, tickNumber);
             AccrueQueueMaintenance(queue, start);
         }
 

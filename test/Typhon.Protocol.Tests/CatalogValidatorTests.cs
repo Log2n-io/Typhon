@@ -64,13 +64,13 @@ public class CatalogValidatorTests
             Position = new CatalogPosition
             {
                 Kind = CatalogPosition.MotionKind, Model = CatalogPosition.LinearModel, Pos = CatalogSamples.Pos2(),
-                Vel = new CatalogCodec { Kind = CodecKind.Vel3, QuantaDiv = 16, Bits = 16 },
+                Vel = new CatalogCodec { Kind = CodecKind.Vel3, UnitExp = -13, Bits = 16 },
             },
         }), "matching pos");
 
     [Test]
     public void AVelocityOutsideAPositionIsRefused() =>
-        AssertBreaks(c => WithCreatureField(c, "hp", new CatalogCodec { Kind = CodecKind.Vel2, QuantaDiv = 1, Bits = 16 }), "only valid inside a position");
+        AssertBreaks(c => WithCreatureField(c, "hp", new CatalogCodec { Kind = CodecKind.Vel2, UnitExp = 0, Bits = 16 }), "only valid inside a position");
 
     [Test]
     public void AListIsNotAnArchetypeField() =>
@@ -190,14 +190,49 @@ public class CatalogValidatorTests
         }, "numeric byte-aligned");
     }
 
+    /// <summary>A grid's tile is a whole number of replication cells, at least one (typhon.3): origin and dimensions are the realm frame's.</summary>
     [Test]
-    public void AGridWithTooManyCellsIsRefused() =>
+    public void AGridWithoutATileIsRefused() =>
         AssertBreaks(c => new Catalog
         {
-            Protocol = c.Protocol, App = c.App, Tick = c.Tick, Limits = c.Limits, Archetypes = c.Archetypes, Enums = c.Enums, Events = c.Events,
-            Commands = c.Commands, Metrics = c.Metrics,
-            Grids = [new CatalogGrid { Origin = [0, 0], Cell = 1, Dims = [100_000, 100_000], Archetypes = [0] }],
-        }, "cells");
+            Protocol = c.Protocol, App = c.App, Tick = c.Tick, Limits = c.Limits, RealmKinds = c.RealmKinds, Archetypes = c.Archetypes, Enums = c.Enums,
+            Events = c.Events, Commands = c.Commands, Metrics = c.Metrics,
+            Grids = [new CatalogGrid { TileCells = 0, Archetypes = [0] }],
+        }, "tileCells");
+
+    /// <summary>A position codec is realm-framed (typhon.3, SUB-30): bits or bounds in the catalog would be a second, disagreeing frame.</summary>
+    [Test]
+    public void APositionCodecCarriesNoBitsOrBounds()
+    {
+        AssertBreaks(c => WithCreature(c, a => new CatalogArchetype
+        {
+            Name = a.Name, Groups = a.Groups, Fields = a.Fields,
+            Position = new CatalogPosition
+            {
+                Kind = CatalogPosition.MotionKind, Model = CatalogPosition.LinearModel, Pos = new CatalogCodec { Kind = CodecKind.Pos2, Bits = 24 },
+                Vel = new CatalogCodec { Kind = CodecKind.Vel2, UnitExp = -13, Bits = 16 },
+            },
+        }), "does not read");
+        AssertBreaks(c => WithCreature(c, a => new CatalogArchetype
+        {
+            Name = a.Name, Groups = a.Groups, Fields = a.Fields,
+            Position = new CatalogPosition { Kind = CatalogPosition.StaticKind, Pos = new CatalogCodec { Kind = CodecKind.Pos2, Min = [0, 0], Max = [1, 1] } },
+        }), "does not read");
+    }
+
+    /// <summary>Each realm kind is declared once (typhon.3): a REALM block names its kind by index.</summary>
+    [Test]
+    public void RealmKindsAreDeclaredOnceEach()
+    {
+        AssertBreaks(c => WithRealmKinds(c, ["", "space", "space"]), "listed twice");
+        Assert.That(() => CatalogValidator.Validate(WithRealmKinds(CatalogSamples.Swg(), null)), Throws.Nothing, "absent means the default kind alone");
+    }
+
+    private static Catalog WithRealmKinds(Catalog c, string[] kinds) => new()
+    {
+        Protocol = c.Protocol, App = c.App, Tick = c.Tick, Limits = c.Limits, SessionKinds = c.SessionKinds, RealmKinds = kinds, Archetypes = c.Archetypes,
+        Enums = c.Enums, Events = c.Events, Commands = c.Commands, Grids = c.Grids, Metrics = c.Metrics,
+    };
 
     [Test]
     public void AMetricNeedsAUnit() =>
@@ -218,17 +253,17 @@ public class CatalogValidatorTests
         }, "has no names");
     }
 
-    /// <summary>A grid at −0 duplicates the same grid at 0, as double equality says.</summary>
+    /// <summary>Two grids of one tile over one archetype set are one grid.</summary>
     [Test]
-    public void AGridDuplicateAtNegativeZeroIsRefused() =>
+    public void AGridDuplicateIsRefused() =>
         AssertBreaks(c => new Catalog
         {
-            Protocol = c.Protocol, App = c.App, Tick = c.Tick, Limits = c.Limits, Archetypes = c.Archetypes, Enums = c.Enums, Events = c.Events,
-            Commands = c.Commands, Metrics = c.Metrics,
+            Protocol = c.Protocol, App = c.App, Tick = c.Tick, Limits = c.Limits, RealmKinds = c.RealmKinds, Archetypes = c.Archetypes, Enums = c.Enums,
+            Events = c.Events, Commands = c.Commands, Metrics = c.Metrics,
             Grids =
             [
-                new CatalogGrid { Origin = [0, 0], Cell = 64, Dims = [4, 4], Archetypes = [0] },
-                new CatalogGrid { Origin = [-0.0, 0], Cell = 64, Dims = [4, 4], Archetypes = [0] },
+                new CatalogGrid { TileCells = 4, Archetypes = [0] },
+                new CatalogGrid { TileCells = 4, Archetypes = [0] },
             ],
         }, "duplicates grid");
 

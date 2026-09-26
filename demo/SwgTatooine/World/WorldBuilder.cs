@@ -25,15 +25,19 @@ public static class WorldBuilder
     /// Populate the database. Returns what was actually created, and fills <paramref name="index"/> with the entity ids
     /// the simulation systems need to address later.
     /// </summary>
-    public static WorldCensus Populate(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldIndex index = null)
+    /// <param name="realm">The planet's realm: every entity spawned here carries it (Realms G1). Planet 0 is Tatooine as it always was; a further planet
+    /// is its twin — the same map, populated from its own seed.</param>
+    public static WorldCensus Populate(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldIndex index = null, ushort realm = 0)
     {
         ArgumentNullException.ThrowIfNull(dbe);
         ArgumentNullException.ThrowIfNull(map);
         ArgumentNullException.ThrowIfNull(config);
 
         var census = new WorldCensus();
-        var rng = new Rng((uint)config.Seed);
+        // Planet 0's seed is the run's seed, so a one-planet run is the world it always was; a further planet draws its own.
+        var rng = new Rng((uint)config.Seed + realm * 0x9E3779B9u);
         index ??= new WorldIndex();
+        _realm = realm;
 
         SpawnCities(dbe, map, config, census, ref rng, index);
         SpawnPointsOfInterest(dbe, map, config, census, ref rng, index);
@@ -44,6 +48,10 @@ public static class WorldBuilder
 
         return census;
     }
+
+    // The planet being populated. The build is serial (one planet after another, on the opening thread), so every spawn helper reads it here rather than
+    // threading a parameter through all of them.
+    private static ushort _realm;
 
     // ── Cities ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -62,6 +70,7 @@ public static class WorldBuilder
         {
             var buildings = city.Buildings;
             var npcs = Scale(city.Npcs, config.PopulationScale);
+            var firstPortal = index.Portals.Count;
 
             using (var tx = dbe.CreateQuickTransaction())
             {
@@ -73,6 +82,10 @@ public static class WorldBuilder
                     {
                         // Kept for shuttle travel (#910). Recording a coordinate the RNG already produced draws nothing, so the world is unchanged.
                         index.Shuttleports.Add((x, z));
+                    }
+                    else if (IsEnterable(i))
+                    {
+                        index.Portals.Add((x, z));   // Realms G1b: this building's door. Draws nothing, like the shuttleport above.
                     }
 
                     SpawnStructure(tx, x, z, 12f, kind, ownerRegion: 0, tickPeriod: 0, ref rng);
@@ -110,7 +123,8 @@ public static class WorldBuilder
                         CityNpc.Bounds.Set(in bounds),
                         CityNpc.Ai.Set(in ai),
                         CityNpc.Timers.Set(in npcTimers),
-                        CityNpc.Move.Set(in move));
+                        CityNpc.Move.Set(in move),
+                        CityNpc.Realm.Set(new NpcRealm(_realm)));
                     census.CityNpcs++;
                 }
 
@@ -119,7 +133,122 @@ public static class WorldBuilder
             }
 
             index.Cities.Add((city.X, city.Z, city.Radius, city.PlayerWeight));
+            index.CityPortals.Add((firstPortal, index.Portals.Count - firstPortal));
         }
+    }
+
+    // ── Space (Realms G1c) ──────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Edge of the space realm's cube, metres.</summary>
+    public const double SpaceEdgeM = 16_000d;
+
+    /// <summary>A starship's half extent, metres.</summary>
+    public const double ShipHalfExtentM = 20d;
+
+    /// <summary>Spawn the space realm's starships, each at a random point flying to a random waypoint. Its own RNG stream.</summary>
+    public static int PopulateSpace(DatabaseEngine dbe, SimConfig config, ushort realm)
+    {
+        ArgumentNullException.ThrowIfNull(dbe);
+        var ships = Scale(config.Starships, config.PopulationScale);
+        var rng = new Rng((uint)config.Seed ^ 0x5BD1E995u);
+        var key = new ShipRealm(realm);
+        var made = 0;
+        while (made < ships)
+        {
+            var n = Math.Min(SpawnBatch, ships - made);
+            using var tx = dbe.CreateQuickTransaction();
+            for (var i = 0; i < n; i++)
+            {
+                var bounds = default(ShipPlacement);
+                bounds.SetAt(SpacePoint(ref rng), SpacePoint(ref rng), SpacePoint(ref rng), ShipHalfExtentM);
+                var move = new ShipMotion
+                {
+                    DestX = SpacePoint(ref rng),
+                    DestY = SpacePoint(ref rng),
+                    DestZ = SpacePoint(ref rng),
+                    SpeedMps = 100f + (rng.NextFloat() * 150f),
+                };
+                tx.Spawn<Starship>(Starship.Bounds.Set(in bounds), Starship.Move.Set(in move), Starship.Realm.Set(in key));
+            }
+
+            tx.Commit();
+            made += n;
+        }
+
+        return made;
+    }
+
+    /// <summary>A coordinate inside the space cube, clear of its faces by a ship's size.</summary>
+    public static double SpacePoint(ref Rng rng) => (rng.NextFloat() - 0.5f) * (SpaceEdgeM - (4 * ShipHalfExtentM));
+
+    // ── Interiors (Realms G1b) ──────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Edge of an interior realm, metres: one cell, so an interior costs one cell's structures per archetype present.</summary>
+    public const float InteriorEdgeM = 64f;
+
+    /// <summary>A city's building <paramref name="i"/> has an interior: every one but the shuttleport (0) and the mission terminals (multiples of 9).</summary>
+    public static bool IsEnterable(int i) => i != 0 && i % 9 != 0;
+
+    /// <summary>Enterable buildings on one planet — the same on every planet, which share the map. Counted from the map, so realms are registered before
+    /// the world is built.</summary>
+    public static int CountEnterable(TatooineMap map)
+    {
+        var n = 0;
+        foreach (var city in map.Cities)
+        {
+            for (var i = 0; i < city.Buildings; i++)
+            {
+                n += IsEnterable(i) ? 1 : 0;
+            }
+        }
+
+        return n;
+    }
+
+    /// <summary>
+    /// The NPCs standing in each of one planet's interiors: portal <c>j</c>'s interior is realm <paramref name="firstRealm"/> + j. Its own RNG stream, so the
+    /// planets' worlds are the same with interiors on or off.
+    /// </summary>
+    public static int PopulateInteriors(DatabaseEngine dbe, SimConfig config, WorldIndex index, int firstRealm, WorldCensus census)
+    {
+        ArgumentNullException.ThrowIfNull(dbe);
+        var rng = new Rng(((uint)config.Seed ^ 0x51ED27A3u) + ((uint)firstRealm * 0x9E3779B9u));
+        var made = 0;
+        var tx = dbe.CreateQuickTransaction();
+        try
+        {
+            for (var j = 0; j < index.Portals.Count; j++)
+            {
+                var realm = new NpcRealm((ushort)(firstRealm + j));
+                for (var n = 0; n < config.InteriorNpcs; n++)
+                {
+                    var c = InteriorEdgeM * 0.5f;
+                    var (x, z) = rng.PointInDisc(c, c, InteriorEdgeM * 0.25f);
+                    var bounds = default(NpcPlacement);
+                    bounds.SetAt(x, z, 0.5f);
+                    var ai = new NpcBrain { Mode = rng.NextFloat() < 0.5f ? AiMode.Wander : AiMode.Idle, HomeX = x, HomeZ = z, LeashRadius = 6f };
+                    var npcTimers = new NpcTimers { MoveUntilTick = 0, RestUntilTick = rng.NextInt(1, 40) };
+                    var move = new NpcMotion { SpeedMps = 1.2f };
+                    tx.Spawn<CityNpc>(CityNpc.Bounds.Set(in bounds), CityNpc.Ai.Set(in ai), CityNpc.Timers.Set(in npcTimers), CityNpc.Move.Set(in move),
+                        CityNpc.Realm.Set(in realm));
+                    census.CityNpcs++;
+                    if (++made % SpawnBatch == 0)
+                    {
+                        tx.Commit();
+                        tx.Dispose();
+                        tx = dbe.CreateQuickTransaction();
+                    }
+                }
+            }
+
+            tx.Commit();
+        }
+        finally
+        {
+            tx.Dispose();
+        }
+
+        return made;
     }
 
     // ── Points of interest ──────────────────────────────────────────────────────────────────────────────────────────
@@ -203,7 +332,8 @@ public static class WorldBuilder
                 var lairId = tx.Spawn<CreatureLair>(
                     CreatureLair.Bounds.Set(in lairBounds),
                     CreatureLair.Spawner.Set(in lair),
-                    CreatureLair.Vitals.Set(in lairVitals));
+                    CreatureLair.Vitals.Set(in lairVitals),
+                    CreatureLair.Realm.Set(new LairRealm(_realm)));
                 census.Lairs++;
                 index.Lairs.Add(lairId);
 
@@ -263,7 +393,8 @@ public static class WorldBuilder
             Creature.Ai.Set(in ai),
             Creature.Timers.Set(in timers),
             Creature.Move.Set(in move),
-            Creature.Vitals.Set(in vitals));
+            Creature.Vitals.Set(in vitals),
+            Creature.Realm.Set(new CreatureRealm(_realm)));
     }
 
     // ── Player structures ───────────────────────────────────────────────────────────────────────────────────────────
@@ -461,7 +592,8 @@ public static class WorldBuilder
                     Player.Move.Set(in move),
                     Player.State.Set(in state),
                     Player.Vitals.Set(in vitals),
-                    Player.Inventory.Set(in inv));
+                    Player.Inventory.Set(in inv),
+                    Player.Realm.Set(new PlayerRealm(_realm)));
                 index.Players.Add(id);
                 census.Players++;
             }
@@ -521,7 +653,8 @@ public static class WorldBuilder
                 var lairId = tx.Spawn<CreatureLair>(
                     CreatureLair.Bounds.Set(in bounds),
                     CreatureLair.Spawner.Set(in lair),
-                    CreatureLair.Vitals.Set(in vitals));
+                    CreatureLair.Vitals.Set(in vitals),
+                    CreatureLair.Realm.Set(new LairRealm(_realm)));
                 census.Lairs++;
                 index.Lairs.Add(lairId);
 
@@ -574,7 +707,7 @@ public static class WorldBuilder
             // Staggered, so the economy does not arrive as a once-a-minute spike that the median tick never sees.
             TickCountdown = tickPeriod == 0 ? 0 : rng.NextInt(1, tickPeriod),
         };
-        tx.Spawn<WorldObject>(WorldObject.Bounds.Set(in bounds), WorldObject.Struct.Set(in s));
+        tx.Spawn<WorldObject>(WorldObject.Bounds.Set(in bounds), WorldObject.Struct.Set(in s), WorldObject.Realm.Set(new StructureRealm(_realm)));
     }
 
     /// <summary>A point on the planet that is not inside an NPC city.</summary>

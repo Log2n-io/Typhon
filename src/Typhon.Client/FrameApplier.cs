@@ -74,10 +74,13 @@ public sealed class FrameApplier
     /// <remarks>An exception thrown by the event handler propagates the same way: the frame is partly applied, and the session must be closed.</remarks>
     public void Apply(ReadOnlySpan<byte> message)
     {
+        // The realm frame is the session's, carried across frames by the store: a REALM block in the first pass replaces it, and the events pass then
+        // decodes its positions over the new one (12-realms § 5.2).
+        var frame = _store.Realm;
         var pass = new Pass(this, events: false);
-        TickReader.Read(message, _store.Plan, ref pass, TickBlocks.AllButEvents);
+        TickReader.Read(message, _store.Plan, ref frame, ref pass, TickBlocks.AllButEvents);
         pass = new Pass(this, events: true);
-        TickReader.Read(message, _store.Plan, ref pass, TickBlocks.Events);
+        TickReader.Read(message, _store.Plan, ref frame, ref pass, TickBlocks.Events);
         ApplyLeaves();
     }
 
@@ -100,6 +103,12 @@ public sealed class FrameApplier
         _store.PeriodUs = periodUs;
         _leaveCount = 0;
         _target = Target.None;
+    }
+
+    private void Realm(RealmFrame frame)
+    {
+        _target = Target.None;
+        _store.SetRealm(frame);
     }
 
     private void BeginEntities(ArchetypePlan archetype)
@@ -334,6 +343,8 @@ public sealed class FrameApplier
                 _applier.BeginTick(tick, flags, periodUs);
             }
         }
+
+        public void Realm(RealmFrame frame) => _applier.Realm(frame);
 
         public void BeginEntities(ArchetypePlan archetype) => _applier.BeginEntities(archetype);
 

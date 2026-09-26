@@ -23,6 +23,7 @@ import {
   type StateRecord,
 } from '../src/index.js';
 import { goldenBin } from './golden-support.js';
+import { KITCHEN } from './frames.js';
 
 /*
  * AC-6 (`07-delivery.md`): once the store has grown to the frames' size, applying a steady-state frame — both passes and
@@ -79,7 +80,7 @@ function catalog(): Catalog {
           kind: 'motion',
           model: 'linear',
           pos: all('pos3', { bits: 32, min: [-1e6, -1e6, -1e6], max: [1e6, 1e6, 1e6] }),
-          vel: all('vel3', { bits: 32, quantaDiv: 1 }),
+          vel: all('vel3', { bits: 32, unitExp: -20 }),
         },
         fields: [
           { name: 'u', codec: all('u32'), group: 'all' },
@@ -162,7 +163,7 @@ function entities(
   states: readonly StateRecord[],
   leaves: readonly number[],
 ): void {
-  writeEntitiesBlock(w, 1, archetype, enters, segments, states, leaves);
+  writeEntitiesBlock(w, 1, archetype, enters, segments, states, leaves, KITCHEN);
 }
 
 const buoys = range(20_001, ENTITIES);
@@ -220,6 +221,7 @@ function steadyFrame(enter: boolean): Uint8Array {
   writeEventsBlock(
     w,
     Array<EventInput>(100).fill({ type: ping, values: { from: drones[0]!, loud: 1, path: pathPoint } }),
+    KITCHEN,
   );
   entities(
     w,
@@ -253,12 +255,20 @@ function steadyFrame(enter: boolean): Uint8Array {
     wides.map((netId, k) => ({ netId, groupMask: 1, values: wideValues(k) })),
     [],
   );
-  writeSelfBlock(w, drone, drones[0]!, 7, 0b11, {
-    fuel: 2.75,
-    manifest: Uint8Array.of(1, 2, 3),
-    vault: 1,
-    pin: 4242,
-  });
+  writeSelfBlock(
+    w,
+    drone,
+    drones[0]!,
+    7,
+    0b11,
+    {
+      fuel: 2.75,
+      manifest: Uint8Array.of(1, 2, 3),
+      vault: 1,
+      pin: 4242,
+    },
+    KITCHEN,
+  );
   writeAggregateBlock(
     w,
     plan.grids[0]!,
@@ -279,7 +289,7 @@ function steadyFrame(enter: boolean): Uint8Array {
 function lightFrame(): Uint8Array {
   const w = new WireWriter(1 << 12);
   writeTickHeader(w, 1, 0, 0);
-  writeEventsBlock(w, [{ type: ping, values: { from: drones[0]!, loud: 1, path: [12.5, -7.25] } }]);
+  writeEventsBlock(w, [{ type: ping, values: { from: drones[0]!, loud: 1, path: [12.5, -7.25] } }], KITCHEN);
   entities(w, beacon, [], [], [{ netId: 1, groupMask: 1, values: { strength: 0.125, drift: 1 } }], []);
   entities(
     w,
@@ -305,7 +315,15 @@ function lightFrame(): Uint8Array {
     [{ netId: wides[0]!, groupMask: 1, values: wideValues(0) }],
     [],
   );
-  writeSelfBlock(w, drone, drones[0]!, 7, 0b11, { fuel: 2.75, manifest: Uint8Array.of(1, 2, 3), vault: 1, pin: 4242 });
+  writeSelfBlock(
+    w,
+    drone,
+    drones[0]!,
+    7,
+    0b11,
+    { fuel: 2.75, manifest: Uint8Array.of(1, 2, 3), vault: 1, pin: 4242 },
+    KITCHEN,
+  );
   writeAggregateBlock(w, plan.grids[0]!, false, [{ cell: 3, counts: [1, 2] }]);
   writeStatsBlock(w, plan, {
     'typhon.tick.p50': [2.5],
@@ -326,6 +344,7 @@ function chatFrame(): Uint8Array {
       type: chat,
       values: { attachment: Uint8Array.of(0, 255, 16), text: 'héllo \uFEFF☀' },
     }),
+    KITCHEN,
   );
   return w.toBytes();
 }
@@ -361,6 +380,7 @@ async function steadyState(collect: () => void, startTick: number): Promise<Stea
     let resolved = 0;
     const from = ping.body.fields.findIndex((f) => f.name === 'from');
     const applier = new FrameApplier(plan, {
+      initialRealm: KITCHEN,
       onEvent: (event) => {
         if (event.type === ping) {
           seen++;

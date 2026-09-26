@@ -83,7 +83,7 @@ describe('Connection handshake', () => {
     FakeSocket.reset();
   });
 
-  it('offers the typhon.2 subprotocol, asks for arraybuffers and sends HELLO as soon as the socket opens', () => {
+  it('offers the typhon.3 subprotocol, asks for arraybuffers and sends HELLO as soon as the socket opens', () => {
     const h = harness();
     h.connection.connect();
     expect(h.socket().protocols).toEqual([ProtocolConstants.webSocketSubprotocol]);
@@ -93,7 +93,7 @@ describe('Connection handshake', () => {
     h.socket().open();
     expect(h.connection.state).toBe(ConnectionState.AwaitingWelcome);
     const hello = parseHello(h.socket().sent[0]!);
-    expect([hello.major, hello.minor, hello.kind, hello.token, hello.caps]).toEqual([2, 0, 'player', 'opaque', 1]);
+    expect([hello.major, hello.minor, hello.kind, hello.token, hello.caps]).toEqual([3, 0, 'player', 'opaque', 1]);
     expect(Array.from(hello.resumeToken)).toEqual(Array<number>(16).fill(0));
     expect(Array.from(hello.clientCatalogHash)).toEqual(Array<number>(8).fill(0));
   });
@@ -272,7 +272,7 @@ describe('Connection refusals', () => {
       code: CloseCode.ProtocolError,
       run: (h) => {
         h.connection.connect();
-        h.socket().open('typhon.3');
+        h.socket().open('typhon.9');
       },
     },
     {
@@ -291,7 +291,7 @@ describe('Connection refusals', () => {
       run: (h) => {
         h.connection.connect();
         h.socket().open();
-        h.socket().deliver(welcomeMessage({ major: 3 }));
+        h.socket().deliver(welcomeMessage({ major: 4 }));
       },
     },
     {

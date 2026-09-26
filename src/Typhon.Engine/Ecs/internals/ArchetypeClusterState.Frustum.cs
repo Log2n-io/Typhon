@@ -38,7 +38,8 @@ internal sealed unsafe partial class ArchetypeClusterState
     public int QueryFrustum(SpatialGrid grid, ReadOnlySpan<double> planes, int planeCount, Vector3Like boundsMin, Vector3Like boundsMax,
         Span<long> results, uint categoryMask = uint.MaxValue)
     {
-        if (results.Length == 0 || planeCount <= 0 || !SpatialSlot.HasSpatialIndex || PerCellIndex == null || ClusterSegment == null || ClusterAabbs == null)
+        var rs = SpatialOf(grid);
+        if (results.Length == 0 || planeCount <= 0 || !SpatialSlot.HasSpatialIndex || rs.PerCellIndex == null || ClusterSegment == null || ClusterAabbs == null)
         {
             return 0;
         }
@@ -64,8 +65,8 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Widened by ClusterReach: a cluster box can reach that far past the cell it is filed in, so a box entering the region from a cell outside the
         // caller's bounding box would otherwise never be classified (SQ-01). The planes still decide what is inside. The outliers that reach further are
         // named in EscapedClusters and classified after the walk.
-        double overhang = Volatile.Read(ref ClusterReach);
-        var escaped = Volatile.Read(ref EscapedClusters);
+        double overhang = Volatile.Read(ref rs.ClusterReach);
+        var escaped = Volatile.Read(ref rs.EscapedClusters);
         // The low side stepped one double down: a box ending exactly on a cell boundary still touches a region starting there (see AabbClusterEnumerator).
         grid.WorldToCellRange(Math.BitDecrement(boundsMin.X - overhang), Math.BitDecrement(boundsMin.Y - overhang),
             is3D ? Math.BitDecrement(boundsMin.Z - overhang) : double.NegativeInfinity,
@@ -100,12 +101,12 @@ internal sealed unsafe partial class ArchetypeClusterState
                 {
                     for (int cx = cellMinX; cx <= cellMaxX && count < results.Length; cx++)
                     {
-                        if (!grid.TryGetCellKey(cx, cy, cz, out int cellKey) || cellKey >= PerCellIndex.Length)
+                        if (!grid.TryGetCellKey(cx, cy, cz, out int cellKey) || cellKey >= rs.PerCellIndex.Length)
                         {
                             continue;
                         }
 
-                        var slot = PerCellIndex[cellKey];
+                        var slot = rs.PerCellIndex[cellKey];
                         if (slot == null)
                         {
                             continue;
@@ -157,7 +158,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 }
 
                 if (SpatialGeometry.ClassifyAABBAgainstPlanes(box, planes, planeCount, dim) == SpatialGeometry.FrustumOutside
-                    || !escaped.IsCurrent(e, ClusterCellMap))
+                    || !escaped.IsCurrent(e, ClusterCellMap, ClusterRealmMap, rs.Realm))
                 {
                     continue;
                 }
@@ -292,6 +293,13 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         byte* clusterBase = accessor.GetChunkAddress(clusterChunkId);
         ulong occupancy = *(ulong*)clusterBase;
+
+        // RM-04: a slot whose realm key names another realm (changed this tick, moved at the next fence) is not this realm's.
+        var realmKeyColumn = RealmKeyColumn;
+        if (realmKeyColumn >= 0)
+        {
+            occupancy = SlotsInRealm(clusterBase, occupancy, realmKeyColumn, RealmKeyStride, ClusterRealmMap[clusterChunkId]);
+        }
 
         Span<double> entityCoords = stackalloc double[6];
         Span<double> entityBox = stackalloc double[6];

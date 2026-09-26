@@ -83,7 +83,8 @@ public static class FieldCodec
     /// <param name="section">The section.</param>
     /// <param name="frameTick">The tick of the frame being decoded, which <c>tickLo</c> rebuilds against.</param>
     /// <param name="sink">Receives the values.</param>
-    public static void ReadSection<TSink>(ref WireReader reader, SectionPlan section, uint frameTick, ref TSink sink)
+    /// <param name="frame">The session's realm frame, which a position field decodes over (SUB-30); <see langword="null"/> when it holds none.</param>
+    public static void ReadSection<TSink>(ref WireReader reader, SectionPlan section, uint frameTick, ref TSink sink, RealmFrame frame = null)
         where TSink : IFieldSink, allows ref struct
     {
         Span<double> one = stackalloc double[4];
@@ -104,7 +105,7 @@ public static class FieldCodec
             switch (f.ValueKind)
             {
                 case FieldValueKind.Number:
-                    ReadNumber(ref reader, f, frameTick, one);
+                    ReadNumber(ref reader, f, frameTick, one, frame);
                     sink.Number(f, one[..f.Components]);
                     break;
                 case FieldValueKind.Text:
@@ -114,7 +115,7 @@ public static class FieldCodec
                     sink.Bytes(f, f.Kind == CodecKind.Bytes ? reader.ReadBytes(f.Codec.N) : reader.ReadBlob(f.Codec.MaxBytes));
                     break;
                 case FieldValueKind.List:
-                    ReadList(ref reader, f, frameTick, ref sink);
+                    ReadList(ref reader, f, frameTick, ref sink, frame);
                     break;
                 case FieldValueKind.Skipped:
                     reader.Skip(f.Codec.FixedBytes);
@@ -127,7 +128,8 @@ public static class FieldCodec
     /// <param name="writer">The writer.</param>
     /// <param name="section">The section.</param>
     /// <param name="values">Supplies each field's value.</param>
-    public static void WriteSection(ref WireWriter writer, SectionPlan section, Func<FieldPlan, FieldValue> values)
+    /// <param name="frame">The realm frame a position field is quantized over (SUB-30); <see langword="null"/> when there is none.</param>
+    public static void WriteSection(ref WireWriter writer, SectionPlan section, Func<FieldPlan, FieldValue> values, RealmFrame frame = null)
     {
         if (section.PackBytes > 0)
         {
@@ -150,7 +152,7 @@ public static class FieldCodec
             switch (f.ValueKind)
             {
                 case FieldValueKind.Number:
-                    WriteNumber(ref writer, f, value.Numbers);
+                    WriteNumber(ref writer, f, value.Numbers, frame);
                     break;
                 case FieldValueKind.Text:
                     writer.WriteStr(value.Text, f.Codec.MaxBytes);
@@ -172,7 +174,7 @@ public static class FieldCodec
 
                     break;
                 case FieldValueKind.List:
-                    WriteList(ref writer, f, value.Numbers ?? []);
+                    WriteList(ref writer, f, value.Numbers ?? [], frame);
                     break;
                 case FieldValueKind.Skipped:
                     // A codec newer than this library: only its width is known, so the caller supplies the encoded bytes verbatim.
@@ -200,7 +202,8 @@ public static class FieldCodec
     /// <param name="field">A byte-aligned numeric field (or list element, or position codec).</param>
     /// <param name="frameTick">The frame's tick, for <c>tickLo</c>.</param>
     /// <param name="destination">Receives <see cref="FieldPlan.Components"/> values.</param>
-    public static void ReadNumber(ref WireReader reader, FieldPlan field, uint frameTick, scoped Span<double> destination)
+    /// <param name="frame">The realm frame a position decodes over; a position with none is a protocol error (1002).</param>
+    public static void ReadNumber(ref WireReader reader, FieldPlan field, uint frameTick, scoped Span<double> destination, RealmFrame frame = null)
     {
         var c = field.Codec;
         switch (field.Kind)
@@ -241,12 +244,18 @@ public static class FieldCodec
                 break;
             case CodecKind.Pos2:
             case CodecKind.Pos3:
+            {
+                var f = frame ?? throw NoRealm(field);
+                var bits = f.PositionBits;
+                var min = f.Min;
+                var step = f.Step;
                 for (var i = 0; i < field.Components; i++)
                 {
-                    destination[i] = WireMath.DecodeQuantWithStep(reader.ReadUnsigned(c.Bits), c.Min[i], field.QuantStep[i]);
+                    destination[i] = WireMath.DecodeQuantWithStep(reader.ReadUnsigned(bits), min[i], step[i]);
                 }
 
                 break;
+            }
             case CodecKind.Vec2:
             case CodecKind.Vec3:
                 for (var i = 0; i < field.Components; i++)
@@ -259,7 +268,7 @@ public static class FieldCodec
             case CodecKind.Vel3:
                 for (var i = 0; i < field.Components; i++)
                 {
-                    destination[i] = WireMath.DecodeVel(reader.ReadSigned(c.Bits), field.VelocityPositionStep[i], c.QuantaDiv, c.Bits);
+                    destination[i] = WireMath.DecodeVel(reader.ReadSigned(c.Bits), field.VelocityUnitExp, c.Bits);
                 }
 
                 break;
@@ -287,7 +296,8 @@ public static class FieldCodec
     /// <param name="writer">The writer.</param>
     /// <param name="field">A byte-aligned numeric field (or list element, or position codec).</param>
     /// <param name="components">At least <see cref="FieldPlan.Components"/> values.</param>
-    public static void WriteNumber(ref WireWriter writer, FieldPlan field, scoped ReadOnlySpan<double> components)
+    /// <param name="frame">The realm frame a position is quantized over; a position with none is refused.</param>
+    public static void WriteNumber(ref WireWriter writer, FieldPlan field, scoped ReadOnlySpan<double> components, RealmFrame frame = null)
     {
         if (components.Length < field.Components)
         {
@@ -334,12 +344,22 @@ public static class FieldCodec
                 break;
             case CodecKind.Pos2:
             case CodecKind.Pos3:
+            {
+                if (frame == null)
+                {
+                    throw new InvalidOperationException($"position '{field.Name}' is realm-framed (typhon.3) and no realm frame was given to encode it over");
+                }
+
+                var bits = frame.PositionBits;
+                var min = frame.Min;
+                var max = frame.Max;
                 for (var i = 0; i < field.Components; i++)
                 {
-                    writer.WriteBits(WireMath.EncodeQuant(components[i], c.Min[i], c.Max[i], c.Bits), c.Bits);
+                    writer.WriteBits(WireMath.EncodeQuant(components[i], min[i], max[i], bits), bits);
                 }
 
                 break;
+            }
             case CodecKind.Vec2:
             case CodecKind.Vec3:
                 for (var i = 0; i < field.Components; i++)
@@ -352,7 +372,7 @@ public static class FieldCodec
             case CodecKind.Vel3:
                 for (var i = 0; i < field.Components; i++)
                 {
-                    writer.WriteBits((uint)WireMath.EncodeVel(components[i], field.VelocityPositionStep[i], c.QuantaDiv, c.Bits), c.Bits);
+                    writer.WriteBits((uint)WireMath.EncodeVel(components[i], field.VelocityUnitExp, c.Bits), c.Bits);
                 }
 
                 break;
@@ -410,7 +430,7 @@ public static class FieldCodec
         }
     }
 
-    private static void ReadList<TSink>(ref WireReader reader, FieldPlan field, uint frameTick, ref TSink sink)
+    private static void ReadList<TSink>(ref WireReader reader, FieldPlan field, uint frameTick, ref TSink sink, RealmFrame frame)
         where TSink : IFieldSink, allows ref struct
     {
         var raw = reader.ReadVaru();
@@ -429,13 +449,13 @@ public static class FieldCodec
         Span<double> values = stackalloc double[count * stride];
         for (var e = 0; e < count; e++)
         {
-            ReadNumber(ref reader, field.Element, frameTick, values.Slice(e * stride, stride));
+            ReadNumber(ref reader, field.Element, frameTick, values.Slice(e * stride, stride), frame);
         }
 
         sink.List(field, count, values);
     }
 
-    private static void WriteList(ref WireWriter writer, FieldPlan field, ReadOnlySpan<double> flattened)
+    private static void WriteList(ref WireWriter writer, FieldPlan field, ReadOnlySpan<double> flattened, RealmFrame frame)
     {
         var stride = field.Components;
         if (stride == 0 || flattened.Length % stride != 0)
@@ -452,9 +472,13 @@ public static class FieldCodec
         writer.WriteVaru((uint)count);
         for (var e = 0; e < count; e++)
         {
-            WriteNumber(ref writer, field.Element, flattened.Slice(e * stride, stride));
+            WriteNumber(ref writer, field.Element, flattened.Slice(e * stride, stride), frame);
         }
     }
+
+    // A position decoded while the session holds no realm: the server sent a positioned value before any REALM (12-realms § 5.2), a protocol error.
+    private static WireFormatException NoRealm(FieldPlan field) =>
+        WireFormatException.Protocol($"position '{field.Name}' arrived while the session holds no realm");
 
     private static FieldValue Require(FieldValue value, FieldPlan field)
     {

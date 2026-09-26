@@ -133,7 +133,7 @@ export interface ConnectionOptions {
 }
 
 /**
- * A `typhon.2` WebSocket client: the handshake, the message caps, the close codes, and frames delivered in arrival order
+ * A `typhon.3` WebSocket client: the handshake, the message caps, the close codes, and frames delivered in arrival order
  * for the consumer to apply synchronously.
  *
  * - **Handshake.** `HELLO` goes out as soon as the socket opens and `WELCOME` must answer within

@@ -86,8 +86,8 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
     private static double MeanExtentFraction(DatabaseEngine dbe)
     {
         var cs = ClusterStateOf(dbe);
-        var cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        var clusters = cs.CellClusterPool.GetClusters(cellKey);
+        var cellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        var clusters = cs.Realm0Spatial.CellClusterPool.GetClusters(cellKey);
         var total = 0d;
         var counted = 0;
         for (var i = 0; i < clusters.Length; i++)
@@ -124,8 +124,8 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        var cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        var clusterCount = cs.CellClusterPool.GetClusters(cellKey).Length;
+        var cellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        var clusterCount = cs.Realm0Spatial.CellClusterPool.GetClusters(cellKey).Length;
         var mean = MeanExtentFraction(dbe);
 
         Assert.Multiple(() =>
@@ -134,12 +134,12 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
             if (tight)
             {
                 Assert.That(mean, Is.LessThanOrEqualTo(SpatialOptions.DefaultCellTreePromoteTightness), $"precondition: packed (mean {mean:F3})");
-                Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "a cell that is both full and packed is what the tree is for");
+                Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "a cell that is both full and packed is what the tree is for");
             }
             else
             {
                 Assert.That(mean, Is.GreaterThan(SpatialOptions.DefaultCellTreePromoteTightness), $"precondition: loose (mean {mean:F3})");
-                Assert.That(cs.PromotedCellCount, Is.Zero, "a tree over clusters that each span the cell prunes nothing and pays the update tax");
+                Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.Zero, "a tree over clusters that each span the cell prunes nothing and pays the update tax");
             }
         });
     }
@@ -158,7 +158,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         var ids = FillCell(dbe, PromoteAt + 4, spread: 0.90f);
         dbe.WriteTickFence(1);
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.Zero, "precondition: born loose, so not promoted");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.Zero, "precondition: born loose, so not promoted");
 
         // Pull every entity into its cluster's own corner — the shape a repair's re-pack produces — without spawning or destroying anything.
         var slots = SlotsPerCluster(dbe);
@@ -195,7 +195,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         Assert.Multiple(() =>
         {
             Assert.That(MeanExtentFraction(dbe), Is.LessThanOrEqualTo(SpatialOptions.DefaultCellTreePromoteTightness));
-            Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "the fence re-read the gate after the bounds tightened");
+            Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "the fence re-read the gate after the bounds tightened");
             Assert.That(cs.LastTickCellTreePromotions, Is.GreaterThan(0));
             Assert.That(ids, Is.Not.Empty);
         });
@@ -224,7 +224,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         FillCell(dbe, PromoteAt + 4, spread: 0.90f);
         dbe.WriteTickFence(1);
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.Zero, "precondition: born loose, so still on the linear scan");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.Zero, "precondition: born loose, so still on the linear scan");
 
         var before = QueryAll(dbe, cs);
         Assert.That(before, Is.Not.Empty, "precondition: the query has to find something before promotion to mean anything after it");
@@ -260,7 +260,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         }
 
         dbe.WriteTickFence(2);
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: the fence promoted the cell");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: the fence promoted the cell");
 
         var after = QueryAll(dbe, cs);
         Assert.That(after, Is.EquivalentTo(before), "the promoted cell answers a different set from the linear scan it replaced (SQ-01)");
@@ -271,7 +271,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
     {
         var found = new HashSet<long>();
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
-        foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
+        foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
         {
             found.Add(unchecked((long)r.Entity.RawValue));
         }
@@ -297,7 +297,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         FillCell(dbe, PromoteAt + 4, spread: 0.02f);
         dbe.WriteTickFence(1);
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: promoted");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: promoted");
 
         // Twenty ticks oscillating by ±0.02 of the cell around the PROMOTE gate — every tick crosses 0.10, none reaches the 0.20 fall-back, so a cell
         // that is already promoted must stay promoted. The gap is the whole subject: with promote and demote at the same value this loop would rebuild
@@ -344,7 +344,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         }
 
         Assert.That(rebuilds, Is.LessThanOrEqualTo(1), $"an oscillation inside the gap rebuilt the cell {rebuilds} times in 20 ticks");
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "the cell fell off the tree without ever reaching the fall-back gate");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "the cell fell off the tree without ever reaching the fall-back gate");
     }
 
     /// <summary>A promoted cell whose clusters are pulled apart past the fall-back gate returns to the linear scan, and still answers.</summary>
@@ -358,12 +358,12 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         FillCell(dbe, PromoteAt + 4, spread: 0.02f);
         dbe.WriteTickFence(1);
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: promoted");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: promoted");
 
         var expected = new HashSet<long>();
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
             {
                 expected.Add(unchecked((long)r.Entity.RawValue));
             }
@@ -401,7 +401,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         var after = new HashSet<long>();
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, 0f, 0f, float.NegativeInfinity, CellSize, CellSize, float.PositiveInfinity))
             {
                 after.Add(unchecked((long)r.Entity.RawValue));
             }
@@ -410,7 +410,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         Assert.Multiple(() =>
         {
             Assert.That(cs.LastTickCellTreeDemotions, Is.GreaterThan(0), "the cell was pulled past the fall-back gate");
-            Assert.That(cs.PromotedCellCount, Is.Zero);
+            Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.Zero);
             Assert.That(after, Is.EquivalentTo(expected), "the fall-back lost or duplicated entities");
         });
     }
@@ -451,7 +451,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         dbe.WriteTickFence(1);
 
         var cs = ClusterStateOf(dbe);
-        Assert.That(cs.PromotedCellCount, promote ? Is.GreaterThan(0) : Is.Zero, "the arm did not get the structure it was asked for");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, promote ? Is.GreaterThan(0) : Is.Zero, "the arm did not get the structure it was asked for");
 
         // A medium query: a tenth of the cell on each axis, which is the selectivity §5.8.4 reports as the boundary.
         const float QMin = 200f;
@@ -459,7 +459,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         var found = 0;
         using (var epoch = EpochGuard.Enter(dbe.EpochManager))
         {
-            foreach (var r in cs.QueryAabb(dbe.SpatialGrid, QMin, QMin, float.NegativeInfinity, QMax, QMax, float.PositiveInfinity))
+            foreach (var r in cs.QueryAabb(dbe.Realm0Grid, QMin, QMin, float.NegativeInfinity, QMax, QMax, float.PositiveInfinity))
             {
                 found += r.Entity.IsNull ? 0 : 1;
             }
@@ -498,7 +498,7 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
     {
         using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var found = 0;
-        foreach (var r in cs.QueryAabb(dbe.SpatialGrid, qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity))
+        foreach (var r in cs.QueryAabb(dbe.Realm0Grid, qMin, qMin, float.NegativeInfinity, qMax, qMax, float.PositiveInfinity))
         {
             found += r.Entity.IsNull ? 0 : 1;
         }
@@ -519,6 +519,6 @@ class CellTreeTightnessGateTests : TestBase<CellTreeTightnessGateTests>
         FillCell(dbe, PromoteAt + 4, spread: 0.90f);
         dbe.WriteTickFence(1);
 
-        Assert.That(ClusterStateOf(dbe).PromotedCellCount, Is.GreaterThan(0), "with the tightness gate off the count alone must still promote");
+        Assert.That(ClusterStateOf(dbe).Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "with the tightness gate off the count alone must still promote");
     }
 }

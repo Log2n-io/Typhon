@@ -97,6 +97,7 @@ export function validateCatalog(c: Catalog, problems: string[]): void {
   }
 
   checkStrings('sessionKinds', c.sessionKinds, ProtocolConstants.sessionKindMaxBytes, problems);
+  checkRealmKinds(c.realmKinds, problems);
   for (const [name, names] of Object.entries(c.enums)) {
     if (name === '') {
       problems.push('an enum needs a name');
@@ -151,6 +152,10 @@ export function checkCanonical(c: Catalog, problems: string[]): void {
   const fail = (what: string): void => {
     problems.push(`the catalog is not canonical: ${what}`);
   };
+
+  if (c.realmKinds !== undefined && !ascending(c.realmKinds)) {
+    fail('realmKinds are not in ordinal order');
+  }
 
   if (!ascending(c.sessionKinds)) {
     fail('sessionKinds are not in ordinal order');
@@ -263,17 +268,11 @@ function fieldsInLayoutOrder(fields: readonly CatalogField[], groups: readonly s
 }
 
 function compareGrids(a: CatalogGrid, b: CatalogGrid): number {
-  const origin = compareSequences(a.origin, b.origin);
-  if (origin !== 0) {
-    return origin;
+  if (a.tileCells !== b.tileCells) {
+    return a.tileCells < b.tileCells ? -1 : 1;
   }
 
-  if (a.cell !== b.cell) {
-    return a.cell < b.cell ? -1 : 1;
-  }
-
-  const dims = compareSequences(a.dims, b.dims);
-  return dims !== 0 ? dims : compareSequences(a.archetypes, b.archetypes);
+  return compareSequences(a.archetypes, b.archetypes);
 }
 
 function compareSequences(a: readonly number[], b: readonly number[]): number {
@@ -314,9 +313,9 @@ function hasClientRegionShape(cmd: CatalogCommand): boolean {
     cmd.rate?.perSec === 5 &&
     cmd.rate.burst === 5 &&
     vertices?.t === 'list' &&
-    // A flat world's region is a polygon (pos2, 3–16 points), a deep world's a polyhedron (pos3, 4–16).
-    ((vertices.of?.t === 'pos2' && vertices.minCount === 3) ||
-      (vertices.of?.t === 'pos3' && vertices.minCount === 4)) &&
+    // Always list<pos3> over the session's realm frame (typhon.3, D-8); the realm decides polygon or polyhedron.
+    vertices.of?.t === 'pos3' &&
+    vertices.minCount === 3 &&
     vertices.maxCount === 16 &&
     field(BuiltInCommand.regionAltitudeField)?.t === 'f16' &&
     field(BuiltInCommand.regionBudgetField)?.t === 'u16' &&
@@ -516,33 +515,13 @@ function checkMetric(m: CatalogMetric, problems: string[]): void {
 }
 
 function checkGrids(grids: readonly CatalogGrid[], archetypeCount: number, problems: string[]): void {
+  const shapes = new Map<string, number>();
   grids.forEach((g, i) => {
     const where = `grid ${i}`;
-    if ((g.dims.length !== 2 && g.dims.length !== 3) || g.origin.length !== g.dims.length) {
-      problems.push(`${where}: dims and origin need 2 or 3 matching axes`);
-    }
 
-    if (!g.origin.every((o) => Number.isFinite(o))) {
-      problems.push(`${where}: origin must be finite`);
-    }
-
-    if (!(g.cell > 0 && Number.isFinite(g.cell))) {
-      problems.push(`${where}: cell must be positive and finite`);
-    }
-
-    let cells = 1;
-    for (const d of g.dims) {
-      if (!(Number.isInteger(d) && d >= 1)) {
-        problems.push(`${where}: every dimension must be an integer of at least 1`);
-        cells = 0;
-        break;
-      }
-
-      cells = Math.min(cells * d, ProtocolConstants.maxGridCells + 1);
-    }
-
-    if (cells > ProtocolConstants.maxGridCells) {
-      problems.push(`${where}: more than ${ProtocolConstants.maxGridCells} cells`);
+    // Origin and dimensions are the realm frame's (typhon.3): the catalog carries the tile alone, in replication cells.
+    if (!(Number.isInteger(g.tileCells) && g.tileCells >= 1)) {
+      problems.push(`${where}: tileCells must be at least 1`);
     }
 
     const seen = new Set<number>();
@@ -553,7 +532,37 @@ function checkGrids(grids: readonly CatalogGrid[], archetypeCount: number, probl
 
       seen.add(idx);
     }
+
+    const key = `${g.tileCells}#${g.archetypes.join(',')}`;
+    const first = shapes.get(key);
+    if (first !== undefined) {
+      problems.push(`${where} duplicates grid ${first}`);
+    } else {
+      shapes.set(key, i);
+    }
   });
+}
+
+/** Each realm kind once (typhon.3): a `REALM` block names its kind by index. Absent means the default `""` alone. */
+function checkRealmKinds(kinds: readonly string[] | undefined, problems: string[]): void {
+  if (kinds === undefined) {
+    return;
+  }
+
+  if (kinds.length > ProtocolConstants.maxRealmKinds) {
+    problems.push(`realmKinds: ${kinds.length} kinds; at most ${ProtocolConstants.maxRealmKinds}`);
+  }
+
+  const seen = new Set<string>();
+  for (const k of kinds) {
+    if (encodeUtf8(k).length > ProtocolConstants.sessionKindMaxBytes || seen.has(k)) {
+      problems.push(
+        `realmKinds: '${k}' is longer than ${ProtocolConstants.sessionKindMaxBytes} UTF-8 bytes, or listed twice`,
+      );
+    }
+
+    seen.add(k);
+  }
 }
 
 /** Bits of a codec's parameters, to refuse one its kind does not read. */
@@ -561,7 +570,7 @@ const Parameter = {
   Bits: 1,
   Bounds: 2,
   Scale: 4,
-  QuantaDiv: 8,
+  UnitExp: 8,
   N: 16,
   MaxBytes: 32,
   List: 64,
@@ -571,15 +580,17 @@ const Parameter = {
 function readParameters(kind: CodecKind): number {
   switch (kind) {
     case CodecKind.Quant:
+      return Parameter.Bits | Parameter.Bounds;
     case CodecKind.Pos2:
     case CodecKind.Pos3:
-      return Parameter.Bits | Parameter.Bounds;
+      // Realm-framed (typhon.3, SUB-30): bits and bounds are the REALM block's, and a parameter here is refused as unread.
+      return 0;
     case CodecKind.Vec2:
     case CodecKind.Vec3:
       return Parameter.Bits | Parameter.Scale;
     case CodecKind.Vel2:
     case CodecKind.Vel3:
-      return Parameter.Bits | Parameter.QuantaDiv;
+      return Parameter.Bits | Parameter.UnitExp;
     case CodecKind.Unorm:
     case CodecKind.Snorm:
     case CodecKind.Angle:
@@ -606,7 +617,7 @@ function checkCodec(at: string, codec: CatalogCodec, maxBytes: number, problems:
       (nonZero(codec.bits) ? Parameter.Bits : 0) |
       (codec.min !== undefined || codec.max !== undefined ? Parameter.Bounds : 0) |
       (nonZero(codec.scale) ? Parameter.Scale : 0) |
-      (nonZero(codec.quantaDiv) ? Parameter.QuantaDiv : 0) |
+      (codec.unitExp !== undefined ? Parameter.UnitExp : 0) |
       (nonZero(codec.n) ? Parameter.N : 0) |
       (nonZero(codec.maxBytes) ? Parameter.MaxBytes : 0) |
       (codec.of !== undefined || nonZero(codec.minCount) || nonZero(codec.maxCount) ? Parameter.List : 0) |
@@ -632,12 +643,7 @@ function checkCodec(at: string, codec: CatalogCodec, maxBytes: number, problems:
       checkBounds(at, codec, 1, problems);
       break;
     case CodecKind.Pos2:
-      checkBits(at, codec.bits, problems);
-      checkBounds(at, codec, 2, problems);
-      break;
     case CodecKind.Pos3:
-      checkBits(at, codec.bits, problems);
-      checkBounds(at, codec, 3, problems);
       break;
     case CodecKind.Vec2:
     case CodecKind.Vec3:
@@ -650,8 +656,15 @@ function checkCodec(at: string, codec: CatalogCodec, maxBytes: number, problems:
     case CodecKind.Vel2:
     case CodecKind.Vel3:
       checkBits(at, codec.bits, problems);
-      if (!(codec.quantaDiv !== undefined && Number.isSafeInteger(codec.quantaDiv) && codec.quantaDiv >= 1)) {
-        problems.push(`${at}: quantaDiv must be an integer ≥ 1`);
+      if (!(
+        codec.unitExp !== undefined &&
+        Number.isSafeInteger(codec.unitExp) &&
+        codec.unitExp >= ProtocolConstants.minVelocityUnitExp &&
+        codec.unitExp <= ProtocolConstants.maxVelocityUnitExp
+      )) {
+        problems.push(
+          `${at}: unitExp must be an integer in [${ProtocolConstants.minVelocityUnitExp}, ${ProtocolConstants.maxVelocityUnitExp}]`,
+        );
       }
 
       break;

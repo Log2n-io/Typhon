@@ -82,6 +82,9 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // Spatial query predicate (at most one per query)
     private ComponentTable _spatialTable;
     private SpatialQueryType _spatialQueryType;
+    // The realm the spatial predicate is evaluated in (Realms C1): realm 0 unless InRealm named another.
+    private RealmId _spatialRealm;
+    private bool _realmNamed;
     // Inline query parameters: meaning depends on _spatialQueryType
     // AABB: [min0..max0..] in [0]..[5]. Radius: center in [0]..[2], radius in [3]. Ray: origin in [0]..[2], dir in [3]..[5], maxDist in [6].
     // Frustum: the bounding box of the frustum in [0]..[5], same layout as AABB; the planes themselves live in _frustumPlanes.
@@ -562,6 +565,29 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
     }
 
+    /// <summary>
+    /// Evaluates the query's spatial predicate (<c>WhereNearby</c> / <c>WhereInAABB</c> / <c>WhereRay</c> / <c>WhereFrustum</c>) in realm
+    /// <paramref name="realm"/>: only that realm's entities match, whatever their coordinates. Realm 0 when never called. The realm must be registered;
+    /// the check runs when the query executes.
+    /// </summary>
+    public EcsQuery<TArchetype> InRealm(RealmId realm)
+    {
+        _spatialRealm = realm;
+        _realmNamed = true;
+        return this;
+    }
+
+    // InRealm scopes the spatial predicate (SQ-08). Named without one it would be ignored and the query would answer every realm's entities: refused.
+    private readonly void CheckRealmScope()
+    {
+        if (_realmNamed && _spatialQueryType == SpatialQueryType.None)
+        {
+            throw new InvalidOperationException(
+                $"InRealm({_spatialRealm.Value}) scopes a spatial predicate (WhereNearby / WhereInAABB / WhereRay / WhereFrustum), and this query has none: "
+                + "it would answer every realm's entities. To walk one realm's clusters, use GetClusterEnumerator(realm) on the archetype's accessor.");
+        }
+    }
+
     /// <summary>Filter by radius (sphere) around a center point. Component <typeparamref name="T"/> must have <c>[SpatialIndex]</c>.</summary>
     public EcsQuery<TArchetype> WhereNearby<T>(double centerX, double centerY, double centerZ, double radius) where T : unmanaged
     {
@@ -797,6 +823,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         [CallerLineNumber] int    callerLine = 0,
         [CallerMemberName] string callerMethod = null)
     {
+        CheckRealmScope();
         if (_orderBy.HasValue)
         {
             throw new InvalidOperationException("A View is unordered; OrderBy / Skip / Take are not supported on ToView().");
@@ -989,6 +1016,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
         _ = callerFile; _ = callerLine; _ = callerMethod;
+        CheckRealmScope();
         if (_orderBy.HasValue)
         {
             throw new InvalidOperationException(
@@ -1053,6 +1081,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
         _ = callerFile; _ = callerLine; _ = callerMethod;
+        CheckRealmScope();
         if (!_orderBy.HasValue)
         {
             throw new InvalidOperationException("ExecuteOrdered requires OrderByField.");
@@ -2466,7 +2495,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         // The SpatialGrid is guaranteed non-null for cluster spatial archetypes (enforced at DatabaseEngine.InitializeArchetypes).
         if (state.ClusterArchetypes != null)
         {
-            var grid = _tx.DBE.SpatialGrid;
+            var grid = _tx.DBE.RealmGridForQuery(_spatialRealm);
 
             // MVCC born/died gate, the same one the SoA scan applies (04-data.md "Isolation guarantees").
             //
@@ -2845,6 +2874,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
         _ = callerFile; _ = callerLine; _ = callerMethod;
+        CheckRealmScope();
         if (_skip > 0 || _take > 0)
         {
             throw new InvalidOperationException(
@@ -2910,6 +2940,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         // callerFile/Line/Method captured at user call site; consumed by trace emission in P2 (issue #335).
         _ = callerFile; _ = callerLine; _ = callerMethod;
+        CheckRealmScope();
         if (_skip > 0 || _take > 0)
         {
             throw new InvalidOperationException("Any() ignores Skip / Take — it reports whether any entity matches. Remove Skip / Take.");
@@ -2974,6 +3005,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     /// </summary>
     public EcsQueryEnumerator GetEnumerator()
     {
+        CheckRealmScope();
         // foreach runs a broad archetype scan + the .Where(lambda) post-filter only. It does NOT apply WhereField, spatial, or OrderBy/Skip/Take — guard
         // against silently iterating the wrong set.
         if (HasFieldPredicates)

@@ -31,6 +31,9 @@ public enum FieldChangeKind
     /// <summary>Field's byte size changed.</summary>
     SizeChanged,
 
+    /// <summary>The component's <c>[RealmKey]</c> moved to or from this field (Realms). Breaking: the realm key places every entity.</summary>
+    RealmKeyChanged,
+
     /// <summary>An index was added to the field.</summary>
     IndexAdded,
 

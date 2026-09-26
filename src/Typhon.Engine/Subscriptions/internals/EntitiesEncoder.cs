@@ -185,11 +185,18 @@ internal static unsafe class EntitiesEncoder
     /// <summary>The largest <c>varu</c> a netId gap can spend.</summary>
     public const int MaxGapBytes = 5;
 
-    /// <summary>Writes the frame header.</summary>
-    /// <param name="w">The writer.</param>
-    /// <param name="tick">The frame's tick, truncated to the wire's <c>u32</c>.</param>
-    /// <param name="flags">The frame's flags.</param>
-    public static void WriteHeader(ref WireWriter w, uint tick, TickFlags flags) => TickWriter.WriteHeader(ref w, tick, flags);
+    /// <summary>
+    /// Writes a <c>TICK</c> header, and — on a <c>RESET</c> with <paramref name="realmBlock"/> — the session's <c>REALM</c> as its first block (typhon.3): its
+    /// frame, or <c>REALM(NONE)</c> when <paramref name="realm"/> is <see langword="null"/>.
+    /// </summary>
+    public static void WriteHeader(ref WireWriter w, uint tick, TickFlags flags, bool realmBlock = false, RealmFrame realm = null)
+    {
+        TickWriter.WriteHeader(ref w, tick, flags);
+        if ((flags & TickFlags.Reset) != 0 && realmBlock)
+        {
+            TickWriter.WriteRealm(ref w, realm);
+        }
+    }
 
     /// <summary>
     /// Writes one archetype's <c>ENTITIES</c> block. Each sub-list must already be sorted ascending by netId and hold no netId twice.

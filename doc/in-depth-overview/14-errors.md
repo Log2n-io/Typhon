@@ -6,7 +6,7 @@ description: 'Errors is the smallest subsystem in Typhon — one folder, a coupl
 
 # 14 — Errors
 
-**Code:** [`src/Typhon.Engine/Errors/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Errors) (+ [`ResourceExhaustedException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceExhaustedException.cs) under `Resources/`, two status enums cited in §5)
+**Code:** [`src/Typhon.Engine/Errors/`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Engine/Errors) (+ [`ResourceExhaustedException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Resources/public/ResourceExhaustedException.cs) under `Resources/`, two status enums cited in [§5](#5-status-enums))
 
 Errors is the smallest subsystem in Typhon — one folder, a couple dozen files — but every other subsystem terminates here. This chapter documents the contract: the exception hierarchy, the numeric error codes, the zero-allocation `Result<,>` pattern for hot paths, and a few invariants you'll want to know before you write a `catch` block.
 
@@ -160,7 +160,7 @@ Thrown when an insert / update would create a duplicate key in a unique secondar
 Three exceptions, all direct subclasses of `TyphonException`:
 
 - [`SchemaValidationException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaValidationException.cs) — the runtime struct definition is incompatible with what's persisted. Carries the full `SchemaDiff` for programmatic inspection (which field changed, what type, what attribute). See [04-schema](04-schema.md).
-- [`SchemaMigrationException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaMigrationException.cs) — one or more entities failed during a schema migration. Carries `ComponentName` and `IReadOnlyList<MigrationFailure>` (see §6). Old segments remain untouched — the user can fix the migration function and re-run.
+- [`SchemaMigrationException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaMigrationException.cs) — one or more entities failed during a schema migration. Carries `ComponentName` and `IReadOnlyList<MigrationFailure>` (see [§6](#6-migrationfailure--per-entity-migration-diagnostics)). Old segments remain untouched — the user can fix the migration function and re-run.
 - [`SchemaDowngradeException`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/SchemaDowngradeException.cs) — the database was written by a newer application version (`PersistedRevision > RuntimeRevision`). The engine refuses to open it to prevent corruption.
 
 > **Worth calling out:** `SchemaDowngradeException` **reuses `TyphonErrorCode.SchemaValidation`** (3001), not a dedicated downgrade code. If you're routing on error code, downgrade and runtime-vs-persisted mismatches look identical at the wire level — disambiguate by the exception type.
@@ -193,8 +193,8 @@ A flat `enum TyphonErrorCode` organized into numeric ranges by subsystem. Codes 
 
 **Notes:**
 - `LockTimeout` lives in the **6xxx Resource** range, not 1xxx — locks are resource contention, not transaction logic.
-- `SchemaDowngradeException` reuses `SchemaValidation` (3001) — see §2.
-- Only Tier 1 codes are defined; reserved tiers (§8) extend the enum without renumbering existing values.
+- `SchemaDowngradeException` reuses `SchemaValidation` (3001) — see [§2](#2-exception-hierarchy).
+- Only Tier 1 codes are defined; reserved tiers ([§8](#8-reserved-tier--declared-but-not-implemented)) extend the enum without renumbering existing values.
 
 ---
 
@@ -328,13 +328,13 @@ public void TryAcquire(ref WaitContext ctx)
 
 The hot method's IL stays compact; the throw lives in `ThrowHelper`'s body, never inlined.
 
-`ThrowHelper` currently has helpers for every Tier 1 exception listed in §2 plus a couple of `ArgumentException` / `InvalidOperationException` wrappers (e.g., the `EnumerateRange` API-misuse helpers for B+Trees). New throw sites should add a helper here rather than throwing inline.
+`ThrowHelper` currently has helpers for every Tier 1 exception listed in [§2](#2-exception-hierarchy) plus a couple of `ArgumentException` / `InvalidOperationException` wrappers (e.g., the `EnumerateRange` API-misuse helpers for B+Trees). New throw sites should add a helper here rather than throwing inline.
 
 ---
 
 ## 8. Reserved tier — declared but not implemented
 
-The error model was designed in tiers. **Tier 1 is what ships today**, and §2 lists every type that exists in `Errors/public/`. Several exceptions named in the original design — Tier 2 / Tier 3 — are reserved in the documentation but **not present in code yet**:
+The error model was designed in tiers. **Tier 1 is what ships today**, and [§2](#2-exception-hierarchy) lists every type that exists in `Errors/public/`. Several exceptions named in the original design — Tier 2 / Tier 3 — are reserved in the documentation but **not present in code yet**:
 
 | Reserved exception | Intended for |
 |---|---|
@@ -354,6 +354,6 @@ If your code path conceptually wants one of these, throw a `TyphonException` wit
 - [02-storage](02-storage.md) — `PageCorruptionException` and `CorruptionException` are thrown from the page-cache CRC verification path.
 - [04-schema](04-schema.md) — the schema exception family (`SchemaValidationException`, `SchemaMigrationException`, `SchemaDowngradeException`) and the `SchemaDiff` / migration model.
 - [06-ecs](06-ecs.md) — `UniqueConstraintViolationException` propagates here from index inserts during `Spawn` / `OpenMut`.
-- [08-transactions](08-transactions.md) — `TransactionTimeoutException` and the conflict-handler model (the reserved `TransactionConflictException` slot in §8).
+- [08-transactions](08-transactions.md) — `TransactionTimeoutException` and the conflict-handler model (the reserved `TransactionConflictException` slot in [§8](#8-reserved-tier--declared-but-not-implemented)).
 - [11-durability](11-durability.md) — `WalWriteException` (fail-fast, per ADR) and `WalClaimTooLargeException` semantics.
 - [13-resources](13-resources.md) — `ResourceExhaustedException` and `ExhaustionPolicy`.

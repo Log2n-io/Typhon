@@ -52,7 +52,7 @@ internal sealed class VisibleClusters
         ClustersPassed = 0;
 
         var state = host.ClusterStateOf(archetypeId);
-        var perCell = state?.PerCellIndex;
+        var perCell = state?.Realm0Spatial?.PerCellIndex;
         if (perCell == null)
         {
             return false;

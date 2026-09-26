@@ -29,7 +29,7 @@ description: 'Documentation for every feature in src/Typhon.Engine, tagged Publi
 | Revision | The per-component MVCC revision-chain subsystem — storage, snapshot visibility, conflict baselines, and GC/crash scrub. | Mixed | [→](Revision/README.md) |
 | Ecs | The archetype-based entity/component data model — CRUD, storage modes, queries, views, relationships, collections, clusters. | Public | [→](Ecs/README.md) |
 | Indexing | Concurrent B+Tree secondary indexes — key-width variants, lookup/range scan, versioned (MVCC) index history, diagnostics. | Mixed | [→](Indexing/README.md) |
-| Spatial | R-Tree spatial indexing, spatial query predicates, trigger volumes, and cluster-based tiered simulation dispatch. | Mixed | [→](Spatial/README.md) |
+| Spatial | R-Tree spatial indexing, spatial query predicates, trigger volumes, cluster-based tiered simulation dispatch, and realms (several isolated worlds in one engine). | Mixed | [→](Spatial/README.md) |
 | Querying | The fluent query builder, execution planning, statistics, and incrementally-refreshed persistent Views. | Public | [→](Querying/README.md) |
 | Transactions | The three-tier execution model (Engine → UoW → Transaction) — durability modes/discipline, commit/rollback, conflict resolution. | Public | [→](Transactions/README.md) |
 | Subscriptions | Engine-owned replication: declared archetype state pushed to remote clients around each session, owner-only state, typed commands and events, over TCP or WebSocket. | Public | [→](Subscriptions/README.md) |
@@ -141,7 +141,8 @@ Every Public feature, one line each — the application-facing surface, complete
 | Field Attribute & Schema Integration | Declare a component field as spatially indexed via [SpatialIndex], validated against schema rules at registration time. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-field-attribute/README.md) |
 | &nbsp;&nbsp;↳ Storage-Mode Compatibility (SingleVersion / Versioned) | The same [SpatialIndex] field works on both storage modes -- only when the tree catches up differs. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-field-attribute/spatial-storage-mode-compat.md) |
 | Spatial Query API (AABB / Radius / Ray / Frustum / kNN / Count) | Query entry points over the per-cell cluster index: the typed ClusterSpatialQuery\<TArch\> plus the public fluent EcsQuery WhereNearby/WhereInAABB/WhereRay/WhereFrustum. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-query-api.md) |
-| Spatial Grid Configuration & Tier Control | Engine-wide grid sizing plus the per-cell SimTier control surface for multi-resolution simulation. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-grid-config.md) |
+| Spatial Grid Configuration & Tier Control | Per-realm grid sizing (realm 0 by default) plus the per-cell SimTier control surface for multi-resolution simulation. | ✅ Implemented | 🔵 Core | [→](Spatial/spatial-grid-config.md) |
+| Realms — Several Worlds in One Engine | Isolated worlds (planets, interiors, space, instanced dungeons): each realm owns its grid and cell size, is queried alone, and sleeps or runs divided when nobody watches it. | ✅ Implemented | 🟣 Advanced | [→](Spatial/realms.md) |
 | Static / Dynamic Tree Separation | A spatial field lands in one of two independent trees -- tick-fence-exempt static, or fat-AABB-maintained dynamic -- chosen once at schema time. | ✅ Implemented | 🟣 Advanced | [→](Spatial/spatial-rtree-index/spatial-rtree-static-dynamic.md) |
 | Cluster-Bound Motion Hysteresis | A cluster's bound already covers its members, so most moves cost a few float compares and no index write. | ✅ Implemented | 🟣 Advanced | [→](Spatial/cluster-bound-hysteresis.md) |
 | Category Filtering | Bitmask pruning skips whole subtrees and clusters before geometry tests -- AND-conjunctive at the R-Tree, any-bit-overlap at the cluster broadphase. | ✅ Implemented | 🟣 Advanced | [→](Spatial/spatial-category-filtering.md) |
@@ -205,7 +206,7 @@ Every Public feature, one line each — the application-facing surface, complete
 | &nbsp;&nbsp;↳ Backpressure & budgets | Skip never queue, catch-up from the push log, rate classes, byte budgets and detail levels, inbound budget and abuse close. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/backpressure-budgets.md) |
 | &nbsp;&nbsp;↳ Transports & hosting | The engine's TCP listener and the ASP.NET Core WebSocket adapter; the catalog endpoint. | ✅ Implemented | 🔵 Core | [→](Subscriptions/transports-hosting.md) |
 | &nbsp;&nbsp;↳ Client SDKs | TypeScript and .NET clients: columnar stores, motion extrapolation, commands, reconnection, code generation. | ✅ Implemented | 🔵 Core | [→](Subscriptions/client-sdks.md) |
-| &nbsp;&nbsp;↳ Wire protocol & catalog | `typhon.2`: handshake with a canonical catalog, tick frames of typed blocks, codecs, close codes. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/wire-protocol.md) |
+| &nbsp;&nbsp;↳ Wire protocol & catalog | `typhon.3`: handshake with a canonical catalog, tick frames of typed blocks, codecs, close codes. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/wire-protocol.md) |
 | &nbsp;&nbsp;↳ Replication diagnostics | `STATS` metrics (built-in and yours), the `DEBUG` capability, the push validator. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/diagnostics.md) |
 
 ### Runtime

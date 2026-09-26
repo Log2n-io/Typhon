@@ -1,6 +1,25 @@
 {
   "description": "an ENTITIES state sub-list of two runs, the second restarting at a lower netId than the first ended on",
   "catalog": "catalog-kitchen-sink",
+  "frame": {
+    "realmId": 3,
+    "generation": 7,
+    "kindIdx": 1,
+    "appTag": 12648430,
+    "posBits": 24,
+    "cellM": "4070000000000000",
+    "deep": true,
+    "min": [
+      "c0c0000000000000",
+      "c0c0000000000000",
+      "c050000000000000"
+    ],
+    "max": [
+      "40c0000000000000",
+      "40c0000000000000",
+      "4050000000000000"
+    ]
+  },
   "log": [
     {
       "call": "beginTick",

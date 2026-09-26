@@ -4,7 +4,7 @@ namespace Typhon.Engine.Internals;
 
 /// <summary>
 /// Per-archetype per-cell spatial slot holding one cluster index for each of the static/dynamic splits. Lazily allocated — an entry in
-/// <c>ArchetypeClusterState.PerCellIndex</c> is null for any cell where this archetype has no clusters (issue #230, Decision Q10).
+/// <c>RealmArchetypeSpatial.PerCellIndex</c> is null for any cell where this archetype has no clusters (issue #230, Decision Q10).
 /// </summary>
 /// <remarks>
 /// <para>

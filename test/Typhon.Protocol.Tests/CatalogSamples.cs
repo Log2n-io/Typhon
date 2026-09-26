@@ -21,17 +21,34 @@ internal static class CatalogSamples
     internal static readonly double[] WorldMin = [-8192, -8192];
     internal static readonly double[] WorldMax = [8192, 8192];
 
-    internal static CatalogCodec Pos2() => new() { Kind = CodecKind.Pos2, Min = WorldMin, Max = WorldMax, Bits = 24 };
+    internal static CatalogCodec Pos2() => new() { Kind = CodecKind.Pos2 };
+
+    /// <summary>catalog-swg's realm: flat, ±8192 m at 24 bits, 256 m replication cells.</summary>
+    internal static RealmFrame SwgFrame => new(0, 0, 0, 0, 24, 256, deep: false, [-8192, -8192, 0], [8192, 8192, 256]);
+
+    /// <summary>catalog-kitchen-sink's realm: deep (the Drone flies), ±8192 m horizontally and ±64 m vertically at 24 bits, 256 m cells.</summary>
+    internal static RealmFrame KitchenFrame => new(3, 7, 1, 0xC0FFEE, 24, 256, deep: true, [-8192, -8192, -64], [8192, 8192, 64]);
+
+    /// <summary>The frame's fields as a golden vector carries them: every number as its IEEE bits.</summary>
+    internal static System.Text.Json.Nodes.JsonObject FrameJson(RealmFrame frame) => frame == null
+        ? null
+        : new System.Text.Json.Nodes.JsonObject
+        {
+            ["realmId"] = frame.RealmId, ["generation"] = frame.Generation, ["kindIdx"] = frame.KindIdx, ["appTag"] = frame.AppTag,
+            ["posBits"] = frame.PositionBits, ["cellM"] = Golden.Bits(frame.CellM), ["deep"] = frame.Deep, ["min"] = Golden.Bits(frame.Min),
+            ["max"] = Golden.Bits(frame.Max),
+        };
 
     /// <summary>Builds the reference catalog, in deliberately non-canonical declaration order so canonicalization has something to do.</summary>
     /// <returns>A catalog equivalent to <see cref="SwgReordered"/> but declared in a different order.</returns>
     internal static Catalog Swg() => new()
     {
-        Protocol = new CatalogProtocolVersion { Major = 2, Minor = 0 },
+        Protocol = new CatalogProtocolVersion { Major = 3, Minor = 0 },
         App = new CatalogApp { Name = "SwgTatooine", Revision = 3 },
         Tick = new CatalogTick { PeriodUs = 100_000, PingHz = 4 },
         Limits = new CatalogLimits { FrameBytes = 262_144, ClientMessageBytes = 1024, ResumeGraceMs = 60_000 },
         SessionKinds = ["player", "god"],
+        RealmKinds = ["interior", ""],
         Archetypes =
         [
             new CatalogArchetype
@@ -85,9 +102,9 @@ internal static class CatalogSamples
                 Rate = new CatalogCommandRate { PerSec = 10, Burst = 20 },
                 Fields = [new CatalogField { Name = "dest", Codec = Pos2() }],
             },
-            BuiltInCommands.CreateClientRegion(Pos2()),
+            BuiltInCommands.CreateClientRegion(),
         ],
-        Grids = [new CatalogGrid { Origin = [-8192, -8192], Cell = 256, Dims = [64, 64], Archetypes = [0, 1] }],
+        Grids = [new CatalogGrid { TileCells = 1, Archetypes = [0, 1] }],
         Metrics = [BuiltInMetrics.Create(BuiltInMetrics.ReservedIdx("typhon.tick.p99"))],
     };
 
@@ -106,6 +123,7 @@ internal static class CatalogSamples
             Tick = c.Tick,
             Limits = c.Limits,
             SessionKinds = ["god", "player"],
+            RealmKinds = ["", "interior"],
             Archetypes =
             [
                 new CatalogArchetype { Name = creature.Name, Groups = ["state", "vitals"], Position = creature.Position, Fields = fields },
@@ -114,7 +132,7 @@ internal static class CatalogSamples
             Enums = c.Enums,
             Events = c.Events,
             Commands = [c.Commands[1], c.Commands[0]],
-            Grids = [new CatalogGrid { Origin = [-8192, -8192], Cell = 256, Dims = [64, 64], Archetypes = [1, 0] }],
+            Grids = [new CatalogGrid { TileCells = 1, Archetypes = [1, 0] }],
             Metrics = c.Metrics,
         };
     }
@@ -123,11 +141,12 @@ internal static class CatalogSamples
     /// <returns>The kitchen-sink catalog.</returns>
     internal static Catalog KitchenSink() => new()
     {
-        Protocol = new CatalogProtocolVersion { Major = 2, Minor = 0 },
+        Protocol = new CatalogProtocolVersion { Major = 3, Minor = 0 },
         App = new CatalogApp { Name = "KitchenSink", Revision = 1 },
         Tick = new CatalogTick { PeriodUs = 50_000, PingHz = 4 },
         Limits = new CatalogLimits { FrameBytes = 262_144, ClientMessageBytes = 1024, ResumeGraceMs = 60_000 },
         SessionKinds = ["viewer"],
+        RealmKinds = ["space", "", "interior"],
         Archetypes =
         [
             new CatalogArchetype
@@ -138,8 +157,8 @@ internal static class CatalogSamples
                 {
                     Kind = CatalogPosition.MotionKind,
                     Model = CatalogPosition.LinearModel,
-                    Pos = new CatalogCodec { Kind = CodecKind.Pos3, Min = [-1024, -64, -1024], Max = [1024, 64, 1024], Bits = 16 },
-                    Vel = new CatalogCodec { Kind = CodecKind.Vel3, QuantaDiv = 4, Bits = 8 },
+                    Pos = new CatalogCodec { Kind = CodecKind.Pos3 },
+                    Vel = new CatalogCodec { Kind = CodecKind.Vel3, UnitExp = -7, Bits = 8 },
                 },
                 Fields =
                 [
@@ -234,7 +253,7 @@ internal static class CatalogSamples
         ],
         Commands =
         [
-            BuiltInCommands.CreateClientRegion(Pos2()),
+            BuiltInCommands.CreateClientRegion(),
             new CatalogCommand
             {
                 Name = "Steer",
@@ -249,7 +268,7 @@ internal static class CatalogSamples
                 ],
             },
         ],
-        Grids = [new CatalogGrid { Origin = [-8192, -8192], Cell = 1024, Dims = [16, 16], Archetypes = [0, 2] }],
+        Grids = [new CatalogGrid { TileCells = 4, Archetypes = [0, 2] }],
         Metrics =
         [
             BuiltInMetrics.Create(BuiltInMetrics.ReservedIdx("typhon.tick.p50")),
@@ -268,6 +287,6 @@ internal static class CatalogSamples
         Kind = CatalogPosition.MotionKind,
         Model = CatalogPosition.LinearModel,
         Pos = Pos2(),
-        Vel = new CatalogCodec { Kind = CodecKind.Vel2, QuantaDiv = 16, Bits = 16 },
+        Vel = new CatalogCodec { Kind = CodecKind.Vel2, UnitExp = -13, Bits = 16 },
     };
 }

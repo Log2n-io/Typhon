@@ -113,7 +113,7 @@ public class GoldenMessageTests
         {
             (region, 65534, new RecordValues
             {
-                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(-100, -100, 100, -100, 150, 200, -150, 200),
+                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(-100, -100, 0, 100, -100, 0, 150, 200, 0, -150, 200, 0),
                 [BuiltInCommands.RegionAltitudeField] = FieldValue.Of(350.5),
                 [BuiltInCommands.RegionBudgetField] = FieldValue.Of(512),
             }),
@@ -123,20 +123,23 @@ public class GoldenMessageTests
 
         var buffer = new byte[1024];
         var w = new WireWriter(buffer);
-        CommandsMessage.Write(ref w, 69_990, commands);
+        var frame = CatalogSamples.KitchenFrame;
+        CommandsMessage.Write(ref w, 69_990, commands, frame);
         var bytes = w.Written.ToArray();
 
         var sink = new RecordingSink();
-        CommandsMessage.Read(bytes, plan, ref sink);
+        CommandsMessage.Read(bytes, plan, ref sink, frame);
 
         Golden.Assert("message-commands", bytes, new JsonObject
         {
-            ["description"] = "COMMANDS against catalog-kitchen-sink: a ClientRegion quad at built-in index 0, then Steer at 16 twice, seq wrapping 65535 → 0.",
+            ["description"] = "COMMANDS against catalog-kitchen-sink: a ClientRegion quad at built-in index 0 (pos3 vertices at the command width, 32 bits, "
+                + "over the session's frame), then Steer at 16 twice, seq wrapping 65535 → 0.",
             ["catalog"] = "catalog-kitchen-sink",
+            ["frame"] = CatalogSamples.FrameJson(frame),
             ["inputs"] = new JsonArray(
                 CommandInput("ClientRegion", 65534, new JsonObject
                 {
-                    ["vertices"] = Golden.Bits([-100, -100, 100, -100, 150, 200, -150, 200]),
+                    ["vertices"] = Golden.Bits([-100, -100, 0, 100, -100, 0, 150, 200, 0, -150, 200, 0]),
                     ["altitudeM"] = Golden.Bits([350.5]),
                     ["budgetKiBps"] = Golden.Bits([512]),
                 }),

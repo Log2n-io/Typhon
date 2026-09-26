@@ -350,8 +350,8 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
             tx.Commit();
         }
 
-        int srcCell = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        int dstCell = dbe.SpatialGrid.WorldToCellKey(350f, 450f, 0f);
+        int srcCell = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        int dstCell = dbe.Realm0Grid.WorldToCellKey(350f, 450f, 0f);
         Assert.That(srcCell, Is.Not.EqualTo(dstCell));
 
         var meta = Archetype<ClMigUnit>.Metadata;
@@ -392,8 +392,8 @@ class ParallelFenceTests : TestBase<ParallelFenceTests>
         Assert.That(migrationsApplied, Is.GreaterThan(0),
             "Single-threaded parallel fence must apply cluster migrations — RuntimeChunkCount/FenceWorkPlan must be prepared via the typed gate.");
 
-        ref var srcCellRef = ref dbe.SpatialGrid.GetCell(srcCell);
-        ref var dstCellRef = ref dbe.SpatialGrid.GetCell(dstCell);
+        ref var srcCellRef = ref dbe.Realm0Grid.GetCell(srcCell);
+        ref var dstCellRef = ref dbe.Realm0Grid.GetCell(dstCell);
         Assert.That(srcCellRef.EntityCount, Is.EqualTo(0), "source cell must empty after migration applied by the single-threaded fence");
         Assert.That(dstCellRef.EntityCount, Is.EqualTo(1), "destination cell must hold the migrated entity");
     }

@@ -33,6 +33,7 @@ public partial class WorldObject : Archetype<WorldObject>
     [Position]
     public static readonly Comp<StructurePlacement> Bounds = Register<StructurePlacement>();
     public static readonly Comp<Structure> Struct = Register<Structure>();
+    public static readonly Comp<StructureRealm> Realm = Register<StructureRealm>();
 }
 
 /// <summary>
@@ -47,6 +48,7 @@ public partial class CreatureLair : Archetype<CreatureLair>
     public static readonly Comp<LairPlacement> Bounds = Register<LairPlacement>();
     public static readonly Comp<Lair> Spawner = Register<Lair>();
     public static readonly Comp<LairVitals> Vitals = Register<LairVitals>();
+    public static readonly Comp<LairRealm> Realm = Register<LairRealm>();
 }
 
 /// <summary>
@@ -65,6 +67,7 @@ public partial class Creature : Archetype<Creature>
 
     /// <summary>Scheduling only — deliberately NOT projected, so a write here reaches no subscriber. See <see cref="CreatureTimers"/>.</summary>
     public static readonly Comp<CreatureTimers> Timers = Register<CreatureTimers>();
+    public static readonly Comp<CreatureRealm> Realm = Register<CreatureRealm>();
 }
 
 /// <summary>
@@ -83,6 +86,18 @@ public partial class CityNpc : Archetype<CityNpc>
 
     /// <summary>Scheduling only — deliberately NOT projected. See <see cref="CreatureTimers"/>.</summary>
     public static readonly Comp<NpcTimers> Timers = Register<NpcTimers>();
+    public static readonly Comp<NpcRealm> Realm = Register<NpcRealm>();
+}
+
+/// <summary>
+/// An AI starship in the space realm (Realms G1c): the one deep-3D, f64 archetype. Not replicated yet (F1).
+/// </summary>
+[Archetype(1, "Starships", ClusterDurability = ClusterDurability.Checkpoint)]
+public partial class Starship : Archetype<Starship>
+{
+    public static readonly Comp<ShipPlacement> Bounds = Register<ShipPlacement>();
+    public static readonly Comp<ShipMotion> Move = Register<ShipMotion>();
+    public static readonly Comp<ShipRealm> Realm = Register<ShipRealm>();
 }
 
 /// <summary>
@@ -104,4 +119,5 @@ public partial class Player : Archetype<Player>
     public static readonly Comp<PlayerVitals> Vitals = Register<PlayerVitals>();
     public static readonly Comp<PlayerState> State = Register<PlayerState>();
     public static readonly Comp<Inventory> Inventory = Register<Inventory>();
+    public static readonly Comp<PlayerRealm> Realm = Register<PlayerRealm>();
 }

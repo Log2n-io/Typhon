@@ -75,14 +75,11 @@ public sealed class CatalogGrid
     /// <summary>The wire index, assigned by canonicalization from the grid's geometry.</summary>
     public int Idx { get; init; }
 
-    /// <summary>World-space origin of cell (0, 0).</summary>
-    public double[] Origin { get; init; }
-
-    /// <summary>Cell edge length in world units.</summary>
-    public double Cell { get; init; }
-
-    /// <summary>Cell counts per axis.</summary>
-    public int[] Dims { get; init; }
+    /// <summary>
+    /// The tile, in the realm's replication cells (<c>typhon.3</c>): origin and dimensions are the realm frame's, so one grid is valid in every realm
+    /// (12-realms § 5.4).
+    /// </summary>
+    public int TileCells { get; init; }
 
     /// <summary>The archetype indices counted on this grid, in the order an <c>AGG</c> cell lists their counts.</summary>
     public int[] Archetypes { get; init; }

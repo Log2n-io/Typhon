@@ -230,8 +230,8 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
         // Cluster has one entity → per-cell index has 1 entry.
         var meta = Archetype<ClCohUnit>.Metadata;
         var cs = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
-        int cellKey = dbe.SpatialGrid.WorldToCellKey(50f, 50f, 0f);
-        Assert.That(cs.PerCellIndex[cellKey].DynamicIndex.ClusterCount, Is.EqualTo(1));
+        int cellKey = dbe.Realm0Grid.WorldToCellKey(50f, 50f, 0f);
+        Assert.That(cs.Realm0Spatial.PerCellIndex[cellKey].DynamicIndex.ClusterCount, Is.EqualTo(1));
 
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -243,7 +243,7 @@ class PerCellRTreeTests : TestBase<PerCellRTreeTests>
         // FinaliseEmptyClusterCellState removes it from the per-cell index. The per-cell
         // slot's DynamicIndex now has zero clusters (or the slot itself may still exist
         // with an empty index — either is acceptable for Phase 1).
-        var slot = cs.PerCellIndex[cellKey];
+        var slot = cs.Realm0Spatial.PerCellIndex[cellKey];
         if (slot?.DynamicIndex != null)
         {
             Assert.That(slot.DynamicIndex.ClusterCount, Is.EqualTo(0));

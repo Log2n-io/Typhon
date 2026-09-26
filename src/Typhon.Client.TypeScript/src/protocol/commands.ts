@@ -4,6 +4,7 @@ import { malformed, protocolError } from './errors.js';
 import { readSection, writeSection, type FieldSink, type FieldValues } from './field-codec.js';
 import { uintInRange } from './range.js';
 import { WireReader } from './reader.js';
+import type { RealmFrame } from './realm-frame.js';
 import type { WireWriter } from './writer.js';
 
 /*
@@ -26,9 +27,16 @@ export interface CommandSink extends FieldSink {
 
 /**
  * Writes a `COMMANDS` message, type byte included. Client → server, an enum value outside its names is refused here
- * rather than sent and answered with a 1007 close (W13).
+ * rather than sent and answered with a 1007 close (W13). A realm-framed field travels over `frame`'s bounds at the
+ * command width, 32 bits (`RealmFrame.forCommands`); a command with one needs the session's frame.
  */
-export function writeCommands(w: WireWriter, clientTick: number, commands: readonly CommandInput[]): void {
+export function writeCommands(
+  w: WireWriter,
+  clientTick: number,
+  commands: readonly CommandInput[],
+  frame: RealmFrame | null = null,
+): void {
+  const commandFrame = frame === null ? null : frame.forCommands;
   if (commands.length === 0) {
     throw new RangeError('a COMMANDS message carries at least one command');
   }
@@ -39,7 +47,7 @@ export function writeCommands(w: WireWriter, clientTick: number, commands: reado
   for (const c of commands) {
     w.varu(c.type.idx);
     w.u16(uintInRange(c.seq, 0xffff, 'seq'));
-    writeSection(w, c.type.body, c.values, true);
+    writeSection(w, c.type.body, c.values, true, commandFrame);
   }
 }
 
@@ -61,16 +69,22 @@ const discard: CommandSink = {
  * The message is validated whole — known types, lengths, enum values within their names (W13, 1007) — before any
  * command reaches `sink` (§ 10 precisions).
  */
-export function readCommands(message: Uint8Array, plan: CatalogPlan, sink: CommandSink): void {
+export function readCommands(
+  message: Uint8Array,
+  plan: CatalogPlan,
+  sink: CommandSink,
+  frame: RealmFrame | null = null,
+): void {
+  const commandFrame = frame === null ? null : frame.forCommands;
   try {
-    decodeCommands(message, plan, discard);
-    decodeCommands(message, plan, sink);
+    decodeCommands(message, plan, discard, commandFrame);
+    decodeCommands(message, plan, sink, commandFrame);
   } finally {
     reader.release();
   }
 }
 
-function decodeCommands(message: Uint8Array, plan: CatalogPlan, sink: CommandSink): void {
+function decodeCommands(message: Uint8Array, plan: CatalogPlan, sink: CommandSink, frame: RealmFrame | null): void {
   const r = reader.reset(message);
   if (r.u8() !== MessageType.Commands) {
     throw protocolError('not a COMMANDS message');
@@ -87,7 +101,7 @@ function decodeCommands(message: Uint8Array, plan: CatalogPlan, sink: CommandSin
     const seq = r.u16();
     sink.command(type, seq, clientTick);
     // A tickLo command field rebuilds against the client's claimed tick, the only frame a command has.
-    readSection(r, type.body, clientTick, sink, true);
+    readSection(r, type.body, clientTick, sink, true, frame);
   }
 
   r.expectEnd('COMMANDS');

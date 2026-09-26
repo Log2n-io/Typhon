@@ -191,7 +191,8 @@ public sealed partial class SimBridge
                 {
                     aggroQueries++;
                     var sphere = new BSphere2F { CenterX = x, CenterY = z, Radius = ai.AggroRadius };
-                    var e = Dbe.ClusterSpatialQuery<Player>().Radius(in sphere);
+                    // The cluster's realm: a creature aggroes on the players of its own planet (Realms G1).
+                    var e = Dbe.ClusterSpatialQuery<Player>(cluster.Realm).Radius(in sphere);
                     try
                     {
                         var bestSq = double.MaxValue;
@@ -347,6 +348,8 @@ public sealed partial class SimBridge
             var states = cluster.GetSpan(Player.State);
             var motions = cluster.GetSpan(Player.Move);
             var chunk = cluster.ChunkId;
+            var realm = cluster.Realm.Value;
+            var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: N ticks elapse between two visits of a strided realm at divisor N
 
             // Explicit replication (ADR-067): the players whose replicated activity this pass changes. Positions are pushed by WriteSpatial.
             var pushSlots = 0UL;
@@ -363,12 +366,14 @@ public sealed partial class SimBridge
 
                 if (state.ActivityTicks > 0)
                 {
-                    state.ActivityTicks--;
-                    if (state.Activity is PlayerActivity.Travelling or PlayerActivity.Roaming or PlayerActivity.Combat or PlayerActivity.ToShuttle)
+                    state.ActivityTicks = Math.Max(0, state.ActivityTicks - k);
+                    if (state.Activity is PlayerActivity.Travelling or PlayerActivity.Roaming or PlayerActivity.Combat or PlayerActivity.ToShuttle
+                        or PlayerActivity.ToPortal)
                     {
                         var dx = move.DestX - x;
                         var dz = move.DestZ - z;
-                        if ((dx * dx) + (dz * dz) < 25f)
+                        var reach = MathF.Max(5f, k * move.SpeedMps * MetresPerTick);
+                        if ((dx * dx) + (dz * dz) < reach * reach)
                         {
                             // Arrived. A traveller stops rather than running past; a fighter stays put and swings.
                             move.VelX = 0f;
@@ -379,6 +384,13 @@ public sealed partial class SimBridge
                                 // before giving up and deciding something else.
                                 state.Activity = PlayerActivity.AwaitingShuttle;
                                 state.ActivityTicks = ShuttleWaitTicks;
+                                pushSlots |= 1UL << idx;
+                            }
+                            else if (state.Activity == PlayerActivity.ToPortal)
+                            {
+                                // At the door: queue the crossing, which TeleportSystem applies next tick. Standing still until then, so Move
+                                // writes nothing that the teleport would overwrite.
+                                EnterPortal(ref state, cluster.GetEntityId(idx), realm, places[idx].HalfExtent, Salt(tick, chunk, idx, 0x0D1CE5A7u));
                                 pushSlots |= 1UL << idx;
                             }
                             else if (state.Activity != PlayerActivity.Combat)
@@ -395,8 +407,26 @@ public sealed partial class SimBridge
                     continue;
                 }
 
+                if (IsDungeonRealm(realm))
+                {
+                    continue;   // a dungeon party waits for its dungeon to send it home (G2)
+                }
+
+                if (realm >= _config.Planets)
+                {
+                    // In an interior and done there: out through the door it came in by.
+                    ExitInterior(ref state, ref move, cluster.GetEntityId(idx), realm, places[idx].HalfExtent, Salt(tick, chunk, idx, 0x3A0B7C11u));
+                    pushSlots |= 1UL << idx;
+                    continue;
+                }
+
                 var roll = Hash01(Salt(tick, chunk, idx, 0xC2B2AE35u));
-                if (roll < 0.40f)
+                if (roll < 0.40f
+                    && TryWalkToPortal(ref state, ref move, x, z, realm, Salt(tick, chunk, idx, 0x7F4A7C15u), Salt(tick, chunk, idx, 0x2C1B3C6Du)))
+                {
+                    // Into a building (Realms G1b): walking to its door, where the crossing is queued.
+                }
+                else if (roll < 0.40f)
                 {
                     // Idle in a city. Stationary, so free to the fence — and still expensive to every awareness query.
                     state.Activity = PlayerActivity.Idle;
@@ -405,7 +435,7 @@ public sealed partial class SimBridge
                     move.VelZ = 0f;
                 }
                 else if (roll < 0.60f
-                         && TryTakeShuttle(ref state, ref move, x, z, Salt(tick, chunk, idx, 0x3C6EF372u), Salt(tick, chunk, idx, 0x165667B1u)))
+                         && TryTakeShuttle(ref state, ref move, x, z, realm, Salt(tick, chunk, idx, 0x3C6EF372u), Salt(tick, chunk, idx, 0x165667B1u)))
                 {
                     // Taking the shuttle (#910): walking to this city's port, where the Shuttle system will board it.
                 }
@@ -531,6 +561,8 @@ public sealed partial class SimBridge
             var motions = cluster.GetReadOnlySpan(Creature.Move);
             var brains = cluster.GetReadOnlySpan(Creature.Ai);
             var timers = cluster.GetReadOnlySpan(Creature.Timers);
+            // Realms G2: a realm at divisor N reaches this system once in N ticks, so its creatures cover N ticks' ground (1 at full rate).
+            var k = ctx.Realms.TicksPerVisit(cluster.Realm);
 
             var moved = 0UL;
             var bits = bits0;
@@ -558,8 +590,8 @@ public sealed partial class SimBridge
                 }
                 else
                 {
-                    x = Math.Clamp(p.X + move.VelX, -half + h, half - h);
-                    z = Math.Clamp(p.Z + move.VelZ, -half + h, half - h);
+                    x = Math.Clamp(p.X + (move.VelX * k), -half + h, half - h);
+                    z = Math.Clamp(p.Z + (move.VelZ * k), -half + h, half - h);
                 }
 
                 // WriteSpatial rather than a plain span write: the barrier flags migration and AABB growth inline, which
@@ -617,6 +649,7 @@ public sealed partial class SimBridge
 
             var places = cluster.GetReadOnlySpan(Player.Bounds);
             var motions = cluster.GetReadOnlySpan(Player.Move);
+            var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2, as for creatures
 
             var moved = 0UL;
             var bits = bits0;
@@ -633,8 +666,8 @@ public sealed partial class SimBridge
 
                 var p = places[idx];
                 var h = p.HalfExtent;
-                var x = Math.Clamp(p.X + move.VelX, -half + h, half - h);
-                var z = Math.Clamp(p.Z + move.VelZ, -half + h, half - h);
+                var x = Math.Clamp(p.X + (move.VelX * k), -half + h, half - h);
+                var z = Math.Clamp(p.Z + (move.VelZ * k), -half + h, half - h);
                 var nb = default(PlayerPlacement);
                 nb.SetAt(x, z, h);
                 if (batched)
@@ -689,6 +722,7 @@ public sealed partial class SimBridge
             var timers = cluster.GetSpan(CityNpc.Timers);
             var motions = cluster.GetSpan(CityNpc.Move);
             var chunk = cluster.ChunkId;
+            var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2, as for creatures
 
             var moved = 0UL;
             var bits = bits0;
@@ -742,7 +776,7 @@ public sealed partial class SimBridge
                 }
 
                 var nb = default(NpcPlacement);
-                nb.SetAt(p.X + move.VelX, p.Z + move.VelZ, p.HalfExtent);
+                nb.SetAt(p.X + (move.VelX * k), p.Z + (move.VelZ * k), p.HalfExtent);
                 if (batched)
                 {
                     next[idx] = nb;
@@ -823,7 +857,7 @@ public sealed partial class SimBridge
                     m++;
                 }
 
-                AwarenessBatch(members[..m], counts[..m], only, sampled, work, ref queries, ref hits);
+                AwarenessBatch(cluster.Realm, members[..m], counts[..m], only, sampled, work, ref queries, ref hits);
                 continue;
             }
 
@@ -837,7 +871,7 @@ public sealed partial class SimBridge
                 var sample = probe && ((cluster.ChunkId * 64) + idx) % WorkProbeSampleEvery == 0;
                 if (only is null or AwarenessTarget.Structures)
                 {
-                    var n = CountInRadius<WorldObject>(in sphere);
+                    var n = CountInRadius<WorldObject>(in sphere, cluster.Realm);
                     hits += n;
                     queries++;
                     if (sample)
@@ -848,7 +882,7 @@ public sealed partial class SimBridge
 
                 if (only is null or AwarenessTarget.Creatures)
                 {
-                    var n = CountInRadius<Creature>(in sphere);
+                    var n = CountInRadius<Creature>(in sphere, cluster.Realm);
                     hits += n;
                     queries++;
                     if (sample)
@@ -859,7 +893,7 @@ public sealed partial class SimBridge
 
                 if (only is null or AwarenessTarget.Npcs)
                 {
-                    var n = CountInRadius<CityNpc>(in sphere);
+                    var n = CountInRadius<CityNpc>(in sphere, cluster.Realm);
                     hits += n;
                     queries++;
                     if (sample)
@@ -870,7 +904,7 @@ public sealed partial class SimBridge
 
                 if (only is null or AwarenessTarget.Players)
                 {
-                    var n = CountInRadius<Player>(in sphere);
+                    var n = CountInRadius<Player>(in sphere, cluster.Realm);
                     hits += n;
                     queries++;
                     if (sample)
@@ -900,20 +934,20 @@ public sealed partial class SimBridge
 
     // Each drain is its own NoInlining method, so a run never JIT-compiles the drains it does not use. That lets an A/B run an engine build that lacks
     // the newer query API under the same host binary.
-    private long CountInRadius<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new() => _config.AwarenessApi switch
+    private long CountInRadius<TArch>(in BSphere2F sphere, RealmId realm) where TArch : Archetype<TArch>, new() => _config.AwarenessApi switch
     {
-        AwarenessApi.MoveNext => CountByMoveNext<TArch>(in sphere),
-        AwarenessApi.Fill => CountByFill<TArch>(in sphere),
+        AwarenessApi.MoveNext => CountByMoveNext<TArch>(in sphere, realm),
+        AwarenessApi.Fill => CountByFill<TArch>(in sphere, realm),
         // A lone query — the shuttle port probe — has no batch to join: the batch arm counts it as the count arm does, so the two arms differ in the
         // awareness drain and nowhere else.
-        AwarenessApi.Count or AwarenessApi.Batch => CountByCount<TArch>(in sphere),
+        AwarenessApi.Count or AwarenessApi.Batch => CountByCount<TArch>(in sphere, realm),
         _ => throw new ArgumentOutOfRangeException(nameof(_config.AwarenessApi), _config.AwarenessApi, "no drain for this awareness API"),
     };
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private long CountByCount<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new()
+    private long CountByCount<TArch>(in BSphere2F sphere, RealmId realm) where TArch : Archetype<TArch>, new()
     {
-        var e = Dbe.ClusterSpatialQuery<TArch>().Radius(in sphere);
+        var e = Dbe.ClusterSpatialQuery<TArch>(realm).Radius(in sphere);
         try
         {
             return e.Count();
@@ -929,10 +963,10 @@ public sealed partial class SimBridge
     private static ClusterSpatialQueryResult[] _fillBuffer;
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private long CountByFill<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new()
+    private long CountByFill<TArch>(in BSphere2F sphere, RealmId realm) where TArch : Archetype<TArch>, new()
     {
         var buffer = _fillBuffer ??= new ClusterSpatialQueryResult[64];
-        var e = Dbe.ClusterSpatialQuery<TArch>().Radius(in sphere);
+        var e = Dbe.ClusterSpatialQuery<TArch>(realm).Radius(in sphere);
         try
         {
             long n = 0;
@@ -956,6 +990,7 @@ public sealed partial class SimBridge
     /// count is exactly its own query's, so the statistics are those of the per-player path.
     /// </summary>
     private void AwarenessBatch(
+        RealmId realm,
         ReadOnlySpan<BSphere2F> members,
         Span<int> counts,
         AwarenessTarget? only,
@@ -966,34 +1001,34 @@ public sealed partial class SimBridge
     {
         if (only is null or AwarenessTarget.Structures)
         {
-            hits += CountBatch<WorldObject>(members, counts, 0, sampled, work);
+            hits += CountBatch<WorldObject>(realm, members, counts, 0, sampled, work);
             queries += members.Length;
         }
 
         if (only is null or AwarenessTarget.Creatures)
         {
-            hits += CountBatch<Creature>(members, counts, 1, sampled, work);
+            hits += CountBatch<Creature>(realm, members, counts, 1, sampled, work);
             queries += members.Length;
         }
 
         if (only is null or AwarenessTarget.Npcs)
         {
-            hits += CountBatch<CityNpc>(members, counts, 2, sampled, work);
+            hits += CountBatch<CityNpc>(realm, members, counts, 2, sampled, work);
             queries += members.Length;
         }
 
         if (only is null or AwarenessTarget.Players)
         {
-            hits += CountBatch<Player>(members, counts, 3, sampled, work);
+            hits += CountBatch<Player>(realm, members, counts, 3, sampled, work);
             queries += members.Length;
         }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private long CountBatch<TArch>(ReadOnlySpan<BSphere2F> members, Span<int> counts, int target, ulong sampled, Span<long> work)
+    private long CountBatch<TArch>(RealmId realm, ReadOnlySpan<BSphere2F> members, Span<int> counts, int target, ulong sampled, Span<long> work)
         where TArch : Archetype<TArch>, new()
     {
-        Dbe.ClusterSpatialQuery<TArch>().CountRadius(members, counts);
+        Dbe.ClusterSpatialQuery<TArch>(realm).CountRadius(members, counts);
         long n = 0;
         for (var j = 0; j < members.Length; j++)
         {
@@ -1010,9 +1045,9 @@ public sealed partial class SimBridge
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private long CountByMoveNext<TArch>(in BSphere2F sphere) where TArch : Archetype<TArch>, new()
+    private long CountByMoveNext<TArch>(in BSphere2F sphere, RealmId realm) where TArch : Archetype<TArch>, new()
     {
-        var e = Dbe.ClusterSpatialQuery<TArch>().Radius(in sphere);
+        var e = Dbe.ClusterSpatialQuery<TArch>(realm).Radius(in sphere);
         try
         {
             long n = 0;

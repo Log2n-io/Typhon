@@ -378,8 +378,9 @@
     must be distinguishable, and the unplaced session is the one that sees nothing
   invariant a profile is served through exactly ONE entity observer, World, Sphere or ClientRegion, with at most one Aggregate beside it (09 § 5) —
     which sends AGG, never entity records, so the entity known-set stays that one observer's; a second entity observer, an aggregate alone, a near
-    budget on any shape but a ClientRegion, the far tier of Far() (an Aggregate's), a centre (Bind, At, AroundControlled) on any shape but a Sphere, and an
-    Aggregate radius beside anything but a Sphere are refused at Start. Profiles may declare different radii, a leave radius and a run-time maximum (09 § 3–4): one window serves them all,
+    budget on any shape but a ClientRegion, the far tier of Far() (an Aggregate's), two anchors (Bind, At, AroundControlled) on one observer, and an
+    Aggregate radius beside anything but a Sphere are refused at Start. An anchor on a World or a ClientRegion names the session's realm only
+    (12-realms § 1.3); a profile's variants by realm kind (In) all take the realm from the same source. Profiles may declare different radii, a leave radius and a run-time maximum (09 § 3–4): one window serves them all,
     sized for the largest radius any session can take, and that radius counts against the window bound at Start
   invariant a radius change (SetRadius, or a profile change between Sphere radii) is geometry like an anchor move: the next frame sweeps the shell
     between the two radii and does not reset
@@ -637,6 +638,75 @@
     OverBudgetAByeAndAProtocolErrorStillClose, AbuseCountsCommandsFromBothSidesAndClosesAfterTheRun, AGapOrACalmWindowBreaksTheRun);
     SelfBlockTests.LastSeqAndRejectionsReachTheClient for the rate and application paths.
 
+
+### SUB-28: A session holds and resolves only its own realm `[fatal][silent]`
+  invariant every ENTITIES record, AGG tile and DEBUG geometry sent to s, and every successful TryResolve for s, concerns entities and cells of realm(s)
+    — whatever their local coordinates; realm(s) = None → s holds nothing positioned
+  invariant each served realm has its own replication: its push index, log, occupancy, aggregate and near counts hold only events of blocks with
+    block.Realm = that realm (block.Realm = ClusterRealmMap[its cluster], stamped at attach); a session's geometry lives in its realm's replication
+    only, in a realm-local slot, so a lookup in another realm's reads the unbound sentinel
+  invariant a realm with no session stops being served (no mark, projection, index or frame work) until a session is placed in it again, when it is
+    re-pushed whole and recounted as after a gap
+  invariant an entity that moves to another realm is never carried in its old realm's frame: it leaves the source realm (a leave there, decoded
+    with that realm's frame, its identity released) and enters the destination as a fresh entry projected in the destination's frame
+  invariant a Near point and a ToKnown entity are filed in their realm, by that realm's cells, and match only that realm's sessions; ToRealm reaches
+    the sessions of one realm or, with its subtree, of the realms below it in the parent tree — which routes and grants no visibility
+  never decide isolation by geometry: identical local coordinates in two realms are the expected case
+  scope: PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
+    ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches
+  on_violation: silent. A client sees or targets an entity of a world it is not in — a cheat, and a store holding two worlds' netIds.
+  verified: RealmSessionTests.EachRealmsSessionsHoldThatRealmsEntitiesOnly_AtIdenticalLocalCoordinates,
+    RealmSessionTests.ATeleportBetweenServedRealmsLeavesOneAndEntersTheOtherInItsFrame,
+    RealmEventTests.ANearEventIsHeardInItsRealmOnly_AtIdenticalLocalCoordinates, RealmEventTests.AToKnownEventIsFiledInItsEntitysRealm,
+    RealmSessionTests.ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns, RealmReplicationTests.AnEntityOfARealmNotServedIsNeverKnownToASession
+
+### SUB-29: A session is in one realm at a time, and a realm switch is one published RESET|REALM frame `[fatal][silent]`
+  invariant realm(s) ∈ {None} ∪ RealmId is one value per tick: the application's (Place(realm, pos) / Enter / Leave), the followed entity's after this
+    tick's fence (Bind, AroundControlled — a teleport switches its sessions in the same tick), or realm 0 (At); a session nobody placed is in realm 0
+    on an engine with one realm and in none on an engine with several, where it holds nothing positioned
+  invariant s's committed realm changes only when a frame with RESET whose FIRST block is REALM(realm(s)) is published; a switch not published is
+    retried as a RESET until one is (SUB-03); a switch of a session that has been sent any frame is a forced RESET, sent at once; only a session never
+    framed has its first realm ride the first frame that has something to say
+  invariant across a switch the link state (budget level, radius shrink, rate), the events cursor, SELF's pending owner mask, the ack cursor and netIds
+    are preserved; the realm-local geometry is given back and taken anew, and a new realm-local slot under a client that holds frames is a RESET
+  invariant an entity-anchored session is never moved explicitly (Place(realm) / Enter / Leave throw); a realm-less Place on an engine with several
+    realms throws; a session observes its realm for the realm policy (RLM-03) while it is in it
+  scope: FrameAssembler.NoteRealm, FrameAssembler.CommitRealm, FrameAssembler.AnchorRealm, FrameAssembler.NoteRealmMoves, SessionFrameState.CommittedRealm,
+    PushHub.Place, SessionTable.SetRealm, SubscriptionsCommands.Enter, SubscriptionsCommands.Leave
+  on_violation: silent. A client applies records of one realm over another's store — entities of a world it is not in, at coordinates that mean
+    another place — or keeps a store the server believes cleared.
+  verified: RealmSessionTests.PlacingIntoAnotherRealmIsOneResetRealmFrame, RealmSessionTests.ASwitchAndBackRefillsFromAResetAndLeavingIsAResetRealmNone,
+    RealmSessionTests.ASkippedRealmSwitchIsRetriedAsAReset, RealmSessionTests.AControlledSessionFollowsItsEntityIntoAnotherRealmInTheSameTick
+    (unplaced sessions, the link state kept and realm observation: the fixture's other tests)
+
+### SUB-30: A realm-framed value is encoded and decoded with exactly one realm's frame `[fatal][silent]`
+  invariant a position (pos2/pos3: ENTITIES records, event and command fields, a region's vertices) and an AGG cell index are quantized over the
+    frame of the realm they belong to — its bounds, its width (REALM.posBits), its replication cell — never over the catalog, which carries the
+    codec's kind alone (typhon.3, 12-realms § 5.1); realm 0's REALM block and its replication's frames are built from the same grid and checked
+    equal at Start, so its bytes are the single-realm ones; a REALM whose quantum is not a positive finite number on some axis is refused
+  invariant a session receives its frame before any value framed by it: its first published frame is a RESET whose first block is REALM, retried until
+    one is published; a REALM travels only as the first block of a RESET frame, and every decoding pass adopts it; a decoder refuses a positioned
+    ENTITIES, an AGG, a DEBUG push geometry or a position field while it holds no realm (1002), and a REALM elsewhere or out of range (1007)
+  invariant a command's realm-framed field travels at RealmFrame.CommandPositionBits (32) over the bounds of the realm the client held at the batch's
+    clientTick; the transport decodes it over that realm's frame, read from the session's realm view — immutable, published by the frame stage before
+    the switching frame, the only session state a transport reads (SUB-05); a command whose realm-framed field was built in a realm the session has left
+    is refused with ACK REALM_CHANGED (a ClientRegion is dropped) and never reaches the application — at the transport, or at the drain when the switch
+    was published between the two (the ring record carries SubscriptionsIngress.FramedRecordFlag); every command arrives with the realm it was built in
+  invariant a velocity is realm-independent: its unit is 2^unitExp metres per tick, derived from the archetype's tolerance and MaxAge (W5)
+  scope: RealmFrame, RealmCodecs, PositionFrame, ProjectionPass.QuantizePosition, ProjectionCompiler.VelocityCodec, SessionFrameState.RealmSent,
+    SubscriptionsIngress.CommandFrame, SubscriptionsIngress.FramedRecordFlag, SessionRealmView, IngressCommandSink.Flush,
+    EntitiesEncoder.WriteHeader, SubscriptionsRuntime.BuildRealm0Frame, TickReader.Read, FieldCodec.ReadNumber, CommandsMessage.Read
+  on_violation: silent. A value encoded over one frame and decoded over another is a wrong position a client renders without error; a catalog that
+    carried bounds could describe one realm only, and every other realm's positions would decode into it.
+  verified: RealmSessionTests.ACommandIsFramedByTheRealmItWasBuiltIn_AndAPositionFromALeftRealmIsRefused,
+    RealmSessionTests.APositionDecodedBeforeASwitchAndDrainedAfterItIsRefused,
+    RealmReplicationTests.RealmFramedQuantizationEqualsTheCatalogCodecForRealmZero (realm 0's frame is the codec's; another realm's frame
+    gives other codes for the same place), RealmReplicationTests.ASessionsFirstPublishedFrameIsAResetWhoseFirstBlockIsItsRealm,
+    EntitiesEncodingTests.TheProducedBytesDecodeIntoTheClientsReplica (the replica decodes the engine's stream over the REALM it was sent);
+    protocol goldens tick-realm, tick-realm-none and wire-refusals (realm-without-reset, realm-not-first, positioned-entities-without-realm,
+    realm-extent-overflows, debug-geometry-without-realm …),
+    decoded bit for bit by both SDKs.
+
 ---
 
 ## Module: Ingress and Frame Hand-off
@@ -875,10 +945,11 @@
 
 ### SUB-24: The occupancy counts exactly the entities whose last pushed position lies in each cell `[fatal][silent]`
   invariant after every index, ∀ cell: occupancy(cell) = the live, identified entries of observed archetypes whose last pushed position lies in cell,
-    and a cell with none has no entry
+    and a cell with none has no entry; with several realms, each served realm's occupancy counts that realm's entries only, in its own frame
   invariant every tick the track runs is indexed, sessions bound to a profile or not: the tick's cell changes are the occupancy's only input
   invariant a tick whose changes the occupancy missed — one the track did not run for, or one it ran but never finished indexing — is followed by a
-    recount at the next index's finish, after that tick's projection: only then do the blocks describe the fence's carried and parked entries
+    recount at the next index's finish, after that tick's projection: only then do the blocks describe the fence's carried and parked entries; a realm
+    woken from dormancy is such a tick's successor — it is recounted after its first projection, never over the blocks it last saw
   invariant the aggregate grids (09 § 8) take the same deltas per archetype and tile: after every index, ∀ grid, tile, counted archetype a: count = the
     live, identified entries of a whose last pushed position lies in the tile; a recount of the occupancy recounts them. A tile is a whole number of
     replication cells over the same origin — a move within a cell never crosses a tile edge — and a grid counts only archetypes push replication serves
@@ -905,6 +976,8 @@
     the zero rows are dropped), PushOracle3DTests.ABudgetedPolyhedronHoldsWholeCellsAndItsAggregateTheRest (also an aggregate one tile as tall as the
     world — red when its z extent is taken as the grid's). Falsifiability: PushIndexTests.AnOccupancyThatKeepsMoversInTheCellTheyLeftIsCaught runs the
     mutant that drops a secondary's decrement; dropping it from the aggregate deltas turns TheCountsEqualARecountUnderChurn red.
+    RealmSessionTests.AWokenRealmsOccupancyCountsItsOwnEntitiesOnly (two realms, one dormant across a spawn and a move; red when the recount walks
+    every realm's blocks).
 
 ### SUB-25: The push index holds this tick's events in cell order and touches only occupied cells `[perf][silent]`
   invariant ∀ tick T, the index (= T's log slot) holds every event of T once under its primary cell and once more under the cell a mover left, cells

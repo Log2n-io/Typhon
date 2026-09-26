@@ -41,7 +41,7 @@ internal sealed class WebSocketLink : ISubscriptionLink
     private CancellationTokenRegistration _abortRegistration;
 
     /// <summary>Adopts an accepted WebSocket.</summary>
-    /// <param name="socket">The socket, already upgraded and carrying the <c>typhon.2</c> subprotocol.</param>
+    /// <param name="socket">The socket, already upgraded and carrying the <c>typhon.3</c> subprotocol.</param>
     public WebSocketLink(WebSocket socket)
     {
         ArgumentNullException.ThrowIfNull(socket);

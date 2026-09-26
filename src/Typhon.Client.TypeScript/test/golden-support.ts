@@ -1,14 +1,15 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type {
-  ArchetypePlan,
-  CommandSink,
-  FieldPlan,
-  GridPlan,
-  MessagePlan,
-  MetricPlan,
-  TickSink,
+import {
+  RealmFrame,
+  type ArchetypePlan,
+  type CommandSink,
+  type FieldPlan,
+  type GridPlan,
+  type MessagePlan,
+  type MetricPlan,
+  type TickSink,
 } from '../src/index.js';
 
 /**
@@ -89,6 +90,51 @@ export function bitsOf(values: ArrayLike<number>, count: number): string[] {
   return result;
 }
 
+/** A realm frame as a golden vector carries it (C# `CatalogSamples.FrameJson`): every number as its IEEE bits. */
+export interface FrameJson {
+  readonly realmId: number;
+  readonly generation: number;
+  readonly kindIdx: number;
+  readonly appTag: number;
+  readonly posBits: number;
+  readonly cellM: string;
+  readonly deep: boolean;
+  readonly min: readonly string[];
+  readonly max: readonly string[];
+}
+
+export function frameJson(frame: RealmFrame | null): FrameJson | null {
+  return frame === null
+    ? null
+    : {
+        realmId: frame.realmId,
+        generation: frame.generation,
+        kindIdx: frame.kindIdx,
+        appTag: frame.appTag,
+        posBits: frame.positionBits,
+        cellM: bits(frame.cellM),
+        deep: frame.deep,
+        min: bitsOf(frame.min, 3),
+        max: bitsOf(frame.max, 3),
+      };
+}
+
+export function frameFromJson(json: FrameJson | null | undefined): RealmFrame | null {
+  return json == null
+    ? null
+    : new RealmFrame(
+        json.realmId,
+        json.generation,
+        json.kindIdx,
+        json.appTag,
+        json.posBits,
+        fromBits(json.cellM),
+        json.deep,
+        json.min.map(fromBits),
+        json.max.map(fromBits),
+      );
+}
+
 export function hex(bytes: Uint8Array): string {
   let s = '';
   for (const b of bytes) {
@@ -118,6 +164,10 @@ export class RecordingSink implements TickSink, CommandSink {
 
   beginTick(tick: number, flags: number, periodUs: number): void {
     this.log.push({ call: 'beginTick', tick, flags, periodUs });
+  }
+
+  realm(frame: RealmFrame | null): void {
+    this.log.push({ call: 'realm', frame: frameJson(frame) });
   }
 
   beginEntities(archetype: ArchetypePlan): void {

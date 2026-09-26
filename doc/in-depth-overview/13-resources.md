@@ -364,7 +364,7 @@ The OTel-facing classes that consume the graph:
 - [`OTelMetricNameBuilder`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/OTelMetricNameBuilder.cs) — canonical naming for the exported instruments.
 - [`EcsMetricsExporter`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Observability/public/EcsMetricsExporter.cs) — ECS-specific exporter, parallel to the resource exporter.
 
-`ResourceHealthChecker` covers the health-check side of the same surface (see §7).
+`ResourceHealthChecker` covers the health-check side of the same surface (see [§7](#7-alerts--health)).
 
 ---
 

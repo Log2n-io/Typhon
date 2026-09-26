@@ -223,7 +223,7 @@ The generator's scope is **`Typhon.Engine` only** — other consumers (tests, to
 
 The trace file's `FileTable` section dedupes source file paths into `u16` file ids; the `SourceLocationManifest` lists `(siteId, fileId, line, kind, methodId)` quads. The Workbench reads both at session-open and renders span hierarchies with clickable source attribution.
 
-Wire-level: when the event has `SpanFlagsHasSourceLocation` set (bit 1 of the `SpanFlags` byte), 2 trailing bytes after the trace context carry the `SourceLocationId`. See §5.
+Wire-level: when the event has `SpanFlagsHasSourceLocation` set (bit 1 of the `SpanFlags` byte), 2 trailing bytes after the trace context carry the `SourceLocationId`. See [§5](#5-wire-protocol).
 
 ---
 

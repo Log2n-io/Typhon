@@ -52,7 +52,7 @@ Isolation and durability aren't one selector — they're **three orthogonal knob
 
 They compose freely. A `SingleVersion` component written under the `Commit` discipline inside an `Immediate` UoW is a real, valid combination — layout says "one in-place slot," discipline says "stage and make this write atomic + zero-loss," mode says "fsync before `Commit()` returns."
 
-> 📌 **`Committed` is not a storage mode.** It's the `Commit` *discipline* applied to the byte-identical `SingleVersion` layout — a way to get atomic, zero-loss durability *without* paying for MVCC. See §8.
+> 📌 **`Committed` is not a storage mode.** It's the `Commit` *discipline* applied to the byte-identical `SingleVersion` layout — a way to get atomic, zero-loss durability *without* paying for MVCC. See [§8](#8-naming-traps).
 
 ---
 
@@ -134,7 +134,7 @@ Recovery replays the WAL and reconstructs every transaction whose commit record 
 | Microsecond commits, a few ms of loss acceptable (general game/server tick) | **`GroupCommit`** |
 | Never acknowledge a commit that isn't on disk (financial, irreversible) | **`Immediate`** |
 | Flush once at the end of a bulk load | **`Deferred`**, then `Flush()` |
-| Read millions of entities across all cores at one consistent snapshot | `PointInTimeAccessor` — see §8 & [ch.5](05-systems.md) |
+| Read millions of entities across all cores at one consistent snapshot | `PointInTimeAccessor` — see [§8](#8-naming-traps) & [ch.5](05-systems.md) |
 
 ---
 
@@ -146,7 +146,7 @@ Three names in this area mislead. Learn them once here.
 
 - **"Tick fence" names three related things.** In this guide it always means **the per-tick durability step** that batches dirty `SingleVersion` writes into the WAL (`dbe.WriteTickFence(n)`, run automatically by the runtime each tick). It is *not* a memory fence, and the parallel-execution machinery that speeds that step up (`RuntimeOptions.EnableParallelFence`) is an internal performance detail you never call.
 
-- **`Committed` is a *discipline*, not a `StorageMode`.** There are exactly three storage modes (`Versioned`/`SingleVersion`/`Transient`). `Committed` is `CommitDiscipline.Commit` layered on the `SingleVersion` layout — see the `Commit` column in §4.
+- **`Committed` is a *discipline*, not a `StorageMode`.** There are exactly three storage modes (`Versioned`/`SingleVersion`/`Transient`). `Committed` is `CommitDiscipline.Commit` layered on the `SingleVersion` layout — see the `Commit` column in [§4](#4-storage-mode-guarantee-matrix).
 
 And the three dials one more time, because collapsing them is the root confusion:
 

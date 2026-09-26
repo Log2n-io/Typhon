@@ -65,8 +65,8 @@ unsafe class AabbClusterEnumeratorDrainTests : TestBase<AabbClusterEnumeratorDra
 
     private static AabbClusterEnumerator Open(DatabaseEngine dbe, ArchetypeClusterState cs, Q q) =>
         q.IsRadius
-            ? cs.QueryRadius(dbe.SpatialGrid, q.X0, q.Y0, q.Z0, q.R)
-            : cs.QueryAabb(dbe.SpatialGrid, q.X0, q.Y0, q.Is3D ? q.Z0 : double.NegativeInfinity, q.X1, q.Y1, q.Is3D ? q.Z1 : double.PositiveInfinity);
+            ? cs.QueryRadius(dbe.Realm0Grid, q.X0, q.Y0, q.Z0, q.R)
+            : cs.QueryAabb(dbe.Realm0Grid, q.X0, q.Y0, q.Is3D ? q.Z0 : double.NegativeInfinity, q.X1, q.Y1, q.Is3D ? q.Z1 : double.PositiveInfinity);
 
     /// <summary>
     /// What the query must return, computed the way the narrowphase is specified: box overlap on every axis, then for a radius query the squared distance
@@ -168,7 +168,7 @@ unsafe class AabbClusterEnumeratorDrainTests : TestBase<AabbClusterEnumeratorDra
                 {
                     return $"{id} (not spawned)";
                 }
-                int home = dbe.SpatialGrid.WorldToCellKey((s.MinX + s.MaxX) / 2, (s.MinY + s.MaxY) / 2, (s.MinZ + s.MaxZ) / 2);
+                int home = dbe.Realm0Grid.WorldToCellKey((s.MinX + s.MaxX) / 2, (s.MinY + s.MaxY) / 2, (s.MinZ + s.MaxZ) / 2);
                 return $"{id} [{s.MinX}, {s.MinY}, {s.MinZ}]..[{s.MaxX}, {s.MaxY}, {s.MaxZ}] home cell {home}";
             }
             Assert.Fail($"{what}: MoveNext's set differs from the oracle's for {q}. Missing: {string.Join("; ", missing.Select(Show))}. "
@@ -300,11 +300,12 @@ unsafe class AabbClusterEnumeratorDrainTests : TestBase<AabbClusterEnumeratorDra
         var population = Spawn(dbe, 4_800, origin: 0f, extent: 1_000f, seed: 3);
         var cs = ClusterStateOf(dbe);
 
-        var cellKey = dbe.SpatialGrid.WorldToCellKey(500d, 500d, 0d);
+        var cellKey = dbe.Realm0Grid.WorldToCellKey(500d, 500d, 0d);
         Assert.Multiple(() =>
         {
             Assert.That(SpatialQueryTuning.SimdLinearScan, Is.True, "precondition: the batched scan must be enabled, or this test runs the scalar one");
-            Assert.That(cs.PerCellIndex[cellKey].DynamicClusterCount, Is.GreaterThan(64), "precondition: the cell half must need more than one 64-slot batch");
+            Assert.That(cs.Realm0Spatial.PerCellIndex[cellKey].DynamicClusterCount, Is.GreaterThan(64),
+                "precondition: the cell half must need more than one 64-slot batch");
         });
 
         var total = RandomQueries2D(1_000d, seed: 4, count: 12).Sum(q => AssertDrains(dbe, cs, population, q, "batched"));
@@ -321,7 +322,7 @@ unsafe class AabbClusterEnumeratorDrainTests : TestBase<AabbClusterEnumeratorDra
         var population = Spawn(dbe, 3_000, origin: 0f, extent: 1_000f, seed: 5);
         var cs = ClusterStateOf(dbe);
 
-        Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote, or the tree path never runs");
+        Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote, or the tree path never runs");
 
         // Boxes straddling the populated cell and its empty neighbours too, so the cell walk leaves a tree half for a cell with nothing in it.
         var total = RandomQueries2D(1_400d, seed: 6, count: 12).Sum(q => AssertDrains(dbe, cs, population, q, "promoted"));
@@ -501,7 +502,7 @@ unsafe class AabbClusterEnumeratorDrainTests : TestBase<AabbClusterEnumeratorDra
         var cs = dbe._archetypeStates[Archetype<ClReachUnit>.Metadata.ArchetypeId].ClusterState;
         if (promoteThreshold > 0)
         {
-            Assert.That(cs.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote, or the tree path never runs");
+            Assert.That(cs.Realm0Spatial.PromotedCellCount, Is.GreaterThan(0), "precondition: the cell must promote, or the tree path never runs");
         }
         var queries = RandomQueries2D(1_000d, seed: 41, count: 20).ToList();
         var saved = SpatialQueryTuning.SimdNarrowphase;

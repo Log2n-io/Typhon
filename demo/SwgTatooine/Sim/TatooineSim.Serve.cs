@@ -31,15 +31,20 @@ public sealed partial class TatooineSim
         _playerView = _viewTx.Query<Player>().ToView();
         _creatureView = _viewTx.Query<Creature>().ToView();
         _npcView = _viewTx.Query<CityNpc>().ToView();
+        _shipView = SpaceRealm >= 0 ? _viewTx.Query<Starship>().ToView() : null;
         _lairView = _viewTx.Query<CreatureLair>().ToView();
         _structureView = _viewTx.Query<WorldObject>().ToView();
 
         _bridge = new SimBridge(_config, Map, Index)
         {
             Dbe = Dbe,
+            PlanetIndexes = Indexes,
+            InteriorsPerPlanet = InteriorsPerPlanet,
+            FirstDungeonRealm = FirstDungeonRealm,
             PlayerView = _playerView,
             CreatureView = _creatureView,
             NpcView = _npcView,
+            ShipView = _shipView,
             LairView = _lairView,
             StructureView = _structureView,
         };
@@ -71,6 +76,7 @@ public sealed partial class TatooineSim
         TatooineReplication.PlayerLeaveM = _config.PlayerLeaveM;
         TatooineReplication.GodRegionMaxEdgeM = _config.GodRegionMaxEdgeM;
         TatooineReplication.GodNearBudget = _config.GodNearBudget;
+        TatooineReplication.Planets = _config.Planets;
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 

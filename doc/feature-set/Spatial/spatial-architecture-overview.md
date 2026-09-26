@@ -29,8 +29,8 @@ source.
 
 Two layers make that one index work, and they are levels of the same structure rather than alternatives:
 
-1. **The cell grid** — one engine-wide coordinate grid, configured once via
-   [Spatial Grid Configuration & Tier Control](./spatial-grid-config.md). It is sparse and three-level, so empty
+1. **The cell grid** — one coordinate grid per realm (realm 0's configured once via
+   [Spatial Grid Configuration & Tier Control](./spatial-grid-config.md), any other realm's through [Realms](./realms.md)). It is sparse and three-level, so empty
    regions cost nothing, and it answers coarse questions cheaply per cell instead of per entity. It underpins both
    the index and the dispatch features: [Spatially-Coherent Entity Clustering](./spatial-coherent-clustering.md)
    (every entity in a cluster shares one grid cell), [Tiered Simulation Dispatch](./tiered-simulation-dispatch.md)
@@ -69,8 +69,8 @@ for this reason.
 
 - **One index** — the per-cell cluster broadphase serves every spatial query, and it is the only index home. Nothing bypasses the grid, and no configuration adds a second structure alongside it.
 - **`[SpatialIndex]` alone is not sufficient** — it requires `ConfigureSpatialGrid` to have been called before `InitializeArchetypes`, and registering it never configures the grid implicitly. The failure is a startup exception naming the archetype, not a degraded query.
-- **The grid is engine-wide and singular** — every spatial archetype shares one cell size and one set of world bounds, fixed before `InitializeArchetypes` and immutable afterwards. There is no per-archetype grid.
-- **Two `cellSize` parameters exist, but only one shapes queries** — the engine-wide `SpatialGridConfig.CellSize`. The `cellSize` argument on `[SpatialIndex]` is carried in schema metadata and sizes no live structure.
+- **The grid is per realm, never per archetype** — within a realm every spatial archetype shares one cell size and one set of world bounds, fixed at registration and immutable afterwards. Several realms are several isolated worlds, each with its own grid ([Realms](./realms.md)); an application that never names a realm has one, realm 0.
+- **Two `cellSize` parameters exist, but only one shapes queries** — the realm's `SpatialGridConfig.CellSize`. The `cellSize` argument on `[SpatialIndex]` is carried in schema metadata and sizes no live structure.
 - **The world is bounded** — positions outside the configured bounds are clamped into the nearest edge cell rather than rejected. See [What Spatial Costs You](./spatial-cost-model.md) for what that means in practice.
 - **This page describes architecture, not an API surface of its own** — there is nothing here to call; every code example lives on the linked feature pages.
 

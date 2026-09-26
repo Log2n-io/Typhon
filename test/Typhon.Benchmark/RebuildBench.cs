@@ -80,8 +80,8 @@ internal static class RebuildBench
 
         void Reset()
         {
-            dbe.SpatialGrid.ResetCellState();
-            cs.CellClusterPool = new CellClusterPool(dbe.SpatialGrid.CellCount);
+            dbe.Realm0Grid.ResetCellState();
+            cs.Realm0Spatial.CellClusterPool = new CellClusterPool(dbe.Realm0Grid.CellCount);
         }
 
         static double TimeMs(Action a)
@@ -98,9 +98,9 @@ internal static class RebuildBench
             // biases the comparison in favour of the two that follow it — small once warm, but free to remove.
             var order = new (string Name, Action Run)[]
             {
-                ("twoPass", () => { cs.RebuildCellState(dbe.SpatialGrid); cs.RebuildClusterAabbs(dbe.SpatialGrid); }),
-                ("serial", () => cs.RebuildSpatialStateFromData(dbe.SpatialGrid, dbe.EpochManager, 1)),
-                ("parallel", () => cs.RebuildSpatialStateFromData(dbe.SpatialGrid, dbe.EpochManager, 0)),
+                ("twoPass", () => { cs.RebuildCellState(dbe.Realm0Grid); cs.RebuildClusterAabbs(dbe.Realm0Grid); }),
+                ("serial", () => cs.RebuildSpatialStateFromData(dbe.Realm0Grid, dbe.EpochManager, 1)),
+                ("parallel", () => cs.RebuildSpatialStateFromData(dbe.Realm0Grid, dbe.EpochManager, 0)),
             };
 
             double twoPass = 0, mergedSerial = 0, mergedParallel = 0;
@@ -134,7 +134,7 @@ internal static class RebuildBench
             for (var r = 0; r < 5; r++)
             {
                 Reset();
-                var ms = TimeMs(() => cs.RebuildSpatialStateFromData(dbe.SpatialGrid, dbe.EpochManager, w));
+                var ms = TimeMs(() => cs.RebuildSpatialStateFromData(dbe.Realm0Grid, dbe.EpochManager, w));
                 if (ms < best) { best = ms; }
             }
             Console.WriteLine($"      W={w,2}   {best,7:F2} ms");

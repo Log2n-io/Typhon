@@ -60,19 +60,19 @@ class GridCellSizeSweepTests : TestBase<GridCellSizeSweepTests>
 
     private static (long bytes, int occupiedSlots, long clusters) MeasureIndexBytes(ArchetypeClusterState cs, List<int> perCellCounts)
     {
-        if (cs.PerCellIndex == null)
+        if (cs.Realm0Spatial.PerCellIndex == null)
         {
             return (0, 0, 0);
         }
 
         // The PerCellIndex array itself: one reference per cell key the grid has ever handed out.
-        long bytes = 24 + ((long)cs.PerCellIndex.Length * 8);
+        long bytes = 24 + ((long)cs.Realm0Spatial.PerCellIndex.Length * 8);
         int occupied = 0;
         long clusters = 0;
 
-        for (int i = 0; i < cs.PerCellIndex.Length; i++)
+        for (int i = 0; i < cs.Realm0Spatial.PerCellIndex.Length; i++)
         {
-            var slot = cs.PerCellIndex[i];
+            var slot = cs.Realm0Spatial.PerCellIndex[i];
             if (slot == null)
             {
                 continue;
@@ -172,7 +172,7 @@ class GridCellSizeSweepTests : TestBase<GridCellSizeSweepTests>
             }
             dbe.WriteTickFence(1);
 
-            var grid = dbe.SpatialGrid;
+            var grid = dbe.Realm0Grid;
             var cs = dbe._archetypeStates[Archetype<ClCohUnit>.Metadata.ArchetypeId].ClusterState;
             var (idxBytes, occupiedSlots, clusters) = MeasureIndexBytes(cs);
             long heapAfter = GC.GetTotalMemory(true);
@@ -360,7 +360,7 @@ class GridCellSizeSweepTests : TestBase<GridCellSizeSweepTests>
             using var scope = ServiceProvider.CreateScope();
             using var dbe = BuildEngine(scope, cellSize, xs, ys);
 
-            var grid = dbe.SpatialGrid;
+            var grid = dbe.Realm0Grid;
             var cs = dbe._archetypeStates[Archetype<ClCohUnit>.Metadata.ArchetypeId].ClusterState;
             var counts = new List<int>();
             var (idxBytes, _, _) = MeasureIndexBytes(cs, counts);
@@ -406,7 +406,7 @@ class GridCellSizeSweepTests : TestBase<GridCellSizeSweepTests>
             using var scope = ServiceProvider.CreateScope();
             using var dbe = BuildEngine(scope, CellSize, xs, ys);
 
-            var grid = dbe.SpatialGrid;
+            var grid = dbe.Realm0Grid;
             var cs = dbe._archetypeStates[Archetype<ClCohUnit>.Metadata.ArchetypeId].ClusterState;
             var counts = new List<int>();
             var (idxBytes, _, _) = MeasureIndexBytes(cs, counts);
