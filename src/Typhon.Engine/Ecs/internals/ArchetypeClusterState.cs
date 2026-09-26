@@ -6183,10 +6183,12 @@ internal sealed unsafe partial class ArchetypeClusterState
             return;
         }
 
+        // Realms D2: a dormant realm's clusters are frozen — no counter advances, no heartbeat fires. Its elective work waits for the realm to run.
+        var dormant = RealmDispatch is { Filtering: true } dispatch ? dispatch : null;
         for (var i = 0; i < ActiveClusterCount; i++)
         {
             var chunkId = ActiveClusterIds[i];
-            if (chunkId >= SleepStates.Length)
+            if (chunkId >= SleepStates.Length || (dormant != null && dormant.IsExcluded(chunkId)))
             {
                 continue;
             }
@@ -6221,6 +6223,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 if ((int)(tickNumber % HeartbeatIntervalTicks) == chunkId % HeartbeatIntervalTicks)
                 {
                     SleepStates[chunkId] = ClusterSleepState.WakePending;
+                    _wakePendingCount++;
                     // SleepingClusterCount is decremented when WakePending→Active in TransitionWakePendingToActive
                 }
             }
@@ -6242,6 +6245,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (SleepStates[chunkId] == ClusterSleepState.Sleeping)
         {
             SleepStates[chunkId] = ClusterSleepState.WakePending;
+            _wakePendingCount++;
             // SleepingClusterCount is decremented in TransitionWakePendingToActive (next tick start)
         }
     }
@@ -6251,6 +6255,9 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// Called single-threaded from <c>BuildTierIndexesAtTickStart</c> before tier index rebuild so woken clusters appear in this tick's per-tier lists.
     /// Guarded by <see cref="_lastWakeTransitionTick"/> to avoid redundant scans when multiple systems reference the same archetype. Issue #233.
     /// </summary>
+    // Clusters set WakePending since the last transition (a heartbeat or a wake request), all fence-serial; the transition walks only when it is non-zero.
+    private int _wakePendingCount;
+
     internal void TransitionWakePendingToActive(long currentTick)
     {
         if (SleepStates == null || _lastWakeTransitionTick == currentTick)
@@ -6258,6 +6265,14 @@ internal sealed unsafe partial class ArchetypeClusterState
             return;
         }
         _lastWakeTransitionTick = currentTick;
+
+        // Nothing pending — the steady state of a world whose sleepers stay asleep: no walk of the active list (Realms D2).
+        if (_wakePendingCount == 0)
+        {
+            return;
+        }
+
+        _wakePendingCount = 0;
 
         for (var i = 0; i < ActiveClusterCount; i++)
         {
@@ -6765,7 +6780,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // Everything derived from a grid — extents, the nomination cap, the cell-target resolver — is the CLUSTER's realm's, loaded when the realm changes
         // from one cluster to the next (Realms C1): a cell key, a cell size and a packing bound all belong to one realm's grid. With one realm the frame
         // loads once, on the first cluster. Step 14 (D1): the extents are the FLOORS; the operative target is a function of the cell's population, which
-        // the resolver resolves once per cell change. Repair nominates in the primary realm only (§12 C1c).
+        // the resolver resolves once per cell change. Repair nominates in every realm (Realms D2).
         var clusterRealmMap = ClusterRealmMap;
         var frameRealm = -1;
         var f = default(AabbRealmFrame);
@@ -6773,7 +6788,9 @@ internal sealed unsafe partial class ArchetypeClusterState
         var slotCapacity = BitOperations.PopCount(Layout.FullMask);
         var flatField = SpatialSlot.HasSpatialIndex && SpatialSlot.FieldInfo.FieldType is SpatialFieldType.AABB2F or SpatialFieldType.BSphere2F
             or SpatialFieldType.AABB2D or SpatialFieldType.BSphere2D;
-        var repairRealm = repairNominationBuffer != null && primaryGrid != null ? primaryGrid.Realm.Value : -1;
+        // Every realm nominates (Realms D2): the one per-archetype queue ranks candidates across realms, and the planner skips those of realms that are not
+        // runnable. The primary grid is still required, as the queue's configuration (D-6).
+        var nominateRepairs = repairNominationBuffer != null && primaryGrid != null;
 
         // Hoisted out of the per-cluster loop, which is the whole point of taking it as a parameter (D1). 64 slots is the cluster capacity ceiling and
         // three axes are cached, so this is 768 bytes on the slice worker's stack, reused for every cluster the slice touches. Allocating it per cluster
@@ -6826,7 +6843,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     if (clusterRealm != frameRealm)
                     {
                         frameRealm = clusterRealm;
-                        f = LoadAabbRealmFrame(RealmSpatial[clusterRealm], clusterRealm == repairRealm);
+                        f = LoadAabbRealmFrame(RealmSpatial[clusterRealm], nominateRepairs);
                         targets = new CellTargetResolver(f.Grid, f.Rs.CellClusterPool, f.CellSize, f.DriftTargetExtent, f.RepairExtent, slotCapacity,
                             flatField, DriftTargetBoost);
                     }
@@ -6935,7 +6952,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     tightness.Note(f.OutlierGuardActive, maxAxisExtent, f.InverseCellSize, targets.PackingBound);
                     if (repairGated)
                     {
-                        repairNominationBuffer.Add(new RepairNomination(cellKey, maxAxisExtent * f.InverseCellSize));
+                        repairNominationBuffer.Add(new RepairNomination(f.Grid.Realm.Value, cellKey, maxAxisExtent * f.InverseCellSize));
                     }
 
                     if (driftGated)
@@ -7004,7 +7021,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 if (clusterRealm != frameRealm)
                 {
                     frameRealm = clusterRealm;
-                    f = LoadAabbRealmFrame(RealmSpatial[clusterRealm], clusterRealm == repairRealm);
+                    f = LoadAabbRealmFrame(RealmSpatial[clusterRealm], nominateRepairs);
                     targets = new CellTargetResolver(f.Grid, f.Rs.CellClusterPool, f.CellSize, f.DriftTargetExtent, f.RepairExtent, slotCapacity,
                         flatField, DriftTargetBoost);
                 }
@@ -7114,7 +7131,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                     var repairMaxExtent = MaxAxisExtent(in fresh);
                     if (repairMaxExtent > targets.RepairExtent)
                     {
-                        repairNominationBuffer.Add(new RepairNomination(cellKey, repairMaxExtent * f.InverseCellSize));
+                        repairNominationBuffer.Add(new RepairNomination(f.Grid.Realm.Value, cellKey, repairMaxExtent * f.InverseCellSize));
                     }
                 }
 

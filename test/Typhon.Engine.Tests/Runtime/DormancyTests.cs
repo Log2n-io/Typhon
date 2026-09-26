@@ -304,6 +304,39 @@ class DormancyTests : TestBase<DormancyTests>
         Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.WakePending));
     }
 
+    /// <summary>
+    /// Realms §9.3-3: a Dynamic spatial archetype with nothing written takes the fence's clean-spatial path, which returned before the sweep — its clusters
+    /// never slept, and a sleeping one's heartbeat never fired. Through the real fence now, not a direct sweep call.
+    /// </summary>
+    [Test]
+    [VerifiesRule("DM-04")]
+    public void IdleDynamicArchetype_TheFenceStillSweeps_AndTheHeartbeatWakes()
+    {
+        using var dbe = SetupEngineWithGrid();
+        var (cs, chunkId, _) = SpawnInCell(dbe, 5f, 5f, SimTier.Tier0);
+        dbe.WriteTickFence(1);
+        cs.SleepThresholdTicks = 3;
+        cs.HeartbeatIntervalTicks = 10;
+
+        for (var tick = 2; tick <= 5; tick++)
+        {
+            dbe.WriteTickFence(tick);
+        }
+
+        Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.Sleeping), "idle fences advance the sleep counter");
+
+        // The next tick whose heartbeat slot is this cluster's: the fence wakes it, and the tick-start transition makes it active.
+        var heartbeat = 6 + ((chunkId - 6) % 10 + 10) % 10;
+        for (var tick = 6; tick <= heartbeat; tick++)
+        {
+            dbe.WriteTickFence(tick);
+        }
+
+        Assert.That(cs.SleepStates[chunkId], Is.EqualTo(ClusterSleepState.WakePending), "the heartbeat fires on an idle fence");
+        cs.TransitionWakePendingToActive(heartbeat + 1);
+        Assert.That((cs.SleepStates[chunkId], cs.SleepingClusterCount), Is.EqualTo((ClusterSleepState.Active, 0)));
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Test 8: No overhead when no sleeping
     // ═══════════════════════════════════════════════════════════════════════

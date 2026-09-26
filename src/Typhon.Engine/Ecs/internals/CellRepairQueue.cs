@@ -19,6 +19,9 @@ namespace Typhon.Engine.Internals;
 /// archetype's clusters. Two archetypes over one cell are two independent candidates, which is correct: they degrade and are repaired independently.</para>
 /// <para><b>Transient, and owes the WAL nothing.</b> Every field here is derived from cluster bounds that are themselves rebuilt at startup. A crash loses
 /// the queue and the next tick's AABB pass re-nominates whatever still deserves it.</para>
+/// <para><b>Keyed by (realm, cell) — Realms D2, decision D-6.</b> One queue per archetype, whatever the realm count: a candidate is a cell of one realm
+/// (<see cref="Key"/>), scored against that realm's grid and cell cluster pool, so tidying is ranked by need across realms and the archetype's one budget
+/// stays bounded. A realm that is not runnable keeps its candidates; the planner skips them until it runs again.</para>
 /// <para><b>Single-threaded by contract.</b> Every method is called from Prep, which runs one work item per archetype. Nomination — the parallel half —
 /// goes into <c>ArchetypeClusterState.RepairNominations</c> under the finalize lock and is folded in here by <see cref="Absorb"/>.</para>
 /// <para><b>A repaired cell cools before it can queue again</b> (<c>RP-07</c>, <c>SpatialGridConfig.RepairCooldownTicks</c>). Under motion a re-packed
@@ -55,10 +58,10 @@ internal sealed class CellRepairQueue
     /// <summary>Per-tick multiplier applied to a candidate's age. See <see cref="Score"/>.</summary>
     private readonly float _agingRatePerTick;
 
-    private readonly Dictionary<int, Candidate> _candidates = [];
+    private readonly Dictionary<long, Candidate> _candidates = [];
 
-    /// <summary>The ranked cell keys produced by the last <see cref="Rerank"/>, best first. Only <see cref="_rankedCount"/> entries are valid.</summary>
-    private int[] _ranked = [];
+    /// <summary>The ranked candidate keys produced by the last <see cref="Rerank"/>, best first. Only <see cref="_rankedCount"/> entries are valid.</summary>
+    private long[] _ranked = [];
 
     private int _rankedCount;
 
@@ -68,7 +71,7 @@ internal sealed class CellRepairQueue
     /// <summary>Nominations absorbed since the last re-rank. A rank whose inputs have not changed is a rank not worth paying for.</summary>
     private int _dirtySinceRank;
 
-    /// <summary>The <c>SpatialGrid.TierVersion</c> the last re-rank saw, so a tier flip invalidates the order that used it.</summary>
+    /// <summary>The engine-wide tier version the last re-rank saw, so a tier flip in any realm invalidates the order that used it.</summary>
     private int _rankedTierVersion = -1;
 
     /// <summary>Ticks a repaired cell spends outside the candidate set; <c>0</c> disables the cooldown.</summary>
@@ -78,10 +81,10 @@ internal sealed class CellRepairQueue
     /// Cells waiting out a cooldown, each mapped to the worst degradation nominated for it since its repair — <c>0</c> when nothing nominated it. Disjoint
     /// from <see cref="_candidates"/>: a cell is in one, the other, or neither. When each cooldown ends is <see cref="_coolingOrder"/>'s business.
     /// </summary>
-    private readonly Dictionary<int, float> _cooling = [];
+    private readonly Dictionary<long, float> _cooling = [];
 
     /// <summary>The same cells in the order they were repaired — which, with one cooldown for every cell, is the order they are released in.</summary>
-    private readonly Queue<(int CellKey, long ReleaseTick)> _coolingOrder = new();
+    private readonly Queue<(long Key, long ReleaseTick)> _coolingOrder = new();
 
     /// <summary>Candidates dropped because the queue was full, since this queue was created.</summary>
     internal long TotalEvicted;
@@ -89,6 +92,15 @@ internal sealed class CellRepairQueue
     /// <summary><see cref="System.Diagnostics.Stopwatch"/> ticks spent in <see cref="Absorb"/> and <see cref="Rerank"/> during the last tick —
     /// <c>AC-11.5</c>'s numerator.</summary>
     internal long LastTickMaintenanceTicks;
+
+    /// <summary>The candidate key of cell <paramref name="cellKey"/> in realm <paramref name="realm"/>: a cell key names a cell in every realm.</summary>
+    internal static long Key(ushort realm, int cellKey) => ((long)realm << 32) | (uint)cellKey;
+
+    /// <summary>The realm of candidate key <paramref name="key"/>.</summary>
+    internal static ushort RealmOf(long key) => (ushort)(key >> 32);
+
+    /// <summary>The cell of candidate key <paramref name="key"/>, within its realm's grid.</summary>
+    internal static int CellOf(long key) => (int)(uint)key;
 
     internal CellRepairQueue(int maxCells, float agingRatePerTick, int cooldownTicks = 0)
     {
@@ -113,8 +125,8 @@ internal sealed class CellRepairQueue
     /// </remarks>
     internal bool NeedsPlanning(long tickNumber) => _candidates.Count > 0 || (_coolingOrder.TryPeek(out var next) && next.ReleaseTick <= tickNumber);
 
-    /// <summary>Ranked cell keys, best first — valid only immediately after <see cref="Rerank"/>.</summary>
-    internal ReadOnlySpan<int> Ranked => _ranked.AsSpan(0, _rankedCount);
+    /// <summary>Ranked candidate keys (<see cref="Key"/>), best first — valid only immediately after <see cref="Rerank"/>.</summary>
+    internal ReadOnlySpan<long> Ranked => _ranked.AsSpan(0, _rankedCount);
 
     /// <summary>
     /// Fold one tick's nominations into the persistent set, keeping the worst degradation per cell.
@@ -126,33 +138,34 @@ internal sealed class CellRepairQueue
     /// candidate against the current tick — see <see cref="TryEvictWorst"/> for why the cached score cannot be used — so the scan is O(n) in the candidates
     /// but runs only in the over-subscribed case it exists for.</para>
     /// </remarks>
-    internal void Absorb(List<ArchetypeClusterState.RepairNomination> nominations, SpatialGrid grid, ArchetypeClusterState state, long tickNumber)
+    internal void Absorb(List<ArchetypeClusterState.RepairNomination> nominations, ArchetypeClusterState state, long tickNumber)
     {
         for (var i = 0; i < nominations.Count; i++)
         {
             var nomination = nominations[i];
+            var key = Key(nomination.Realm, nomination.CellKey);
 
             // HELD, neither admitted nor dropped (RP-07). The cell was repaired too recently to be a candidate, but the evidence is kept and handed back
             // by ReleaseCooled. Dropping it would lose a cell that goes still while it cools: in barrier-only mode nothing nominates a cell nobody writes
             // (RP-04's known gap), so this nomination may be the last one it ever gets.
-            if (_cooling.Count > 0 && _cooling.TryGetValue(nomination.CellKey, out var held))
+            if (_cooling.Count > 0 && _cooling.TryGetValue(key, out var held))
             {
                 if (nomination.Degradation > held)
                 {
-                    _cooling[nomination.CellKey] = nomination.Degradation;
+                    _cooling[key] = nomination.Degradation;
                 }
 
                 continue;
             }
 
-            Admit(nomination.CellKey, nomination.Degradation, grid, state, tickNumber);
+            Admit(key, nomination.Degradation, state, tickNumber);
         }
     }
 
     /// <summary>Fold one degradation reading into the candidate set: raise an existing candidate's, or queue a new candidate, evicting at the cap.</summary>
-    private void Admit(int cellKey, float degradation, SpatialGrid grid, ArchetypeClusterState state, long tickNumber)
+    private void Admit(long key, float degradation, ArchetypeClusterState state, long tickNumber)
     {
-        if (_candidates.TryGetValue(cellKey, out var existing))
+        if (_candidates.TryGetValue(key, out var existing))
         {
             if (degradation > existing.Degradation)
             {
@@ -161,8 +174,8 @@ internal sealed class CellRepairQueue
                 // Re-scored, not just re-degraded. TryEvictWorst picks its victim on the CACHED score, so a cell whose degradation has just tripled
                 // would otherwise carry its pre-nomination score into the victim scan and lose to a mediocre newcomer scored fresh — evicting the
                 // candidate that most deserves servicing, at the exact moment it became the most deserving.
-                existing.Score = Score(cellKey, in existing, grid, state, tickNumber);
-                _candidates[cellKey] = existing;
+                existing.Score = Score(key, in existing, state, tickNumber);
+                _candidates[key] = existing;
                 _dirtySinceRank++;
             }
 
@@ -181,9 +194,9 @@ internal sealed class CellRepairQueue
         // An unscored newcomer enters at 0, which is below every ranked candidate — so the next newcomer of the same batch evicts IT, and the one
         // after that evicts the second. Only the last nomination of a batch would survive, TotalEvicted would be inflated by the churn, and the
         // eviction policy would be last-writer-wins wearing a ranking as a disguise. Scoring first makes the victim scan compare like with like.
-        candidate.Score = Score(cellKey, in candidate, grid, state, tickNumber);
+        candidate.Score = Score(key, in candidate, state, tickNumber);
 
-        if (_candidates.Count >= _maxCells && !TryEvictWorst(candidate.Score, grid, state, tickNumber))
+        if (_candidates.Count >= _maxCells && !TryEvictWorst(candidate.Score, state, tickNumber))
         {
             // Every live candidate outranks the newcomer, so admitting it would mean evicting something better. Dropped, and counted: a non-zero
             // eviction rate against a full queue is the reading that says the cap is below what the world actually degrades.
@@ -191,7 +204,7 @@ internal sealed class CellRepairQueue
             return;
         }
 
-        _candidates[cellKey] = candidate;
+        _candidates[key] = candidate;
         _dirtySinceRank++;
     }
 
@@ -203,18 +216,18 @@ internal sealed class CellRepairQueue
     /// and <see cref="Remove"/> is its path: RP-03's no-op memo already stops it recurring, and a cooldown would make the cell's next genuine degradation wait
     /// out a repair that never happened.
     /// </remarks>
-    internal void MarkRepaired(int cellKey, long tickNumber)
+    internal void MarkRepaired(long key, long tickNumber)
     {
         // A cooling cell is never a candidate, so the planner cannot have repaired one — and a second cooldown would leave one cell two FIFO entries.
-        Debug.Assert(!_cooling.ContainsKey(cellKey), "a cooling cell was repaired");
-        Remove(cellKey);
+        Debug.Assert(!_cooling.ContainsKey(key), "a cooling cell was repaired");
+        Remove(key);
         if (_cooldownTicks == 0)
         {
             return;
         }
 
-        _cooling[cellKey] = 0f;
-        _coolingOrder.Enqueue((cellKey, tickNumber + _cooldownTicks));
+        _cooling[key] = 0f;
+        _coolingOrder.Enqueue((key, tickNumber + _cooldownTicks));
     }
 
     /// <summary>
@@ -229,14 +242,14 @@ internal sealed class CellRepairQueue
     /// fence already requires: a repeated tick never ends a cooldown, and a decreasing one delays releases behind an older head. Neither corrupts
     /// anything.</para>
     /// </remarks>
-    internal void ReleaseCooled(SpatialGrid grid, ArchetypeClusterState state, long tickNumber)
+    internal void ReleaseCooled(ArchetypeClusterState state, long tickNumber)
     {
         while (_coolingOrder.TryPeek(out var next) && next.ReleaseTick <= tickNumber)
         {
             _coolingOrder.Dequeue();
-            if (_cooling.Remove(next.CellKey, out var held) && held > 0f)
+            if (_cooling.Remove(next.Key, out var held) && held > 0f)
             {
-                Admit(next.CellKey, held, grid, state, tickNumber);
+                Admit(next.Key, held, state, tickNumber);
             }
         }
     }
@@ -252,9 +265,9 @@ internal sealed class CellRepairQueue
     /// <para>Aging is applied at <b>score</b> time rather than by re-sorting on a timer, so a quiet tick still costs nothing: the order only goes stale in
     /// the direction of under-serving old candidates, and the next rank — triggered by the next nomination anywhere in the archetype — corrects it.</para>
     /// </remarks>
-    internal bool Rerank(SpatialGrid grid, ArchetypeClusterState state, long tickNumber)
+    /// <remarks><c>tierVersion</c> is the engine-wide one (<see cref="RealmTable.TierVersion"/>): a tier flip in any realm re-weights candidates.</remarks>
+    internal bool Rerank(int tierVersion, ArchetypeClusterState state, long tickNumber)
     {
-        var tierVersion = grid.TierVersion;
         if (_dirtySinceRank == 0 && tierVersion == _rankedTierVersion && _rankedCount == _candidates.Count)
         {
             return false;
@@ -264,7 +277,7 @@ internal sealed class CellRepairQueue
         if (_ranked.Length < count)
         {
             var grown = Math.Max(count, Math.Max(16, _ranked.Length * 2));
-            _ranked = new int[grown];
+            _ranked = new long[grown];
             _rankedScores = new float[grown];
         }
 
@@ -272,7 +285,7 @@ internal sealed class CellRepairQueue
         foreach (var pair in _candidates)
         {
             _ranked[n] = pair.Key;
-            _rankedScores[n] = -Score(pair.Key, pair.Value, grid, state, tickNumber);   // negated so an ascending sort yields best-first, with no comparer
+            _rankedScores[n] = -Score(pair.Key, pair.Value, state, tickNumber);   // negated so an ascending sort yields best-first, with no comparer
             n++;
         }
 
@@ -314,9 +327,12 @@ internal sealed class CellRepairQueue
     /// <para><b>ageFactor</b> — unbounded in the tick count, which is what makes <c>AC-11.3</c> true rather than likely: whatever a candidate's base
     /// score, enough ticks of waiting carry it to the head. Ranking alone starves; §5.6 asks for ranking, not for starvation.</para>
     /// </remarks>
-    private float Score(int cellKey, in Candidate candidate, SpatialGrid grid, ArchetypeClusterState state, long tickNumber)
+    private float Score(long key, in Candidate candidate, ArchetypeClusterState state, long tickNumber)
     {
-        var pool = state.SpatialOf(grid).CellClusterPool;
+        // The candidate's OWN realm: its grid for the tier weight, its cluster pool for the count. A realm whose state is gone scores the floor.
+        var rs = SpatialOfRealm(state, RealmOf(key));
+        var cellKey = CellOf(key);
+        var pool = rs?.CellClusterPool;
         var clusters = pool != null ? pool.GetClusters(cellKey) : default;
         if (clusters.Length < 2)
         {
@@ -327,7 +343,14 @@ internal sealed class CellRepairQueue
 
         var age = tickNumber - candidate.WaitingSinceTick;
         var ageFactor = 1f + (_agingRatePerTick * (age > 0 ? age : 0));
-        return candidate.Degradation * TierWeight(grid, cellKey) * clusters.Length * ageFactor;
+        return candidate.Degradation * TierWeight(rs.Grid, cellKey) * clusters.Length * ageFactor;
+    }
+
+    /// <summary>The archetype's spatial state in <paramref name="realm"/>, or null when it has none there.</summary>
+    private static RealmArchetypeSpatial SpatialOfRealm(ArchetypeClusterState state, ushort realm)
+    {
+        var byRealm = state.RealmSpatial;
+        return byRealm != null && realm < byRealm.Length ? byRealm[realm] : null;
     }
 
     /// <summary>
@@ -345,7 +368,7 @@ internal sealed class CellRepairQueue
     /// </remarks>
     private static float TierWeight(SpatialGrid grid, int cellKey)
     {
-        if ((uint)cellKey >= (uint)grid.CellCount)
+        if (grid == null || (uint)cellKey >= (uint)grid.CellCount)
         {
             return 1f;
         }
@@ -373,7 +396,7 @@ internal sealed class CellRepairQueue
     /// this evicts an approximately-worst candidate rather than the worst. That is acceptable for a heuristic queue whose whole output is an ordering
     /// preference, and it errs by keeping a slightly worse cell rather than by dropping a better one — the re-score is what rules out the second.</para>
     /// </remarks>
-    private bool TryEvictWorst(float incomingScore, SpatialGrid grid, ArchetypeClusterState state, long tickNumber)
+    private bool TryEvictWorst(float incomingScore, ArchetypeClusterState state, long tickNumber)
     {
         for (var i = _rankedCount - 1; i >= 0; i--)
         {
@@ -384,7 +407,7 @@ internal sealed class CellRepairQueue
             }
 
             // A tie keeps the incumbent, so a batch of identical nominations against a full queue evicts nothing rather than churning through it.
-            if (incomingScore <= Score(key, in candidate, grid, state, tickNumber))
+            if (incomingScore <= Score(key, in candidate, state, tickNumber))
             {
                 return false;
             }
@@ -409,16 +432,16 @@ internal sealed class CellRepairQueue
     }
 
     /// <summary>Forget one cell — called when the planner declines it as unrepairable. A cell it services goes through <see cref="MarkRepaired"/>.</summary>
-    internal void Remove(int cellKey)
+    internal void Remove(long key)
     {
-        if (_candidates.Remove(cellKey))
+        if (_candidates.Remove(key))
         {
             _dirtySinceRank++;
         }
     }
 
     /// <summary>The degradation recorded for a queued cell, or <c>0</c> when it is not queued. Drives the safety valve's threshold test.</summary>
-    internal float DegradationOf(int cellKey) => _candidates.TryGetValue(cellKey, out var candidate) ? candidate.Degradation : 0f;
+    internal float DegradationOf(long key) => _candidates.TryGetValue(key, out var candidate) ? candidate.Degradation : 0f;
 
     /// <summary>Whether the candidate set is at its hard cap, so the next admission has to evict one (<c>AC-11.8</c>).</summary>
     internal bool IsAtCapacity => _candidates.Count >= _maxCells;
@@ -437,9 +460,10 @@ internal sealed class CellRepairQueue
     /// <para>Scoring every critical candidate is O(n) and the sort it replaces is O(n log n), so the saving this exists for survives: what is skipped is
     /// the ORDER over the whole queue, not the choice among the cells the valve may take.</para>
     /// </remarks>
-    internal bool TryFindCritical(float criticalRatio, SpatialGrid grid, ArchetypeClusterState state, long tickNumber, out int cellKey)
+    /// <remarks>With <c>skip</c> non-null, candidates of realms it does not run this tick are passed over (a non-runnable realm waits, D-6).</remarks>
+    internal bool TryFindCritical(float criticalRatio, ArchetypeClusterState state, long tickNumber, out long key, RealmTable skip = null)
     {
-        cellKey = 0;
+        key = 0;
         if (criticalRatio <= 0f)
         {
             return false;
@@ -451,16 +475,16 @@ internal sealed class CellRepairQueue
         {
             // Copied out because Score takes its candidate by `in` and a KeyValuePair's Value is a property, so it has no referenceable location (CS8156).
             var candidate = pair.Value;
-            if (candidate.Degradation < criticalRatio)
+            if (candidate.Degradation < criticalRatio || (skip != null && !skip.IsRunnable(RealmOf(pair.Key))))
             {
                 continue;
             }
 
-            var score = Score(pair.Key, in candidate, grid, state, tickNumber);
+            var score = Score(pair.Key, in candidate, state, tickNumber);
             if (!found || score > bestScore)
             {
                 bestScore = score;
-                cellKey = pair.Key;
+                key = pair.Key;
                 found = true;
             }
         }
@@ -469,7 +493,7 @@ internal sealed class CellRepairQueue
     }
 
     /// <summary>The worst degradation nominated for a cooling cell since its repair, or <c>0</c> when it is not cooling or nothing nominated it.</summary>
-    internal float HeldDegradationOf(int cellKey) => _cooling.TryGetValue(cellKey, out var held) ? held : 0f;
+    internal float HeldDegradationOf(long key) => _cooling.TryGetValue(key, out var held) ? held : 0f;
 
     /// <summary>
     /// Drop every candidate. Called when the archetype's cluster AABBs are rebuilt, because a candidate describes bounds that no longer exist.

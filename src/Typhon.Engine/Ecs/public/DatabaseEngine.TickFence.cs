@@ -1362,7 +1362,7 @@ public partial class DatabaseEngine
         var plannerStart = Stopwatch.GetTimestamp();
         try
         {
-            var planned = clusterState.PlanCellRepairs(PrimaryGrid, ref accessor, tickNumber, remainingBudgetNs, out var budgetUsedMs);
+            var planned = clusterState.PlanCellRepairs(PrimaryGrid, ref accessor, tickNumber, remainingBudgetNs, out var budgetUsedMs, _realms);
             clusterState.LastTickReclusterBudgetUsedMs = budgetUsedMs;
 
             // Timed here rather than inside the planner so the bracket covers the accessor rent too, and fed back on the NEXT tick — the planner's own
@@ -2011,9 +2011,12 @@ public partial class DatabaseEngine
 
         EmitSpatialArchetypeSnapshot(clusterState, meta.ArchetypeId, PrimaryGrid);
 
-        // Clean-spatial-refresh branch (path 1) stops here — no dormancy sweep change (already swept clean), no WAL emit.
+        // Clean-spatial-refresh branch (path 1) stops here — no WAL emit. It still sweeps, with nothing dirty: nothing was written this tick, so every
+        // active cluster is one tick quieter (Realms §9.3-3). Returning before the sweep froze the counters of a fully idle Dynamic archetype, and its
+        // clusters never slept nor did a sleeping one's heartbeat fire.
         if (clusterState.FenceBranchPath == 1)
         {
+            clusterState.DormancySweep(Array.Empty<long>(), tickNumber);
             return false;
         }
 

@@ -1483,6 +1483,16 @@
   on_violation: a fixed budget spent on a partition the queries already find tight — the churn RP-07 stops, paid for again; or, the other way, a
     world whose queries the tally cannot see starved of maintenance
 
+### RP-08: Repair runs in every realm through one queue per archetype, keyed by (realm, cell) `[silent]`
+  invariant the AABB refresh nominates a degraded cluster's cell in the cluster's OWN realm; the queue key is (realm, cell) — a cell key names a
+    cell in every realm, so a bare key would merge two worlds' candidates
+  invariant a candidate is scored against its realm's grid (tier weight) and its realm's cell cluster pool (cluster count), and planned in that
+    realm's grid; the budget, the controllers, the cap and the cooldown stay per archetype (D-6) — the total is bounded whatever the realm count
+  invariant a candidate of a realm that is not runnable waits (DM-04); a candidate whose realm holds no state for the archetype is dropped
+  scope: CellRepairQueue.Key, CellRepairQueue.Absorb, ArchetypeClusterState.PlanCellRepairs, ArchetypeClusterState.RepairNomination
+  verified: RealmRepairTests.RepairRunsInEveryRealm_AndADormantRealmsCandidatesWait (nominating in the primary realm only fails it)
+  on_violation: every realm but the primary loses its clusters' tightness for good — queries there slow down as the world moves
+
 ### RP-07: A repaired cell is not repaired again until its cooldown ends, and what it is nominated for meanwhile is held `[perf][silent]`
   invariant a unit that MOVED entities starts its cell's cooldown: RepairCooldownTicks ticks during which the cell
     is not a queue candidate — not ranked, not serviced, not offered the valve, not counted against
@@ -1979,6 +1989,20 @@
   scope: ArchetypeClusterState.SleepThresholdTicks (property), DormancySweep
   on_violation: counter wraps to 0 → cluster oscillates between Active and Sleeping every 65536 ticks
     instead of staying asleep
+
+### DM-04: Every fence sweeps; dormancy — of a cluster or of a realm — freezes elective work only, never mandatory work `[fatal][silent]`
+  invariant every fence of an archetype with dormancy enabled runs DormancySweep, on every branch — the clean-spatial branch (path 1, nothing
+    written) included: nothing written means every active cluster is one tick quieter (Realms §9.3-3; that branch used to return before it)
+  invariant TransitionWakePendingToActive walks the active list only when a cluster was set WakePending since the last transition
+  invariant a cluster of a Dormant realm (RLM-03) is frozen: its sleep counter does not advance and no heartbeat fires; its repair candidates wait in
+    the archetype's queue, ageing, and are planned once the realm runs (D-6)
+  never skip MANDATORY work for dormancy: a write to an entity of a dormant realm or a sleeping cluster is still detected, migrated, refreshed,
+    WAL-logged and indexed, and wakes what it touches (DM-01; an entry wakes a realm, RLM-03)
+  scope: DatabaseEngine.WriteClusterTickFence, ArchetypeClusterState.DormancySweep, ArchetypeClusterState.TransitionWakePendingToActive,
+    ArchetypeClusterState.PlanCellRepairs, CellRepairQueue.TryFindCritical
+  verified: DormancyTests.IdleDynamicArchetype_TheFenceStillSweeps_AndTheHeartbeatWakes (fails with path 1's early return restored);
+    RealmRepairTests.RepairRunsInEveryRealm_AndADormantRealmsCandidatesWait (planning a dormant realm's candidates fails it)
+  on_violation: a fully idle archetype whose clusters never sleep, or sleep and never heartbeat; a dormant interior tidied every tick for nobody
 
 ---
 

@@ -257,7 +257,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
             cellKeys[c] = grid.WorldToCellKey((c * CellSize) + 50f, 50f, 0f);
         }
 
-        var serviced = new HashSet<int>();
+        var serviced = new HashSet<long>();
         var nominations = new List<ArchetypeClusterState.RepairNomination>();
 
         for (var tick = 1; tick <= 400; tick++)
@@ -271,11 +271,11 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
             nominations.Clear();
             for (var c = 0; c < CellCount; c++)
             {
-                nominations.Add(new ArchetypeClusterState.RepairNomination(cellKeys[c], c == 0 ? 0.95f : 0.20f));
+                nominations.Add(new ArchetypeClusterState.RepairNomination(0, cellKeys[c], c == 0 ? 0.95f : 0.20f));
             }
 
-            queue.Absorb(nominations, grid, state, tick);
-            queue.Rerank(grid, state, tick);
+            queue.Absorb(nominations, state, tick);
+            queue.Rerank(grid.TierVersion, state, tick);
 
             var ranked = queue.Ranked;
             if (ranked.Length == 0)
@@ -321,7 +321,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
             cellKeys[c] = grid.WorldToCellKey((c * CellSize) + 50f, 50f, 0f);
         }
 
-        var serviced = new HashSet<int>();
+        var serviced = new HashSet<long>();
         var nominations = new List<ArchetypeClusterState.RepairNomination>();
 
         for (var tick = 1; tick <= 100; tick++)
@@ -329,11 +329,11 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
             nominations.Clear();
             for (var c = 0; c < CellCount; c++)
             {
-                nominations.Add(new ArchetypeClusterState.RepairNomination(cellKeys[c], c == 0 ? 0.95f : 0.20f));
+                nominations.Add(new ArchetypeClusterState.RepairNomination(0, cellKeys[c], c == 0 ? 0.95f : 0.20f));
             }
 
-            queue.Absorb(nominations, grid, state, tick);
-            queue.Rerank(grid, state, tick);
+            queue.Absorb(nominations, state, tick);
+            queue.Rerank(grid.TierVersion, state, tick);
 
             var ranked = queue.Ranked;
             if (ranked.Length == 0)
@@ -378,8 +378,8 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
 
         const int Cooldown = 10;
         var queue = new CellRepairQueue(maxCells: 4096, agingRatePerTick: 0f, cooldownTicks: Cooldown);
-        var nominations = new List<ArchetypeClusterState.RepairNomination> { new(held, 0.8f), new(quiet, 0.8f) };
-        queue.Absorb(nominations, grid, state, 1);
+        var nominations = new List<ArchetypeClusterState.RepairNomination> { new(0, held, 0.8f), new(0, quiet, 0.8f) };
+        queue.Absorb(nominations, state, 1);
         queue.MarkRepaired(held, 1);
         queue.MarkRepaired(quiet, 1);
         Assert.That((queue.Count, queue.CoolingCount), Is.EqualTo((0, 2)), "a repaired cell must leave the candidates and start cooling");
@@ -387,10 +387,10 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         // Nominated on every tick of its cooldown, the worst reading in the middle — then still: nothing nominates it on the tick the cooldown ends.
         for (var tick = 2; tick <= Cooldown; tick++)
         {
-            queue.ReleaseCooled(grid, state, tick);
+            queue.ReleaseCooled(state, tick);
             nominations.Clear();
-            nominations.Add(new ArchetypeClusterState.RepairNomination(held, tick == 5 ? 0.95f : 0.85f));
-            queue.Absorb(nominations, grid, state, tick);
+            nominations.Add(new ArchetypeClusterState.RepairNomination(0, held, tick == 5 ? 0.95f : 0.85f));
+            queue.Absorb(nominations, state, tick);
             Assert.Multiple(() =>
             {
                 Assert.That(queue.Count, Is.Zero, $"tick {tick}: a cell inside its {Cooldown}-tick cooldown became a repair candidate");
@@ -406,8 +406,8 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         Assert.That(queue.HeldDegradationOf(held), Is.EqualTo(0.95f), "the cooldown must hold the WORST degradation nominated, not the latest");
         Assert.That(queue.NeedsPlanning(1 + Cooldown), Is.True,
             "a cooldown ends on this tick with no nomination and no candidate — the fence must still plan, or the released cell is never re-queued");
-        queue.ReleaseCooled(grid, state, 1 + Cooldown);
-        queue.Rerank(grid, state, 1 + Cooldown);
+        queue.ReleaseCooled(state, 1 + Cooldown);
+        queue.Rerank(grid.TierVersion, state, 1 + Cooldown);
 
         Assert.Multiple(() =>
         {
@@ -433,29 +433,29 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         var grid = dbe.SpatialGrid;
         var a = grid.WorldToCellKey(50f, 50f, 0f);
         var b = grid.WorldToCellKey(CellSize + 50f, 50f, 0f);
-        var nominations = new List<ArchetypeClusterState.RepairNomination> { new(a, 0.9f) };
+        var nominations = new List<ArchetypeClusterState.RepairNomination> { new(0, a, 0.9f) };
 
         // A queue of ONE, whose one place a cooling cell must not occupy.
         var queue = new CellRepairQueue(maxCells: 1, agingRatePerTick: 0f, cooldownTicks: 10);
-        queue.Absorb(nominations, grid, state, 1);
+        queue.Absorb(nominations, state, 1);
         queue.MarkRepaired(a, 1);
-        nominations[0] = new ArchetypeClusterState.RepairNomination(b, 0.2f);
-        queue.Absorb(nominations, grid, state, 2);
+        nominations[0] = new ArchetypeClusterState.RepairNomination(0, b, 0.2f);
+        queue.Absorb(nominations, state, 2);
         Assert.That((queue.Count, queue.TotalEvicted, queue.CoolingCount), Is.EqualTo((1, 0L, 1)),
             "a cooling cell took the queue's only place: the newcomer was dropped or something was evicted to make room");
 
         // After a rebuild a cell key names another cell, so the cooling state goes with the candidates — and leaves no release behind.
         queue.Clear();
         Assert.That((queue.Count, queue.CoolingCount, queue.NeedsPlanning(1_000)), Is.EqualTo((0, 0, false)), "Clear left cooling state behind");
-        nominations[0] = new ArchetypeClusterState.RepairNomination(a, 0.9f);
-        queue.Absorb(nominations, grid, state, 3);
+        nominations[0] = new ArchetypeClusterState.RepairNomination(0, a, 0.9f);
+        queue.Absorb(nominations, state, 3);
         Assert.That(queue.Count, Is.EqualTo(1), "a cell cooling before Clear was held after it instead of admitted");
 
         // Cooldown 0: MarkRepaired is the Remove it replaced, and the next nomination is admitted at once.
         var off = new CellRepairQueue(maxCells: 4096, agingRatePerTick: 0f, cooldownTicks: 0);
-        off.Absorb(nominations, grid, state, 1);
+        off.Absorb(nominations, state, 1);
         off.MarkRepaired(a, 1);
-        off.Absorb(nominations, grid, state, 1);
+        off.Absorb(nominations, state, 1);
         Assert.That((off.Count, off.CoolingCount), Is.EqualTo((1, 0)), "with the cooldown off, a repaired cell was not simply forgotten");
     }
 
@@ -572,15 +572,15 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         var nominations = new List<ArchetypeClusterState.RepairNomination>();
         for (var c = 0; c < CellCount; c++)
         {
-            nominations.Add(new ArchetypeClusterState.RepairNomination(grid.WorldToCellKey((c * CellSize) + 50f, 50f, 0f), 0.60f + (c * 0.05f)));
+            nominations.Add(new ArchetypeClusterState.RepairNomination(0, grid.WorldToCellKey((c * CellSize) + 50f, 50f, 0f), 0.60f + (c * 0.05f)));
         }
 
-        queue.Absorb(nominations, grid, state, 1);
-        queue.Rerank(grid, state, 1);
+        queue.Absorb(nominations, state, 1);
+        queue.Rerank(grid.TierVersion, state, 1);
 
         // What the ranked path would service: the first candidate in rank order that clears the threshold.
         var ranked = queue.Ranked;
-        var expected = -1;
+        var expected = -1L;
         for (var i = 0; i < ranked.Length && expected < 0; i++)
         {
             if (queue.DegradationOf(ranked[i]) >= Critical)
@@ -592,7 +592,7 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         Assert.That(expected, Is.GreaterThanOrEqualTo(0), "precondition: the ranking must hold a critical candidate, or the comparison below is vacuous");
         Assert.Multiple(() =>
         {
-            Assert.That(queue.TryFindCritical(Critical, grid, state, 1, out var found), Is.True,
+            Assert.That(queue.TryFindCritical(Critical, state, 1, out var found), Is.True,
                 "the starved path must find the critical candidate the ranked scan can see");
             Assert.That(found, Is.EqualTo(expected),
                 "the starved path must service the cell the ranking would have hoisted — an arbitrary critical cell can be one RepairOneCell declines, "
@@ -616,15 +616,15 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         var nominations = new List<ArchetypeClusterState.RepairNomination>();
         for (var c = 0; c < CellCount; c++)
         {
-            nominations.Add(new ArchetypeClusterState.RepairNomination(grid.WorldToCellKey((c * CellSize) + 50f, 50f, 0f), 0.40f));
+            nominations.Add(new ArchetypeClusterState.RepairNomination(0, grid.WorldToCellKey((c * CellSize) + 50f, 50f, 0f), 0.40f));
         }
 
-        queue.Absorb(nominations, grid, state, 1);
+        queue.Absorb(nominations, state, 1);
         Assert.Multiple(() =>
         {
             Assert.That(queue.Count, Is.EqualTo(CellCount), "precondition: the candidates are queued, they are merely not critical");
-            Assert.That(queue.TryFindCritical(0.8f, grid, state, 1, out _), Is.False, "0.40 degradation is below the 0.80 threshold and is not the valve's");
-            Assert.That(queue.TryFindCritical(0f, grid, state, 1, out _), Is.False, "a disabled valve (ratio 0) selects nobody, however degraded");
+            Assert.That(queue.TryFindCritical(0.8f, state, 1, out _), Is.False, "0.40 degradation is below the 0.80 threshold and is not the valve's");
+            Assert.That(queue.TryFindCritical(0f, state, 1, out _), Is.False, "a disabled valve (ratio 0) selects nobody, however degraded");
         });
     }
 
@@ -753,13 +753,13 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         var nominations = new List<ArchetypeClusterState.RepairNomination>();
         for (var c = 0; c < 4; c++)
         {
-            nominations.Add(new ArchetypeClusterState.RepairNomination(cellKeys[c], 0.20f));
+            nominations.Add(new ArchetypeClusterState.RepairNomination(0, cellKeys[c], 0.20f));
         }
 
-        nominations.Add(new ArchetypeClusterState.RepairNomination(cellKeys[4], 0.95f));
+        nominations.Add(new ArchetypeClusterState.RepairNomination(0, cellKeys[4], 0.95f));
 
-        queue.Absorb(nominations, grid, state, 1);
-        queue.Rerank(grid, state, 1);
+        queue.Absorb(nominations, state, 1);
+        queue.Rerank(grid.TierVersion, state, 1);
 
         var ranked = queue.Ranked.ToArray();
 
@@ -812,11 +812,11 @@ class ClusterRepairQueueTests : TestBase<ClusterRepairQueueTests>
         var nominations = new List<ArchetypeClusterState.RepairNomination>();
         for (var c = 0; c < CellCount; c++)
         {
-            nominations.Add(new ArchetypeClusterState.RepairNomination(cellKeys[c], 0.85f));
+            nominations.Add(new ArchetypeClusterState.RepairNomination(0, cellKeys[c], 0.85f));
         }
 
-        queue.Absorb(nominations, grid, state, 1);
-        queue.Rerank(grid, state, 1);
+        queue.Absorb(nominations, state, 1);
+        queue.Rerank(grid.TierVersion, state, 1);
 
         var ranked = queue.Ranked;
         Assert.That(ranked.Length, Is.EqualTo(CellCount), "not every cell was queued, so the ordering below is over the wrong set");

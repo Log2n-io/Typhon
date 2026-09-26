@@ -135,11 +135,15 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// </remarks>
     internal readonly struct RepairNomination
     {
-        internal RepairNomination(int cellKey, float degradation)
+        internal RepairNomination(ushort realm, int cellKey, float degradation)
         {
+            Realm = realm;
             CellKey = cellKey;
             Degradation = degradation;
         }
+
+        /// <summary>The realm the cell is in: a cell key names a cell in every realm (Realms D2).</summary>
+        internal ushort Realm { get; }
 
         /// <summary>The cell whose clusters need re-packing. The CELL, not the cluster: a repair unit is a cell's worst clusters, and which those are is a
         /// ranking the planner performs over the whole cell rather than over whichever clusters one slice happened to hold.</summary>
@@ -191,7 +195,7 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal static bool SkipRankWhenBudgetStarved = true;
 
     /// <inheritdoc cref="_repairEntryScratch"/>
-    private int[] _repairCellScratch = [];
+    private long[] _repairCellScratch = [];
 
     /// <inheritdoc cref="_repairEntryScratch"/>
     private int[] _repairDestinationScratch = [];
@@ -372,10 +376,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     /// either. Continuing would mean ranking, sorting and hashing every remaining candidate to reach a conclusion already known — up to
     /// <c>RepairQueueMaxCells</c> of them, on Prep, charged to no budget.</para>
     /// </remarks>
+    /// <remarks>
+    /// <b>Realms D2.</b> <c>grid</c> is the primary realm's: its configuration carries the archetype's budget and queue knobs (D-6). Each candidate is
+    /// planned in its OWN realm's grid, and a candidate of a realm that is not runnable in <c>realms</c> waits (null plans every realm).
+    /// </remarks>
     internal int PlanCellRepairs(SpatialGrid grid, ref ChunkAccessor<PersistentStore> accessor, long tickNumber, double remainingBudgetNs,
-        out double budgetUsedMs)
+        out double budgetUsedMs, RealmTable realms = null)
     {
-        var rs = SpatialOf(grid);
         budgetUsedMs = 0d;
         LastTickRepairedEntityCount = 0;
         LastTickRepairUnitCount = 0;
@@ -392,7 +399,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // one that must come back with the degradation it was held at.
         if (queue != null && grid != null)
         {
-            queue.ReleaseCooled(grid, this, tickNumber);
+            queue.ReleaseCooled(this, tickNumber);
         }
 
         // No CellClusterPool test: absorbing is what makes a nomination survive its tick (TH-03), and gating it on a structure the SCORE happens to read
@@ -400,7 +407,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         // to remove. Score tolerates a missing pool by returning zero, which ranks the candidate last until the pool exists and it is re-ranked.
         if (queue != null && nominations.Count > 0 && grid != null)
         {
-            queue.Absorb(nominations, grid, this, tickNumber);
+            queue.Absorb(nominations, this, tickNumber);
         }
 
         nominations.Clear();
@@ -427,7 +434,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             return 0;
         }
 
-        if (grid == null || ClusterSegment == null || rs.CellClusterPool == null || ClusterCellMap == null || ClusterAabbs == null)
+        if (grid == null || ClusterSegment == null || ClusterCellMap == null || ClusterAabbs == null)
         {
             AccrueQueueMaintenance(queue, maintenanceStart);
             return 0;
@@ -473,12 +480,12 @@ internal sealed unsafe partial class ArchetypeClusterState
         int rankedCount;
         if (valveOnly)
         {
-            rankedCount = queue.TryFindCritical(criticalRatio, grid, this, tickNumber, out var criticalCell) ? 1 : 0;
+            rankedCount = queue.TryFindCritical(criticalRatio, this, tickNumber, out var criticalCell, realms) ? 1 : 0;
             if (rankedCount == 1)
             {
                 if (_repairCellScratch.Length < 1)
                 {
-                    _repairCellScratch = new int[16];
+                    _repairCellScratch = new long[16];
                 }
 
                 _repairCellScratch[0] = criticalCell;
@@ -488,14 +495,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             // Ranked, not sorted by cell key. §5.6: "round-robin is the wrong policy" — a region nobody queries never needs tight clusters. Lazy, so a tick
             // whose nominations changed nothing pays a comparison rather than a sort (AC-11.5).
-            queue.Rerank(grid, this, tickNumber);
+            queue.Rerank(realms?.TierVersion ?? grid.TierVersion, this, tickNumber);
 
             // A snapshot, because RepairOneCell removes serviced cells from the queue and the ranked array is the queue's own buffer. Copying the keys out
             // first is cheaper than the alternative of deferring every removal to a second pass, and the count is the candidate count, not the entity count.
             var ranked = queue.Ranked;
             if (_repairCellScratch.Length < ranked.Length)
             {
-                _repairCellScratch = new int[Math.Max(ranked.Length, Math.Max(16, _repairCellScratch.Length * 2))];
+                _repairCellScratch = new long[Math.Max(ranked.Length, Math.Max(16, _repairCellScratch.Length * 2))];
             }
 
             ranked.CopyTo(_repairCellScratch);
@@ -545,7 +552,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         {
             for (var i = 0; i < rankedCount; i++)
             {
-                if (queue.DegradationOf(_repairCellScratch[i]) >= criticalRatio)
+                if (queue.DegradationOf(_repairCellScratch[i]) >= criticalRatio && IsPlannable(_repairCellScratch[i], realms))
                 {
                     criticalIndex = i;
                     break;
@@ -555,7 +562,7 @@ internal sealed unsafe partial class ArchetypeClusterState
 
         if (criticalIndex >= 0)
         {
-            totalMoved += RepairOneCell(_repairCellScratch[criticalIndex], grid, ref accessor, tickNumber, estimateNsPerEntity, true, ref remainingNs);
+            totalMoved += RepairQueuedCandidate(_repairCellScratch[criticalIndex], ref accessor, tickNumber, estimateNsPerEntity, true, ref remainingNs);
         }
 
         for (var i = 0; i < rankedCount; i++)
@@ -570,7 +577,13 @@ internal sealed unsafe partial class ArchetypeClusterState
                 break;
             }
 
-            totalMoved += RepairOneCell(_repairCellScratch[i], grid, ref accessor, tickNumber, estimateNsPerEntity, false, ref remainingNs);
+            // A candidate of a realm that is not runnable waits in the queue, ageing, until its realm runs (D-6): dormancy freezes elective work.
+            if (!IsPlannable(_repairCellScratch[i], realms))
+            {
+                continue;
+            }
+
+            totalMoved += RepairQueuedCandidate(_repairCellScratch[i], ref accessor, tickNumber, estimateNsPerEntity, false, ref remainingNs);
         }
 
         // ── Top up the deferred-drain list for everything the plan added ────────────────────────────────────────────
@@ -602,20 +615,42 @@ internal sealed unsafe partial class ArchetypeClusterState
         return totalMoved;
     }
 
+    /// <summary>True when <paramref name="key"/>'s realm runs this tick, so its candidate may be planned. Null <paramref name="realms"/> plans every realm.</summary>
+    private static bool IsPlannable(long key, RealmTable realms) => realms == null || realms.IsRunnable(CellRepairQueue.RealmOf(key));
+
+    /// <summary>
+    /// Plan one queued candidate in its own realm's grid. A candidate whose realm holds no state for this archetype any more is forgotten.
+    /// </summary>
+    private int RepairQueuedCandidate(long key, ref ChunkAccessor<PersistentStore> accessor, long tickNumber, double estimateNsPerEntity, bool valveAvailable,
+        ref double remainingNs)
+    {
+        var realm = CellRepairQueue.RealmOf(key);
+        var rs = RealmSpatial != null && realm < RealmSpatial.Length ? RealmSpatial[realm] : null;
+        if (rs?.Grid == null || rs.CellClusterPool == null)
+        {
+            RepairQueue?.Remove(key);
+            return 0;
+        }
+
+        return RepairOneCell(CellRepairQueue.CellOf(key), rs.Grid, ref accessor, tickNumber, estimateNsPerEntity, valveAvailable, ref remainingNs);
+    }
+
     /// <summary>
     /// Plan one cell's repair unit: rank its clusters, admit the unit if the budget covers it, then hand off to <see cref="ExecuteRepairPlan"/>. Returns the
     /// number of entities the unit will move, or <c>0</c> when nothing was begun.
     /// </summary>
+    /// <remarks><c>grid</c> is the cell's realm's: the cell's geometry and its cluster pool are that realm's.</remarks>
     private int RepairOneCell(int cellKey, SpatialGrid grid, ref ChunkAccessor<PersistentStore> accessor, long tickNumber, double estimateNsPerEntity,
         bool valveAvailable, ref double remainingNs)
     {
         var rs = SpatialOf(grid);
+        var queueKey = CellRepairQueue.Key(grid.Realm.Value, cellKey);
         var clusters = rs.CellClusterPool.GetClusters(cellKey);
         if (clusters.Length < 2)
         {
             // A single cluster is already its own optimal packing — a sort cannot improve a partition of one. Dropped from the queue rather than left to
             // age, because no amount of waiting will make it repairable and an unrepairable candidate at the head is a slot the ranking cannot use.
-            RepairQueue?.Remove(cellKey);
+            RepairQueue?.Remove(queueKey);
             return 0;
         }
 
@@ -672,7 +707,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // Dropped from the queue, not merely skipped. The memo says this cell's geometry has not changed since it was found already packed, so it is
             // not waiting for budget and ageing it to the head spends the head slot on a cell that cannot use it — and, in a CAPPED queue, evicts a cell
             // that can. Nomination re-queues it the moment its geometry actually moves.
-            RepairQueue?.Remove(cellKey);
+            RepairQueue?.Remove(queueKey);
             return 0;
         }
 
@@ -686,7 +721,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         var unitClusters = perUnit <= 0 ? clusters.Length : Math.Min(perUnit, clusters.Length);
         if (unitClusters < 2)
         {
-            RepairQueue?.Remove(cellKey);
+            RepairQueue?.Remove(queueKey);
             return 0;
         }
 
@@ -696,7 +731,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         if (population < 2)
         {
             // Same reasoning as the no-op memo above: a unit of fewer than two entities has no permutation to find, so waiting cannot help it.
-            RepairQueue?.Remove(cellKey);
+            RepairQueue?.Remove(queueKey);
             return 0;
         }
 
@@ -758,7 +793,7 @@ internal sealed unsafe partial class ArchetypeClusterState
                 // INSIDE the try, so a throw from the probe still reaches the finally that disposes the span rather than leaking its ring slot. Guarded
                 // rather than assigned unconditionally because the factory folds to `return default` when the gate is off while the ARGUMENT would still be
                 // evaluated, and DegradationOf is a dictionary probe. The gate is `static readonly`, so with the kind off this block disappears entirely.
-                unitSpan.Degradation = RepairQueue?.DegradationOf(cellKey) ?? 0f;
+                unitSpan.Degradation = RepairQueue?.DegradationOf(queueKey) ?? 0f;
             }
 
             moved = ExecuteRepairPlan(cellKey, grid, ref accessor, candidates, unitClusters, population);
@@ -789,7 +824,7 @@ internal sealed unsafe partial class ArchetypeClusterState
             // head slot on a cell that cannot use it. The memo above is what stops it costing a gather next tick; nomination re-queues it the moment its
             // geometry actually changes.
             _repairNoOpGeometry[cellKey] = geometry;
-            RepairQueue?.Remove(cellKey);
+            RepairQueue?.Remove(queueKey);
             return 0;
         }
 
@@ -806,7 +841,7 @@ internal sealed unsafe partial class ArchetypeClusterState
         LastTickRepairUnitCount++;
 
         // Out of the queue AND cooling (RP-07): re-packing this cell again before the cooldown ends would buy back what the next ticks' motion undoes.
-        RepairQueue?.MarkRepaired(cellKey, tickNumber);
+        RepairQueue?.MarkRepaired(queueKey, tickNumber);
         return moved;
     }
 
