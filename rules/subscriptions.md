@@ -647,12 +647,15 @@
     only, in a realm-local slot, so a lookup in another realm's reads the unbound sentinel
   invariant a realm with no session stops being served (no mark, projection, index or frame work) until a session is placed in it again, when it is
     re-pushed whole and recounted as after a gap
+  invariant an entity that moves to another realm is never carried in its old realm's frame: it leaves the source realm (a leave there, decoded
+    with that realm's frame, its identity released) and enters the destination as a fresh entry projected in the destination's frame
   invariant until events are realm-aware (R4.7), the geometric routes (Near, ToKnown) are filed by realm 0's cells and reach realm 0's sessions only
   never decide isolation by geometry: identical local coordinates in two realms are the expected case
   scope: PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
-    ArchetypeReplicationState.TryAttachBlock
+    ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry
   on_violation: silent. A client sees or targets an entity of a world it is not in — a cheat, and a store holding two worlds' netIds.
   verified: RealmSessionTests.EachRealmsSessionsHoldThatRealmsEntitiesOnly_AtIdenticalLocalCoordinates,
+    RealmSessionTests.ATeleportBetweenServedRealmsLeavesOneAndEntersTheOtherInItsFrame,
     RealmSessionTests.ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns, RealmReplicationTests.AnEntityOfARealmNotServedIsNeverKnownToASession
 
 ### SUB-29: A session is in one realm at a time, and a realm switch is one published RESET|REALM frame `[fatal][silent]`

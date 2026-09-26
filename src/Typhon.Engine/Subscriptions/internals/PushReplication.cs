@@ -710,6 +710,7 @@ internal abstract unsafe partial class PushReplication
     public long OrphanRelease;
     public long OrphanMigrate;
     public long OrphanDrain;
+    public long OrphanRealm;
 
     private protected readonly ReplicationOccupancy _occupancy = new();
 

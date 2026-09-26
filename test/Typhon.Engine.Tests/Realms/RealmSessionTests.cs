@@ -468,6 +468,76 @@ class RealmSessionTests : TestBase<RealmSessionTests>
     }
 
     [Test]
+    [VerifiesRule("SUB-28")]
+    public void ATeleportBetweenServedRealmsLeavesOneAndEntersTheOtherInItsFrame()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var sessions = harness.OpenSessions(2, World);
+        var commands = harness.Subscriptions.Commands;
+        commands.Enter(sessions[0], RealmId.Default);
+        commands.Enter(sessions[1], new RealmId(1));
+        var ids = Spawn(dbe, 0, 3);
+        Spawn(dbe, 1, 1);
+
+        void Run3()
+        {
+            for (var i = 0; i < 3; i++)
+            {
+                harness.RunTick(harness.Tick + 1);
+                harness.Deliver(sessions[0]);
+                harness.Deliver(sessions[1]);
+            }
+        }
+
+        Run3();
+        var archetype = harness.CatalogPlan.ArchetypeByName(nameof(RealmUnit)).Idx;
+        var before = harness.NetIdOf(ids[1]);
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(harness, sessions[0]), Is.EqualTo(3));
+            Assert.That(Held(harness, sessions[1]), Is.EqualTo(1));
+        });
+
+        // Realm 0 → realm 1, both served: a leave in realm 0, an enter in realm 1 at its place there — never realm 0's codes read in realm 1's frame.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Teleport(ids[1], RealmUnit.Pos, new RealmId(1), At(-12.5f, 30, 1, 1));
+            tx.Commit();
+        }
+
+        Run3();
+        var after = harness.NetIdOf(ids[1]);
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Replica(sessions[0]).NetIds(archetype), Does.Not.Contain(before), "realm 0's session was told it left");
+            Assert.That(Held(harness, sessions[0]), Is.EqualTo(2));
+            Assert.That(after, Is.Not.Zero, "it has an identity in realm 1");
+            Assert.That(harness.Replica(sessions[1]).NetIds(archetype), Does.Contain(after));
+            Assert.That(Held(harness, sessions[1]), Is.EqualTo(2));
+            var at = harness.Replica(sessions[1]).Position(archetype, after);
+            Assert.That(at[0], Is.EqualTo(-12.5).Within(0.01));
+            Assert.That(at[1], Is.EqualTo(30).Within(0.01));
+        });
+
+        // And back.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Teleport(ids[1], RealmUnit.Pos, RealmId.Default, At(60, 60, 0, 1));
+            tx.Commit();
+        }
+
+        Run3();
+        Assert.Multiple(() =>
+        {
+            Assert.That(Held(harness, sessions[0]), Is.EqualTo(3));
+            Assert.That(Held(harness, sessions[1]), Is.EqualTo(1));
+            var at = harness.Replica(sessions[0]).Position(archetype, harness.NetIdOf(ids[1]));
+            Assert.That(at[0], Is.EqualTo(60).Within(0.01));
+        });
+    }
+
+    [Test]
     public void ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns()
     {
         using var dbe = SetupEngine();

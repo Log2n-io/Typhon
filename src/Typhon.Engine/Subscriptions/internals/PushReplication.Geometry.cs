@@ -996,6 +996,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             {
                 case 0: OrphanRelease++; break;
                 case 1: OrphanMigrate++; break;
+                case 3: OrphanRealm++; break;
                 default: OrphanDrain++; break;
             }
         }
