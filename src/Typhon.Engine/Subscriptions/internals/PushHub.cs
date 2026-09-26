@@ -82,9 +82,12 @@ internal sealed unsafe class PushHub
     /// <param name="isPush">Per plan index: some profile observes the archetype.</param>
     /// <param name="automatic">Per plan index: the engine detects its changes.</param>
     /// <param name="realm0">Realm 0's replication, served from the start.</param>
-    public PushHub(ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic, PushReplication realm0)
+    /// <param name="maxSessions">The session table's width: the link state and the placement map are per session slot.</param>
+    public PushHub(ArchetypeReplicationState[] states, bool[] isPush, bool[] automatic, PushReplication realm0, int maxSessions)
     {
         ArgumentNullException.ThrowIfNull(realm0);
+        _placement = new ulong[Math.Max(1, maxSessions)];
+        Links = new PushLinkState[_placement.Length];
         _states = states;
         _automatic = automatic;
         var count = 0;
@@ -162,6 +165,109 @@ internal sealed unsafe class PushHub
         }
 
         _active[_activeCount++] = replication;
+    }
+
+    // ══ Sessions (R4.3): the realm-local slot each session holds, and the link state that crosses realms ════════════════════════════════════════════
+
+    // Per session slot: (realm-local slot << 32) | (realm << 16) | generation of the session placed there; 0 when it holds no realm's slot.
+    private readonly ulong[] _placement;
+
+    /// <summary>Per session slot: the budget loop's state — the link's, not a realm's, so a realm switch keeps a congested session's level (09 § 10).</summary>
+    internal readonly PushLinkState[] Links;
+
+    // Realm-local slots nobody was placed in are given back every this many ticks: a session that closed or lost its profile leaves its slot until then.
+    private const uint SweepEvery = 64;
+
+    /// <summary>The realm-local slot <paramref name="session"/> holds in <paramref name="realm"/>'s replication, or 0 when it holds none there.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int LocalSlot(SessionId session, ushort realm)
+    {
+        var slot = (uint)session.Slot;
+        if (slot >= (uint)_placement.Length)
+        {
+            return 0;
+        }
+
+        var p = _placement[slot];
+        return (ushort)p == session.Generation && (ushort)(p >> 16) == realm ? (int)(p >> 32) : 0;
+    }
+
+    /// <summary>
+    /// Places <paramref name="session"/> in <paramref name="realm"/> for this tick: a realm-local slot of that realm's replication, taken on the first tick
+    /// and kept after (leaving any other realm's), and the session's link state, kept across realms. Returns the replication, or <see langword="null"/>
+    /// when the realm is not served — the session then holds no realm's slot. Serial (the frame prologue).
+    /// </summary>
+    internal PushReplication Place(SessionId session, ushort realm, uint tick)
+    {
+        var slot = session.Slot;
+        ref var link = ref Links[slot];
+        if (link.Generation != session.Generation)
+        {
+            link = default;
+            link.Generation = session.Generation;
+        }
+
+        var replication = For(realm);
+        var p = _placement[slot];
+        var local = (int)(p >> 32);
+        if (local != 0 && (ushort)p == session.Generation && (ushort)(p >> 16) == realm)
+        {
+            replication.Touch(local, tick);
+            return replication;
+        }
+
+        Leave(slot);
+        if (replication == null)
+        {
+            return null;
+        }
+
+        local = replication.Join(session);
+        replication.Touch(local, tick);
+        _placement[slot] = ((ulong)(uint)local << 32) | ((ulong)realm << 16) | session.Generation;
+        return replication;
+    }
+
+    /// <summary>Gives back the realm-local slot session slot <paramref name="slot"/> holds, whichever realm it is in. Serial (the frame prologue).</summary>
+    internal void Leave(int slot)
+    {
+        if ((uint)slot >= (uint)_placement.Length)
+        {
+            return;
+        }
+
+        var p = _placement[slot];
+        var local = (int)(p >> 32);
+        _placement[slot] = 0;
+        if (local != 0)
+        {
+            For((ushort)(p >> 16))?.Release(local);
+        }
+    }
+
+    /// <summary>A replication gave back <paramref name="session"/>'s slot in <paramref name="realm"/>: the placement is dropped if it still names it.</summary>
+    internal void Forget(SessionId session, ushort realm)
+    {
+        var p = _placement[session.Slot];
+        if ((ushort)p == session.Generation && (ushort)(p >> 16) == realm)
+        {
+            _placement[session.Slot] = 0;
+        }
+    }
+
+    /// <summary>Every <see cref="SweepEvery"/> ticks, after the tick's placements: slots no session was placed in go back. Serial (the frame prologue).</summary>
+    internal void SweepUnplaced(uint tick)
+    {
+        if (tick % SweepEvery != 0)
+        {
+            return;
+        }
+
+        var active = Active;
+        for (var r = 0; r < active.Length; r++)
+        {
+            active[r].ReleaseUnseen(tick, this);
+        }
     }
 
     /// <summary>Per plan index and change group, how many forgotten pushes changed it.</summary>

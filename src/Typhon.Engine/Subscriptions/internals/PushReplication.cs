@@ -55,18 +55,30 @@ internal struct PushSessionState
     public double PRadius;
     public WindowRows P;
 
-    // The LOD level (09 § 10), committed with the frame like the anchor: Level is what every change held back so far was scheduled by, TargetLevel is
-    // where the budget loop wants the session, PLevel what this frame's gather moved it to.
+    // The LOD level (09 § 10), committed with the frame like the anchor: Level is what every change held back so far was scheduled by, PLevel what this
+    // frame's gather moved it to (towards the link's TargetLevel).
     public byte Level;
     public byte PLevel;
-    public byte TargetLevel;
 
     /// <summary>After the level fell: the level whose periods a flush's history still spans, until <see cref="WideUntil"/> (<see cref="LodBands.AtLevel"/>).</summary>
     public byte WideLevel;
     public uint WideUntil;
+}
 
-    // The budget loop: the level it asked for and the steps (a ShrinkSteps-th of the radius each) it took off the radius at the last level (09 § 10; TargetLevel adds the overload step),
-    // the bytes/s EWMA, ticks spent over the budget and under its lower mark, and the last tick it was fed.
+/// <summary>
+/// What the budget loop (09 § 10) remembers about a session's link: engine-wide, by session slot, so a realm switch — a door — keeps a congested session's
+/// level and rate (R4.3, 12-realms § 1.5). The geometry a level applies to is the realm's (<see cref="PushSessionState"/>).
+/// </summary>
+internal struct PushLinkState
+{
+    /// <summary>The session generation this state belongs to; 0 before the session's first placement.</summary>
+    public ushort Generation;
+
+    /// <summary>Where the budget loop wants the session's LOD level: its own level plus the overload step.</summary>
+    public byte TargetLevel;
+
+    // The level the budget loop asked for and the steps (a ShrinkSteps-th of the radius each) it took off the radius at the last level, the bytes/s EWMA,
+    // ticks spent over the budget and under its lower mark, and the last tick it was fed.
     public byte BudgetLevel;
     public byte Shrink;
     public float Rate;
@@ -295,7 +307,7 @@ internal abstract unsafe partial class PushReplication
         for (var i = 0; i < count; i++)
         {
             var session = sessions[i];
-            ref var st = ref _sessions[session.Slot];
+            ref var st = ref _sessions[L(session)];
             if (st.Bound && st.Generation == session.Generation)
             {
                 census[st.Level]++;
@@ -338,22 +350,26 @@ internal abstract unsafe partial class PushReplication
     /// <returns>The level, 0 for an unbound session.</returns>
     public int TargetLevelOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
-        return st.Bound && st.Generation == session.Generation ? st.TargetLevel : 0;
+        ref var link = ref LinkOf(session);
+        return link.Generation == session.Generation ? link.TargetLevel : 0;
     }
+
+    /// <summary>A session's link state (engine-wide, by session slot); the caller checks its generation.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected ref PushLinkState LinkOf(SessionId session) => ref Hub.Links[session.Slot];
 
     /// <summary>Tests only: a session's committed LOD level.</summary>
     internal int LevelOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         return st.Bound && st.Generation == session.Generation ? st.Level : 0;
     }
 
     /// <summary>Tests only: a session's bytes/s EWMA.</summary>
     internal double RateOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
-        return st.Bound && st.Generation == session.Generation ? st.Rate : 0d;
+        ref var link = ref LinkOf(session);
+        return link.Generation == session.Generation ? link.Rate : 0d;
     }
 
     /// <summary>
@@ -377,24 +393,24 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Tests only: the steps a session's radius is short of its own, as the budget loop left them.</summary>
     internal int ShrinkOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
-        return st.Bound && st.Generation == session.Generation ? st.Shrink : 0;
+        ref var link = ref LinkOf(session);
+        return link.Generation == session.Generation ? link.Shrink : 0;
     }
 
     /// <summary>Tests only: a session's committed radius — its own, less any last-resort shrink.</summary>
     internal double RadiusOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         return st.Bound && st.Generation == session.Generation ? st.Radius : 0d;
     }
 
     /// <summary>Tests only: sets the steps taken off a session's radius, as the budget loop would at its last level.</summary>
     internal void SetShrink(SessionId session, int steps)
     {
-        ref var st = ref _sessions[session.Slot];
-        if (st.Bound && st.Generation == session.Generation)
+        ref var link = ref LinkOf(session);
+        if (link.Generation == session.Generation)
         {
-            st.Shrink = (byte)Math.Clamp(steps, 0, MaxShrink);
+            link.Shrink = (byte)Math.Clamp(steps, 0, MaxShrink);
         }
     }
 
@@ -405,10 +421,10 @@ internal abstract unsafe partial class PushReplication
     internal void SetTargetLevel(SessionId session, int level)
     {
         ArgumentOutOfRangeException.ThrowIfGreaterThan((uint)level, (uint)MaxLevel, nameof(level));
-        ref var st = ref _sessions[session.Slot];
-        if (st.Bound && st.Generation == session.Generation)
+        ref var link = ref LinkOf(session);
+        if (link.Generation == session.Generation)
         {
-            st.TargetLevel = (byte)level;
+            link.TargetLevel = (byte)level;
         }
     }
 
@@ -426,8 +442,8 @@ internal abstract unsafe partial class PushReplication
     /// <param name="tickSeconds">The live tick period.</param>
     public void Pace(SessionId session, int bytes, int budget, double tickSeconds)
     {
-        ref var st = ref _sessions[session.Slot];
-        if (!st.Bound || st.Generation != session.Generation || LevelsPinned)
+        ref var st = ref LinkOf(session);
+        if (st.Generation != session.Generation || LevelsPinned)
         {
             return;
         }
@@ -523,7 +539,114 @@ internal abstract unsafe partial class PushReplication
     public long LogTooOld;
     public long LogAmbiguous;
 
-    private protected readonly PushSessionState[] _sessions;
+    // By realm-local slot (R4.3): slot 0 is a sentinel no session ever holds — never bound, never written — so a session not placed in this realm reads an
+    // unbound state wherever it is looked up. The others are handed out by Join and given back by Release; the arrays grow ×2 from a few.
+    private protected PushSessionState[] _sessions;
+    private SessionId[] _slotOwners;
+    private uint[] _slotSeen;
+    private int[] _freeSlots;
+    private int _freeCount;
+    private int _slotHigh = 1;
+
+    /// <summary>The realm-local slots a new replication starts with, the sentinel included; ×2 on demand.</summary>
+    internal const int InitialSessionSlots = 8;
+
+    /// <summary>The realm-local slot <paramref name="session"/> holds here, or 0 (the unbound sentinel) when it is not placed in this realm.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private protected int L(SessionId session) => Hub.LocalSlot(session, ServedRealm);
+
+    /// <summary>Tests only: the realm-local session slots allocated, the sentinel included.</summary>
+    internal int SessionSlotCapacity => _sessions.Length;
+
+    /// <summary>Tests only: the realm-local slots in use.</summary>
+    internal int SessionsHere => _slotHigh - 1 - _freeCount;
+
+    /// <summary>A realm-local slot for <paramref name="session"/>, reset: nothing of a previous occupant survives. Serial (the frame prologue).</summary>
+    internal int Join(SessionId session)
+    {
+        int local;
+        if (_freeCount > 0)
+        {
+            local = _freeSlots[--_freeCount];
+        }
+        else
+        {
+            local = _slotHigh++;
+            if (local == _sessions.Length)
+            {
+                GrowSessions(_sessions.Length * 2);
+            }
+        }
+
+        ResetSlot(local);
+        _slotOwners[local] = session;
+        return local;
+    }
+
+    /// <summary>Gives a realm-local slot back. Serial (the frame prologue).</summary>
+    internal void Release(int local)
+    {
+        Debug.Assert(local > 0 && local < _slotHigh, "only a slot Join handed out is released");
+        ResetSlot(local);
+        _slotOwners[local] = default;
+        _freeSlots[_freeCount++] = local;
+    }
+
+    /// <summary>Stamps a realm-local slot as in use this tick (<see cref="ReleaseUnseen"/>).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void Touch(int local, uint tick) => _slotSeen[local] = tick;
+
+    /// <summary>
+    /// Gives back every slot no session was placed in this tick — a session that closed, or lost its profile — and tells <paramref name="hub"/>. Serial,
+    /// after the tick's placements.
+    /// </summary>
+    internal void ReleaseUnseen(uint tick, PushHub hub)
+    {
+        for (var local = 1; local < _slotHigh; local++)
+        {
+            if (_slotSeen[local] == tick || !_slotOwners[local].IsValid)
+            {
+                continue;
+            }
+
+            hub.Forget(_slotOwners[local], ServedRealm);
+            Release(local);
+        }
+    }
+
+    // A slot handed to a new session: its geometry, region and shadow belong to nobody (generation 0 is no session's).
+    private protected virtual void ResetSlot(int local)
+    {
+        _sessions[local] = default;
+        if (local < _regions.Length && _regions[local] != null)
+        {
+            _regions[local].Generation = 0;
+        }
+
+        if (Shadow)
+        {
+            _shadowGen[local] = 0;
+            _shadow[local]?.Clear();
+        }
+    }
+
+    private protected virtual void GrowSessions(int length)
+    {
+        Array.Resize(ref _sessions, length);
+        Array.Resize(ref _slotOwners, length);
+        Array.Resize(ref _slotSeen, length);
+        Array.Resize(ref _freeSlots, length);
+        if (_regions.Length > 0)
+        {
+            Array.Resize(ref _regions, length);
+        }
+
+        if (Shadow)
+        {
+            Array.Resize(ref _shadow, length);
+            Array.Resize(ref _shadowGen, length);
+        }
+    }
     private protected uint _tick;
 
     /// <summary>The most rows a window can have: <see cref="ReplicationGrid.MaxWindow"/> in the flat implementation, 13² in the deep one (10 § 4.3).</summary>
@@ -568,8 +691,8 @@ internal abstract unsafe partial class PushReplication
     // of a held id, no state, segment or leave of an unheld one), and every few ticks it must equal the geometric known-set recomputed from the blocks.
     // Either failing is a divergence a client would carry for good. Off by default: it is a HashSet per session.
     public readonly bool Shadow;
-    private protected readonly HashSet<uint>[] _shadow = [];
-    private protected readonly ushort[] _shadowGen = [];
+    private protected HashSet<uint>[] _shadow = [];
+    private protected ushort[] _shadowGen = [];
     public long ShadowIllegal;
     public long ShadowMissing;
     public long ShadowExtra;
@@ -778,7 +901,10 @@ internal abstract unsafe partial class PushReplication
         _gridH = grid.DimY;
         _gridD = grid.DimZ;
 
-        _sessions = new PushSessionState[Math.Max(1, maxSessions)];
+        _sessions = new PushSessionState[InitialSessionSlots];
+        _slotOwners = new SessionId[InitialSessionSlots];
+        _slotSeen = new uint[InitialSessionSlots];
+        _freeSlots = new int[InitialSessionSlots];
         if (Shadow)
         {
             _shadow = new HashSet<uint>[_sessions.Length];
@@ -806,7 +932,7 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Shadow oracle: applies one published frame's records to the session's shadow of its client, counting every illegal record.</summary>
     public void ShadowApply(SessionId session, FrameWorkerScratch scratch, int archetypes, bool reset)
     {
-        var slot = session.Slot;
+        var slot = L(session);
         var set = _shadow[slot];
         if (set == null || _shadowGen[slot] != session.Generation)
         {
@@ -1090,7 +1216,7 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Tests only: a ClientRegion session's committed near-budget estimate — the counted entities of its delivered cells.</summary>
     internal int RegionHeldOf(SessionId session)
     {
-        var r = (uint)session.Slot < (uint)_regions.Length ? _regions[session.Slot] : null;
+        var r = (uint)L(session) < (uint)_regions.Length ? _regions[L(session)] : null;
         return r != null && r.Generation == session.Generation && r.Anchored ? r.Held : 0;
     }
 
@@ -1121,7 +1247,7 @@ internal abstract unsafe partial class PushReplication
     /// <summary>A session's pending anchor, after its gather: where an aggregate's radius is centred.</summary>
     public Vector3D PendingAnchorOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         return st.Bound && st.Generation == session.Generation ? new Vector3D(st.PAnchorX, st.PAnchorY, st.PAnchorZ) : default;
     }
 
@@ -1161,7 +1287,7 @@ internal abstract unsafe partial class PushReplication
     /// <summary>The tick of a session's last committed frame; 0 before its first.</summary>
     public uint LastTickOf(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         return st.Bound && st.Generation == session.Generation && st.Anchored ? st.LastTick : 0;
     }
 
@@ -1326,7 +1452,7 @@ internal abstract unsafe partial class PushReplication
     /// <summary>Whether a session slot is in a state that needs a RESET before anything else is sent.</summary>
     public bool NeedsReset(SessionId session)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
         return !st.Bound || st.Generation != session.Generation ? false : st.NeedsReset;
     }
 
@@ -1367,7 +1493,7 @@ internal abstract unsafe partial class PushReplication
     /// </summary>
     public void NoteWorldSession(SessionId session, bool forceReset)
     {
-        ref var st = ref _sessions[session.Slot];
+        ref var st = ref _sessions[L(session)];
 
         // Frames missed that the log covers are caught up without a fill; only a gap it does not cover resets. A reset the catch-up decides for a reused
         // identity is not foreseen: that fill finds no order, delivers nothing, and the next tick's prologue takes the order for it.

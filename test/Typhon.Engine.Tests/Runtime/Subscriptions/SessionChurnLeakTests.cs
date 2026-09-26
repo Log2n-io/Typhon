@@ -94,6 +94,11 @@ class SessionChurnLeakTests : TestBase<SessionChurnLeakTests>
             Assert.That(highestSlot, Is.LessThan(Concurrent * 4),
                 $"after {Cycles} cycles a fresh generation of sessions was given slots up to {highestSlot}. Slots that climb with the cycle count are "
                 + "rows that were closed but never returned to the free list, and the server eventually refuses admission at MaxSessions");
+
+            // The realm-local geometry slots (R4.3) follow the same churn: a closed session's slot goes back, so the realm's arrays stay at their
+            // high-water mark instead of climbing to MaxSessions.
+            Assert.That(harness.Subscriptions.Push.SessionSlotCapacity, Is.LessThanOrEqualTo(PushReplication.InitialSessionSlots * 2),
+                "a realm's session slots grew with the cycle count: closed sessions' slots are not given back");
         });
     }
 

@@ -119,8 +119,14 @@ internal sealed unsafe partial class FrameAssembler
 
                 _eventSessions[_eventSessionCount++] = session;
                 PrepareSession(session);
+
+                // No view, so no realm-local geometry: a slot it held (a profile it had) goes back.
+                Push.Hub.Leave(session.Slot);
                 continue;
             }
+
+            // Its realm-local slot and link state (R4.3): every push session is in realm 0 until sessions are placed in realms.
+            Push.Hub.Place(session, RealmId.Default.Value, (uint)_tick);
 
             divisor = Math.Min(divisor << overload, 4);
 
@@ -179,6 +185,9 @@ internal sealed unsafe partial class FrameAssembler
         }
 
         _pushSessionCount = n;
+
+        // Slots of sessions that closed or lost their profile since the last sweep go back.
+        Push.Hub.SweepUnplaced((uint)_tick);
 
         // Every tick the track runs is indexed, sessions bound or not: the index is the tick's log slot, and its cell changes are the occupancy's only
         // input (SUB-24). A tick left unindexed would leave the occupancy short of its spawns and crossings.

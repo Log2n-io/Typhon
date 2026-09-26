@@ -193,7 +193,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
                     Options.ForceDeepReplicationForTest);
 
                 // The engine-wide collector (R4.1), serving realm 0's replication; the stages below loop over its served realms as they are added.
-                Hub = new PushHub(_replicationStates, observed, automatic, Push);
+                Hub = new PushHub(_replicationStates, observed, automatic, Push, Options.MaxSessions);
 
                 // SUB-30: what the projection quantizes with (the plans' frames) and what every RESET tells a client (the REALM block) are two computations
                 // from the same grid; they must agree to the bit.

@@ -84,11 +84,11 @@ internal sealed unsafe partial class PushReplication<TEvent>
     /// <summary>The slot's region geometry for this session, created at its first region gather and emptied for a new session of the slot.</summary>
     private RegionSession RegionFor(SessionId session)
     {
-        var r = _regions[session.Slot];
+        var r = _regions[L(session)];
         if (r == null)
         {
             r = new RegionSession { D = new ulong[RegionRows], P = new ulong[RegionRows], Generation = session.Generation };
-            _regions[session.Slot] = r;
+            _regions[L(session)] = r;
             return r;
         }
 
@@ -118,7 +118,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
             return null;
         }
 
-        var r = _regions[session.Slot];
+        var r = _regions[L(session)];
         return r != null && r.Generation == session.Generation && r.PendingTick == _tick ? r : null;
     }
 
@@ -131,7 +131,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
             return false;
         }
 
-        var r = _regions[session.Slot];
+        var r = _regions[L(session)];
         return r != null && r.Generation == session.Generation && r.Anchored;
     }
 
@@ -261,7 +261,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
     {
         complete = true;
         var from = Stopwatch.GetTimestamp();
-        var slotIndex = session.Slot;
+        var slotIndex = L(session);
         ref var st = ref _sessions[slotIndex];
         if (!st.Bound || st.Generation != session.Generation)
         {
@@ -273,7 +273,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
         r.PendingTick = tick;
 
         // No LOD for a region (09 § 9 bands are a Sphere's): a session switched from a Sphere at a level goes back to 0 with this frame.
-        st.TargetLevel = 0;
+        LinkOf(session).TargetLevel = 0;
         st.PLevel = 0;
 
         // A session whose committed geometry is another shape's holds what that shape named: only a RESET says what it holds now.
@@ -1219,7 +1219,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
             return;
         }
 
-        var r = _regions[session.Slot];
+        var r = _regions[L(session)];
         if (r == null || r.Generation != session.Generation)
         {
             return;
@@ -1245,12 +1245,12 @@ internal sealed unsafe partial class PushReplication<TEvent>
     /// <summary>Whether a region session's committed hull and delivered window hold a point (SUB-26): what its client was last told.</summary>
     private bool RegionHoldsCommitted(SessionId session, float x, float y, float pz, ulong key)
     {
-        if ((uint)session.Slot >= (uint)_regions.Length)
+        if ((uint)L(session) >= (uint)_regions.Length)
         {
             return false;
         }
 
-        var r = _regions[session.Slot];
+        var r = _regions[L(session)];
         return r != null && r.Generation == session.Generation && r.Anchored && InHull(in r.Hull, x, y, pz)
                && RegionHeld(r.D, r.OriginX, r.OriginY, r.OriginZ, key);
     }
@@ -1296,7 +1296,7 @@ internal sealed unsafe partial class PushReplication<TEvent>
     /// <summary>A region's <c>PUSH_GEOMETRY</c> body: the pending hull's vertices, the near budget's estimate and the pending window.</summary>
     private void WriteDebugRegion(SessionId session, PushGeometryFlags flags, int nearBudget, ref WireWriter w)
     {
-        var r = (uint)session.Slot < (uint)_regions.Length ? _regions[session.Slot] : null;
+        var r = (uint)L(session) < (uint)_regions.Length ? _regions[L(session)] : null;
         if (r == null || r.Generation != session.Generation)
         {
             PushGeometry.WriteRegion(ref w, flags, TEvent.Deep ? 3 : 2, [], 0, nearBudget);
@@ -1387,13 +1387,13 @@ internal sealed unsafe partial class PushReplication<TEvent>
 
     internal override bool RegionDelivers(SessionId session, double x, double y, double z)
     {
-        var r = _regions.Length == 0 ? null : _regions[session.Slot];
+        var r = _regions.Length == 0 ? null : _regions[L(session)];
         return r != null && r.Generation == session.Generation && r.Anchored && RegionHeld(r.D, r.OriginX, r.OriginY, r.OriginZ, CellKey(x, y, z));
     }
 
     internal override int RegionDeliveredCells(SessionId session)
     {
-        var r = _regions.Length == 0 ? null : _regions[session.Slot];
+        var r = _regions.Length == 0 ? null : _regions[L(session)];
         if (r == null || r.Generation != session.Generation || !r.Anchored)
         {
             return 0;
