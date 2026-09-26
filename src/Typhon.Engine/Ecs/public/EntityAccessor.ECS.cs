@@ -86,6 +86,25 @@ public unsafe partial class EntityAccessor
             startIndex, endIndex);
     }
 
+    /// <summary>
+    /// An enumerator over the clusters of <typeparamref name="TArch"/> in realm <paramref name="realm"/> only (Realms), bypassing
+    /// <see cref="ArchetypeAccessor{TArch}"/>: O(clusters in that realm). An archetype without a <c>[RealmKey]</c> lives in realm 0.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The archetype does not use cluster storage, or <paramref name="realm"/> is not registered.</exception>
+    public ClusterEnumerator<TArch> GetClusterEnumerator<TArch>(RealmId realm) where TArch : class
+    {
+        var meta = ArchetypeRegistry.GetMetadata<TArch>();
+        var es = _dbe._archetypeStates[meta.ArchetypeId];
+        if (!meta.IsClusterEligible || es?.ClusterState == null)
+        {
+            throw new InvalidOperationException($"Archetype {typeof(TArch).Name} does not use cluster storage");
+        }
+
+        _dbe.CheckRealmRegistered(realm);
+        var ids = es.ClusterState.ReadRealmClusterList(realm.Value, out var count);
+        return ClusterEnumerator<TArch>.CreateScoped(meta, es.ClusterState, ids, count);
+    }
+
     /// <summary>Get cached ComponentInfo by type ID. For ArchetypeAccessor's Versioned chain walk.</summary>
     internal ComponentInfo GetComponentInfoInternal(int componentTypeId, Type componentType) =>
         GetComponentInfoByTypeId(componentTypeId, componentType);

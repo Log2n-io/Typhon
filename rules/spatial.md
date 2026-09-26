@@ -2330,6 +2330,19 @@
     the first fence after reopen; an invalid key in the file is rewritten at rebuild)
   on_violation: after a crash, entities answer the wrong realm's queries, or a cluster's box spans two worlds' coordinates
 
+### RM-07: A realm's cluster list holds exactly that realm's clusters, and a realm scope is never silently dropped `[fatal][silent]`
+  invariant a realm's clusters of an archetype are its realm pool's list: a cluster joins it when it joins a cell of that pool (claim, repair, rebuild)
+    and leaves it when it leaves the pool (drain); after every fence, ∀ realm R: list(R) = { active clusters whose ClusterRealmMap is R }, each once
+  invariant an archetype with no spatial state is wholly in realm 0: its list there is the active list, and empty in every other realm
+  invariant the list is published like the active list (CLUSTERWALK-02): a grown array before the count that indexes it; a walk reads the count first
+  invariant a per-realm walk or count naming an unregistered realm throws; an EcsQuery that names a realm (InRealm) without a spatial predicate throws
+    at execution, rather than answering every realm's entities
+  scope: CellClusterPool.ReadClusterList, ArchetypeClusterState.ReadRealmClusterList, DatabaseEngine.CheckRealmRegistered, EcsQuery.InRealm
+  verified: RealmClusterListTests.ARealmsClusterWalkYieldsThatRealmsEntitiesOnly_AndFollowsMovesAndDrains (red when a drain leaves the list or a
+    claim does not join it), RealmClusterListTests.AnUnkeyedArchetypeIsWhollyInRealm0, RealmClusterListTests.AnUnregisteredRealmIsRefused,
+    RealmClusterListTests.InRealmWithoutASpatialPredicateIsRefused_AndWithOneIsScoped (red without the guard)
+  on_violation: a per-realm system walks another realm's clusters or misses its own; a query believed realm-scoped answers every realm
+
 ## Module: Realms — policy and dispatch (Realms D)
 
 ### RLM-03: A realm's policy is decided once per tick, at tick start, before any dispatch `[fatal][silent]`

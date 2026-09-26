@@ -427,7 +427,12 @@ change (`Transaction.Teleport`) is a mandatory cell crossing handled by the fenc
 source realm's cluster and is placed in the destination realm's grid.
 
 **Queries** answer in one realm (SQ-08): the cell walk runs over that realm's grid and the narrowphase filters on the realm (RM-04), so entities at
-the same coordinates in another realm never match.
+the same coordinates in another realm never match. `EcsQuery.InRealm` scopes the spatial predicate only, and is refused on a query without one.
+
+**Per-realm cluster lists.** Each realm's `CellClusterPool` keeps, beside its per-cell lists, a flat list of every cluster it holds — the realm's
+clusters of the archetype, joined when a cluster joins a cell of the pool (claim, repair, rebuild) and left when it leaves it (drain), published like
+the active list (count acquired first). `GetClusterEnumerator(realm)` walks it: O(clusters in the realm). The list lives in the pool, so it resets with
+the pool at rebuild; a removal is a vectorized `IndexOf` over the realm's list, the cost the archetype-wide active list already pays per drain (RM-07).
 
 **Sizing.** A realm's structures are sized from its own config. The grid's block directory — packed block coordinates to a block — is a dense
 `int[]` over every block of the world when the world has at most 16 384 blocks (one load per lookup), a hash map beyond; a realm's state for an

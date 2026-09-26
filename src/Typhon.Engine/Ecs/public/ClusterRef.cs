@@ -1379,6 +1379,11 @@ public unsafe ref struct ClusterEnumerator<TArch> where TArch : class
         return result;
     }
 
+    /// <summary>An enumerator over a (list, count) pair its caller read once, under the list's own protocol: a realm's cluster list (Realms).</summary>
+    [AllowCopy]
+    internal static ClusterEnumerator<TArch> CreateScoped(ArchetypeMetadata meta, ArchetypeClusterState state, int[] clusterIds, int count) =>
+        CreateScoped(state, meta, state.ClusterSegment, state.TransientSegment, clusterIds, 0, count);
+
     /// <summary>The chunk ID of the current cluster. Available after <see cref="MoveNext"/> returns true.</summary>
     public int CurrentChunkId
     {

@@ -392,6 +392,39 @@ public unsafe ref struct ArchetypeAccessor<TArch> where TArch : class
             _clusterState, _archetype, _clusterState.ClusterSegment, _clusterState.TransientSegment, clusterIds, startIndex, endIndex);
     }
 
+    /// <summary>
+    /// An enumerator over the clusters of this archetype in realm <paramref name="realm"/> only (Realms): O(clusters in that realm), not a filter over
+    /// every realm's. An archetype without a <c>[RealmKey]</c> lives in realm 0 — all its clusters there, none elsewhere. The enumerator owns its own
+    /// ChunkAccessor and must be disposed.
+    /// </summary>
+    /// <remarks>Like <see cref="GetClusterEnumerator()"/>, the list is live: walk it from a system, or outside the tick fence.</remarks>
+    /// <exception cref="InvalidOperationException">The archetype does not use cluster storage, or <paramref name="realm"/> is not registered.</exception>
+    public ClusterEnumerator<TArch> GetClusterEnumerator(RealmId realm)
+    {
+        if (!_hasClusterStorage)
+        {
+            throw new InvalidOperationException($"Archetype {typeof(TArch).Name} does not use cluster storage");
+        }
+
+        _accessor.DBE.CheckRealmRegistered(realm);
+        var ids = _clusterState.ReadRealmClusterList(realm.Value, out var count);
+        return ClusterEnumerator<TArch>.CreateScoped(_archetype, _clusterState, ids, count);
+    }
+
+    /// <summary>How many clusters of this archetype are in realm <paramref name="realm"/>.</summary>
+    /// <exception cref="InvalidOperationException"><paramref name="realm"/> is not registered.</exception>
+    public int ClusterCountIn(RealmId realm)
+    {
+        _accessor.DBE.CheckRealmRegistered(realm);
+        if (!_hasClusterStorage)
+        {
+            return 0;
+        }
+
+        _clusterState.ReadRealmClusterList(realm.Value, out var count);
+        return count;
+    }
+
     /// <summary>Release the cached EntityMap and cluster ChunkAccessors.</summary>
     public void Dispose()
     {

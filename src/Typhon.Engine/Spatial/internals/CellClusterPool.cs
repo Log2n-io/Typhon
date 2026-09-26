@@ -79,6 +79,11 @@ internal sealed class CellClusterPool
     /// <summary>Managed thread id of the writer currently inside <see cref="AddCluster"/> or <see cref="RemoveCluster"/>; zero when there is none.</summary>
     private int _writerInFlight;
 
+    // Every cluster in the pool, flat (Realms: a realm's cluster list — the pool is one realm's). Appended and removed with the cell entry, under the same
+    // writer discipline; published like the archetype's active list — a grown array first, the count that indexes it second (CLUSTERWALK-02).
+    private int[] _clusters = [];
+    private int _clusterCount;
+
     // Side-array chunk 0's length and the outer arrays' initial length (Realms SP-4): the whole world's cell count when it fits in one chunk, so a
     // one-cell interior's pool holds four 1-int arrays rather than four 256-int ones. Every key of the pool's own grid is below that count; EnsureCell
     // refuses one that is not (a key from another realm's grid), which would otherwise index past chunk 0 on the read side.
@@ -344,6 +349,7 @@ internal sealed class CellClusterPool
 
             _pool[Head(cellKey) + count] = clusterChunkId;
             Volatile.Write(ref Count(cellKey), count + 1);   // release: the entry, the head and the pool are visible to a reader that sees this count
+            AppendCluster(clusterChunkId);
         }
         finally
         {
@@ -383,6 +389,7 @@ internal sealed class CellClusterPool
                 // a duplicate chunk id costs a redundant claim attempt, never a wrong cell.
                 span[i] = span[^1];
                 Volatile.Write(ref Count(cellKey), count - 1);
+                RemoveListedCluster(clusterChunkId);
                 return true;
             }
             return false;
@@ -391,6 +398,56 @@ internal sealed class CellClusterPool
         {
             ExitWriter();
         }
+    }
+
+    /// <summary>
+    /// Every cluster in the pool — its realm's clusters of this archetype — as a (list, count) pair: the count acquired first, then the list, so the list is
+    /// at least that long (CLUSTERWALK-02). Order is insertion order disturbed by swap-with-last removals. Any thread.
+    /// </summary>
+    internal int[] ReadClusterList(out int count)
+    {
+        count = Volatile.Read(ref _clusterCount);
+        var ids = Volatile.Read(ref _clusters);
+        if (count > ids.Length)
+        {
+            count = ids.Length;
+        }
+
+        return ids;
+    }
+
+    /// <summary>How many clusters the pool holds.</summary>
+    internal int ClusterListCount => Volatile.Read(ref _clusterCount);
+
+    private void AppendCluster(int clusterChunkId)
+    {
+        var n = _clusterCount;
+        var ids = _clusters;
+        if (n >= ids.Length)
+        {
+            // Release 1: the grown array, before the count that indexes it (the active list's protocol, AddToActiveList).
+            var grown = new int[Math.Max(4, ids.Length * 2)];
+            Array.Copy(ids, grown, n);
+            Volatile.Write(ref _clusters, grown);
+            ids = grown;
+        }
+
+        ids[n] = clusterChunkId;
+        Volatile.Write(ref _clusterCount, n + 1);   // release 2
+    }
+
+    // O(clusters in the realm), vectorized: removals are drains, and the archetype's own active list pays the same linear scan per drain.
+    private void RemoveListedCluster(int clusterChunkId)
+    {
+        var n = _clusterCount;
+        var at = _clusters.AsSpan(0, n).IndexOf(clusterChunkId);
+        if (at < 0)
+        {
+            return;
+        }
+
+        _clusters[at] = _clusters[n - 1];
+        Volatile.Write(ref _clusterCount, n - 1);
     }
 
     private void GrowCellSegment(int cellKey, ref int capacity)

@@ -3067,6 +3067,36 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
+    /// The clusters of this archetype in realm <paramref name="realm"/> (Realms): its realm's pool's list, O(clusters there) to walk. An archetype without
+    /// spatial state (no realm key, no spatial field) is wholly in realm 0: the active list there, nothing elsewhere. The caller has checked the realm is
+    /// registered. Same (list, count) protocol as <see cref="ReadActiveClusterList"/>.
+    /// </summary>
+    internal int[] ReadRealmClusterList(ushort realm, out int count)
+    {
+        var byRealm = Volatile.Read(ref RealmSpatial);
+        if (byRealm == null)
+        {
+            if (realm == RealmId.Default.Value)
+            {
+                return ReadActiveClusterList(out count);
+            }
+
+            count = 0;
+            return [];
+        }
+
+        var rs = realm < byRealm.Length ? Volatile.Read(ref byRealm[realm]) : null;
+        var pool = rs?.CellClusterPool;
+        if (pool == null)
+        {
+            count = 0;
+            return [];
+        }
+
+        return pool.ReadClusterList(out count);
+    }
+
+    /// <summary>
     /// Per-cluster realm, parallel to <see cref="ClusterCellMap"/> (Realms C1): the realm whose grid <c>ClusterCellMap[chunkId]</c> is a key of. Grown with
     /// the cell map (same length, published before it), written where a cluster is given its cell, before the cluster is published.
     /// </summary>

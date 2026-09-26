@@ -1109,6 +1109,19 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// The grid a spatial query in realm <paramref name="realm"/> walks. Throws when the realm is not registered: a query naming a realm that does not
     /// exist is an application error, never an empty answer. An archetype with no cluster in a registered realm answers empty.
     /// </summary>
+    /// <summary>
+    /// Refuses a realm that is not registered, for a per-realm cluster walk: naming a realm that does not exist is an application error, never an empty
+    /// answer. With no realm table (no spatial grid, no realm), realm 0 alone exists.
+    /// </summary>
+    internal void CheckRealmRegistered(RealmId realm)
+    {
+        var known = _realms == null ? realm == RealmId.Default : !realm.IsNone && _realms.TryGet(realm.Value) != null;
+        if (!known)
+        {
+            throw new InvalidOperationException($"Realm {realm.Value} is not registered: a per-realm walk must name a registered realm.");
+        }
+    }
+
     internal SpatialGrid RealmGridForQuery(RealmId realm)
     {
         var r = realm.IsNone ? null : _realms?.TryGet(realm.Value);

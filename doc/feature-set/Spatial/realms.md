@@ -30,10 +30,14 @@ query answers in one realm only; an empty interior can sleep; thousands of one-r
   a component of its own. **An archetype without a key lives in realm 0**, always: no key column, no cost, and it cannot be moved elsewhere.
 - **Moving between realms** is `Transaction.Teleport(id, spatialComp, realm, position)`: applied at the next tick fence, the entity keeps its
   `EntityId` and lands in the destination realm's grid. A realm change is always a cell crossing, whatever the hysteresis band.
-- **Queries answer in one realm**: `EcsQuery.InRealm(realm)` for the fluent predicates, `dbe.ClusterSpatialQuery<T>(realm)` for the cluster
-  broadphase. Without a realm they query realm 0. Entities at identical coordinates in another realm are never returned.
+- **Queries answer in one realm**: `EcsQuery.InRealm(realm)` for the fluent spatial predicates, `dbe.ClusterSpatialQuery<T>(realm)` for the cluster
+  broadphase. Without a realm they query realm 0. Entities at identical coordinates in another realm are never returned. `InRealm` scopes a
+  *spatial* predicate: on a query without one it throws rather than answering every realm.
+- **One realm's clusters, walked alone.** `accessor.GetClusterEnumerator(realm)` (on `ArchetypeAccessor<T>`, or `GetClusterEnumerator<T>(realm)` on a
+  transaction or `ctx.Accessor`) walks only that realm's clusters of the archetype — O(clusters in that realm), not a filter over every realm's — and
+  `ClusterCountIn(realm)` counts them. Each realm keeps its own cluster list, joined at claim and left at drain.
 - **Systems see every runnable realm.** A QuerySystem walks the clusters of every realm its policy lets run this tick; `ClusterRef.Realm` says which
-  realm a cluster is in, so a system scopes its own spatial queries by it.
+  realm a cluster is in, so a system scopes its own spatial queries by it. A system that works on one realm walks that realm's list instead.
 - **Each realm has a policy when nobody watches it.** `WhenUnobserved = Simulate` keeps it running, at full rate or at `UnobservedTickDivisor`
   (each cluster once every N runs, integrated over N ticks of delta time); `Sleep` makes it dormant after `SleepAfterTicks` unobserved ticks — no
   systems, no spatial maintenance. A realm is observed while a client session is in it, or while the application pins it with `Realms.Observe`.
@@ -71,6 +75,13 @@ tx.Teleport(id, Player.Bounds, new RealmId(1), in doorway);        // lands in t
 
 var nearby = tx.Query<Player>().WhereNearby<PlayerBounds>(x, y, 0, 30).InRealm(new RealmId(1)).Execute();
 
+// Every player in the cantina, cluster by cluster — O(clusters there), whatever the planet holds.
+using var players = tx.For<Player>();
+foreach (var cluster in players.GetClusterEnumerator(new RealmId(1)))
+{
+    for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1) { /* cluster.GetEntityId(slot), cluster.Get<T>(slot) … */ }
+}
+
 // Instanced content on a running engine.
 dbe.Realms.Register(new RealmId(40), dungeonConfig);
 using var pin = dbe.Realms.Observe(new RealmId(40));               // keep it active while the party is inside
@@ -97,17 +108,20 @@ its realm's divisor declares `.RealmRate(RealmRate.Full)`.
   every later open a registration that differs from it is refused, a catalogued realm the application does not register is rebuilt from it (a
   generic opener such as the Workbench sees every realm), and a cluster naming a realm nobody knows refuses the open rather than being filed
   elsewhere (RLM-01). `ConfigureRealms` is never clamped (RLM-02). The rebuild checks every slot's realm (RM-06).
+- **Per-realm walks.** A realm's cluster list holds exactly its clusters after every fence; a walk or count naming an unregistered realm throws; an
+  unkeyed archetype is wholly in realm 0 (RM-07). Like the archetype-wide walk, the list is live: walk it from a system or outside the fence.
 - **Policy.** Decided once per tick, before any dispatch (RLM-03); a dormant realm's clusters reach no QuerySystem (RLM-04); a divided realm's
   clusters run exactly once every N runs of a system (RLM-05). With every realm runnable, dispatch is exactly the single-realm path.
 - **Lifecycle.** A realm is removed only once empty, and its id may be registered again only after a later open has proven it empty (RLM-06). Realm
   0 cannot be unregistered.
-- **Limits.** Tier assignment through `TickContext.SpatialGrid` is realm 0's grid only; other realms' cells keep their tiers. Realm ids are
+- **Limits.** A QuerySystem cannot yet be narrowed to one realm by its declaration (it walks every runnable realm; filter by `ClusterRef.Realm`, or
+  walk `GetClusterEnumerator(realm)` from a non-parallel system). Tier assignment through `TickContext.SpatialGrid` is realm 0's grid only; other realms' cells keep their tiers. Realm ids are
   `ushort`s below `MaxRealms` (0xFFFF is "no realm"). `[RealmKey]` is one `ushort` per archetype, on a SingleVersion component, without `[Index]`.
   The per-archetype spatial telemetry event is one per archetype, not per realm.
 
 ## 🧪 Tests
 
-`RealmTableTests`, `RealmRegistrationTests`, `RealmKeyTests`, `RealmKeyComponentTests`, `RealmArchetypeSpatialTests`, `CrossRealmMigrationTests`,
+`RealmClusterListTests`, `RealmTableTests`, `RealmRegistrationTests`, `RealmKeyTests`, `RealmKeyComponentTests`, `RealmArchetypeSpatialTests`, `CrossRealmMigrationTests`,
 `RealmFenceTests`, `RealmRepairTests`, `RealmPolicyTests`, `RealmDivisorTests`, `RealmLifecycleTests`, `RealmCatalogTests`, `RealmCatalogCrashTests`,
 `RealmReopenTests`, `RecoveryRealmTests`, `RealmFootprintTests`, `RealmRuntimeTests` (engine); the SWG demo's `RealmChecks` (planets, interiors,
 space, dungeons).
