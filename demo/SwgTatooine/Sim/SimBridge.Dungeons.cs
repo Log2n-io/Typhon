@@ -187,7 +187,7 @@ public sealed partial class SimBridge
             tx.Commit();
         }
 
-        // Heard on planet 0 and in the dungeon itself, before it closes: its party is still inside until the fence sends it home.
+        // Heard on planet 0's subtree when the tick's frames are built — by then the fence has sent the party home, so it hears it on the planet.
         TatooineReplication.Announce(ctx,
             new RealmNews { Realm = 0, What = RealmNews.DungeonClosed, Subject = dungeon.Realm, Count = (ushort)dungeon.Party.Length });
 

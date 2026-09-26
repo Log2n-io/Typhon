@@ -419,17 +419,19 @@ public sealed class BotSwarm : IAsyncDisposable
     /// Realms G3, across the population: the tours asked for, the realm switches the sessions applied (each a <c>RESET</c> carrying a new <c>REALM</c>),
     /// and the <c>RealmNews</c> announcements heard.
     /// </summary>
-    public (long Asked, long Switches, long News) Realms()
+    public (long Asked, long Switches, long News, int InRealm) Realms()
     {
         long asked = 0, switches = 0, news = 0;
+        var inRealm = 0;
         foreach (var bot in _bots)
         {
             asked += Volatile.Read(ref bot.ToursAsked);
             switches += Volatile.Read(ref bot.RealmSwitches);
             news += bot.News.Count;
+            inRealm += bot.Client.Store?.Realm != null ? 1 : 0;
         }
 
-        return (asked, switches, news);
+        return (asked, switches, news, inRealm);
     }
 
     private readonly Dictionary<ushort, int> _disconnects = [];
@@ -550,10 +552,13 @@ public sealed class BotSwarm : IAsyncDisposable
         {
             Ticks++;
             var moveRegions = _options.RegionEveryTicks > 0 && Ticks % _options.RegionEveryTicks == 0;
-            var tour = _options.TourEverySeconds > 0 && _options.Planets > 1 && Ticks % ((long)_options.TourEverySeconds * Math.Max(1, _options.TickHz)) == 0;
+            var tourPeriod = (long)_options.TourEverySeconds * Math.Max(1, _options.TickHz);
+            var touring = _options.TourEverySeconds > 0 && _options.Planets > 1 && _options.Kind != "player";
+            var index = 0;
 
             foreach (var bot in _bots)
             {
+                index++;
                 if (!bot.Client.IsConnected)
                 {
                     continue;
@@ -564,7 +569,8 @@ public sealed class BotSwarm : IAsyncDisposable
                     // The ping first: it is what keeps the session alive, and a region update that threw would otherwise take the ping with it.
                     await bot.Client.SendPingAsync(ct).ConfigureAwait(false);
 
-                    if (tour)
+                    // Staggered by bot: every camera switching on one tick would be N whole-planet RESETs in one server tick.
+                    if (touring && (Ticks + index) % tourPeriod == 0)
                     {
                         await bot.SendNextPlanetAsync(_options, ct).ConfigureAwait(false);
                     }
@@ -717,10 +723,18 @@ public sealed class BotSwarm : IAsyncDisposable
 
             // A square footprint around the camera: four points is the minimum a quad needs and the minimum the wire accepts is three, so this is the
             // smallest honest region rather than the smallest legal one.
+            // Vertices are list<pos3> over the session's realm (typhon.3): a flat realm's quad at z 0, a deep realm's as a box half as tall as it is wide.
             var half = options.RegionRadiusM * 0.5;
+            double[] vertices = Client.Store?.Realm?.Deep == true
+                ?
+                [
+                    x - half, y - half, -half, x + half, y - half, -half, x + half, y + half, -half, x - half, y + half, -half,
+                    x - half, y - half, half, x + half, y - half, half, x + half, y + half, half, x - half, y + half, half,
+                ]
+                : [x - half, y - half, 0, x + half, y - half, 0, x + half, y + half, 0, x - half, y + half, 0];
             var values = new RecordValues
             {
-                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(x - half, y - half, x + half, y - half, x + half, y + half, x - half, y + half),
+                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(vertices),
                 [BuiltInCommands.RegionAltitudeField] = FieldValue.Of(120.0),
                 [BuiltInCommands.RegionBudgetField] = FieldValue.Of(options.BudgetKiBps),
             };

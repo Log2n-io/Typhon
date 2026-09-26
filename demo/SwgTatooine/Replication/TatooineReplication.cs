@@ -4,21 +4,6 @@ using System.Numerics;
 
 namespace SwgTatooine;
 
-/// <summary>
-/// What a connected client sees of Tatooine, declared through the public replication API and nothing else.
-/// </summary>
-/// <remarks>
-/// <para>
-/// <b>This file is the blueprint claim.</b> It contains no framing, no codec arithmetic, no varint, no socket: an application says which archetypes are
-/// replicated, which of their fields travel, how position is quantized and who may look at what — and the engine does the rest. If anything below starts to
-/// look like protocol code, the API has failed rather than the demo.
-/// </para>
-/// <para>
-/// <b>Five archetypes, three shapes.</b> Creatures, city NPCs and players move, so they carry motion and change groups; lairs and world objects never move,
-/// so they are sent once on enter and never updated — which costs a client nothing per tick and is the case that most easily goes unnoticed if the projection
-/// compiler treats "no change group" as an error rather than as a shape.
-/// </para>
-/// </remarks>
 /// <summary>A god camera asks to look at another planet (Realms G3): the planet's realm id.</summary>
 public struct ViewRealm
 {
@@ -51,6 +36,21 @@ public struct RealmNews
     public ushort Count;
 }
 
+/// <summary>
+/// What a connected client sees of Tatooine, declared through the public replication API and nothing else.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>This file is the blueprint claim.</b> It contains no framing, no codec arithmetic, no varint, no socket: an application says which archetypes are
+/// replicated, which of their fields travel, how position is quantized and who may look at what — and the engine does the rest. If anything below starts to
+/// look like protocol code, the API has failed rather than the demo.
+/// </para>
+/// <para>
+/// <b>Five archetypes, three shapes.</b> Creatures, city NPCs and players move, so they carry motion and change groups; lairs and world objects never move,
+/// so they are sent once on enter and never updated — which costs a client nothing per tick and is the case that most easily goes unnoticed if the projection
+/// compiler treats "no change group" as an error rather than as a shape.
+/// </para>
+/// </remarks>
 public static class TatooineReplication
 {
     /// <summary>The god camera's profile: the whole planet, every archetype, through a <c>World</c> observer.</summary>
@@ -192,14 +192,17 @@ public static class TatooineReplication
         }
         else
         {
-            subs.Profile(GodProfile, p => p
-                .Detection(detection)
-                .World()
-                .Of<Creature>()
-                .Of<CityNpc>()
-                .Of<Player>()
-                .Of<CreatureLair>()
-                .Of<WorldObject>());
+            subs.Profile(GodProfile, p =>
+            {
+                p.Detection(detection)
+                    .World()
+                    .Of<Creature>()
+                    .Of<CityNpc>()
+                    .Of<Player>()
+                    .Of<CreatureLair>()
+                    .Of<WorldObject>();
+                p.NotIn(InteriorKind);
+            });
         }
 
         // Centred on the player the session controls, at its post-fence position (09 § 6): no per-tick Place. The session follows its player through
@@ -218,7 +221,8 @@ public static class TatooineReplication
 
         // Realms G3: a planet's news reaches its subtree, and a god camera moves between planets with a command.
         subs.Event<RealmNews>(e => e.RouteToRealm(n => new RealmId(n.Realm), subtree: true));
-        subs.Command<ViewRealm>(c => c.Rate(2, 4).Field(v => v.Realm, Codec.VarUInt));
+        // Every accepted ask is a RESET of a whole planet, the dearest frame there is: once a second, a burst of two.
+        subs.Command<ViewRealm>(c => c.Rate(1, 2).Field(v => v.Realm, Codec.VarUInt));
         _declared = true;
     }
 
@@ -265,7 +269,7 @@ public static class TatooineReplication
         // and a realm that is not a planet is not the god camera's to enter.
         foreach (var command in subs.Commands<ViewRealm>())
         {
-            if (command.Value.Realm < (uint)Planets && string.Equals(subs.SessionKindOf(command.Session), GodKind, StringComparison.Ordinal))
+            if (command.Value.Realm < (uint)Planets && !string.Equals(subs.SessionKindOf(command.Session), PlayerKind, StringComparison.Ordinal))
             {
                 subs.Enter(command.Session, new RealmId((ushort)command.Value.Realm));
             }

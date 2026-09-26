@@ -478,6 +478,55 @@ class RealmSessionTests : TestBase<RealmSessionTests>
         }
     }
 
+    [TestCase(true, true)]
+    [TestCase(true, false)]
+    [TestCase(false, false)]
+    public void ARegionSentThroughTheTransportIsServed_WithRealmKindsDeclared(bool kinds, bool notIn)
+    {
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<RealmPos>();
+        dbe.ConfigureSpatialGrid(Realm0Grid());
+        dbe.InitializeArchetypes();
+        using (dbe)
+        {
+            using var harness = FrameHarness.Create(dbe, subs =>
+            {
+                if (kinds)
+                {
+                    subs.RealmKinds("interior");
+                }
+
+                subs.Archetype<RealmUnit>(a => a.Motion(RealmUnit.Pos, m => m.Teleport(20)));
+                subs.Profile("god", p =>
+                {
+                    p.ClientRegion(80).Of<RealmUnit>();
+                    if (notIn)
+                    {
+                        p.NotIn("interior");
+                    }
+                });
+            }, nameof(ARegionSentThroughTheTransportIsServed_WithRealmKindsDeclared), replicationCellM: 10);
+            harness.RunFence = true;
+            harness.RunIngress = true;
+            var session = harness.OpenSessions(1, "god")[0];
+            Spawn(dbe, 0, 3);
+            Run(harness, session, 2);
+            var frame = harness.Replica(session).Store.Realm;
+            Assert.That(frame, Is.Not.Null, "the session was sent its realm before it had a region");
+
+            var region = new RecordValues
+            {
+                [BuiltInCommands.RegionVerticesField] = FieldValue.Of(0d, 0d, 0d, 60d, 0d, 0d, 60d, 60d, 0d, 0d, 60d, 0d),
+                [BuiltInCommands.RegionAltitudeField] = FieldValue.Of(50d),
+                [BuiltInCommands.RegionBudgetField] = FieldValue.Of(256d),
+            };
+            harness.Subscriptions.Ingress.OnCommands(session,
+                Encode(harness.CatalogPlan, (uint)harness.Tick, frame, (BuiltInCommands.ClientRegion, 1, region)));
+            Run(harness, session, 4);
+            Assert.That(Held(harness, session), Is.EqualTo(3), "the region's entities");
+        }
+    }
+
     [Test]
     public void ARadiusSetForTheProfileIsBoundedByTheVariantServingTheRealm()
     {

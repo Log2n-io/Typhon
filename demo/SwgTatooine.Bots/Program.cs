@@ -194,8 +194,8 @@ Console.WriteLine($"ran {(DateTime.UtcNow - started).TotalSeconds:F0}s over {swa
 Console.WriteLine($"connected at end: {swarm.Connected} of {opened}");
 Console.WriteLine($"messages received: {swarm.MessagesReceived}");
 Console.WriteLine($"receive-loop faults: {swarm.Faults}");
-var (toursAsked, realmSwitches, news) = swarm.Realms();
-Console.WriteLine($"realms: {toursAsked} tours asked, {realmSwitches} realm switches applied, {news} RealmNews heard");
+var (toursAsked, realmSwitches, news, inRealm) = swarm.Realms();
+Console.WriteLine($"realms: {toursAsked} tours asked, {realmSwitches} realm switches applied, {news} RealmNews heard, {inRealm} of {opened} sessions holding a realm");
 
 if (swarm.Disconnects.Count == 0)
 {

@@ -184,7 +184,8 @@ public sealed class Fuzzer
         var y = (random.NextDouble() * 4000) - 2000;
         var values = new RecordValues
         {
-            [BuiltInCommands.RegionVerticesField] = FieldValue.Of(x, y, x + 200, y, x + 200, y + 200, x, y + 200),
+            // list<pos3> (typhon.3): a flat quad at z 0.
+            [BuiltInCommands.RegionVerticesField] = FieldValue.Of(x, y, 0d, x + 200, y, 0d, x + 200, y + 200, 0d, x, y + 200, 0d),
             [BuiltInCommands.RegionAltitudeField] = FieldValue.Of(120.0),
             [BuiltInCommands.RegionBudgetField] = FieldValue.Of(64),
         };
