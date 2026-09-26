@@ -509,6 +509,7 @@ public sealed class RuntimeSchedule
             systems[sysIdx].WritesVersioned = reg.WritesVersioned;
             systems[sysIdx].TierFilter = reg.TierFilter;
             systems[sysIdx].CellAmortize = reg.CellAmortize;
+            systems[sysIdx].RealmRate = reg.RealmRate;
             systems[sysIdx].IsCheckerboard = reg.Checkerboard;
             systems[sysIdx].ChunksPerWorker = reg.ChunksPerWorker;
             systems[sysIdx].MinChunkSize = reg.MinChunkSize;

@@ -2357,3 +2357,15 @@
     disabling the selection or the scan filter reddens them (run by hand 2026-09-26); Observer_KeepsTheRealmActive (no index ever built)
   on_violation: dormant interiors simulated anyway (the cost realms exist to remove), or changes delivered for entities no system runs
 
+### RLM-05: A divided realm's clusters are strided on the system's run count and the chunk id — each exactly once every N runs `[fatal][silent]`
+  invariant for a RealmRate.Divided QuerySystem without a change filter, a cluster of a realm at divisor N > 1 is selected on run r iff
+    (r + PhaseOf(realm) + chunkId) mod N == 0 — so over any N consecutive runs every such cluster is selected exactly once, and the realm's load is
+    spread over the N runs rather than landing on one
+  invariant keyed on the SYSTEM's run count, never the tick number: a TickDivisor would otherwise alias it and starve every cluster off its parity
+  invariant ctx.Realms.DeltaTime(realm) = AmortizedDeltaTime × the realm's divisor for a Divided system, AmortizedDeltaTime for a Full one
+  invariant a change-filtered system and a RealmRate.Full system are not strided; an observed realm is at divisor 1; no divided realm ⇒ one branch
+  scope: TyphonRuntime.SelectDispatchClusters, RealmTable.PhaseOf, RealmTable.DividedCount, RealmsAccessor.DeltaTime, SystemBuilder.RealmRate
+  verified: RealmDivisorTests (exactly twice in 8 runs, parallel and not; no starvation under TickDivisor 2 — keying the stride on the tick fails it;
+    Full and observed realms every run; per-realm delta time)
+  on_violation: a planet's creatures integrated twice in some windows and never in others, or at the wrong delta time — visible as jumps
+

@@ -1400,6 +1400,37 @@ public sealed partial class TyphonRuntime : IDisposable
             count = dispatch.Count;
         }
 
+        // Realms D4 (RLM-05): a realm simulated at divisor N contributes each of its clusters once every N runs of the system — keyed on the system's own
+        // run count, the realm's phase and the chunk id, so the realm's load spreads over the N runs and a TickDivisor cannot alias it. Not for a
+        // change-filtered system (its input is already the dirty set) nor a RealmRate.Full one. No divided realm: one branch.
+        var realms = Engine?.RealmTable;
+        if (realms is { DividedCount: > 0 } && sys.RealmRate == RealmRate.Divided && _systemChangeFilterTables[sysIdx] == null
+            && cs.ClusterRealmMap != null && (ids != null || tier == SimTier.All))
+        {
+            if (ids == null)
+            {
+                ids = ReadActiveClusterList(cs, out count);
+            }
+
+            var buf = ReferenceEquals(ids, _systemAmortizationBuffers[sysIdx]) ? ids : EnsureSelectionBuffer(sysIdx, count);
+            var realmMap = cs.ClusterRealmMap;
+            var run = (ulong)Math.Max(0, _systemRunCount[sysIdx] - 1);
+            var written = 0;
+            for (var i = 0; i < count; i++)
+            {
+                var chunkId = ids[i];
+                var realm = chunkId < realmMap.Length ? realmMap[chunkId] : (ushort)0;
+                var divisor = (uint)realms.DivisorOf(realm);
+                if (divisor <= 1 || (run + (ulong)RealmTable.PhaseOf(realm) + (ulong)chunkId) % divisor == 0)
+                {
+                    buf[written++] = chunkId;
+                }
+            }
+
+            ids = buf;
+            count = written;
+        }
+
         // Issue #233: sleeping clusters leave the selection. A system nothing else narrowed is "promoted" to a filtered copy of its archetype's active
         // list, so the dispatch walks clusters from here on. SleepingClusterCount == 0 skips it all (DM-02's fast path).
         if (cs.SleepingClusterCount > 0 && cs.SleepStates != null)
@@ -1972,6 +2003,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ClusterIds = clusterIdArray,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
+            Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, sys.RealmRate == RealmRate.Divided),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
@@ -2133,6 +2165,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 ClusterIds = clusterIdArray,
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
+                Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, sys.RealmRate == RealmRate.Divided),
                 Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
                 WorkerId = workerId,
                 ChunkIndex = chunkIndex,
@@ -2976,6 +3009,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ConsumedQueues = _systemConsumedQueues[sysIdx],
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
+            Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, sys.RealmRate == RealmRate.Divided),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
             WorkerId = workerId,
             // Single-invocation system: one chunk, index 0. Left at the default 0 before #860, which made the documented slicing formula

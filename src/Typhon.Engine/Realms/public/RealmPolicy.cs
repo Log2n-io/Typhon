@@ -23,6 +23,53 @@ public enum RealmRunState : byte
     Closing = 3,
 }
 
+/// <summary>How a QuerySystem runs over a realm simulated at a divisor (<see cref="RealmConfig.UnobservedTickDivisor"/>).</summary>
+[PublicAPI]
+public enum RealmRate : byte
+{
+    /// <summary>Each cluster of an N-divided realm once every N runs of the system, spread over the N runs; the system integrates with
+    /// <c>ctx.Realms.DeltaTime(realm)</c>. The default.</summary>
+    Divided = 0,
+
+    /// <summary>Every run, in every runnable realm, whatever its divisor — for a system that must see every cluster each tick. Dormant realms are still
+    /// excluded.</summary>
+    Full = 1,
+}
+
+/// <summary>
+/// What a system reads of the realm policy this tick (<see cref="TickContext.Realms"/>): each realm's state, rate divisor and the delta time a cluster
+/// of it integrates over.
+/// </summary>
+[PublicAPI]
+public readonly struct RealmsAccessor
+{
+    private readonly RealmTable _table;
+    private readonly float _amortizedDeltaTime;
+    private readonly bool _divided;
+
+    internal RealmsAccessor(RealmTable table, float amortizedDeltaTime, bool divided)
+    {
+        _table = table;
+        _amortizedDeltaTime = amortizedDeltaTime;
+        _divided = divided;
+    }
+
+    /// <summary>
+    /// The time a cluster of <paramref name="realm"/> integrates over this run: <see cref="TickContext.AmortizedDeltaTime"/> × the realm's divisor for a
+    /// <see cref="RealmRate.Divided"/> system (it saw the cluster once in that many runs), the amortized delta time for a <see cref="RealmRate.Full"/> one.
+    /// </summary>
+    public float DeltaTime(RealmId realm) => _divided && _table != null ? _amortizedDeltaTime * _table.DivisorOf(realm.Value) : _amortizedDeltaTime;
+
+    /// <summary>The realm's rate divisor this tick: 1 when observed, its <see cref="RealmConfig.UnobservedTickDivisor"/> otherwise.</summary>
+    public int DivisorOf(RealmId realm) => _table?.DivisorOf(realm.Value) ?? 1;
+
+    /// <summary>True when <paramref name="realm"/>'s clusters are dispatched this tick.</summary>
+    public bool IsRunnable(RealmId realm) => _table == null || _table.IsRunnable(realm.Value);
+
+    /// <summary>What <paramref name="realm"/> is doing this tick. Refuses an unregistered id.</summary>
+    public RealmRunState StateOf(RealmId realm) => _table?.StateOf(realm.Value) ?? RealmRunState.Active;
+}
+
 /// <summary>
 /// An application pin on a realm (<see cref="RealmRegistry.Observe"/>): while held, the realm is <see cref="RealmRunState.Active"/> from the next tick on
 /// — what a headless server, a benchmark or a test uses where no session observes. Dispose releases it; disposing twice releases once.

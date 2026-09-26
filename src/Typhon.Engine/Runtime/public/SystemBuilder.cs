@@ -24,6 +24,7 @@ public sealed class SystemBuilder
     internal int _tickDivisor = 1;
     internal int _throttledTickDivisor = 1;
     internal bool _canShed;
+    internal RealmRate _realmRate;
     internal bool _parallel;
     internal bool _writesVersioned;
     internal float _chunksPerWorker = 1f;
@@ -107,6 +108,16 @@ public sealed class SystemBuilder
     public SystemBuilder ThrottledTickDivisor(int divisor)
     {
         _throttledTickDivisor = divisor;
+        return this;
+    }
+
+    /// <summary>
+    /// How this QuerySystem runs over realms simulated at a divisor (Realms D4): <see cref="Engine.RealmRate.Divided"/> (the default) visits each cluster
+    /// of an N-divided realm once every N runs; <see cref="Engine.RealmRate.Full"/> visits every runnable cluster every run.
+    /// </summary>
+    public SystemBuilder RealmRate(RealmRate rate)
+    {
+        _realmRate = rate;
         return this;
     }
 
@@ -464,6 +475,8 @@ public sealed class SystemBuilder<TContext> where TContext : class
     public SystemBuilder<TContext> Tier(SimTier tier) { _inner.Tier(tier); return this; }
     /// <summary>Sets the cell-level amortization denominator — the system processes <c>1/N</c> of the tier's clusters per tick. Requires a non-<see cref="SimTier.All"/> tier.</summary>
     public SystemBuilder<TContext> CellAmortize(int denominator) { _inner.CellAmortize(denominator); return this; }
+    /// <inheritdoc cref="SystemBuilder.RealmRate(Engine.RealmRate)"/>
+    public SystemBuilder<TContext> RealmRate(RealmRate rate) { _inner.RealmRate(rate); return this; }
     /// <summary>Enables two-phase checkerboard dispatch — no two adjacent cells are processed simultaneously. Requires <see cref="Parallel"/>.</summary>
     public SystemBuilder<TContext> Checkerboard() { _inner.Checkerboard(); return this; }
     /// <summary>Assigns this system to a phase. The phase must be one declared on the owning DAG.</summary>

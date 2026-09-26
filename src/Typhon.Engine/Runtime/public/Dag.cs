@@ -130,7 +130,8 @@ public sealed class Dag
     public Dag QuerySystem(string name, Action<TickContext> action, string after = null, string[] afterAll = null,
         SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, Func<ViewBase> input = null, Type[] changeFilter = null,
         int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false, bool parallel = false, bool writesVersioned = false,
-        SimTier tier = SimTier.All, int cellAmortize = 0, bool checkerboard = false, float chunksPerWorker = 1f, int minChunkSize = 0)
+        SimTier tier = SimTier.All, int cellAmortize = 0, bool checkerboard = false, float chunksPerWorker = 1f, int minChunkSize = 0,
+        RealmRate realmRate = RealmRate.Divided)
     {
         Track.Schedule.ThrowIfBuilt();
         ArgumentNullException.ThrowIfNull(name);
@@ -140,6 +141,7 @@ public sealed class Dag
         {
             Name = name,
             Type = SystemType.QuerySystem,
+            RealmRate = realmRate,
             CallbackAction = action,
             Priority = priority,
             ShouldRun = shouldRun,
@@ -260,6 +262,7 @@ public sealed class Dag
             WritesVersioned = builder._writesVersioned,
             TierFilter = builder._tierFilter,
             CellAmortize = builder._cellAmortize,
+            RealmRate = builder._realmRate,
             Checkerboard = builder._checkerboard,
             ChunksPerWorker = builder._chunksPerWorker,
             MinChunkSize = builder._minChunkSize,
@@ -367,6 +370,7 @@ public sealed class Dag
         public int ExplicitChunkCount;          // > 0 → chunked-parallel CallbackSystem (no entity context)
         public SimTier TierFilter = SimTier.All;
         public int CellAmortize;
+        public RealmRate RealmRate;
         public bool Checkerboard;
         public Phase Phase;
         public bool PhaseSet;

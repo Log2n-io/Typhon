@@ -108,6 +108,15 @@ internal sealed class RealmTable
     /// <summary>Registered realms that are not runnable this tick (<see cref="RealmRunState.Dormant"/>). Zero ⇒ nothing is filtered anywhere (RLM-04).</summary>
     internal int NonRunnableCount { get; private set; }
 
+    /// <summary>Runnable realms simulated at a divisor above 1 this tick. Zero ⇒ no system strides (RLM-05).</summary>
+    internal int DividedCount { get; private set; }
+
+    /// <summary>
+    /// Realm <paramref name="id"/>'s offset in its divisor's rotation, so realms of one divisor do not all run the same bucket on the same run. A hash,
+    /// fixed per realm: the stride is keyed on (system run count + this + chunk id), RLM-05.
+    /// </summary>
+    internal static int PhaseOf(ushort id) => (int)((id * 0x9E3779B1u) >> 16);
+
     /// <summary>Evaluations run — tests read it to prove the policy runs once per tick.</summary>
     internal long EvaluationCount { get; private set; }
 
@@ -157,6 +166,7 @@ internal sealed class RealmTable
         EvaluationCount++;
         var changed = false;
         var nonRunnable = 0;
+        var divided = 0;
         foreach (var realm in Registered)
         {
             var id = realm.Id.Value;
@@ -210,9 +220,11 @@ internal sealed class RealmTable
             }
 
             nonRunnable += next == RealmRunState.Dormant ? 1 : 0;
+            divided += next != RealmRunState.Dormant && divisor > 1 ? 1 : 0;
         }
 
         NonRunnableCount = nonRunnable;
+        DividedCount = divided;
         if (changed)
         {
             PolicyEpoch++;

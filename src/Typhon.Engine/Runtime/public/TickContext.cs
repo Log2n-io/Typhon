@@ -236,6 +236,12 @@ public struct TickContext
     public SpatialGridAccessor SpatialGrid { get; init; }
 
     /// <summary>
+    /// The realm policy this tick (Realms D4): each realm's state and divisor, and the delta time a cluster of a realm integrates over —
+    /// <c>ctx.Realms.DeltaTime(cluster.Realm)</c> in a system that runs over realms simulated at a divisor.
+    /// </summary>
+    public RealmsAccessor Realms { get; init; }
+
+    /// <summary>
     /// What a system reads this tick's client commands through, and answers them with — <c>ctx.Subscriptions.Commands&lt;MoveIntent&gt;()</c>
     /// (design/Subscriptions/01-model.md § 7). <see langword="null"/> when the application declared no subscriptions, and on a context built without a
     /// <see cref="TyphonRuntime"/> at all (standalone scheduler tests).

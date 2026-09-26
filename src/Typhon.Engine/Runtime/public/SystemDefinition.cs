@@ -250,6 +250,9 @@ public sealed class SystemDefinition
     /// </summary>
     public int CellAmortize { get; internal set; }
 
+    /// <summary>How this QuerySystem runs over realms simulated at a divisor (Realms D4, RLM-05). See <see cref="Engine.RealmRate"/>.</summary>
+    public RealmRate RealmRate { get; internal set; }
+
     /// <summary>
     /// When true, this parallel QuerySystem uses two-phase checkerboard dispatch (issue #234). Clusters are split into Red
     /// (<c>(cellX + cellY) % 2 == 0</c>) and Black sets, dispatched as two sequential parallel phases within one DAG node.
