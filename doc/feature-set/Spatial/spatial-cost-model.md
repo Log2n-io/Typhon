@@ -220,14 +220,16 @@ distance in your world:
 | Entities per cell | Consequence |
 |---|---|
 | 4 | cells outnumber clusters; boundary crossings, and therefore migrations, are at their most frequent |
-| **16 – 64** | **the measured basin** — around one cluster per cell, up to one full cluster |
-| 256 | clusters per cell rise; the broadphase opens more of them per query |
-| 1 024 and above | queries lose selectivity, and a repair unit becomes an expensive, indivisible piece of work |
+| **16 – 64** | around one cluster per cell, up to one full cluster — **where the small synthetic sweep bottomed out**, not a target |
+| 256 | clusters per cell rise; the broadphase opens more of them per query, and prunes between them |
+| 1 024 and above | a repair unit becomes an expensive, indivisible piece of work. Query selectivity depends on cluster extent against the query radius rather than on this count, and a game-shaped workload measured its optimum here |
 
-The harness that produced this sweeps occupancy at 4, 16, 64, 256, 1 024 and 4 096 entities per cell, so the
-basin is resolved to those grid points and no finer. The upper bound has an independent justification: a cluster
-holds 64 slots, so beyond about 64 entities per cell you are guaranteeing multiple clusters per cell, and beyond a
-few thousand you are building the ~130 ms repair unit measured above.
+The harness that produced this sweeps occupancy at 4, 16, 64, 256, 1 024 and 4 096 entities per cell, so its curve is
+resolved to those grid points and no finer — and occupancy is the harness's axis, not a knob you set. Several clusters
+per cell is the normal, intended shape (a cluster holds 64 slots, and the cell-level broadphase exists precisely to
+prune between clusters); a game-shaped workload measured its optimum with dozens of clusters per cell. The real upper
+bound is the repair unit: beyond a few thousand entities in a cell you are building the ~130 ms indivisible piece of
+work measured above.
 
 Sparsity is not a reason to hesitate over small cells. Only occupied cells are allocated: a 40³ world at 20%
 occupancy resides in 1.2 MiB against 3.9 MiB dense, a factor of 3.2. The ratio tracks occupancy — it is not a
@@ -239,14 +241,17 @@ There is no call on this page. The sizing decision is arithmetic you do once, be
 [Spatial Grid Configuration & Tier Control](./spatial-grid-config.md):
 
 ```text
-target occupancy      = 16 to 64 entities per populated cell
-populated cells       = entity count / target occupancy
-cell side             = (populated world volume / populated cells) ^ (1/dimensions)
+cell side             = dominant query radius / ClusterTargetExtentRatio      (0.25 by default, so ~4x the radius)
 ```
 
-Worked, for 100 000 entities spread over a 1 000 × 1 000 flat region at a target of 32 per cell: 3 125 populated
-cells, 1 000 000 square units of world, 320 square units per cell, so a cell side of about 18 units. Round to
-something legible — 16 or 20 — and confirm it against the occupancy counter rather than against the arithmetic.
+A cell holds clusters, not entities, and its size is what caps how wide a cluster may grow
+(`max(density-derived target, ClusterTargetExtentRatio) × GrowthCapSlack × CellSize`). So the sizing question is what
+extent you want the cluster gate to prune at, which is the scale your queries test — not an entity count, which is a
+consequence of your population rather than a knob.
+
+Worked, for a workload whose dominant query is a 50-unit radius: a cell side of about 200 units puts the cluster extent
+cap near 50. Treat it as a starting point and confirm it by sweeping, not by arithmetic — the two workloads measured so
+far put the optimum an order of magnitude apart, and [Spatial Tuning](./spatial-tuning.md) carries both tables.
 
 Two sanity checks before you accept a number. Your **largest entity extent should be small against the cell side**,
 because every query walks the cells its region can reach — its own extent grown by the archetype's cluster reach —

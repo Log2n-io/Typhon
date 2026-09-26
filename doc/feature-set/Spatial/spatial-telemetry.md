@@ -204,7 +204,9 @@ blameless.
 
 **Which knob.** Raise `MigrationHysteresisRatio` first, from its default of a twentieth of the cell towards a tenth. If
 absorption stays near zero after that, the margin was never the problem and the cell is too small for how far things
-move in a tick: raise `CellSize` instead, back towards 16 to 64 entities per cell.
+move in a tick: raise `CellSize` instead. On the workloads measured so far the cost curve is flat or still improving at
+the large end, so raising it is rarely what hurts — see [Spatial Tuning](./spatial-tuning.md) for the two measurements
+and why there is no portable target occupancy.
 
 **What you expect after.** The absorbed count rises and the migration count falls, with their sum roughly unchanged —
 that is the margin catching crossings it was previously paying for. If instead both fall together, you changed the cell

@@ -49,38 +49,40 @@ Degradation is answered at three levels, cheapest first. Each has its own ratio,
 
 ## 📐 Choosing the cell size
 
-This is the one consequential decision. Derive it from density, not from intuition about the world:
+This is the one consequential decision, and the unit matters: **a cell holds clusters, not entities.** Cell size's real job is to bound how wide a cluster may grow — the cap is `max(density-derived target, ClusterTargetExtentRatio) × GrowthCapSlack × CellSize`, with the ratio at 0.25 by default and the engine tightening the target further as a cell fills. So choosing a cell size is choosing **how tight a cluster is allowed to be, in world units**. An entity count per cell is a consequence of that and of your population; it is not a lever, and it is not what either measurement below varies.
 
-```
-cells    = population / targetEntitiesPerCell
-side     = cbrt(cells)              // sqrt(cells) for a flat world
-cellSize = worldSideLength / side
-```
+Two costs pull against each other:
 
-**Target 16 to 64 entities per cell.** The basin is measured, not asserted: `SpatialPartitionMatrix` Matrix C sweeps occupancy across 4, 16, 64, 256, 1 024 and 4 096 entities per cell, at 16 000 entities in a 1 000-unit 3D world, eight workers, cruise motion.
+- **Too large** and the cluster gate stops pruning: a cluster box spans much of its cell, so every hit opens a wide box and the entities inside are examined anyway.
+- **Too small** and the walks pay instead: ray and frustum walks are cell-major and probe the grid once per coordinate swept, while the cluster extent is capped far below the query radius, so neither the cell nor the cluster prunes what the other did not. Finer is not safer.
 
-| entities/cell | cell size | fence | small AABB query | ray query |
-|---|---|---|---|---|
-| 4 | 63 | 2.67 ms | 1.7 µs | **58.4 µs** |
-| **16** | **100** | **1.77 ms** | **1.3 µs** | 15.1 µs |
-| **64** | **159** | 2.19 ms | 1.6 µs | **9.6 µs** |
-| 256 | 252 | 2.26 ms | 3.3 µs | 13.9 µs |
-| 1 024 | 400 | 2.62 ms | 7.5 µs | 23.3 µs |
-| 4 096 | 635 | 3.59 ms | **19.2 µs** | 62.3 µs |
+**There is no portable number here, and the two workloads measured so far disagree by an order of magnitude.** Do not derive a cell size from a rule of thumb — measure it on your own workload.
 
-**Too large costs query time.** A small AABB query runs 19.2 µs at 4 096 entities per cell against 1.3 µs in the basin — **14.8×** — because every hit opens a box spanning most of a large cell. Frustum queries degrade about 12× over the same range.
+**A small synthetic world** — `SpatialPartitionMatrix` Matrix C: 16 000 entities in a 1 000-unit 3D world, eight workers, cruise motion. Measured before the #941 query rebuild, so treat the absolute numbers as historical.
 
-**Too small costs cell-walk time.** The ray runs 58.4 µs at 4 entities per cell against 9.6 µs at 64 — **6.1×** — because the ray and frustum walks are cell-major and probe the grid once per coordinate swept. Finer is not safer.
+| cell size | fence | small AABB query | ray query |
+|---|---|---|---|
+| 63 | 2.67 ms | 1.7 µs | **58.4 µs** |
+| **100** | **1.77 ms** | **1.3 µs** | 15.1 µs |
+| **159** | 2.19 ms | 1.6 µs | **9.6 µs** |
+| 252 | 2.26 ms | 3.3 µs | 13.9 µs |
+| 400 | 2.62 ms | 7.5 µs | 23.3 µs |
+| 635 | 3.59 ms | **19.2 µs** | 62.3 µs |
 
-**Worked example.** A volumetric world 4 000 units per side holding 250 000 entities, aimed at the middle of the basin at 32 per cell:
+Both failure directions are visible: the small AABB query costs 14.8× more at cell 635 than at 100, and the ray costs 6.1× more at cell 63 than at 159.
 
-```
-cells    = 250 000 / 32   = 7 813
-side     = cbrt(7 813)    ≈ 19.8
-cellSize = 4 000 / 19.8   ≈ 202       → round to 200
-```
+**A game-shaped world at scale** — the SWG Tatooine demo on current `main`: 268 944 entities (173 504 of them moving), 10 Hz, five archetypes and nine systems, dominant query radius 192 m. Median tick over three passes, cell sizes quoted at the real planet's scale:
 
-That gives a 20 × 20 × 20 grid, 8 000 cell slots, comfortably inside the 32-bit cell-key limit the constructor enforces. Size for *occupied* density and ignore empty volume: the grid is sparse and materialises a cell only once something occupies it, measured at 3.9 MiB dense against 1.2 MiB resident at 20 % occupancy. Matching cell size to your typical query radius is a plausible second rule and is **unmeasured**; where the two disagree, follow density.
+| world | 64 m | 128 m | 256 m | 512 m | 1 024 m |
+|---|---:|---:|---:|---:|---:|
+| 16 km | 8.20 ms | 4.43 ms | 3.58 ms | **3.34 ms** | 3.34 ms |
+| 128 km | 7.62 ms | 4.22 ms | 3.30 ms | **3.02 ms** | 3.18 ms |
+
+Here the optimum is a **plateau at the large end**, and the finest cell costs 2.3–2.5× the best at every population measured. Walking fewer, fatter cells wins once a cell walk is cheap: the SQ-01 reach that can fall, the SIMD broadphase and batched radius queries all arrived after the synthetic matrix above.
+
+**Where to start, then measure.** Take your dominant query radius and give the cluster gate room to work at that scale: with the default `ClusterTargetExtentRatio` of 0.25, a cell of roughly **four times your dominant query radius** caps cluster extent near the radius your queries actually test. That is a starting point rather than a rule — the SWG optimum sits around it, and nothing has yet isolated cell size from cluster extent as separate variables. Sweep it: `demo/SwgTatooine --sweep` is the worked instrument, and its report is one example of the output to look for.
+
+Size for *occupied* density and ignore empty volume: the grid is sparse and materialises a cell only once something occupies it, measured at 3.9 MiB dense against 1.2 MiB resident at 20 % occupancy. Keep the grid inside the 32-bit cell-key limit the constructor enforces.
 
 One cost that is not a tuning preference: cell membership is decided by an entity's **centre**, so a cluster's box can overhang its cell. Every box, radius, ray and frustum query grows its cell range by the archetype's **cluster reach** (`ClusterReach` in spatial telemetry): the largest overhang among ordinary clusters, recomputed at every tick fence, so it falls again once the cluster that raised it is fixed. The few clusters that reach much further — an entity teleported and not yet migrated, an oversized entity — are not widened for; they are named (up to 16, `EscapedClusterCount`) and every query tests them directly. Past 16 the reach widens to cover the rest. Only the part of a box inside the world counts. Keep your largest entities small against the cell size all the same: a reach of a large fraction of a cell makes every query walk the neighbouring cells.
 
@@ -91,7 +93,7 @@ One cost that is not a tuning preference: cell membership is decided by an entit
 dbe.ConfigureSpatialGrid(new SpatialGridConfig(
     worldMin: new Vector3(0f, 0f, 0f),
     worldMax: new Vector3(4000f, 4000f, 4000f),
-    cellSize: 200f,                             // derived above: 250 K entities at ~32 per cell
+    cellSize: 200f,                             // ~4x a 50-unit dominant query radius; then swept
 
     migrationHysteresisRatio:         0.05f,    // inter-cell dead zone
     clusterTargetExtentRatio:         0.25f,    // drift gate
@@ -121,7 +123,7 @@ All twenty-one settings, in constructor order (`WorldMin` and `WorldMax` share a
 | Parameter | Default | Unit | Controls | Safe range | Symptom when wrong |
 |---|---|---|---|---|---|
 | `WorldMin` / `WorldMax` | required | world units | Grid extent; the max corner is **exclusive** | max strictly greater on all three axes | Throws at config time. An entity that leaves the world is clamped into the nearest edge cell, not rejected, so it silently piles up at the boundary |
-| `CellSize` | required | world units | Clusters per cell, memory, query selectivity, migration rate — everything above | **cliff** · 16–64 entities/cell | Too large: query cost climbs 14.8× at 4 096 per cell. Too small: ray and frustum cost climbs 6.1× at 4 per cell. Cells × axes must fit a 32-bit key or the constructor throws |
+| `CellSize` | required | world units | Clusters per cell, the cluster extent cap, memory, query selectivity, migration rate — everything above | **cliff** · workload-specific, start at ~4× the dominant query radius and sweep | Too large: small-AABB cost climbs 14.8× across the synthetic range. Too small: ray and frustum climb 6.1×, and the game-shaped workload pays 2.3–2.5× at its finest cell. Cells × axes must fit a 32-bit key or the constructor throws |
 | `MigrationHysteresisRatio` | `0.05` | fraction of cell | Dead zone past a cell face before a crossing migrates | dial · 0.02–0.15, unvalidated | Near-zero `HysteresisAbsorbedCount` against a high `MigrationCount` — entities oscillating on a boundary migrate every tick |
 | `ClusterTargetExtentRatio` | `0.25` | fraction of cell | The box a cluster should stay inside; the gate that admits a cluster to per-entity drift testing | dial · 0.1–0.5, **cliff above ~1.05** | Too tight and every written cluster enters a per-entity walk, producing drifters the budget then drops — pure cost, no tightness. Above ~1.05 no cluster can exceed it and drift detection silently stops |
 | `ClusterDriftMarginRatio` | `0.05` | fraction of cell | Dead zone around that target region | dial · 0.02–0.15 | Near-zero `DriftAbsorbedCount` — entities relocated every tick to move a few units |
@@ -180,13 +182,13 @@ That does **not** make a high mean per cell something to ignore. Promotion caps 
 
 ## 🚦 Starting recipes
 
-**Dense 2D top-down** (RTS, MOBA). `SpatialGridConfig.Flat`, 32 entities per cell, everything else default. Watch `RelocationsThrottled` over the first few hundred ticks and double `ReclusterBudgetMs` until it reads zero whenever `ReclusterBudgetGrantedMs` is the whole budget.
+**Dense 2D top-down** (RTS, MOBA). `SpatialGridConfig.Flat`, cell about 4× your dominant query radius, everything else default. Watch `RelocationsThrottled` over the first few hundred ticks and double `ReclusterBudgetMs` until it reads zero whenever `ReclusterBudgetGrantedMs` is the whole budget.
 
-**Sparse 3D volumetric** (space sim, voxel world, ray-heavy queries). Full constructor, 32–64 entities per cell. Resist going finer for precision: the ray walk is cell-major and cost 58.4 µs at 4 per cell against 9.6 µs at 64. Sparsity in the *world* is free, because empty cells are never materialised; sparsity in a *cell* is not.
+**Sparse 3D volumetric** (space sim, voxel world, ray-heavy queries). Full constructor, cell about 4× the dominant query radius. Resist going finer for precision: the ray walk is cell-major and cost 58.4 µs at cell 63 against 9.6 µs at cell 159 in the synthetic sweep. Sparsity in the *world* is free, because empty cells are never materialised; sparsity in a *cell* is not.
 
-**Mostly static with a moving minority.** Defaults throughout, 32 entities per cell. This shape is cheap by construction: at 1 % of entities moving, Prep costs 0.40 ms and the whole fence 1.46 ms, against 9.82 ms and 16.97 ms with everything moving at 64 000 entities. Clusters do amplify the minority — a quarter of entities moving dirties about nine tenths of the clusters, since a cluster is dirty if any one of its entities moved.
+**Mostly static with a moving minority.** Defaults throughout. This shape is cheap by construction: at 1 % of entities moving, Prep costs 0.40 ms and the whole fence 1.46 ms, against 9.82 ms and 16.97 ms with everything moving at 64 000 entities. Clusters do amplify the minority — a quarter of entities moving dirties about nine tenths of the clusters, since a cluster is dirty if any one of its entities moved.
 
-**High-churn spawn and destroy.** 32 entities per cell, `ReclusterBudgetMs` at 2–4 ms to start. Churn moves no entity but it frees slots, and a freed slot refills first-fit with no regard for position, so the drift path carries more load here than in a purely kinematic world. Watch `DriftersUnplaced` and `RepairQueueEvicted`. An aged world measured 30–35 % *faster* than a fresh one at equal migration count and tightness, which is **unexplained** — do not tune against a freshly spawned world and expect the numbers to hold.
+**High-churn spawn and destroy.** Cell about 4× the dominant query radius, `ReclusterBudgetMs` at 2–4 ms to start. Churn moves no entity but it frees slots, and a freed slot refills first-fit with no regard for position, so the drift path carries more load here than in a purely kinematic world. Watch `DriftersUnplaced` and `RepairQueueEvicted`. An aged world measured 30–35 % *faster* than a fresh one at equal migration count and tightness, which is **unexplained** — do not tune against a freshly spawned world and expect the numbers to hold.
 
 Whatever the shape, the acceptance test is the same: run at the real population, read `RelocationsThrottled` and `RepairUnitsRefused` after a few hundred ticks on the ticks granted the whole budget, and do not ship until both are zero there in the steady state. On ticks the controller grants less, both may sit above zero: that is it choosing not to spend, and `QueryCandidatesPerHit` holding steady is the check that it chose well.
 
