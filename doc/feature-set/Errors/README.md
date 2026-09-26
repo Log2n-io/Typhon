@@ -5,7 +5,7 @@ description: 'Typhon''s unified error model: a single-rooted exception hierarchy
 ---
 
 # Errors
-> Typhon's unified error model: a single-rooted exception hierarchy with numeric error codes and an `IsTransient` retry hint, finite per-subsystem timeouts that replace infinite hangs, `ExhaustionPolicy`-driven bounded-resource failures, and a DEBUG-only declared-access validator. For expected non-error outcomes on hot paths, a zero-allocation `Result<TValue,TStatus>` struct replaces exceptions entirely — retrying is always the caller's decision, the engine never retries on its own.
+> Typhon's unified error model: a single-rooted exception hierarchy with numeric error codes and an `IsTransient` retry hint, finite per-subsystem timeouts that replace infinite hangs, `ExhaustionPolicy`-driven bounded-resource failures, and an opt-in declared-access validator. For expected non-error outcomes on hot paths, a zero-allocation `Result<TValue,TStatus>` struct replaces exceptions entirely — retrying is always the caller's decision, the engine never retries on its own.
 
 > 🔬 **Recommended:** read [in-depth-overview/14-errors.md](../../in-depth-overview/14-errors.md) (Chapter 14: Errors) first to understand the overall design and concepts behind this category, before diving into the specific features below.
 
@@ -21,7 +21,7 @@ description: 'Typhon''s unified error model: a single-rooted exception hierarchy
 | [Storage & Corruption Exceptions](storage-corruption-exceptions.md) | Typed failures for storage I/O, CRC32C page corruption (unhealable), and another-process database-file-lock detection | ✅ Implemented | 🟣 Advanced |
 | [Durability (WAL / BulkLoad / Commit) Exceptions](durability-exceptions.md) | Typed, fail-fast failures from the WAL writer, the commit pipeline's durability wait, and BulkLoad session lifecycle | ✅ Implemented | 🟣 Advanced |
 | [Schema & Constraint Violation Exceptions](schema-constraint-exceptions.md) | Engine-refuses-to-proceed failures for the data model: breaking schema mismatch, migration failure, revision downgrade, duplicate unique key | ✅ Implemented | 🟣 Advanced |
-| [Runtime/Scheduler Declared-Access Validation](runtime-access-validation.md) | DEBUG-only `InvalidAccessException` when a system writes a component it never declared via `Writes<T>()`/`SideWrites<T>()`, compiled out in RELEASE | ✅ Implemented | 🟣 Advanced |
+| [Runtime/Scheduler Declared-Access Validation](runtime-access-validation.md) | Opt-in `InvalidAccessException` when a system writes a component it never declared via `Writes<T>()`/`SideWrites<T>()` — enabled by `Typhon:Checks:DeclaredAccess`, compiled in all builds, zero cost when off | ✅ Implemented | 🟣 Advanced |
 
 ## Internal Features
 
