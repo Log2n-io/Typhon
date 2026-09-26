@@ -510,6 +510,8 @@
       href: Subscriptions/client-sdks.md
     - name: 'Wire Protocol & Catalog'
       href: Subscriptions/wire-protocol.md
+    - name: 'Sessions in Realms'
+      href: Subscriptions/realms.md
     - name: 'Replication Diagnostics'
       href: Subscriptions/diagnostics.md
 - name: Transactions

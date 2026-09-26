@@ -38,6 +38,7 @@ a slow client hold up the tick.
 | [Transports & hosting](transports-hosting.md) | The engine's TCP listener and the ASP.NET Core WebSocket adapter; the catalog endpoint | ✅ Implemented | 🔵 Core |
 | [Client SDKs](client-sdks.md) | TypeScript (browser) and .NET (bots, tools) clients: stores, motion extrapolation, commands, reconnection, code generation | ✅ Implemented | 🔵 Core |
 | [Wire protocol & catalog](wire-protocol.md) | `typhon.3`: the handshake, the canonical catalog, frames and blocks, close codes | ✅ Implemented | 🟣 Advanced |
+| [Sessions in realms](realms.md) | A session in one realm at a time, each realm served at its own scale, a switch as one `RESET` + `REALM` frame; kinds and profile variants; realm-scoped events | 🚧 Partial | 🟣 Advanced |
 | [Diagnostics](diagnostics.md) | `STATS` metrics (built-in and your own), the `DEBUG` capability, the push validator, runtime counters | ✅ Implemented | 🟣 Advanced |
 
 ## ⚠️ Not built yet
@@ -56,7 +57,7 @@ Refused at `Start` or at the call — never silently ignored:
   [Replication catalog](xref:concept-replication-catalog)
 - Related feature: [Overload Management](../Runtime/overload-management.md) — replication degrades sessions before the tick does
 - Related feature: [Spatial](../Spatial/README.md) — a replicated archetype is spatially indexed; views are found through the grid
-- Correctness rules: [`rules/subscriptions.md`](https://github.com/Log2n-io/Typhon/blob/main/rules/subscriptions.md) (SUB-01 … SUB-27)
+- Correctness rules: [`rules/subscriptions.md`](https://github.com/Log2n-io/Typhon/blob/main/rules/subscriptions.md) (SUB-01 … SUB-30)
 
 <!-- Deep dive: claude/design/Subscriptions/README.md -->
 <!-- Deep dive: claude/adr/067-push-replication.md -->

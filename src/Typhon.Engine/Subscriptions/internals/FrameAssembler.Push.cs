@@ -312,6 +312,21 @@ internal sealed unsafe partial class FrameAssembler
             + $"cells delivered {p.CellsDelivered}, sweeps {p.Sweeps} ({p.SweepSlots} slots); resets {p.Resets}; "
             + $"serial prepare {p.Hub.PrepareTicks * f:F0} ms, index {p.IndexTicks * f:F0} ms "
             + $"(sort {p.SortTicks * f:F0}, merge {p.MergeTicks * f:F0}, finish {p.FinishTicks * f:F0}), gather busy {p.GatherTicks * f:F0} ms (cumulative)");
+        // Realms (R4.6): the realms served now, with their sessions and the tick's events each; activations, deactivations and refusals since Start.
+        var hub = p.Hub;
+        if (hub.Active.Length > 1 || hub.RealmsActivated > 0 || RealmsUnreplicated > 0 || RealmsUnserved > 0)
+        {
+            var served = new System.Text.StringBuilder();
+            foreach (var r in hub.Active)
+            {
+                served.Append($" {r.ServedRealm}:{r.SessionsHere}s/{r.Events}e");
+            }
+
+            Console.Error.WriteLine(
+                $"  PUSH REALMS: {hub.Active.Length} served [realm:sessions/events{served}]; activated {hub.RealmsActivated}, deactivated {hub.RealmsDeactivated}, "
+                + $"unservable {hub.RealmsUnservable}; session-ticks in an unreplicated realm {RealmsUnreplicated}, in an excluded kind {RealmsUnserved}");
+        }
+
         Console.Error.WriteLine(
             $"  PUSH CELLS: delivery {p.DeliverTicks * f:F0} ms, {p.DeliverDecoded} decoded for {p.DeliverEntered} entered; "
             + $"sweep {p.SweepTicks * f:F0} ms, {p.SweepDecoded} decoded for {p.SweepSlots} in the cell; empty skipped {p.EmptyCellsSkipped}");
