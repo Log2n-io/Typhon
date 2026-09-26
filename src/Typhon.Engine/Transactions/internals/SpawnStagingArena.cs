@@ -86,6 +86,7 @@ internal sealed unsafe class SpawnStagingArena : IDisposable
             }
 
             EnsureBlockIndexFits();
+            // native-alloc: an arena block is never moved, resized or reallocated — the type's whole design constraint
             var big = (byte*)NativeMemory.Alloc((nuint)need);
             NativeMemory.Clear(big, (nuint)need);
             _blocks.Add((IntPtr)big);
@@ -195,6 +196,7 @@ internal sealed unsafe class SpawnStagingArena : IDisposable
     private void AppendBlock()
     {
         EnsureBlockIndexFits();
+        // native-alloc: an arena block is never moved, resized or reallocated — the type's whole design constraint
         var block = (byte*)NativeMemory.Alloc(BlockSize);
         _blocks.Add((IntPtr)block);
         _currentBlock = _blocks.Count - 1;

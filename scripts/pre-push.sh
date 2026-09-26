@@ -118,6 +118,7 @@ PY
 step "rule scopes (gate: invariants)"          python3 scripts/check-rule-scopes.py --quiet
 step "rule coverage (gate: rule-coverage)"     python3 scripts/audit-rule-coverage.py
 step "test suppressions (gate: invariants)"    python3 scripts/lint-test-suppressions.py
+step "native allocations (gate: invariants)"   python3 scripts/lint-native-allocations.py
 step "runsettings (gate: invariants)"          python3 scripts/check-runsettings.py
 step "gate filters (gate: invariants)"         python3 scripts/check-gate-filters.py --quiet --no-github
 step "blueprint public API (gate: invariants)" python3 scripts/check-blueprint-public-api.py --quiet

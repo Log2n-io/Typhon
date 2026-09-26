@@ -865,6 +865,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         if (lease.DepartedCount == lease.DepartedCapacity)
         {
             var capacity = lease.DepartedCapacity == 0 ? 16 : lease.DepartedCapacity * 2;
+            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
             lease.Departed = (DepartedEntity*)NativeMemory.Realloc(lease.Departed, (nuint)capacity * (nuint)sizeof(DepartedEntity));
             lease.DepartedCapacity = capacity;
         }
@@ -1060,6 +1061,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         if (lease.ReleasedCount == lease.ReleasedCapacity)
         {
             var capacity = lease.ReleasedCapacity == 0 ? 32 : lease.ReleasedCapacity * 2;
+            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
             lease.Released = (uint*)NativeMemory.Realloc(lease.Released, (nuint)capacity * sizeof(uint));
             lease.ReleasedCapacity = capacity;
         }
@@ -1074,6 +1076,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
             return;
         }
 
+        // native-alloc: per-worker lease table, sized once from the worker count and freed with the pass
         var grown = (Lease*)NativeMemory.AllocZeroed((nuint)workers, (nuint)sizeof(Lease));
         if (_leases != null)
         {
@@ -1093,6 +1096,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
             capacity *= 2;
         }
 
+        // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
         lease.Ids = (uint*)NativeMemory.Realloc(lease.Ids, (nuint)capacity * sizeof(uint));
         lease.Capacity = capacity;
     }

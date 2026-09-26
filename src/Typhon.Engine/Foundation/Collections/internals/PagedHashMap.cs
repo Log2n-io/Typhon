@@ -1100,6 +1100,7 @@ unsafe class PagedHashMap<TKey, TValue, TStore> : PagedHashMapBase<TStore> where
             Current = default;
 
             int bufferSize = MaxBufferEntries * (sizeof(TKey) + sizeof(TValue));
+            // native-alloc: per-enumerator buffer, freed with the enumerator; a tree node per enumeration would churn the resource tree
             _buffer = (byte*)NativeMemory.AllocZeroed((nuint)bufferSize);
         }
 
