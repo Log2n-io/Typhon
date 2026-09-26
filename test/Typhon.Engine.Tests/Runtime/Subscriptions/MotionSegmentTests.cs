@@ -786,6 +786,7 @@ unsafe class MotionSegmentTests : TestBase<MotionSegmentTests>
             FieldOffsetInComponent = from.FieldOffsetInComponent,
             SpatialFieldType = from.SpatialFieldType,
             Pos = from.Pos,
+            Frame = from.Frame,
             Vel = null,
             PositionStep = from.PositionStep,
             FinestPositionStep = from.FinestPositionStep,

@@ -150,6 +150,15 @@ internal abstract unsafe partial class PushReplication
     private protected readonly double[] _queryPad;
     private protected readonly double[] _skipMargin;
 
+    /// <summary>
+    /// The realm this replication serves (Realms R4.2): realm 0 until sessions are placed in realms (R4.3). A cluster of any other realm is never pushed,
+    /// so nothing of it is ever known to a session here (SUB-28).
+    /// </summary>
+    public readonly ushort ServedRealm;
+
+    /// <summary>The served realm's codecs: the frame each archetype's positions are quantized over and decoded with (SUB-30).</summary>
+    public readonly RealmCodecs Codecs;
+
     /// <summary>The visibility radius: the largest a session takes, which sizes its window.</summary>
     public readonly double Radius;
 
@@ -712,6 +721,8 @@ internal abstract unsafe partial class PushReplication
             }
         }
 
+        ServedRealm = RealmId.Default.Value;
+        Codecs = RealmCodecs.FromPlans(plans);
         _bootstrapped = new bool[plans.Length];
         _validateCursor = new int[plans.Length];
         _validating = new Dictionary<int, ulong>[plans.Length];
@@ -766,18 +777,18 @@ internal abstract unsafe partial class PushReplication
             var slack = position.Moving ? plans[a].VisibilitySlackM : 0d;
             _queryPad[a] = 1d + slack;
 
-            var pos = position.Pos;
-            _minX[a] = pos.Min[0];
-            _minY[a] = pos.Min[1];
-            _stepX[a] = WireMath.QuantStep(pos.Min[0], pos.Max[0], pos.Bits);
-            _stepY[a] = WireMath.QuantStep(pos.Min[1], pos.Max[1], pos.Bits);
+            var frame = Codecs.ByPlan[a];
+            _minX[a] = frame.Min[0];
+            _minY[a] = frame.Min[1];
+            _stepX[a] = frame.Step[0];
+            _stepY[a] = frame.Step[1];
             // In a flat grid every geometric z is 0 (10 § 3.4), whichever implementation serves it.
             _hasZ[a] = deep && position.Dims == 3 && grid != null && !grid.Flat;
             _pruneMargin[a] = 0.01 + Math.Max(_stepX[a], _stepY[a]);
             if (_hasZ[a])
             {
-                _minZ[a] = pos.Min[2];
-                _stepZ[a] = WireMath.QuantStep(pos.Min[2], pos.Max[2], pos.Bits);
+                _minZ[a] = frame.Min[2];
+                _stepZ[a] = frame.Step[2];
                 _pruneMargin[a] = Math.Max(_pruneMargin[a], 0.01 + _stepZ[a]);
             }
 
@@ -786,7 +797,7 @@ internal abstract unsafe partial class PushReplication
             // The cell delivery and sweep prune against v̂, which is quantized: the same centimetre, quantum and slack as the far sweep.
             _skipMargin[a] = _pruneMargin[a];
 
-            _axisBytes[a] = pos.Bits / 8;
+            _axisBytes[a] = frame.AxisBytes;
             _pushChunks[a] = new int[64];
             _pushBlocks[a] = new nint[64];
             _pushMasks[a] = new ulong[64];
@@ -1209,6 +1220,9 @@ internal abstract unsafe partial class PushReplication
     /// Before the parked drain: drops last tick's push marks, collects this tick's push set, and gives every cluster in it a block — so an entity that
     /// migrated into a cluster with no block is drained into one this tick rather than dropped.
     /// </summary>
+    // The realm map PrepareBlocks filters the archetype it is collecting by, or null when the engine has one realm. Serial, like the collector.
+    private ushort[] _servedFilter;
+
     public void PrepareBlocks(uint tick)
     {
         var from = Stopwatch.GetTimestamp();
@@ -1254,6 +1268,9 @@ internal abstract unsafe partial class PushReplication
                 Array.Resize(ref _repush[a], capacity);
             }
 
+            // Realms (R4.2): on an engine with more than one realm, a cluster of a realm this replication does not serve is never pushed, so it never gets
+            // a block, an identity or an event. One realm: no map, and AddPush's test is a null check.
+            _servedFilter = (cs.RealmTableOrNull?.RegisteredCount ?? 1) > 1 ? Volatile.Read(ref cs.ClusterRealmMap) : null;
             var slotMask = state.Layout.SlotCount >= 64 ? ulong.MaxValue : (1UL << state.Layout.SlotCount) - 1;
             var everything = _automatic[a] || !_bootstrapped[a] || resumed || (Volatile.Read(ref cs.StructureTick) == tick && cs.StructureCoversAll);
             if (everything)
@@ -1384,6 +1401,12 @@ internal abstract unsafe partial class PushReplication
             return;
         }
 
+        var served = _servedFilter;
+        if (served != null && (uint)chunk < (uint)served.Length && served[chunk] != ServedRealm)
+        {
+            return;
+        }
+
         var n = _pushCount[a];
         if (n == _pushChunks[a].Length)
         {
@@ -1432,6 +1455,10 @@ internal abstract unsafe partial class PushReplication
 
     /// <summary>Sizes and empties the per-worker event lists for this tick's projection.</summary>
     private protected abstract void ResetWorkers(int workers);
+
+    /// <summary>The codecs of <paramref name="realm"/> when this replication serves it, otherwise <see langword="null"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public RealmCodecs CodecsFor(ushort realm) => realm == ServedRealm ? Codecs : null;
 
     // ══ Projection (parallel, one worker per block) ══════════════════════════════════════════════════════════════════════════════════════════════════
 

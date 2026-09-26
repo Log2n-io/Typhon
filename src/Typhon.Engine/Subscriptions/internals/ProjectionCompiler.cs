@@ -485,21 +485,13 @@ internal static class ProjectionCompiler
         }
 
         var dims = spatial.SpatialFieldType.Is3D() ? 3 : 2;
+        // Realm 0's frame (R4.2): the catalog codec still carries its bounds, and the two are one computation so they cannot disagree.
         var bits = Codec.DefaultPositionBits;
-        var min = new double[dims];
-        var max = new double[dims];
-        var step = new double[dims];
-        var finest = double.MaxValue;
-        ref readonly var config = ref grid.Config;
-        for (var axis = 0; axis < dims; axis++)
+        var frame = PositionFrame.Over(in grid.Config, dims, bits);
+        var pos = new CatalogCodec
         {
-            min[axis] = axis == 0 ? config.WorldMin.X : axis == 1 ? config.WorldMin.Y : config.WorldMin.Z;
-            max[axis] = axis == 0 ? config.WorldMax.X : axis == 1 ? config.WorldMax.Y : config.WorldMax.Z;
-            step[axis] = WireMath.QuantStep(min[axis], max[axis], bits);
-            finest = Math.Min(finest, step[axis]);
-        }
-
-        var pos = new CatalogCodec { Kind = dims == 3 ? CodecKind.Pos3 : CodecKind.Pos2, Bits = bits, Min = min, Max = max };
+            Kind = dims == 3 ? CodecKind.Pos3 : CodecKind.Pos2, Bits = bits, Min = (double[])frame.Min.Clone(), Max = (double[])frame.Max.Clone(),
+        };
         var moving = declared.IsMotion;
         var motion = declared.Motion;
         CatalogCodec vel = null;
@@ -548,8 +540,9 @@ internal static class ProjectionCompiler
             SpatialFieldType = spatial.SpatialFieldType,
             Pos = pos,
             Vel = vel,
-            PositionStep = step,
-            FinestPositionStep = finest,
+            Frame = frame,
+            PositionStep = frame.Step,
+            FinestPositionStep = frame.FinestStep,
             ToleranceMetres = motion == null || motion.ToleranceMetres <= 0 ? DefaultToleranceMetres : motion.ToleranceMetres,
             TeleportMaxSpeedMps = motion?.TeleportMaxSpeedMps ?? 0d,
             MaxAgeSeconds = motion == null || motion.MaxAgeSeconds <= 0 ? DefaultMaxAgeSeconds : motion.MaxAgeSeconds,

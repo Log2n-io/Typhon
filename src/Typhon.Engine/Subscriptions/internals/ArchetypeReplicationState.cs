@@ -862,6 +862,9 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             // rejects as a double release, from inside a parallel pass. One memset per newly watched cluster, on a path that has just rented a block, buys
             // the whole initialization path a known starting state.
             NativeMemory.Clear((byte*)rented + ReplicationBlockLayout.HeaderSize, (nuint)(Layout.BlockSize - ReplicationBlockLayout.HeaderSize));
+
+            // The cluster's realm, fixed from its claim to its drain (Realms C1), which is exactly this block's lifetime (R4.2).
+            rented->Realm = RealmOfCluster(chunkId);
             if (Push != null)
             {
                 if (chunkId >= BlockByChunk.Length)
@@ -883,6 +886,13 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
         block = rented;
         return true;
+    }
+
+    /// <summary>The realm cluster <paramref name="chunkId"/> is in: realm 0 for an unattached state or a single-realm archetype.</summary>
+    internal ushort RealmOfCluster(int chunkId)
+    {
+        var map = _attachedTo == null ? null : Volatile.Read(ref _attachedTo.ClusterRealmMap);
+        return map != null && (uint)chunkId < (uint)map.Length ? map[chunkId] : RealmId.Default.Value;
     }
 
     /// <summary>

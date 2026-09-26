@@ -258,6 +258,9 @@ internal sealed class CompiledPosition
     /// <summary>The <c>vel2</c> / <c>vel3</c> codec with its derived width, or <see langword="null"/> when the model carries no velocity.</summary>
     public CatalogCodec Vel { get; init; }
 
+    /// <summary>Realm 0's frame for this position (R4.2): what <see cref="Pos"/>'s bounds and width describe, and what replication falls back to.</summary>
+    public PositionFrame Frame { get; init; }
+
     /// <summary>The position quantum on each axis, computed exactly as <see cref="WireMath.QuantStep"/> does.</summary>
     public double[] PositionStep { get; init; }
 

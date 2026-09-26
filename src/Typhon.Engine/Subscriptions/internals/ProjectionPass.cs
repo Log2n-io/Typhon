@@ -148,6 +148,10 @@ internal static unsafe class ProjectionPass
         var push = state.Push;
         var pushIndex = state.PushArchetypeIndex;
 
+        // The frame of the block's realm (R4.2, SUB-30): a block describes one cluster, and a cluster is in one realm from its claim to its drain, so the
+        // frame is hoisted per block. A block of a realm replication does not serve is never pushed (PrepareBlocks); the fallback is realm 0's own.
+        var frame = push?.CodecsFor(block->Realm)?.ByPlan[pushIndex] ?? plan.Position?.Frame;
+
         // ── 1. Slots that stopped being occupied give their identities back ─────────────────────────────────────────────────────────────────────────────
         var released = 0;
         var gone = watched & ~occupancy;
@@ -273,7 +277,7 @@ internal static unsafe class ProjectionPass
         // Everything the rule needs that is a property of the ARCHETYPE rather than of the entity: the tolerance and teleport thresholds pre-squared, the
         // heartbeat in ticks, and the four offsets a segment is written at. The scratch is carved once for the whole block, so the per-slot call allocates no
         // stack of its own and stays inlinable.
-        var motion = MotionPolicy.For(position, layout, state.TickPeriodSeconds);
+        var motion = MotionPolicy.For(position, frame, layout, state.TickPeriodSeconds);
         byte* velocityColumn = null;
         if (motion.Enabled && motion.VelocityDeclared)
         {
@@ -337,7 +341,7 @@ internal static unsafe class ProjectionPass
             // ── Position: quantized, compared, stored; then the motion rule decides whether it becomes a SEGMENT (P1-10) ──────────────────────────────────
             if (position != null && positionBytes > 0)
             {
-                QuantizePosition(position, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
+                QuantizePosition(position, frame, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
                 var stored = coldBytes + layout.PrevPositionOffsetInColdEntry;
                 var visibility = coldBytes + layout.VisibilityPositionOffsetInColdEntry;
                 if (push != null)
@@ -397,7 +401,7 @@ internal static unsafe class ProjectionPass
             {
                 // A static position: no previous copy is kept and no segment is reserved, because it never changes and nothing extrapolates from it. It is
                 // read once, here, into the cold entry's enter cache — the one place an enter record can find it on a later tick.
-                QuantizePosition(position, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
+                QuantizePosition(position, frame, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
                 var staticBytes = layout.EnterPositionBytes;
                 quantizedPosition[..staticBytes].CopyTo(new Span<byte>(coldBytes + layout.EnterPositionOffsetInColdEntry, staticBytes));
                 if (push != null)
@@ -668,19 +672,18 @@ internal static unsafe class ProjectionPass
     // ── Position ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Quantizes one slot's position, axis by axis, into <paramref name="destination"/>: the archetype's <c>pos2</c>/<c>pos3</c> codec, little-endian, the
-    /// same bytes a segment or an enter carries.
+    /// Quantizes one slot's position, axis by axis, into <paramref name="destination"/>: the archetype's <c>pos2</c>/<c>pos3</c> codec over the realm's
+    /// <paramref name="frame"/>, little-endian, the same bytes a segment or an enter carries.
     /// </summary>
-    private static void QuantizePosition(CompiledPosition position, byte* clusterBase, byte* transientBase, ArchetypeClusterInfo clusterLayout, int slot,
-        Span<byte> destination)
+    private static void QuantizePosition(CompiledPosition position, PositionFrame frame, byte* clusterBase, byte* transientBase,
+        ArchetypeClusterInfo clusterLayout, int slot, Span<byte> destination)
     {
         var storeBase = StoreFor(clusterLayout, transientBase, clusterBase, position.ComponentSlot);
         var value = storeBase + position.ComponentOffsetInCluster + (slot * position.ComponentSize) + position.FieldOffsetInComponent;
-        var bytes = position.Pos.Bits / 8;
+        var bytes = frame.AxisBytes;
         for (var axis = 0; axis < position.Dims; axis++)
         {
-            var code = WireMath.EncodeQuant(Centre(position.SpatialFieldType, value, axis, position.Dims), position.Pos.Min[axis], position.Pos.Max[axis],
-                position.Pos.Bits);
+            var code = WireMath.EncodeQuant(Centre(position.SpatialFieldType, value, axis, position.Dims), frame.Min[axis], frame.Max[axis], frame.Bits);
             for (var i = 0; i < bytes; i++)
             {
                 destination[(axis * bytes) + i] = (byte)(code >> (8 * i));

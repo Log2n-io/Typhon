@@ -158,6 +158,7 @@ internal sealed unsafe class ReplicationBlockPool : ResourceNode, IMemoryResourc
             // the previous occupant's entities, with their identities, and sessions would be served them.
             header->ProjectedWatchedMask = 0;
             header->ProjectedOccupancy = 0;
+            header->Realm = 0;
             header->ChunkId = UnassignedChunkId;
             header->NextFree = FreeListEnd;
             header->PoolState = PoolStateRented;

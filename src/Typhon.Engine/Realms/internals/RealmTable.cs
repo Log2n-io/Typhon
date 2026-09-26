@@ -130,6 +130,9 @@ internal sealed class RealmTable
     /// Simulated or divisor-only flip leaves it, so observer churn rebuilds nothing (review #4).</summary>
     internal int RunnableEpoch { get; private set; }
 
+    /// <summary>How many realms are registered now: 1 on a single-realm engine, where nothing needs a realm filter.</summary>
+    internal int RegisteredCount => Volatile.Read(ref _registered).Count;
+
     /// <summary>Registered realms that are not runnable this tick (<see cref="RealmRunState.Dormant"/>). Zero ⇒ nothing is filtered anywhere (RLM-04).</summary>
     internal int NonRunnableCount { get; private set; }
 

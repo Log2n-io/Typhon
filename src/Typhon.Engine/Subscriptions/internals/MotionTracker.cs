@@ -90,11 +90,11 @@ internal readonly struct MotionPolicy
     /// <summary>Byte offset of the declared velocity value inside its component.</summary>
     public int VelocityFieldOffset { get; }
 
-    private MotionPolicy(CompiledPosition position, in ReplicationBlockLayout layout, double tickPeriodSeconds)
+    private MotionPolicy(CompiledPosition position, PositionFrame frame, in ReplicationBlockLayout layout, double tickPeriodSeconds)
     {
         Position = position;
         Dims = position.Dims;
-        PosBytes = position.Pos.Bits / 8;
+        PosBytes = frame.AxisBytes;
         Linear = position.Linear && position.Vel != null;
         VelBits = Linear ? position.Vel.Bits : 0;
         VelBytes = Linear ? position.Vel.Bits / 8 : 0;
@@ -102,7 +102,7 @@ internal readonly struct MotionPolicy
         VelocityDeclared = position.VelocityIsDeclared;
         VelocityComponentSize = position.VelocityComponentSize;
         VelocityFieldOffset = position.VelocityFieldOffsetInComponent;
-        Step = position.PositionStep;
+        Step = frame.Step;
         TickPeriodSeconds = tickPeriodSeconds;
 
         var tolerance = position.ToleranceMetres;
@@ -132,12 +132,13 @@ internal readonly struct MotionPolicy
     /// Derives the policy for one archetype, or a disabled one when it does not move.
     /// </summary>
     /// <param name="position">The compiled position, which may be <see langword="null"/>.</param>
+    /// <param name="frame">The frame of the realm the block's entities are in (R4.2); <see langword="null"/> takes the position's own, realm 0's.</param>
     /// <param name="layout">The archetype's block layout, which the segment and run-start offsets come from.</param>
     /// <param name="tickPeriodSeconds">
     /// The tick period in force, in seconds; a non-positive value takes <see cref="MotionTracker.DefaultTickPeriodSeconds"/>.
     /// </param>
     /// <returns>The policy.</returns>
-    public static MotionPolicy For(CompiledPosition position, in ReplicationBlockLayout layout, double tickPeriodSeconds)
+    public static MotionPolicy For(CompiledPosition position, PositionFrame frame, in ReplicationBlockLayout layout, double tickPeriodSeconds)
     {
         if (position == null || !position.Moving || layout.SegmentBytes <= 0)
         {
@@ -145,7 +146,7 @@ internal readonly struct MotionPolicy
         }
 
         var period = double.IsFinite(tickPeriodSeconds) && tickPeriodSeconds > 0 ? tickPeriodSeconds : MotionTracker.DefaultTickPeriodSeconds;
-        return new MotionPolicy(position, in layout, period);
+        return new MotionPolicy(position, frame ?? position.Frame, in layout, period);
     }
 }
 
