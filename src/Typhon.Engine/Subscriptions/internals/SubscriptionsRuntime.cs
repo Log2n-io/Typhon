@@ -691,6 +691,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <summary>The push path, or <see langword="null"/> when no profile observes anything.</summary>
     internal PushReplication Push { get; private set; }
 
+    /// <summary>The send pump, so a teardown test can read what its quiesce observed (#1006).</summary>
+    internal SendPump SendPumpForTest => _sendPump;
+
     /// <summary>The owner routing (11 § 2.2), when an archetype declares owner fields; <see langword="null"/> otherwise.</summary>
     internal SelfTracker Self { get; private set; }
 
@@ -855,12 +858,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         var frames = _frames;
         if (frames != null && session.IsValid && session.Slot < Options.MaxSessions)
         {
-            var send = frames.SendStateOf(session.Slot);
-            SessionSendState.Initialize(send);
+            ref var send = ref frames.SendStateOf(session.Slot);
+            SessionSendState.Initialize(ref send);
 
             // Silence is measured from the handshake, not from the first PING: a client that completes HELLO and then says nothing must be closed on the same
             // schedule as one that stops mid-session, and a zero here would exempt it forever.
-            send->NotePing(Volatile.Read(ref _currentTick));
+            send.NotePing(Volatile.Read(ref _currentTick));
         }
 
         _sendPump?.AttachLink(session, link);
@@ -887,7 +890,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             return;
         }
 
-        frames.SendStateOf(session.Slot)->NoteCapsGranted(caps);
+        frames.SendStateOf(session.Slot).NoteCapsGranted(caps);
     }
 
     /// <inheritdoc />
@@ -907,9 +910,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             return;
         }
 
-        var send = frames.SendStateOf(session.Slot);
-        send->NotePing(Volatile.Read(ref _currentTick));
-        send->ReportAppliedTick(appliedTick);
+        ref var send = ref frames.SendStateOf(session.Slot);
+        send.NotePing(Volatile.Read(ref _currentTick));
+        send.ReportAppliedTick(appliedTick);
     }
 
     /// <inheritdoc />
@@ -1163,7 +1166,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         // Before the assembler, because a running pump holds a pointer into the assembler's frame pool for the duration of one send. Its Dispose quiesces.
         _sendPump?.Dispose();
 
-        _frames?.Dispose();
+        // #1006: the quiesce above is bounded, so a pump can still be inside a send here, holding a pointer into a frame-pool slab. The assembler leaves those
+        // slabs allocated rather than free them under a socket; its send states need no such care, being managed memory it references.
+        _frames?.Dispose(pumpsStillRunning: (_sendPump?.PumpsStillRunningAtDispose ?? 0) > 0);
     }
 
     /// <summary>

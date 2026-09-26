@@ -3,6 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using Typhon.Engine.Internals;
 using Typhon.Protocol;
 using Typhon.Schema.Definition;
@@ -107,6 +108,91 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
             Assert.That(update.States.Select(s => s.NetId).ToArray(), Is.Ordered.Ascending);
             Assert.That(update.Blocks, Is.EqualTo(new[] { nameof(ProjCreature) }), "the rocks changed nothing, so they get no block at all");
             Assert.That(KindOrder(update), Is.Ordered.Ascending, "the sub-lists are written in the grammar's order");
+        });
+    }
+
+    /// <summary>
+    /// Every session's send state starts on a cache line, which is the whole of what its split layout depends on.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="SessionSendState"/> puts the producer's counters on one line and the send side's on the next so that a completion does not invalidate the
+    /// line the producing chunk is writing. That holds only if slot 0 starts on a line boundary: the stride is 192 bytes, a multiple of 64, so every slot
+    /// inherits the base's alignment and a misaligned base misaligns all of them. The states live in a pinned managed array with byte slack for exactly this
+    /// reason (#1006 moved them off a native block), and nothing else would notice if the padding were dropped — the cost would be silent false sharing.
+    /// </remarks>
+    [Test]
+    public void EverySendStateStartsOnItsOwnCacheLine()
+    {
+        using var harness = Create();
+        for (var slot = 0; slot < 4; slot++)
+        {
+            var address = (nuint)Unsafe.AsPointer(ref harness.Assembler.SendStateOf(slot));
+            Assert.That((int)(address % 64), Is.Zero, $"slot {slot} does not start on a cache line, so a producer and a send pump share one");
+        }
+    }
+
+    /// <summary>
+    /// A <c>World</c> observer's membership changes only when an entity is created or destroyed — never because the population moved (#1005).
+    /// </summary>
+    /// <remarks>
+    /// #1005 measured the opposite on the shared-<c>World</c>-frame path: 110 sessions over 17 724 entities produced 2 594 570 leaves over 256 ticks with
+    /// nothing destroyed, every one attributed to interest, against zero leaves in a control with the mover switched off. That path was dropped rather than
+    /// deferred and <c>SharedFrameSet</c> is gone, so the cost half of the issue — the shared encode never engaging — cannot be reproduced. The correctness
+    /// half still can: <c>PushShape.World</c> exists, and this is its counted falsification. A single session keeps the arithmetic exact.
+    /// </remarks>
+    [Test]
+    public void AWorldSessionNeverLeavesALivingEntity_HoweverFarThePopulationMoves()
+    {
+        using var harness = Create();
+
+        // Spread across several replication cells to begin with, so the movement below crosses cell boundaries rather than jittering inside one.
+        var positions = new double[200];
+        for (var i = 0; i < positions.Length; i++)
+        {
+            positions[i] = -1200.0 + (i * 12.0);
+        }
+
+        SpawnCreaturesAt(harness, positions);
+        harness.RunTick(1);
+        var sessions = harness.OpenSessions(8, Profile);
+
+        var enters = new Dictionary<SessionId, List<uint>>();
+        var leaves = 0;
+        var segments = 0;
+        foreach (var s in sessions)
+        {
+            enters[s] = [];
+        }
+
+        for (var tick = 2; tick <= 40; tick++)
+        {
+            MoveAll(harness, tick);
+            harness.RunTick(tick);
+            foreach (var s in sessions)
+            {
+                var frame = harness.Read(s);
+                if (frame == null)
+                {
+                    continue;
+                }
+
+                enters[s].AddRange(frame.Enters);
+                leaves += frame.Leaves.Count;
+                segments += frame.Segments.Count;
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            // Without this the case would pass on a mover that moved nothing, which is the shape of vacuous proof #1005 itself warns about.
+            Assert.That(segments, Is.GreaterThan(0), "the population demonstrably moved on the wire, so the absence of leaves means something");
+
+            Assert.That(leaves, Is.Zero, "nothing was destroyed, so a World observer has nothing to leave — movement is not a membership change");
+            foreach (var s in sessions)
+            {
+                Assert.That(enters[s].Count, Is.EqualTo(positions.Length), $"session {s} entered every entity exactly once; a re-enter means it had left");
+                Assert.That(enters[s], Is.Unique);
+            }
         });
     }
 
@@ -608,6 +694,33 @@ unsafe class FrameAssemblerTests : TestBase<FrameAssemblerTests>
     /// <summary>Changes the vitals group of the occupied slots in <c>[from, to)</c> of the first cluster to values derived from <paramref name="seed"/>.</summary>
     private static void DamageFirst(FrameHarness harness, int from, int to, int seed = 200) => WriteFirstCluster(harness, from, to - from,
         (ref ProjBounds bounds, ref ProjAi ai, int slot) => ai.Level = (ushort)(seed + slot));
+
+    /// <summary>Moves every live creature a long way through the spatial column, which the engine pushes for the whole cluster (#1005).</summary>
+    private static void MoveAll(FrameHarness harness, int step)
+    {
+        using var tx = harness.Engine.CreateQuickTransaction();
+        var accessor = tx.For<ProjCreature>();
+        foreach (var cluster in accessor.GetClusterEnumerator())
+        {
+            var occupancy = cluster.OccupancyBits;
+#pragma warning disable TYPHON009
+            var bounds = cluster.GetSpan(ProjCreature.Bounds);
+#pragma warning restore TYPHON009
+            while (occupancy != 0)
+            {
+                var slot = BitOperations.TrailingZeroCount(occupancy);
+                occupancy &= occupancy - 1;
+
+                // Coprime strides, so each slot walks its own path across the cells rather than the population moving as one block.
+                var x = -1400f + (((step * 137) + (slot * 61)) % 2800);
+                var y = -1400f + (((step * 71) + (slot * 29)) % 2800);
+                bounds[slot] = At(x, y);
+            }
+        }
+
+        accessor.Dispose();
+        tx.Commit();
+    }
 
     /// <summary>Changes the vitals group of every live creature in every cluster, and pushes each slot it wrote.</summary>
     private static void DamageAll(FrameHarness harness, int seed)

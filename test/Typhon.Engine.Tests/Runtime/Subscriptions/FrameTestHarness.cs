@@ -275,10 +275,10 @@ sealed unsafe class FrameHarness : IDisposable
     public int Deliver(SessionId session)
     {
         var replica = _replicas[session.Value];
-        var send = Assembler.SendStateOf(session.Slot);
+        ref var send = ref Assembler.SendStateOf(session.Slot);
         var delivered = 0;
 
-        while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
             var bytes = new ReadOnlySpan<byte>(frame.Bytes, frame.Length);
             if (DigestFrames)
@@ -287,7 +287,7 @@ sealed unsafe class FrameHarness : IDisposable
             }
 
             replica.Apply(bytes);
-            send->CompleteSend(frame.Sequence);
+            send.CompleteSend(frame.Sequence);
             delivered++;
         }
 
@@ -299,11 +299,11 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns>How many frames were drained.</returns>
     public int Drain(SessionId session)
     {
-        var send = Assembler.SendStateOf(session.Slot);
+        ref var send = ref Assembler.SendStateOf(session.Slot);
         var drained = 0;
-        while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
-            send->CompleteSend(frame.Sequence);
+            send.CompleteSend(frame.Sequence);
             drained++;
         }
 
@@ -507,11 +507,11 @@ sealed unsafe class FrameHarness : IDisposable
     public List<byte[]> Collect(SessionId session)
     {
         var frames = new List<byte[]>();
-        var send = Assembler.SendStateOf(session.Slot);
-        while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
             frames.Add(new ReadOnlySpan<byte>(frame.Bytes, frame.Length).ToArray());
-            send->CompleteSend(frame.Sequence);
+            send.CompleteSend(frame.Sequence);
         }
 
         return frames;
@@ -522,8 +522,8 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns>The log, or <see langword="null"/> when no frame was ready.</returns>
     public FrameLog Read(SessionId session)
     {
-        var send = Assembler.SendStateOf(session.Slot);
-        if (!send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        if (!send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
             return null;
         }
@@ -531,7 +531,7 @@ sealed unsafe class FrameHarness : IDisposable
         var log = new FrameLog();
         var bytes = new ReadOnlySpan<byte>(frame.Bytes, frame.Length);
         log.Decode(bytes, CatalogPlan, Subscriptions.Realm0Frame);
-        send->CompleteSend(frame.Sequence);
+        send.CompleteSend(frame.Sequence);
         return log;
     }
 
@@ -540,8 +540,8 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns><see langword="true"/> when one is ready.</returns>
     public bool HasFrame(SessionId session)
     {
-        var send = Assembler.SendStateOf(session.Slot);
-        return send->ReadySequence > send->SentSequence;
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        return send.ReadySequence > send.SentSequence;
     }
 
     /// <summary>The per-session frame state, for a test that has to set up a condition the engine reaches rarely.</summary>

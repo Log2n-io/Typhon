@@ -33,6 +33,10 @@ internal sealed class InProcessLink : ISubscriptionLink
     private int _closes;
     private int _inFlight;
     private int _overlaps;
+    private int _stalledSends;
+
+    /// <summary>Non-null once <see cref="StallSends"/> is armed: every later send returns this task and completes only when the test faults it.</summary>
+    private TaskCompletionSource _stall;
 
     /// <summary>How long every send waits before completing. Zero — the default — completes synchronously.</summary>
     public TimeSpan Delay { get; set; }
@@ -80,6 +84,35 @@ internal sealed class InProcessLink : ISubscriptionLink
     /// </summary>
     public int OverlappedSends => Volatile.Read(ref _overlaps);
 
+    /// <summary>How many sends were parked by <see cref="StallSends"/>.</summary>
+    public int StalledSends => Volatile.Read(ref _stalledSends);
+
+    /// <summary>
+    /// Parks every later send until <see cref="FaultStalledSends"/>, ignoring the cancellation token.
+    /// </summary>
+    /// <remarks>
+    /// <b>For #1006, and the ignored token is the point.</b> <see cref="Delay"/> parks on a <i>cancellable</i> <c>Task.Delay</c>, so shutdown's cancel releases
+    /// the pump at once and it is never still inside a send when the quiesce deadline passes — which is why no fixture reached the hazard. A real transport
+    /// parked in a socket write to a peer that has stopped reading does not observe cancellation either, and that is the case the bounded quiesce exists for.
+    /// Arm this after the handshake: a link stalled from the start never delivers its own WELCOME.
+    /// </remarks>
+    public void StallSends() => Volatile.Write(ref _stall, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+
+    /// <summary>Faults every parked send with a cancellation — the path the #1006 report captured, where the pump's catch calls <c>Complete</c>.</summary>
+    public void FaultStalledSends() => Volatile.Read(ref _stall)?.TrySetCanceled();
+
+    /// <summary>Waits until a send has actually been parked, so a test never tears down before the pump is inside one.</summary>
+    public bool WaitForStalledSend(TimeSpan timeout)
+    {
+        var deadline = Environment.TickCount64 + (long)timeout.TotalMilliseconds;
+        while (Volatile.Read(ref _stalledSends) == 0 && Environment.TickCount64 < deadline)
+        {
+            Thread.Sleep(1);
+        }
+
+        return Volatile.Read(ref _stalledSends) > 0;
+    }
+
     /// <inheritdoc />
     public ValueTask SendAsync(ReadOnlyMemory<byte> message, CancellationToken ct)
     {
@@ -92,6 +125,14 @@ internal sealed class InProcessLink : ISubscriptionLink
         {
             DroppedAfterClose++;
             return ValueTask.CompletedTask;
+        }
+
+        var stall = Volatile.Read(ref _stall);
+        if (stall != null)
+        {
+            // Before the in-flight bookkeeping: this send never completes, so counting it there would report an overlap that never happened.
+            Interlocked.Increment(ref _stalledSends);
+            return new ValueTask(stall.Task);
         }
 
         if (Interlocked.Increment(ref _inFlight) > 1)

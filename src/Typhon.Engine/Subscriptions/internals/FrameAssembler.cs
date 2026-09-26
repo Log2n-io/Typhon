@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Typhon.Protocol;
@@ -251,6 +252,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
                 capacity *= 2;
             }
 
+            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
             _bytes = (byte*)NativeMemory.Realloc(_bytes, (nuint)capacity);
             _byteCapacity = capacity;
         }
@@ -286,6 +288,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
         if (list.Count == list.Capacity)
         {
             var capacity = list.Capacity == 0 ? 64 : list.Capacity * 2;
+            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
             list.Items = (FrameRecord*)NativeMemory.Realloc(list.Items, (nuint)capacity * (nuint)sizeof(FrameRecord));
             list.Capacity = capacity;
         }
@@ -306,6 +309,7 @@ internal sealed unsafe class FrameWorkerScratch : IDisposable
             capacity *= 2;
         }
 
+        // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
         _sortScratch = (FrameRecord*)NativeMemory.Realloc(_sortScratch, (nuint)capacity * (nuint)sizeof(FrameRecord));
         _sortCapacity = capacity;
     }
@@ -511,8 +515,31 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     private readonly int _closeBoundTicks;
     private readonly int _degradeBoundTicks;
 
-    private PinnedMemoryBlock _sendBlock;
-    private SessionSendState* _sendStates;
+    /// <summary>
+    /// The per-session send states, as a pinned managed array indexed from <see cref="_sendStatesOffset"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Managed, and deliberately so (#1006).</b> This was a native <c>AllocatePinned</c> block addressed through a <c>SessionSendState*</c>, and the only
+    /// thing that bought was a 64-byte base alignment — which a pinned array gives too, once the slack is taken in bytes. What it charged for that was C-style
+    /// lifetime management on memory a send pump can still be holding after the runtime is torn down: the block was freed while a pump was inside a send, and
+    /// the pump's completion then wrote through a stale address. A reference keeps this alive as long as the assembler, so there is nothing to free and a late
+    /// completion writes into live memory that nobody reads again — harmless by construction rather than by a guard.
+    /// </para>
+    /// <para>
+    /// <b>Why it is not an array of <see cref="SessionSendState"/>.</b> The element stride is 192 bytes, a multiple of 64, so every element shares the base's
+    /// alignment and skipping whole elements can never fix a misaligned base. The slack has to be in bytes, so the array is bytes and the states are a cast
+    /// span over it.
+    /// </para>
+    /// <para>
+    /// <b>What it gives up.</b> The resource-tree accounting, telemetry id and leak diagnostics that <c>AllocatePinned</c> attaches. That is a real loss, and
+    /// a fair price for a structure touched once per session per tick rather than once per entity.
+    /// </para>
+    /// </remarks>
+    private readonly byte[] _sendStates;
+
+    /// <summary>Bytes to skip in <see cref="_sendStates"/> so slot 0 starts on a cache-line boundary.</summary>
+    private readonly int _sendStatesOffset;
     private FrameWorkerScratch[] _workers = [];
     private long _tick;
     private StatsEncoder _stats;
@@ -606,8 +633,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         _maxFrameBytes = Math.Min(options.FrameBytes, FramePool.LargestClassBytes);
 
         Pool = new FramePool($"{id}.Pool", parent, allocator, options);
-        _sendBlock = allocator.AllocatePinned($"{id}.SendStates", parent, options.MaxSessions * SessionSendState.Bytes, true, 64);
-        _sendStates = (SessionSendState*)_sendBlock.DataAsPointer;
+        // 63 bytes of slack for the alignment, pinned so the address that decides the offset cannot change afterwards. See the field's remarks.
+        _sendStates = GC.AllocateArray<byte>((options.MaxSessions * SessionSendState.Bytes) + CacheLineBytes - 1, pinned: true);
+        _sendStatesOffset = CacheLinePadding(_sendStates);
     }
 
     /// <summary>The frame pool every published frame's bytes come from.</summary>
@@ -671,7 +699,24 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     /// <summary>The per-slot hand-off state, which a send pump claims frames through.</summary>
     /// <param name="slot">The session table row.</param>
     /// <returns>The state.</returns>
-    public SessionSendState* SendStateOf(int slot) => (SessionSendState*)((byte*)_sendStates + ((long)slot * SessionSendState.Bytes));
+    public ref SessionSendState SendStateOf(int slot) => ref MemoryMarshal.Cast<byte, SessionSendState>(_sendStates.AsSpan(_sendStatesOffset))[slot];
+
+    /// <summary>A cache line, the granularity <see cref="SessionSendState"/>'s layout is built around.</summary>
+    private const int CacheLineBytes = 64;
+
+    /// <summary>
+    /// How many bytes to skip in <paramref name="pinned"/> for a cache-line-aligned start.
+    /// </summary>
+    /// <param name="pinned">A pinned array, so the answer stays true for its lifetime.</param>
+    /// <remarks>
+    /// One address read, to compute a constant; the pointer is not retained. Holding a pointer over GC memory is what the engine's rule forbids — a buffer
+    /// reachable only through one can be freed under it — and a number derived from an address is not a way to reach memory.
+    /// </remarks>
+    private static int CacheLinePadding(byte[] pinned)
+    {
+        var misalignment = (int)((nuint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(pinned)) % CacheLineBytes);
+        return misalignment == 0 ? 0 : CacheLineBytes - misalignment;
+    }
 
     /// <summary>One session's frame state, or <see langword="null"/> when the slot has never produced a frame.</summary>
     /// <param name="session">The session.</param>
@@ -973,7 +1018,21 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     }
 
     /// <inheritdoc />
-    public void Dispose()
+    public void Dispose() => Dispose(pumpsStillRunning: false);
+
+    /// <summary>
+    /// Tears the assembler down, leaving the frame pool's slabs allocated when <paramref name="pumpsStillRunning"/> says a send may still be reading out of one.
+    /// </summary>
+    /// <param name="pumpsStillRunning">
+    /// <see cref="SendPump.PumpsStillRunningAtDispose"/> was non-zero: a pump was still inside a send when the quiesce deadline passed.
+    /// </param>
+    /// <remarks>
+    /// The send states need nothing here — they are a managed array this object references (#1006). The frame BYTES are different: they are native by
+    /// necessity, because they exist to reach a socket without a copy, and a pointer into them is held across the send's await. See
+    /// <see cref="FramePool.KeepSlabsForOutstandingSends"/>.
+    /// </remarks>
+    internal void Dispose(bool pumpsStillRunning)
+
     {
         if (_disposed)
         {
@@ -992,14 +1051,17 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         // The counters and the slots go FIRST, and nothing here reads them. Their buffer is a child of the resource parent, which may already have been
         // torn down by the time this runs; and a block still sitting in a slot needs no return, because the pool is about to free the slabs it was carved
         // from. Walking the slots to hand them back would be bookkeeping paid for with a read of memory that may no longer exist.
-        _sendStates = null;
-        _sendBlock?.Dispose();
-        _sendBlock = null;
-
+        // The send states are a managed array held by a field, so there is nothing to free here: the GC keeps them alive while this object is, and a send pump
+        // that outlives the quiesce can complete into them without writing through a freed address (#1006).
 
         for (var slot = 0; slot < _states.Length; slot++)
         {
             _states[slot] = null;
+        }
+
+        if (pumpsStillRunning)
+        {
+            Pool.KeepSlabsForOutstandingSends();
         }
 
         Pool.Dispose();
@@ -1034,12 +1096,12 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             }
 
             var state = BindSlot(slot, session);
-            var send = SendStateOf(slot);
+            ref var send = ref SendStateOf(slot);
 
             // Silence first: a client that has stopped talking is gone whatever its skip run says, and 4001 tells its SDK to reconnect rather than to back off
             // as 1013 would.
             // The stamp is the tick plus one, so zero is "this slot was never bound" and every real tick — tick zero included — is a mark the sweep can use.
-            var heardFrom = send->PingStamp;
+            var heardFrom = send.PingStamp;
             if (heardFrom > 0 && _tick - (heardFrom - 1) > _silenceBoundTicks)
             {
                 _sessions.RequestClose(session, SessionCloseReason.Unacknowledged, CloseCodes.NoAcknowledgement);
@@ -1047,7 +1109,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 continue;
             }
 
-            var skipRun = send->SkipRun;
+            var skipRun = send.SkipRun;
 
             // The high-water mark, read where every session's run is already in hand. One compare per open session per tick, on the prologue rather than on
             // the encode path, and it is what turns the close bound from a number somebody chose into one the deployment's own behaviour argues for.

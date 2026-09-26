@@ -877,9 +877,9 @@ internal sealed unsafe partial class FrameAssembler
         // connected. Nothing was published before it, so the store it clears is empty.
         reset |= first;
 
-        var send = SendStateOf(slot);
-        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick) || SkipPolicy.AcknowledgementLag(send->ProducedTick, send->AckedTick) > _lagBoundTicks
-            || !send->TryBeginFrame(out var sequence, out var recycled))
+        ref var send = ref SendStateOf(slot);
+        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick) || SkipPolicy.AcknowledgementLag(send.ProducedTick, send.AckedTick) > _lagBoundTicks
+            || !send.TryBeginFrame(out var sequence, out var recycled))
         {
             NoteSkip(state);
             return;
@@ -899,7 +899,7 @@ internal sealed unsafe partial class FrameAssembler
         if (length > _maxFrameBytes || !Pool.TryRentOrKeep(length, ref block, out var previous))
         {
             ReturnIfValid(block);
-            send->AbandonFrame(sequence);
+            send.AbandonFrame(sequence);
             NoteSkip(state);
             return;
         }
@@ -907,7 +907,7 @@ internal sealed unsafe partial class FrameAssembler
         ReturnIfValid(previous);
         buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
         PublishRealmView(session, state, reset);
-        send->PublishFrame(sequence, block, length, _tick);
+        send.PublishFrame(sequence, block, length, _tick);
         events?.NoteDelivered(count, lost);
         CommitSelf(session, state, in self, -1, ref counters);
         state.EventsCursor = (uint)_tick;
@@ -1133,7 +1133,7 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        var send = SendStateOf(session.Slot);
+        ref var send = ref SendStateOf(session.Slot);
         if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick))
         {
             NoteSkip(state);
@@ -1141,15 +1141,15 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        if (SkipPolicy.AcknowledgementLag(send->ProducedTick, send->AckedTick) > _lagBoundTicks)
+        if (SkipPolicy.AcknowledgementLag(send.ProducedTick, send.AckedTick) > _lagBoundTicks)
         {
-            send->NoteSkipped();
+            send.NoteSkipped();
             NoteSkip(state);
             push.NoteNotPublished(session);
             return;
         }
 
-        if (!send->TryBeginFrame(out var sequence, out var recycled))
+        if (!send.TryBeginFrame(out var sequence, out var recycled))
         {
             NoteSkip(state);
             push.NoteNotPublished(session);
@@ -1263,7 +1263,7 @@ internal sealed unsafe partial class FrameAssembler
 
         var aggWrite = aggDue && (aggRows > 0 || aggReset);
         var stats = Stats;
-        var emitStats = stats != null && stats.IsEmissionTick && (send->Caps & Capabilities.Stats) != 0;
+        var emitStats = stats != null && stats.IsEmissionTick && (send.Caps & Capabilities.Stats) != 0;
         var newlyComplete = complete && !state.ViewComplete;
 
         // DEBUG (09 § 15), for a session granted the cap — which admission grants only under AllowDebug: the grid with its first frame and every RESET, its
@@ -1271,7 +1271,7 @@ internal sealed unsafe partial class FrameAssembler
         var debugGrid = false;
         var debugGeometry = 0;
         var debugHash = 0UL;
-        if ((send->Caps & Capabilities.Debug) != 0 && (uint)session.Slot < (uint)_debugGeneration.Length)
+        if ((send.Caps & Capabilities.Debug) != 0 && (uint)session.Slot < (uint)_debugGeneration.Length)
         {
             var profile = _pushProfiles[index];
             var shape = _pushRegion[index] ? PushShape.Region : _pushWorld[index] ? PushShape.World : PushShape.Sphere;
@@ -1297,7 +1297,7 @@ internal sealed unsafe partial class FrameAssembler
         {
             // Nothing to say. The anchor may still have moved and a cell with nothing in it may have been delivered; neither changes what the client holds,
             // so the pending state is committed even though no frame is.
-            send->AbandonIdleFrame(sequence);
+            send.AbandonIdleFrame(sequence);
             ReturnIfValid(recycled);
             NoteSkip(state, counted: false);
             push.Commit(session);
@@ -1371,7 +1371,7 @@ internal sealed unsafe partial class FrameAssembler
         if (length > _maxFrameBytes)
         {
             counters.OversizeSkips++;
-            send->AbandonFrame(sequence);
+            send.AbandonFrame(sequence);
             ReturnIfValid(recycled);
             NoteSkip(state);
             push.NoteNotPublished(session);
@@ -1382,7 +1382,7 @@ internal sealed unsafe partial class FrameAssembler
         if (!Pool.TryRentOrKeep(length, ref block, out var previous))
         {
             ReturnIfValid(block);
-            send->AbandonFrame(sequence);
+            send.AbandonFrame(sequence);
             NoteSkip(state);
             push.NoteNotPublished(session);
             return;
@@ -1391,7 +1391,7 @@ internal sealed unsafe partial class FrameAssembler
         ReturnIfValid(previous);
         buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
         PublishRealmView(session, state, reset);
-        send->PublishFrame(sequence, block, length, _tick);
+        send.PublishFrame(sequence, block, length, _tick);
         published = length;
         if (eventCount > 0)
         {

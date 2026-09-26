@@ -40,7 +40,7 @@ unsafe class DebugBlockTests : TestBase<DebugBlockTests>
 
     private static int Cell(double v, double cellM) => (int)Math.Floor((v + ProjectionTestSchema.WorldExtentM) / cellM);
 
-    private static void Grant(FrameHarness harness, SessionId session) => harness.Assembler.SendStateOf(session.Slot)->NoteCapsGranted(Capabilities.Debug);
+    private static void Grant(FrameHarness harness, SessionId session) => harness.Assembler.SendStateOf(session.Slot).NoteCapsGranted(Capabilities.Debug);
 
     // Runs ticks, reading every frame of each session; returns each session's frames in order.
     private List<FrameLog>[] Run(FrameHarness harness, int ticks, params SessionId[] sessions)

@@ -484,7 +484,7 @@ internal sealed class SendPump : IDisposable
         }
 
         var session = _sessions.IdAt(slot);
-        return session.IsValid && _frames.SendStateOf(slot)->TryClaimFrame(_frames.Gate.CommittedTick, out _);
+        return session.IsValid && _frames.SendStateOf(slot).TryClaimFrame(_frames.Gate.CommittedTick, out _);
     }
 
     /// <summary>Claims a slot's next sendable frame, as values an async method may hold across an await.</summary>
@@ -499,7 +499,7 @@ internal sealed class SendPump : IDisposable
     /// </remarks>
     private unsafe bool TryClaim(int slot, out nint bytes, out int length, out long sequence)
     {
-        if (!_frames.SendStateOf(slot)->TryClaimFrame(_frames.Gate.CommittedTick, out var frame))
+        if (!_frames.SendStateOf(slot).TryClaimFrame(_frames.Gate.CommittedTick, out var frame))
         {
             bytes = 0;
             length = 0;
@@ -535,7 +535,8 @@ internal sealed class SendPump : IDisposable
     /// <summary>Releases the slot a frame occupied. The release inside it is what lets the producer overwrite the bytes (SUB-04).</summary>
     /// <param name="slot">The session table row.</param>
     /// <param name="sequence">The sequence that was sent.</param>
-    private unsafe void Complete(int slot, long sequence) => _frames.SendStateOf(slot)->CompleteSend(sequence);
+    private void Complete(int slot, long sequence) => _frames.SendStateOf(slot).CompleteSend(sequence);
+
 
     /// <summary>
     /// Sends at most one frame for a session.
