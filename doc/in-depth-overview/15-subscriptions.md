@@ -345,7 +345,7 @@ it, a 256-tick summary counts what a session missed, delivered as the built-in `
 
 At `Start`, `CatalogBuilder` compiles the plans, profiles' grids, commands, events and metrics into the **catalog** — canonical JSON, every
 collection sorted, indices assigned in canonical order, built-ins at reserved indices — and hashes it. It travels in `WELCOME` and is served
-by `MapTyphonCatalog`. The wire (`typhon.2`, [`Typhon.Protocol`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Protocol)):
+by `MapTyphonCatalog`. The wire (`typhon.3`, [`Typhon.Protocol`](https://github.com/Log2n-io/Typhon/tree/main/src/Typhon.Protocol)):
 messages `HELLO`, `WELCOME`, `TICK`, `COMMANDS`, `PING`/`PONG`, `KICK`, `BYE`; a `TICK` carries typed, length-prefixed blocks — `ENTITIES`,
 `EVENTS`, `SELF`, `AGG`, `STATS`, `DEBUG`, `ACKS`, `EXT` — each skippable by a client that does not know it. Records are absolute: a frame
 never depends on one the client might have missed. Codec arithmetic (quantization, packing, varints, half floats, positions, velocities) is

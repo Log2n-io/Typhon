@@ -259,7 +259,7 @@ public static class FieldCodec
             case CodecKind.Vel3:
                 for (var i = 0; i < field.Components; i++)
                 {
-                    destination[i] = WireMath.DecodeVel(reader.ReadSigned(c.Bits), field.VelocityPositionStep[i], c.QuantaDiv, c.Bits);
+                    destination[i] = WireMath.DecodeVel(reader.ReadSigned(c.Bits), field.VelocityUnitExp, c.Bits);
                 }
 
                 break;
@@ -352,7 +352,7 @@ public static class FieldCodec
             case CodecKind.Vel3:
                 for (var i = 0; i < field.Components; i++)
                 {
-                    writer.WriteBits((uint)WireMath.EncodeVel(components[i], field.VelocityPositionStep[i], c.QuantaDiv, c.Bits), c.Bits);
+                    writer.WriteBits((uint)WireMath.EncodeVel(components[i], field.VelocityUnitExp, c.Bits), c.Bits);
                 }
 
                 break;

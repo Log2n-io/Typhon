@@ -561,7 +561,7 @@ const Parameter = {
   Bits: 1,
   Bounds: 2,
   Scale: 4,
-  QuantaDiv: 8,
+  UnitExp: 8,
   N: 16,
   MaxBytes: 32,
   List: 64,
@@ -579,7 +579,7 @@ function readParameters(kind: CodecKind): number {
       return Parameter.Bits | Parameter.Scale;
     case CodecKind.Vel2:
     case CodecKind.Vel3:
-      return Parameter.Bits | Parameter.QuantaDiv;
+      return Parameter.Bits | Parameter.UnitExp;
     case CodecKind.Unorm:
     case CodecKind.Snorm:
     case CodecKind.Angle:
@@ -606,7 +606,7 @@ function checkCodec(at: string, codec: CatalogCodec, maxBytes: number, problems:
       (nonZero(codec.bits) ? Parameter.Bits : 0) |
       (codec.min !== undefined || codec.max !== undefined ? Parameter.Bounds : 0) |
       (nonZero(codec.scale) ? Parameter.Scale : 0) |
-      (nonZero(codec.quantaDiv) ? Parameter.QuantaDiv : 0) |
+      (codec.unitExp !== undefined ? Parameter.UnitExp : 0) |
       (nonZero(codec.n) ? Parameter.N : 0) |
       (nonZero(codec.maxBytes) ? Parameter.MaxBytes : 0) |
       (codec.of !== undefined || nonZero(codec.minCount) || nonZero(codec.maxCount) ? Parameter.List : 0) |
@@ -650,8 +650,15 @@ function checkCodec(at: string, codec: CatalogCodec, maxBytes: number, problems:
     case CodecKind.Vel2:
     case CodecKind.Vel3:
       checkBits(at, codec.bits, problems);
-      if (!(codec.quantaDiv !== undefined && Number.isSafeInteger(codec.quantaDiv) && codec.quantaDiv >= 1)) {
-        problems.push(`${at}: quantaDiv must be an integer ≥ 1`);
+      if (!(
+        codec.unitExp !== undefined &&
+        Number.isSafeInteger(codec.unitExp) &&
+        codec.unitExp >= ProtocolConstants.minVelocityUnitExp &&
+        codec.unitExp <= ProtocolConstants.maxVelocityUnitExp
+      )) {
+        problems.push(
+          `${at}: unitExp must be an integer in [${ProtocolConstants.minVelocityUnitExp}, ${ProtocolConstants.maxVelocityUnitExp}]`,
+        );
       }
 
       break;

@@ -27,7 +27,7 @@ public enum FieldValueKind
 /// </summary>
 public sealed class FieldPlan
 {
-    internal FieldPlan(string name, CatalogField field, CatalogCodec codec, double[] velPositionStep, Dictionary<string, string[]> enums)
+    internal FieldPlan(string name, CatalogField field, CatalogCodec codec, Dictionary<string, string[]> enums)
     {
         Name = name;
         Field = field;
@@ -35,7 +35,7 @@ public sealed class FieldPlan
         Kind = codec.Kind;
         Packed = CatalogSerializer.IsPacked(Kind);
         BitCount = Kind == CodecKind.Bool ? 1 : Kind == CodecKind.Bits ? codec.N : 0;
-        VelocityPositionStep = velPositionStep;
+        VelocityUnitExp = codec.UnitExp ?? 0;
         (ValueKind, Components) = Kind switch
         {
             CodecKind.Pos2 or CodecKind.Vec2 or CodecKind.Vel2 => (FieldValueKind.Number, 2),
@@ -57,7 +57,7 @@ public sealed class FieldPlan
                 throw new CatalogException([$"list '{name}' needs a numeric element codec and at most {ProtocolConstants.MaxListCount} elements"]);
             }
 
-            Element = new FieldPlan(name, null, codec.Of, null);
+            Element = new FieldPlan(name, null, codec.Of);
             Components = Element.Components;
         }
 
@@ -73,8 +73,8 @@ public sealed class FieldPlan
         EnumCount = field?.Enum != null && enums != null && enums.TryGetValue(field.Enum, out var names) ? names.Length : 0;
     }
 
-    internal FieldPlan(string name, CatalogField field, CatalogCodec codec, double[] velPositionStep)
-        : this(name, field, codec, velPositionStep, null)
+    internal FieldPlan(string name, CatalogField field, CatalogCodec codec)
+        : this(name, field, codec, null)
     {
     }
 
@@ -114,8 +114,8 @@ public sealed class FieldPlan
     /// <summary>For a list, the element's plan.</summary>
     public FieldPlan Element { get; }
 
-    /// <summary>For a <c>vel</c> codec, the linked position codec's step on each axis.</summary>
-    public double[] VelocityPositionStep { get; }
+    /// <summary>For a velocity: the unit's binary exponent — one code is <c>2^VelocityUnitExp</c> metres per tick (W5).</summary>
+    public int VelocityUnitExp { get; }
 
     /// <summary>For a <c>quant</c> or position codec, the step on each axis, computed once exactly as <see cref="WireMath.QuantStep"/> does.</summary>
     public double[] QuantStep { get; }
@@ -170,17 +170,12 @@ public sealed class PositionPlan
     {
         Moving = position.Kind == CatalogPosition.MotionKind;
         Linear = Moving && position.Model == CatalogPosition.LinearModel;
-        Pos = new FieldPlan("position", null, position.Pos, null);
+        Pos = new FieldPlan("position", null, position.Pos);
         Dims = Pos.Components;
         if (Linear)
         {
-            var step = new double[Dims];
-            for (var i = 0; i < Dims; i++)
-            {
-                step[i] = WireMath.QuantStep(position.Pos.Min[i], position.Pos.Max[i], position.Pos.Bits);
-            }
-
-            Vel = new FieldPlan("velocity", null, position.Vel, step);
+            // An absolute unit (W5, typhon.3): nothing of the position codec — whose bounds are a realm's — enters the velocity decode.
+            Vel = new FieldPlan("velocity", null, position.Vel);
         }
     }
 
@@ -283,7 +278,7 @@ public sealed class ArchetypePlan
         {
             if (belongs(f))
             {
-                var plan = new FieldPlan(f.Name, f, f.Codec, null, enums);
+                var plan = new FieldPlan(f.Name, f, f.Codec, enums);
                 plan.Ordinal = all.Count;
                 fields.Add(plan);
                 all.Add(plan);
@@ -304,7 +299,7 @@ public sealed class MessagePlan
         var plans = new FieldPlan[fields?.Length ?? 0];
         for (var i = 0; i < plans.Length; i++)
         {
-            plans[i] = new FieldPlan(fields[i].Name, fields[i], fields[i].Codec, null, enums) { Ordinal = i };
+            plans[i] = new FieldPlan(fields[i].Name, fields[i], fields[i].Codec, enums) { Ordinal = i };
         }
 
         Body = new SectionPlan(plans);
@@ -330,7 +325,7 @@ public sealed class MetricPlan
         Name = metric.Name;
         Session = metric.Scope == CatalogMetric.SessionScope;
         ValueCount = metric.Labels?.Length ?? 1;
-        Value = new FieldPlan(metric.Name, null, metric.Codec, null);
+        Value = new FieldPlan(metric.Name, null, metric.Codec);
     }
 
     /// <summary>The catalog metric.</summary>

@@ -13,7 +13,7 @@ namespace Typhon.Client;
 /// <remarks>
 /// <para>
 /// <b>The framing is all this adds to a socket</b>, and it is the exact mirror of the server's link: a little-endian <c>u32</c> length that excludes itself,
-/// turning a byte stream into the message stream the protocol is defined over. The <c>TYP2</c> preamble is exchanged first and both sides check it, which is
+/// turning a byte stream into the message stream the protocol is defined over. The <c>TYP3</c> preamble is exchanged first and both sides check it, which is
 /// what stops a client talking Typhon at a port that answers something else entirely and then blaming the codec.
 /// </para>
 /// <para>
@@ -71,7 +71,7 @@ public sealed class TcpClientTransport : IClientTransport
         if (!await ReadExactlyAsync(_header, ct).ConfigureAwait(false) || !_header.AsSpan().SequenceEqual(ProtocolConstants.TcpPreamble))
         {
             await DisposeAsync().ConfigureAwait(false);
-            throw new InvalidOperationException($"the peer at {_host}:{_port} did not answer the TYP2 preamble, so it is not a Typhon TCP endpoint");
+            throw new InvalidOperationException($"the peer at {_host}:{_port} did not answer the TYP3 preamble, so it is not a Typhon TCP endpoint");
         }
     }
 

@@ -37,7 +37,7 @@ a slow client hold up the tick.
 | [Backpressure & budgets](backpressure-budgets.md) | Skip never queue, catch-up from an 8-tick log, rate classes, per-session byte budgets, the inbound budget and the abuse close | ✅ Implemented | 🟣 Advanced |
 | [Transports & hosting](transports-hosting.md) | The engine's TCP listener and the ASP.NET Core WebSocket adapter; the catalog endpoint | ✅ Implemented | 🔵 Core |
 | [Client SDKs](client-sdks.md) | TypeScript (browser) and .NET (bots, tools) clients: stores, motion extrapolation, commands, reconnection, code generation | ✅ Implemented | 🔵 Core |
-| [Wire protocol & catalog](wire-protocol.md) | `typhon.2`: the handshake, the canonical catalog, frames and blocks, close codes | ✅ Implemented | 🟣 Advanced |
+| [Wire protocol & catalog](wire-protocol.md) | `typhon.3`: the handshake, the canonical catalog, frames and blocks, close codes | ✅ Implemented | 🟣 Advanced |
 | [Diagnostics](diagnostics.md) | `STATS` metrics (built-in and your own), the `DEBUG` capability, the push validator, runtime counters | ✅ Implemented | 🟣 Advanced |
 
 ## ⚠️ Not built yet

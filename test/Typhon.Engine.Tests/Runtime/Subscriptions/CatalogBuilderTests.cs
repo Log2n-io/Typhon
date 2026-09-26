@@ -323,7 +323,7 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
             "archetypes", "idx", "groups", "position", "kind", "model", "pos", "vel", "fields", "codec", "group", "onEnter", "enum", "smoothing", "owner",
             "enums", "events", "scope", "commands", "delivery", "rate", "perSec", "burst",
             "grids", "origin", "cell", "dims", "archetypeIdx", "metrics", "unit", "labels",
-            "t", "bits", "min", "max", "scale", "quantaDiv", "n", "maxBytes", "of", "minCount", "maxCount", "fixedBytes",
+            "t", "bits", "min", "max", "scale", "unitExp", "n", "maxBytes", "of", "minCount", "maxCount", "fixedBytes",
         ];
 
         var unexpected = new List<string>();

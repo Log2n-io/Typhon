@@ -205,7 +205,7 @@ Every Public feature, one line each — the application-facing surface, complete
 | &nbsp;&nbsp;↳ Backpressure & budgets | Skip never queue, catch-up from the push log, rate classes, byte budgets and detail levels, inbound budget and abuse close. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/backpressure-budgets.md) |
 | &nbsp;&nbsp;↳ Transports & hosting | The engine's TCP listener and the ASP.NET Core WebSocket adapter; the catalog endpoint. | ✅ Implemented | 🔵 Core | [→](Subscriptions/transports-hosting.md) |
 | &nbsp;&nbsp;↳ Client SDKs | TypeScript and .NET clients: columnar stores, motion extrapolation, commands, reconnection, code generation. | ✅ Implemented | 🔵 Core | [→](Subscriptions/client-sdks.md) |
-| &nbsp;&nbsp;↳ Wire protocol & catalog | `typhon.2`: handshake with a canonical catalog, tick frames of typed blocks, codecs, close codes. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/wire-protocol.md) |
+| &nbsp;&nbsp;↳ Wire protocol & catalog | `typhon.3`: handshake with a canonical catalog, tick frames of typed blocks, codecs, close codes. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/wire-protocol.md) |
 | &nbsp;&nbsp;↳ Replication diagnostics | `STATS` metrics (built-in and yours), the `DEBUG` capability, the push validator. | ✅ Implemented | 🟣 Advanced | [→](Subscriptions/diagnostics.md) |
 
 ### Runtime

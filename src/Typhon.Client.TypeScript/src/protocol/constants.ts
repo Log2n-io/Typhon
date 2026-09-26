@@ -3,11 +3,14 @@
  * before it has received any catalog.
  */
 export const ProtocolConstants = {
-  /** The protocol major this library speaks: WebSocket subprotocol `typhon.2`, TCP preamble `TYP2`. */
-  major: 2,
+  /**
+   * The protocol major this library speaks: WebSocket subprotocol `typhon.3`, TCP preamble `TYP3`. Major 3 (Realms D-4):
+   * an absolute velocity unit and realm-framed positions, which an older client would decode wrongly without noticing.
+   */
+  major: 3,
   /** The protocol minor this library speaks; the lower minor of the two sides wins. */
   minor: 0,
-  webSocketSubprotocol: 'typhon.2',
+  webSocketSubprotocol: 'typhon.3',
   /** Largest `HELLO` message, in bytes: the first message's own limit, before `limits.clientMessageBytes` applies. */
   helloMaxBytes: 16 * 1024,
   /**
@@ -35,10 +38,13 @@ export const ProtocolConstants = {
   maxGridCells: 1 << 24,
   /** The largest event, command or metric index: wire indices are dense from their reserved base (W27). */
   maxMessageIndex: 0xffff,
+  /** The legal range of a velocity codec's `unitExp` (W5): 2^-40 to 2^16 metres per tick. */
+  minVelocityUnitExp: -40,
+  maxVelocityUnitExp: 16,
 } as const;
 
-/** The 4-byte TCP preamble, ASCII `TYP2`: each side writes its own, and a mismatch closes without a `KICK` (W31). */
-export const TCP_PREAMBLE: readonly number[] = [0x54, 0x59, 0x50, 0x32];
+/** The 4-byte TCP preamble, ASCII `TYP3`: each side writes its own, and a mismatch closes without a `KICK` (W31). */
+export const TCP_PREAMBLE: readonly number[] = [0x54, 0x59, 0x50, 0x33];
 
 /** The first byte of every message. Client-to-server types have the high bit set. */
 export const MessageType = {

@@ -2,7 +2,7 @@
   "description": "HELLO with every optional field absent: zero resume token, zero hash, empty payload (W19).",
   "type": 129,
   "message": {
-    "major": 2,
+    "major": 3,
     "minor": 0,
     "caps": 0,
     "kind": "god",

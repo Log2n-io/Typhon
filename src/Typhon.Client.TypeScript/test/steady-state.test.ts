@@ -79,7 +79,7 @@ function catalog(): Catalog {
           kind: 'motion',
           model: 'linear',
           pos: all('pos3', { bits: 32, min: [-1e6, -1e6, -1e6], max: [1e6, 1e6, 1e6] }),
-          vel: all('vel3', { bits: 32, quantaDiv: 1 }),
+          vel: all('vel3', { bits: 32, unitExp: -20 }),
         },
         fields: [
           { name: 'u', codec: all('u32'), group: 'all' },

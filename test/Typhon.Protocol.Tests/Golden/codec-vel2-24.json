@@ -1,15 +1,12 @@
 {
-  "description": "vel2 at 24 bits, quantaDiv 16 (W5): sign extension of an i24 (0xFFFFFF is \u22121), the clamp \u00B1(2\u00B2\u00B3 \u2212 1), a tie, and the wire-only code \u22122\u00B2\u00B3 decoding as \u2212(2\u00B2\u00B3 \u2212 1).",
+  "description": "vel2 at 24 bits, unit 2^-14 m (W5): sign extension of an i24 (0xFFFFFF is \u22121), the clamp \u00B1(2\u00B2\u00B3 \u2212 1), a tie, and the wire-only code \u22122\u00B2\u00B3 decoding as \u2212(2\u00B2\u00B3 \u2212 1).",
   "codec": {
     "t": "vel2",
     "bits": 24,
-    "quantaDiv": 16
+    "unitExp": -14
   },
   "frameTick": 70000,
-  "positionStep": [
-    "3f50000000000000",
-    "3f50000000000000"
-  ],
+  "unitExp": -14,
   "cases": [
     {
       "input": [

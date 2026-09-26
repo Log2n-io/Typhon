@@ -85,7 +85,7 @@ public class GoldenCatalogRefusalTests
 
     private static Catalog Base(Dictionary<string, string[]> enums = null, CatalogField extra = null) => new()
     {
-        Protocol = new CatalogProtocolVersion { Major = 2 },
+        Protocol = new CatalogProtocolVersion { Major = 3 },
         App = new CatalogApp { Name = "Refusals", Revision = 1 },
         Tick = new CatalogTick { PeriodUs = 50_000, PingHz = 4 },
         Limits = new CatalogLimits { FrameBytes = 65_536, ClientMessageBytes = 1024 },
@@ -107,7 +107,7 @@ public class GoldenCatalogRefusalTests
                 Position = new CatalogPosition
                 {
                     Kind = CatalogPosition.MotionKind, Model = CatalogPosition.LinearModel, Pos = CatalogSamples.Pos2(),
-                    Vel = new CatalogCodec { Kind = CodecKind.Vel2, QuantaDiv = 16, Bits = 16 },
+                    Vel = new CatalogCodec { Kind = CodecKind.Vel2, UnitExp = -13, Bits = 16 },
                 },
                 Fields = [new CatalogField { Name = "hp", Codec = new CatalogCodec { Kind = CodecKind.Unorm, Bits = 8 }, Group = "vitals" }],
             },

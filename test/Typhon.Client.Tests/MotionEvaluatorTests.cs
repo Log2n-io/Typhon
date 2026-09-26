@@ -406,7 +406,7 @@ public class MotionEvaluatorTests
     /// <summary>The five-archetype world of <c>motion.test.ts</c>, at its 10 Hz tick period.</summary>
     private static WorldStore World() => new(CatalogPlan.Compile(new Catalog
     {
-        Protocol = new CatalogProtocolVersion { Major = 2, Minor = 0 },
+        Protocol = new CatalogProtocolVersion { Major = 3, Minor = 0 },
         App = new CatalogApp { Name = "Motion", Revision = 1 },
         Tick = new CatalogTick { PeriodUs = 100_000, PingHz = 4 },
         Limits = new CatalogLimits { FrameBytes = 262_144, ClientMessageBytes = 1024, ResumeGraceMs = 60_000 },
@@ -430,7 +430,7 @@ public class MotionEvaluatorTests
         Model = model,
         Pos = Pos(dims),
         Vel = model == CatalogPosition.LinearModel
-            ? new CatalogCodec { Kind = dims == 2 ? CodecKind.Vel2 : CodecKind.Vel3, Bits = 8, QuantaDiv = 4 }
+            ? new CatalogCodec { Kind = dims == 2 ? CodecKind.Vel2 : CodecKind.Vel3, Bits = 8, UnitExp = -12 }
             : null,
     };
 

@@ -193,7 +193,7 @@ unsafe class MotionSegmentTests : TestBase<MotionSegmentTests>
 
         /// <summary>The segment's velocity on one axis, in metres per tick.</summary>
         public double Velocity(int slot, int axis) =>
-            WireMath.DecodeVel(VelocityCode(slot, axis), Position.PositionStep[axis], Position.Vel.QuantaDiv, Position.Vel.Bits);
+            WireMath.DecodeVel(VelocityCode(slot, axis), (int)Position.Vel.UnitExp, Position.Vel.Bits);
 
         /// <summary>The segment's <c>t0</c> as it travels: the low 16 bits of its start tick (W9).</summary>
         public ushort TickLo(int slot)
@@ -542,10 +542,8 @@ unsafe class MotionSegmentTests : TestBase<MotionSegmentTests>
         harness.PlaceAt(0, 500.9, 500);
         harness.Tick(2);
 
-        var expectedX = WireMath.EncodeVel(declaredX * TickPeriodSeconds, harness.Position.PositionStep[0], harness.Position.Vel.QuantaDiv,
-            harness.Position.Vel.Bits);
-        var expectedY = WireMath.EncodeVel(declaredY * TickPeriodSeconds, harness.Position.PositionStep[1], harness.Position.Vel.QuantaDiv,
-            harness.Position.Vel.Bits);
+        var expectedX = WireMath.EncodeVel(declaredX * TickPeriodSeconds, (int)harness.Position.Vel.UnitExp, harness.Position.Vel.Bits);
+        var expectedY = WireMath.EncodeVel(declaredY * TickPeriodSeconds, (int)harness.Position.Vel.UnitExp, harness.Position.Vel.Bits);
 
         Assert.Multiple(() =>
         {
@@ -602,11 +600,11 @@ unsafe class MotionSegmentTests : TestBase<MotionSegmentTests>
         using var harness = Harness.Create(ServiceProvider);
         var position = harness.Position;
         var limit = WireMath.SymmetricLimit(position.Vel.Bits);
-        var carried = limit * position.FinestPositionStep / position.Vel.QuantaDiv;
+        var carried = Math.ScaleB(limit, (int)position.Vel.UnitExp);
         var teleportStep = TeleportMps * TickPeriodSeconds;
 
         Assert.That(carried, Is.GreaterThanOrEqualTo(teleportStep),
-            $"the codec is {position.Vel.Bits} bits at quantaDiv {position.Vel.QuantaDiv}, carrying {carried} m per tick against a teleport step of "
+            $"the codec is {position.Vel.Bits} bits at 2^{position.Vel.UnitExp} m, carrying {carried} m per tick against a teleport step of "
           + $"{teleportStep} m — W5 derives the width from exactly this number");
 
         // Run at just under the threshold on both axes, which is the fastest thing the rule will ever measure without calling it a teleport.

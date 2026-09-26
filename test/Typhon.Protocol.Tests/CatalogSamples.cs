@@ -27,7 +27,7 @@ internal static class CatalogSamples
     /// <returns>A catalog equivalent to <see cref="SwgReordered"/> but declared in a different order.</returns>
     internal static Catalog Swg() => new()
     {
-        Protocol = new CatalogProtocolVersion { Major = 2, Minor = 0 },
+        Protocol = new CatalogProtocolVersion { Major = 3, Minor = 0 },
         App = new CatalogApp { Name = "SwgTatooine", Revision = 3 },
         Tick = new CatalogTick { PeriodUs = 100_000, PingHz = 4 },
         Limits = new CatalogLimits { FrameBytes = 262_144, ClientMessageBytes = 1024, ResumeGraceMs = 60_000 },
@@ -123,7 +123,7 @@ internal static class CatalogSamples
     /// <returns>The kitchen-sink catalog.</returns>
     internal static Catalog KitchenSink() => new()
     {
-        Protocol = new CatalogProtocolVersion { Major = 2, Minor = 0 },
+        Protocol = new CatalogProtocolVersion { Major = 3, Minor = 0 },
         App = new CatalogApp { Name = "KitchenSink", Revision = 1 },
         Tick = new CatalogTick { PeriodUs = 50_000, PingHz = 4 },
         Limits = new CatalogLimits { FrameBytes = 262_144, ClientMessageBytes = 1024, ResumeGraceMs = 60_000 },
@@ -139,7 +139,7 @@ internal static class CatalogSamples
                     Kind = CatalogPosition.MotionKind,
                     Model = CatalogPosition.LinearModel,
                     Pos = new CatalogCodec { Kind = CodecKind.Pos3, Min = [-1024, -64, -1024], Max = [1024, 64, 1024], Bits = 16 },
-                    Vel = new CatalogCodec { Kind = CodecKind.Vel3, QuantaDiv = 4, Bits = 8 },
+                    Vel = new CatalogCodec { Kind = CodecKind.Vel3, UnitExp = -7, Bits = 8 },
                 },
                 Fields =
                 [
@@ -268,6 +268,6 @@ internal static class CatalogSamples
         Kind = CatalogPosition.MotionKind,
         Model = CatalogPosition.LinearModel,
         Pos = Pos2(),
-        Vel = new CatalogCodec { Kind = CodecKind.Vel2, QuantaDiv = 16, Bits = 16 },
+        Vel = new CatalogCodec { Kind = CodecKind.Vel2, UnitExp = -13, Bits = 16 },
     };
 }

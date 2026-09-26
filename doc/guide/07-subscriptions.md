@@ -430,7 +430,7 @@ builder.Services.AddTyphonSubscriptions(o => o.AllowOrigin("https://play.example
 
 var app = builder.Build();
 app.UseWebSockets();
-app.MapTyphonSubscriptions("/ws");             // the replication endpoint (subprotocol typhon.2)
+app.MapTyphonSubscriptions("/ws");             // the replication endpoint (subprotocol typhon.3)
 app.MapTyphonCatalog("/typhon/catalog.json");  // the catalog, for code generation and tools
 await app.RunAsync();
 ```

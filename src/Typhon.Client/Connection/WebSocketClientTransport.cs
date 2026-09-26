@@ -7,10 +7,10 @@ using Typhon.Protocol;
 
 namespace Typhon.Client;
 
-/// <summary>The browser's transport, from .NET: a <see cref="ClientWebSocket"/> speaking the <c>typhon.2</c> subprotocol.</summary>
+/// <summary>The browser's transport, from .NET: a <see cref="ClientWebSocket"/> speaking the <c>typhon.3</c> subprotocol.</summary>
 /// <remarks>
 /// <para>
-/// <b>The subprotocol is requested, not assumed.</b> A server that does not offer <c>typhon.2</c> has not agreed to speak this protocol, and finding that
+/// <b>The subprotocol is requested, not assumed.</b> A server that does not offer <c>typhon.3</c> has not agreed to speak this protocol, and finding that
 /// out at the upgrade is far better than discovering it from the first message that fails to parse. The negotiated value is checked after the handshake for
 /// the same reason.
 /// </para>

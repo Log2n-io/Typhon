@@ -1,16 +1,12 @@
 {
-  "description": "vel3 inside the kitchen-sink Drone position (W5): quantaDiv 4, 8 bits \u2014 clamps, \u00B1\u00BD-unit ties, exactly \u00B1L, and the wire-only code \u2212128 decoding as \u2212127.",
+  "description": "vel3 inside the kitchen-sink Drone position (W5): unit 2^-7 m, 8 bits \u2014 clamps, \u00B1\u00BD-unit ties, exactly \u00B1L, and the wire-only code \u2212128 decoding as \u2212127.",
   "codec": {
     "t": "vel3",
     "bits": 8,
-    "quantaDiv": 4
+    "unitExp": -7
   },
   "frameTick": 70000,
-  "positionStep": [
-    "3fa0000000000000",
-    "3f60000000000000",
-    "3fa0000000000000"
-  ],
+  "unitExp": -7,
   "cases": [
     {
       "input": [
@@ -29,15 +25,15 @@
     {
       "input": [
         "3fa0000000000000",
-        "bf40000000000000",
-        "3ff4000000000000"
+        "bf80000000000000",
+        "3fd4000000000000"
       ],
       "offset": 3,
       "length": 3,
       "decoded": [
         "3fa0000000000000",
-        "bf40000000000000",
-        "3fefc00000000000"
+        "bf80000000000000",
+        "3fd4000000000000"
       ]
     },
     {
@@ -50,7 +46,7 @@
       "length": 3,
       "decoded": [
         "3fefc00000000000",
-        "bfafc00000000000",
+        "bfefc00000000000",
         "0000000000000000"
       ]
     },
@@ -64,7 +60,7 @@
       "length": 3,
       "decoded": [
         "3f80000000000000",
-        "bf70000000000000",
+        "bf80000000000000",
         "3fefc00000000000"
       ]
     },
@@ -87,7 +83,7 @@
       "length": 3,
       "decoded": [
         "bfefc00000000000",
-        "3fafc00000000000",
+        "3fefc00000000000",
         "3f80000000000000"
       ]
     }

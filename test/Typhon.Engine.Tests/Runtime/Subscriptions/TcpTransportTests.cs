@@ -12,7 +12,7 @@ using Typhon.Protocol;
 namespace Typhon.Engine.Tests.Runtime.Subscriptions;
 
 /// <summary>
-/// P1-07 — the built-in TCP transport: the <c>TYP2</c> preamble, <c>u32 len</c> framing, and the seam's promises held over a real socket.
+/// P1-07 — the built-in TCP transport: the <c>TYP3</c> preamble, <c>u32 len</c> framing, and the seam's promises held over a real socket.
 /// </summary>
 /// <remarks>
 /// <para>

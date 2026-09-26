@@ -67,7 +67,7 @@ export interface DataSource {
 }
 
 export interface TyphonSourceOptions {
-  /** The server's WebSocket URL, which must speak `typhon.2`. */
+  /** The server's WebSocket URL, which must speak `typhon.3`. */
   readonly url: string;
   /** The clock render time comes from; the source feeds it every frame. */
   readonly clock: Clock;

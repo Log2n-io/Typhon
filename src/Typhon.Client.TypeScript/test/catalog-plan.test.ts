@@ -55,18 +55,18 @@ const cases: [string, (c: CatalogObject) => void, RegExp][] = [
     /pos2 needs 2 min and max/,
   ],
   [
-    'a velocity with quantaDiv 0',
+    'a velocity without a unit exponent',
     (c) => {
-      archetype(c, 'Drone').position!.vel!.quantaDiv = 0;
+      archetype(c, 'Drone').position!.vel = { t: 'vel3', bits: 8 };
     },
-    /quantaDiv ≥ 1/,
+    /unitExp in/,
   ],
   [
     'a velocity with fewer axes than its position',
     (c) => {
-      archetype(c, 'Drone').position!.vel = { t: 'vel2', bits: 8, quantaDiv: 4 };
+      archetype(c, 'Drone').position!.vel = { t: 'vel2', bits: 8, unitExp: -8 };
     },
-    /step on every axis/,
+    /matching pos's dimensions/,
   ],
   [
     'a quantizer of 12 bits',

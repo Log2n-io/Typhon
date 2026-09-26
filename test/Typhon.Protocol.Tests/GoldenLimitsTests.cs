@@ -112,7 +112,7 @@ public class GoldenLimitsTests
 
         return new Catalog
         {
-            Protocol = new CatalogProtocolVersion { Major = 2 },
+            Protocol = new CatalogProtocolVersion { Major = 3 },
             App = new CatalogApp { Name = "Wide", Revision = 1 },
             Tick = new CatalogTick { PeriodUs = 100_000, PingHz = 4 },
             Limits = new CatalogLimits { FrameBytes = 262_144, ClientMessageBytes = 1024, ResumeGraceMs = 0 },

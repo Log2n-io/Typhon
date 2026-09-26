@@ -45,8 +45,8 @@ interface CodecCase {
 interface CodecVector {
   readonly codec: CatalogCodec;
   readonly frameTick: number;
-  /** For a velocity: the linked position's step per axis. */
-  readonly positionStep?: string[];
+  /** For a velocity: the unit exponent it decodes with (also in the codec). */
+  readonly unitExp?: number;
   readonly cases: CodecCase[];
 }
 
@@ -78,7 +78,7 @@ function decodeWithMath(bytes: Uint8Array, f: FieldPlan, frameTick: number, out:
     case CodecKind.Vel2:
     case CodecKind.Vel3:
       for (let i = 0; i < f.components; i++) {
-        out[i] = decodeVel(r.signed(f.bits), f.velocityStep[i]!, f.quantaDiv, f.limit);
+        out[i] = decodeVel(r.signed(f.bits), f.velocityUnit, f.limit);
       }
 
       return true;
@@ -103,8 +103,7 @@ function decodeWithMath(bytes: Uint8Array, f: FieldPlan, frameTick: number, out:
 }
 
 function planOf(vector: CodecVector): FieldPlan {
-  const velocityStep = vector.positionStep === undefined ? undefined : Float64Array.from(vector.positionStep, fromBits);
-  return new FieldPlan('v', 0, { name: 'v', codec: vector.codec }, vector.codec, {}, velocityStep);
+  return new FieldPlan('v', 0, { name: 'v', codec: vector.codec }, vector.codec, {});
 }
 
 describe('golden codec vectors', () => {

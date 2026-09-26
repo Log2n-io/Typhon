@@ -1,5 +1,5 @@
 {
   "description": "The engine\u0027s own catalog, emitted by CatalogBuilder from a compiled projection plan rather than hand-built: three archetypes (one moving with a packed enum and a fraction, one with an owner section, one static), the eleven built-in metrics, an application metric, an event and the built-in EventsLost at index 0, two commands and the built-in ClientRegion at index 0.",
-  "hash": "d5b90f9149662ba0",
+  "hash": "50b0a50a86f4e44d",
   "byteCount": 3549
 }

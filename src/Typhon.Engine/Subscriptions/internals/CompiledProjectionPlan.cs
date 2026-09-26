@@ -219,8 +219,8 @@ internal readonly struct CompiledGroup
 /// <remarks>
 /// <para>
 /// A position is not a field (W15/W16): it travels only in an enter record and in motion segments, it belongs to no change group, and its bounds come from
-/// the spatial grid rather than from the declaration. The velocity codec's width <i>and</i> its <c>quantaDiv</c> are derived here together, once, from the
-/// archetype's teleport speed — see <see cref="ProjectionCompiler.VelocityCodec"/>.
+/// the spatial grid rather than from the declaration. The velocity codec's width <i>and</i> its absolute unit are derived here together, once, from the
+/// archetype's teleport speed, tolerance and heartbeat — see <see cref="ProjectionCompiler.VelocityCodec"/>.
 /// </para>
 /// <para>
 /// A class rather than a struct: one per archetype, read once per cluster at most, and wide enough that copying it by value would buy nothing.

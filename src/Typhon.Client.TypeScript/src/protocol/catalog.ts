@@ -45,7 +45,8 @@ export interface CatalogCodec {
   readonly min?: readonly number[];
   readonly max?: readonly number[];
   readonly scale?: number;
-  readonly quantaDiv?: number;
+  /** A velocity's unit exponent: one code is 2^unitExp metres per tick (W5, `typhon.3`). */
+  readonly unitExp?: number;
   readonly n?: number;
   readonly maxBytes?: number;
   readonly of?: CatalogCodec;
@@ -368,7 +369,7 @@ function readField(f: JsonObject, where: string, p: string[]): CatalogField {
   return field;
 }
 
-const CODEC_INTEGERS = ['bits', 'quantaDiv', 'n', 'maxBytes', 'minCount', 'maxCount', 'fixedBytes'] as const;
+const CODEC_INTEGERS = ['bits', 'unitExp', 'n', 'maxBytes', 'minCount', 'maxCount', 'fixedBytes'] as const;
 
 /**
  * A codec, and for a list its element. An element's own `of` is refused rather than read, so the recursion is one level
@@ -583,9 +584,8 @@ export class FieldPlan {
   /** 2^(bits−1) − 1 (vec, vel, snorm). */
   readonly limit: number;
   readonly scale: number;
-  readonly quantaDiv: number;
-  /** For a `vel` codec, the linked position codec's step on each axis. */
-  readonly velocityStep: Float64Array;
+  /** For a `vel` codec, its absolute unit 2^unitExp metres per tick (W5, `typhon.3`); 0 otherwise. */
+  readonly velocityUnit: number;
   readonly n: number;
   readonly maxBytes: number;
   readonly fixedBytes: number;
@@ -594,14 +594,7 @@ export class FieldPlan {
   /** The enum's value names, or `null`. */
   readonly enumNames: readonly string[] | null;
 
-  constructor(
-    name: string,
-    index: number,
-    field: CatalogField | null,
-    codec: CatalogCodec,
-    enums: Catalog['enums'],
-    velocityStep: Float64Array = NO_AXES,
-  ) {
+  constructor(name: string, index: number, field: CatalogField | null, codec: CatalogCodec, enums: Catalog['enums']) {
     this.name = name;
     this.index = index;
     this.field = field;
@@ -612,13 +605,11 @@ export class FieldPlan {
     this.bitCount = kind === CodecKind.Bool ? 1 : kind === CodecKind.Bits ? (codec.n ?? 0) : 0;
     this.bits = codec.bits ?? 0;
     this.scale = codec.scale ?? 0;
-    this.quantaDiv = codec.quantaDiv ?? 0;
     this.n = codec.n ?? 0;
     this.maxBytes = codec.maxBytes ?? 0;
     this.fixedBytes = codec.fixedBytes ?? 0;
     this.minCount = codec.minCount ?? 0;
     this.maxCount = codec.maxCount ?? 0;
-    this.velocityStep = velocityStep;
     const enumName = field?.enum;
     this.enumNames =
       enumName !== undefined && Object.prototype.hasOwnProperty.call(enums, enumName) ? enums[enumName]! : null;
@@ -696,9 +687,21 @@ export class FieldPlan {
     }
 
     if (kind === CodecKind.Vel2 || kind === CodecKind.Vel3) {
-      if (velocityStep.length !== components || !(this.quantaDiv >= 1)) {
-        throw refuse(`field '${name}': a velocity needs its position's step on every axis and quantaDiv ≥ 1`);
+      const e = codec.unitExp;
+      if (
+        e === undefined ||
+        !Number.isSafeInteger(e) ||
+        e < ProtocolConstants.minVelocityUnitExp ||
+        e > ProtocolConstants.maxVelocityUnitExp
+      ) {
+        throw refuse(
+          `field '${name}': a velocity needs unitExp in [${ProtocolConstants.minVelocityUnitExp}, ${ProtocolConstants.maxVelocityUnitExp}]`,
+        );
       }
+
+      this.velocityUnit = 2 ** e;
+    } else {
+      this.velocityUnit = 0;
     }
 
     const byteAligned = isByteWidth(this.bits);
@@ -812,7 +815,7 @@ export class PositionPlan {
         throw refuse('the linear model needs a vel2 or vel3 codec');
       }
 
-      this.vel = new FieldPlan('velocity', -1, null, vel, enums, this.pos.step);
+      this.vel = new FieldPlan('velocity', -1, null, vel, enums);
       if (this.vel.components !== this.dims) {
         throw refuse("the linear model needs a vel codec matching pos's dimensions");
       }

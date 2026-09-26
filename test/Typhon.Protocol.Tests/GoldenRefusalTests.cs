@@ -109,7 +109,7 @@ public class GoldenRefusalTests
     {
         var plan = CatalogPlan.Compile(CatalogSerializer.Canonicalize(new Catalog
         {
-            Protocol = new CatalogProtocolVersion { Major = 2 },
+            Protocol = new CatalogProtocolVersion { Major = 3 },
             App = new CatalogApp { Name = "Refusal" },
             Tick = new CatalogTick { PeriodUs = 1, PingHz = 1 },
             Limits = new CatalogLimits { FrameBytes = 1 << 20, ClientMessageBytes = 1024 },

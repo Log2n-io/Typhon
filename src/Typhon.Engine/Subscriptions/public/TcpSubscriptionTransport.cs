@@ -12,7 +12,7 @@ using Typhon.Protocol;
 namespace Typhon.Engine;
 
 /// <summary>
-/// The engine's own listener: an asynchronous <see cref="Socket"/>, the <c>TYP2</c> preamble, <c>u32 len</c> framing, and no ASP.NET Core anywhere.
+/// The engine's own listener: an asynchronous <see cref="Socket"/>, the <c>TYP3</c> preamble, <c>u32 len</c> framing, and no ASP.NET Core anywhere.
 /// </summary>
 /// <remarks>
 /// <para>

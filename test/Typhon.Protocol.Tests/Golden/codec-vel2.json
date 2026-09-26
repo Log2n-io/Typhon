@@ -1,15 +1,12 @@
 {
-  "description": "vel2 as catalog-swg declares it: 16 bits, quantaDiv 16 \u2014 sign extension at 16 bits, the clamp, a tie, and \u221232768.",
+  "description": "vel2 as catalog-swg declares it: 16 bits, unit 2^-13 m \u2014 sign extension at 16 bits, the clamp, a tie, and \u221232768.",
   "codec": {
     "t": "vel2",
     "bits": 16,
-    "quantaDiv": 16
+    "unitExp": -13
   },
   "frameTick": 70000,
-  "positionStep": [
-    "3f50000000000000",
-    "3f50000000000000"
-  ],
+  "unitExp": -13,
   "cases": [
     {
       "input": [
@@ -31,28 +28,28 @@
       "offset": 4,
       "length": 4,
       "decoded": [
-        "bfffffc000000000",
-        "3fffffc000000000"
+        "c000000000000000",
+        "4000000000000000"
       ]
     },
     {
       "input": [
-        "3f00000000000000",
-        "bf00000000000000"
+        "3f10000000000000",
+        "bf10000000000000"
       ],
       "offset": 8,
       "length": 4,
       "decoded": [
-        "3f10000000000000",
-        "bf10000000000000"
+        "3f20000000000000",
+        "bf20000000000000"
       ]
     },
     {
       "offset": 12,
       "length": 4,
       "decoded": [
-        "bfffffc000000000",
-        "bf10000000000000"
+        "c00fffc000000000",
+        "bf20000000000000"
       ]
     }
   ]

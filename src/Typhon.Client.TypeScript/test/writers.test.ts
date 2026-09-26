@@ -87,7 +87,7 @@ describe('tick writers', () => {
 describe('message and command writers', () => {
   const zeros = (n: number) => new Uint8Array(n);
   const hello = {
-    major: 2,
+    major: 3,
     minor: 0,
     caps: 0,
     kind: 'player',
@@ -97,7 +97,7 @@ describe('message and command writers', () => {
     helloPayload: zeros(0),
   };
   const welcome = {
-    major: 2,
+    major: 3,
     minor: 0,
     capsGranted: 0,
     sessionId: 1,
@@ -184,7 +184,7 @@ describe.skipIf(gc === undefined && (process.env.CI ?? '') === '')('decoders reu
         () => {
           const w = new WireWriter();
           writeWelcome(w, {
-            major: 2,
+            major: 3,
             minor: 0,
             capsGranted: 0,
             sessionId: 1,

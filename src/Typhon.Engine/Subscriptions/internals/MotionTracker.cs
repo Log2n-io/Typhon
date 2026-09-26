@@ -39,8 +39,8 @@ internal readonly struct MotionPolicy
     /// <summary>The velocity codec's width in bits, or <c>0</c> for the <c>none</c> model.</summary>
     public int VelBits { get; }
 
-    /// <summary>The velocity codec's divisor: one velocity code is a position step over this (W5).</summary>
-    public int QuantaDiv { get; }
+    /// <summary>The velocity unit's binary exponent: one velocity code is <c>2^VelUnitExp</c> metres per tick (W5, absolute).</summary>
+    public int VelUnitExp { get; }
 
     /// <summary>Whether a segment carries a velocity to extrapolate from.</summary>
     public bool Linear { get; }
@@ -98,7 +98,7 @@ internal readonly struct MotionPolicy
         Linear = position.Linear && position.Vel != null;
         VelBits = Linear ? position.Vel.Bits : 0;
         VelBytes = Linear ? position.Vel.Bits / 8 : 0;
-        QuantaDiv = Linear ? position.Vel.QuantaDiv : 1;
+        VelUnitExp = Linear ? position.Vel.UnitExp ?? 0 : 0;
         VelocityDeclared = position.VelocityIsDeclared;
         VelocityComponentSize = position.VelocityComponentSize;
         VelocityFieldOffset = position.VelocityFieldOffsetInComponent;
@@ -328,12 +328,12 @@ internal static unsafe class MotionTracker
             if (policy.Linear)
             {
                 var code = ReadVelocity(segment + policy.SegmentVelocityOffset + (a * policy.VelBytes), policy.VelBytes);
-                velocity = WireMath.DecodeVel(code, axisStep, policy.QuantaDiv, policy.VelBits);
+                velocity = WireMath.DecodeVel(code, policy.VelUnitExp, policy.VelBits);
                 segmentMoving |= code != 0;
 
                 // The rejected trigger, evaluated beside the adopted one: it fires when the velocity the client holds is not the one this tick's step
                 // quantizes to — which is what a "send a segment when the quantized velocity changes" engine would have had to emit for it to hold it.
-                shadowFires |= WireMath.EncodeVel(step[a], axisStep, policy.QuantaDiv, policy.VelBits) != code;
+                shadowFires |= WireMath.EncodeVel(step[a], policy.VelUnitExp, policy.VelBits) != code;
             }
 
             var origin = ReadCode(segment + (a * posBytes), posBytes) * axisStep;
@@ -448,7 +448,7 @@ internal static unsafe class MotionTracker
             {
                 // Clamped by the codec, and the clamp is never reached in practice: the width was derived from the same teleport threshold that trigger 1
                 // refuses to let a step exceed (W5), so a displacement that would saturate has already been sent as a teleport.
-                var code = velocity.IsEmpty ? 0 : WireMath.EncodeVel(velocity[a], policy.Step[a], policy.QuantaDiv, policy.VelBits);
+                var code = velocity.IsEmpty ? 0 : WireMath.EncodeVel(velocity[a], policy.VelUnitExp, policy.VelBits);
                 WriteCode(at + (a * policy.VelBytes), policy.VelBytes, unchecked((uint)code));
             }
         }

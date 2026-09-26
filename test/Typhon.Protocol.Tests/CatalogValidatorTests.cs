@@ -64,13 +64,13 @@ public class CatalogValidatorTests
             Position = new CatalogPosition
             {
                 Kind = CatalogPosition.MotionKind, Model = CatalogPosition.LinearModel, Pos = CatalogSamples.Pos2(),
-                Vel = new CatalogCodec { Kind = CodecKind.Vel3, QuantaDiv = 16, Bits = 16 },
+                Vel = new CatalogCodec { Kind = CodecKind.Vel3, UnitExp = -13, Bits = 16 },
             },
         }), "matching pos");
 
     [Test]
     public void AVelocityOutsideAPositionIsRefused() =>
-        AssertBreaks(c => WithCreatureField(c, "hp", new CatalogCodec { Kind = CodecKind.Vel2, QuantaDiv = 1, Bits = 16 }), "only valid inside a position");
+        AssertBreaks(c => WithCreatureField(c, "hp", new CatalogCodec { Kind = CodecKind.Vel2, UnitExp = 0, Bits = 16 }), "only valid inside a position");
 
     [Test]
     public void AListIsNotAnArchetypeField() =>

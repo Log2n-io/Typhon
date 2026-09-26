@@ -72,7 +72,7 @@ public enum CodecKind
     /// <summary>A signed 3D vector, <see cref="CatalogCodec.Scale"/> per step (W4).</summary>
     Vec3,
 
-    /// <summary>Engine-measured 2D displacement per tick, in position steps ÷ <see cref="CatalogCodec.QuantaDiv"/> (W5). Only inside a position.</summary>
+    /// <summary>Engine-measured 2D displacement per tick, in units of <c>2^</c><see cref="CatalogCodec.UnitExp"/> metres (W5). Only inside a position.</summary>
     Vel2,
 
     /// <summary>Engine-measured 3D displacement per tick (W5). Only inside a position.</summary>
@@ -187,9 +187,12 @@ public sealed class CatalogCodec
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public double Scale { get; init; }
 
-    /// <summary>Divisor applied to the position step, for <see cref="CodecKind.Vel2"/> and <see cref="CodecKind.Vel3"/>.</summary>
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
-    public int QuantaDiv { get; init; }
+    /// <summary>
+    /// The velocity unit's binary exponent, for <see cref="CodecKind.Vel2"/> and <see cref="CodecKind.Vel3"/>: one code is <c>2^unitExp</c> metres per tick
+    /// (W5, <c>typhon.3</c>) — absolute, independent of any position codec or realm.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? UnitExp { get; init; }
 
     /// <summary>Bit count for <see cref="CodecKind.Bits"/>, or byte count for <see cref="CodecKind.Bytes"/>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]

@@ -122,46 +122,46 @@ public class GoldenCodecTests
             V(Nan, 0, 0, 1), V(0, 0, 3, 4), Raw(0x03, 0x08, 0x00, 0x00));
     }
 
-    /// <summary>The velocity codec needs the position step it is expressed in; the vector records it so a client can build the same plan.</summary>
+    /// <summary>The velocity codec is expressed in its own absolute unit (<c>typhon.3</c>); the vector records the exponent it decodes with.</summary>
     [Test]
     public void Velocity()
     {
         var catalog = CatalogSerializer.Canonicalize(CatalogSamples.KitchenSink());
         var drone = CatalogPlan.Compile(catalog).ArchetypeByName("Drone").Position;
-        var step = drone.Vel.VelocityPositionStep;
+        var u = Math.ScaleB(1.0, drone.Vel.VelocityUnitExp);
 
         var cases = new List<JsonObject>();
         var buffer = new byte[256];
         var w = new WireWriter(buffer);
-        var tie = step[0] * 0.5 / 4;
+        var tie = u * 0.5;
         foreach (var v in new[]
         {
-            V(0, 0, 0), V(step[0], -step[1] / 4, step[2] * 40), V(1e9, -1e9, Nan), V(tie, -tie, 127 * step[2] / 4), V(-127 * step[0] / 4, 0, 0),
+            V(0, 0, 0), V(4 * u, -u, 40 * u), V(1e9, -1e9, Nan), V(tie, -tie, 127 * u), V(-127 * u, 0, 0),
         })
         {
             cases.Add(EncodeCase(ref w, drone.Vel, FrameTick, FieldValue.Of(v.Numbers)));
         }
 
         cases.Add(EncodeCase(ref w, drone.Vel, FrameTick, Raw(0x80, 0x7F, 0x01)));
-        Finish("codec-vel3", "vel3 inside the kitchen-sink Drone position (W5): quantaDiv 4, 8 bits — clamps, ±½-unit ties, exactly ±L, and the wire-only "
-            + "code −128 decoding as −127.", drone.Vel, cases, w.Written.ToArray(), FrameTick, new JsonObject { ["positionStep"] = Golden.Bits(step) });
+        Finish("codec-vel3", "vel3 inside the kitchen-sink Drone position (W5): unit 2^-7 m, 8 bits — clamps, ±½-unit ties, exactly ±L, and the wire-only "
+            + "code −128 decoding as −127.", drone.Vel, cases, w.Written.ToArray(), FrameTick, new JsonObject { ["unitExp"] = drone.Vel.VelocityUnitExp });
 
         var creature = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.Swg())).ArchetypeByName("Creature").Position;
-        var swgStep = creature.Vel.VelocityPositionStep;
+        var swgU = Math.ScaleB(1.0, creature.Vel.VelocityUnitExp);
         cases = [];
         w = new WireWriter(buffer);
-        foreach (var v in new[] { V(swgStep[0], -swgStep[1]), V(-2, 2), V(swgStep[0] * 0.5 / 16, -swgStep[1] * 0.5 / 16) })
+        foreach (var v in new[] { V(8 * swgU, -8 * swgU), V(-2, 2), V(swgU * 0.5, -swgU * 0.5) })
         {
             cases.Add(EncodeCase(ref w, creature.Vel, FrameTick, v));
         }
 
         cases.Add(EncodeCase(ref w, creature.Vel, FrameTick, Raw(0x00, 0x80, 0xFF, 0xFF)));
-        Finish("codec-vel2", "vel2 as catalog-swg declares it: 16 bits, quantaDiv 16 — sign extension at 16 bits, the clamp, a tie, and −32768.", creature.Vel,
-            cases, w.Written.ToArray(), FrameTick, new JsonObject { ["positionStep"] = Golden.Bits(swgStep) });
+        Finish("codec-vel2", "vel2 as catalog-swg declares it: 16 bits, unit 2^-13 m — sign extension at 16 bits, the clamp, a tie, and −32768.", creature.Vel,
+            cases, w.Written.ToArray(), FrameTick, new JsonObject { ["unitExp"] = creature.Vel.VelocityUnitExp });
 
         var wide = CatalogPlan.Compile(CatalogSerializer.Canonicalize(new Catalog
         {
-            Protocol = new CatalogProtocolVersion { Major = 2 }, App = new CatalogApp { Name = "Vel24" }, Tick = new CatalogTick { PeriodUs = 1, PingHz = 1 },
+            Protocol = new CatalogProtocolVersion { Major = 3 }, App = new CatalogApp { Name = "Vel24" }, Tick = new CatalogTick { PeriodUs = 1, PingHz = 1 },
             Limits = new CatalogLimits { FrameBytes = 1 << 20, ClientMessageBytes = 1024 },
             Archetypes =
             [
@@ -171,23 +171,23 @@ public class GoldenCodecTests
                     Position = new CatalogPosition
                     {
                         Kind = CatalogPosition.MotionKind, Model = CatalogPosition.LinearModel, Pos = CatalogSamples.Pos2(),
-                        Vel = new CatalogCodec { Kind = CodecKind.Vel2, QuantaDiv = 16, Bits = 24 },
+                        Vel = new CatalogCodec { Kind = CodecKind.Vel2, UnitExp = -14, Bits = 24 },
                     },
                 },
             ],
         })).ArchetypeByName("M").Position;
-        var wideStep = wide.Vel.VelocityPositionStep;
+        var wideU = Math.ScaleB(1.0, wide.Vel.VelocityUnitExp);
         cases = [];
         w = new WireWriter(buffer);
-        foreach (var v in new[] { V(wideStep[0], -wideStep[1]), V(1e9, -1e9), V(wideStep[0] * 0.5 / 16, -wideStep[1] * 0.5 / 16) })
+        foreach (var v in new[] { V(16 * wideU, -16 * wideU), V(1e9, -1e9), V(wideU * 0.5, -wideU * 0.5) })
         {
             cases.Add(EncodeCase(ref w, wide.Vel, FrameTick, v));
         }
 
         cases.Add(EncodeCase(ref w, wide.Vel, FrameTick, Raw(0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF)));
-        Finish("codec-vel2-24", "vel2 at 24 bits, quantaDiv 16 (W5): sign extension of an i24 (0xFFFFFF is −1), the clamp ±(2²³ − 1), a tie, and the "
+        Finish("codec-vel2-24", "vel2 at 24 bits, unit 2^-14 m (W5): sign extension of an i24 (0xFFFFFF is −1), the clamp ±(2²³ − 1), a tie, and the "
             + "wire-only code −2²³ decoding as −(2²³ − 1).", wide.Vel, cases, w.Written.ToArray(), FrameTick,
-            new JsonObject { ["positionStep"] = Golden.Bits(wideStep) });
+            new JsonObject { ["unitExp"] = wide.Vel.VelocityUnitExp });
     }
 
     [Test]
@@ -296,7 +296,7 @@ public class GoldenCodecTests
 
         var plan = CatalogPlan.Compile(CatalogSerializer.Canonicalize(new Catalog
         {
-            Protocol = new CatalogProtocolVersion { Major = 2 }, App = new CatalogApp { Name = "Packs" }, Tick = new CatalogTick { PeriodUs = 1, PingHz = 1 },
+            Protocol = new CatalogProtocolVersion { Major = 3 }, App = new CatalogApp { Name = "Packs" }, Tick = new CatalogTick { PeriodUs = 1, PingHz = 1 },
             Limits = new CatalogLimits { FrameBytes = 1 << 20, ClientMessageBytes = 1024 },
             Events = [new CatalogEvent { Name = "P", Scope = "all", Fields = fields }],
         })).EventByName("P");
@@ -423,7 +423,7 @@ public class GoldenCodecTests
         {
             var catalog = new Catalog
             {
-                Protocol = new CatalogProtocolVersion { Major = 2 },
+                Protocol = new CatalogProtocolVersion { Major = 3 },
                 App = new CatalogApp { Name = "Codec" },
                 Tick = new CatalogTick { PeriodUs = 1, PingHz = 1 },
                 Limits = new CatalogLimits { FrameBytes = 1 << 20, ClientMessageBytes = 1024 },
@@ -442,7 +442,7 @@ public class GoldenCodecTests
         {
             var catalog = new Catalog
             {
-                Protocol = new CatalogProtocolVersion { Major = 2 },
+                Protocol = new CatalogProtocolVersion { Major = 3 },
                 App = new CatalogApp { Name = "Section" },
                 Tick = new CatalogTick { PeriodUs = 1, PingHz = 1 },
                 Limits = new CatalogLimits { FrameBytes = 1 << 20, ClientMessageBytes = 1024 },

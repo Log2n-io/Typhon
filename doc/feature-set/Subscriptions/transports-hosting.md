@@ -19,9 +19,9 @@ must not depend on ASP.NET Core, and no transport may block or be called by the 
 - **Links are thin.** A transport accepts connections and moves bytes; handshake, admission, caps and close codes are the engine's, behind
   `ISubscriptionAcceptor`. **Send pumps** owned by the engine walk only the sessions that produced a frame, hand it to the session's link
   (at most one send in flight), and chain the next; the tick never awaits a send.
-- **TCP** (`TcpSubscriptionTransport`, in the engine): a `TYP2` preamble, `u32` length framing, optional TLS
+- **TCP** (`TcpSubscriptionTransport`, in the engine): a `TYP3` preamble, `u32` length framing, optional TLS
   (`ServerCertificate`), `TCP_NOTSENT_LOWAT` where the OS has it. Binds **loopback** unless `Address` is set.
-- **WebSocket** (`Typhon.Subscriptions.AspNetCore`): the `typhon.2` subprotocol, an allowed-origin list (empty **refuses to start**;
+- **WebSocket** (`Typhon.Subscriptions.AspNetCore`): the `typhon.3` subprotocol, an allowed-origin list (empty **refuses to start**;
   `AllowAnyOrigin()` is explicit), explicit keep-alive, a bounded receive loop. No `permessage-deflate`: quantized payloads barely compress
   and per-connection zlib defeats encode-once.
 - **Catalog endpoint**: `MapTyphonCatalog` serves exactly the bytes `WELCOME` carries, for code generation and tools.

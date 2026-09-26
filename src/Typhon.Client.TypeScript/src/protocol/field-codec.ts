@@ -167,11 +167,11 @@ export function readNumber(r: WireReader, f: FieldPlan, frameTick: number, out: 
       break;
     case CodecKind.Vel2:
     case CodecKind.Vel3:
-      // decodeVel: max(q, −limit) × posStep ÷ quantaDiv.
+      // decodeVel: max(q, −limit) × 2^unitExp.
       for (let i = 0; i < f.components; i++) {
         r.signedInto(f.bits, out, offset + i);
         const q = out[offset + i]!;
-        out[offset + i] = ((q < -f.limit ? -f.limit : q) * f.velocityStep[i]!) / f.quantaDiv;
+        out[offset + i] = (q < -f.limit ? -f.limit : q) * f.velocityUnit;
       }
 
       break;
@@ -391,7 +391,7 @@ export function writeNumber(w: WireWriter, f: FieldPlan, c: ArrayLike<number>, o
     case CodecKind.Vel2:
     case CodecKind.Vel3:
       for (let i = 0; i < f.components; i++) {
-        w.bits(encodeVel(c[offset + i]!, f.velocityStep[i]!, f.quantaDiv, f.limit), f.bits);
+        w.bits(encodeVel(c[offset + i]!, f.velocityUnit, f.limit), f.bits);
       }
 
       break;

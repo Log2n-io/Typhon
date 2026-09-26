@@ -6,26 +6,25 @@ using Typhon.Protocol;
 namespace Typhon.Engine.Tests.Runtime;
 
 /// <summary>
-/// P1-02 / D2 — a <c>vel</c> codec's width and its <c>quantaDiv</c> are derived together at registration, neither fixed (W5).
+/// P1-02 / D2, Realms D-3 — a <c>vel</c> codec's absolute unit <c>2^unitExp</c> m per tick comes from the motion rule's drift budget, and its width is
+/// the narrowest that carries the largest non-teleport displacement at that unit (W5, <c>typhon.3</c>).
 /// </summary>
 /// <remarks>
 /// <para>
-/// <c>L ≥ ⌈maxSpeed × period × multiplier / posStep × quantaDiv⌉</c>, with <c>L = 2ᵇ⁻¹ − 1</c>. The search runs the four legal widths outermost and the
-/// divisors <c>16, 8, 4, 2, 1</c> inside each: <b>the narrowest width that can carry the displacement, then the finest velocity quantum that width affords.</b>
-/// Every displacement a tick can carry below the teleport threshold must fit, because saturating instead would emit a segment per tick for every fast mover
-/// exactly while the server is overloaded — which is when traffic must not grow.
+/// <c>u</c> = the largest power of two ≤ <c>Tolerance / MaxAge</c> (ticks at the nominal period); then <c>L(b) ≥ ⌈maxSpeed × period × multiplier / u⌉</c>,
+/// <c>L = 2ᵇ⁻¹ − 1</c>. Nothing of a position codec enters: the unit is the same in every realm, whatever its bounds.
 /// </para>
 /// <para>
-/// <b>The ladder cases are driven through unit inputs</b> (<c>posStep = 1</c>, <c>period = 1</c>, <c>multiplier = 1</c>) so the speed IS the displacement in
-/// position quanta and the boundary is exact rather than a float32 near-miss. The SWG case then checks the real numbers end to end, through the codec itself.
+/// <b>The ladder cases are driven through unit inputs</b> (tolerance 1 m over one tick, so <c>u = 1</c>; <c>period = 1</c>, <c>multiplier = 1</c>) so the
+/// speed IS the code count and the boundary is exact.
 /// </para>
 /// </remarks>
 [TestFixture]
 [NonParallelizable]
 class VelocityCodecWidthTests : TestBase<VelocityCodecWidthTests>
 {
-    /// <summary>The derived pair for a displacement of <paramref name="quanta"/> position quanta per tick.</summary>
-    private static (int Bits, int QuantaDiv) CodecFor(double quanta) => ProjectionCompiler.VelocityCodec(quanta, 1.0, 1, 1.0);
+    /// <summary>The derived pair for a displacement of <paramref name="codes"/> unit-1 codes per tick.</summary>
+    private static (int Bits, int UnitExp) CodecFor(double codes) => ProjectionCompiler.VelocityCodec(codes, 1.0, 1, 1.0, 1.0);
 
     private DatabaseEngine SetupEngine() => ProjectionTestSchema.SetupEngine(ServiceProvider);
 
@@ -37,8 +36,8 @@ class VelocityCodecWidthTests : TestBase<VelocityCodecWidthTests>
     {
         Assert.Multiple(() =>
         {
-            Assert.That(CodecFor(1).Bits, Is.EqualTo(8));
-            Assert.That(CodecFor(127).Bits, Is.EqualTo(8), "127 quanta still fit 8 bits, at quantaDiv 1");
+            Assert.That(CodecFor(1), Is.EqualTo((8, 0)));
+            Assert.That(CodecFor(127).Bits, Is.EqualTo(8));
             Assert.That(CodecFor(128).Bits, Is.EqualTo(16));
             Assert.That(CodecFor(32_767).Bits, Is.EqualTo(16));
             Assert.That(CodecFor(32_768).Bits, Is.EqualTo(24));
@@ -48,122 +47,66 @@ class VelocityCodecWidthTests : TestBase<VelocityCodecWidthTests>
     }
 
     /// <summary>
-    /// The divisor is the largest power of two ≤ 16 the chosen width still carries, and it drops only as far as the displacement forces it.
+    /// The unit is the largest power of two within <c>Tolerance / MaxAge</c> ticks, clamped to the protocol's legal exponents, and independent of speed.
     /// </summary>
-    /// <remarks>
-    /// This is the half of W5 that used to be a constant. At 8 bits a displacement of 7 quanta leaves room for the full sixteenths; 127 quanta leaves room
-    /// for none of them and takes whole quanta rather than a second byte. The pair is what a client decodes with, so both halves are asserted together.
-    /// </remarks>
     [Test]
-    public void QuantaDiv_IsTheFinestTheChosenWidthAffords()
+    public void UnitExp_IsTheLargestPowerOfTwoWithinTheDriftBudget()
     {
         Assert.Multiple(() =>
         {
-            Assert.That(CodecFor(7), Is.EqualTo((8, 16)), "7 x 16 = 112 codes fits 8 bits with the finest divisor");
-            Assert.That(CodecFor(15), Is.EqualTo((8, 8)), "15 x 16 = 240 does not; halving the divisor costs resolution, not a byte");
-            Assert.That(CodecFor(127), Is.EqualTo((8, 1)), "at the edge of 8 bits the divisor is spent entirely");
-            Assert.That(CodecFor(128), Is.EqualTo((16, 16)), "the next width restores the finest divisor");
-            Assert.That(CodecFor(2_048), Is.EqualTo((16, 8)), "SWG's creature: one halving, and 16 bits instead of 24");
-            Assert.That(CodecFor(32_768), Is.EqualTo((24, 16)), "past 16 bits at quantaDiv 1 the width widens and the divisor resets");
-            Assert.That(ProjectionCompiler.MaxVelocityQuantaDiv, Is.EqualTo(16), "the divisor is derived in [1, 16]; 16 is the ceiling, not the value");
+            Assert.That(ProjectionCompiler.VelocityCodec(1, 1.0, 1, 1.0, 4.0).UnitExp, Is.EqualTo(-2), "1 m over 4 ticks is exactly 2^-2");
+            Assert.That(ProjectionCompiler.VelocityCodec(1, 1.0, 1, 1.0, 5.0).UnitExp, Is.EqualTo(-3), "0.2 m rounds DOWN to 2^-3, never up");
+            Assert.That(ProjectionCompiler.VelocityCodec(20, 0.02, 1, 0.05, 5.0).UnitExp, Is.EqualTo(-13),
+                "SWG's players: 5 cm over 250 ticks is 0.2 mm, 2^-13 m per tick");
+            Assert.That(ProjectionCompiler.VelocityCodec(20, 0.1, 1, 0.05, 5.0).UnitExp, Is.EqualTo(-10), "the same rule at 10 Hz: 50 ticks, 1 mm");
+            Assert.That(ProjectionCompiler.VelocityCodec(200, 0.1, 1, 0.05, 5.0).UnitExp, Is.EqualTo(-10), "a faster archetype buys width, not unit");
+            Assert.That(ProjectionCompiler.VelocityCodec(1e-9, 1.0, 1, 1e-20, 1.0).UnitExp, Is.EqualTo(ProtocolConstants.MinVelocityUnitExp));
+            Assert.That(ProjectionCompiler.VelocityCodec(1, 1.0, 1, 1e9, 1.0).UnitExp, Is.EqualTo(ProtocolConstants.MaxVelocityUnitExp));
         });
     }
 
     /// <summary>
-    /// The derived pair actually round-trips the largest legal displacement: it encodes inside ±L and decodes back within one velocity quantum.
+    /// A speed no width can carry at the derived unit is refused at registration, never saturated.
     /// </summary>
-    /// <remarks>
-    /// <b>The invariant, not the loop condition.</b> Asserting <c>SymmetricLimit(bits) ≥ needed</c> restates the search's own test and would pass for any
-    /// arithmetic the derivation happened to use. What has to hold is a property of the codec: the fastest thing that is not a teleport encodes without
-    /// clamping — one code past L and the segment saturates, which is the failure the derivation exists to prevent — and decodes back to the displacement it
-    /// started from, to the resolution the chosen divisor promises (<c>posStep / quantaDiv</c>).
-    /// </remarks>
     [Test]
-    public void DerivedPair_EncodesTheLargestLegalDisplacementWithoutClamping()
+    public void AnUncarriableSpeed_IsRefused() => Assert.Throws<InvalidOperationException>(() => ProjectionCompiler.VelocityCodec(1e9, 1.0, 1, 1e-6, 1.0));
+
+    /// <summary>
+    /// The derived pair round-trips the largest legal displacement without clamping, within half a unit — and that half unit over <c>MaxAge</c> ticks of
+    /// extrapolation stays within half the tolerance, which is what the unit is derived for.
+    /// </summary>
+    [Test]
+    public void DerivedPair_EncodesTheLargestLegalDisplacement_AndBoundsTheDrift()
     {
+        const double tolerance = 0.05;
+        const double maxAge = 5.0;
+        var period = ProjectionTestSchema.TickPeriodSeconds;
         foreach (var speed in new[] { 0.5, 2.0, 20.0, 100.0, 300.0 })
         {
             foreach (var multiplier in new[] { 1, 4, 6 })
             {
-                var step = ProjectionTestSchema.PositionStepM;
-                var (bits, quantaDiv) = ProjectionCompiler.VelocityCodec(speed, ProjectionTestSchema.TickPeriodSeconds, multiplier, step);
+                var (bits, unitExp) = ProjectionCompiler.VelocityCodec(speed, period, multiplier, tolerance, maxAge);
 
-                // The largest displacement one tick may carry and still not be a teleport, on one axis.
-                var displacement = speed * ProjectionTestSchema.TickPeriodSeconds * multiplier;
+                var displacement = speed * period * multiplier;
                 var limit = WireMath.SymmetricLimit(bits);
-                var code = WireMath.EncodeVel(displacement, step, quantaDiv, bits);
-                var decoded = WireMath.DecodeVel(code, step, quantaDiv, bits);
-                var velocityQuantum = step / quantaDiv;
+                var code = WireMath.EncodeVel(displacement, unitExp, bits);
+                var decoded = WireMath.DecodeVel(code, unitExp, bits);
+                var unit = Math.ScaleB(1.0, unitExp);
 
                 Assert.Multiple(() =>
                 {
-                    Assert.That(Math.Abs(code), Is.LessThanOrEqualTo(limit),
-                        $"{speed} m/s at x{multiplier} must encode inside +/-{limit} at {bits} bits / quantaDiv {quantaDiv}");
-                    Assert.That(WireMath.EncodeVel(-displacement, step, quantaDiv, bits), Is.EqualTo(-code), "the codec is symmetric");
-                    Assert.That(Math.Abs(decoded - displacement), Is.LessThanOrEqualTo(velocityQuantum),
-                        $"{speed} m/s at x{multiplier} must decode back within one velocity quantum ({velocityQuantum} m/tick)");
+                    Assert.That(Math.Abs(code), Is.LessThanOrEqualTo(limit), $"{speed} m/s at x{multiplier} must encode inside +/-{limit} at {bits} bits");
+                    Assert.That(WireMath.EncodeVel(-displacement, unitExp, bits), Is.EqualTo(-code), "the codec is symmetric");
+                    Assert.That(Math.Abs(decoded - displacement), Is.LessThanOrEqualTo(unit / 2), "decodes within half a unit");
+                    Assert.That(unit / 2 * (maxAge / period), Is.LessThanOrEqualTo(tolerance / 2), "half a unit of drift per tick over MaxAge");
                 });
             }
         }
     }
 
     /// <summary>
-    /// The pair rises with the teleport speed and with the tick multiplier, which are the two factors of the same displacement.
+    /// The per-archetype opt-out caps the multiplier at 1: an archetype whose movement is bounded per tick pays the nominal width, at the same unit.
     /// </summary>
-    /// <remarks>
-    /// Resolution is spent before bytes are, so a faster archetype first loses divisor and only then gains a byte per axis. Both directions are asserted as
-    /// the ordering they are — finer-or-equal divisor never accompanies a narrower width — rather than as three fixed pairs.
-    /// </remarks>
-    [Test]
-    public void Pair_DegradesResolutionBeforeItSpendsBytes()
-    {
-        var step = ProjectionTestSchema.PositionStepM;
-        var atOne = ProjectionCompiler.VelocityCodec(10.0, 0.1, 1, step);
-        var atSix = ProjectionCompiler.VelocityCodec(10.0, 0.1, 6, step);
-        var faster = ProjectionCompiler.VelocityCodec(40.0, 0.1, 1, step);
-
-        Assert.Multiple(() =>
-        {
-            // 10 m/s over a 0.1 s tick is 1 m per tick: 1 024 position quanta, which 16 bits carries at the full sixteenths. Six ticks' worth in one costs
-            // resolution — 6 144 quanta needs quantaDiv 4 — but not the third byte the fixed divisor used to force.
-            Assert.That(atOne, Is.EqualTo((16, 16)));
-            Assert.That(atSix, Is.EqualTo((16, 4)));
-            Assert.That(faster, Is.EqualTo((16, 4)), "4x the speed at the nominal rate is the same displacement as 6x the period, near enough");
-            Assert.That(atSix.QuantaDiv, Is.LessThan(atOne.QuantaDiv), "a longer tick spends resolution first");
-            Assert.That(atSix.Bits, Is.EqualTo(atOne.Bits), "and does not spend a byte while resolution is left to spend");
-        });
-    }
-
-    /// <summary>
-    /// SWG's numbers — 20 m/s, 10 Hz, a 2⁻¹⁰ m position step — land on 16 bits at <c>quantaDiv</c> 8, not on 24 bits at 16.
-    /// </summary>
-    /// <remarks>
-    /// This is the case the joint derivation exists for. At the fixed divisor the displacement needed 32 768 codes and 16 bits carries 32 767 — one short —
-    /// so every creature segment paid two bytes forever to keep a velocity quantum of a sixteenth of 2⁻¹⁰ m. Halving the divisor buys the whole width back
-    /// for an eighth of a position quantum, 0.12 mm per tick, which is three orders below the float32 jitter the measurement already lives with.
-    /// </remarks>
-    [Test]
-    public void SwgNumbers_Land_On16BitsAtQuantaDiv8()
-    {
-        var quanta = ProjectionTestSchema.MaxSpeedMps * ProjectionTestSchema.TickPeriodSeconds / ProjectionTestSchema.PositionStepM;
-        Assert.That(quanta, Is.EqualTo(2_048), "2 m per tick is 2 048 position quanta");
-        Assert.That(WireMath.SymmetricLimit(16), Is.EqualTo(32_767), "at quantaDiv 16 that is 32 768 codes - one more than 16 bits carries");
-
-        var pair = ProjectionCompiler.VelocityCodec(ProjectionTestSchema.MaxSpeedMps, ProjectionTestSchema.TickPeriodSeconds, 1,
-            ProjectionTestSchema.PositionStepM);
-
-        Assert.That(pair, Is.EqualTo((16, 8)));
-        Assert.That(ProjectionTestSchema.PositionStepM / pair.QuantaDiv, Is.EqualTo(1.0 / 8192.0).Within(1e-12),
-            "an eighth of a position quantum is 0.12 mm per tick of velocity resolution");
-    }
-
-    /// <summary>
-    /// The per-archetype opt-out caps the multiplier at 1: an archetype whose movement is bounded per tick pays the nominal width.
-    /// </summary>
-    /// <remarks>
-    /// At 100 m/s the dilated displacement no longer fits 16 bits at <i>any</i> divisor, so the opt-out is worth a byte per axis per segment here — and the
-    /// wider width comes with the divisor restored to 16, which is the derivation's ordering showing through.
-    /// </remarks>
     [Test]
     public void IgnoreTickDilation_CapsTheMultiplierAtOne()
     {
@@ -174,13 +117,13 @@ class VelocityCodecWidthTests : TestBase<VelocityCodecWidthTests>
 
         Assert.Multiple(() =>
         {
+            // 100 m/s x 0.1 s x 6 = 60 m per tick at 2^-10 m: 61 440 codes, past 16 bits. The nominal 10 m is 10 240 codes.
             Assert.That(dilated.Position.SizedForTickMultiplier, Is.EqualTo(6), "without the opt-out the width covers the ladder's last rung");
             Assert.That(dilated.Position.Vel.Bits, Is.EqualTo(24));
-            Assert.That(dilated.Position.Vel.QuantaDiv, Is.EqualTo(16), "the wider width affords the finest divisor again");
             Assert.That(nominal.Position.SizedForTickMultiplier, Is.EqualTo(1), "the opt-out caps the multiplier at 1");
             Assert.That(nominal.Position.IgnoresTickDilation, Is.True);
             Assert.That(nominal.Position.Vel.Bits, Is.EqualTo(16), "the nominal rate needs 8 bits fewer here - 2 B per segment, forever");
-            Assert.That(nominal.Position.Vel.QuantaDiv, Is.EqualTo(2), "and pays for them in resolution, which is the cheaper of the two");
+            Assert.That((dilated.Position.Vel.UnitExp, nominal.Position.Vel.UnitExp), Is.EqualTo((-10, -10)), "the unit is the drift budget's, not the width's");
         });
     }
 
@@ -206,10 +149,10 @@ class VelocityCodecWidthTests : TestBase<VelocityCodecWidthTests>
     }
 
     /// <summary>
-    /// The compiled velocity codec carries the divisor a client decodes with, and the segment is sized from both codecs.
+    /// The compiled velocity codec carries the unit a client decodes with, and the segment is sized from both codecs.
     /// </summary>
     [Test]
-    public void CompiledVelocityCodec_CarriesItsDivisorAndSizesTheSegment()
+    public void CompiledVelocityCodec_CarriesItsUnitAndSizesTheSegment()
     {
         using var dbe = SetupEngine();
         var plan = ProjectionTestSchema.PlanFor(ProjectionTestSchema.CompileAll(dbe), nameof(ProjCreature));
@@ -217,12 +160,12 @@ class VelocityCodecWidthTests : TestBase<VelocityCodecWidthTests>
         Assert.Multiple(() =>
         {
             Assert.That(plan.Position.Vel.Kind, Is.EqualTo(CodecKind.Vel2), "a 2D position takes a 2D velocity");
-            Assert.That(plan.Position.Vel.QuantaDiv, Is.EqualTo(8));
-            Assert.That(plan.Position.Vel.Bits, Is.EqualTo(16));
+            Assert.That(plan.Position.Vel.UnitExp, Is.EqualTo(-10), "5 cm over 50 ticks: 2^-10 m per tick");
+            Assert.That(plan.Position.Vel.Bits, Is.EqualTo(16), "2 m per tick is 2 048 codes");
             Assert.That(plan.Position.Pos.Kind, Is.EqualTo(CodecKind.Pos2));
             Assert.That(plan.Position.Pos.Bits, Is.EqualTo(24));
 
-            // p0 (2 x 3 B) | v (2 x 2 B) | t0 (2 B) | epoch (1 B) - the two bytes the fixed divisor used to cost, on every creature segment.
+            // p0 (2 x 3 B) | v (2 x 2 B) | t0 (2 B) | epoch (1 B).
             Assert.That(plan.Position.SegmentBytes, Is.EqualTo(13));
         });
     }

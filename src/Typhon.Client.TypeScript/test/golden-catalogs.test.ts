@@ -61,8 +61,8 @@ describe('golden catalogs', () => {
     expect(creature.groupSections[0]!.packBytes).toBe(1);
     expect(creature.fields.map((f) => f.index)).toEqual([0, 1, 2]);
     expect(creature.fields[1]!.enumNames).toEqual(['Idle', 'Wander', 'Pursue', 'Fighting', 'Leashing', 'Dead']);
-    // The velocity step is the position step: 16 384 m over 2^24 codes.
-    expect(Array.from(creature.position!.vel!.velocityStep)).toEqual([16384 / 2 ** 24, 16384 / 2 ** 24]);
+    // The velocity unit is absolute (typhon.3): 2^-13 m per tick, whatever the position's bounds.
+    expect(creature.position!.vel!.velocityUnit).toBe(2 ** -13);
 
     expect(plan.clientRegion!.body.fields.map((f) => f.name)).toEqual(['altitudeM', 'budgetKiBps', 'vertices']);
     expect(plan.command(16).name).toBe('MoveTo');
@@ -269,7 +269,7 @@ describe('golden catalogs', () => {
     const wrongMajor = JSON.parse(new TextDecoder().decode(goldenBin('catalog-swg'))) as {
       protocol: { major: number };
     };
-    wrongMajor.protocol.major = 3;
-    expect(() => parseCatalog(JSON.stringify(wrongMajor))).toThrow(/protocol 3\.0; this client speaks major 2/);
+    wrongMajor.protocol.major = 4;
+    expect(() => parseCatalog(JSON.stringify(wrongMajor))).toThrow(/protocol 4\.0; this client speaks major 3/);
   });
 });

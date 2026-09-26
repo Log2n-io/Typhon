@@ -590,9 +590,9 @@ public static class CatalogValidator
             case CodecKind.Vel2:
             case CodecKind.Vel3:
                 CheckBits(at, codec.Bits, problems);
-                if (codec.QuantaDiv < 1)
+                if (codec.UnitExp is not (>= ProtocolConstants.MinVelocityUnitExp and <= ProtocolConstants.MaxVelocityUnitExp))
                 {
-                    problems.Add($"{at}: quantaDiv must be an integer ≥ 1");
+                    problems.Add($"{at}: unitExp must be an integer in [{ProtocolConstants.MinVelocityUnitExp}, {ProtocolConstants.MaxVelocityUnitExp}]");
                 }
 
                 break;
@@ -667,7 +667,7 @@ public static class CatalogValidator
         {
             CodecKind.Quant or CodecKind.Pos2 or CodecKind.Pos3 => Parameter.Bits | Parameter.Bounds,
             CodecKind.Vec2 or CodecKind.Vec3 => Parameter.Bits | Parameter.Scale,
-            CodecKind.Vel2 or CodecKind.Vel3 => Parameter.Bits | Parameter.QuantaDiv,
+            CodecKind.Vel2 or CodecKind.Vel3 => Parameter.Bits | Parameter.UnitExp,
             CodecKind.Unorm or CodecKind.Snorm or CodecKind.Angle => Parameter.Bits,
             CodecKind.Bits or CodecKind.Bytes => Parameter.N,
             CodecKind.Str or CodecKind.Blob => Parameter.MaxBytes,
@@ -679,7 +679,7 @@ public static class CatalogValidator
         present |= codec.Bits != 0 ? Parameter.Bits : 0;
         present |= codec.Min != null || codec.Max != null ? Parameter.Bounds : 0;
         present |= codec.Scale != 0 || double.IsNaN(codec.Scale) ? Parameter.Scale : 0;
-        present |= codec.QuantaDiv != 0 ? Parameter.QuantaDiv : 0;
+        present |= codec.UnitExp != null ? Parameter.UnitExp : 0;
         present |= codec.N != 0 ? Parameter.N : 0;
         present |= codec.MaxBytes != 0 ? Parameter.MaxBytes : 0;
         present |= codec.Of != null || codec.MinCount != 0 || codec.MaxCount != 0 ? Parameter.List : 0;
@@ -699,7 +699,7 @@ public static class CatalogValidator
         Bits = 1,
         Bounds = 2,
         Scale = 4,
-        QuantaDiv = 8,
+        UnitExp = 8,
         N = 16,
         MaxBytes = 32,
         List = 64,

@@ -526,13 +526,7 @@ class Generator {
       case CodecKind.Vel3:
         for (let i = 0; i < f.components; i++) {
           const code = q(signed(f.bits, 0));
-          emit(
-            depth,
-            store(
-              i,
-              `((${code} < ${-f.limit} ? ${-f.limit} : ${code}) * ${lit(f.velocityStep[i]!)}) / ${lit(f.quantaDiv)}`,
-            ),
-          );
+          emit(depth, store(i, `(${code} < ${-f.limit} ? ${-f.limit} : ${code}) * ${lit(f.velocityUnit)}`));
         }
 
         break;

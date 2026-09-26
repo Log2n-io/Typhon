@@ -1,6 +1,6 @@
 {
   "description": "The engine\u0027s own ENTITIES encoder, as a TCP-framed stream (u32 length LE \u002B message, W31): a WELCOME carrying the catalog these frames decode against, then one TICK per tick of a driven Engine-Subscriptions track over a moving archetype with a packed enum and a fraction, an archetype with an owner section, and a static one. The frames cover the initial fill (VIEW_COMPLETE), motion segments, state records with a group mask, leaves after enters in the same frame, and a RESET refill. The expectation is the sequence of calls a decoder makes into its sink, per frame.",
-  "catalogHash": "6f0303c3e60363df",
+  "catalogHash": "7d89c850d8c91858",
   "frames": [
     {
       "tick": 1,
