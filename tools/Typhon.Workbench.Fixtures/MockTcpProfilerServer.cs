@@ -87,6 +87,16 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
     public bool IncludeSchema { get; set; }
 
     /// <summary>
+    /// When set, the server accepts the socket and then sends <b>nothing</b> — no Init, no blocks.
+    /// </summary>
+    /// <remarks>
+    /// The shape of a wedged exporter, or of a port answered by something that is not Typhon at all. It exists so the bounded wait
+    /// <c>AttachSessionRuntime.StartAsync</c> performs on the Init handshake can be tested for what it does when Init never comes: yield a profiler-only
+    /// session after the timeout, rather than hang the attach for ever.
+    /// </remarks>
+    public bool SuppressInit { get; set; }
+
+    /// <summary>
     /// Number of client connections accepted so far. A restart scenario expects this to reach 2: the original attach,
     /// then the reconnect after <see cref="DropClientAsync"/> or <see cref="SendShutdownAsync"/>.
     /// </summary>
@@ -156,13 +166,23 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
             {
                 var stream = accepted.GetStream();
 
-                // Send Init frame immediately on connect.
-                var initPayload = BuildInitPayload(CreatedUtcTicks, IncludeSchema);
-                await WriteFrameAsync(stream, LiveFrameType.Init, initPayload, _cts.Token).ConfigureAwait(false);
+                // Send Init frame immediately on connect — unless this server is standing in for a peer that never speaks.
+                if (!SuppressInit)
+                {
+                    var initPayload = BuildInitPayload(CreatedUtcTicks, IncludeSchema);
+                    await WriteFrameAsync(stream, LiveFrameType.Init, initPayload, _cts.Token).ConfigureAwait(false);
+                }
 
                 lock (_clientLock)
                 {
                     _clientConnected.TrySetResult();
+                }
+
+                if (SuppressInit)
+                {
+                    // Nothing further to send: hold the socket open so the client is waiting on silence rather than on a closed stream.
+                    await WaitForDisconnectAsync(accepted).ConfigureAwait(false);
+                    continue;
                 }
 
                 if (Scripted)

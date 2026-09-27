@@ -45,6 +45,11 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     private const int ConnectRetryCount = 3;
     private const int ConnectRetryDelayMs = 2000;
     private const int ReconnectDelayMs = 2000;
+    /// <summary>
+    /// How long <see cref="StartAsync(Guid, string, ILogger, CancellationToken, CaptureMode)"/> waits for the handshake's Init frame before returning a
+    /// session without schema. The exporter writes Init on accept, so this is a ceiling on a pathological peer, not a latency the user normally pays.
+    /// </summary>
+    private const int InitHandshakeTimeoutSeconds = 5;
     /// <summary>The wire's own limit, not this reader's preference — the producer checks the same constant before it sends (#WB-01).</summary>
     private const int MaxFrameBytes = LiveStreamProtocol.MaxFrameBytes;
 
@@ -56,6 +61,25 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
 
     /// <summary>Coalesce GlobalMetricsUpdated SSE deltas to at most one per N ms.</summary>
     private const int GlobalMetricsTimerMs = 1000;
+
+    /// <summary>
+    /// Coalesce finalized tick summaries into one <c>tickSummariesAdded</c> SSE frame per N ms — the cadence
+    /// <c>claude/design/Profiler/08-profiler-live-replay-unification.md</c> §"Delta cadence" specifies.
+    /// </summary>
+    /// <remarks>
+    /// One frame per tick is one frame per engine tick: measured at 48.8/s against the SWG demo at <c>--hz 50</c> in
+    /// capture-everything mode. Each frame flips the client's <c>metadata</c> identity, which re-renders the profiler
+    /// tree and repaints both canvases — <c>drawTimeArea</c> ran 7 942 times in 166 s (42 s of main-thread time, 25 % of
+    /// wall) purely because the SSE rate set the repaint rate. The renderer cannot show 50 distinct frames a second
+    /// anyway, so the extra 40 are paid for nothing.
+    /// </remarks>
+    private const int TickSummaryFlushMs = 100;
+
+    /// <summary>
+    /// Flush the pending summaries early once this many have queued, so a burst (an engine catching up after a stall)
+    /// is not held for a full <see cref="TickSummaryFlushMs"/> window and does not grow one frame without bound.
+    /// </summary>
+    private const int TickSummaryFlushThreshold = 256;
 
     /// <summary>Per-subscriber bounded delta channel: SSE clients buffer up to this many deltas before being kicked.</summary>
     private const int SubscriberBufferSize = 1000;
@@ -143,6 +167,15 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     private Timer _flushChunkTimer;
     private Timer _trailingTickTimer;
     private Timer _globalMetricsTimer;
+    private Timer _tickSummaryFlushTimer;
+
+    /// <summary>
+    /// Summaries finalized since the last <c>tickSummariesAdded</c> broadcast. Guarded by its own lock rather than
+    /// <see cref="_builderLock"/>: the producer holds the builder lock when it appends here, and the flush timer must
+    /// not contend for the builder lock just to drain a list.
+    /// </summary>
+    private readonly List<TickSummaryDto> _pendingSummaryDeltas = [];
+    private readonly object _pendingSummaryLock = new();
 
     private volatile string _connectionStatus = "connecting";
     private volatile bool _unrecoverable;
@@ -289,8 +322,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// <see cref="CaptureMode.Everything"/> preserves the pre-#805 behaviour and is the default for every existing
     /// caller. <see cref="CaptureMode.CherryPick"/> starts the session idle — see <c>12-on-demand-tick-capture.md</c>.
     /// </param>
+    /// <param name="initHandshakeTimeout">
+    /// How long to wait for the handshake's Init frame before returning a schema-less session. Defaults to
+    /// <see cref="InitHandshakeTimeoutSeconds"/>; a test that wants to exercise the silent-peer path passes something short so the suite does not spend
+    /// five seconds proving a timeout fires.
+    /// </param>
     public static async Task<AttachSessionRuntime> StartAsync(Guid sessionId, string endpointAddress, ILogger logger, CancellationToken ct,
-        CaptureMode captureMode = CaptureMode.Everything)
+        CaptureMode captureMode = CaptureMode.Everything, TimeSpan initHandshakeTimeout = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(endpointAddress);
         var (host, port) = ParseEndpoint(endpointAddress);
@@ -343,6 +381,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         runtime._flushChunkTimer = new Timer(runtime.OnFlushChunkTimer, null, FlushChunkTimerMs, FlushChunkTimerMs);
         runtime._trailingTickTimer = new Timer(runtime.OnTrailingTickTimer, null, TrailingTickTimerMs, TrailingTickTimerMs);
         runtime._globalMetricsTimer = new Timer(runtime.OnGlobalMetricsTimer, null, GlobalMetricsTimerMs, GlobalMetricsTimerMs);
+        runtime._tickSummaryFlushTimer = new Timer(runtime.OnTickSummaryFlushTimer, null, TickSummaryFlushMs, TickSummaryFlushMs);
 
         _ = Task.Run(() => runtime.ReadLoopAsync(tcp))
             .ContinueWith(
@@ -350,6 +389,41 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                 default,
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
+
+        // Wait for the handshake's Init frame before handing the runtime back, so the session's CAPABILITIES are settled when
+        // the caller projects it.
+        //
+        // `AttachSession.Capabilities` reports `schema` only once `StaticSchema` is non-null, and that is resolved while the
+        // Init frame is processed (#WB-01). Returning the moment the socket connects meant `SessionsController` serialised the
+        // DTO strictly before any frame had been read, so the created session ALWAYS advertised `profiler` alone — measured on
+        // the wire as `profiler` at create and `schema, profiler` three seconds later. The SPA seeds its store from the create
+        // response and re-reads a session only on profile attach/detach and pause flips, none of which happen on a plain
+        // attach, so the Schema Explorer stayed hidden in exactly the remote-attach mode #WB-01 exists to serve.
+        //
+        // Init is the first thing the exporter writes on accept, so in practice this resolves in milliseconds. The timeout
+        // exists because a live session is still worth having without it: an engine that sends no Init (or sends its schema
+        // tables empty) degrades to profiler-only rather than failing the attach, which is the same outcome as before.
+        var handshakeTimeout = initHandshakeTimeout > TimeSpan.Zero ? initHandshakeTimeout : TimeSpan.FromSeconds(InitHandshakeTimeoutSeconds);
+        try
+        {
+            await runtime.MetadataReady.WaitAsync(handshakeTimeout, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // WaitAsync's own timeout. The session lives; it simply has no schema to advertise yet.
+            runtime.LogInitHandshakeTimedOut(handshakeTimeout.TotalSeconds);
+        }
+        catch (TimeoutException)
+        {
+            runtime.LogInitHandshakeTimedOut(handshakeTimeout.TotalSeconds);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A faulted handshake (unrecoverable Init, disposed mid-connect) is the read loop's business to report, not a
+            // reason to refuse a session the socket already accepted.
+            runtime.LogInitHandshakeFaulted(ex);
+        }
+
         return runtime;
     }
 
@@ -745,6 +819,9 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                         // with the temp file. Save before anyone can dispose us.
                         AutoSaveOnTeardown("engine_shutdown");
                         ShutdownReceived?.Invoke("engine_shutdown");
+                        // Deltas coalesce on a 100 ms timer; the last window's ticks have to go out BEFORE the
+                        // shutdown frame or a client that stops reading on shutdown loses them.
+                        FlushPendingSummaryDeltas();
                         BroadcastDelta(new LiveStreamEventDto(Kind: "shutdown", Status: "engine_shutdown"));
                         return StreamEndReason.Shutdown;
 
@@ -1117,8 +1194,48 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             ConsecutiveUnderrun: summary.ConsecutiveUnderrun);
         _tickSummaries.Add(dto);
         _metadataSnapshot = null;
+        // The in-process event stays per-tick — CaptureHarness and the capture window logic count ticks, and a
+        // coalesced event would make them wait on a timer. Only the SSE fan-out coalesces.
         TickSummaryAdded?.Invoke(dto);
-        BroadcastDelta(new LiveStreamEventDto(Kind: "tickSummaryAdded", TickSummary: dto));
+        bool flushNow;
+        lock (_pendingSummaryLock)
+        {
+            _pendingSummaryDeltas.Add(dto);
+            flushNow = _pendingSummaryDeltas.Count >= TickSummaryFlushThreshold;
+        }
+        if (flushNow)
+        {
+            FlushPendingSummaryDeltas();
+        }
+    }
+
+    /// <summary>
+    /// Drain <see cref="_pendingSummaryDeltas"/> into one <c>tickSummariesAdded</c> delta. Safe to call from the flush
+    /// timer, from the producer when the buffer crosses <see cref="TickSummaryFlushThreshold"/>, and from shutdown —
+    /// an empty buffer broadcasts nothing.
+    /// </summary>
+    private void FlushPendingSummaryDeltas()
+    {
+        // Drain AND broadcast under the one lock. Three callers can race here — the flush timer, the producer crossing
+        // TickSummaryFlushThreshold, and shutdown — and draining outside the broadcast would let two disjoint batches
+        // reach a subscriber's channel in the wrong order. The client appends each batch to `metadata.tickSummaries`,
+        // which `viewRangeToTickRange` binary-searches, so an inversion there is a silently wrong chunk lookup rather
+        // than a visible glitch. `BroadcastDelta` only does a non-blocking TryWrite per subscriber (a full buffer is
+        // handed to a fire-and-forget task), so holding the lock across it costs nothing.
+        lock (_pendingSummaryLock)
+        {
+            if (_pendingSummaryDeltas.Count == 0) return;
+            var batch = _pendingSummaryDeltas.ToArray();
+            _pendingSummaryDeltas.Clear();
+            BroadcastDelta(new LiveStreamEventDto(Kind: "tickSummariesAdded", TickSummaries: batch));
+        }
+    }
+
+    private void OnTickSummaryFlushTimer(object _)
+    {
+        if (_disposed) return;
+        try { FlushPendingSummaryDeltas(); }
+        catch (ObjectDisposedException) { /* shutting down */ }
     }
 
     private void OnBuilderChunkFlushed(ChunkManifestEntry entry)
@@ -1447,10 +1564,15 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         // Idempotent — a window already saved by a shutdown frame is not written twice.
         try { AutoSaveOnTeardown("session_closed"); } catch { }
 
+        // Drain before the timer goes away, so the ticks finalized in the last sub-100 ms window still reach a client
+        // that is watching the shutdown.
+        try { FlushPendingSummaryDeltas(); } catch { }
+
         _disposed = true;
         try { _flushChunkTimer?.Dispose(); } catch { }
         try { _trailingTickTimer?.Dispose(); } catch { }
         try { _globalMetricsTimer?.Dispose(); } catch { }
+        try { _tickSummaryFlushTimer?.Dispose(); } catch { }
         try { _cts.Cancel(); } catch { }
         try { _cts.Dispose(); } catch { }
         try

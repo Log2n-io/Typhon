@@ -9,7 +9,7 @@ namespace Typhon.Workbench.Streams;
 /// SSE stream of growth-deltas for an Attach session (#289 unified pipeline; retyped for #308).
 /// Emits a full <c>metadata</c> snapshot on connect / reconnect, then per-tick / per-chunk / 1 Hz
 /// metrics deltas as the builder grows the in-memory cache. Each delta ships as a typed SSE event
-/// (<c>event: tickSummaryAdded</c> etc.) — clients install one <c>addEventListener</c> per kind for
+/// (<c>event: tickSummariesAdded</c> etc.) — clients install one <c>addEventListener</c> per kind for
 /// clean TypeScript narrowing instead of switching on a discriminator inside the JSON payload.
 /// <c>heartbeat</c> on connection-state changes and on 5 s idle timeouts; <c>shutdown</c> when the
 /// engine ends the session.

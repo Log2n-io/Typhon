@@ -18,14 +18,14 @@ import type {
  * SSE subscription for the profiler live delta stream (#289 unified pipeline; retyped for #308).
  *
  * Wraps {@link useEventSource} with typed event listeners — each delta arrives on its own SSE
- * event channel (`metadata`, `tickSummaryAdded`, `chunkAdded`, `globalMetricsUpdated`,
+ * event channel (`metadata`, `tickSummariesAdded`, `chunkAdded`, `globalMetricsUpdated`,
  * `threadInfoAdded`, `heartbeat`, `shutdown`) instead of switching on a discriminator inside the
  * payload. The hook reconstructs the in-store `LiveStreamPayload` union shape (which still carries
  * `kind`) before pushing into the rAF-batched buffer, so {@link useProfilerSessionStore.applyLiveBatch}
  * sees the same union it always has.
  *
  * **rAF-coalesced batching.** Each SSE message handler runs synchronously on the main thread; under heavy ingest
- * (many chunkAdded + tickSummaryAdded per second from a busy engine), one-mutation-per-event meant N×O(N)
+ * (many chunkAdded + tickSummariesAdded per second from a busy engine), one-mutation-per-event meant N×O(N)
  * `[...prev, entry]` array spreads + N×subscriber notifications per frame, which stuttered the UI. We now buffer
  * incoming events in a ref and flush them via `requestAnimationFrame` so each native paint cycle applies AT MOST
  * one batched mutation. The `applyLiveBatch` store action collapses the N appends into a single O(N+batchSize)
@@ -61,8 +61,8 @@ export function useProfilerLiveStream(sessionId: string | null) {
   const listeners = useMemo(
     () => ({
       metadata: (data: { metadata: ProfilerMetadataDto }) => enqueue({ kind: 'metadata', metadata: data.metadata }),
-      tickSummaryAdded: (data: { tickSummary: TickSummaryDto }) =>
-        enqueue({ kind: 'tickSummaryAdded', tickSummary: data.tickSummary }),
+      tickSummariesAdded: (data: { tickSummaries: TickSummaryDto[] }) =>
+        enqueue({ kind: 'tickSummariesAdded', tickSummaries: data.tickSummaries }),
       chunkAdded: (data: { chunkEntry: ChunkManifestEntryDto }) =>
         enqueue({ kind: 'chunkAdded', chunkEntry: data.chunkEntry }),
       threadInfoAdded: (data: { threadInfo: LiveThreadInfo }) =>
