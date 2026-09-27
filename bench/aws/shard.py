@@ -15,6 +15,17 @@ cut); workers=1 == a clean serial dev run, the known-green config. A final SERIA
 assertions that flake under any parallel load). Net locally: ~9 min -> ~55 s,
 flaky-red -> green. See claude/design/Infrastructure/ci-merge-gate.md.
 
+GATED PASSES (see GATED_PASSES below): some tests need a telemetry flag that is
+OFF for the suite, and `TelemetryConfig` reads its configuration once when
+Typhon.Engine loads -- before the first test runs -- so no fixture can flip one.
+Those tests used to be `[Explicit] [Category("Manual")]`, i.e. run nowhere, with
+a comment saying the tier "would have to fork a differently-configured process".
+This tool already forks eight; one more with different env vars costs seconds and
+turns a fixture that ran nowhere into one the gate runs. Each pass names its
+category and the environment it runs under; those categories are excluded from
+the parallel shards, exactly as `Sensitive` is, so a gated test runs ONCE, under
+the flags it needs.
+
 Modes:
   run  --results-dir DIR        execute the committed shards.json (CI uses this)
   plan --k K --trx FILE...      regenerate shards.json from one or more trx — pass the
@@ -67,18 +78,49 @@ GATE_EXCLUDED = ("Quarantine", "Nightly", "Manual")
 def _excluded(extra=()):
     return "&".join(f"(Category!={c})" for c in tuple(GATE_EXCLUDED) + tuple(extra))
 
+# ── gated passes ────────────────────────────────────────────────────────────
+# One extra `dotnet test` process per entry, run after the quiet pass, with the
+# given environment ON TOP of the gate's. The point is tests whose subject is a
+# telemetry flag: `TelemetryConfig` is a static-constructor read of configuration
+# that happens before the first test, so a flag cannot be flipped from inside a
+# run — the only way to cover such a test is a process started with the flag set.
+#
+# Rules for a category listed here:
+#   * It is EXCLUDED from the parallel shards (SHARD_EXCLUDED_CATEGORIES), so its
+#     tests run exactly once, under these flags, and never bare — where they would
+#     fail for the reason the flag exists.
+#   * Its tests must be [NonParallelizable] in spirit: a pass runs at workers=1.
+#   * They must PASS under the env, obviously, and must not depend on any flag
+#     being off — a second pass is the answer for that, not a conditional test.
+#
+# A pass whose category selects nothing is not an error: it prints 0 tests and the
+# entry stays as the place the next such test goes.
+GATED_PASSES = (
+    # label, category, env additions, why
+    ("T", "TelemetryGated", {"TYPHON__PROFILER__SPATIAL__ENABLED": "true",
+                             "TYPHON__PROFILER__CONCURRENCY__ENABLED": "true"},
+     "telemetry subtrees the suite leaves off: spatial trace records (kinds 65-67) and concurrency tracing"),
+)
+
+# Categories that run in a pass of their own and must therefore not run in the shards.
+SHARD_EXCLUDED_CATEGORIES = ("Sensitive",) + tuple(c for _, c, _, _ in GATED_PASSES)
+
+def gated_filter(category):
+    return f"(Category={category})&{_excluded()}"
+
 def positive_filter(classes):
     cls = "|".join(f"FullyQualifiedName~{c}." for c in classes)
-    return f"{_excluded(('Sensitive',))}&({cls})"
+    return f"{_excluded(SHARD_EXCLUDED_CATEGORIES)}&({cls})"
 
 def catchall_filter(assigned_elsewhere):
     neg = "&".join(f"(FullyQualifiedName!~{c}.)" for c in assigned_elsewhere)
-    base = _excluded(("Sensitive",))
+    base = _excluded(SHARD_EXCLUDED_CATEGORIES)
     return f"{base}&{neg}" if neg else base
 
 # The quiet pass runs Sensitive ALONE, but a Sensitive test that is also quarantined or tiered stays out — otherwise
 # the one filter in the run that does not honour GATE_EXCLUDED becomes the way an excluded test sneaks back in.
 SENSITIVE_FILTER = f"(Category=Sensitive)&{_excluded()}"
+
 
 # ── plan (maintenance) ──────────────────────────────────────────────────────
 
@@ -197,16 +239,16 @@ def plan_problems(shards):
                 owner[c] = i
         base, _, _ = s.get("filter", "").partition("&(FullyQualifiedName~")
         runs = set(_INCLUDED.findall(s.get("filter", "")))
-        if base != _excluded(("Sensitive",)):
-            problems.append(f"shard {i}: its filter's category exclusion is not the gate's ({_excluded(('Sensitive',))})")
+        if base != _excluded(SHARD_EXCLUDED_CATEGORIES):
+            problems.append(f"shard {i}: its filter's category exclusion is not the gate's ({_excluded(SHARD_EXCLUDED_CATEGORIES)})")
         for c in sorted(runs - set(classes)):
             problems.append(f"shard {i}: its filter runs {c}, which its classes list does not name")
         for c in sorted(set(classes) - runs):
             problems.append(f"shard {i}: its classes list names {c}, which its filter does not run")
 
     catchall = shards[0].get("filter", "")
-    if not catchall.startswith(_excluded(("Sensitive",))):
-        problems.append(f"shard 0: its filter's category exclusion is not the gate's ({_excluded(('Sensitive',))})")
+    if not catchall.startswith(_excluded(SHARD_EXCLUDED_CATEGORIES)):
+        problems.append(f"shard 0: its filter's category exclusion is not the gate's ({_excluded(SHARD_EXCLUDED_CATEGORIES)})")
     excluded = set(_EXCLUDED.findall(catchall))
     for c in sorted(set(owner) - excluded):
         problems.append(f"shard 0 does not exclude {c} (listed in shard {owner[c]}), so it runs twice")
@@ -234,13 +276,18 @@ def cmd_sync():
 
 # ── run (CI) ────────────────────────────────────────────────────────────────
 
-def run_one(label, flt, results_dir, project=None):
+def run_one(label, flt, results_dir, project=None, env_extra=None):
     trx = f"shard{label}.trx"
     cmd = ["dotnet", "test", project or TESTPROJ, "-c", CFG, "--no-build",
            "--filter", flt, "--settings", RUNSETTINGS,
            "--logger", f"trx;LogFileName={trx}", "--results-directory", results_dir]
+    # Inherited-plus-extra rather than a replacement: a bare env loses PATH, DOTNET_ROOT and the runner's own variables.
+    env = None
+    if env_extra:
+        env = dict(os.environ)
+        env.update(env_extra)
     t0 = time.time()
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True, env=env)
     with open(os.path.join(results_dir, f"shard{label}.log"), "w",
               encoding="utf-8", errors="replace") as fh:
         fh.write(r.stdout + "\n" + r.stderr)
@@ -314,8 +361,9 @@ def cmd_run(results_dir):
     # Default = every shard at once (the gate). SHARD_CONCURRENCY caps it without touching the PLAN, so a
     # core-poor runner slows down instead of silently testing a different set.
     conc = max(1, int(os.environ.get("SHARD_CONCURRENCY") or len(shards)))
-    print(f"[shard] {len(shards)} shards (workers=1, {conc} at a time) + serial Sensitive pass; "
-          f"cfg={CFG} repo={REPO}", flush=True)
+    gated = ", ".join(f"{label}={category}" for label, category, _, _ in GATED_PASSES)
+    print(f"[shard] {len(shards)} shards (workers=1, {conc} at a time) + serial Sensitive pass"
+          f"{f' + gated passes ({gated})' if gated else ''}; cfg={CFG} repo={REPO}", flush=True)
     t0 = time.time()
     results = []
     with ThreadPoolExecutor(max_workers=conc) as ex:
@@ -346,6 +394,20 @@ def cmd_run(results_dir):
     st, sp, sf = parse_trx(strx); tot += st; pas += sp; fail += sf
     print(f"   S  {src:3d}  {sdt:5.0f}s  {st:5d}  {sp:5d}  {sf:5d}", flush=True)
 
+    # ── gated passes ────────────────────────────────────────────────────────
+    # One process per entry, with its flags set. A pass that selects no test prints zeros and costs ~2 s; that is the
+    # price of the entry staying in the table as the place the next flag-dependent test goes.
+    gated_trx = []
+    gated_secs = 0.0
+    for label, category, env_extra, why in GATED_PASSES:
+        print(f"\ngated pass {label} (Category={category}, workers=1) — {why}...", flush=True)
+        g0 = time.time()
+        _, grc, gdt, gtrx = run_one(label, gated_filter(category), results_dir, env_extra=env_extra)
+        gated_secs += time.time() - g0
+        gt, gp, gf = parse_trx(gtrx); tot += gt; pas += gp; fail += gf
+        gated_trx.append(gtrx)
+        print(f"   {label}  {grc:3d}  {gdt:5.0f}s  {gt:5d}  {gp:5d}  {gf:5d}", flush=True)
+
     # ── Retry pass ───────────────────────────────────────────────────────────
     # The suite carries a long tail of low-probability TIMING flakes: concurrency/
     # scheduler/leak tests that assert async completion within a window too tight on
@@ -355,28 +417,57 @@ def cmd_run(results_dir):
     # attempt (an engine race would also flake on the fast box — these don't), so retry
     # absorbs test-window fragility WITHOUT masking real bugs. Flaked-but-recovered
     # tests are listed (transparency), not hidden.
-    initial_fail = fail + sf
-    failed = set()
+    initial_fail = fail
+    # Failures are bucketed by the ENVIRONMENT they must be retried under. A gated test re-run without its flag fails
+    # again for a reason that has nothing to do with the code — it would be reported as "still failing after 2 retries,
+    # likely a real regression", which is exactly the wrong conclusion. Bucket key: None for the gate's own environment,
+    # otherwise the pass label.
+    failed_by_env = {None: set()}
     for trx in [t for _, _, _, t in results] + [strx]:
-        failed |= {k for k, o in all_results(trx).items() if o == "Failed"}
+        failed_by_env[None] |= {k for k, o in all_results(trx).items() if o == "Failed"}
+    for (label, _, _, _), trx in zip(GATED_PASSES, gated_trx):
+        gated_failures = {k for k, o in all_results(trx).items() if o == "Failed"}
+        if gated_failures:
+            failed_by_env[label] = gated_failures
 
+    gated_env = {label: env for label, _, env, _ in GATED_PASSES}
     flaked = set()
     retry_secs = 0.0
     MAX_RETRIES = 2
     for attempt in range(1, MAX_RETRIES + 1):
-        if not failed:
+        if not any(failed_by_env.values()):
             break
-        classes = sorted({c for c, _ in failed})
-        rflt = _excluded() + "&(" + "|".join(f"FullyQualifiedName~{c}." for c in classes) + ")"
-        print(f"\nretry {attempt}/{MAX_RETRIES}: re-running {len(failed)} failed test(s) "
-              f"in {len(classes)} class(es), alone (workers=1)...", flush=True)
-        _, _, rdt, rtrx = run_one(f"R{attempt}", rflt, results_dir)
-        retry_secs += rdt
-        res = all_results(rtrx)
-        recovered = {t for t in failed if res.get(t) == "Passed"}
-        flaked |= recovered
-        failed -= recovered
-        print(f"   R{attempt}  {rdt:5.0f}s  recovered {len(recovered)}, still failing {len(failed)}", flush=True)
+        for env_label in sorted(failed_by_env, key=lambda x: (x is not None, x)):
+            bucket = failed_by_env[env_label]
+            if not bucket:
+                continue
+            classes = sorted({c for c, _ in bucket})
+            rflt = _excluded() + "&(" + "|".join(f"FullyQualifiedName~{c}." for c in classes) + ")"
+            where = "" if env_label is None else f" under gated pass {env_label}'s environment"
+            print(f"\nretry {attempt}/{MAX_RETRIES}: re-running {len(bucket)} failed test(s) "
+                  f"in {len(classes)} class(es), alone (workers=1){where}...", flush=True)
+            suffix = f"R{attempt}" if env_label is None else f"R{attempt}{env_label}"
+            _, _, rdt, rtrx = run_one(suffix, rflt, results_dir, env_extra=gated_env.get(env_label))
+            retry_secs += rdt
+            res = all_results(rtrx)
+
+            # A retry that produced NO results tested nothing, and its outcome says nothing about the code — the same reasoning the
+            # shards get above, applied where it was missing. Seen on 2026-09-27: a retry died with "Test host process crashed", wrote
+            # no trx, and was therefore counted as "recovered 0, still failing 1" — which the verdict then reported as "likely a real
+            # regression" about a test that passed on the next attempt and 3/3 in isolation. An attempt that did not run must not
+            # consume one of the two, or a host crash becomes a red gate.
+            if not res:
+                print(f"   {suffix}  {rdt:5.0f}s  produced NO results (testhost never connected, or the host died) — not counted "
+                      "as an attempt", flush=True)
+                continue
+
+            recovered = {t for t in bucket if res.get(t) == "Passed"}
+            flaked |= recovered
+            failed_by_env[env_label] = bucket - recovered
+            print(f"   {suffix}  {rdt:5.0f}s  recovered {len(recovered)}, still failing "
+                  f"{len(failed_by_env[env_label])}", flush=True)
+
+    failed = set().union(*failed_by_env.values()) if failed_by_env else set()
 
     # ── Plan integrity ───────────────────────────────────────────────────────
     # Checked AFTER the retries so it sees every trx the run produced, and folded into the verdict: a plan that

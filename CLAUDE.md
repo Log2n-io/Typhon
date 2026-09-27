@@ -166,8 +166,10 @@ Each line names the gate job it corresponds to, so a local failure is the same f
 > locally" — which is wrong.
 
 **The engine suite runs the way the gate runs it** (since 2026-09-12): `bench/aws/shard.py run`.
-- It runs the gate's 8 shards as 8 concurrent single-worker processes, then the serial `Sensitive` pass, then up to two
-  retries of whatever failed.
+- It runs the gate's 8 shards as 8 concurrent single-worker processes, then the serial `Sensitive` pass, then the
+  **gated passes** (`GATED_PASSES` — one process per entry with telemetry flags set in its environment, for tests whose
+  subject is a flag that `TelemetryConfig` reads before the first test can run), then up to two retries of whatever
+  failed, each retried under the environment of the pass it failed in.
 - Measured on a 7950X: **48 s**, against **92 s** for one `dotnet test` process. One process spends its second half
   running the 120 `[NonParallelizable]` fixtures one at a time; separate processes cannot share statics, so the shards
   run them side by side.

@@ -35,10 +35,12 @@ namespace Typhon.Engine.Tests.Concurrency;
 /// </code>
 /// </remarks>
 [TestFixture]
-// Manual tier: needs TYPHON__PROFILER__CONCURRENCY__ENABLED=true in the PROCESS environment, which cannot be set
-// per-fixture from inside a shared test run — the tier would have to fork a differently-configured process.
-[Explicit("Requires TYPHON__PROFILER__CONCURRENCY__ENABLED=true env var (or test JSON override).")]
-[Category("Manual")]
+// Needs TYPHON__PROFILER__CONCURRENCY__ENABLED=true in the PROCESS environment: TelemetryConfig reads its configuration
+// in a static constructor, before the first test, so no fixture can flip it. This was [Explicit] + Manual — "the tier
+// would have to fork a differently-configured process" — and therefore ran NOWHERE. The gate forks eight processes
+// already; it now forks one more with this flag set (GATED_PASSES in bench/aws/shard.py), and the category keeps this
+// fixture out of the parallel shards, where it would assert against a subsystem that is not recording.
+[Category("TelemetryGated")]
 [NonParallelizable]
 public class ConcurrencyTracingStressTests
 {
