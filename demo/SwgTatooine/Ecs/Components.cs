@@ -532,6 +532,63 @@ public struct PlayerState
     [Field] public int ShuttleDest;
 }
 
+/// <summary>Who decides what a player does.</summary>
+/// <remarks>
+/// <b>The field exists so that two deciders cannot fight over one entity (SWG-01).</b> Before it, <c>PlayerThink</c> drove every player in the world; a
+/// client sending an intent would have had its destination overwritten by the server's own activity mix on the next tick that player re-decided. The
+/// simulation therefore has to be told which players are no longer its to drive, and that is the whole content of this enum.
+/// </remarks>
+public static class ControllerKind
+{
+    /// <summary>Driven by <c>PlayerThink</c>: the activity mix the benchmark measures. Every player starts here.</summary>
+    public const byte InProcess = 0;
+
+    /// <summary>Possessed by a human client's session. <c>PlayerThink</c> leaves it alone entirely.</summary>
+    public const byte Human = 1;
+
+    /// <summary>
+    /// Possessed by a bot, which sends the same intents over the same wire. Distinct from <see cref="Human"/> only so a measurement can say which it
+    /// measured; nothing in the simulation branches on the difference.
+    /// </summary>
+    public const byte Bot = 2;
+}
+
+/// <summary>
+/// Who is driving this player, and what it has asked for. Written by the input system, read by <c>PlayerThink</c> and by combat.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Its own component rather than three more fields on <see cref="PlayerState"/>, for the reason <see cref="CreatureTimers"/> exists.</b>
+/// <c>PlayerState</c> is in the compiled projection — it carries <c>[Replicate]</c> on <c>Activity</c> and <c>[Owner]</c> on the mission waypoint — and
+/// <c>ClusterRef.GetSpan</c> marks a cluster changed when the span is handed out, never observing what the caller does with it. A possession mark or a
+/// target written beside replicated state would therefore read as a change to that state on every input tick, for every possessed player. Keeping it
+/// separate also leaves <c>PlayerState</c>'s layout byte-for-byte what every earlier measurement ran against.
+/// </para>
+/// <para>
+/// <b>Not replicated, deliberately.</b> A client knows its own target: it sent the command. Putting <see cref="Target"/> on the wire would pull this
+/// component into the projection and undo the paragraph above; when a reason to show a target to OTHER clients arrives, it belongs in the event that
+/// describes the attack rather than in per-entity state.
+/// </para>
+/// <para>Zero is the resting state throughout: <c>InProcess</c>, no controller, no target — so a spawned player needs no initialisation.</para>
+/// </remarks>
+[Component("Swg.PlayerControl", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PlayerControl
+{
+    /// <summary>What this player is attacking or inspecting, resolved from the <c>netId</c> its client sent; <c>EntityId.Null</c> for none.</summary>
+    /// <remarks>
+    /// The resolved entity, not the <c>netId</c>. An identity is released and reused when an entity leaves every session's view, so a stored <c>netId</c>
+    /// can come to name a different entity between the tick it was sent and the tick it is read — which is a target that silently changes creature.
+    /// </remarks>
+    [Field] public EntityId Target;
+
+    /// <summary>The session driving this player — <c>SessionId.Value</c> — or 0 when <see cref="Kind"/> is <see cref="ControllerKind.InProcess"/>.</summary>
+    [Field] public uint Controller;
+
+    /// <summary>See <see cref="ControllerKind"/>.</summary>
+    [Field] public byte Kind;
+}
+
 /// <summary>What a simulated player is doing this tick.</summary>
 /// <remarks>
 /// The mix matters more than the individual behaviours: a planet where 40 % of players are parked in a cantina generates

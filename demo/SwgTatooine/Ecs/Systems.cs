@@ -484,3 +484,46 @@ internal sealed class AwarenessSplitSystem : QuerySystem
 
     protected override void Execute(TickContext ctx) => _bridge.AwarenessTick(ctx, _target);
 }
+
+/// <summary>
+/// Everything the tick does about sessions: kicks, counts, profiles, possession and this tick's client intents (SWG-01).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Serial, and in this DAG rather than a replication DAG of its own, for two reasons that are both correctness.</b> Session requests append to an
+/// unsynchronized per-worker segment that no caller can address by its own worker index (#1070), so segment 0 is safe only while one thread writes it — and
+/// applying an intent writes <c>PlayerMotion</c>, which <c>PlayerThink</c> also writes, so the two have to be orderable, which across DAGs they are not
+/// (<c>overview/13-runtime.md</c>: "a cross-DAG <c>.After()</c> edge is a configuration error"). <see cref="TatooineReplication.SessionTick"/>'s remarks
+/// carry the full account.
+/// </para>
+/// <para>
+/// <b>The <c>Input</c> phase, which exists for it</b> — see <c>SimPhases.Input</c>. <c>Shuttle</c> writes the same two player components in <c>Spawn</c>, and
+/// the access deriver refuses two writers of one component in one phase without an explicit edge; a phase of its own says what an edge would only enforce.
+/// </para>
+/// </remarks>
+internal sealed class PlayerSessionSystem : CallbackSystem
+{
+    protected override void Configure(SystemBuilder b) => b
+        .Name("PlayerSessions")
+        .Phase(SimPhases.Input)
+        .Writes<PlayerControl>()
+        .Writes<PlayerMotion>()
+        .Writes<PlayerState>()
+        .Reads<PlayerPlacement>();
+
+    protected override void Execute(TickContext ctx) => TatooineReplication.SessionTick(ctx);
+}
+
+/// <summary>The periodic replication report: cumulative counters, every three hundred ticks.</summary>
+/// <remarks>
+/// In the report phase with every other diagnostic, and separate from <see cref="PlayerSessionSystem"/> because it writes nothing and must not be ordered
+/// against anything. It was the same method until SWG-01, which is how a print ended up in the phase that decides what players do.
+/// </remarks>
+internal sealed class ReplicationReportSystem : CallbackSystem
+{
+    protected override void Configure(SystemBuilder b) => b
+        .Name("ReplicationReport")
+        .Phase(SimPhases.Report);
+
+    protected override void Execute(TickContext ctx) => TatooineReplication.ReportTick(ctx);
+}

@@ -16,6 +16,20 @@ namespace SwgTatooine;
 public static class SimPhases
 {
     /// <summary>
+    /// What the outside world asked for: sessions opening and closing, possession, and this tick's client intents (SWG-01).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Its own phase, ahead of everything, rather than sharing <see cref="Spawn"/>.</b> Applying an intent writes <c>PlayerState</c> and
+    /// <c>PlayerMotion</c>, which <c>Shuttle</c> also writes in <see cref="Spawn"/> — and the access deriver rightly refuses two writers of one component in
+    /// one phase without an explicit edge. An edge would do, but it would have to name a system that is only in the schedule when <c>--no-shuttles</c> is
+    /// absent, and it would say nothing about why. A phase says it: the client's intent for this tick is settled before the simulation looks at anything.
+    /// </para>
+    /// <para>Empty in a measurement run, which has no sessions, and an empty phase costs nothing.</para>
+    /// </remarks>
+    public static readonly Phase Input = new("Input");
+
+    /// <summary>
     /// Spawning and despawning: lairs replacing killed creatures, mission terminals issuing destroy missions, camps
     /// being created and torn down. Runs first because everything downstream should see this tick's population.
     /// </summary>

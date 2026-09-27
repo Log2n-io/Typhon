@@ -316,6 +316,15 @@ public sealed partial class SimBridge
     // Think — players
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
+    /// <summary>Player-ticks <see cref="PlayerThinkTick"/> declined to decide for because a client is driving that player (SWG-01).</summary>
+    private long _possessedSkipped;
+
+    /// <summary>
+    /// How many player-ticks the activity mix did not decide. Zero in a measurement run, which is what makes it a usable assertion: a non-zero value means a
+    /// session is driving somebody.
+    /// </summary>
+    public long PossessedSkipped => Interlocked.Read(ref _possessedSkipped);
+
     /// <summary>
     /// Player behaviour: an activity mix rather than one loop.
     /// </summary>
@@ -349,6 +358,10 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(Player.Bounds);
             var states = cluster.GetSpan(Player.State);
             var motions = cluster.GetSpan(Player.Move);
+
+            // Read-only, so asking who drives these players does not mark the cluster changed. One byte per player, contiguous: a cache line covers 64 of
+            // them, which is why possession is its own component rather than three more fields on PlayerState (SWG-01).
+            var controls = cluster.GetReadOnlySpan(Player.Control);
             var realm = cluster.Realm.Value;
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: N ticks elapse between two visits of a strided realm at divisor N
 
@@ -359,6 +372,15 @@ public sealed partial class SimBridge
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
+
+                // A possessed player is its client's to drive, and two deciders on one entity is the bug this guards (SWG-01). Nothing below runs for it: not
+                // the arrival test, not the re-decide, not the timer — a possessed player has no server-side activity timer at all, so ActivityTicks is zero
+                // and the re-decide below would fire on every tick and overwrite the destination the client just sent.
+                if (controls[idx].Kind != ControllerKind.InProcess)
+                {
+                    Interlocked.Increment(ref _possessedSkipped);
+                    continue;
+                }
 
                 ref var state = ref states[idx];
                 ref var move = ref motions[idx];

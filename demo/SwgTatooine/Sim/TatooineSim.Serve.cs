@@ -105,6 +105,10 @@ public sealed partial class TatooineSim
         TatooineReplication.Planets = _config.Planets;
         TatooineReplication.MaxClients = _config.MaxClients;
         TatooineReplication.MaxSpectators = _config.MaxSpectators;
+
+        // What an intent is validated against: the world it must stay inside, and the tick it gets one step of (SWG-01).
+        TatooineReplication.WorldEdgeM = _config.WorldEdgeM;
+        TatooineReplication.MetresPerTickForIntents = 1f / _config.TickRateHz;
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
@@ -120,16 +124,15 @@ public sealed partial class TatooineSim
         Console.WriteLine($"  catalog {Typhon.Protocol.CatalogSerializer.HashBytes(catalog.Span):X16}, {catalog.Length} B");
     }
 
-    /// <summary>The simulation's own schedule, plus the one system a server needs that a benchmark does not.</summary>
+    /// <summary>The simulation's own schedule, plus the two systems a server needs that a benchmark does not.</summary>
+    /// <remarks>
+    /// <b>They join the simulation's DAG rather than a DAG of their own, which they had until SWG-01.</b> Two DAGs on one track have no barrier between them
+    /// and cannot carry an edge to each other, so a session system in its own DAG could run concurrently with <c>PlayerThink</c> — which matters the moment it
+    /// applies an intent, because both write <c>PlayerMotion</c> — and concurrently with a second session system, which matters because session requests share
+    /// one unsynchronized segment. See <see cref="TatooineReplication.SessionTick"/>.
+    /// </remarks>
     private void BuildServeSchedule(RuntimeSchedule schedule)
-    {
-        BuildSchedule(schedule, replicating: true);
-
-        // A session with no profile is in no tick's session set and receives nothing, so this is what turns a connection into a viewer. It runs on the public
-        // track like any other system, which is the point: binding a session is application work, not engine work.
-        schedule.PublicTrack.DeclareDag("Replication").CallbackSystem("BindSessions", TatooineReplication.BindOpenedSessions)
-            .CallbackSystem("PlaceSessions", TatooineReplication.PlacePlayerSessions);
-    }
+        => BuildSchedule(schedule, replicating: true);
 
     /// <summary>Where the built browser client is expected, relative to the repository root.</summary>
     /// <param name="baseDirectory">The process's base directory.</param>

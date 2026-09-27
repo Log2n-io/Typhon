@@ -12,6 +12,85 @@ public struct ViewRealm
 }
 
 /// <summary>
+/// "Walk to this point." The one movement intent a client needs and the only one it gets (SWG-01).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>A destination, never a position.</b> The server integrates it through the same <c>Steer</c> every simulated player uses, so the client's message
+/// cannot move anything: it can only change where a player is heading, at whatever speed the server says that player is entitled to. Speed hacks are
+/// impossible by construction rather than by check — there is no code path from a client message to a placement
+/// (<c>design/SwgTatooine/06-gameplay.md § 2</c>).
+/// </para>
+/// <para>
+/// Coalesced <see cref="CommandCoalesce.LatestPerSession"/>: for a continuous intent an older destination is already wrong, so a client that sends ten in a
+/// tick costs the tick one.
+/// </para>
+/// </remarks>
+public struct MoveTo
+{
+    /// <summary>Where to walk, in world metres. Clamped to the world when applied.</summary>
+    public float X;
+
+    /// <summary>Where to walk, in world metres.</summary>
+    public float Z;
+}
+
+/// <summary>
+/// "Walk this way, at this speed class." The held-key form of <see cref="MoveTo"/>, and — at speed class 0 — the stop.
+/// </summary>
+/// <remarks>
+/// <b>Stop is a speed class rather than a fourth command type, which is a stated deviation from
+/// <c>design/SwgTatooine/04-protocol.md § 4</c>.</b> That table lists <c>MoveDir</c> and <c>Stop</c> as separate rows, with <c>Stop</c> carrying no fields.
+/// A field-less command is a wire struct of one padding byte whose only content is its type, and with <c>LatestPerSession</c> coalescing a client that sent
+/// <c>MoveDir</c> and <c>Stop</c> in one tick would have both applied in an order the protocol never stated. Speed class 0 says the same thing
+/// unambiguously and one type more cheaply. Nothing is lost: a client has a stop, and a bot has the same one.
+/// </remarks>
+public struct MoveDir
+{
+    /// <summary>Heading in radians, 0 along +X, measured toward +Z.</summary>
+    public float Heading;
+
+    /// <summary>See <see cref="SpeedClasses"/>. Anything higher is refused and counted.</summary>
+    public byte SpeedClass;
+}
+
+/// <summary>The speed classes a client may ask for, and what each is worth.</summary>
+/// <remarks>
+/// <b>A class rather than a speed, because a speed from a client is the speed hack.</b> The server maps the class onto a figure the player is entitled to,
+/// and the mapping is the whole of the entitlement check. There is no mount state in this demo yet, so there is no class above <see cref="Run"/>: a client
+/// asking for one is refused rather than given 12 m/s, and the refusal is counted. When mounts exist, the class stays and the mapping learns about them.
+/// </remarks>
+public static class SpeedClasses
+{
+    /// <summary>Stand still.</summary>
+    public const byte Stop = 0;
+
+    /// <summary>Half of <see cref="Run"/> — SWG had no separate walk figure worth quoting, so this is a fraction rather than a source.</summary>
+    public const byte Walk = 1;
+
+    /// <summary>[CORE3] <c>TatooineData.PlayerRunSpeedMps</c>, the fastest anything on foot moves.</summary>
+    public const byte Run = 2;
+
+    /// <summary>The first class this server does not grant.</summary>
+    public const byte Count = 3;
+}
+
+/// <summary>
+/// "This is what I am aiming at." The target a later tick's combat reads (SWG-02).
+/// </summary>
+/// <remarks>
+/// <b>The reference is a <c>netId</c>, and it is resolved through <c>SubscriptionsCommands.TryResolve</c> — which refuses an entity the session was never
+/// shown</b> (SUB-26). That is the check that makes a target a target rather than a world-wide entity picker: a client cannot aim at something it cannot
+/// see, and it cannot discover an entity's identity by guessing one. A refusal is not an error — an entity may have left since the client sent this — so it
+/// clears the target and is counted.
+/// </remarks>
+public struct SetTarget
+{
+    /// <summary>The target's network identity, or 0 to stop targeting.</summary>
+    public uint NetId;
+}
+
+/// <summary>
 /// News of a realm, heard by every session in it and in the realms under it (Realms G3: <c>RouteToRealm</c> over the parent tree) — a planet's news
 /// reaches the players in its buildings and dungeons.
 /// </summary>
@@ -381,25 +460,90 @@ public static class TatooineReplication
 
         // Realms G3: a planet's news reaches its subtree, and a god camera moves between planets with a command.
         subs.Event<RealmNews>(e => e.RouteToRealm(n => new RealmId(n.Realm), subtree: true));
-        // Every accepted ask is a RESET of a whole planet, the dearest frame there is: once a second, a burst of two.
-        subs.Command<ViewRealm>(c => c.Rate(1, 2).Field(v => v.Realm, Codec.VarUInt));
+
+        // Every accepted ask is a RESET of a whole planet, the dearest frame there is: once a second, a burst of two. Spectators only — a possessed player
+        // moves between planets by taking a shuttle like everyone else, and now that admission assigns roles the engine can say so instead of this being a
+        // string comparison in BindOpenedSessions (which stays, as the check that the god camera is not a player's).
+        subs.Command<ViewRealm>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(v => v.Realm, Codec.VarUInt));
+
+        // The movement and targeting intents (SWG-01). Players and bots only: a spectator has no entity to move, so the engine refuses the message rather
+        // than the system dropping it after the wire has already been paid for.
+        //
+        // The rates are 04-protocol § 4's. MoveTo and MoveDir are LatestPerSession because an older destination is already wrong, and generous per second
+        // because a client sending one per frame is normal — the coalescing is what makes that cheap, not the rate. SetTarget is queued at 4/s: each one is a
+        // decision rather than a continuous state, and a client that spams them is picking targets faster than a person can.
+        //
+        // Every field is given an explicit codec. A field with none still travels, at its natural width, so leaving one out is a silent 4 bytes rather than
+        // an error — and a heading in 16 bits is a quarter of a degree, which is finer than a mouse can aim.
+        subs.Command<MoveTo>(c => c
+            .Coalesce(CommandCoalesce.LatestPerSession)
+            .Rate(30, 60)
+            .Roles(SessionRole.Player)
+            .Precheck(static (in MoveTo m) => float.IsFinite(m.X) && float.IsFinite(m.Z))
+            .Field(m => m.X, Codec.F32, "x")
+            .Field(m => m.Z, Codec.F32, "z"));
+        subs.Command<MoveDir>(c => c
+            .Coalesce(CommandCoalesce.LatestPerSession)
+            .Rate(30, 60)
+            .Roles(SessionRole.Player)
+            .Precheck(static (in MoveDir m) => float.IsFinite(m.Heading) && m.SpeedClass < SpeedClasses.Count)
+            .Field(m => m.Heading, Codec.F16, "heading")
+            .Field(m => m.SpeedClass, Codec.U8, "speedClass"));
+        subs.Command<SetTarget>(c => c
+            .Rate(4, 8)
+            .Roles(SessionRole.Player)
+            .Field(t => t.NetId, Codec.VarUInt, "netId"));
+
         _declared = true;
     }
 
     /// <summary>
-    /// Binds every session that opens to <see cref="GodProfile"/>.
+    /// Everything the tick does about sessions, in one serial system: kicks, counts, profiles, possession and the clients' intents.
+    /// </summary>
+    /// <param name="tick">The tick context.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>One system, and that is a correctness requirement rather than tidiness (SWG-01).</b> Two things forced it.
+    /// </para>
+    /// <para>
+    /// First, session requests. <c>SubscriptionsCommands.Session(session, worker)</c> appends to a per-worker segment whose append is deliberately
+    /// unsynchronized — its own remarks say two threads sharing one "loses records, duplicates them, or throws out of an <c>Array.Resize</c>" — and the
+    /// worker index cannot be passed <c>TickContext.WorkerId</c>, because that ranges over <c>[0, WorkerCount]</c> while the log is sized
+    /// <c>WorkerCount</c> (filed as #1070). So every caller uses segment 0, and segment 0 is safe only if one thread writes it. This used to be two callback
+    /// systems declared with no edge between them in one DAG phase — <c>ExecuteInline</c> runs a callback system on whichever worker reaches it, so they
+    /// could and did run concurrently, one staging <c>Profile</c> and <c>Enter</c> while the other staged <c>Control</c>.
+    /// </para>
+    /// <para>
+    /// Second, ECS writes. Applying an intent writes <c>PlayerMotion</c> and <c>PlayerControl</c>, and <c>PlayerThink</c> writes <c>PlayerMotion</c> too.
+    /// Ordering them needs them in the SAME DAG — "a cross-DAG <c>.After()</c> edge is a configuration error … access-edge derivation runs per-DAG"
+    /// (<c>overview/13-runtime.md</c>) — and DAGs within a track have no barrier between them. So this lives in the simulation's own DAG, in the
+    /// <c>Spawn</c> phase, ahead of every phase that reads what it wrote.
+    /// </para>
+    /// </remarks>
+    public static void SessionTick(TickContext tick)
+    {
+        if (BindOpenedSessions(tick))
+        {
+            PossessPlayers(tick);
+            ApplyIntents(tick);
+        }
+    }
+
+    /// <summary>
+    /// Binds every session that opens to its profile, and answers a god camera's request to look at another planet.
     /// </summary>
     /// <param name="tick">The tick context of the system this is called from.</param>
+    /// <returns><see langword="false"/> when there is nothing further to do this tick — no replication, or the server is shutting down.</returns>
     /// <remarks>
     /// A session with no profile receives nothing, so this is not optional wiring — it is the moment a connection becomes a viewer. The request is staged
-    /// and applied by the next tick's prologue, which is what makes it safe to call from a system on any worker.
+    /// and applied by the next tick's prologue.
     /// </remarks>
-    public static void BindOpenedSessions(TickContext tick)
+    private static bool BindOpenedSessions(TickContext tick)
     {
         var subs = tick.Subscriptions;
         if (subs == null)
         {
-            return;
+            return false;
         }
 
         _pushCommands = subs;
@@ -418,7 +562,7 @@ public static class TatooineReplication
                 }
             }
 
-            return;
+            return false;
         }
 
         RecountSessions(subs);
@@ -453,6 +597,8 @@ public static class TatooineReplication
                 subs.Enter(command.Session, new RealmId((ushort)command.Value.Realm));
             }
         }
+
+        return true;
     }
 
     /// <summary>
@@ -691,17 +837,24 @@ public static class TatooineReplication
     private static double SendCpuFrom;
     private static int SendGen0From;
 
-    public static void PlacePlayerSessions(TickContext tick)
+    /// <summary>
+    /// The periodic replication report: what the track did, cumulatively, every three hundred ticks.
+    /// </summary>
+    /// <param name="tick">The tick context.</param>
+    /// <remarks>
+    /// Split out of the possession pass (SWG-01) because the two have nothing to do with each other and only one of them may write ECS state. This reads
+    /// counters and prints; it stages nothing and touches no entity, so it is free to sit in the report phase where every other diagnostic is.
+    /// </remarks>
+    public static void ReportTick(TickContext tick)
     {
         var subs = tick.Subscriptions;
-        var tx = tick.Transaction;
-        if (subs == null || tx == null)
+        if (subs == null)
         {
             return;
         }
 
-        // The periodic report. Error, not Out: a redirected stdout is block-buffered and this process is stopped rather than asked to exit, so the buffer is
-        // never flushed and the diagnostic is lost exactly when it is being collected.
+        // Error, not Out: a redirected stdout is block-buffered and this process is stopped rather than asked to exit, so the buffer is never flushed and the
+        // diagnostic is lost exactly when it is being collected.
         if (++_placeTicks % 300 == 0)
         {
             var (projected, dormant) = subs.ProjectionBlocks;
@@ -797,6 +950,32 @@ public static class TatooineReplication
                     $"  frame phases (ms CPU, cumulative): gather {ph.Gather:F0}, sort {ph.Sort:F0}, encode {ph.Encode:F0}, publish {ph.Publish:F0}");
             }
         }
+    }
+
+    /// <summary>
+    /// Hands each player session a player of its own to control, takes it back when the session goes, and marks both on the entity.
+    /// </summary>
+    /// <param name="tick">The tick context.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>The claim is made once per session, not per tick.</b> The engine centres the session's sphere on the entity from then on
+    /// (<c>AroundControlled</c>), so there is no per-tick walk of every player and no <c>Place</c>. See <see cref="BoundPlayer"/> for what re-picking per tick
+    /// cost when this method used to do it.
+    /// </para>
+    /// <para>
+    /// <b>What SWG-01 added is the mark on the ENTITY.</b> The claim table alone tells the session which player it drives; it does not tell the simulation to
+    /// stop driving that player. <c>PlayerControl.Kind</c> is that, and it is written here — the one place that knows both when a claim is made and when it is
+    /// given back — rather than inferred anywhere from the table, which only this system may read.
+    /// </para>
+    /// </remarks>
+    private static void PossessPlayers(TickContext tick)
+    {
+        var subs = tick.Subscriptions;
+        var tx = tick.Transaction;
+        if (subs == null || tx == null)
+        {
+            return;
+        }
 
         // NOT disposed: the accessor comes from the TICK's transaction, which owns it and releases it. Disposing one taken from a transaction this
         // method did not create tears down the cached EntityMap and chunk accessors mid-tick, which stops later systems reading.
@@ -827,21 +1006,34 @@ public static class TatooineReplication
             foreach (var cluster in accessor.GetClusterEnumerator())
             {
                 var occupancy = cluster.OccupancyBits;
-                var ids = cluster.EntityIds;
                 while (occupancy != 0 && cursor < Unbound.Count)
                 {
                     var slot = BitOperations.TrailingZeroCount(occupancy);
                     occupancy &= occupancy - 1;
-                    var id = ids[slot];
-                    if (BoundIds.Contains(id))
+
+                    // The EntityId rather than the raw long the span carries, because the claim has to be opened for writing on RELEASE as well as on claim
+                    // and an EntityId cannot be reconstructed from a raw value outside the engine.
+                    var entity = cluster.GetEntityId(slot);
+                    if (BoundIds.Contains(entity))
                     {
                         continue;
                     }
 
                     var session = Unbound[cursor++];
-                    BoundPlayer[session.Value] = id;
-                    BoundIds.Add(id);
-                    subs.Session(session).Control(cluster.GetEntityId(slot));
+                    BoundPlayer[session.Value] = entity;
+                    BoundIds.Add(entity);
+                    subs.Session(session).Control(entity);
+
+                    // The mark that stops PlayerThink driving it. Written through OpenMut rather than into this cluster's span because the span is read-only
+                    // here and, more to the point, a possession is one entity: opening it says so, and sets the dirty bit the fence and the projection read.
+                    if (accessor.TryOpenMut(entity, out var possessed))
+                    {
+                        ref var control = ref possessed.Write(Player.Control);
+                        control.Kind = ControllerKind.Human;
+                        control.Controller = session.Value;
+                        control.Target = EntityId.Null;
+                        System.Threading.Interlocked.Increment(ref _possessions);
+                    }
                 }
 
                 if (cursor >= Unbound.Count)
@@ -854,12 +1046,23 @@ public static class TatooineReplication
         // A closed session gives its player back, or the maps grow for the life of the process and every player eventually reads as held — at which
         // point a new session is bound to nothing and sees nothing.
         Retired.Clear();
-        foreach (var (sessionValue, id) in BoundPlayer)
+        foreach (var (sessionValue, entity) in BoundPlayer)
         {
             if (!Seen.Contains(sessionValue))
             {
                 Retired.Add(sessionValue);
-                BoundIds.Remove(id);
+                BoundIds.Remove(entity);
+
+                // Back to the simulation. Without this a player whose client left would stand still for ever: possessed, so PlayerThink skips it, and with
+                // nobody left to send it an intent. Zero throughout is the resting state, which is also what a freshly spawned player has.
+                if (accessor.TryOpenMut(entity, out var released))
+                {
+                    ref var control = ref released.Write(Player.Control);
+                    control.Kind = ControllerKind.InProcess;
+                    control.Controller = 0u;
+                    control.Target = EntityId.Null;
+                    System.Threading.Interlocked.Increment(ref _releases);
+                }
             }
         }
 
@@ -868,6 +1071,250 @@ public static class TatooineReplication
             BoundPlayer.Remove(Retired[i]);
         }
     }
+
+    // ── Intents (SWG-01) ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Movement intents applied.</summary>
+    private static long _intentsApplied;
+
+    /// <summary>Intents whose session controls no player — a command that arrived before the claim, or after the player was given back.</summary>
+    private static long _intentsUnowned;
+
+    /// <summary>Intents asking for a speed this server does not grant.</summary>
+    private static long _intentsRefusedSpeed;
+
+    /// <summary>Targets refused because the session was never shown the entity it named, or it has gone.</summary>
+    private static long _targetsRefused;
+
+    /// <summary>Targets set.</summary>
+    private static long _targetsSet;
+
+    /// <summary>Possessions granted and given back.</summary>
+    private static long _possessions;
+
+    /// <summary>Players handed back to the simulation.</summary>
+    private static long _releases;
+
+    /// <summary>What the intent path did, cumulatively. For the report and for the checks beside the demo.</summary>
+    public static (long Applied, long Unowned, long RefusedSpeed, long TargetsSet, long TargetsRefused, long Possessions, long Releases) Intents
+        => (System.Threading.Interlocked.Read(ref _intentsApplied), System.Threading.Interlocked.Read(ref _intentsUnowned),
+            System.Threading.Interlocked.Read(ref _intentsRefusedSpeed), System.Threading.Interlocked.Read(ref _targetsSet),
+            System.Threading.Interlocked.Read(ref _targetsRefused), System.Threading.Interlocked.Read(ref _possessions),
+            System.Threading.Interlocked.Read(ref _releases));
+
+    /// <summary>
+    /// Applies this tick's client intents: where each possessed player is heading, how fast, and what it is aiming at.
+    /// </summary>
+    /// <param name="tick">The tick context.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Command-first, not player-first, which is a stated deviation from <c>design/SwgTatooine/03-server.md § 6</c>.</b> That section has a parallel
+    /// <c>PlayerInput</c> system reading <c>Commands&lt;MoveTo&gt;().TryGetLatest(session, out cmd)</c>, which is a scan of the command buffer per player per
+    /// chunk — O(players × commands) for a buffer whose length is bounded by the number of CONNECTED clients. Walking the commands and opening the one entity
+    /// each names is O(commands), and it is what makes this affordable serially, which is what the segment-0 and <c>PlayerMotion</c> hazards described on
+    /// <see cref="SessionTick"/> require. Nothing about the validation or the effect changes.
+    /// </para>
+    /// <para>
+    /// <b>Every intent is re-validated here, where the state it must agree with is.</b> The wire check is syntactic (a finite coordinate, a declared speed
+    /// class) and the engine's rate limiter is arithmetic; neither knows whether this session still controls that player, whether the destination is in the
+    /// world, or whether the target is something this client was ever shown. A speed is never taken from a client at all — only a class, which is mapped to
+    /// what the player is entitled to — so there is no code path from a message to a position and a speed hack is impossible by construction rather than by
+    /// check (<c>06-gameplay.md § 2</c>).
+    /// </para>
+    /// <para>
+    /// <b><c>ActivityTicks</c> is set to zero, deliberately.</b> A possessed player has no server-side activity timer: nothing counts down for it because
+    /// nothing is deciding for it. That also makes the possession mark load-bearing rather than decorative — with <c>ActivityTicks</c> at zero,
+    /// <c>PlayerThink</c> would re-decide this player's activity on the very next tick and overwrite the destination the client just sent.
+    /// </para>
+    /// </remarks>
+    private static void ApplyIntents(TickContext tick)
+    {
+        var subs = tick.Subscriptions;
+        var tx = tick.Transaction;
+        if (subs == null || tx == null || BoundPlayer.Count == 0)
+        {
+            return;
+        }
+
+        var accessor = tx.For<Player>();
+        var half = (float)(WorldEdgeM * 0.5);
+
+        foreach (var command in subs.Commands<MoveTo>())
+        {
+            if (!TryOpenControlled(subs, accessor, command.Session, out var player))
+            {
+                continue;
+            }
+
+            ref var move = ref player.Write(Player.Move);
+            move.DestX = Math.Clamp(command.Value.X, -half, half);
+            move.DestZ = Math.Clamp(command.Value.Z, -half, half);
+            move.SpeedMps = TatooineData.PlayerRunSpeedMps;
+            SteerTo(ref move, ref player, subs);
+        }
+
+        foreach (var command in subs.Commands<MoveDir>())
+        {
+            if (!TryOpenControlled(subs, accessor, command.Session, out var player))
+            {
+                continue;
+            }
+
+            if (!TrySpeedFor(command.Value.SpeedClass, out var speed))
+            {
+                System.Threading.Interlocked.Increment(ref _intentsRefusedSpeed);
+                continue;
+            }
+
+            // A heading is turned into a destination one second of travel away rather than into a velocity, so that this and MoveTo leave the player in the
+            // same state and PlayerMove needs to know nothing about which one sent it. A held key re-sends every frame, and each one renews the second.
+            ref var move = ref player.Write(Player.Move);
+            var place = player.Read(Player.Bounds);
+            move.SpeedMps = speed;
+            var reach = MathF.Max(speed, 1f);
+            move.DestX = Math.Clamp(place.X + (MathF.Cos(command.Value.Heading) * reach), -half, half);
+            move.DestZ = Math.Clamp(place.Z + (MathF.Sin(command.Value.Heading) * reach), -half, half);
+            SteerTo(ref move, ref player, subs);
+        }
+
+        foreach (var command in subs.Commands<SetTarget>())
+        {
+            if (!TryOpenControlled(subs, accessor, command.Session, out var player))
+            {
+                continue;
+            }
+
+            ref var control = ref player.Write(Player.Control);
+            if (command.Value.NetId == 0u)
+            {
+                control.Target = EntityId.Null;
+                continue;
+            }
+
+            // TryResolve, not TryResolveAny: a client may only name what it was shown (SUB-26). A refusal is not an error — the entity may have left since the
+            // command was sent — so the target is cleared and counted rather than the session being closed.
+            if (subs.TryResolve(command.Session, command.Value.NetId, out var target))
+            {
+                control.Target = target;
+                System.Threading.Interlocked.Increment(ref _targetsSet);
+            }
+            else
+            {
+                control.Target = EntityId.Null;
+                System.Threading.Interlocked.Increment(ref _targetsRefused);
+            }
+        }
+    }
+
+    /// <summary>The player a session controls, opened for writing.</summary>
+    /// <param name="subs">This tick's replication surface.</param>
+    /// <param name="accessor">The tick transaction's player accessor.</param>
+    /// <param name="session">The session that sent the command.</param>
+    /// <param name="player">The entity.</param>
+    /// <returns><see langword="false"/> when the session controls nothing, or what it controls has gone.</returns>
+    /// <remarks>
+    /// <b>Both failures are ordinary rather than exceptional</b> and are counted as one: a command can arrive on the tick a session opened, before the claim
+    /// has been made, and a command can be in flight when the player it names is destroyed. Neither is the client's fault and neither is worth a kick.
+    /// </remarks>
+    private static bool TryOpenControlled(SubscriptionsCommands subs, ArchetypeAccessor<Player> accessor, SessionId session, out EntityRefMut player)
+    {
+        if (!BoundPlayer.TryGetValue(session.Value, out var entity) || !accessor.TryOpenMut(entity, out player))
+        {
+            System.Threading.Interlocked.Increment(ref _intentsUnowned);
+            player = default;
+            return false;
+        }
+
+        System.Threading.Interlocked.Increment(ref _intentsApplied);
+        return true;
+    }
+
+    /// <summary>Points a player's velocity at the destination its intent just set, and tells replication its activity changed.</summary>
+    /// <param name="move">The player's motion, already carrying the destination and the speed.</param>
+    /// <param name="player">The entity.</param>
+    /// <param name="subs">This tick's replication surface, for the push mark.</param>
+    /// <remarks>
+    /// The same <c>Steer</c> the simulation uses, through the same <c>PlayerMove</c> integration: an intent is a destination and nothing else, and that is
+    /// the whole of why a client cannot move faster than the server allows.
+    /// </remarks>
+    private static void SteerTo(ref PlayerMotion move, ref EntityRefMut player, SubscriptionsCommands subs)
+    {
+        ref var state = ref player.Write(Player.State);
+        state.Activity = PlayerActivity.Travelling;
+
+        // Zero, because a possessed player has no server-side timer: see the remarks on ApplyIntents.
+        state.ActivityTicks = 0;
+
+        var place = player.Read(Player.Bounds);
+        var dx = move.DestX - place.X;
+        var dz = move.DestZ - place.Z;
+        var len = MathF.Sqrt((dx * dx) + (dz * dz));
+        if (len < 0.001f)
+        {
+            move.VelX = 0f;
+            move.VelZ = 0f;
+        }
+        else
+        {
+            var step = MathF.Min(move.SpeedMps * MetresPerTickForIntents, len);
+            move.VelX = dx / len * step;
+            move.VelZ = dz / len * step;
+        }
+
+        subs.Replicate(in player);
+    }
+
+    /// <summary>What a speed class is worth, or nothing when this server does not grant it.</summary>
+    /// <param name="speedClass">The class the client asked for.</param>
+    /// <param name="speed">Metres per second.</param>
+    /// <returns><see langword="false"/> for a class above what the player is entitled to.</returns>
+    /// <remarks>
+    /// There is no mount state in this demo, so <c>PlayerRunSpeedMps</c> is the ceiling and a client asking for more is refused rather than clamped: a clamp
+    /// would let a client ask for 12 m/s every tick and never learn that it is not getting it, and the refusal is the number that says whether anything is
+    /// trying.
+    /// </remarks>
+    private static bool TrySpeedFor(byte speedClass, out float speed)
+    {
+        switch (speedClass)
+        {
+            case SpeedClasses.Stop: speed = 0f; return true;
+            case SpeedClasses.Walk: speed = TatooineData.PlayerRunSpeedMps * 0.5f; return true;
+            case SpeedClasses.Run: speed = TatooineData.PlayerRunSpeedMps; return true;
+            default: speed = 0f; return false;
+        }
+    }
+
+    /// <summary>Clears the intent counters, so one check's refusals do not decide the next one's.</summary>
+    /// <remarks>Called from a <c>SetUp</c>, for the reason <see cref="ResetSessionAccounting"/> is. Never from the demo.</remarks>
+    public static void ResetIntentAccounting()
+    {
+        System.Threading.Interlocked.Exchange(ref _intentsApplied, 0);
+        System.Threading.Interlocked.Exchange(ref _intentsUnowned, 0);
+        System.Threading.Interlocked.Exchange(ref _intentsRefusedSpeed, 0);
+        System.Threading.Interlocked.Exchange(ref _targetsRefused, 0);
+        System.Threading.Interlocked.Exchange(ref _targetsSet, 0);
+        System.Threading.Interlocked.Exchange(ref _possessions, 0);
+        System.Threading.Interlocked.Exchange(ref _releases, 0);
+        BoundPlayer.Clear();
+        BoundIds.Clear();
+    }
+
+    /// <summary>The player a session controls, or <c>EntityId.Null</c>.</summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The entity.</returns>
+    /// <remarks>
+    /// The claim table is this system's alone at run time — nothing else may read it, because nothing else is on its thread. A check reads it between ticks,
+    /// which is a different situation and the only one in which this is safe.
+    /// </remarks>
+    public static EntityId ControlledForTest(SessionId session)
+        => BoundPlayer.TryGetValue(session.Value, out var entity) ? entity : EntityId.Null;
+
+    /// <summary>The world's edge in metres, so an intent's destination can be clamped to it.</summary>
+    /// <remarks>Set from the configuration before <c>Start</c>, like every other value here that the simulation owns and replication reads.</remarks>
+    public static double WorldEdgeM { get; set; } = 16_384d;
+
+    /// <summary>One tick's share of a second, for turning a speed into a step. Set before <c>Start</c>.</summary>
+    public static float MetresPerTickForIntents { get; set; } = 0.1f;
 
     /// <summary>The player each session watches, for the life of the session.</summary>
     /// <remarks>
@@ -890,10 +1337,10 @@ public static class TatooineReplication
     /// teleport.
     /// </para>
     /// </remarks>
-    private static readonly Dictionary<uint, long> BoundPlayer = [];
+    private static readonly Dictionary<uint, EntityId> BoundPlayer = [];
 
     /// <summary>The players held by some session, so the walk can tell a free one from a taken one without searching.</summary>
-    private static readonly HashSet<long> BoundIds = [];
+    private static readonly HashSet<EntityId> BoundIds = [];
 
     /// <summary>Scratch: the player sessions open this tick that hold no player yet.</summary>
     private static readonly List<SessionId> Unbound = [];

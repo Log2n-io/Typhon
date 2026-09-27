@@ -57,7 +57,9 @@ public sealed partial class TatooineSim
     public void PrintChunkStats() => _bridge?.PrintChunkStats();
 
     /// <summary>The systems' shared state, once a run or a serve has built it; null before that.</summary>
-    /// <remarks>Public for the same reason <see cref="Runtime"/> is: the checks beside this demo read what it accumulated, and reflection is not a test.</remarks>
+    /// <remarks>
+    /// Public for the same reason <see cref="Runtime"/> is: the checks beside this demo read what it accumulated, and reflection is not a test.
+    /// </remarks>
     public SimBridge Bridge => _bridge;
 
     /// <summary>
@@ -408,7 +410,7 @@ public sealed partial class TatooineSim
     private void BuildSchedule(RuntimeSchedule schedule, bool replicating = false)
     {
         var dag = schedule.PublicTrack.DeclareDag("Tatooine")
-            .Phases(SimPhases.Spawn, SimPhases.Think, SimPhases.Move, SimPhases.Awareness, SimPhases.Resolve,
+            .Phases(SimPhases.Input, SimPhases.Spawn, SimPhases.Think, SimPhases.Move, SimPhases.Awareness, SimPhases.Resolve,
                 SimPhases.Economy, SimPhases.Report)
             .DefaultPhase(SimPhases.Report);
 
@@ -466,6 +468,14 @@ public sealed partial class TatooineSim
         dag.Add(new CreatureCombatSystem(_bridge));
 
         dag.Add(new EconomySystem(_bridge));
+
+        // Only a server has sessions. In the simulation's own DAG rather than one of its own, because an intent writes PlayerMotion and PlayerThink writes it
+        // too — see PlayerSessionSystem.
+        if (replicating)
+        {
+            dag.Add(new PlayerSessionSystem());
+            dag.Add(new ReplicationReportSystem());
+        }
     }
 }
 

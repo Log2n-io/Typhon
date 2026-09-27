@@ -30,6 +30,80 @@ internal sealed class FakeLink : ISubscriptionLink
     /// <summary>The connection the acceptor handed back, so a close can be reported to it as a real transport does.</summary>
     public ISubscriptionConnection Connection { get; set; }
 
+    /// <summary>The session this link's <c>HELLO</c> opened, read from the <c>WELCOME</c> the server answered with.</summary>
+    /// <remarks>
+    /// Taken from the wire rather than from a session table, because that is what a client has: a test that reached into the engine for it could pass while
+    /// the identity the client was actually told was a different one.
+    /// </remarks>
+    public SessionId Session
+    {
+        get
+        {
+            foreach (var message in Sent)
+            {
+                if (message.Length > 0 && message[0] == MessageTypes.Welcome)
+                {
+                    return SessionId.FromValue(WelcomeMessage.Parse(message).SessionId);
+                }
+            }
+
+            return SessionId.None;
+        }
+    }
+
+    /// <summary>Delivers a client-to-server message, as a transport does when bytes arrive.</summary>
+    /// <param name="message">The encoded message.</param>
+    public void Send(byte[] message) => Connection.OnMessage(message);
+
+    /// <summary>
+    /// The compiled catalog this client negotiated, built the way a real client builds one: from the JSON <c>WELCOME</c> carried.
+    /// </summary>
+    /// <remarks>
+    /// <b>From the wire, not from the registry.</b> A test that compiled the server's own export would encode against a catalog the client was never sent, so
+    /// a command index that disagreed between the two would pass here and fail against every real client.
+    /// </remarks>
+    public CatalogPlan Plan
+    {
+        get
+        {
+            if (_plan != null)
+            {
+                return _plan;
+            }
+
+            foreach (var message in Sent)
+            {
+                if (message.Length > 0 && message[0] == MessageTypes.Welcome)
+                {
+                    _plan = CatalogPlan.Compile(CatalogSerializer.FromUtf8(WelcomeMessage.Parse(message).CatalogJson));
+                    return _plan;
+                }
+            }
+
+            throw new InvalidOperationException("no WELCOME arrived, so this client has no catalog to encode against");
+        }
+    }
+
+    private CatalogPlan _plan;
+
+    /// <summary>Sends one command, encoded through the protocol's own writer against this client's negotiated catalog.</summary>
+    /// <param name="name">The command's declared name.</param>
+    /// <param name="values">Its field values, by field name.</param>
+    /// <remarks>
+    /// <b>Never a hand-spelt byte array.</b> A test that writes the wire itself is green in the same build as a broken encoder, and — worse here — would pin
+    /// a command index that the catalog is free to renumber when a declaration is added.
+    /// </remarks>
+    public void SendCommand(string name, RecordValues values)
+    {
+        var commands = new List<(MessagePlan, ushort, RecordValues)> { (Plan.CommandByName(name), _seq++, values) };
+        var buffer = new byte[1024];
+        var writer = new WireWriter(buffer);
+        CommandsMessage.Write(ref writer, clientTick: 1, commands);
+        Send(writer.Written.ToArray());
+    }
+
+    private ushort _seq = 1;
+
     /// <summary>The close code and reason the engine asked for, or null while the link is open.</summary>
     public (ushort Code, string Reason)? Closed { get; private set; }
 
@@ -126,6 +200,46 @@ internal sealed class FakeTransport : ISubscriptionTransport
 /// <summary>Builds the client-to-server messages these checks send, through <c>Typhon.Protocol</c>'s own writers.</summary>
 internal static class ClientSays
 {
+    /// <summary>Encodes a <c>PING</c>, which is how a client stays connected.</summary>
+    /// <param name="clientMs">The client's own clock reading, echoed in the <c>PONG</c>.</param>
+    /// <param name="lastAppliedTick">The newest tick the client has applied.</param>
+    /// <returns>The message.</returns>
+    public static byte[] Ping(uint clientMs, uint lastAppliedTick)
+    {
+        var scratch = new byte[16];
+        var writer = new WireWriter(scratch);
+        new PingMessage(clientMs, lastAppliedTick).Write(ref writer);
+        return writer.Written.ToArray();
+    }
+
+    /// <summary>The field values of a <c>MoveTo</c>.</summary>
+    /// <param name="x">Where to walk.</param>
+    /// <param name="z">Where to walk.</param>
+    /// <returns>The values, keyed by the names the declaration gave.</returns>
+    public static RecordValues MoveTo(float x, float z) => new()
+    {
+        ["x"] = FieldValue.Of(x),
+        ["z"] = FieldValue.Of(z),
+    };
+
+    /// <summary>The field values of a <c>MoveDir</c>.</summary>
+    /// <param name="heading">Radians, 0 along +X.</param>
+    /// <param name="speedClass">See <c>SpeedClasses</c>.</param>
+    /// <returns>The values.</returns>
+    public static RecordValues MoveDir(float heading, byte speedClass) => new()
+    {
+        ["heading"] = FieldValue.Of(heading),
+        ["speedClass"] = FieldValue.Of(speedClass),
+    };
+
+    /// <summary>The field values of a <c>SetTarget</c>.</summary>
+    /// <param name="netId">The target's network identity, or 0 to clear.</param>
+    /// <returns>The values.</returns>
+    public static RecordValues SetTarget(uint netId) => new()
+    {
+        ["netId"] = FieldValue.Of(netId),
+    };
+
     /// <summary>Encodes a <c>HELLO</c>.</summary>
     /// <param name="kind">The session kind the client names.</param>
     /// <returns>The message.</returns>
@@ -179,20 +293,71 @@ internal sealed class SessionHarness
         Assert.That(connection, Is.Not.Null, "the runtime declined the link outright");
         link.Connection = connection;
         connection.OnMessage(ClientSays.Hello(kind));
+        _links.Add(link);
+        Current = this;
         return link;
     }
+
+    private readonly List<FakeLink> _links = [];
+
+    /// <summary>
+    /// The harness whose clients <see cref="Until"/> keeps alive. One per fixture, because a check runs one server at a time.
+    /// </summary>
+    /// <remarks>
+    /// A static because <see cref="Until"/> is one: a wait for a condition reads nicely as a free function and every wait in every check has to keep the
+    /// clients alive, so making it an instance method would mean every call site carrying the harness for that one reason.
+    /// </remarks>
+    private static SessionHarness Current;
 
     /// <summary>Waits until the runtime has ticked past where it is now.</summary>
     /// <param name="count">How many ticks.</param>
     public void Ticks(int count)
     {
         var target = _sim.Runtime.CurrentTickNumber + count;
-        Assert.That(SpinWait.SpinUntil(() => _sim.Runtime.CurrentTickNumber >= target, TimeSpan.FromSeconds(10)), Is.True, "the runtime stopped ticking");
+        Assert.That(SpinWait.SpinUntil(
+            () =>
+            {
+                Keepalive();
+                return _sim.Runtime.CurrentTickNumber >= target;
+            },
+            TimeSpan.FromSeconds(10)), Is.True, "the runtime stopped ticking");
+    }
+
+    /// <summary>
+    /// Sends a <c>PING</c> on every connected link, which is what stops the server closing them.
+    /// </summary>
+    /// <remarks>
+    /// <b>A real client pings; a test that does not gets a correct 4001 and looks like a bug in what it was testing.</b> The frame assembler closes a session
+    /// it has not heard from for <c>_silenceBoundTicks</c> with <c>NoAcknowledgement</c> — "a client that has stopped talking is gone" — so an otherwise
+    /// passing case that waits more than about a second sees its session released, its player handed back to the simulation, and its assertions fail against
+    /// state that <c>PlayerThink</c> has resumed writing. That cost an afternoon's worth of the wrong hypothesis once, so the keepalive is inside the waits
+    /// rather than left to each case to remember.
+    /// </remarks>
+    public void Keepalive()
+    {
+        var tick = (uint)Math.Max(0, _sim.Runtime.CurrentTickNumber);
+        for (var i = 0; i < _links.Count; i++)
+        {
+            var link = _links[i];
+            if (link.Closed == null)
+            {
+                link.Send(ClientSays.Ping(tick, tick));
+            }
+        }
     }
 
     /// <summary>Waits for a condition the tick or the send pump makes true, or fails.</summary>
     /// <param name="condition">The condition.</param>
     /// <param name="what">What was being waited for, for the failure message.</param>
     public static void Until(Func<bool> condition, string what)
-        => Assert.That(SpinWait.SpinUntil(condition, TimeSpan.FromSeconds(10)), Is.True, $"timed out waiting for {what}");
+        => Assert.That(
+            SpinWait.SpinUntil(
+                () =>
+                {
+                    Current?.Keepalive();
+                    return condition();
+                },
+                TimeSpan.FromSeconds(10)),
+            Is.True,
+            $"timed out waiting for {what}");
 }
