@@ -410,12 +410,18 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
         SpinWait.SpinUntil(() => ring.TotalTicksRecorded >= 3, TimeSpan.FromSeconds(5));
         runtime.Shutdown();
 
+        // Bracketed, because `Shutdown` is explicitly NOT a quiescence point — it stops new ticks and does not wait for the one in flight, which then finishes
+        // and posts its accounting (see its remarks; `Dispose` is what joins the tick thread). Asserting `stats.Tick == ring.NewestTick` therefore compared
+        // two reads of a value that was still moving, and failed about one cold run in three at 1000 Hz with the snapshot one tick behind. The property that
+        // is actually true, and the one worth pinning, is that the snapshot names a tick the ring held while it was taken.
+        var newestBefore = ring.NewestTick;
         var stats = runtime.ReadStats();
+        var newestAfter = ring.NewestTick;
 
         Assert.Multiple(() =>
         {
             Assert.That(stats.TicksInWindow, Is.GreaterThanOrEqualTo(3), "the window covers the ticks that ran");
-            Assert.That(stats.Tick, Is.EqualTo(ring.NewestTick), "the snapshot names the tick it ends at");
+            Assert.That(stats.Tick, Is.InRange(newestBefore, newestAfter), "the snapshot names the tick it ends at");
             Assert.That(stats.TargetTickMs, Is.EqualTo(1.0).Within(1e-9), "1000 Hz is a 1 ms target");
             Assert.That(stats.TickP50Ms, Is.GreaterThan(0), "a tick that ran took time");
             Assert.That(stats.TickP99Ms, Is.GreaterThanOrEqualTo(stats.TickP50Ms), "p99 cannot be below p50 over one window");

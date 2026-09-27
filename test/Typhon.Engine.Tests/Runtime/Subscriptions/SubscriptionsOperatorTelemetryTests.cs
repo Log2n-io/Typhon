@@ -108,6 +108,7 @@ class SubscriptionsOperatorTelemetryTests : TestBase<SubscriptionsOperatorTeleme
     /// </para>
     /// </remarks>
     [Test]
+    [VerifiesRule("TR-01")]
     public void EveryTickTelemetryWindowPassSurvivesAnEmptyRing()
     {
         using var world = new World(ProjectionTestSchema.SetupEngine(ServiceProvider));

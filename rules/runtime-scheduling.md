@@ -780,3 +780,33 @@ all. Both failures are silent.
   verified: SystemInputViewLivenessTests.SystemInputView_SeesEntitiesSpawnedWhileTheRuntimeIsRunning — spawns while the
             runtime is ticking, which no fixture anywhere did before, and asserts the system sees 20 rather than 10.
   requires BIND-01 (a system with no input View has no membership to keep fresh)
+
+## Module: TR — Tick telemetry ring readers
+
+`TickTelemetryRing` is written once per tick by the tick driver and read by everything that reports what the engine is doing: the HTTP stats
+snapshot, the `STATS` block that reaches game clients, the push-replication operator records. Its two bounds are the only thing a reader has to
+go on, and both report `-1` while the ring is empty — which is the state EVERY reader sees on tick 0, because the ring is written at the end of a
+tick. The hand-written window pass does not survive that, and three shipped copies of it did not.
+
+### TR-01: A window pass over the tick telemetry ring never asks it for a tick the ring does not hold `[fatal]` `[silent]`
+  invariant a reader resolves its window through `TickTelemetryRing.TryGetRange`, which returns false for an empty ring and otherwise yields
+            `first >= OldestAvailableTick` and `last == NewestTick`; every tick in `[first, last]` is one `GetTick` / `GetSystemMetrics` accepts
+  never a reader forming its own bounds as `Math.Max(OldestAvailableTick, tick - window)`: on an empty ring that is `Math.Max(-1, -1)` and the
+        loop's first call is `GetTick(-1)`, which throws `ArgumentOutOfRangeException`
+  note: `[fatal]` because of WHERE these readers run, not because a percentile matters. The operator emission is called from
+        `SubscriptionsContext.Reset`, on the unconditional tick path, BEFORE the ring is written — so the throw stopped the recording that would
+        have made the next tick's call legal and the condition sustained itself for every tick of the run. `[silent]` is the reason it needs a
+        rule: arguments are evaluated before a gated emit is entered, so the throw fires whether or not anyone wanted the record, and it surfaced
+        as 508 ticks with 2 337 trace records and not one record of the expected kind, every gate true and every null check passing. Nobody saw
+        an exception
+  note: `TryGetRange` takes an absolute `fromInclusive`, not a width, deliberately. The two shipped readers disagree by one on what "the window"
+        means — `StatsEncoder` walks `[tick - window, newest]` and `ReadStats` walks `[newest - window + 1, newest]` — and a helper that took a
+        width would have to pick one and silently change the other's published percentiles. Settling that is #1066's business, not this rule's
+  scope: TickTelemetryRing.cs (TryGetRange, GetTick, GetSystemMetrics, OldestAvailableTick, NewestTick), StatsEncoder.cs
+         (DurabilityWaitPercentile, FillTickSamples, SystemMeans), TyphonRuntime.cs (ReadStats)
+  verified: TickTelemetryRingTests.TryGetRange_RefusesAnEmptyRing_AndNeverYieldsATickGetTickWouldRefuse — asserts the property directly, over
+            every `from` a caller could compute against a ring from empty through wrapped, including the negative one the trap produces;
+            SubscriptionsOperatorTelemetryTests.EveryTickTelemetryWindowPassSurvivesAnEmptyRing — the consumer end, on a real encoder
+  note: no RuleMutant. The guard was mutation-verified by hand when it landed — widening it to `newest < -99` reproduced the exact
+        `ArgumentOutOfRangeException` the empty-ring test names — and a mutant of `TryGetRange` itself is caught by the exhaustive cross-check,
+        which calls `GetTick` on every tick the helper returns

@@ -507,8 +507,10 @@ public sealed partial class TyphonRuntime : IDisposable
             };
         }
 
-        var oldest = Math.Max(ring.OldestAvailableTick, newest - window + 1);
-        var ticks = (int)(newest - oldest + 1);
+        // One spelling of the clamp, shared with the STATS path, rather than two that have to agree. Re-reading `newest` from it also makes the pair
+        // self-consistent: the tick driver can advance between the read above and this one, and a window whose ends came from different reads is not a window.
+        // A false return needs `window < 1`, which the old form turned into a zero-tick window; keep that rather than inventing a different answer.
+        var ticks = ring.TryGetRange(newest - window + 1, out var oldest, out newest) ? (int)(newest - oldest + 1) : 0;
         var durations = new double[ticks];
         var waits = new double[ticks];
         var systemSums = new double[Scheduler.AllSystemCount];

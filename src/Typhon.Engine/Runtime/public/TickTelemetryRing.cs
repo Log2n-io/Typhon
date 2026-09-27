@@ -74,6 +74,38 @@ public sealed class TickTelemetryRing
     public long NewestTick => _head > 0 ? _head - 1 : -1;
 
     /// <summary>
+    /// The readable tick range at or after <paramref name="fromInclusive"/>, or <see langword="false"/> when there is none.
+    /// </summary>
+    /// <param name="fromInclusive">
+    /// The oldest tick the caller wants. Clamped up to <see cref="OldestAvailableTick"/>; the caller owns what "the window" means, so this takes an absolute
+    /// tick rather than a width and never reinterprets one.
+    /// </param>
+    /// <param name="first">The oldest readable tick in the range. Undefined when this returns <see langword="false"/>.</param>
+    /// <param name="last">The newest readable tick in the range — <see cref="NewestTick"/>. Undefined when this returns <see langword="false"/>.</param>
+    /// <returns><see langword="true"/> when <c>for (var t = first; t &lt;= last; t++)</c> is safe to pass to <see cref="GetTick"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Every window pass over this ring should start here, because the hand-written form has a trap and three shipped copies of it fell in.</b>
+    /// <see cref="OldestAvailableTick"/> and <see cref="NewestTick"/> both report <c>-1</c> while the ring is empty, so the natural
+    /// <c>for (var t = Math.Max(oldest, tick - window); t &lt;= newest; t++)</c> evaluates to <c>t = -1; -1 &lt;= -1</c> and calls
+    /// <see cref="GetTick"/>(-1), which throws. Empty is not an edge case: the ring is written at the END of a tick, so it is the state every consumer sees
+    /// on tick 0.
+    /// </para>
+    /// <para>
+    /// <b>That throw is unusually destructive on a tick-path consumer</b> and is why this exists rather than a note in each caller.
+    /// <c>StatsEncoder</c>'s three passes are reached from <c>SubscriptionsContext.Reset</c>, which runs BEFORE the ring is written — so the throw stopped the
+    /// recording that would have made the next tick's call legal, and the condition sustained itself for every tick of the run. It surfaced as 508 ticks and
+    /// not one telemetry record emitted, with every gate and null check passing; not as an exception anyone saw.
+    /// </para>
+    /// </remarks>
+    public bool TryGetRange(long fromInclusive, out long first, out long last)
+    {
+        last = NewestTick;
+        first = Math.Max(OldestAvailableTick, fromInclusive);
+        return last >= 0 && first <= last;
+    }
+
+    /// <summary>
     /// Records a tick's telemetry data into the ring buffer. Called at the end of each tick by the scheduler.
     /// Zero allocation — copies data into pre-allocated slots.
     /// </summary>

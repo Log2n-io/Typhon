@@ -476,21 +476,15 @@ internal sealed class StatsEncoder
             return 0;
         }
 
-        var count = 0;
-        var oldest = telemetry.OldestAvailableTick;
-        var newest = telemetry.NewestTick;
-
-        // An empty ring reports BOTH bounds as -1, and `Math.Max(-1, tick - window)` is -1 on the first tick — which reached `GetTick(-1)` and threw
-        // `ArgumentOutOfRangeException("No ticks have been recorded yet")`. The ring is written at the END of a tick, so "no ticks yet" is the state every
-        // consumer sees on tick 0 and the throw is not an edge case. It cost WB-02 a whole session: the operator emission runs from
-        // `SubscriptionsContext.Reset`, which runs BEFORE the ring is written, so the throw prevented the recording that would have made the next call legal
-        // and the condition sustained itself for every tick of the run — 508 ticks, not one record emitted, with every gate and null check passing.
-        if (newest < 0)
+        // TryGetRange rather than a hand-written clamp: an empty ring reports BOTH bounds as -1, so the natural loop reaches GetTick(-1) and throws. See
+        // TickTelemetryRing.TryGetRange for why that throw was unusually destructive from here, and what it cost.
+        if (!telemetry.TryGetRange(tick - window, out var first, out var last))
         {
             return 0;
         }
 
-        for (var t = Math.Max(oldest, tick - window); t <= newest && count < _samples.Length; t++)
+        var count = 0;
+        for (var t = first; t <= last && count < _samples.Length; t++)
         {
             _samples[count++] = telemetry.GetTick(t).UowFlushMs;
         }
@@ -505,17 +499,13 @@ internal sealed class StatsEncoder
             return 0;
         }
 
-        var count = 0;
-        var oldest = telemetry.OldestAvailableTick;
-        var newest = telemetry.NewestTick;
-
-        // An empty ring, same as in DurabilityWaitPercentile: both bounds read -1 and GetTick(-1) throws.
-        if (newest < 0)
+        if (!telemetry.TryGetRange(tick - window, out var first, out var last))
         {
             return 0;
         }
 
-        for (var t = Math.Max(oldest, tick - window); t <= newest && count < _samples.Length; t++)
+        var count = 0;
+        for (var t = first; t <= last && count < _samples.Length; t++)
         {
             _samples[count++] = telemetry.GetTick(t).ActualDurationMs;
         }
@@ -531,18 +521,14 @@ internal sealed class StatsEncoder
             return;
         }
 
-        Array.Clear(_systemSums);
-        var ticks = 0;
-        var oldest = telemetry.OldestAvailableTick;
-        var newest = telemetry.NewestTick;
-
-        // An empty ring, same as in DurabilityWaitPercentile: both bounds read -1 and GetSystemMetrics(-1) throws.
-        if (newest < 0)
+        if (!telemetry.TryGetRange(tick - window, out var first, out var last))
         {
             return;
         }
 
-        for (var t = Math.Max(oldest, tick - window); t <= newest; t++)
+        Array.Clear(_systemSums);
+        var ticks = 0;
+        for (var t = first; t <= last; t++)
         {
             var systems = telemetry.GetSystemMetrics(t);
             var upTo = Math.Min(systems.Length, _systemSums.Length);
