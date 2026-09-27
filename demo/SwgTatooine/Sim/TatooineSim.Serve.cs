@@ -106,9 +106,9 @@ public sealed partial class TatooineSim
         TatooineReplication.MaxClients = _config.MaxClients;
         TatooineReplication.MaxSpectators = _config.MaxSpectators;
 
-        // What an intent is validated against: the world it must stay inside, and the tick it gets one step of (SWG-01).
-        TatooineReplication.WorldEdgeM = _config.WorldEdgeM;
-        TatooineReplication.MetresPerTickForIntents = 1f / _config.TickRateHz;
+        // What an intent is validated against: the world it must stay inside, and the tick it gets one step of (SWG-01). Required rather than defaulted, so a
+        // path that forgot it would refuse to start rather than clamp to the wrong world silently.
+        TatooineReplication.ConfigureIntents(_config.WorldEdgeM, _config.TickRateHz);
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 

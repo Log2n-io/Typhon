@@ -286,23 +286,40 @@ public sealed partial class SimBridge
     /// Point a velocity at a destination at a given speed.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Takes the two velocity components by <c>ref</c> rather than the motion component, because the three motion types
     /// are distinct for the scheduler's benefit (see the header of <c>Components.cs</c>) and a shared helper would
     /// otherwise have to be written three times.
+    /// </para>
+    /// <para>
+    /// <b>Static and internal, so that the intent path uses THIS integration rather than a copy of it.</b> An intent is a destination and the server's own
+    /// movement is what carries a player to it — which is the whole of why a client cannot move faster than the server allows — and that argument holds only
+    /// while there is one integration. It was briefly two, line for line, with the tick period supplied separately to each; two implementations that must agree
+    /// and cannot be compared is the shape of the bug, not a duplication to tidy up later.
+    /// </para>
     /// </remarks>
-    private void Steer(ref float velX, ref float velZ, float speedMps, float x, float z, float destX, float destZ)
+    /// <param name="velX">The velocity's X component, written.</param>
+    /// <param name="velZ">The velocity's Z component, written.</param>
+    /// <param name="speedMps">Metres per second.</param>
+    /// <param name="metresPerTick">One tick's share of a second.</param>
+    /// <param name="x">Where the entity is.</param>
+    /// <param name="z">Where the entity is.</param>
+    /// <param name="destX">Where it is going.</param>
+    /// <param name="destZ">Where it is going.</param>
+    /// <returns>Whether the entity is going anywhere: <see langword="false"/> when it has arrived or has no speed.</returns>
+    internal static bool Steer(ref float velX, ref float velZ, float speedMps, float metresPerTick, float x, float z, float destX, float destZ)
     {
         var dx = destX - x;
         var dz = destZ - z;
         var len = MathF.Sqrt((dx * dx) + (dz * dz));
-        if (len < 0.001f)
+        if (len < 0.001f || speedMps <= 0f)
         {
             velX = 0f;
             velZ = 0f;
-            return;
+            return false;
         }
 
-        var step = speedMps * MetresPerTick;
+        var step = speedMps * metresPerTick;
         if (step > len)
         {
             step = len;
@@ -310,7 +327,19 @@ public sealed partial class SimBridge
 
         velX = dx / len * step;
         velZ = dz / len * step;
+        return true;
     }
+
+    /// <summary>The instance form, for the simulation's own systems: the same integration at this run's tick period.</summary>
+    /// <param name="velX">The velocity's X component, written.</param>
+    /// <param name="velZ">The velocity's Z component, written.</param>
+    /// <param name="speedMps">Metres per second.</param>
+    /// <param name="x">Where the entity is.</param>
+    /// <param name="z">Where the entity is.</param>
+    /// <param name="destX">Where it is going.</param>
+    /// <param name="destZ">Where it is going.</param>
+    private void Steer(ref float velX, ref float velZ, float speedMps, float x, float z, float destX, float destZ)
+        => Steer(ref velX, ref velZ, speedMps, MetresPerTick, x, z, destX, destZ);
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Think — players
@@ -342,6 +371,11 @@ public sealed partial class SimBridge
     {
         var tick = ctx.TickNumber;
         var hz = _config.TickRateHz;
+
+        // Accumulated locally and added once, rather than an interlocked increment per possessed player per tick from every parallel chunk. It is a diagnostic
+        // counter sitting next to its siblings in the same cache line, so the contended form would have chunks invalidating each other's line to maintain a
+        // number nobody reads inside the tick.
+        var skipped = 0L;
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Player>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -378,7 +412,7 @@ public sealed partial class SimBridge
                 // and the re-decide below would fire on every tick and overwrite the destination the client just sent.
                 if (controls[idx].Kind != ControllerKind.InProcess)
                 {
-                    Interlocked.Increment(ref _possessedSkipped);
+                    skipped++;
                     continue;
                 }
 
@@ -517,6 +551,11 @@ public sealed partial class SimBridge
             }
 
             TatooineReplication.Replicate(in cluster, pushSlots);
+        }
+
+        if (skipped != 0)
+        {
+            Interlocked.Add(ref _possessedSkipped, skipped);
         }
     }
 

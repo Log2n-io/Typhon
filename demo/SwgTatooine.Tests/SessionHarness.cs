@@ -153,6 +153,35 @@ internal sealed class FakeLink : ISubscriptionLink
         return ValueTask.CompletedTask;
     }
 
+    /// <summary>
+    /// How many messages had been sent when the link was closed, or -1 while it is open.
+    /// </summary>
+    /// <remarks>
+    /// <b>The ordinal is what makes "KICK then close" assertable.</b> A case that checks only that a <c>KICK</c> arrived and that the close code matches is
+    /// satisfied by a transport that wrote the close first — which is the opposite of what the protocol requires (<c>03 § 3</c>: <c>KICK</c>, then close).
+    /// Recording the count at the moment of the close turns the order into a number.
+    /// </remarks>
+    public int SentWhenClosed { get; private set; } = -1;
+
+    /// <summary>The index of the first message of a type, or -1.</summary>
+    /// <param name="type">Its <see cref="MessageTypes"/> byte.</param>
+    /// <returns>The index.</returns>
+    public int IndexOf(byte type)
+    {
+        lock (_sent)
+        {
+            for (var i = 0; i < _sent.Count; i++)
+            {
+                if (_sent[i].Length > 0 && _sent[i][0] == type)
+                {
+                    return i;
+                }
+            }
+        }
+
+        return -1;
+    }
+
     /// <inheritdoc/>
     public bool TrySendUnreliable(ReadOnlySpan<byte> datagram) => false;
 
@@ -167,6 +196,7 @@ internal sealed class FakeLink : ISubscriptionLink
             }
 
             _closed = (code, reason);
+            SentWhenClosed = _sent.Count;
         }
 
         // Outside the lock: OnClosed reaches into the engine, and holding a lock a send could also want across that call is how a deadlock is built.
@@ -351,7 +381,9 @@ internal sealed class SessionHarness
     /// <summary>
     /// Stops <see cref="Until"/> keeping this harness's clients alive. Every fixture that builds one calls this from its teardown.
     /// </summary>
-    /// <remarks>Idempotent, and it only clears the static when this harness is the one holding it — so an out-of-order teardown cannot unhook a live one.</remarks>
+    /// <remarks>
+    /// Idempotent, and it only clears the static when this harness is the one holding it — so an out-of-order teardown cannot unhook a live one.
+    /// </remarks>
     public void Release()
     {
         if (ReferenceEquals(_current, this))

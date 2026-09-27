@@ -179,10 +179,11 @@ suite_step "websocket adapter suite (Release)" "$WSADAPTER" pre-push-ws-adapter.
 
 # ── the rest of the gate's aux-tests job ─────────────────────────────────────────────────────────────────────────────
 #
-# The `aux-tests` job runs eight projects; this script ran two of them. The other six were only ever exercised on a billed
-# c6id instance — the same gap that sent one bug to the gate five times through test/Typhon.Workbench.Tests, which is the
-# founding story of this whole script. They are seconds each, and two of them (the demo suites) are where WP-3's own
-# checks live, so a WP-3 change that breaks a demo world would otherwise be discovered by CI rather than here.
+# The `aux-tests` job runs eight projects and this script ran exactly one of them — the WebSocket adapter, above. The other
+# seven were only ever exercised on a billed c6id instance: the same gap that sent one bug to the gate five times through
+# test/Typhon.Workbench.Tests, which is the founding story of this whole script. (The engine, workbench and client suites
+# above belong to other gate jobs, which is why they are not in this list.) They are seconds each, and two of them — the
+# demo suites — are where WP-3's own checks live, so a WP-3 change that broke a demo world would be found by CI, not here.
 AUX=(
   test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj
   test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj

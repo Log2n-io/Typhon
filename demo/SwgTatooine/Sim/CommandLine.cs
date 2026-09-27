@@ -26,16 +26,18 @@ public static class CommandLine
     /// </exception>
     public static SimConfig Parse(string[] args)
     {
+        // Every fallback below is `c.X`, never a literal. A literal matching the field initialiser today is drift waiting to happen, and it would show up in
+        // the one place meant to be authoritative: `--help` would print a default the program does not use.
         var c = new SimConfig();
         var r = new ArgReader(args ?? []);
 
         r.Group("mode");
         r.Switch("--help", "print this list and exit (or -h as the first argument)");
-        c.ServePort = r.Int("--serve", 0, "serve over WebSocket on this port instead of measuring; 0 measures", min: 0, max: 65535);
+        c.ServePort = r.Int("--serve", c.ServePort, "serve over WebSocket on this port instead of measuring; 0 measures", min: 0, max: 65535);
         c.RunSweep = r.Switch("--sweep", "run the partitioning matrix instead of one configuration");
-        c.SweepWorlds = r.Floats("--sweep-worlds", [TatooineData.PlanetEdgeM / 1000f, 64f, 128f], "sweep axis: world edges, km");
-        c.SweepPops = r.Floats("--sweep-pops", [1f, 4f, 16f], "sweep axis: population scales");
-        c.SweepCells = r.Floats("--sweep-cells", [64f, 128f, 256f, 512f, 1024f], "sweep axis: cell sizes, m at the real planet's scale");
+        c.SweepWorlds = r.Floats("--sweep-worlds", c.SweepWorlds, "sweep axis: world edges, km");
+        c.SweepPops = r.Floats("--sweep-pops", c.SweepPops, "sweep axis: population scales");
+        c.SweepCells = r.Floats("--sweep-cells", c.SweepCells, "sweep axis: cell sizes, m at the real planet's scale");
 
         r.Group("world and population");
         c.WorldEdgeKm = r.Float("--world", c.WorldEdgeKm, "planet edge, km; 16.384 is the real Tatooine", min: 0.001f);
@@ -67,7 +69,8 @@ public static class CommandLine
         c.ClusterTargetPackingSlack = r.Float("--packing-slack", c.ClusterTargetPackingSlack, "spare capacity a new cluster is given", min: 1f);
         c.ClusterTargetExtentRatio = r.Float("--target-ratio", c.ClusterTargetExtentRatio, "extent/bound a new cluster aims for", min: 0f);
         c.ClusterRepairExtentRatio = r.Float("--repair-ratio", c.ClusterRepairExtentRatio, "extent/bound above which a cluster is repaired", min: 0f);
-        c.ClusterRepairCriticalExtentRatio = r.Float("--repair-critical", c.ClusterRepairCriticalExtentRatio, "extent/bound that makes a repair urgent", min: 0f);
+        c.ClusterRepairCriticalExtentRatio = r.Float("--repair-critical", c.ClusterRepairCriticalExtentRatio,
+            "extent/bound that makes a repair urgent", min: 0f);
         c.RepairWorstClustersPerUnit = r.Int("--repair-unit", c.RepairWorstClustersPerUnit, "clusters repaired per unit of budget", min: 1);
         c.RepairCooldownTicks = r.Int("--repair-cooldown", c.RepairCooldownTicks, "ticks before a repaired cluster may be repaired again", min: 0);
         c.QueryEfficiencyTolerance = r.Float("--eff-tol", c.QueryEfficiencyTolerance, "reported query efficiency tolerance", min: 0f);
@@ -86,17 +89,18 @@ public static class CommandLine
         r.Group("sessions and replication");
         c.MaxClients = r.Int("--max-clients", c.MaxClients, "player sessions admitted at once; 0 is unlimited", min: 0);
         c.MaxSpectators = r.Int("--max-spectators", c.MaxSpectators, "god-camera sessions admitted at once; 0 is unlimited", min: 0);
-        c.SessionBudgetBytesPerSecond = r.Int("--session-budget", 0, "per-player outbound budget, bytes per second; 0 is none", min: 0);
+        c.SessionBudgetBytesPerSecond = r.Int("--session-budget", c.SessionBudgetBytesPerSecond,
+            "per-player outbound budget, bytes per second; 0 is none", min: 0);
         c.IngressBytesPerSecond = r.Int("--ingress-budget", c.IngressBytesPerSecond, "per-session inbound budget, bytes per second", min: 0);
-        c.PlayerLeaveM = r.Dbl("--player-leave", 0d, "players' leave radius, m; 0 is none", min: 0d);
-        c.GodRegionMaxEdgeM = r.Dbl("--god-region", 0d, "god camera's largest region edge, m; 0 keeps the whole-world camera", min: 0d);
+        c.PlayerLeaveM = r.Dbl("--player-leave", c.PlayerLeaveM, "players' leave radius, m; 0 is none", min: 0d);
+        c.GodRegionMaxEdgeM = r.Dbl("--god-region", c.GodRegionMaxEdgeM, "god camera's largest region edge, m; 0 keeps the whole-world camera", min: 0d);
         c.GodNearBudget = r.Int("--god-near", c.GodNearBudget, "god camera's near budget, entities", min: 0);
         c.SubscriptionsPushAutomatic = r.Choice("--subs-mode", "push", ["push", "push-auto"], "who detects a change: the simulation, or the engine")
             == "push-auto";
         c.SubscriptionsCollapseWorkUnits = r.Choice("--subs-pipeline", "staged", ["staged", "collapsed"], "run the frame pipeline staged or collapsed")
             == "collapsed" ? int.MaxValue : 0;
         c.SubscriptionsPhaseTiming = r.Switch("--subs-phases", "report per-phase replication timing");
-        c.DormancyTicks = r.Int("--dormancy", 0, "ticks of stillness before a cluster sleeps; 0 is never", min: 0);
+        c.DormancyTicks = r.Int("--dormancy", c.DormancyTicks, "ticks of stillness before a cluster sleeps; 0 is never", min: 0);
 
         r.Group("runtime and scheduling");
         c.TickRateHz = r.Int("--hz", c.TickRateHz, "tick rate; 10 is the baseline the published numbers are quoted at", min: 1, max: 100_000);
@@ -127,7 +131,7 @@ public static class CommandLine
             "movenext" => CombatApi.MoveNext,
             _ => CombatApi.Batch,
         };
-        c.IdleCreatureFraction = r.Dbl("--idle-creatures", 0d, "share of creatures that never think", min: 0d, max: 1d);
+        c.IdleCreatureFraction = r.Dbl("--idle-creatures", c.IdleCreatureFraction, "share of creatures that never think", min: 0d, max: 1d);
         c.RespawnSeconds = r.Float("--respawn-s", c.RespawnSeconds, "seconds before a lair revives a killed creature", min: 0.001f);
 
         r.Group("persistence and output");

@@ -505,8 +505,9 @@ internal sealed class ArgReader
             }
         }
 
-        // A third of the name, so `--hz` does not suggest `--pop` while `--target_ratio` does suggest `--target-ratio`.
-        return bestDistance <= Math.Max(1, token.Length / 3) ? best : null;
+        // A third of the name, so `--hz` does not suggest `--pop` while `--target_ratio` does suggest `--target-ratio` — capped, because a third of a long
+        // token is not a near miss: without the cap a thirty-character token accepted a distance of ten, which is a different flag with a shared prefix.
+        return bestDistance <= Math.Clamp(token.Length / 3, 1, 4) ? best : null;
     }
 
     /// <summary>Levenshtein distance.</summary>

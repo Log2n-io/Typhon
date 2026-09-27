@@ -504,7 +504,10 @@ public static class TatooineReplication
             .Coalesce(CommandCoalesce.LatestPerSession)
             .Rate(30, 60)
             .Roles(SessionRole.Player)
-            .Precheck(static (in MoveDir m) => float.IsFinite(m.Heading) && m.SpeedClass < SpeedClasses.Count)
+            // Finiteness only. The speed class is deliberately NOT checked here: the engine's own contract for a pre-check is that it "rejects the impossible,
+            // not the disallowed", and which classes this server grants is policy that lives with the entitlement in TrySpeedFor. Checking it here made the
+            // system's refusal counter unreachable by any client — so the code claimed to count something it never could.
+            .Precheck(static (in MoveDir m) => float.IsFinite(m.Heading))
             .Field(m => m.Heading, Codec.F16, "heading")
             .Field(m => m.SpeedClass, Codec.U8, "speedClass"));
         subs.Command<SetTarget>(c => c
@@ -583,7 +586,7 @@ public static class TatooineReplication
             return false;
         }
 
-        RecountSessions(subs);
+        WalkSessions(subs);
 
         foreach (ref readonly var e in subs.SessionEvents)
         {
@@ -644,11 +647,14 @@ public static class TatooineReplication
         return true;
     }
 
-    /// <summary>Consecutive ticks with no session event, after which an unclaimed reservation is known to be a leak rather than an admission in flight.</summary>
+    /// <summary>
+    /// Consecutive ticks with no session event, after which an unclaimed reservation is known to be a leak rather than an admission in flight.
+    /// </summary>
     private static int _quietTicks;
 
     /// <summary>
-    /// Recounts the live sessions of each role from the session table, so that the admission hook has a number it did not derive from its own increments.
+    /// Walks the open sessions once: publishes the live count per role for the admission hook, and collects which sessions need a player and which
+    /// are still here.
     /// </summary>
     /// <param name="subs">This tick's replication surface.</param>
     /// <remarks>
@@ -667,19 +673,26 @@ public static class TatooineReplication
     /// which is the one place both facts are in hand.
     /// </para>
     /// </remarks>
-    private static void RecountSessions(SubscriptionsCommands subs)
+    private static void WalkSessions(SubscriptionsCommands subs)
     {
+        Unbound.Clear();
+        Seen.Clear();
         var players = 0;
         var spectators = 0;
+
         foreach (var session in subs.OpenSessions)
         {
-            if (string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal))
-            {
-                players++;
-            }
-            else
+            if (!string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal))
             {
                 spectators++;
+                continue;
+            }
+
+            players++;
+            Seen.Add(session.Value);
+            if (!BoundPlayer.ContainsKey(session.Value))
+            {
+                Unbound.Add(session);
             }
         }
 
@@ -1025,26 +1038,19 @@ public static class TatooineReplication
             return;
         }
 
+        // `Unbound` and `Seen` were filled by WalkSessions, one walk of the open sessions for this tick rather than one per consumer. There were two, each
+        // with an ordinal string compare per session per tick, to produce facts a single pass already has in hand.
+        //
+        // Nothing to claim and nothing to release is the common case by far — a server spends almost every tick with a stable set of clients — and it is worth
+        // detecting, because `tx.For<Player>()` is not free: it creates an EntityMap accessor and pre-warms the component table.
+        if (Unbound.Count == 0 && BoundPlayer.Count == Seen.Count)
+        {
+            return;
+        }
+
         // NOT disposed: the accessor comes from the TICK's transaction, which owns it and releases it. Disposing one taken from a transaction this
         // method did not create tears down the cached EntityMap and chunk accessors mid-tick, which stops later systems reading.
         var accessor = tx.For<Player>();
-
-        // Which sessions still need a player. Collected first so the walk below can hand one out the moment it meets a player nobody holds.
-        Unbound.Clear();
-        Seen.Clear();
-        foreach (var session in subs.OpenSessions)
-        {
-            if (!string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            Seen.Add(session.Value);
-            if (!BoundPlayer.ContainsKey(session.Value))
-            {
-                Unbound.Add(session);
-            }
-        }
 
         // A player for every session that does not hold one yet, handed over once with Control: the engine centres the session's sphere on it from then
         // on (AroundControlled), so there is no per-tick walk of every player and no Place.
@@ -1076,10 +1082,10 @@ public static class TatooineReplication
                     // here and, more to the point, a possession is one entity: opening it says so, and sets the dirty bit the fence and the projection read.
                     if (accessor.TryOpenMut(entity, out var possessed))
                     {
-                        ref var control = ref possessed.Write(Player.Control);
-                        control.Kind = ControllerKind.Human;
-                        control.Controller = session.Value;
-                        control.Target = EntityId.Null;
+                        possessed.Write(Player.Control).Kind = ControllerKind.Human;
+                        ref var owner = ref possessed.Write(Player.Session);
+                        owner.Controller = session.Value;
+                        owner.Target = EntityId.Null;
                         Normalise(ref possessed);
                         System.Threading.Interlocked.Increment(ref _possessions);
                     }
@@ -1106,10 +1112,10 @@ public static class TatooineReplication
                 // nobody left to send it an intent. Zero throughout is the resting state, which is also what a freshly spawned player has.
                 if (accessor.TryOpenMut(entity, out var released))
                 {
-                    ref var control = ref released.Write(Player.Control);
-                    control.Kind = ControllerKind.InProcess;
-                    control.Controller = 0u;
-                    control.Target = EntityId.Null;
+                    released.Write(Player.Control).Kind = ControllerKind.InProcess;
+                    ref var owner = ref released.Write(Player.Session);
+                    owner.Controller = 0u;
+                    owner.Target = EntityId.Null;
                     Normalise(ref released);
                     System.Threading.Interlocked.Increment(ref _releases);
                 }
@@ -1155,8 +1161,18 @@ public static class TatooineReplication
 
     // ── Intents (SWG-01) ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    /// <summary>Movement intents applied.</summary>
+    /// <summary>Movement intents that reached a player and passed validation.</summary>
     private static long _intentsApplied;
+
+    /// <summary>
+    /// Commands of any kind whose session controlled a player — what used to be miscounted as "applied".
+    /// </summary>
+    /// <remarks>
+    /// Separate because the two answer different questions. This one says whether a client's commands are reaching the tick at all, which is the first thing to
+    /// look at when nothing moves; <see cref="_intentsApplied"/> says whether they survived validation. Counting them as one made a refused <c>MoveDir</c> both
+    /// applied and refused, and made every <c>SetTarget</c> look like a movement intent.
+    /// </remarks>
+    private static long _intentsOwned;
 
     /// <summary>Intents whose session controls no player — a command that arrived before the claim, or after the player was given back.</summary>
     private static long _intentsUnowned;
@@ -1177,8 +1193,9 @@ public static class TatooineReplication
     private static long _releases;
 
     /// <summary>What the intent path did, cumulatively. For the report and for the checks beside the demo.</summary>
-    public static (long Applied, long Unowned, long RefusedSpeed, long TargetsSet, long TargetsRefused, long Possessions, long Releases) Intents
-        => (System.Threading.Interlocked.Read(ref _intentsApplied), System.Threading.Interlocked.Read(ref _intentsUnowned),
+    public static (long Owned, long Applied, long Unowned, long RefusedSpeed, long TargetsSet, long TargetsRefused, long Possessions, long Releases) Intents
+        => (System.Threading.Interlocked.Read(ref _intentsOwned), System.Threading.Interlocked.Read(ref _intentsApplied),
+            System.Threading.Interlocked.Read(ref _intentsUnowned),
             System.Threading.Interlocked.Read(ref _intentsRefusedSpeed), System.Threading.Interlocked.Read(ref _targetsSet),
             System.Threading.Interlocked.Read(ref _targetsRefused), System.Threading.Interlocked.Read(ref _possessions),
             System.Threading.Interlocked.Read(ref _releases));
@@ -1232,6 +1249,7 @@ public static class TatooineReplication
             move.DestZ = Math.Clamp(command.Value.Z, -half, half);
             move.SpeedMps = TatooineData.PlayerRunSpeedMps;
             SteerTo(ref move, ref player, subs);
+            System.Threading.Interlocked.Increment(ref _intentsApplied);
         }
 
         foreach (var command in subs.Commands<MoveDir>())
@@ -1256,6 +1274,7 @@ public static class TatooineReplication
             move.DestX = Math.Clamp(place.X + (MathF.Cos(command.Value.Heading) * reach), -half, half);
             move.DestZ = Math.Clamp(place.Z + (MathF.Sin(command.Value.Heading) * reach), -half, half);
             SteerTo(ref move, ref player, subs);
+            System.Threading.Interlocked.Increment(ref _intentsApplied);
         }
 
         foreach (var command in subs.Commands<SetTarget>())
@@ -1265,10 +1284,10 @@ public static class TatooineReplication
                 continue;
             }
 
-            ref var control = ref player.Write(Player.Control);
+            ref var owner = ref player.Write(Player.Session);
             if (command.Value.NetId == 0u)
             {
-                control.Target = EntityId.Null;
+                owner.Target = EntityId.Null;
                 continue;
             }
 
@@ -1276,12 +1295,12 @@ public static class TatooineReplication
             // command was sent — so the target is cleared and counted rather than the session being closed.
             if (subs.TryResolve(command.Session, command.Value.NetId, out var target))
             {
-                control.Target = target;
+                owner.Target = target;
                 System.Threading.Interlocked.Increment(ref _targetsSet);
             }
             else
             {
-                control.Target = EntityId.Null;
+                owner.Target = EntityId.Null;
                 System.Threading.Interlocked.Increment(ref _targetsRefused);
             }
         }
@@ -1294,19 +1313,40 @@ public static class TatooineReplication
     /// <param name="player">The entity.</param>
     /// <returns><see langword="false"/> when the session controls nothing, or what it controls has gone.</returns>
     /// <remarks>
+    /// <para>
     /// <b>Both failures are ordinary rather than exceptional</b> and are counted as one: a command can arrive on the tick a session opened, before the claim
     /// has been made, and a command can be in flight when the player it names is destroyed. Neither is the client's fault and neither is worth a kick.
+    /// </para>
+    /// <para>
+    /// <b>A claim whose entity has gone is dropped, not kept.</b> Nothing in this demo destroys a <c>Player</c>, so this is latent — but keeping a dead id in
+    /// the claim table would strand the session for ever (it holds a player, so it is never handed another) and would permanently exclude whichever live player
+    /// inherited the recycled <c>EntityId</c> from being possessed by anyone. Dropping it lets the next tick's walk re-bind the session, which is the behaviour
+    /// this method's remarks used to claim without the code doing it.
+    /// </para>
+    /// <para>
+    /// It counts an OWNED command, not an applied one. The movement paths increment <see cref="_intentsApplied"/> themselves, after their own validation has
+    /// passed — counting here made a refused <c>MoveDir</c> both applied and refused, and made every <c>SetTarget</c> a movement intent.
+    /// </para>
     /// </remarks>
     private static bool TryOpenControlled(SubscriptionsCommands subs, ArchetypeAccessor<Player> accessor, SessionId session, out EntityRefMut player)
     {
-        if (!BoundPlayer.TryGetValue(session.Value, out var entity) || !accessor.TryOpenMut(entity, out player))
+        if (!BoundPlayer.TryGetValue(session.Value, out var entity))
         {
             System.Threading.Interlocked.Increment(ref _intentsUnowned);
             player = default;
             return false;
         }
 
-        System.Threading.Interlocked.Increment(ref _intentsApplied);
+        if (!accessor.TryOpenMut(entity, out player))
+        {
+            BoundPlayer.Remove(session.Value);
+            BoundIds.Remove(entity);
+            System.Threading.Interlocked.Increment(ref _intentsUnowned);
+            player = default;
+            return false;
+        }
+
+        System.Threading.Interlocked.Increment(ref _intentsOwned);
         return true;
     }
 
@@ -1320,28 +1360,20 @@ public static class TatooineReplication
     /// </remarks>
     private static void SteerTo(ref PlayerMotion move, ref EntityRefMut player, SubscriptionsCommands subs)
     {
+        var place = player.Read(Player.Bounds);
+
+        // The simulation's own integration, not a copy of it: one function, so "an intent cannot move a player faster than the server does" is a property of
+        // the code rather than of two implementations happening to agree.
+        var moving = SimBridge.Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, MetresPerTickForIntents, place.X, place.Z, move.DestX, move.DestZ);
+
         ref var state = ref player.Write(Player.State);
-        state.Activity = PlayerActivity.Travelling;
+
+        // A player going nowhere is Idle, not Travelling. `Activity` is replicated, so getting this wrong tells every client watching that a standing player is
+        // running — which is the one visible consequence in the whole intent path, and a stop is the commonest intent there is.
+        state.Activity = moving ? PlayerActivity.Travelling : PlayerActivity.Idle;
 
         // Zero, because a possessed player has no server-side timer: see the remarks on ApplyIntents.
         state.ActivityTicks = 0;
-
-        var place = player.Read(Player.Bounds);
-        var dx = move.DestX - place.X;
-        var dz = move.DestZ - place.Z;
-        var len = MathF.Sqrt((dx * dx) + (dz * dz));
-        if (len < 0.001f)
-        {
-            move.VelX = 0f;
-            move.VelZ = 0f;
-        }
-        else
-        {
-            var step = MathF.Min(move.SpeedMps * MetresPerTickForIntents, len);
-            move.VelX = dx / len * step;
-            move.VelZ = dz / len * step;
-        }
-
         subs.Replicate(in player);
     }
 
@@ -1370,6 +1402,7 @@ public static class TatooineReplication
     public static void ResetIntentAccounting()
     {
         System.Threading.Interlocked.Exchange(ref _intentsApplied, 0);
+        System.Threading.Interlocked.Exchange(ref _intentsOwned, 0);
         System.Threading.Interlocked.Exchange(ref _intentsUnowned, 0);
         System.Threading.Interlocked.Exchange(ref _intentsRefusedSpeed, 0);
         System.Threading.Interlocked.Exchange(ref _targetsRefused, 0);
@@ -1388,8 +1421,8 @@ public static class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _announced, 0);
         _placeTicks = 0;
         _quietTicks = 0;
-        WorldEdgeM = 16_384d;
-        MetresPerTickForIntents = 0.1f;
+        WorldEdgeM = 0d;
+        MetresPerTickForIntents = 0f;
         PlayerBudgetBytesPerSecond = 0;
         PlayerLeaveM = 0d;
         GodRegionMaxEdgeM = 0d;
@@ -1416,11 +1449,12 @@ public static class TatooineReplication
         using var tx = dbe.CreateQuickTransaction();
         foreach (var cluster in tx.For<Player>().GetClusterEnumerator())
         {
+            var owners = cluster.GetReadOnlySpan(Player.Session);
             var control = cluster.GetReadOnlySpan(Player.Control);
             for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
             {
                 var slot = BitOperations.TrailingZeroCount(bits);
-                if (control[slot].Controller == session.Value && control[slot].Kind != ControllerKind.InProcess)
+                if (owners[slot].Controller == session.Value && control[slot].Kind != ControllerKind.InProcess)
                 {
                     return cluster.GetEntityId(slot);
                 }
@@ -1430,12 +1464,31 @@ public static class TatooineReplication
         return EntityId.Null;
     }
 
-    /// <summary>The world's edge in metres, so an intent's destination can be clamped to it.</summary>
-    /// <remarks>Set from the configuration before <c>Start</c>, like every other value here that the simulation owns and replication reads.</remarks>
-    public static double WorldEdgeM { get; set; } = 16_384d;
+    /// <summary>The world's edge in metres, so an intent's destination can be clamped to it. Zero until <see cref="ConfigureIntents"/> is called.</summary>
+    public static double WorldEdgeM { get; private set; }
 
-    /// <summary>One tick's share of a second, for turning a speed into a step. Set before <c>Start</c>.</summary>
-    public static float MetresPerTickForIntents { get; set; } = 0.1f;
+    /// <summary>One tick's share of a second, for turning a speed into a step. Zero until <see cref="ConfigureIntents"/> is called.</summary>
+    public static float MetresPerTickForIntents { get; private set; }
+
+    /// <summary>
+    /// States the two figures every intent is validated against: the world it must stay inside, and the tick it gets one step of.
+    /// </summary>
+    /// <param name="worldEdgeM">The world's edge, metres.</param>
+    /// <param name="tickRateHz">The tick rate.</param>
+    /// <exception cref="ArgumentOutOfRangeException">Either is not positive.</exception>
+    /// <remarks>
+    /// <b>Required and explicit, with no default, because both are load-bearing and a wrong one is silent.</b> They began as defaulted properties —
+    /// 16 384 m and 0.1 s, the latter being 10 Hz rather than whatever the run is at — so a path that set the configuration but forgot these clamped every
+    /// destination to the wrong world and moved a player five times too far per tick at 50 Hz, with nothing to see. The repository's rule for a parameter of
+    /// that kind is that it is required and explicit, refused at start rather than silently clamped, which is what this is.
+    /// </remarks>
+    public static void ConfigureIntents(double worldEdgeM, int tickRateHz)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(worldEdgeM);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(tickRateHz);
+        WorldEdgeM = worldEdgeM;
+        MetresPerTickForIntents = 1f / tickRateHz;
+    }
 
     /// <summary>The player each session watches, for the life of the session.</summary>
     /// <remarks>

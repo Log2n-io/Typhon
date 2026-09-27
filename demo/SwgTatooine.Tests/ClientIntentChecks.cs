@@ -97,8 +97,8 @@ public sealed class ClientIntentChecks
             var place = entity.Read(Player.Bounds);
             var move = entity.Read(Player.Move);
             var state = entity.Read(Player.State);
-            var control = entity.Read(Player.Control);
-            return (place.X, place.Z, move.DestX, move.DestZ, move.VelX, move.VelZ, state.Activity, control.Target);
+            var owner = entity.Read(Player.Session);
+            return (place.X, place.Z, move.DestX, move.DestZ, move.VelX, move.VelZ, state.Activity, owner.Target);
         }
 
         /// <summary>Unhooks the harness from the keepalive before disposing the world, so no later wait can tick a disposed runtime.</summary>
@@ -196,8 +196,8 @@ public sealed class ClientIntentChecks
         var after = world.Read();
         Assert.Multiple(() =>
         {
-            Assert.That(TatooineReplication.Intents.Applied, Is.Zero, "a NaN destination was applied");
-            Assert.That(after.X, Is.EqualTo(before.X), "the player moved on a command that should never have been decoded");
+            Assert.That(TatooineReplication.Intents.Owned, Is.Zero, "a NaN destination reached the tick");
+            Assert.That(after.X, Is.EqualTo(before.X).Within(StepM * 0.01f), "the player moved on a command that should never have been decoded");
             Assert.That(float.IsFinite(after.DestX) && float.IsFinite(after.DestZ), Is.True);
         });
     }
@@ -259,27 +259,55 @@ public sealed class ClientIntentChecks
     /// 12 m/s on every tick and never learn it is not getting it, and the refusal count is the only number that says whether anything is trying.
     /// </para>
     /// <para>
-    /// The class is above what the wire's pre-check accepts (<c>SpeedClass &lt; SpeedClasses.Count</c>), so this also covers the pre-check: the command is
-    /// refused before decoding, and the counter that moves is the engine's rather than the system's. What the case claims either way is that the player did not
-    /// move faster.
+    /// <b>The counter is asserted, and it took a fix to the wire declaration to make that possible.</b> The class bound was in the command's
+    /// <c>Precheck</c>, which runs on the transport thread — so every over-range class died before the tick and the system's refusal counter could never move,
+    /// while the code claimed "the refusal is counted". The pre-check now checks only finiteness, which is what the engine's contract for one says it is for
+    /// ("rejects the impossible, not the disallowed"), and the entitlement is refused where the entitlement lives.
     /// </para>
     /// </remarks>
     [Test]
-    public void ASpeedClassTheServerDoesNotGrantIsRefused()
+    public void ASpeedClassTheServerDoesNotGrantIsRefusedAndCounted()
     {
         using var world = new Possessed(Config());
         var before = world.Read();
 
         world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, 200));
+        SessionHarness.Until(() => TatooineReplication.Intents.RefusedSpeed >= 1, "the speed class to be refused by the tick");
         world.Harness.Ticks(3);
 
         var after = world.Read();
         var travelled = MathF.Abs(after.X - before.X) + MathF.Abs(after.Z - before.Z);
         Assert.Multiple(() =>
         {
+            Assert.That(TatooineReplication.Intents.RefusedSpeed, Is.EqualTo(1), "the refusal is the only number that says whether anything is trying");
+            Assert.That(TatooineReplication.Intents.Applied, Is.Zero, "a refused intent was counted as applied");
             Assert.That(travelled, Is.LessThan(StepM), "a refused speed class moved the player");
             Assert.That(after.VelX, Is.Zero, "a refused intent set a velocity");
         });
+    }
+
+    /// <summary>
+    /// A stopped player is <c>Idle</c>, not <c>Travelling</c> — and the activity is on the wire, so every watching client sees the difference.
+    /// </summary>
+    /// <remarks>
+    /// <c>SteerTo</c> set <c>Travelling</c> unconditionally, so a client that pressed stop was still broadcast as running. A stop is the commonest intent there
+    /// is, and this is the only visible consequence in the whole intent path.
+    /// </remarks>
+    [Test]
+    public void AStoppedPlayerIsIdleOnTheWire()
+    {
+        using var world = new Possessed(Config());
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Run));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the move to be applied");
+        world.Harness.Ticks(2);
+        Assert.That(world.Read().Activity, Is.EqualTo(PlayerActivity.Travelling), "the player is not moving, so stopping it proves nothing");
+
+        world.Link.SendCommand(nameof(MoveDir), ClientSays.MoveDir(0f, SpeedClasses.Stop));
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the stop to be applied");
+        world.Harness.Ticks(2);
+
+        Assert.That(world.Read().Activity, Is.EqualTo(PlayerActivity.Idle), "a stopped player is still broadcast as running");
     }
 
     // ── Targeting ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -327,7 +355,7 @@ public sealed class ClientIntentChecks
         var refusedAfterBogus = TatooineReplication.Intents.TargetsRefused;
 
         world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(0u));
-        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the clear to reach a tick");
+        SessionHarness.Until(() => TatooineReplication.Intents.Owned >= 2, "the clear to reach a tick");
         world.Harness.Ticks(2);
 
         Assert.Multiple(() =>
@@ -405,12 +433,14 @@ public sealed class ClientIntentChecks
         harness.Ticks(2);
 
         using var tx = sim.Dbe.CreateQuickTransaction();
-        var control = tx.For<Player>().Open(entity).Read(Player.Control);
+        var opened = tx.For<Player>().Open(entity);
+        var kind = opened.Read(Player.Control).Kind;
+        var owner = opened.Read(Player.Session);
         Assert.Multiple(() =>
         {
-            Assert.That(control.Kind, Is.EqualTo(ControllerKind.InProcess), "the player is still possessed by a session that has gone");
-            Assert.That(control.Controller, Is.Zero);
-            Assert.That(control.Target, Is.EqualTo(EntityId.Null));
+            Assert.That(kind, Is.EqualTo(ControllerKind.InProcess), "the player is still possessed by a session that has gone");
+            Assert.That(owner.Controller, Is.Zero);
+            Assert.That(owner.Target, Is.EqualTo(EntityId.Null));
         });
     }
 

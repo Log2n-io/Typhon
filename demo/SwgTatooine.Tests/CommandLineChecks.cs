@@ -211,6 +211,45 @@ public sealed class CommandLineChecks
         Assert.That(ex.Message, Does.Contain("--sweep-cells"));
     }
 
+    /// <summary>
+    /// A token far from every declared flag gets no suggestion, which is the half of <c>Nearest</c> a positive case cannot show.
+    /// </summary>
+    /// <remarks>
+    /// A suggester that always suggests is worse than none: it sends the reader to a flag they did not mean, and the nearest of eighty names is never far. This
+    /// is the case that keeps the threshold honest.
+    /// </remarks>
+    [TestCase("--verbose")]
+    [TestCase("--nonsense-flag-entirely")]
+    public void ATokenFarFromEveryFlagGetsNoSuggestion(string token)
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CommandLine.Parse([token]));
+        Assert.Multiple(() =>
+        {
+            Assert.That(ex.Message, Does.Contain(token));
+            Assert.That(ex.Message, Does.Not.Contain("did you mean"), "a token this far from every flag was given a suggestion");
+        });
+    }
+
+    /// <summary>A bare word that is not a flag at all is refused, rather than ignored as a stray.</summary>
+    [Test]
+    public void AStrayPositionalTokenIsRefused()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CommandLine.Parse(["report.md"]));
+        Assert.That(ex.Message, Does.Contain("report.md"));
+    }
+
+    /// <summary><c>--serve 0</c> means "measure", which is the one port value that is not a port.</summary>
+    [Test]
+    public void ServePortZeroMeasures()
+    {
+        var config = CommandLine.Parse(["--serve", "0"]);
+        Assert.Multiple(() =>
+        {
+            Assert.That(config.ServePort, Is.Zero);
+            Assert.That(config.HelpText, Is.Null, "it is a legitimate line, not a refusal");
+        });
+    }
+
     /// <summary>A well-formed line parses, and the values reach the configuration.</summary>
     [Test]
     public void AWellFormedLineParses()

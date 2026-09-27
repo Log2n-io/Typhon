@@ -554,26 +554,51 @@ public static class ControllerKind
 }
 
 /// <summary>
-/// Who is driving this player, and what it has asked for. Written by the input system, read by <c>PlayerThink</c> and by combat.
+/// One byte: who decides what this player does. Read by every system that must leave a possessed player alone.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Its own component rather than three more fields on <see cref="PlayerState"/>, for the reason <see cref="CreatureTimers"/> exists.</b>
-/// <c>PlayerState</c> is in the compiled projection — it carries <c>[Replicate]</c> on <c>Activity</c> and <c>[Owner]</c> on the mission waypoint — and
-/// <c>ClusterRef.GetSpan</c> marks a cluster changed when the span is handed out, never observing what the caller does with it. A possession mark or a
-/// target written beside replicated state would therefore read as a change to that state on every input tick, for every possessed player. Keeping it
-/// separate also leaves <c>PlayerState</c>'s layout byte-for-byte what every earlier measurement ran against.
+/// <b>One byte in a component of its own, and the arithmetic is the whole reason.</b> Three systems read this every tick for every player —
+/// <c>PlayerThink</c>, <c>Shuttle</c> and <c>Dungeon</c> — on the measurement path as well as the serve path. It first shipped as one field of a 16-byte
+/// struct alongside the target and the controller, with a comment claiming "one byte per player, contiguous: a cache line covers 64 of them". That was wrong
+/// by a factor of sixteen: components are stored array-of-structs, so a 16-byte stride puts **four** players in a cache line and made the guard a new
+/// 16-byte stream over every player per tick. One byte per player is what the comment described and what this is: 64 players per line, and a whole cluster's
+/// worth in one.
 /// </para>
 /// <para>
-/// <b>Not replicated, deliberately.</b> A client knows its own target: it sent the command. Putting <see cref="Target"/> on the wire would pull this
-/// component into the projection and undo the paragraph above; when a reason to show a target to OTHER clients arrives, it belongs in the event that
-/// describes the attack rather than in per-entity state.
+/// <b>Separate from <see cref="PlayerState"/> for the reason <see cref="CreatureTimers"/> exists.</b> <c>PlayerState</c> is in the compiled projection — it
+/// carries <c>[Replicate]</c> on <c>Activity</c> and <c>[Owner]</c> on the mission waypoint — and <c>ClusterRef.GetSpan</c> marks a cluster changed when the
+/// span is handed out, never observing what the caller does with it. A possession mark written beside replicated state would read as a change to that state
+/// on every input tick. Keeping it out also leaves <c>PlayerState</c>'s layout byte-for-byte what every earlier measurement ran against.
 /// </para>
-/// <para>Zero is the resting state throughout: <c>InProcess</c>, no controller, no target — so a spawned player needs no initialisation.</para>
+/// <para>Zero is the resting state: <c>InProcess</c>, so a spawned player needs no initialisation.</para>
 /// </remarks>
 [Component("Swg.PlayerControl", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
 public struct PlayerControl
+{
+    /// <summary>See <see cref="ControllerKind"/>.</summary>
+    [Field] public byte Kind;
+}
+
+/// <summary>
+/// Which session drives this player and what it is aiming at. Read only where an intent is applied, never on the per-tick guard.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Split from <see cref="PlayerControl"/> because the two have different read rates by an order of magnitude.</b> The possession byte is read for every
+/// player every tick; these two are read for the handful of players a client sent a command about. Keeping them together made the common read pay for the
+/// rare one — see <see cref="PlayerControl"/> for the measurement that says by how much.
+/// </para>
+/// <para>
+/// <b>Not replicated, deliberately.</b> A client knows its own target: it sent the command. Putting <see cref="Target"/> on the wire would pull this
+/// component into the projection; when a reason to show a target to OTHER clients arrives, it belongs in the event that describes the attack rather than in
+/// per-entity state.
+/// </para>
+/// </remarks>
+[Component("Swg.PlayerSession", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+public struct PlayerSession
 {
     /// <summary>What this player is attacking or inspecting, resolved from the <c>netId</c> its client sent; <c>EntityId.Null</c> for none.</summary>
     /// <remarks>
@@ -582,11 +607,13 @@ public struct PlayerControl
     /// </remarks>
     [Field] public EntityId Target;
 
-    /// <summary>The session driving this player — <c>SessionId.Value</c> — or 0 when <see cref="Kind"/> is <see cref="ControllerKind.InProcess"/>.</summary>
+    /// <summary>
+    /// The session driving this player — <c>SessionId.Value</c> — or 0 when <see cref="PlayerControl.Kind"/> is <see cref="ControllerKind.InProcess"/>.
+    /// </summary>
+    /// <remarks>
+    /// It is what <c>TatooineReplication.ControlledBy</c> scans for, so the world rather than a dictionary answers which player a session holds.
+    /// </remarks>
     [Field] public uint Controller;
-
-    /// <summary>See <see cref="ControllerKind"/>.</summary>
-    [Field] public byte Kind;
 }
 
 /// <summary>What a simulated player is doing this tick.</summary>

@@ -103,7 +103,10 @@ public sealed class RunHygieneChecks
     /// <b>The world is bigger and the run longer than elsewhere here, because an arrival is not cheap to provoke.</b> A player decides to travel only while
     /// it is inside a city, then walks to its port, and after arriving it idles for <c>200 × TickRateHz</c> ticks — so at the fixture's 0.05 population scale
     /// a two-thousand-tick run produced exactly one arrival, and a case asserting over that would have been reporting on a world in which nothing happened.
-    /// Ten times the population and 600 unpaced ticks give ~17 arrivals across ~15 port-ticks, which is what these invariants need to mean anything.
+    /// </para>
+    /// <para>
+    /// <b>The most expensive case in the suite, and the cost is what the assertions cost.</b> Every weaker world leaves one of the five counters unexercised —
+    /// see the population comment below for the measurements. A cheaper case that asserted only the three easy ones would name five numbers and check three.
     /// </para>
     /// </remarks>
     [Test]
@@ -112,7 +115,11 @@ public sealed class RunHygieneChecks
         var config = Config();
         config.Unpaced = true;
         config.TickRateHz = 10;
-        config.PopulationScale = 0.5f;
+
+        // Twelve times the fixture's population, because the THRESHOLD counters need a burst of sixteen at one port and smaller worlds do not produce one:
+        // measured, pop 0.5 gives a largest burst of 2 and pop 2 gives 7, so `AtLeast16` stayed 0 and every assertion about it held with the counter deleted.
+        // At pop 6 the largest burst is 19 and `AtLeast16` reaches 1, which is what makes it a checked number rather than a named one.
+        config.PopulationScale = 6f;
         config.WarmTicks = 0;
         config.MeasuredTicks = 600;
         config.ShuttleIntervalS = 2f;
@@ -129,9 +136,11 @@ public sealed class RunHygieneChecks
         {
             Assert.That(arrivals.Total, Is.GreaterThan(0), "no shuttle landed, so the counters were never exercised");
             Assert.That(arrivals.PortTicks, Is.GreaterThan(0).And.LessThanOrEqualTo(arrivals.Total), "a port-tick with an arrival carries at least one");
-            Assert.That(arrivals.Largest, Is.GreaterThan(0).And.LessThanOrEqualTo(arrivals.Total), "the largest burst is one of the arrivals");
+            Assert.That(arrivals.Largest, Is.GreaterThanOrEqualTo(16).And.LessThanOrEqualTo(arrivals.Total),
+                "no burst reached 16, so the threshold counters below are asserting over two zeros");
+            Assert.That(arrivals.AtLeast16, Is.GreaterThan(0).And.LessThanOrEqualTo(arrivals.PortTicks),
+                "a threshold counts port-ticks, so it cannot exceed them");
             Assert.That(arrivals.AtLeast64, Is.LessThanOrEqualTo(arrivals.AtLeast16), "every burst of 64 is a burst of 16");
-            Assert.That(arrivals.AtLeast16, Is.LessThanOrEqualTo(arrivals.PortTicks), "a threshold counts port-ticks, so it cannot exceed them");
         });
     }
 
@@ -166,7 +175,8 @@ public sealed class RunHygieneChecks
             Assert.That(third.RejectCode, Is.EqualTo(TatooineReplication.HouseFullCloseCode));
             Assert.That(third.RejectCode, Is.InRange(CloseCodes.FirstApplicationCode, CloseCodes.LastApplicationCode),
                 "a protocol code would tell an SDK something different about whether to come back");
-            Assert.That(third.RejectReason, Is.Not.Null.And.Not.Empty, "a refusal a client cannot explain to its user is a dropped connection with extra steps");
+            Assert.That(third.RejectReason, Is.Not.Null.And.Not.Empty,
+                "a refusal a client cannot explain to its user is a dropped connection with extra steps");
             Assert.That(TatooineReplication.RefusedFull, Is.EqualTo(1), "a refusal nobody counts is a refusal nobody notices");
         });
     }
@@ -184,7 +194,8 @@ public sealed class RunHygieneChecks
         {
             Assert.That(TatooineReplication.Admit(Asking(TatooineReplication.GodKind)).IsAccepted, Is.True);
             Assert.That(TatooineReplication.Admit(Asking(TatooineReplication.GodKind)).IsAccepted, Is.False, "the spectator house is full");
-            Assert.That(TatooineReplication.Admit(Asking(TatooineReplication.PlayerKind)).IsAccepted, Is.True, "players have their own cap, which is unlimited");
+            Assert.That(TatooineReplication.Admit(Asking(TatooineReplication.PlayerKind)).IsAccepted, Is.True,
+                "players have their own cap, which is unlimited");
         });
     }
 
@@ -267,6 +278,11 @@ public sealed class RunHygieneChecks
             Assert.That(kick.Value.Code, Is.EqualTo(TatooineReplication.ShutdownCloseCode));
             Assert.That(kick.Value.Reason, Is.EqualTo("the box is going down"), "the operator's reason is what reaches the client");
             Assert.That(link.Closed.Value.Code, Is.EqualTo(TatooineReplication.ShutdownCloseCode), "the close carries the same code as the KICK");
+
+            // The ORDER, as a number. Asserting only that both happened is satisfied by a transport that closed first and sent the KICK into a dead link,
+            // which is exactly the behaviour the protocol forbids and the one this whole item exists to produce.
+            Assert.That(link.IndexOf(MessageTypes.Kick), Is.GreaterThanOrEqualTo(0).And.LessThan(link.SentWhenClosed),
+                "the KICK was written after the close, so the client was dropped and then told why");
         });
     }
 
