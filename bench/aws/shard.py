@@ -98,8 +98,10 @@ def _excluded(extra=()):
 GATED_PASSES = (
     # label, category, env additions, why
     ("T", "TelemetryGated", {"TYPHON__PROFILER__SPATIAL__ENABLED": "true",
-                             "TYPHON__PROFILER__CONCURRENCY__ENABLED": "true"},
-     "telemetry subtrees the suite leaves off: spatial trace records (kinds 65-67) and concurrency tracing"),
+                             "TYPHON__PROFILER__CONCURRENCY__ENABLED": "true",
+                             "TYPHON__PROFILER__SUBSCRIPTIONS__ENABLED": "true"},
+     "telemetry subtrees the suite leaves off: spatial trace records (kinds 65-67), push-replication operator "
+     "records (kinds 68-69) and concurrency tracing"),
 )
 
 # Categories that run in a pass of their own and must therefore not run in the shards.

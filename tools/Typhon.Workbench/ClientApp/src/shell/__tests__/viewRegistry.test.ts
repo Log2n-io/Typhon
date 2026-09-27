@@ -37,6 +37,7 @@ const ZONE_D_ACTIVE = [
   // #911 O3 — Spatial Maintenance: the fence-side spatial counters. Profiler-scoped, attach-only in practice
   // (the panel renders its own cold state in a trace session).
   'SpatialMaintenance',
+  'Subscriptions',
 ] as const;
 
 // The full registry key set = gated-off ∪ active. Used to assert the registry covers exactly the documented set.

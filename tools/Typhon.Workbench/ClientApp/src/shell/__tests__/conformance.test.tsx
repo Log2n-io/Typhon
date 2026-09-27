@@ -22,6 +22,7 @@ import EngineLiveHealthPanel from '@/panels/EngineLiveHealth/EngineLiveHealthPan
 import DevFixturePanel from '@/panels/DevFixture/DevFixturePanel';
 import IntegrityPanel from '@/panels/Integrity/IntegrityPanel';
 import SpatialMaintenancePanel from '@/panels/SpatialMaintenance/SpatialMaintenancePanel';
+import SubscriptionsPanel from '@/panels/Subscriptions/SubscriptionsPanel';
 
 // AC2.11 / AC3.11 — per-view conformance, parameterized over the reintroduced Stage-2/3 views (the conformance
 // doc's suites D + E). Each view is rendered in its **cold** state (no session → hooks disabled → empty/loading)
@@ -85,6 +86,7 @@ const VIEWS: { id: string; label: string; render: () => React.JSX.Element }[] = 
   // renders its attach-only cold state — which is the branch D + E need, and is a sentence explaining why the view is
   // empty rather than an empty panel.
   { id: 'SpatialMaintenance', label: 'Spatial Maintenance', render: () => <SpatialMaintenancePanel {...NO_PROPS} /> },
+  { id: 'Subscriptions', label: 'Subscriptions', render: () => <SubscriptionsPanel {...NO_PROPS} /> },
 ];
 
 function mount(view: (typeof VIEWS)[number]) {

@@ -55,6 +55,8 @@ export const enum TraceEventKind {
   SpatialRelocationOutcome = 65,
   SpatialArchetypeTelemetry = 66,
   SpatialRealmTelemetry = 67,
+  SubscriptionsServerTelemetry = 68,
+  SubscriptionsSessionTelemetry = 69,
 
   WalFlush = 80,
   WalSegmentRotate = 81,
@@ -804,6 +806,24 @@ export interface TraceEvent {
   escapedClusters?: number;
   promotedCells?: number;
   blockedCells?: number;
+  // ── Subscriptions operator telemetry (#WB-02, kinds 68 and 69) ────────────────────────────────────────────────────
+  // Server record (68). `sessions` is the population; `reportedSessions` is how many kind-69 rows accompanied it, and a
+  // consumer must render the difference rather than treat the rows as the whole list — the rows are capped at 64.
+  sessions?: number;
+  netOutBytesPerSec?: number;
+  trackP99Ms?: number;
+  durabilityWaitP99Ms?: number;
+  framesSkipped?: number;
+  framePoolRented?: number;
+  framePoolBlocks?: number;
+  framePoolBudgetSkips?: number;
+  reportedSessions?: number;
+  // Per-session row (69). `sessionId` fits a JS number: the engine packs slot | generation << 16 into 32 bits even
+  // though the wire field is u64. `realmId` is 0xFFFF for a session not yet told its realm, which is NOT realm 0.
+  sessionId?: number;
+  bytesPerSec?: number;
+  degradeLevel?: number;
+
   // NOTE kind 67 reuses `budgetConfiguredMs` / `efficiencyTolerance` declared above for kind 66. On a REALM row they are
   // that realm's DECLARATION: maintenance is budgeted per archetype from realm 0's grid, so a realm's declared value is
   // not what the engine enforces. Kind 66's is the effective ceiling.

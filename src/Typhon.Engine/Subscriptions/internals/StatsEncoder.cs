@@ -241,6 +241,30 @@ internal sealed class StatsEncoder
         Volatile.Write(ref _isEmissionTick, 1);
     }
 
+    // ── operator telemetry (#WB-02) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // The profiler-wire emission needs three figures this class already knows how to compute, but it CANNOT reuse the values `Collect` leaves in
+    // `_serverValues`: those are indexed by the application's catalog plan, and `BeginTick` returns before collecting anything when the app declared no
+    // metrics. An operator's view of replication must not be silenceable by an application choosing not to declare metrics, so these are exposed as
+    // on-demand reads over the same sources, and the caller keeps its own window. That is also why `SentBytes` is a raw counter here rather than a rate —
+    // the rate's denominator belongs to whoever owns the window, and the two windows are independent by design.
+
+    /// <summary>Sessions open right now, for a caller that reports population alongside its own figures.</summary>
+    internal int OpenSessions => _sessions.OpenCount;
+
+    /// <summary>The send pump's lifetime byte count, or 0 with no pump. The caller differences it against its own mark.</summary>
+    internal long SentBytes => _sendPump?.BytesSent ?? 0;
+
+    /// <summary>p99 of the replication track's duration over <paramref name="window"/> ticks ending at <paramref name="tick"/>, in ms.</summary>
+    internal double TrackP99Ms(long tick, int window) => TrackPercentile(tick, window, 0.99);
+
+    /// <summary>p99 of the durability wait over the same window, in ms. Zero when no telemetry ring is attached.</summary>
+    internal double DurabilityWaitP99Ms(long tick, int window)
+    {
+        var telemetry = Volatile.Read(ref _telemetry);
+        return telemetry == null ? 0 : DurabilityWaitPercentile(telemetry, tick, window, 0.99);
+    }
+
     /// <summary>
     /// Writes one session's <c>STATS</c> block: the shared server bytes, then its own three values.
     /// </summary>
@@ -455,6 +479,17 @@ internal sealed class StatsEncoder
         var count = 0;
         var oldest = telemetry.OldestAvailableTick;
         var newest = telemetry.NewestTick;
+
+        // An empty ring reports BOTH bounds as -1, and `Math.Max(-1, tick - window)` is -1 on the first tick — which reached `GetTick(-1)` and threw
+        // `ArgumentOutOfRangeException("No ticks have been recorded yet")`. The ring is written at the END of a tick, so "no ticks yet" is the state every
+        // consumer sees on tick 0 and the throw is not an edge case. It cost WB-02 a whole session: the operator emission runs from
+        // `SubscriptionsContext.Reset`, which runs BEFORE the ring is written, so the throw prevented the recording that would have made the next call legal
+        // and the condition sustained itself for every tick of the run — 508 ticks, not one record emitted, with every gate and null check passing.
+        if (newest < 0)
+        {
+            return 0;
+        }
+
         for (var t = Math.Max(oldest, tick - window); t <= newest && count < _samples.Length; t++)
         {
             _samples[count++] = telemetry.GetTick(t).UowFlushMs;
@@ -473,6 +508,13 @@ internal sealed class StatsEncoder
         var count = 0;
         var oldest = telemetry.OldestAvailableTick;
         var newest = telemetry.NewestTick;
+
+        // An empty ring, same as in DurabilityWaitPercentile: both bounds read -1 and GetTick(-1) throws.
+        if (newest < 0)
+        {
+            return 0;
+        }
+
         for (var t = Math.Max(oldest, tick - window); t <= newest && count < _samples.Length; t++)
         {
             _samples[count++] = telemetry.GetTick(t).ActualDurationMs;
@@ -493,6 +535,13 @@ internal sealed class StatsEncoder
         var ticks = 0;
         var oldest = telemetry.OldestAvailableTick;
         var newest = telemetry.NewestTick;
+
+        // An empty ring, same as in DurabilityWaitPercentile: both bounds read -1 and GetSystemMetrics(-1) throws.
+        if (newest < 0)
+        {
+            return;
+        }
+
         for (var t = Math.Max(oldest, tick - window); t <= newest; t++)
         {
             var systems = telemetry.GetSystemMetrics(t);

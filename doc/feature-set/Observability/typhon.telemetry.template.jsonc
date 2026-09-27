@@ -831,6 +831,18 @@
           },
         },
       },
+      "Subscriptions": {
+        // Combined gate for the Subscriptions tracing subtree — the push-replication subsystem's operator telemetry. Distinct from Runtime:Subscription, which gates ECS change-subscription delivery spans.
+        "Enabled": false,
+        "ServerTelemetry": {
+          // Combined gate for the Subscriptions:ServerTelemetry instant (kind 68: one record per stats emission carrying the server-wide replication figures — sessions, outbound bytes/s, track p99, frame-pool occupancy — that the STATS block already computes for game clients).
+          "Enabled": false,
+        },
+        "SessionTelemetry": {
+          // Combined gate for the Subscriptions:SessionTelemetry instant (kind 69: one row per connected session, carrying its bytes/s, skipped frames and degrade level). Separate from ServerTelemetry because its volume scales with the session count, not with the engine: a server at its 8192-session limit can afford the one server record and not the rows, so the emission is capped and the server record states how many sessions it is not showing.
+          "Enabled": false,
+        },
+      },
       "Durability": {
         // Combined gate for the Durability tracing subtree (WAL, checkpoint, recovery, UoW spans).
         "Enabled": false,

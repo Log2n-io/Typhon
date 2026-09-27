@@ -216,5 +216,18 @@ internal sealed class SubscriptionsContext
         Volatile.Write(ref _computeSeq, 0);
         Volatile.Write(ref _flushSeq, 0);
         Volatile.Write(ref _publishSeq, 0);
+
+        // The operator records (#WB-02, kinds 68-69) are emitted here rather than from the frames track, because the track is not dispatched when no session
+        // is served and "no sessions" is the reading an operator most needs. This method runs every tick regardless. Costs two flag reads when the gates are
+        // off — see EmitOperatorTelemetry.
+        //
+        // LAST, after every field above is reset, and that ordering is load-bearing. This method is on the unconditional tick path, ahead of the fence, and a
+        // throw from it propagates out of `OnTickEndInternal`. Placed above the resets, a throw left the context carrying the PREVIOUS tick's TickNumber with
+        // its counters un-zeroed — the state every stage then reads. It is also self-sustaining when the thrower is a telemetry consumer, because the rings
+        // this tick would have filled are written after the point that threw: WB-02's first version asked the tick-telemetry ring for a percentile before the
+        // first tick was recorded, and the resulting throw stopped the recording that would have made the next tick's call legal, for 508 consecutive ticks.
+        // Emitting last cannot prevent a throw — that belongs to the emitter, and StatsEncoder's window passes now tolerate an empty ring — but it bounds the
+        // damage to the observation instead of the tick.
+        Subscriptions?.Frames?.EmitOperatorTelemetry(tickNumber);
     }
 }

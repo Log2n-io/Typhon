@@ -476,6 +476,90 @@ public sealed class TypedDtoRoundTripTests
         });
     }
 
+    /// <summary>
+    /// Kinds 68 and 69 decode in the order <see cref="TraceEventKind.SubscriptionsServerTelemetry"/> and
+    /// <see cref="TraceEventKind.SubscriptionsSessionTelemetry"/> document, and a shorter record is a prefix whose missing fields read zero (#WB-02).
+    /// </summary>
+    /// <remarks>
+    /// Worth pinning for the same reason kind 67 is: the generator packs with no alignment padding, so both layouts put wide fields at odd offsets. Kind 68
+    /// has an i32 then three f32s then two i64s, and kind 69 opens with a u64 followed by a u16 — which puts its f32 at offset 10 and its i64 at 14, neither
+    /// on a natural boundary. A hand-written decoder that assumes a float starts on a multiple of four gets both wrong.
+    /// </remarks>
+    [Test]
+    public void SubscriptionsTelemetry_DecodesTheDocumentedLayouts_AndAShorterRecordStopsAtItsOwnSize()
+    {
+        const int serverPayload = 44;
+        var server = new byte[TraceRecordHeader.CommonHeaderSize + serverPayload];
+        WriteInstantHeader(server, (ushort)server.Length, TraceEventKind.SubscriptionsServerTelemetry);
+        var sp = server.AsSpan(TraceRecordHeader.CommonHeaderSize);
+        BinaryPrimitives.WriteInt32LittleEndian(sp, 2048);                  // sessions
+        BinaryPrimitives.WriteSingleLittleEndian(sp[4..], 1_250_000f);      // netOutBytesPerSec
+        BinaryPrimitives.WriteSingleLittleEndian(sp[8..], 0.75f);           // trackP99Ms
+        BinaryPrimitives.WriteSingleLittleEndian(sp[12..], 3.5f);           // durabilityWaitP99Ms
+        BinaryPrimitives.WriteInt64LittleEndian(sp[16..], 91_233L);         // framesSkipped
+        BinaryPrimitives.WriteInt32LittleEndian(sp[24..], 40);              // framePoolRented
+        BinaryPrimitives.WriteInt32LittleEndian(sp[28..], 64);              // framePoolBlocks
+        BinaryPrimitives.WriteInt64LittleEndian(sp[32..], 7L);              // framePoolBudgetSkips
+        // Deliberately below `sessions`: the record says how many rows accompany it, and a consumer must render the difference.
+        BinaryPrimitives.WriteInt32LittleEndian(sp[40..], 64);              // reportedSessions
+
+        var srv = SubscriptionsServerTelemetryEventDto.Decode(server, CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(srv.Sessions, Is.EqualTo(2048));
+            Assert.That(srv.NetOutBytesPerSec, Is.EqualTo(1_250_000f));
+            Assert.That(srv.TrackP99Ms, Is.EqualTo(0.75f));
+            Assert.That(srv.DurabilityWaitP99Ms, Is.EqualTo(3.5f));
+            Assert.That(srv.FramesSkipped, Is.EqualTo(91_233L));
+            Assert.That(srv.FramePoolRented, Is.EqualTo(40));
+            Assert.That(srv.FramePoolBlocks, Is.EqualTo(64));
+            Assert.That(srv.FramePoolBudgetSkips, Is.EqualTo(7L));
+            Assert.That(srv.ReportedSessions, Is.EqualTo(64));
+            Assert.That(srv.ReportedSessions, Is.LessThan(srv.Sessions), "the capped case is the one a panel has to state");
+        });
+
+        WriteInstantHeader(server, (ushort)(TraceRecordHeader.CommonHeaderSize + 16), TraceEventKind.SubscriptionsServerTelemetry);
+        var clippedServer = SubscriptionsServerTelemetryEventDto.Decode(server, CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(clippedServer.Sessions, Is.EqualTo(2048), "the prefix decodes as before");
+            Assert.That(clippedServer.DurabilityWaitP99Ms, Is.EqualTo(3.5f));
+            Assert.That(clippedServer.FramesSkipped, Is.Zero, "a field the record does not reach reads zero");
+            Assert.That(clippedServer.FramePoolBudgetSkips, Is.Zero);
+            Assert.That(clippedServer.ReportedSessions, Is.Zero);
+        });
+
+        const int sessionPayload = 26;
+        var row = new byte[TraceRecordHeader.CommonHeaderSize + sessionPayload];
+        WriteInstantHeader(row, (ushort)row.Length, TraceEventKind.SubscriptionsSessionTelemetry);
+        var rp = row.AsSpan(TraceRecordHeader.CommonHeaderSize);
+        BinaryPrimitives.WriteUInt64LittleEndian(rp, 0x0007_0000_0002UL);   // sessionId (slot 2, generation 7)
+        BinaryPrimitives.WriteUInt16LittleEndian(rp[8..], ushort.MaxValue); // realmId — the "not told its realm yet" sentinel
+        BinaryPrimitives.WriteSingleLittleEndian(rp[10..], 48_000f);        // bytesPerSec
+        BinaryPrimitives.WriteInt64LittleEndian(rp[14..], 12L);             // framesSkipped
+        BinaryPrimitives.WriteInt32LittleEndian(rp[22..], 2);               // degradeLevel
+
+        var one = SubscriptionsSessionTelemetryEventDto.Decode(row, CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(one.SessionId, Is.EqualTo(0x0007_0000_0002UL));
+            Assert.That(one.RealmId, Is.EqualTo(ushort.MaxValue), "0xFFFF must survive as itself — it is how a consumer tells 'no realm yet' from realm 0");
+            Assert.That(one.BytesPerSec, Is.EqualTo(48_000f));
+            Assert.That(one.FramesSkipped, Is.EqualTo(12L));
+            Assert.That(one.DegradeLevel, Is.EqualTo(2));
+        });
+
+        WriteInstantHeader(row, (ushort)(TraceRecordHeader.CommonHeaderSize + 10), TraceEventKind.SubscriptionsSessionTelemetry);
+        var clippedRow = SubscriptionsSessionTelemetryEventDto.Decode(row, CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(clippedRow.SessionId, Is.EqualTo(0x0007_0000_0002UL));
+            Assert.That(clippedRow.RealmId, Is.EqualTo(ushort.MaxValue));
+            Assert.That(clippedRow.BytesPerSec, Is.Zero);
+            Assert.That(clippedRow.DegradeLevel, Is.Zero);
+        });
+    }
+
     /// <summary>Write an instant's 12-byte common header: u16 size, u8 kind, u8 thread slot, i64 timestamp.</summary>
     private static void WriteInstantHeader(Span<byte> record, ushort size, TraceEventKind kind)
     {

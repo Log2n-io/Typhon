@@ -71,6 +71,7 @@ export function isInstantKind(v: number): boolean {
   // #911 — 65/66 are instants sitting among spans (60-64). Same shape as the EcsSpawnBatch carve-out above, and missing it
   // would render both as phantom spans with a fabricated duration read out of their payload.
   if (v === 65 || v === 66 || v === 67) return true;                       // 67 joined them for the per-realm record (#WB-05)
+  if (v === 68 || v === 69) return true;                                   // push replication's server record and its session rows (#WB-02)
   if (v >= 90 && v <= 116) return true;                                    // Concurrency tracing (Phase 2, #280)
   // Spatial tracing (Phase 3, #281) — mixed; instants are 127-135, 137, 140-142, 144, 145.
   if ((v >= 127 && v <= 135) || v === 137 || (v >= 140 && v <= 142) || v === 144 || v === 145) return true;
@@ -294,6 +295,48 @@ function decodeInstant(
         // ── the realm census (#WB-05)
         presentRealms: at(139, 4, reader.readI32.bind(reader), 0),
         runnableRealms: at(143, 4, reader.readI32.bind(reader), 0),
+      };
+    }
+
+    // #WB-02 — push replication's operator records. `framesSkipped` and `framePoolBudgetSkips` are i64 on the wire and
+    // read as Numbers: both are counts of frames, which cannot approach 2^53 in any session a human watches. The
+    // offsets are NOT naturally aligned (i64 at 16 and at 32, f32 at 4) because the generator packs without padding.
+    case TraceEventKind.SubscriptionsServerTelemetry: {
+      // Bounded by the record's OWN size, for the reason kind 66 is: the enum declares this payload append-only, so a
+      // record from an older producer is a strict prefix and a field it does not reach must read zero rather than the
+      // next record's bytes — or, for the block's last record, throw a DataView RangeError that nothing here catches and
+      // that costs the whole chunk (marked failed for 30 s, rendered as a gap).
+      const end68 = pos + recordSize;
+      const at68 = <T,>(offset: number, size: number, read: (o: number) => T, zero: T): T =>
+        payloadOffset + offset + size <= end68 ? read(payloadOffset + offset) : zero;
+      return {
+        kind, threadSlot, tickNumber, timestampUs,
+        sessions: at68(0, 4, (o) => reader.readI32(o), 0),
+        netOutBytesPerSec: at68(4, 4, (o) => reader.readF32(o), 0),
+        trackP99Ms: at68(8, 4, (o) => reader.readF32(o), 0),
+        durabilityWaitP99Ms: at68(12, 4, (o) => reader.readF32(o), 0),
+        framesSkipped: at68(16, 8, (o) => reader.readI64AsNumber(o), 0),
+        framePoolRented: at68(24, 4, (o) => reader.readI32(o), 0),
+        framePoolBlocks: at68(28, 4, (o) => reader.readI32(o), 0),
+        framePoolBudgetSkips: at68(32, 8, (o) => reader.readI64AsNumber(o), 0),
+        reportedSessions: at68(40, 4, (o) => reader.readI32(o), 0),
+      };
+    }
+
+    // The session id is u64 on the wire but the engine packs slot | generation << 16, so the value always fits a
+    // Number; reading the low word alone would drop the generation and make two sessions in one slot indistinguishable.
+    case TraceEventKind.SubscriptionsSessionTelemetry: {
+      const end69 = pos + recordSize;
+      const at69 = <T,>(offset: number, size: number, read: (o: number) => T, zero: T): T =>
+        payloadOffset + offset + size <= end69 ? read(payloadOffset + offset) : zero;
+      return {
+        kind, threadSlot, tickNumber, timestampUs,
+        sessionId: at69(0, 8, (o) => reader.readI64AsNumber(o), 0),
+        // The sentinel, not 0: a row too short to carry its realm has NOT told us it is in realm 0.
+        realmId: at69(8, 2, (o) => reader.readU16(o), 0xffff),
+        bytesPerSec: at69(10, 4, (o) => reader.readF32(o), 0),
+        framesSkipped: at69(14, 8, (o) => reader.readI64AsNumber(o), 0),
+        degradeLevel: at69(22, 4, (o) => reader.readI32(o), 0),
       };
     }
 

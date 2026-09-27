@@ -13,15 +13,17 @@ import { TraceEventKind } from '@/libs/profiler/model/types';
 // so a divergence fails here rather than in someone's timeline.
 //
 // Source of truth, in ladder order (C# returns false ⇒ instant):
-//   <10 · 76, 77 · 36 · 65, 66, 67 · 90-116 · 127-135, 137, 140-142, 144, 145 · 146-148, 151, 153, 154, 156-158, 161, 162 ·
+//   <10 · 76, 77 · 36 · 65, 66, 67, 68, 69 · 90-116 · 127-135, 137, 140-142, 144, 145 · 146-148, 151, 153, 154, 156-158, 161, 162 ·
 //   166-172 · 176, 178, 180, 182, 183, 185, 186 · 191, 197, 200, 202, 203, 206-208, 211-213 ·
 //   217, 218, 220, 225, 228, 233, 234 · 242, 244 · 247, 248 · 254
 const INSTANT_KINDS: readonly number[] = [
   0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
   36, 76, 77,
   // #911 — 65/66 are instants wedged among spans (60-64), so they need a point carve-out exactly like 36 does. 67
-  // joined them in #WB-05 (the per-realm shape record), which is why it moved out of the span list below.
-  65, 66, 67,
+  // joined them in #WB-05 (the per-realm shape record), which is why it moved out of the span list below, and 68/69
+  // in #WB-02 (push replication's server record and its per-session rows). Neither was in EITHER list before that
+  // change, so this test would not have caught them — the same gap that let kind 67 decode as a span once.
+  65, 66, 67, 68, 69,
   90, 100, 116,
   127, 131, 135, 137, 140, 142, 144, 145,
   146, 147, 148, 151, 153, 154, 156, 157, 158, 161, 162,

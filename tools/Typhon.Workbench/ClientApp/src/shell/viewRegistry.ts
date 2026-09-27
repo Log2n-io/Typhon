@@ -76,6 +76,7 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   // Attach-only in practice; the panel renders its own cold state elsewhere, so the scope map below carries 'profiler'
   // and the panel does the finer gating.
   SpatialMaintenance: true,
+  Subscriptions: true,
 };
 
 // Returns whether a view (or a view-bound command) is currently reachable. An undefined id means the caller
@@ -124,6 +125,7 @@ const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
   Profiler: 'profiler',
   TopSpans: 'profiler',
   SpatialMaintenance: 'profiler',
+  Subscriptions: 'profiler',
   CallTree: 'profiler',
   SourcePreview: 'profiler',
   SystemDag: 'profiler',

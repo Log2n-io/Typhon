@@ -305,3 +305,105 @@ describe('#911 spatial trace kinds — wire layout', () => {
     expect(b.crossingCount).toBeUndefined();
   });
 });
+
+// #WB-02 — the same silent-drift guard for push replication's two operator kinds. Both layouts put wide fields at
+// offsets that are not naturally aligned, which is exactly where a hand-written table goes wrong: the server record has
+// i64s at 16 and 32, and the session row has an f32 at 10 and an i64 at 14.
+describe('#WB-02 subscriptions trace kinds — wire layout', () => {
+  it('kind 68 SubscriptionsServerTelemetry: 9 fields, i64s at 16 and 32', () => {
+    const bytes = record(68, false, (v, o) => {
+      v.setInt32(o, 2048, true);            // sessions
+      v.setFloat32(o + 4, 1_250_000, true); // netOutBytesPerSec
+      v.setFloat32(o + 8, 0.75, true);      // trackP99Ms
+      v.setFloat32(o + 12, 3.5, true);      // durabilityWaitP99Ms
+      v.setBigInt64(o + 16, 91_233n, true); // framesSkipped
+      v.setInt32(o + 24, 40, true);         // framePoolRented
+      v.setInt32(o + 28, 64, true);         // framePoolBlocks
+      v.setBigInt64(o + 32, 7n, true);      // framePoolBudgetSkips
+      v.setInt32(o + 40, 64, true);         // reportedSessions
+      return o + 44;
+    });
+
+    const e = decodeOne(bytes);
+    expect(e.kind).toBe(TraceEventKind.SubscriptionsServerTelemetry);
+    expect(e.sessions).toBe(2048);
+    expect(e.netOutBytesPerSec).toBe(1_250_000);
+    expect(e.trackP99Ms).toBe(0.75);
+    expect(e.durabilityWaitP99Ms).toBe(3.5);
+    expect(e.framesSkipped).toBe(91_233);
+    expect(e.framePoolRented).toBe(40);
+    expect(e.framePoolBlocks).toBe(64);
+    expect(e.framePoolBudgetSkips).toBe(7);
+    // Below `sessions` on purpose: the rows are capped at 64, and a panel has to say so rather than present the rows it
+    // received as the whole population.
+    expect(e.reportedSessions).toBe(64);
+    expect(e.reportedSessions!).toBeLessThan(e.sessions!);
+  });
+
+  it('kind 69 SubscriptionsSessionTelemetry: the u64 id keeps its generation, and 0xFFFF realm is not realm 0', () => {
+    const bytes = record(69, false, (v, o) => {
+      // slot 2, generation 7 — the engine packs slot | generation << 16, so dropping the high word would make two
+      // sessions that reused one slot indistinguishable.
+      v.setBigUint64(o, BigInt(2 | (7 << 16)), true); // sessionId
+      v.setUint16(o + 8, 0xffff, true);               // realmId — not yet told its realm
+      v.setFloat32(o + 10, 48_000, true);             // bytesPerSec
+      v.setBigInt64(o + 14, 12n, true);               // framesSkipped
+      v.setInt32(o + 22, 2, true);                    // degradeLevel
+      return o + 26;
+    });
+
+    const e = decodeOne(bytes);
+    expect(e.kind).toBe(TraceEventKind.SubscriptionsSessionTelemetry);
+    expect(e.sessionId).toBe(2 | (7 << 16));
+    expect(e.realmId).toBe(0xffff);
+    expect(e.bytesPerSec).toBe(48_000);
+    expect(e.framesSkipped).toBe(12);
+    expect(e.degradeLevel).toBe(2);
+  });
+});
+
+// The prefix half of the append-only contract, which the C# side has had since kind 66 and the TS side did not: a record
+// written by an older producer is shorter, and every field it does not reach must read zero rather than the following
+// record's bytes. For the LAST record in a block an unguarded read walks off the buffer and DataView throws RangeError,
+// which `decodeChunkBinary` does not catch — the chunk is then marked failed for 30 s and renders as a gap.
+describe('append-only prefixes decode without reading past the record', () => {
+  it('kind 68: a record that stops after durabilityWaitP99Ms reads the rest as zero', () => {
+    const bytes = record(68, false, (v, o) => {
+      v.setInt32(o, 7, true);
+      v.setFloat32(o + 4, 1_000, true);
+      v.setFloat32(o + 8, 0.5, true);
+      v.setFloat32(o + 12, 2.5, true);
+      return o + 16; // a pre-append producer: 16 bytes of payload, not 44
+    });
+
+    const e = decodeOne(bytes);
+    expect(e.sessions).toBe(7);
+    expect(e.durabilityWaitP99Ms).toBe(2.5);
+    expect(e.framesSkipped).toBe(0);
+    expect(e.framePoolBudgetSkips).toBe(0);
+    expect(e.reportedSessions).toBe(0);
+  });
+
+  it('kind 69: a truncated row keeps the realm SENTINEL rather than claiming realm 0', () => {
+    const bytes = record(69, false, (v, o) => {
+      v.setBigUint64(o, 42n, true);
+      return o + 8; // stops before realmId
+    });
+
+    const e = decodeOne(bytes);
+    expect(e.sessionId).toBe(42);
+    // Zero here would assert the session is in realm 0, which is a different claim from "we were not told".
+    expect(e.realmId).toBe(0xffff);
+    expect(e.bytesPerSec).toBe(0);
+    expect(e.degradeLevel).toBe(0);
+  });
+
+  it('a truncated record as the LAST in its block does not throw', () => {
+    // The unguarded version threw RangeError here, which decodeChunkBinary does not catch.
+    const bytes = record(68, false, (v, o) => {
+      v.setInt32(o, 1, true);
+      return o + 4;
+    });
+    expect(() => decodeOne(bytes)).not.toThrow();
+  });
+});

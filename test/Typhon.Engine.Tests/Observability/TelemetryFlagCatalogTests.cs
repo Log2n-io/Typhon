@@ -16,11 +16,12 @@ public class TelemetryFlagCatalogTests
     public void Catalog_enumerates_all_nodes_root_first()
     {
         Assert.That(TelemetryFlagCatalog.Prefix, Is.EqualTo("Typhon:Profiler"));
-        // 228 keyed flags (1 master + 4 composite + 4 raw-leaf + 219 subtree) + 8 pure grouping nodes.
+        // 231 keyed flags (1 master + 4 composite + 4 raw-leaf + 222 subtree) + 8 pure grouping nodes.
         // The subtree count went 215 -> 218 with #911's three spatial-maintenance gates (Repair, Relocation, ArchetypeTelemetry), then 218 -> 219 with
         // #WB-05's RealmTelemetry (kind 67, the per-realm shape record — its own gate because its volume scales with the realm count, not the archetype
-        // count).
-        Assert.That(TelemetryFlagCatalog.All.Count, Is.EqualTo(236));
+        // count), then 219 -> 222 with #WB-02's push-replication operator telemetry: the `Subscriptions` subtree root plus ServerTelemetry (kind 68) and
+        // SessionTelemetry (kind 69), split for the same volume-scaling reason as the realm record.
+        Assert.That(TelemetryFlagCatalog.All.Count, Is.EqualTo(239));
 
         var root = TelemetryFlagCatalog.All[0];
         Assert.That(root.Kind, Is.EqualTo(TelemetryFlagKind.Master));

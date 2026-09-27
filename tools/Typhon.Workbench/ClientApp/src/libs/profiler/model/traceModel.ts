@@ -427,7 +427,67 @@ export interface TickData {
    * absent row means "not runnable this tick", never "no such realm".
    */
   spatialByRealm?: Map<number, SpatialRealmShape>;
+
+  /**
+   * Push replication's server-wide figures for this tick, from a kind-68 record (#WB-02). Present only on the ~1 Hz
+   * stats ticks that emit one, so a panel reads the newest over a window rather than expecting one per tick.
+   */
+  subscriptions?: SubscriptionsServerTelemetry;
+
+  /**
+   * One row per session that sent a kind-69 record on this tick, keyed by session id.
+   *
+   * <b>A sample, not the population.</b> The engine caps the rows at 64; `subscriptions.reportedSessions` against
+   * `subscriptions.sessions` says how many were left out, and a panel is required to state that difference rather than
+   * present these rows as every session.
+   */
+  subscriptionSessions?: Map<number, SubscriptionsSessionTelemetry>;
 }
+
+/** Server-wide push-replication figures — trace kind 68 (#WB-02). */
+export interface SubscriptionsServerTelemetry {
+  /** Sessions open at this emission. The denominator for every per-session figure. */
+  sessions: number;
+  /** Outbound replication bytes per second across all sessions, over the window since the previous emission. */
+  netOutBytesPerSec: number;
+  /** p99 of the replication track's own duration, ms. */
+  trackP99Ms: number;
+  /** p99 of the durability wait, ms. Beside the track figure because a slow track is often a slow disk. */
+  durabilityWaitP99Ms: number;
+  /** Frames skipped since each session opened, summed. Cumulative — differentiate it over a window to get a rate. */
+  framesSkipped: number;
+  /** Frame-pool blocks rented. */
+  framePoolRented: number;
+  /** Frame-pool blocks allocated. Full occupancy against this is backpressure, not health. */
+  framePoolBlocks: number;
+  /**
+   * Frames the pool refused for want of budget. Cumulative, and more actionable than `framesSkipped`: a per-session
+   * skip means one client fell behind, a budget skip means the server ran out of frame memory.
+   */
+  framePoolBudgetSkips: number;
+  /** How many session rows accompanied this record. Below `sessions` when the emission hit its cap. */
+  reportedSessions: number;
+}
+
+/** One session's push-replication figures — trace kind 69 (#WB-02). */
+export interface SubscriptionsSessionTelemetry {
+  /** Slot | generation << 16, so two sessions that reused a slot are distinct. */
+  sessionId: number;
+  /** The realm the client holds, or `SESSION_REALM_UNKNOWN` before its first RESET — which is not realm 0. */
+  realmId: number;
+  bytesPerSec: number;
+  framesSkipped: number;
+  /** The engine's own "this client is struggling" signal, before a skip is forced. Zero is healthy. */
+  degradeLevel: number;
+}
+
+/**
+ * `realmId` on a kind-69 row for a session that has not been told its realm yet.
+ *
+ * The engine's `CommittedRealm` is -1 until the session's first RESET; the wire field is unsigned, so it arrives as
+ * 0xFFFF. A consumer must not render it as realm 65535, and must not collapse it to realm 0 either.
+ */
+export const SESSION_REALM_UNKNOWN = 0xffff;
 
 /** Key for {@link TickData.spatialByRealm}. Both halves are u16 on the wire, so the pack is lossless. */
 export function realmArchetypeKey(realmId: number, archetypeId: number): number {
@@ -783,6 +843,8 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
   // #911 O3 — built lazily so a tick with no spatial archetype carries no map at all rather than an empty one.
   let spatialByArchetype: Map<number, SpatialTickTelemetry> | undefined;
   let spatialByRealm: Map<number, SpatialRealmShape> | undefined;
+  let subscriptions: SubscriptionsServerTelemetry | undefined;
+  let subscriptionSessions: Map<number, SubscriptionsSessionTelemetry> | undefined;
 
   // Phases are still emitted as Start/End instant pairs — keep a short-lived map to pair them up.
   const openPhases = new Map<number, TraceEvent>();
@@ -992,6 +1054,35 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
           blockedCells: evt.blockedCells ?? 0,
           budgetConfiguredMs: evt.budgetConfiguredMs ?? 0,
           efficiencyTolerance: evt.efficiencyTolerance ?? 0,
+        });
+        break;
+      }
+
+      // #WB-02 — last one wins within a tick: the emission is once per stats period, so a second record on the same
+      // tick would mean a reconnect replayed one, and the newer is the one to believe.
+      case TraceEventKind.SubscriptionsServerTelemetry: {
+        subscriptions = {
+          sessions: evt.sessions ?? 0,
+          netOutBytesPerSec: evt.netOutBytesPerSec ?? 0,
+          trackP99Ms: evt.trackP99Ms ?? 0,
+          durabilityWaitP99Ms: evt.durabilityWaitP99Ms ?? 0,
+          framesSkipped: evt.framesSkipped ?? 0,
+          framePoolRented: evt.framePoolRented ?? 0,
+          framePoolBlocks: evt.framePoolBlocks ?? 0,
+          framePoolBudgetSkips: evt.framePoolBudgetSkips ?? 0,
+          reportedSessions: evt.reportedSessions ?? 0,
+        };
+        break;
+      }
+
+      case TraceEventKind.SubscriptionsSessionTelemetry: {
+        const sessionId = evt.sessionId ?? 0;
+        (subscriptionSessions ??= new Map()).set(sessionId, {
+          sessionId,
+          realmId: evt.realmId ?? SESSION_REALM_UNKNOWN,
+          bytesPerSec: evt.bytesPerSec ?? 0,
+          framesSkipped: evt.framesSkipped ?? 0,
+          degradeLevel: evt.degradeLevel ?? 0,
         });
         break;
       }
@@ -1470,6 +1561,8 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
     rawEvents: events,
     spatialByArchetype,
     spatialByRealm,
+    subscriptions,
+    subscriptionSessions,
   };
 }
 

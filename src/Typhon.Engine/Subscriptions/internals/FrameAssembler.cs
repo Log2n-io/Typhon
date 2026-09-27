@@ -400,6 +400,16 @@ internal sealed class SessionFrameState
     /// <summary><see cref="BytesPublished"/> as of that block, so the next one reports the window rather than the session's whole life.</summary>
     public long StatsBytesMark { get; set; }
 
+    /// <summary>
+    /// <see cref="BytesPublished"/> as of the last operator-telemetry emission (#WB-02) — a separate mark from <see cref="StatsBytesMark"/>, deliberately.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="StatsBytesMark"/> is advanced only when a client-facing <c>STATS</c> block is written, which needs the application to have declared metrics
+    /// and the session to hold the Stats capability. The operator emission runs regardless of both — that independence is its whole point — so sharing the mark
+    /// meant that on a server with no metric catalog it never moved, and every emission divided the session's lifetime byte total by one window.
+    /// </remarks>
+    public long OperatorStatsBytesMark { get; set; }
+
     /// <summary>Rebinds the slot to a new session: every per-session number starts again.</summary>
     /// <param name="generation">The new session's generation.</param>
     /// <param name="tick">
@@ -425,6 +435,8 @@ internal sealed class SessionFrameState
         BytesPublished = 0;
         StatsTick = tick;
         StatsBytesMark = 0;
+        // Reset with the rest: a reused slot must not report the previous session's bytes as this one's first window.
+        OperatorStatsBytesMark = 0;
         SelfEntity = EntityId.Null;
         CommittedProfile = -1;
         SelfNetId = 0;
@@ -485,6 +497,22 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
     private readonly ArchetypeEncodePlan[] _encodePlans;
     private readonly SessionTable _sessions;
     private readonly SessionFrameState[] _states;
+
+    /// <summary>
+    /// Cap on <c>SubscriptionsSessionTelemetry</c> (trace kind 69) rows per emission (#WB-02).
+    /// </summary>
+    /// <remarks>
+    /// 64 is chosen against what a panel can show rather than what the engine can hold: a table of a few dozen sessions is readable, and the server record
+    /// reports the population so an operator sees that the list is a sample. The alternative — one row per session at the 8192-session limit — would put
+    /// half a megabyte of trace on the wire every second for rows nobody scrolls to.
+    /// </remarks>
+    private const int OperatorSessionRowCap = 64;
+
+    /// <summary>Tick of the last operator-telemetry emission, -1 before the first. Its own window, independent of the encoder's — see <c>EmitOperatorTelemetry</c>.</summary>
+    private long _operatorEmissionTick = -1;
+
+    /// <summary>The send pump's byte count at that emission, so the next one reports its window rather than the process's whole life.</summary>
+    private long _operatorSentBytesMark;
     private readonly int _maxFrameBytes;
     private readonly int _lagBoundTicks;
 
@@ -1067,6 +1095,139 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         Pool.Dispose();
     }
 
+
+    /// <summary>
+    /// Emits the push-replication operator records (#WB-02, kinds 68 and 69) once per stats period.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Called from the end of <c>SubscriptionsContext.Reset</c>, not from this class's own <c>BeginTick</c>.</b> An operator needs "0 sessions, 0 bytes/s"
+    /// to arrive as a reading — a server whose clients have all left must not look like an engine that stopped reporting. `BeginTick` cannot provide that at
+    /// any position inside it: the frames track is not dispatched at all when no session is served, so the method is never entered. `Reset` runs
+    /// unconditionally on the tick driver ahead of the fence, which is the only per-tick single-threaded point that is always reached. It is called LAST in
+    /// that method, after every per-tick field is reset, because a throw from here propagates out of <c>OnTickEndInternal</c> — see the comment at the call.
+    ///
+    /// <b>Nothing reached here may throw, and that is not a style preference.</b> The first version asked <see cref="StatsEncoder"/> for a durability
+    /// percentile as a call argument, and on tick 0 that pass indexed a tick-telemetry ring holding nothing and threw. C# evaluates arguments before entering
+    /// the gated method, so the throw happened whether or not the record was wanted; because the ring is written at the END of a tick, the throw stopped the
+    /// recording that would have made the next tick's call legal, and the condition sustained itself. The symptom was not an exception anywhere visible — it
+    /// was 508 ticks, 2 337 trace records and not one record of kind 68, with the gate true and every null check passing. The window passes tolerate an empty
+    /// ring now; a new argument here is a new obligation to check.
+    ///
+    /// <b>Independent of <see cref="StatsEncoder"/>, and on its own window.</b> The encoder's <c>BeginTick</c> returns before collecting anything
+    /// when the application declared no metrics, because with an empty catalog there is no client-facing <c>STATS</c> block to encode. An operator's view of
+    /// replication must not be silenceable that way — an app that declares no metrics is exactly an app whose replication nobody has looked at. So this runs
+    /// unconditionally at the same cadence, keeps its own <see cref="_operatorEmissionTick"/> / <see cref="_operatorSentBytesMark"/> pair, and reads the
+    /// encoder's figures on demand instead of borrowing values indexed by the app's plan.
+    /// </para>
+    /// <para>
+    /// <b>Cost when the gates are off is two flag reads</b> — but only because they are read HERE, before anything else. The generator puts each gate check
+    /// inside its <c>Emit</c>, and C# evaluates arguments before the call, so passing a percentile as an argument would compute it whether or not the record is
+    /// wanted. Reading both flags up front is what makes the claim true; it was not, in the first version of this method.
+    /// </para>
+    /// <para>
+    /// <b>The row emission is capped</b> at <see cref="OperatorSessionRowCap"/>. Volume scales with the session count, not with the engine, so a server at its
+    /// 8192-session limit would otherwise spend the trace on rows nobody reads; the server record's <c>ReportedSessions</c> against its <c>Sessions</c> says
+    /// what was left out, and a consumer is required to render that difference rather than treat the rows as the whole population.
+    /// </para>
+    /// </remarks>
+    internal void EmitOperatorTelemetry(long tickNumber)
+    {
+        var stats = Stats;
+        if (stats == null)
+        {
+            return;
+        }
+
+        // Gate FIRST, and here rather than relying on the generated Emit. The generator puts `if (!TelemetryConfig.<Gate>) return;` INSIDE the emit method
+        // (TraceEventGenerator.cs:1273/1428/1446), and C# evaluates a call's arguments before entering it — so passing `stats.TrackP99Ms(...)` and
+        // `stats.DurabilityWaitP99Ms(...)` as arguments ran two window passes and two Array.Sorts every second with both gates off, and mutated the encoder's
+        // own `_samples` scratch while doing it. `DatabaseEngine.TickFence.cs` uses this same shape for the same reason.
+        var wantServer = TelemetryConfig.SubscriptionsServerTelemetryActive;
+        var wantSessions = TelemetryConfig.SubscriptionsSessionTelemetryActive;
+        if (!wantServer && !wantSessions)
+        {
+            return;
+        }
+
+        var period = stats.EmissionPeriodTicksForTest > 0 ? stats.EmissionPeriodTicksForTest : stats.EmissionPeriodTicks;
+        if (tickNumber % period != 0)
+        {
+            return;
+        }
+
+        // The window is this emission's own, in ticks, and never zero — the first emission would otherwise divide by the absolute tick number.
+        var window = _operatorEmissionTick < 0 ? period : (int)Math.Min(period, Math.Max(1, tickNumber - _operatorEmissionTick));
+        var seconds = window * _tickSeconds;
+        var sent = stats.SentBytes;
+        var outBytesPerSec = seconds <= 0 ? 0 : Math.Max(0, sent - _operatorSentBytesMark) / seconds;
+
+        // One pass over the open sessions, serving both records: the server's skip total and, under its own gate, the per-session rows.
+        var skipped = 0L;
+        var reported = 0;
+        {
+            var sessions = _sessions.GetEnumerator();
+            while (sessions.MoveNext())
+            {
+                var session = sessions.Current;
+                var slot = session.Slot;
+                if (slot >= (uint)_states.Length)
+                {
+                    continue;
+                }
+
+                var state = _states[slot];
+                if (state == null)
+                {
+                    continue;
+                }
+
+                skipped += state.FramesSkipped;
+
+                if (!wantSessions || reported >= OperatorSessionRowCap)
+                {
+                    continue;
+                }
+
+                // Our own mark, never `StatsBytesMark`: that one is written only by `StatsEncoder.WriteSessionSegment`, which runs only when the
+                // application declared metrics AND the session holds the Stats capability. With no metric catalog — the very case this emission exists to
+                // cover — it stays 0 for the session's life, so subtracting it divided a lifetime byte total by a one-second window and reported a figure
+                // that climbed for ever.
+                var bytes = Math.Max(0, state.BytesPublished - state.OperatorStatsBytesMark);
+                state.OperatorStatsBytesMark = state.BytesPublished;
+                TyphonEvent.EmitSubscriptionsSessionTelemetry(
+                    sessionId: session.Value,
+                    // -1 before the session's first RESET, widened to the wire's unsigned field so a consumer can tell that from realm 0.
+                    realmId: state.CommittedRealm < 0 ? ushort.MaxValue : (ushort)state.CommittedRealm,
+                    bytesPerSec: seconds <= 0 ? 0f : (float)(bytes / seconds),
+                    framesSkipped: state.FramesSkipped,
+                    degradeLevel: state.DegradeLevel);
+                reported++;
+            }
+        }
+
+        if (!wantServer)
+        {
+            _operatorEmissionTick = tickNumber;
+            _operatorSentBytesMark = sent;
+            return;
+        }
+
+        var pool = Pool;
+        TyphonEvent.EmitSubscriptionsServerTelemetry(
+            sessions: stats.OpenSessions,
+            netOutBytesPerSec: (float)outBytesPerSec,
+            trackP99Ms: (float)stats.TrackP99Ms(tickNumber, window),
+            durabilityWaitP99Ms: (float)stats.DurabilityWaitP99Ms(tickNumber, window),
+            framesSkipped: skipped,
+            framePoolRented: pool?.RentedCount ?? 0,
+            framePoolBlocks: pool?.BlockCount ?? 0,
+            framePoolBudgetSkips: pool?.BudgetSkipCount ?? 0,
+            reportedSessions: reported);
+
+        _operatorEmissionTick = tickNumber;
+        _operatorSentBytesMark = sent;
+    }
 
     // ── The prologue ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 

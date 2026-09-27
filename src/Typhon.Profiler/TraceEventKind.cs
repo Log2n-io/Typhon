@@ -319,6 +319,51 @@ public enum TraceEventKind : byte
     /// </summary>
     SpatialRealmTelemetry = 67,
 
+    // ── Push replication: the operator's view of Subscriptions (instants) ──
+
+    /// <summary>
+    /// Server-wide push-replication figures, one record per stats emission (1 Hz, alongside the client-facing <c>STATS</c> block).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Payload, tightly packed with no alignment padding, in this order: <c>sessions: i32</c>, <c>netOutBytesPerSec: f32</c>,
+    /// <c>trackP99Ms: f32</c>, <c>durabilityWaitP99Ms: f32</c>, <c>framesSkipped: i64</c>, <c>framePoolRented: i32</c>,
+    /// <c>framePoolBlocks: i32</c>, <c>framePoolBudgetSkips: i64</c>, <c>reportedSessions: i32</c>. 44 bytes.
+    /// <b>Two fields belong here and are deliberately absent from this first version</b> — the live NetId count and the server-wide dropped-command total.
+    /// Neither the allocator nor the ingress table is reachable from the emission site, and threading a constructor dependency through
+    /// <c>FrameAssembler</c> for them is a worse trade than appending them later, which the append-only rule below exists to allow. They are omitted rather
+    /// than sent as zero, because a field that always reads zero is worse than a field that is not there. Grow it only by APPENDING, as with kinds 66 and 67 — a reader keyed on offsets
+    /// stays correct against an older producer, and the size guard is what lets a shorter record decode.
+    /// </para>
+    /// <para>
+    /// <b>A transport, not a measurement.</b> Every value here is one the engine already computes for the <c>STATS</c> wire block
+    /// that goes to game clients (<c>Subscriptions/internals/StatsEncoder.cs</c>); this re-emits it on the profiler wire, because an
+    /// attach session is a one-way stream with no way to call an accessor on the engine it watches. <c>reportedSessions</c> is how
+    /// many kind-69 rows accompany this record, so a panel can state how many sessions it is NOT showing rather than implying the
+    /// list is complete.
+    /// </para>
+    /// <para>Gated on <c>SubscriptionsServerTelemetryActive</c>.</para>
+    /// </remarks>
+    SubscriptionsServerTelemetry = 68,
+
+    /// <summary>
+    /// One connected session's push-replication figures. Emitted per session per stats emission, up to a cap.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Payload, tightly packed: <c>sessionId: u64</c>, <c>realmId: u16</c>, <c>bytesPerSec: f32</c>, <c>framesSkipped: i64</c>,
+    /// <c>degradeLevel: i32</c>. 26 bytes. Append-only, as above. <c>realmId</c> is <c>0xFFFF</c> for a session that has not been told its realm yet, which is
+    /// the committed realm's own "-1 before the first RESET" widened to an unsigned field — a consumer can tell that from "in realm 0".
+    /// </para>
+    /// <para>
+    /// <b>Capped by design, and the cap is visible.</b> Volume scales with the session count, not with the engine, so a server at
+    /// its 8192-session limit would otherwise spend the trace on rows nobody reads. The emission stops at a bound and kind 68's
+    /// <c>reportedSessions</c> against its <c>sessions</c> says what was left out.
+    /// </para>
+    /// <para>Gated on <c>SubscriptionsSessionTelemetryActive</c>, separately from kind 68 for that reason.</para>
+    /// </remarks>
+    SubscriptionsSessionTelemetry = 69,
+
     // ── .NET runtime GC suspension (span) ──
 
     /// <summary>
@@ -1196,10 +1241,10 @@ public static class TraceEventKindExtensions
         {
             return false;
         }
-        // #911: 64 is a span, 65 and 66 are instants; 67 joined them for the per-realm record. Their numeric neighbours (60-63) are all spans, so the
-        // instants need an explicit carve-out — the EcsSpawnBatch lesson one group along. TraceEventShapeConsistencyTests holds this against the producers'
-        // declared Shape.
-        if (v is 65 or 66 or 67)
+        // #911: 64 is a span, 65 and 66 are instants; 67 joined them for the per-realm record, and 68-69 for push replication's server record and
+        // its per-session rows. Their numeric neighbours (60-63) are all spans, so the instants need an explicit carve-out — the EcsSpawnBatch lesson
+        // one group along. TraceEventShapeConsistencyTests holds this against the producers' declared Shape.
+        if (v is 65 or 66 or 67 or 68 or 69)
         {
             return false;
         }
