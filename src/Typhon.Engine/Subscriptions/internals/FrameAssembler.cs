@@ -1164,8 +1164,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         var sent = stats.SentBytes;
         var outBytesPerSec = seconds <= 0 ? 0 : Math.Max(0, sent - _operatorSentBytesMark) / seconds;
 
-        // One pass over the open sessions, serving both records: the server's skip total and, under its own gate, the per-session rows.
-        var skipped = 0L;
+        // One pass over the open sessions, for the per-session rows. The server record's skip total is NOT summed here: `FramesSkipped` is a process-wide
+        // counter that only ever rises, whereas a sum over currently-open sessions FALLS when one closes — so a consumer told to differentiate it, which is
+        // what kind 68 documents, would get a negative rate from an ordinary disconnect. The monotonic counter is what that field describes.
         var reported = 0;
         {
             var sessions = _sessions.GetEnumerator();
@@ -1184,19 +1185,23 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                     continue;
                 }
 
-                skipped += state.FramesSkipped;
+                // Our own mark, never `StatsBytesMark`: that one is written only by `StatsEncoder.WriteSessionSegment`, which runs only when the
+                // application declared metrics AND the session holds the Stats capability. With no metric catalog — the very case this emission exists to
+                // cover — it stays 0 for the session's life, so subtracting it divided a lifetime byte total by a one-second window and reported a figure
+                // that climbed for ever.
+                //
+                // Advanced for EVERY session walked, before the cap and the gate are consulted, because the mark is a window boundary and not a property of
+                // being reported. Advancing it only for reported rows reproduced the very defect the separate mark exists to prevent: a session past the cap
+                // kept a stale mark, and the first period it did fit in divided every skipped period's bytes by ONE window. The gate being off for a while
+                // did the same. The loop already visits every session, so this costs one store.
+                var bytes = Math.Max(0, state.BytesPublished - state.OperatorStatsBytesMark);
+                state.OperatorStatsBytesMark = state.BytesPublished;
 
                 if (!wantSessions || reported >= OperatorSessionRowCap)
                 {
                     continue;
                 }
 
-                // Our own mark, never `StatsBytesMark`: that one is written only by `StatsEncoder.WriteSessionSegment`, which runs only when the
-                // application declared metrics AND the session holds the Stats capability. With no metric catalog — the very case this emission exists to
-                // cover — it stays 0 for the session's life, so subtracting it divided a lifetime byte total by a one-second window and reported a figure
-                // that climbed for ever.
-                var bytes = Math.Max(0, state.BytesPublished - state.OperatorStatsBytesMark);
-                state.OperatorStatsBytesMark = state.BytesPublished;
                 TyphonEvent.EmitSubscriptionsSessionTelemetry(
                     sessionId: session.Value,
                     // -1 before the session's first RESET, widened to the wire's unsigned field so a consumer can tell that from realm 0.
@@ -1221,7 +1226,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             netOutBytesPerSec: (float)outBytesPerSec,
             trackP99Ms: (float)stats.TrackP99Ms(tickNumber, window),
             durabilityWaitP99Ms: (float)stats.DurabilityWaitP99Ms(tickNumber, window),
-            framesSkipped: skipped,
+            framesSkipped: FramesSkipped,
             framePoolRented: pool?.RentedCount ?? 0,
             framePoolBlocks: pool?.BlockCount ?? 0,
             framePoolBudgetSkips: pool?.BudgetSkipCount ?? 0,

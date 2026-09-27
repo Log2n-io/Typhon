@@ -124,6 +124,44 @@ internal void M() { }
 """)
         self.assertEqual({}, found)
 
+    def test_a_summary_inside_an_example_code_block_is_not_counted(self):
+        # A hard gate that fires on a correct file gets switched off. A doc comment may legally CONTAIN a summary as
+        # prose — an example showing how a member is documented — and an analyzer or generator is exactly where such an
+        # example belongs. The earlier probe used the `/// /// <summary>` nested form, which never matched; this is the
+        # plain form, which did.
+        found = self.scan("Sample.cs", """
+/// <summary>The type.</summary>
+/// <example>
+/// <code>
+/// <summary>Documents the member below.</summary>
+/// void M() { }
+/// </code>
+/// </example>
+class A { }
+""")
+        self.assertEqual({}, found)
+
+    def test_an_orphan_after_an_example_block_is_still_counted(self):
+        # The sample must suppress only itself: a real second summary AFTER the block closes is the defect.
+        found = self.scan("SampleThenOrphan.cs", """
+/// <summary>The type.</summary>
+/// <code>
+/// <summary>Prose.</summary>
+/// </code>
+/// <summary>A real second summary on the same member.</summary>
+class A { }
+""")
+        self.assertEqual({"src/SampleThenOrphan.cs": [6]}, found)
+
+    def test_a_one_line_code_sample_does_not_swallow_the_rest_of_the_block(self):
+        found = self.scan("OneLineCode.cs", """
+/// <summary>First.</summary>
+/// <code>var x = 1;</code>
+/// <summary>Second, and orphaned.</summary>
+class A { }
+""")
+        self.assertEqual({"src/OneLineCode.cs": [4]}, found)
+
     def test_a_bom_and_crlf_do_not_hide_an_orphan(self):
         # Probed because a miss here would be invisible: the file reads normally and the check simply says nothing.
         path = os.path.join(self.root, "src", "Bom.cs")

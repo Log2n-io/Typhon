@@ -32,8 +32,11 @@ Checks:
 Known limits, all of them misses rather than false alarms — deliberate, because a gate that blocks a correct push gets
 switched off, while one that lets some cases through still stops the shape that actually happens. Probed when it landed:
 
-  * A preprocessor directive between the two comments (`#region`, `#if`) ends the block, so the pair is not seen. The
-    mistake this exists to catch is a member inserted directly above a doc comment, which leaves them adjacent.
+  * Anything that is not a `///` line between the two comments ends the block, so the pair is not seen: a preprocessor
+    directive (`#region`, `#if`), or a plain `//` comment. The mistake this exists to catch is a member inserted
+    directly above a doc comment, which leaves them adjacent — and the separators that legitimately mean "two different
+    members" (an attribute, a blank line, code) are the same shape, so the check cannot tell them apart and errs
+    towards missing.
   * `/** … */` delimited doc comments are not read at all. This repo has none; `///` is universal here.
   * An UNESCAPED `<summary>` inside an `<example><code>` sample would count. In practice such a sample writes the
     inner comment's own `///` first (`/// /// <summary>`), which does not match, or escapes the angle brackets — and a
@@ -76,6 +79,16 @@ SKIP_DIRS = {"obj", "bin", "node_modules", ".git", "TestResults"}
 DOC_LINE = re.compile(r"^\s*///")
 OPEN_SUMMARY = re.compile(r"^\s*///\s*<summary>")
 
+# A doc comment may legally CONTAIN a `<summary>` that is not its own: an `<example>` or a `<code>` block showing how a
+# member is documented. Such a sample is prose, not a second element, so the lines between the opening and closing tag
+# are not counted. Without this the check is a hard gate that fires on a correct file, and `src/Typhon.Analyzers` and
+# `src/Typhon.Generators` are exactly where documenting-a-member examples belong.
+SAMPLE_OPEN = re.compile(r"^\s*///\s*<(example|code)\b")
+# NOT anchored, deliberately: `/// <code>var x = 1;</code>` closes on the line it opened, and an anchored close cannot
+# see that — it left the block open for the rest of the comment and swallowed a real orphan after it. Its own self-test
+# caught that.
+SAMPLE_CLOSE = re.compile(r"</(example|code)>")
+
 
 class Finding:
     def __init__(self, check, where, message):
@@ -90,9 +103,19 @@ def scan_file(path):
     try:
         with open(path, "r", encoding="utf-8-sig", errors="replace") as fh:
             summaries_in_block = 0
+            sample_depth = 0
             for number, line in enumerate(fh, start=1):
                 if not DOC_LINE.match(line):
                     summaries_in_block = 0
+                    sample_depth = 0
+                    continue
+                # A one-line `<code>…</code>` opens and closes on the same line, so close first and never go negative.
+                if SAMPLE_CLOSE.search(line):
+                    sample_depth = max(0, sample_depth - 1)
+                elif SAMPLE_OPEN.match(line) and not SAMPLE_CLOSE.search(line):
+                    sample_depth += 1
+                    continue
+                if sample_depth > 0:
                     continue
                 if OPEN_SUMMARY.match(line):
                     summaries_in_block += 1

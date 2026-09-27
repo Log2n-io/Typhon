@@ -139,7 +139,13 @@ export default function SubscriptionsPanel(_props: IDockviewPanelProps) {
       </table>
 
       <div className="p-3 text-fs-xs text-muted-foreground" data-testid="subscriptions-coverage">
-        {coverage.capped ? (
+        {coverage.sessionGateClosed ? (
+          <>
+            <b>{coverage.open}</b> sessions open and no per-session row in this window. The row cap is 64, so it cannot produce none: the{' '}
+            <span className="font-mono">Subscriptions:SessionTelemetry</span> gate is off, separately from the server record's. Enable it for
+            the per-session view — the figures above are unaffected.
+          </>
+        ) : coverage.capped ? (
           <>
             Showing <b>{coverage.reported}</b> of <b>{coverage.open}</b> open sessions, busiest first —{' '}
             <b>{coverage.hidden}</b> not shown. The engine caps the per-session rows so the trace cost does not scale with the session

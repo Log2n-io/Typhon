@@ -55,6 +55,15 @@ export interface SessionCoverage {
   hidden: number;
   /** True when the list is a sample rather than the population, which the panel must state rather than imply. */
   capped: boolean;
+  /**
+   * True when the server reports sessions open and NOT ONE row arrived — which the row cap cannot cause, so the per-session gate is off.
+   *
+   * Kinds 68 and 69 have independent gates (`telemetry-flags.jsonc`: `Subscriptions:ServerTelemetry` and `Subscriptions:SessionTelemetry`).
+   * With the first on and the second off the engine emits the server record with `reportedSessions: 0` and skips every row, so a 2048-session
+   * server produced "Showing 0 of 2048 open sessions — the engine caps the per-session rows". The cap is 64: it can never report zero. Saying
+   * the cap did it is a false cause in the one place the panel exists to be honest about what it is not showing.
+   */
+  sessionGateClosed: boolean;
 }
 
 /**
@@ -68,7 +77,13 @@ export function readSessionCoverage(row: SubscriptionsServerTelemetry, rows: rea
   // Trust the row count over the record's own field where they disagree: the rows are what is on screen, and a record whose
   // `reportedSessions` outran its rows (a truncated chunk, a mid-emission reconnect) must not make the panel claim rows it lacks.
   const reported = Math.min(rows.length, Math.max(0, row.reportedSessions));
-  return { open, reported, hidden: Math.max(0, open - reported), capped: open > reported };
+  return {
+    open,
+    reported,
+    hidden: Math.max(0, open - reported),
+    capped: open > reported,
+    sessionGateClosed: open > 0 && reported === 0,
+  };
 }
 
 /** A cumulative counter differentiated over the window, so the panel shows a rate rather than a total that only ever climbs. */
@@ -121,14 +136,10 @@ export function differentiate(
   if (!(seconds > 0)) {
     return { total, perSecond: null };
   }
-  // Clamped at zero, and the reason is ordinary rather than exceptional. `framesSkipped` on the server record is the SUM of per-session
-  // counters that each count since their own session opened, over a population that changes — so a session disconnecting removes its whole
-  // contribution and the total drops, with no restart and nothing wrong. (A restart does it too; it is the rarer cause.)
-  //
-  // The consequence to know, because the clamp hides it: in a window where a session left, skips by the sessions that stayed are subtracted
-  // away with it, so this reads 0 while skipping was happening. Reading 0 here means "no NET growth in a changing population", not "no skips".
-  // The fix belongs on the wire — a server-wide counter that does not leave with its session — not in this arithmetic, which cannot recover
-  // information the record does not carry.
+  // Clamped at zero because the engine can restart inside a window and a negative rate is not a reading about anything. The counters this is
+  // applied to are monotonic on the producer's side — `framesSkipped` and `framePoolBudgetSkips` both count since the RUNTIME started, not
+  // since each session opened — so a restart is the only ordinary way the difference goes negative. An earlier version of the wire summed
+  // per-session counters here, which fell whenever a session disconnected and made this clamp hide real skips; the fix was on the producer.
   return { total, perSecond: Math.max(0, total - pick(oldest)) / seconds };
 }
 

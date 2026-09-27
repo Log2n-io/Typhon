@@ -2,6 +2,7 @@ using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using Typhon.Engine.Internals;
 using Typhon.Engine.Tests.Profiler;
 using Typhon.Profiler;
@@ -64,15 +65,33 @@ class SubscriptionsOperatorTelemetryTests : TestBase<SubscriptionsOperatorTeleme
         TyphonProfiler.AttachExporter(observer);
         TyphonProfiler.Start(ResourceRegistry.Profiler, TraceMetadata());
         long seen;
+        long faults;
         try
         {
             using var world = new World(ProjectionTestSchema.SetupEngine(ServiceProvider));
-            seen = observer.WaitFor(TraceEventKind.SubscriptionsServerTelemetry, 3, TimeSpan.FromSeconds(5));
+
+            // Wait for the record this case is ABOUT, not for a count of the kind. `observer.WaitFor` counts every kind-68 record the exporter has seen, and
+            // the profiler is a process-global whose per-thread rings still hold records another fixture's runtime left queued — so a count of 3 was satisfied
+            // the instant the session started, by records belonging to servers with 1, 40 and 110 sessions, and this world was disposed before it had ticked.
+            // In isolation there is nothing stale, so the count waited for the right records and the case passed; the neighbours are what exposed it.
+            var deadline = Environment.TickCount64 + 5000;
+            while (!Decoded(observer).Any(IsIdleServer) && Environment.TickCount64 < deadline)
+            {
+                Thread.Sleep(5);
+            }
+
+            seen = observer.CountOf(TraceEventKind.SubscriptionsServerTelemetry);
+            // The emission is wrapped in a catch at its call site, because a throw there escapes OnTickEndInternal and costs the tick. That catch must not be
+            // able to hide a broken emission from this test — the whole point of the case is that records arrive — so the fault counter is asserted, not just
+            // the records. Without this, a throw reads as "no records" and sends the reader looking at the profiler instead of at the emitter.
+            faults = world.Context.OperatorTelemetryFaults;
         }
         finally
         {
             TyphonProfiler.Stop();
         }
+
+        Assert.That(faults, Is.Zero, "the operator emission threw and was caught — see SubscriptionsContext.OperatorTelemetryFaults");
 
         Assert.That(seen, Is.GreaterThanOrEqualTo(3),
             $"records seen: {observer.RecordsProcessed}, kinds: {KindsSeen(observer)}");
@@ -81,7 +100,7 @@ class SubscriptionsOperatorTelemetryTests : TestBase<SubscriptionsOperatorTeleme
         // fixture's runtime left queued is delivered to this exporter too. What this case claims is that a server with no session produces a record at all —
         // a neighbour's rows can only add to the set, never remove the one being looked for.
         var rows = Decoded(observer);
-        Assert.That(rows.Any(r => r.Sessions == 0 && r.ReportedSessions == 0 && r.NetOutBytesPerSec == 0), Is.True,
+        Assert.That(rows.Any(IsIdleServer), Is.True,
             $"no record reports an idle server; rows: {string.Join(" ", rows.Select(r => $"({r.Sessions},{r.ReportedSessions},{r.NetOutBytesPerSec})"))}");
     }
 
@@ -122,6 +141,16 @@ class SubscriptionsOperatorTelemetryTests : TestBase<SubscriptionsOperatorTeleme
             Assert.That(() => stats.TrackP99Ms(0, 1), Throws.Nothing, "the track's own ring, which already clamped");
         });
     }
+
+    /// <summary>
+    /// The reading this case exists for: a server with no session, reporting so rather than reporting nothing.
+    /// </summary>
+    /// <remarks>
+    /// Both the wait and the assertion use this, deliberately. A wait on a COUNT of the kind is satisfiable by a record from another fixture's runtime — the
+    /// profiler is process-global and its per-thread rings outlive a session — which returned before this world had ticked.
+    /// </remarks>
+    private static bool IsIdleServer(SubscriptionsServerTelemetryEventDto row) =>
+        row.Sessions == 0 && row.ReportedSessions == 0 && row.NetOutBytesPerSec == 0;
 
     private static string KindsSeen(TraceRingObserver observer) =>
         string.Join(", ", observer.GetRecords().Select(r => r.Kind).Distinct().OrderBy(k => (byte)k));
@@ -167,6 +196,9 @@ class SubscriptionsOperatorTelemetryTests : TestBase<SubscriptionsOperatorTeleme
         }
 
         public SubscriptionsRuntime Subscriptions { get; }
+
+        /// <summary>The context the emission is called from, so a case can read its fault counter.</summary>
+        public SubscriptionsContext Context => _runtime.SubscriptionsContextForTest;
 
         public void Dispose()
         {

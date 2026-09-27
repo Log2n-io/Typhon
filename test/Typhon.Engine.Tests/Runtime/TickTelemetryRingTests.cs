@@ -210,4 +210,67 @@ public class TickTelemetryRingTests
         Assert.That(clamped, Is.EqualTo(2), "a `from` older than the ring retains is clamped up, not refused");
         Assert.That(ring.TryGetRange(ring.NewestTick + 1, out _, out _), Is.False, "a range starting past the newest tick is empty, not a one-tick window");
     }
+
+    /// <summary>
+    /// <see cref="TickTelemetryRing.TryGetTick"/> and <see cref="TickTelemetryRing.TryGetSystemMetrics"/> answer false where their throwing peers throw.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why a range from <see cref="TickTelemetryRing.TryGetRange"/> is not enough.</b> The clamp is a snapshot and the validation is live. On a window as
+    /// wide as the ring — <c>TyphonRuntime.ReadStats</c> takes <c>windowTicks</c> from its caller, unbounded — the oldest end clamps EXACTLY to
+    /// <see cref="TickTelemetryRing.OldestAvailableTick"/>, so one tick recorded by the driver between resolving the range and reading its first element
+    /// evicts it and <see cref="TickTelemetryRing.GetTick"/> throws out of a public API. A reader walking a range wants that tick skipped; losing the oldest
+    /// sample of a percentile is the tearing it already accepts by reading a live ring.
+    /// </para>
+    /// <para>
+    /// Asserted against the throwing peers on the same tick numbers, so the pair cannot drift: the Try forms must answer false exactly where the others raise.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("TR-01")]
+    public void TryGetTickAndTryGetSystemMetrics_AnswerFalseWhereTheirThrowingPeersThrow()
+    {
+        var ring = new TickTelemetryRing(4, 1);
+        Span<SystemTelemetry> systems = stackalloc SystemTelemetry[1];
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(ring.TryGetTick(0, out _), Is.False, "an empty ring holds nothing");
+            Assert.That(ring.TryGetSystemMetrics(0, out _), Is.False);
+            Assert.That(ring.TryGetTick(-1, out _), Is.False, "and the negative the trap produces is not a tick either");
+        });
+
+        for (var i = 0; i < 6; i++)
+        {
+            ring.Record(new TickTelemetry { TickNumber = i, ActualDurationMs = i + 1f }, systems);
+        }
+
+        Assert.That(ring.OldestAvailableTick, Is.EqualTo(2), "the premise: ticks 0 and 1 have been evicted");
+
+        foreach (var evicted in (ReadOnlySpan<long>)[-1, 0, 1, 6, 7])
+        {
+            var at = evicted;
+            Assert.Multiple(() =>
+            {
+                Assert.That(ring.TryGetTick(at, out var gone), Is.False, $"tick {at} is not held");
+                Assert.That(gone.TickNumber, Is.Zero, "and the out parameter is default rather than a stale slot's contents");
+                Assert.That(ring.TryGetSystemMetrics(at, out var noSystems), Is.False);
+                Assert.That(noSystems.Length, Is.Zero);
+                Assert.That(() => ring.GetTick(at), Throws.TypeOf<ArgumentOutOfRangeException>(), "the peer raises on exactly this tick");
+            });
+        }
+
+        for (var held = 2L; held <= 5; held++)
+        {
+            var at = held;
+            Assert.Multiple(() =>
+            {
+                Assert.That(ring.TryGetTick(at, out var tick), Is.True);
+                Assert.That(tick.TickNumber, Is.EqualTo(at), "and it is the tick asked for, not a neighbour");
+                Assert.That(tick.ActualDurationMs, Is.EqualTo(at + 1f));
+                Assert.That(ring.TryGetSystemMetrics(at, out var metrics), Is.True);
+                Assert.That(metrics.Length, Is.EqualTo(1));
+            });
+        }
+    }
 }

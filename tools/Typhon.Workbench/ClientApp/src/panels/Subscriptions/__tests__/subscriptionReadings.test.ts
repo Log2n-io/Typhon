@@ -79,12 +79,27 @@ describe('readSessionCoverage', () => {
   it('reports the hidden count when the emission was capped', () => {
     const rows = Array.from({ length: 64 }, (_, i) => session(i));
     const c = readSessionCoverage(server({ sessions: 2048, reportedSessions: 64 }), rows);
-    expect(c).toEqual({ open: 2048, reported: 64, hidden: 1984, capped: true });
+    expect(c).toEqual({ open: 2048, reported: 64, hidden: 1984, capped: true, sessionGateClosed: false });
   });
 
   it('is not capped when every open session sent a row', () => {
     const c = readSessionCoverage(server({ sessions: 2, reportedSessions: 2 }), [session(1), session(2)]);
-    expect(c).toEqual({ open: 2, reported: 2, hidden: 0, capped: false });
+    expect(c).toEqual({ open: 2, reported: 2, hidden: 0, capped: false, sessionGateClosed: false });
+  });
+
+  // Kinds 68 and 69 have independent gates. With the server record on and the per-session one off, the engine emits
+  // `reportedSessions: 0` and no rows — and the cap is 64, so it can never report none. Blaming the cap would state a
+  // false cause in the one place the panel exists to be honest about what it is not showing.
+  it('distinguishes a closed per-session gate from the row cap', () => {
+    const c = readSessionCoverage(server({ sessions: 2048, reportedSessions: 0 }), []);
+    expect(c.sessionGateClosed).toBe(true);
+    expect(c.capped).toBe(true);
+    expect(c.hidden).toBe(2048);
+  });
+
+  it('does not call the gate closed when there is simply nobody connected', () => {
+    const c = readSessionCoverage(server({ sessions: 0, reportedSessions: 0 }), []);
+    expect(c).toEqual({ open: 0, reported: 0, hidden: 0, capped: false, sessionGateClosed: false });
   });
 
   it('trusts the rows on screen over a record claiming more than it delivered', () => {
@@ -115,21 +130,20 @@ describe('differentiate', () => {
     expect(r?.perSecond).toBeNull();
   });
 
-  // The commonest cause is not a restart: framesSkipped is a SUM over per-session counters, so a session disconnecting takes its whole
-  // contribution out of the total and the sum falls with nothing wrong. A negative rate is not a reading about anything either way.
-  it('clamps a counter that went backwards, which a session disconnecting is enough to cause', () => {
+  // The wire's counters are monotonic — both count since the RUNTIME started, not since each session opened — so a restart is the only
+  // ordinary way the difference goes negative, and a negative rate is not a reading about anything.
+  it('clamps a counter that went backwards, which means the engine restarted inside the window', () => {
     const ticks = [tick(0, server({ framesSkipped: 900 })), tick(50, server({ framesSkipped: 4 }))];
     expect(differentiate(ticks, (x) => x.framesSkipped, tickSeconds)?.perSecond).toBe(0);
   });
 
-  // The limitation the clamp hides, pinned so it is a known property rather than a surprise: in a window where a session left, the skipping
-  // done by the sessions that stayed is subtracted away with it. 0 here means "no NET growth across a changing population", not "no skips".
-  it('reads zero when a departing session\'s counter outweighs the skips of the sessions that stayed', () => {
-    // 700 leaves with one session; the remaining sessions skipped 60 more in the same window. Net is negative, so the real 60 is invisible.
-    const ticks = [tick(0, server({ framesSkipped: 900, sessions: 4 })), tick(50, server({ framesSkipped: 260, sessions: 3 }))];
+  // The property that makes the clamp safe rather than lossy, and the reason the producer had to change: a session leaving must not move this
+  // number down. Were framesSkipped still a sum over open sessions, the 60 skips the remaining sessions did here would be invisible.
+  it('reports the skips that happened even when the session count falls inside the window', () => {
+    const ticks = [tick(0, server({ framesSkipped: 900, sessions: 4 })), tick(50, server({ framesSkipped: 960, sessions: 3 }))];
     const r = differentiate(ticks, (x) => x.framesSkipped, tickSeconds);
-    expect(r?.perSecond).toBe(0);
-    expect(r?.total).toBe(260);
+    expect(r?.total).toBe(960);
+    expect(r?.perSecond).toBeGreaterThan(0);
   });
 
   it('returns null when nothing in the window carried a record', () => {

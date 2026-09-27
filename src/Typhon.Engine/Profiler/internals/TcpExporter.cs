@@ -629,10 +629,10 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
             // tables alone exceed the limit, this still returns a frame the receiver will refuse, and because it refuses by declaring the stream malformed
             // the Workbench drops the connection, reconnects, and is handed the identical frame — forever, with nothing in either log saying why. That is the
             // one outcome worse than failing to carry the schema, so it is stated once, loudly, at the point the size is known.
-            if (ms.Length > LiveStreamProtocol.MaxFrameBytes)
-            {
-                InitPayloadUnsendableBytes = ms.Length;
-            }
+            // Assigned unconditionally, so a later Initialize with smaller metadata clears it. Setting it only on the over-limit branch made the property
+            // contradict its own summary ("0 when the frame is sendable"): once raised it stayed raised for the exporter's life, so an operator reading it
+            // after a reconnect that succeeded saw a permanent "attach cannot succeed" that was no longer true.
+            InitPayloadUnsendableBytes = ms.Length > LiveStreamProtocol.MaxFrameBytes ? ms.Length : 0;
         }
 
         return ms.ToArray();

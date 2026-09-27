@@ -430,6 +430,11 @@ public static class TyphonProfiler
                 {
                     // Swallow per-batch exporter errors so one bad batch doesn't kill the whole exporter thread.
                     // Future: log via [LoggerMessage] once profiler logging is in place.
+                    //
+                    // Unfiltered on purpose, and it is what keeps the outer ObjectDisposedException catch honest: an exporter whose own sink is disposed —
+                    // a closed TcpExporter socket, a disposed FileStream — raises ObjectDisposedException from HERE, and that is a per-batch exporter
+                    // failure, not an abandoned queue. Netting it here means the outer catch only ever sees the enumerator's, so the counter it publishes
+                    // diagnoses the one condition it names.
                 }
                 finally
                 {

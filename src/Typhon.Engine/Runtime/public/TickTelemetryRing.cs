@@ -106,6 +106,60 @@ public sealed class TickTelemetryRing
     }
 
     /// <summary>
+    /// One tick's telemetry, or <see langword="false"/> when the ring no longer holds it. The non-throwing peer of <see cref="GetTick"/>.
+    /// </summary>
+    /// <param name="tickNumber">The tick to read.</param>
+    /// <param name="tick">The tick's telemetry. <c>default</c> when this returns <see langword="false"/>.</param>
+    /// <returns><see langword="false"/> when <paramref name="tickNumber"/> has been evicted, or has not been recorded.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>A range from <see cref="TryGetRange"/> is not a promise that every tick in it still exists when you get there.</b> The clamp is a snapshot and the
+    /// validation is live: the tick driver is a concurrent writer, so on a window as wide as <see cref="Capacity"/> the oldest end clamps EXACTLY to
+    /// <see cref="OldestAvailableTick"/>, and a single tick recorded between resolving the range and reading its first element evicts it. <see cref="GetTick"/>
+    /// then throws — out of whatever public method was reading, which for <c>TyphonRuntime.ReadStats</c> means an operator's stats call fails rather than
+    /// returning a slightly short window.
+    /// </para>
+    /// <para>
+    /// A reader walking a range wants that skipped, not raised: losing the oldest sample of a percentile is the tearing such a reader already accepts by
+    /// reading a live ring at all, and it is strictly less wrong than no answer. <see cref="GetTick"/> stays for a caller naming one tick it believes is
+    /// present, where a throw is the right answer to a bug.
+    /// </para>
+    /// </remarks>
+    public bool TryGetTick(long tickNumber, out TickTelemetry tick)
+    {
+        if (!Holds(tickNumber))
+        {
+            tick = default;
+            return false;
+        }
+
+        tick = _ticks[(int)(tickNumber & _mask)];
+        return true;
+    }
+
+    /// <summary>
+    /// One tick's per-system telemetry, or <see langword="false"/> when the ring no longer holds it. The non-throwing peer of <see cref="GetSystemMetrics"/>.
+    /// </summary>
+    /// <param name="tickNumber">The tick to read.</param>
+    /// <param name="systems">The tick's per-system metrics. Empty when this returns <see langword="false"/>.</param>
+    /// <returns><see langword="false"/> when <paramref name="tickNumber"/> has been evicted, or has not been recorded.</returns>
+    /// <remarks>Paired with <see cref="TryGetTick"/> for the same reason — see its remarks. A walk that guards one and not the other still throws.</remarks>
+    public bool TryGetSystemMetrics(long tickNumber, out ReadOnlySpan<SystemTelemetry> systems)
+    {
+        if (!Holds(tickNumber))
+        {
+            systems = default;
+            return false;
+        }
+
+        systems = _systemMetrics[(int)(tickNumber & _mask)].AsSpan(0, _systemCount);
+        return true;
+    }
+
+    /// <summary>Whether the ring currently holds <paramref name="tickNumber"/>. The predicate <see cref="ValidateTickNumber"/> throws on.</summary>
+    private bool Holds(long tickNumber) => _head != 0 && tickNumber >= OldestAvailableTick && tickNumber < _head;
+
+    /// <summary>
     /// Records a tick's telemetry data into the ring buffer. Called at the end of each tick by the scheduler.
     /// Zero allocation — copies data into pre-allocated slots.
     /// </summary>

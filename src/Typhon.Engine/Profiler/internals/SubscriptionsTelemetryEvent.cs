@@ -42,18 +42,18 @@ internal ref partial struct SubscriptionsServerTelemetryEvent
     /// the two numbers side by side are what tell those apart.
     /// </summary>
     [BeginParam] public float DurabilityWaitP99Ms;
-    /// <summary>Frames skipped since each session opened, summed over open sessions. Cumulative — a consumer differentiates it over its own window.</summary>
+    /// <summary>Frames skipped since the runtime started, server-wide. Monotonic — a consumer differentiates it over its own window.</summary>
     /// <remarks>
     /// <para>
     /// The most diagnostic counter on this record: a skip is the engine deciding a session could not keep up, so a rising slope here is the shape of "why did
     /// this client not see that entity" before anyone thinks to ask it.
     /// </para>
     /// <para>
-    /// <b>It is a sum over a population that changes, so it is not monotonic.</b> Each term counts since its own session opened, and a session that
-    /// disconnects takes its whole contribution out of the sum — so this can fall between two emissions with nothing wrong, and a difference across such a
-    /// window is smaller than the skipping that actually happened (a consumer clamping at zero reads 0). That is a limitation of the field, not of the
-    /// consumer: recovering the real figure needs a server-wide counter that does not leave with its session, which this record does not yet carry and should
-    /// gain by APPENDING when it does. Until then, read a rising slope as a real signal and a flat one as inconclusive.
+    /// <b><c>FrameAssembler.FramesSkipped</c>, the process-wide counter — not a sum over the open sessions.</b> The first version summed
+    /// <c>SessionFrameState.FramesSkipped</c> across currently-open sessions, which FALLS when one closes: a consumer told to differentiate it, as the line
+    /// above tells it to, got a negative rate out of an ordinary disconnect, and the skipping done by the sessions that stayed was subtracted away with the
+    /// departing session's total. Per-session skips are still available, per session, on
+    /// <see cref="SubscriptionsSessionTelemetryEvent.FramesSkipped"/> — where the population cannot change underneath the number.
     /// </para>
     /// </remarks>
     [BeginParam] public long FramesSkipped;

@@ -1602,8 +1602,15 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
 
         // Drain AFTER the read loop has been told to stop, not before. Draining first left a window — the loop was still live across the flush, the
         // `_disposed` store and the cancel — in which a finalized tick could land in `_pendingSummaryDeltas` and never be sent, which is exactly the loss the
-        // flush exists to prevent. Cancelling first closes the producer, so this drain sees everything there will ever be. The timers are already gone, so
-        // nothing else can race this call.
+        // flush exists to prevent. The timers are already gone, so none of them can race this call.
+        //
+        // It NARROWS that window rather than closing it, and the distinction matters to whoever reads this next. `_cts.Cancel()` only REQUESTS cancellation;
+        // nothing joins the read loop (it is detached), so a record already inside `FeedRawRecords` can still finalize a tick and append after this drain has
+        // run. Closing it needs the loop joined, which teardown deliberately does not do — a transport that never returns from a read must not hang the
+        // session's disposal.
+        //
+        // This drain also runs after the `_disposed` store above, and is correct only because neither `FlushPendingSummaryDeltas` nor `BroadcastDelta` carries
+        // a `_disposed` guard. Adding one later — which would look like tightening — silently restores the loss.
         try { FlushPendingSummaryDeltas(); } catch { }
         try { _cts.Dispose(); } catch { }
         try

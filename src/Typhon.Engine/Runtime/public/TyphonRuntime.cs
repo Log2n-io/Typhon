@@ -512,28 +512,40 @@ public sealed partial class TyphonRuntime : IDisposable
         // One spelling of the clamp, shared with the STATS path, rather than two that have to agree. Re-reading `newest` from it also makes the pair
         // self-consistent: the tick driver can advance between the read above and this one, and a window whose ends came from different reads is not a window.
         // A false return needs `window < 1`, which the old form turned into a zero-tick window; keep that rather than inventing a different answer.
-        var ticks = ring.TryGetRange(newest - window + 1, out var oldest, out newest) ? (int)(newest - oldest + 1) : 0;
-        var durations = new double[ticks];
-        var waits = new double[ticks];
+        var spanTicks = ring.TryGetRange(newest - window + 1, out var oldest, out newest) ? (int)(newest - oldest + 1) : 0;
+        var durations = new double[spanTicks];
+        var waits = new double[spanTicks];
         var systemSums = new double[Scheduler.AllSystemCount];
         var overruns = 0;
         var multiplier = 1;
-        var i = 0;
+
+        // How many ticks were actually READ, which is not the width of the range resolved above. The tick driver writes this ring concurrently, so a resolved
+        // range is not a promise that every tick in it still exists when the loop reaches it: with `windowTicks` as wide as the ring — it is caller-supplied
+        // and unbounded — `oldest` clamps exactly to OldestAvailableTick, and one tick recorded in between evicts it. GetTick would throw out of this public
+        // method, failing an operator's stats call rather than returning a window one sample short, so both reads go through the Try peers and a tick that has
+        // gone is skipped. That is the tearing this method's remarks already accept.
+        //
+        // Both reads are taken BEFORE anything is recorded, so a tick contributes to every figure or to none. Incrementing on the first and continuing on the
+        // second would leave the per-system means dividing by a count that includes ticks whose metrics were never summed.
+        var ticks = 0;
         for (var t = oldest; t <= newest; t++)
         {
-            ref readonly var tick = ref ring.GetTick(t);
-            durations[i] = tick.ActualDurationMs;
-            waits[i] = tick.UowFlushMs;
+            if (!ring.TryGetTick(t, out var tick) || !ring.TryGetSystemMetrics(t, out var systems))
+            {
+                continue;
+            }
+
+            durations[ticks] = tick.ActualDurationMs;
+            waits[ticks] = tick.UowFlushMs;
             // The newest tick's, so it ends up holding the last one the loop sees. Published beside Overruns because that count is measured against the 1×
             // target and a modulated tick legitimately exceeds it — see RuntimeStatsSnapshot.Overruns.
             multiplier = tick.TickMultiplier;
-            i++;
+            ticks++;
             if (targetMs > 0 && tick.ActualDurationMs > targetMs)
             {
                 overruns++;
             }
 
-            var systems = ring.GetSystemMetrics(t);
             var upTo = Math.Min(systems.Length, systemSums.Length);
             for (var sys = 0; sys < upTo; sys++)
             {
