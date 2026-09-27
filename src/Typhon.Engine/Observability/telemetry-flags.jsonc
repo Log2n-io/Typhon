@@ -655,6 +655,12 @@
                   "kind": "subtreeResolved",
                   "field": "SpatialArchetypeTelemetryActive",
                   "desc": "Combined gate for the Spatial:ClusterMigration:ArchetypeTelemetry instant (kind 66: the per-archetype per-tick counter snapshot the Workbench Spatial panel reads)."
+                },
+                {
+                  "name": "RealmTelemetry",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialRealmTelemetryActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:RealmTelemetry instant (kind 67: one row per RUNNABLE realm per spatial archetype, carrying that realm's partition shape). Separate from ArchetypeTelemetry because its volume scales with the realm count, not the archetype count: a galaxy of thousands of interiors can afford the one archetype record and not the thousands of realm rows."
                 }
               ]
             },

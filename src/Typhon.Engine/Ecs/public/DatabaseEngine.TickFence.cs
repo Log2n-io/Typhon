@@ -1877,6 +1877,12 @@ public partial class DatabaseEngine
             pinsRejected: clusterState.LastTickPinsRejected,
             crossingsQueued: clusterState.LastTickCrossingsQueued);
 
+        // The realm census, walked once for both records. O(present realms) — the same walk MaxClusterReachAcrossRealms already does, and behind the
+        // profiler gate above. Counted here rather than inside the per-realm emitter so the two records agree even when the per-realm kind is gated off:
+        // "runnable 3 of 1 188" must stay true whether or not the rows are being sent.
+        var present = clusterState.PresentRealmSpatial;
+        var runnable = CountRunnableRealms(present, clusterState.RealmTableOrNull);
+
         var samples = clusterState.LastTickTightnessSamples;
         TyphonEvent.EmitSpatialArchetypeTelemetry(
             archetypeId: archetypeId,
@@ -1910,7 +1916,96 @@ public partial class DatabaseEngine
             repairedEntities: clusterState.LastTickRepairedEntityCount,
             repairQueueEvicted: clusterState.RepairQueue?.TotalEvicted ?? 0L,
             measuredNsPerEntity: (float)clusterState.LastTickMeasuredNsPerEntity,
-            driftTargetBoost: clusterState.DriftTargetBoost);
+            driftTargetBoost: clusterState.DriftTargetBoost,
+            presentRealms: present.Length,
+            runnableRealms: runnable);
+
+        EmitSpatialRealmRows(clusterState, archetypeId, present);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="rs"/> is a realm the per-realm record is emitted for: one with a grid, that the policy considers runnable this tick.
+    /// </summary>
+    /// <remarks>
+    /// The single definition of "a realm that gets a row" (#WB-05). Kind 66's census and kind 67's rows both go through it, so the count and the rows can
+    /// never disagree — a census of 3 beside 4 rows reads as an engine bug and would be a duplicated predicate. A null realm table is the single-realm
+    /// engine, where realm 0 is always runnable.
+    /// </remarks>
+    /// <param name="rs">One realm's spatial state for this archetype.</param>
+    /// <param name="realms">The engine's realm table, or <see langword="null"/> for a non-realm engine.</param>
+    /// <returns><see langword="true"/> when the realm gets a row.</returns>
+    internal static bool RealmGetsATelemetryRow(RealmArchetypeSpatial rs, RealmTable realms)
+        => rs?.Grid != null && (realms == null || realms.IsRunnable(rs.Realm.Value));
+
+    /// <summary>
+    /// How many of <paramref name="present"/> get a per-realm telemetry row — kind 66's <c>runnableRealms</c>, against its <c>presentRealms</c>.
+    /// </summary>
+    /// <param name="present">The realms this archetype has cluster state in.</param>
+    /// <param name="realms">The engine's realm table, or <see langword="null"/>.</param>
+    /// <returns>The count.</returns>
+    internal static int CountRunnableRealms(ReadOnlySpan<RealmArchetypeSpatial> present, RealmTable realms)
+    {
+        var runnable = 0;
+        foreach (var rs in present)
+        {
+            if (RealmGetsATelemetryRow(rs, realms))
+            {
+                runnable++;
+            }
+        }
+
+        return runnable;
+    }
+
+    /// <summary>
+    /// One row per RUNNABLE realm this archetype has cluster state in (#WB-05, kind 67): that realm's grid, reach, outliers and configured budget.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Shape, never rates.</b> Every field is per-realm state the realm owns. The per-tick counters are owned per ARCHETYPE — one
+    /// <see cref="ArchetypeClusterState"/> serves every realm the archetype lives in — so a realm-keyed copy of them would report the sum under one realm's
+    /// name, which is worse than their absence because it would look right. Kind 66 remains their only source and is archetype-wide by construction.</para>
+    /// <para><b>Runnable only, and the skipped realms are accounted for rather than hidden.</b> <c>Realms/02-runtime-lifecycle.md</c> §6 bounds per
+    /// realm-archetype telemetry at "runnable only" because a galaxy of a few thousand sleeping interiors would otherwise spend the trace on rows that are
+    /// zero by definition. Kind 66 carries the present and runnable counts for the same tick, so a consumer states how many rows it is not showing — and a
+    /// realm going dormant is visible as a row disappearing while the skipped count rises.</para>
+    /// <para><b>Every read is O(1).</b> A pool's cluster count, a realm's reach, an escaped-set count, two list counts and four config fields — no walk of
+    /// cells, no allocation, and the whole method is behind the kind's own gate, so an engine not being watched pays the loop bound and nothing else.</para>
+    /// </remarks>
+    private static void EmitSpatialRealmRows(ArchetypeClusterState clusterState, ushort archetypeId, ReadOnlySpan<RealmArchetypeSpatial> present)
+    {
+        if (!TelemetryConfig.SpatialRealmTelemetryActive)
+        {
+            return;
+        }
+
+        var realms = clusterState.RealmTableOrNull;
+        foreach (var rs in present)
+        {
+            if (!RealmGetsATelemetryRow(rs, realms))
+            {
+                continue;
+            }
+
+            var config = rs.Grid.Config;
+            var divisor = realms?.DivisorOf(rs.Realm.Value) ?? 1;
+            TyphonEvent.EmitSpatialRealmTelemetry(
+                realmId: rs.Realm.Value,
+                archetypeId: archetypeId,
+                runState: (byte)(realms?.StateOf(rs.Realm.Value) ?? RealmRunState.Active),
+                // Saturated rather than wrapped: a divisor above 255 is not a policy any configuration reaches, and a wrapped 256 reading as 0 would say
+                // "every tick" about a realm visited once in 256.
+                divisor: (byte)Math.Min(divisor, byte.MaxValue),
+                cellSize: (float)config.CellSize,
+                cellCount: config.CellCount,
+                gridDepth: config.GridDepth,
+                clusters: rs.CellClusterPool?.ClusterListCount ?? 0,
+                clusterReach: Volatile.Read(ref rs.ClusterReach),
+                escapedClusters: rs.EscapedClusters.Count,
+                promotedCells: Volatile.Read(ref rs.PromotedCellCount),
+                blockedCells: rs.TightnessBlockedCells?.Count ?? 0,
+                budgetConfiguredMs: config.ReclusterBudgetMs,
+                efficiencyTolerance: config.QueryEfficiencyTolerance);
+        }
     }
 
     /// <summary>

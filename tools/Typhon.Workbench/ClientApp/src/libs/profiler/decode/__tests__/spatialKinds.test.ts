@@ -99,7 +99,7 @@ describe('#911 spatial trace kinds — wire layout', () => {
     expect(e.crossingsQueued).toBe(88);
   });
 
-  it('kind 66 SpatialArchetypeTelemetry: fifteen required fields, floats where the producer declares floats', () => {
+  it('kind 66 SpatialArchetypeTelemetry: a pre-#941 record still decodes, and its appended fields read zero', () => {
     // The three f32 slots (migrationCpuMs, budgetUsedMs, extentRatio/packingBound) are what an offset slip most easily
     // hides: an i32 read of a float's bytes yields a huge integer that no assertion on a count would catch.
     const bytes = record(66, false, (v, o) => {
@@ -138,6 +138,140 @@ describe('#911 spatial trace kinds — wire layout', () => {
     expect(e.packingBound).toBeCloseTo(0.5, 5);
     expect(e.cellTreePromotions).toBe(1);
     expect(e.cellTreeDemotions).toBe(4);
+
+    // #944. This record stops at 58 payload bytes — exactly what the engine wrote before #941 appended the controller
+    // fields. An instant grows by appending, so a short record is a strict PREFIX of a long one and its missing fields
+    // must decode as zero. The alternative is what makes this worth a test: reading past the record into whatever
+    // follows it, which yields plausible numbers rather than an error.
+    expect(e.queryClustersOpened).toBe(0);
+    expect(e.candidatesPerHitSmoothed).toBe(0);
+    expect(e.controllerFlags).toBe(0);
+    expect(e.driftTargetBoost).toBe(0);
+  });
+
+  it('kind 66 SpatialArchetypeTelemetry: the seventeen fields #941 appended, in the layout the producer declares', () => {
+    // Transcribed from SpatialArchetypeTelemetryEvent's [BeginParam] order. The generator packs with NO alignment
+    // padding — a u8 at 106 is followed by an i32 at 107 — so every offset after ControllerFlags is odd, which is
+    // exactly the kind of layout a hand-transcribed decoder gets wrong by assuming alignment.
+    const bytes = record(66, false, (v, o) => {
+      v.setUint16(o, 9, true);                      // archetypeId
+      v.setInt32(o + 2, 1234, true);                // activeClusters
+      v.setInt32(o + 6, 56, true);                  // migrations
+      v.setFloat32(o + 10, 4.5, true);              // migrationCpuMs
+      v.setInt32(o + 14, 7, true);                  // hysteresisAbsorbed
+      v.setInt32(o + 18, 88, true);                 // driftersDetected
+      v.setInt32(o + 22, 2, true);                  // repairUnits
+      v.setInt32(o + 26, 3, true);                  // repairUnitsRefused
+      v.setInt32(o + 30, 17, true);                 // repairQueueDepth
+      v.setFloat32(o + 34, 1.25, true);             // budgetUsedMs
+      v.setInt32(o + 38, 640, true);                // tightnessSamples
+      v.setFloat32(o + 42, 0.9, true);              // extentRatio
+      v.setFloat32(o + 46, 0.5, true);              // packingBound
+      v.setInt32(o + 50, 1, true);                  // cellTreePromotions
+      v.setInt32(o + 54, 4, true);                  // cellTreeDemotions
+      v.setBigInt64(o + 58, 9_001n, true);          // queryClustersOpened
+      v.setBigInt64(o + 66, 400_000n, true);        // queryCandidates
+      v.setBigInt64(o + 74, 200_000n, true);        // queryHits
+      v.setFloat32(o + 82, 8.0, true);              // budgetConfiguredMs
+      v.setFloat32(o + 86, 2.0, true);              // budgetGrantedMs
+      v.setFloat32(o + 90, 0.25, true);             // efficiencyTolerance
+      v.setFloat32(o + 94, 2.5, true);              // candidatesPerHitSmoothed
+      v.setFloat32(o + 98, 2.0, true);              // candidatesPerHitBest
+      v.setInt32(o + 102, 13, true);                // ticksAtWholeBudget
+      v.setUint8(o + 106, 0x03);                    // controllerFlags — both bits
+      v.setInt32(o + 107, 6, true);                 // efficiencyRebases
+      v.setInt32(o + 111, 21, true);                // repairCellsCooling
+      v.setInt32(o + 115, 2, true);                 // repairValveFires
+      v.setInt32(o + 119, 512, true);               // repairedEntities
+      v.setBigInt64(o + 123, 77n, true);            // repairQueueEvicted
+      v.setFloat32(o + 131, 145.5, true);           // measuredNsPerEntity
+      v.setFloat32(o + 135, 1.5, true);             // driftTargetBoost
+      v.setInt32(o + 139, 1188, true);              // presentRealms  (#WB-05)
+      v.setInt32(o + 143, 3, true);                 // runnableRealms
+      return o + 147;
+    });
+
+    const e = decodeOne(bytes);
+    // The prefix must still be right: an offset slip in the appended block is a bug, but one in the prefix would be a
+    // regression in what already worked.
+    expect(e.cellTreeDemotions).toBe(4);
+    expect(e.queryClustersOpened).toBe(9_001);
+    expect(e.queryCandidates).toBe(400_000);
+    expect(e.queryHits).toBe(200_000);
+    expect(e.budgetConfiguredMs).toBeCloseTo(8.0, 5);
+    expect(e.budgetGrantedMs).toBeCloseTo(2.0, 5);
+    expect(e.efficiencyTolerance).toBeCloseTo(0.25, 5);
+    expect(e.candidatesPerHitSmoothed).toBeCloseTo(2.5, 5);
+    expect(e.candidatesPerHitBest).toBeCloseTo(2.0, 5);
+    expect(e.ticksAtWholeBudget).toBe(13);
+    expect(e.controllerFlags).toBe(0x03);
+    expect(e.efficiencyRebases).toBe(6);
+    expect(e.repairCellsCooling).toBe(21);
+    expect(e.repairValveFires).toBe(2);
+    expect(e.repairedEntities).toBe(512);
+    expect(e.repairQueueEvicted).toBe(77);
+    expect(e.measuredNsPerEntity).toBeCloseTo(145.5, 4);
+    expect(e.driftTargetBoost).toBeCloseTo(1.5, 5);
+    expect(e.presentRealms).toBe(1188);
+    expect(e.runnableRealms).toBe(3);
+  });
+
+  it('kind 66: a record that stops MID-append zero-fills from that point, rather than reading past its end', () => {
+    // The case a length check alone would miss: the record reaches some appended fields and not others. 82 payload
+    // bytes is the three i64 query counters and nothing after them.
+    const bytes = record(66, false, (v, o) => {
+      v.setUint16(o, 9, true);
+      v.setBigInt64(o + 58, 5n, true);
+      v.setBigInt64(o + 66, 6n, true);
+      v.setBigInt64(o + 74, 7n, true);
+      return o + 82;
+    });
+
+    const e = decodeOne(bytes);
+    expect(e.queryClustersOpened).toBe(5);
+    expect(e.queryCandidates).toBe(6);
+    expect(e.queryHits).toBe(7);
+    expect(e.budgetConfiguredMs).toBe(0);
+    expect(e.controllerFlags).toBe(0);
+    expect(e.driftTargetBoost).toBe(0);
+  });
+
+  it('kind 67 SpatialRealmTelemetry: two u16s then two u8s, so every field after them is misaligned on purpose', () => {
+    // The layout a decoder gets wrong by assuming a float starts on a 4-byte boundary: cellSize sits at payload+6.
+    const bytes = record(67, false, (v, o) => {
+      v.setUint16(o, 1188, true);         // realmId
+      v.setUint16(o + 2, 7, true);        // archetypeId
+      v.setUint8(o + 4, 1);               // runState — Simulated
+      v.setUint8(o + 5, 4);               // divisor
+      v.setFloat32(o + 6, 64, true);      // cellSize
+      v.setInt32(o + 10, 256, true);      // cellCount
+      v.setInt32(o + 14, 1, true);        // gridDepth
+      v.setInt32(o + 18, 31, true);       // clusters
+      v.setFloat32(o + 22, 180.9, true);  // clusterReach
+      v.setInt32(o + 26, 3, true);        // escapedClusters
+      v.setInt32(o + 30, 2, true);        // promotedCells
+      v.setInt32(o + 34, 4, true);        // blockedCells
+      v.setFloat32(o + 38, 8, true);      // budgetConfiguredMs
+      v.setFloat32(o + 42, 0.25, true);   // efficiencyTolerance
+      return o + 46;
+    });
+
+    const e = decodeOne(bytes);
+    expect(e.kind).toBe(TraceEventKind.SpatialRealmTelemetry);
+    expect(e.realmId).toBe(1188);
+    expect(e.archetypeId).toBe(7);
+    expect(e.runState).toBe(1);
+    expect(e.divisor).toBe(4);
+    expect(e.cellSize).toBeCloseTo(64, 5);
+    expect(e.cellCount).toBe(256);
+    expect(e.gridDepth).toBe(1);
+    expect(e.clusters).toBe(31);
+    expect(e.clusterReach).toBeCloseTo(180.9, 4);
+    expect(e.escapedClusters).toBe(3);
+    expect(e.promotedCells).toBe(2);
+    expect(e.blockedCells).toBe(4);
+    expect(e.budgetConfiguredMs).toBeCloseTo(8, 5);
+    expect(e.efficiencyTolerance).toBeCloseTo(0.25, 5);
   });
 
   it('kind 60 ClusterMigration: the #911 optional block is additive — a pre-#911 record still decodes', () => {

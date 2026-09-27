@@ -10,7 +10,12 @@ import {
   detectRepairPin,
   latestSampleFor,
   ratePerSecond,
+  readController,
+  readQueryEfficiency,
+  readRealmShapes,
   readTightness,
+  realmRunStateName,
+  windowGrowth,
 } from './spatialReadings';
 
 /**
@@ -61,6 +66,12 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
   const repairPin = detectRepairPin(windowedTicks, archetypeId);
   const migrationsPerSec = ratePerSecond(windowedTicks, archetypeId, (r) => r.migrations);
   const driftersPerSec = ratePerSecond(windowedTicks, archetypeId, (r) => r.driftersDetected);
+  // #944 — the appended controller half. Efficiency is a WINDOW sum (the field's own instruction) while the controller's
+  // state is read off the latest record: one is a cost over time, the other is where the controller stands right now.
+  const efficiency = readQueryEfficiency(windowedTicks, archetypeId);
+  const evictedInWindow = windowGrowth(windowedTicks, archetypeId, (r) => r.repairQueueEvicted);
+  const realms = readRealmShapes(windowedTicks, archetypeId);
+  const rebasesInWindow = windowGrowth(windowedTicks, archetypeId, (r) => r.efficiencyRebases);
 
   return (
     <div className="flex h-full w-full flex-col overflow-auto bg-background" data-testid="spatial-maintenance">
@@ -88,6 +99,7 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
             row={sample.row}
             identity={identity}
             repairPin={repairPin}
+            efficiency={efficiency}
           />
 
           <Group title="Crossing" testId="spatial-group-crossing" hint="An entity left its cell. Correctness — never refused.">
@@ -124,11 +136,51 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
             <FenceSpan gaugeSeries={gaugeData.gaugeSeries} migrationCpuMs={sample.row.migrationCpuMs} tickNumber={sample.tickNumber} />
           </Group>
 
+          <Group
+            title="Controller"
+            testId="spatial-group-controller"
+            hint="What the budget above was DERIVED from: the queries' efficiency decides the share of the configured budget the fence may spend."
+          >
+            <Stat label="Budget configured" value={sample.row.budgetConfiguredMs} decimals={3} unit="ms"
+              hint="The ReclusterBudgetMs ceiling. Repeated in every record because an attach stream carries no configuration." />
+            <Stat label="Budget granted" value={sample.row.budgetGrantedMs} decimals={3} unit="ms"
+              hint="Configured x the share the efficiency earned. 'Budget committed' above is what the repair path then spent of it." />
+            <Stat label="Tolerance" value={sample.row.efficiencyTolerance} decimals={2}
+              hint="QueryEfficiencyTolerance. ZERO MEANS THE CONTROLLER IS OFF, not that it tolerates everything." />
+            <Stat label="Candidates/hit (now)" value={sample.row.candidatesPerHitSmoothed} decimals={2} hint="Smoothed — the controller's input." />
+            <Stat label="Candidates/hit (best)" value={sample.row.candidatesPerHitBest} decimals={2}
+              hint="The set point: the lowest smoothed value since the last re-base." />
+            <Stat label="Ticks at whole budget" value={sample.row.ticksAtWholeBudget}
+              hint="Consecutive. The re-base comes the tick after EfficiencyRebaseTicks of them." />
+            <Stat label="Re-bases (window)" value={rebasesInWindow}
+              hint="Differentiated over the window — the raw counter is cumulative since the cluster state was created." />
+            <Stat label="Measured cost" value={sample.row.measuredNsPerEntity} decimals={1} unit="ns/entity"
+              hint="The per-entity migration cost the budget was actually spent against." />
+            <Stat label="Drift-target boost" value={sample.row.driftTargetBoost} decimals={2} unit="x"
+              hint="The throttle's multiplier on the drift target. 1 is none; at its cap, relocation detection is off." />
+          </Group>
+
+          <Group
+            title="Repair health"
+            testId="spatial-group-repair-health"
+            hint="Whether the repair path is working or merely surviving: what cooled off, what the valve forced through, what fell off the queue."
+          >
+            <Stat label="Cells cooling" value={sample.row.repairCellsCooling}
+              hint="Waiting out RepairCooldownTicks after a repair. A level, not a rate." />
+            <Stat label="Valve fires" value={sample.row.repairValveFires}
+              hint="Units admitted PAST the budget. A steady non-zero here with units pinned at one is the budget not working." />
+            <Stat label="Entities repaired" value={sample.row.repairedEntities} />
+            <Stat label="Queue evicted (window)" value={evictedInWindow}
+              hint="Candidates dropped at the queue cap, differentiated over the window. Non-zero means repair demand exceeds the queue." />
+          </Group>
+
           <Group title="Structure" testId="spatial-group-structure" hint="What the partition looks like right now.">
             <Stat label="Active clusters" value={sample.row.activeClusters} />
             <Stat label="Cell-tree promotions" value={sample.row.cellTreePromotions} />
             <Stat label="Cell-tree demotions" value={sample.row.cellTreeDemotions} />
           </Group>
+
+          <Realms reading={realms} />
 
           <GridOccupancy gaugeSeries={gaugeData.gaugeSeries} />
         </>
@@ -140,13 +192,15 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
 // ── The three derived readings ───────────────────────────────────────────────────────────────────────────────────
 
 function DerivedReadings({
-  row, identity, repairPin,
+  row, identity, repairPin, efficiency,
 }: {
   row: SpatialTickTelemetry;
   identity: ReturnType<typeof checkDrifterIdentity>;
   repairPin: ReturnType<typeof detectRepairPin>;
+  efficiency: ReturnType<typeof readQueryEfficiency>;
 }) {
   const tightness = readTightness(row);
+  const controller = readController(row);
 
   return (
     <div className="flex flex-col gap-2 border-b border-border p-3" data-testid="spatial-readings">
@@ -189,6 +243,25 @@ function DerivedReadings({
         note={repairPin.pinned
           ? 'Pinned at one while units are being refused — the signature of a budget the planner cannot spend, where the single unit each tick is the safety valve rather than the budget working.'
           : 'Watches for a unit count pinned at 1 across budgets while units are refused.'}
+      />
+
+      {/* 4 — #944: the controller, as a verdict. The nine numbers in the Controller block below are only readable against
+          the one question they answer: is the fence being given the budget its query efficiency has earned? */}
+      <Reading
+        testId="spatial-reading-controller"
+        title="Budget controller"
+        ok={!controller.active || !controller.hasSignal ? null : controller.grantedShare >= 0.999 === controller.withinTolerance}
+        detail={!controller.active
+          ? 'QueryEfficiencyTolerance is 0 — the controller is off and the fence always receives the whole configured budget.'
+          : !controller.hasSignal
+            ? `No efficiency signal this tick (the queries did not hit enough to steer by), so the grant is being held at `
+              + `${(controller.grantedShare * 100).toFixed(0)}% rather than decided.`
+            : `granted ${(controller.grantedShare * 100).toFixed(0)}% of ${controller.configuredMs.toFixed(3)} ms — `
+              + `candidates/hit ${controller.smoothed.toFixed(2)} against a best of ${controller.best.toFixed(2)} `
+              + `(${controller.distanceFromBest.toFixed(2)}x, tolerance ${controller.tolerance.toFixed(2)})`}
+        note={controller.rebasedThisTick
+          ? 'This tick RE-BASED the best: the controller accepted the current cost as the new set point, having spent EfficiencyRebaseTicks at the whole budget without recovering the old one.'
+          : `Window cost: ${efficiency.candidatesPerHit.toFixed(2)} candidates per hit over ${efficiency.samples.toLocaleString()} tick(s) — summed, never averaged.`}
       />
     </div>
   );
@@ -305,6 +378,101 @@ function GridOccupancy({ gaugeSeries }: { gaugeSeries: Map<GaugeId, GaugeSeries>
 }
 
 // ── Layout primitives ────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The per-realm shape table (#WB-05, kind 67).
+ *
+ * <b>Shape, not rates, and the block says so.</b> A realm owns its grid, its cell size and its maintenance budget since
+ * #1050, so "is spatial healthy" became a per-realm question — a thrashing 50 m dungeon is invisible behind a calm 16 km
+ * planet. What is per-realm in the engine TODAY is the shape; the per-tick counters are owned per archetype, one set for
+ * every realm, so this table cannot show them and the footer says which figures are summed instead of leaving a reader
+ * to assume the rows account for everything.
+ *
+ * <b>Runnable realms only.</b> A dormant realm sends no row, which is why the census is printed beside the count: "3 of
+ * 1 188" is a fact about the engine, while four rows with no denominator reads as four realms existing.
+ */
+function Realms({ reading }: { reading: ReturnType<typeof readRealmShapes> }) {
+  if (reading.tickNumber === null) {
+    return (
+      <div className="border-b border-border p-3" data-testid="spatial-group-realms">
+        <div className="text-fs-sm font-medium text-foreground">Realms</div>
+        <div className="mt-1 text-fs-xs text-muted-foreground">
+          No realm rows in the window. An engine with one realm still emits a row for it, so this means the per-realm
+          telemetry flag is off (<code>Spatial:ClusterMigration:RealmTelemetry</code>) or no realm was runnable.
+        </div>
+      </div>
+    );
+  }
+
+  const hidden = Math.max(0, reading.presentRealms - reading.rows.length);
+  return (
+    <div className="border-b border-border p-3" data-testid="spatial-group-realms">
+      <div className="text-fs-sm font-medium text-foreground">Realms</div>
+      <div className="mb-2 text-fs-xs text-muted-foreground" data-testid="spatial-realms-census">
+        {`${reading.rows.length.toLocaleString()} runnable of ${reading.presentRealms.toLocaleString()} this archetype lives in`}
+        {hidden > 0 ? ` — ${hidden.toLocaleString()} not runnable, so not shown` : ''}
+        {` (tick ${reading.tickNumber.toLocaleString()})`}
+      </div>
+      <table className="w-full text-fs-xs" data-testid="spatial-realms-table">
+        <thead className="text-muted-foreground">
+          <tr className="text-left">
+            <th className="font-normal">realm</th>
+            <th className="font-normal">state</th>
+            <th className="font-normal text-right">÷</th>
+            <th className="font-normal text-right">cell</th>
+            <th className="font-normal text-right">cells</th>
+            <th className="font-normal text-right">clusters</th>
+            <th className="font-normal text-right">reach</th>
+            <th className="font-normal text-right">escaped</th>
+            <th className="font-normal text-right">promoted</th>
+            <th className="font-normal text-right">blocked</th>
+            {/* "declared", not "budget". Maintenance is budgeted per archetype from realm 0's grid, so a realm's configured
+                value is what it asks for and not what it gets — a column reading "budget" would be presenting the ceiling a
+                grant was measured against, which is a different number and lives on the archetype row. */}
+            <th className="font-normal text-right">budget&nbsp;(decl)</th>
+          </tr>
+        </thead>
+        <tbody className="font-mono text-foreground">
+          {reading.rows.map((r) => (
+            <tr key={r.realmId} data-testid={`spatial-realm-row-${r.realmId}`}>
+              <td>#{r.realmId}</td>
+              <td className="font-sans text-muted-foreground">{realmRunStateName(r.runState)}</td>
+              <td className="text-right">{r.divisor}</td>
+              <td className="text-right">{r.cellSize.toLocaleString(undefined, { maximumFractionDigits: 1 })} m</td>
+              <td className="text-right">{r.cellCount.toLocaleString()}{r.gridDepth > 1 ? ' ³' : ''}</td>
+              <td className="text-right">{r.clusters.toLocaleString()}</td>
+              {/* Reach in CELLS, with the metres beside it. The raw value is not a reading: 180 m is nothing in a 1 km
+                  realm and means the broadphase has stopped pruning in a 64 m one. */}
+              <td className={`text-right ${r.reachBlown ? 'text-amber-300' : ''}`} title={`${r.clusterReach.toFixed(1)} m`}>
+                {r.reachInCells.toLocaleString(undefined, { maximumFractionDigits: 2 })}×
+              </td>
+              <td className="text-right">{r.escapedClusters.toLocaleString()}</td>
+              <td className="text-right">{r.promotedCells.toLocaleString()}</td>
+              <td className="text-right">{r.blockedCells.toLocaleString()}</td>
+              <td
+                className={`text-right ${Math.abs(r.budgetConfiguredMs - reading.enforcedBudgetMs) > 0.01 ? 'text-amber-300' : ''}`}
+                title={`declares ${r.budgetConfiguredMs.toFixed(2)} ms; the engine enforces ${reading.enforcedBudgetMs.toFixed(2)} ms for the whole archetype`}
+              >
+                {r.budgetConfiguredMs.toFixed(2)} ms
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <div className="mt-2 text-fs-xs text-muted-foreground" data-testid="spatial-realms-footer">
+        Shape only. Migrations, repair units, budget spent and the tightness means are owned per archetype in the engine —
+        one set of counters for every realm — so the blocks above are sums across these rows, not one realm's work.
+        {' '}
+        <b>budget (decl)</b> is each realm&apos;s declaration; the engine enforces{' '}
+        <span className="font-mono">{reading.enforcedBudgetMs.toFixed(2)} ms</span> for the whole archetype, from realm 0&apos;s
+        grid.
+        {reading.someRealmDeclaresADifferentBudget
+          ? ' A realm highlighted above declares a budget that is not the one being enforced for it.'
+          : ''}
+      </div>
+    </div>
+  );
+}
 
 function Group({ title, testId, hint, children }: {
   title: string; testId: string; hint: string; children: React.ReactNode;

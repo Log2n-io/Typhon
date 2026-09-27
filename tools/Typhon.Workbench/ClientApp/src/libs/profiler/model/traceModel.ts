@@ -417,6 +417,59 @@ export interface TickData {
    * tick that is not a chunk boundary. A consumer walking raw events for a per-tick series would silently see one tick in fifty.
    */
   spatialByArchetype?: Map<number, SpatialTickTelemetry>;
+
+  /**
+   * One row per (realm, archetype) that sent a kind-67 record this tick — the SHAPE of each runnable realm's partition
+   * (#WB-05), keyed <c>realmId * 65536 + archetypeId</c>.
+   *
+   * <b>Runnable realms only, and that is why the census exists.</b> A dormant realm sends no row, so a panel must read
+   * <c>presentRealms</c> / <c>runnableRealms</c> off the archetype row to say how many realms it is not showing. An
+   * absent row means "not runnable this tick", never "no such realm".
+   */
+  spatialByRealm?: Map<number, SpatialRealmShape>;
+}
+
+/** Key for {@link TickData.spatialByRealm}. Both halves are u16 on the wire, so the pack is lossless. */
+export function realmArchetypeKey(realmId: number, archetypeId: number): number {
+  return realmId * 65536 + archetypeId;
+}
+
+/**
+ * One realm's partition shape for one archetype, for one tick (kind 67).
+ *
+ * <b>No rate counters, deliberately.</b> Migrations, repair units, budget spent and the tightness means are owned per
+ * ARCHETYPE in the engine — one set of counters serves every realm the archetype lives in — so they are absent here
+ * rather than copied under a realm's name, where they would read as that realm's work and be the sum of all realms'.
+ * They live on {@link SpatialTickTelemetry}, which is archetype-wide by construction.
+ */
+export interface SpatialRealmShape {
+  realmId: number;
+  archetypeId: number;
+  /** `RealmRunState`: Dormant 0, Simulated 1, Active 2, Closing 3. */
+  runState: number;
+  /** 1 = visited every tick; N = once every N ticks. */
+  divisor: number;
+  /** THIS realm's cell edge. Two realms of one archetype routinely differ by orders of magnitude. */
+  cellSize: number;
+  cellCount: number;
+  /** 1 for a flat realm — the record states dimensionality this way rather than with a flag. */
+  gridDepth: number;
+  clusters: number;
+  /** How far past its cell a query reaches, in world units. Meaningless except against `cellSize`. */
+  clusterReach: number;
+  escapedClusters: number;
+  promotedCells: number;
+  blockedCells: number;
+  /**
+   * This realm's **declared** `ReclusterBudgetMs` — what its config asks for, not what the engine enforces.
+   *
+   * Maintenance is budgeted per ARCHETYPE and the one budget spent comes from realm 0's grid, so two realms declaring
+   * different values both run under realm 0's. The effective ceiling is {@link SpatialTickTelemetry.budgetConfiguredMs}
+   * on the archetype row; this is the declaration, which is worth seeing precisely when it differs.
+   */
+  budgetConfiguredMs: number;
+  /** This realm's **declared** `QueryEfficiencyTolerance`. Declared, for the same reason as `budgetConfiguredMs`. */
+  efficiencyTolerance: number;
 }
 
 /**
@@ -443,6 +496,13 @@ function spatialRowFor(map: Map<number, SpatialTickTelemetry>, archetypeId: numb
       budgetUsedMs: 0,
       tightnessSamples: 0, extentRatio: 0, packingBound: 0,
       activeClusters: 0, cellTreePromotions: 0, cellTreeDemotions: 0,
+      queryClustersOpened: 0, queryCandidates: 0, queryHits: 0,
+      budgetConfiguredMs: 0, budgetGrantedMs: 0, efficiencyTolerance: 0,
+      candidatesPerHitSmoothed: 0, candidatesPerHitBest: 0, ticksAtWholeBudget: 0,
+      controllerFlags: 0, efficiencyRebases: 0,
+      repairCellsCooling: 0, repairValveFires: 0, repairedEntities: 0, repairQueueEvicted: 0,
+      measuredNsPerEntity: 0, driftTargetBoost: 0,
+      presentRealms: 0, runnableRealms: 0,
     };
     map.set(archetypeId, row);
   }
@@ -481,6 +541,46 @@ export interface SpatialTickTelemetry {
   activeClusters: number;
   cellTreePromotions: number;
   cellTreeDemotions: number;
+  // ── Query tally (#941, decoded since #944) ──
+  /** Clusters this archetype's range queries opened since the previous fence. SUM across records for a window. */
+  queryClustersOpened: number;
+  /** Entities in those clusters — every occupied slot, matched or not. */
+  queryCandidates: number;
+  queryHits: number;
+  // ── Maintenance controller ──
+  /** The configured `ReclusterBudgetMs`: the ceiling the grant is a share of. */
+  budgetConfiguredMs: number;
+  /** What the controller actually granted this tick. `budgetUsedMs` is what the repair path then committed. */
+  budgetGrantedMs: number;
+  /** Configured `QueryEfficiencyTolerance`. Zero means the controller is OFF. */
+  efficiencyTolerance: number;
+  candidatesPerHitSmoothed: number;
+  /** The set point: the lowest smoothed value since the last re-base. */
+  candidatesPerHitBest: number;
+  ticksAtWholeBudget: number;
+  /** Bit 0: the queries hit enough to steer by. Bit 1: this tick re-based the best. */
+  controllerFlags: number;
+  /** Cumulative since the archetype's cluster state was created, so a dropped record loses none. */
+  efficiencyRebases: number;
+  // ── Repair health ──
+  /** Cells waiting out `RepairCooldownTicks`. A level. */
+  repairCellsCooling: number;
+  repairValveFires: number;
+  repairedEntities: number;
+  /** Cumulative — differentiate across records to get a rate. */
+  repairQueueEvicted: number;
+  measuredNsPerEntity: number;
+  /** 1 = no throttle. At its cap, relocation detection is off. */
+  driftTargetBoost: number;
+  // ── Realm census (#WB-05) ──
+  /**
+   * Realms this archetype has cluster state in. Every OTHER field on this interface is summed across all of them — the
+   * engine owns the per-tick counters per archetype, not per realm — so this is the number that says how much is being
+   * summed, not a dimension to split by.
+   */
+  presentRealms: number;
+  /** How many of those sent a {@link SpatialRealmShape} row this tick. The rest are not runnable. */
+  runnableRealms: number;
 }
 
 /** One ThreadInfo record (kind 77) — slot ownership metadata emitted when a producer thread claims its slot. */
@@ -682,6 +782,7 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
   let gaugeSnapshot: GaugeSnapshot | undefined;
   // #911 O3 — built lazily so a tick with no spatial archetype carries no map at all rather than an empty one.
   let spatialByArchetype: Map<number, SpatialTickTelemetry> | undefined;
+  let spatialByRealm: Map<number, SpatialRealmShape> | undefined;
 
   // Phases are still emitted as Start/End instant pairs — keep a short-lived map to pair them up.
   const openPhases = new Map<number, TraceEvent>();
@@ -849,6 +950,49 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
         row.packingBound = evt.packingBound ?? 0;
         row.cellTreePromotions = evt.cellTreePromotions ?? 0;
         row.cellTreeDemotions = evt.cellTreeDemotions ?? 0;
+        row.queryClustersOpened = evt.queryClustersOpened ?? 0;
+        row.queryCandidates = evt.queryCandidates ?? 0;
+        row.queryHits = evt.queryHits ?? 0;
+        row.budgetConfiguredMs = evt.budgetConfiguredMs ?? 0;
+        row.budgetGrantedMs = evt.budgetGrantedMs ?? 0;
+        row.efficiencyTolerance = evt.efficiencyTolerance ?? 0;
+        row.candidatesPerHitSmoothed = evt.candidatesPerHitSmoothed ?? 0;
+        row.candidatesPerHitBest = evt.candidatesPerHitBest ?? 0;
+        row.ticksAtWholeBudget = evt.ticksAtWholeBudget ?? 0;
+        row.controllerFlags = evt.controllerFlags ?? 0;
+        row.efficiencyRebases = evt.efficiencyRebases ?? 0;
+        row.repairCellsCooling = evt.repairCellsCooling ?? 0;
+        row.repairValveFires = evt.repairValveFires ?? 0;
+        row.repairedEntities = evt.repairedEntities ?? 0;
+        row.repairQueueEvicted = evt.repairQueueEvicted ?? 0;
+        row.measuredNsPerEntity = evt.measuredNsPerEntity ?? 0;
+        row.driftTargetBoost = evt.driftTargetBoost ?? 0;
+        row.presentRealms = evt.presentRealms ?? 0;
+        row.runnableRealms = evt.runnableRealms ?? 0;
+        break;
+      }
+
+      // #WB-05 — one record per runnable realm. Keyed by (realm, archetype) rather than merged into the archetype row:
+      // the two carry different things, and collapsing them would mean choosing a realm's value to stand for all.
+      case TraceEventKind.SpatialRealmTelemetry: {
+        const realmId = evt.realmId ?? 0;
+        const archetypeId = evt.archetypeId ?? 0;
+        (spatialByRealm ??= new Map()).set(realmArchetypeKey(realmId, archetypeId), {
+          realmId,
+          archetypeId,
+          runState: evt.runState ?? 0,
+          divisor: evt.divisor ?? 1,
+          cellSize: evt.cellSize ?? 0,
+          cellCount: evt.cellCount ?? 0,
+          gridDepth: evt.gridDepth ?? 0,
+          clusters: evt.clusters ?? 0,
+          clusterReach: evt.clusterReach ?? 0,
+          escapedClusters: evt.escapedClusters ?? 0,
+          promotedCells: evt.promotedCells ?? 0,
+          blockedCells: evt.blockedCells ?? 0,
+          budgetConfiguredMs: evt.budgetConfiguredMs ?? 0,
+          efficiencyTolerance: evt.efficiencyTolerance ?? 0,
+        });
         break;
       }
 
@@ -1325,6 +1469,7 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
     contextSwitches,
     rawEvents: events,
     spatialByArchetype,
+    spatialByRealm,
   };
 }
 

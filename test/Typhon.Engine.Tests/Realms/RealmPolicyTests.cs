@@ -7,6 +7,9 @@ using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
 using Typhon.Engine.Internals;
+using Typhon.Engine.Tests.Profiler;
+using Typhon.Profiler;
+using Typhon.Profiler.Events;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Realms;
@@ -22,6 +25,12 @@ class RealmPolicyTests : TestBase<RealmPolicyTests>
     private const int SleepAfter = 2;
 
     private static SpatialGridConfig Grid() => SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(100, 100), 10);
+
+    /// <summary>The least metadata a profiler session needs — this fixture asserts on records, never on the session header.</summary>
+    private static ProfilerSessionMetadata TraceMetadata() => new(
+        systems: [], archetypes: [], componentTypes: [], workerCount: 0, baseTickRate: 1000f,
+        startTimestamp: System.Diagnostics.Stopwatch.GetTimestamp(), stopwatchFrequency: System.Diagnostics.Stopwatch.Frequency,
+        startedUtc: DateTime.UtcNow);
 
     private static RealmPos At(float x, float y, ushort realm, int tag = 0) =>
         new() { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Realm = realm, Tag = tag };
@@ -79,6 +88,111 @@ class RealmPolicyTests : TestBase<RealmPolicyTests>
         runtime.Shutdown();
         Assert.That(ticksSeen, Is.GreaterThanOrEqualTo(ticks), "the runtime ran");
         return seen.ToDictionary(p => p.Key, p => p.Value.ToHashSet());
+    }
+
+    /// <summary>
+    /// #WB-05 — the census kind 66 carries is the realms this archetype lives in and how many of them get a per-realm row, and the two move apart exactly
+    /// when a realm goes dormant.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This tests the PREDICATE rather than the wire, deliberately, and it is the half that can run: the per-realm record is gated on the <c>Spatial</c>
+    /// telemetry subtree, which the suite leaves off (a subtree root defaults to false, and turning it on would enable every spatial SPAN for every fixture).
+    /// <c>EveryRunnableRealmSendsARow_OverTheWire</c> below covers the emission itself and needs the flag, so it is <c>[Explicit]</c>. What matters most is
+    /// here: a census that disagrees with the rows would read as an engine bug, and the two share one definition of "runnable" so they cannot.
+    /// </para>
+    /// <para>
+    /// The identity is asserted as it changes, not as a constant. Realm 1 is a <c>Sleep</c> realm with <c>SleepAfterTicks = 2</c>, so the run starts with
+    /// three runnable realms and ends with two while the present count stays at three — which is the whole claim: a dormant realm does not vanish from the
+    /// engine's accounting, it stops getting a row.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void TheRealmCensusCountsEveryPresentRealm_AndOnlyRunnableOnesGetARow()
+    {
+        using var dbe = ThreeRealms(out _, out _, out _);
+        var state = StateOf(dbe);
+
+        Assert.That(state.PresentRealmSpatial.Length, Is.EqualTo(3), "all three realms hold clusters of this archetype after the fence");
+        Assert.That(DatabaseEngine.CountRunnableRealms(state.PresentRealmSpatial, dbe.RealmTable), Is.EqualTo(3),
+            "nothing is dormant yet: a Sleep realm holds SleepAfterTicks before it sleeps");
+
+        Dispatched(dbe, 8, parallel: true);
+
+        Assert.That(dbe.Realms.StateOf(new RealmId(1)), Is.EqualTo(RealmRunState.Dormant), "the premise of the next assertion");
+        Assert.That(state.PresentRealmSpatial.Length, Is.EqualTo(3),
+            "a dormant realm still HOLDS its clusters — the present count is what stops the row count being read as the realm count");
+        Assert.That(DatabaseEngine.CountRunnableRealms(state.PresentRealmSpatial, dbe.RealmTable), Is.EqualTo(2),
+            "realm 1 is dormant, so it gets no row; realms 0 and 2 do");
+        Assert.That(DatabaseEngine.RealmGetsATelemetryRow(state.RealmSpatial[1], dbe.RealmTable), Is.False, "specifically realm 1");
+        Assert.That(DatabaseEngine.RealmGetsATelemetryRow(state.RealmSpatial[0], dbe.RealmTable), Is.True);
+        Assert.That(DatabaseEngine.RealmGetsATelemetryRow(state.RealmSpatial[2], dbe.RealmTable), Is.True);
+    }
+
+    /// <summary>
+    /// #WB-05 — the per-realm record (kind 67) reaches the trace once per runnable realm, carrying that realm's own grid.
+    /// </summary>
+    /// <remarks>
+    /// <c>[Category("TelemetryGated")]</c> because it needs the <c>Spatial</c> telemetry subtree on, and a subtree root defaults to off: the suite's
+    /// <c>typhon.telemetry.json</c> enables the profiler but not this subtree, and enabling it there would turn on every spatial SPAN for every fixture.
+    /// <c>TelemetryConfig</c> reads its configuration in a static constructor, before the first test, so no fixture can flip the flag — which is why this
+    /// used to be <c>[Explicit] [Category("Manual")]</c> and therefore ran nowhere. The merge gate now runs it in a dedicated process with the flag set
+    /// (<c>GATED_PASSES</c> in <c>bench/aws/shard.py</c>), and the category keeps it out of the parallel shards, where it would fail bare. Locally:
+    /// <code>
+    /// $env:TYPHON__PROFILER__SPATIAL__ENABLED = 'true'; dotnet test --filter "Category=TelemetryGated"
+    /// </code>
+    /// The wire LAYOUT is covered without the flag by
+    /// <c>TypedDtoRoundTripTests.SpatialRealmTelemetry_DecodesTheDocumentedLayout_AndAShorterRecordStopsAtItsOwnSize</c>, and the emission PREDICATE by
+    /// <see cref="TheRealmCensusCountsEveryPresentRealm_AndOnlyRunnableOnesGetARow"/>; what only this test covers is that the fence actually calls the
+    /// emitter.
+    /// </remarks>
+    [Test]
+    [Category("TelemetryGated")]
+    public void EveryRunnableRealmSendsARow_OverTheWire()
+    {
+        using var observer = new TraceRingObserver(ResourceRegistry.Profiler, captureRawBytes: true);
+        TyphonProfiler.AttachExporter(observer);
+        TyphonProfiler.Start(ResourceRegistry.Profiler, TraceMetadata());
+        try
+        {
+            using var dbe = ThreeRealms(out _, out _, out _);
+            Dispatched(dbe, 8, parallel: true);
+        }
+        finally
+        {
+            TyphonProfiler.Stop();
+        }
+
+        var archetypeId = Archetype<RealmUnit>.Metadata.ArchetypeId;
+        var rows = new List<SpatialRealmTelemetryEventDto>();
+        var census = new List<(int Present, int Runnable)>();
+        foreach (var (kind, bytes) in observer.GetRecords())
+        {
+            if (kind == TraceEventKind.SpatialRealmTelemetry)
+            {
+                var dto = SpatialRealmTelemetryEventDto.Decode(bytes, 0, 1);
+                if (dto.ArchetypeId == archetypeId)
+                {
+                    rows.Add(dto);
+                }
+            }
+            else if (kind == TraceEventKind.SpatialArchetypeTelemetry)
+            {
+                var dto = SpatialArchetypeTelemetryEventDto.Decode(bytes, 0, 1);
+                if (dto.ArchetypeId == archetypeId)
+                {
+                    census.Add((dto.PresentRealms, dto.RunnableRealms));
+                }
+            }
+        }
+
+        Assert.That(rows, Is.Not.Empty, $"records seen: {observer.RecordsProcessed}; is TYPHON__PROFILER__SPATIAL__ENABLED set?");
+        Assert.That(census, Is.Not.Empty, "the archetype record carries the census on every tick");
+        Assert.That(census.Select(c => c.Present).Distinct(), Is.EqualTo(new[] { 3 }), "three realms hold clusters for the whole run");
+        Assert.That(census.Any(c => c.Runnable < c.Present), Is.True, "realm 1 sleeps within eight ticks — otherwise this proves nothing about the filter");
+        Assert.That(rows.Select(r => r.RunState), Has.No.Member((byte)RealmRunState.Dormant), "a dormant realm sends no row");
+        Assert.That(rows.Select(r => r.RealmId).Distinct(), Is.SupersetOf(new ushort[] { 0, 2 }));
+        Assert.That(rows.All(r => r.CellSize > 0), Is.True, "every row carries its realm's own grid");
     }
 
     [TestCase(true, false)]

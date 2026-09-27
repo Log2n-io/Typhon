@@ -335,7 +335,7 @@ public sealed class TypedDtoRoundTripTests
     public void SpatialArchetypeTelemetry_DecodesTheDocumentedLayout_AndAnOlderRecordWithTheAppendedFieldsAtZero()
     {
         const int legacyPayload = 58;
-        const int fullPayload = 139;
+        const int fullPayload = 147;
         var full = new byte[TraceRecordHeader.CommonHeaderSize + fullPayload];
         WriteInstantHeader(full, (ushort)full.Length, TraceEventKind.SpatialArchetypeTelemetry);
         var p = full.AsSpan(TraceRecordHeader.CommonHeaderSize);
@@ -359,6 +359,8 @@ public sealed class TypedDtoRoundTripTests
         BinaryPrimitives.WriteInt64LittleEndian(p[123..], 8);          // repairQueueEvicted
         BinaryPrimitives.WriteSingleLittleEndian(p[131..], 1500f);     // measuredNsPerEntity
         BinaryPrimitives.WriteSingleLittleEndian(p[135..], 3.25f);     // driftTargetBoost
+        BinaryPrimitives.WriteInt32LittleEndian(p[139..], 1188);        // presentRealms  (#WB-05)
+        BinaryPrimitives.WriteInt32LittleEndian(p[143..], 3);           // runnableRealms
 
         var dto = SpatialArchetypeTelemetryEventDto.Decode(full, CurrentTick, TicksPerUs);
         Assert.Multiple(() =>
@@ -383,6 +385,8 @@ public sealed class TypedDtoRoundTripTests
             Assert.That(dto.RepairQueueEvicted, Is.EqualTo(8));
             Assert.That(dto.MeasuredNsPerEntity, Is.EqualTo(1500f));
             Assert.That(dto.DriftTargetBoost, Is.EqualTo(3.25f));
+            Assert.That(dto.PresentRealms, Is.EqualTo(1188));
+            Assert.That(dto.RunnableRealms, Is.EqualTo(3));
         });
 
         // The same bytes under the size an older build wrote: the appended fields still sit in the buffer, and must not be read.
@@ -406,6 +410,69 @@ public sealed class TypedDtoRoundTripTests
             Assert.That(clipped.CellTreeDemotions, Is.EqualTo(9));
             Assert.That(clipped.EfficiencyRebases, Is.Zero);
             Assert.That(clipped.RepairQueueEvicted, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// Kind 67 decodes in the order <see cref="TraceEventKind.SpatialRealmTelemetry"/> documents — the contract the Workbench's own by-offset decoder
+    /// mirrors — and, like kind 66, a shorter record is a prefix whose missing fields read zero rather than the bytes after it.
+    /// </summary>
+    /// <remarks>
+    /// The mixed widths are why this is worth pinning: two u16s, two u8s back to back, then f32/i32 alternating. The generator packs with NO alignment
+    /// padding, so every offset from <c>cellSize</c> onwards is at 6 mod 4 — precisely the layout a hand-written decoder gets wrong by assuming a float
+    /// starts on a 4-byte boundary.
+    /// </remarks>
+    [Test]
+    public void SpatialRealmTelemetry_DecodesTheDocumentedLayout_AndAShorterRecordStopsAtItsOwnSize()
+    {
+        const int fullPayload = 46;
+        var full = new byte[TraceRecordHeader.CommonHeaderSize + fullPayload];
+        WriteInstantHeader(full, (ushort)full.Length, TraceEventKind.SpatialRealmTelemetry);
+        var p = full.AsSpan(TraceRecordHeader.CommonHeaderSize);
+        BinaryPrimitives.WriteUInt16LittleEndian(p, 1188);             // realmId
+        BinaryPrimitives.WriteUInt16LittleEndian(p[2..], 7);           // archetypeId
+        p[4] = (byte)RealmRunState.Simulated;                          // runState
+        p[5] = 4;                                                      // divisor
+        BinaryPrimitives.WriteSingleLittleEndian(p[6..], 64f);         // cellSize
+        BinaryPrimitives.WriteInt32LittleEndian(p[10..], 256);         // cellCount
+        BinaryPrimitives.WriteInt32LittleEndian(p[14..], 1);           // gridDepth
+        BinaryPrimitives.WriteInt32LittleEndian(p[18..], 31);          // clusters
+        BinaryPrimitives.WriteSingleLittleEndian(p[22..], 180.9f);     // clusterReach
+        BinaryPrimitives.WriteInt32LittleEndian(p[26..], 3);           // escapedClusters
+        BinaryPrimitives.WriteInt32LittleEndian(p[30..], 2);           // promotedCells
+        BinaryPrimitives.WriteInt32LittleEndian(p[34..], 4);           // blockedCells
+        BinaryPrimitives.WriteSingleLittleEndian(p[38..], 8f);         // budgetConfiguredMs
+        BinaryPrimitives.WriteSingleLittleEndian(p[42..], 0.25f);      // efficiencyTolerance
+
+        var dto = SpatialRealmTelemetryEventDto.Decode(full, CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(dto.RealmId, Is.EqualTo(1188));
+            Assert.That(dto.ArchetypeId, Is.EqualTo(7));
+            Assert.That(dto.RunState, Is.EqualTo((byte)RealmRunState.Simulated));
+            Assert.That(dto.Divisor, Is.EqualTo(4));
+            Assert.That(dto.CellSize, Is.EqualTo(64f));
+            Assert.That(dto.CellCount, Is.EqualTo(256));
+            Assert.That(dto.GridDepth, Is.EqualTo(1));
+            Assert.That(dto.Clusters, Is.EqualTo(31));
+            Assert.That(dto.ClusterReach, Is.EqualTo(180.9f));
+            Assert.That(dto.EscapedClusters, Is.EqualTo(3));
+            Assert.That(dto.PromotedCells, Is.EqualTo(2));
+            Assert.That(dto.BlockedCells, Is.EqualTo(4));
+            Assert.That(dto.BudgetConfiguredMs, Is.EqualTo(8f));
+            Assert.That(dto.EfficiencyTolerance, Is.EqualTo(0.25f));
+        });
+
+        // The same bytes under a size that stops after cellSize: everything past it must read zero, not the bytes still sitting in the buffer.
+        WriteInstantHeader(full, (ushort)(TraceRecordHeader.CommonHeaderSize + 10), TraceEventKind.SpatialRealmTelemetry);
+        var clipped = SpatialRealmTelemetryEventDto.Decode(full, CurrentTick, TicksPerUs);
+        Assert.Multiple(() =>
+        {
+            Assert.That(clipped.RealmId, Is.EqualTo(1188), "the prefix decodes as before");
+            Assert.That(clipped.CellSize, Is.EqualTo(64f));
+            Assert.That(clipped.CellCount, Is.Zero, "a field the record does not reach reads zero");
+            Assert.That(clipped.ClusterReach, Is.Zero);
+            Assert.That(clipped.EfficiencyTolerance, Is.Zero);
         });
     }
 

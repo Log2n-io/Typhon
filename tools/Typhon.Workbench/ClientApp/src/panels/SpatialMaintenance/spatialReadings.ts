@@ -1,4 +1,4 @@
-import type { SpatialTickTelemetry, TickData } from '@/libs/profiler/model/traceModel';
+import type { SpatialRealmShape, SpatialTickTelemetry, TickData } from '@/libs/profiler/model/traceModel';
 
 /**
  * The three derived readings the Spatial panel exists to show (#911 O3), as pure functions over decoded ticks.
@@ -166,6 +166,185 @@ export function detectRepairPin(ticks: readonly TickData[], archetypeId: number)
   };
 }
 
+// ── Per-realm shape (#WB-05, kind 67) ────────────────────────────────────────────────────────────────────────────
+
+/** How far a realm's query reach may run past its own cell size before the cell-level broadphase stops pruning usefully. */
+export const REALM_REACH_WARN_CELLS = 1;
+
+export interface RealmShapeRow extends SpatialRealmShape {
+  /**
+   * `clusterReach / cellSize`. Reach is meaningless on its own — 180 m is nothing in a 1 km realm and catastrophic in a
+   * 64 m one — so the ratio, not the raw value, is what a row is judged on.
+   */
+  reachInCells: number;
+  /** True when a query for this realm reaches past its neighbouring cell, i.e. the cell broadphase has stopped pruning. */
+  reachBlown: boolean;
+}
+
+export interface RealmShapeReading {
+  /** The tick these rows came from, or null when no tick in the window carried any. */
+  tickNumber: number | null;
+  /** The realms that sent a row, ascending by id. Runnable realms only — see `presentRealms` for what is missing. */
+  rows: RealmShapeRow[];
+  /** Realms this archetype has state in, from the archetype record of the SAME tick. */
+  presentRealms: number;
+  /** How many of those were runnable, i.e. how many rows the engine sent. */
+  runnableRealms: number;
+  /**
+   * The budget the engine actually ENFORCES for this archetype, in ms, from the archetype row of the same tick.
+   *
+   * Every row's own `budgetConfiguredMs` is that realm's DECLARATION. Maintenance is budgeted per archetype (Realms D-6)
+   * and the one budget spent comes from realm 0's grid, so a realm declaring 4 ms runs under realm 0's whatever it says.
+   * The panel shows both because the gap is the thing worth seeing — a realm configured differently from what runs.
+   */
+  enforcedBudgetMs: number;
+  /** True when at least one row DECLARES a budget the engine will not enforce for it. */
+  someRealmDeclaresADifferentBudget: boolean;
+}
+
+/**
+ * The most recent tick in `ticks` that carried per-realm rows for `archetypeId`, as a sorted table.
+ *
+ * <b>The census comes from the same tick, not from the latest archetype record.</b> Pairing this tick's rows with
+ * another tick's counts would let the panel say "3 of 1 188" over four rows — the sort of off-by-one that reads as a
+ * bug in the engine rather than in the panel.
+ */
+export function readRealmShapes(ticks: readonly TickData[], archetypeId: number): RealmShapeReading {
+  for (let i = ticks.length - 1; i >= 0; i--) {
+    const byRealm = ticks[i].spatialByRealm;
+    if (byRealm === undefined || byRealm.size === 0) continue;
+
+    const rows: RealmShapeRow[] = [];
+    for (const shape of byRealm.values()) {
+      if (shape.archetypeId !== archetypeId) continue;
+      const reachInCells = shape.cellSize > 0 ? shape.clusterReach / shape.cellSize : 0;
+      rows.push({ ...shape, reachInCells, reachBlown: reachInCells > REALM_REACH_WARN_CELLS });
+    }
+    if (rows.length === 0) continue;
+
+    rows.sort((a, b) => a.realmId - b.realmId);
+    const archetypeRow = ticks[i].spatialByArchetype?.get(archetypeId);
+    const enforcedBudgetMs = archetypeRow?.budgetConfiguredMs ?? 0;
+    return {
+      tickNumber: ticks[i].tickNumber,
+      rows,
+      presentRealms: archetypeRow?.presentRealms ?? rows.length,
+      runnableRealms: archetypeRow?.runnableRealms ?? rows.length,
+      enforcedBudgetMs,
+      // Compared at f16 precision, which is what the wire carries: a difference below that is the codec, not a configuration.
+      someRealmDeclaresADifferentBudget: rows.some((r) => Math.abs(r.budgetConfiguredMs - enforcedBudgetMs) > 0.01),
+    };
+  }
+
+  return { tickNumber: null, rows: [], presentRealms: 0, runnableRealms: 0, enforcedBudgetMs: 0, someRealmDeclaresADifferentBudget: false };
+}
+
+/** `RealmRunState` on the wire. Named here because the Workbench has no other reason to know the engine's enum. */
+export const REALM_RUN_STATE_NAMES: Readonly<Record<number, string>> = {
+  0: 'Dormant',
+  1: 'Simulated',
+  2: 'Active',
+  3: 'Closing',
+};
+
+export function realmRunStateName(state: number): string {
+  return REALM_RUN_STATE_NAMES[state] ?? `state ${state}`;
+}
+
+// ── The maintenance controller (#944 / #941's appended fields) ───────────────────────────────────────────────────
+
+export interface QueryEfficiencyReading {
+  /** Ticks in the window that carried a record for this archetype. Zero means the ratio below is not a reading. */
+  samples: number;
+  /** Clusters the range queries opened, summed over the window. */
+  clustersOpened: number;
+  /** Entities in those clusters, summed. */
+  candidates: number;
+  /** Matches returned, summed. */
+  hits: number;
+  /**
+   * Summed candidates over summed hits — the cost of a match over the window. Zero when nothing was hit.
+   *
+   * <b>Summed, never averaged.</b> The field's own instruction, and the reason is Simpson's paradox in miniature: a tick that opens
+   * one cluster for one hit and a tick that opens 400 for 200 average to a ratio of 1.5, while the work that actually happened cost
+   * 401/201 ≈ 2.0. Averaging per-tick ratios weights a cheap tick and an expensive one equally; the engine's controller sums, and a
+   * panel that does otherwise disagrees with the number the engine is steering on.
+   */
+  candidatesPerHit: number;
+}
+
+export function readQueryEfficiency(ticks: readonly TickData[], archetypeId: number): QueryEfficiencyReading {
+  let samples = 0;
+  let clustersOpened = 0;
+  let candidates = 0;
+  let hits = 0;
+
+  for (const t of ticks) {
+    const row = t.spatialByArchetype?.get(archetypeId);
+    if (row === undefined) continue;
+    samples++;
+    clustersOpened += row.queryClustersOpened;
+    candidates += row.queryCandidates;
+    hits += row.queryHits;
+  }
+
+  return { samples, clustersOpened, candidates, hits, candidatesPerHit: hits > 0 ? candidates / hits : 0 };
+}
+
+/** Bit 0 of `controllerFlags` — the queries hit enough this tick for the efficiency signal to mean anything. */
+export const CONTROLLER_FLAG_SIGNAL = 0x01;
+/** Bit 1 of `controllerFlags` — this tick re-based the best, accepting what the whole budget could not recover. */
+export const CONTROLLER_FLAG_REBASED = 0x02;
+
+export interface ControllerReading {
+  /**
+   * Whether the controller is running at all. `efficiencyTolerance === 0` means OFF — not "perfectly tolerant" — so every figure
+   * below is meaningless and the panel must say off rather than draw zeros that look like measurements.
+   */
+  active: boolean;
+  /** The configured `QueryEfficiencyTolerance` itself — the verdict cites it, so it travels with the reading. */
+  tolerance: number;
+  configuredMs: number;
+  grantedMs: number;
+  /** Granted over configured. 1 is the whole budget. Zero when nothing is configured. */
+  grantedShare: number;
+  smoothed: number;
+  best: number;
+  /** `smoothed / best` — how far above its own best the archetype's queries currently cost. 1 is at the best. */
+  distanceFromBest: number;
+  /** Whether that distance is inside the configured tolerance, i.e. whether the grant should be whole. */
+  withinTolerance: boolean;
+  ticksAtWholeBudget: number;
+  rebases: number;
+  /** Bit 0: the queries hit enough to steer by. Without it the controller is holding, not deciding. */
+  hasSignal: boolean;
+  /** Bit 1: this tick re-based. Rare and meaningful — it is the controller giving up on recovering the old best. */
+  rebasedThisTick: boolean;
+}
+
+export function readController(row: SpatialTickTelemetry): ControllerReading {
+  const { budgetConfiguredMs: configuredMs, budgetGrantedMs: grantedMs, efficiencyTolerance: tolerance } = row;
+  const distanceFromBest = row.candidatesPerHitBest > 0 ? row.candidatesPerHitSmoothed / row.candidatesPerHitBest : 0;
+  return {
+    active: tolerance > 0,
+    tolerance,
+    configuredMs,
+    grantedMs,
+    grantedShare: configuredMs > 0 ? grantedMs / configuredMs : 0,
+    smoothed: row.candidatesPerHitSmoothed,
+    best: row.candidatesPerHitBest,
+    distanceFromBest,
+    // At or below (1 + tolerance) the grant is whole. Evaluated here rather than read off the grant so the panel can say when the two
+    // DISAGREE — a grant that is not whole while the distance says it should be is a controller bug, and it would otherwise be
+    // invisible behind a share that merely looks plausible.
+    withinTolerance: distanceFromBest > 0 && distanceFromBest <= 1 + tolerance,
+    ticksAtWholeBudget: row.ticksAtWholeBudget,
+    rebases: row.efficiencyRebases,
+    hasSignal: (row.controllerFlags & CONTROLLER_FLAG_SIGNAL) !== 0,
+    rebasedThisTick: (row.controllerFlags & CONTROLLER_FLAG_REBASED) !== 0,
+  };
+}
+
 // ── Cumulative-member differentiation ────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -177,6 +356,36 @@ export function detectRepairPin(ticks: readonly TickData[], archetypeId: number)
  *
  * Returns 0 when the window has no span or no samples.
  */
+/**
+ * The growth of a CUMULATIVE counter across the window — first record to last.
+ *
+ * `efficiencyRebases` and `repairQueueEvicted` are cumulative since the archetype's cluster state was created, deliberately, so that a
+ * dropped record or a late attach loses none of them. That makes their instantaneous value a reading about the whole process lifetime
+ * rather than about now: an engine up for an hour shows a large number and a panel that renders it as a per-tick figure says the
+ * spatial layer is thrashing when it is idle. Differentiating is the only way to read them as activity.
+ *
+ * Returns 0 when fewer than two records carry the archetype — one sample cannot show growth, and returning the single value would
+ * report a lifetime total as if it had just happened.
+ */
+export function windowGrowth(
+  ticks: readonly TickData[], archetypeId: number, select: (row: SpatialTickTelemetry) => number,
+): number {
+  let first: number | null = null;
+  let last = 0;
+  let samples = 0;
+
+  for (const t of ticks) {
+    const row = t.spatialByArchetype?.get(archetypeId);
+    if (row === undefined) continue;
+    samples++;
+    const value = select(row);
+    if (first === null) first = value;
+    last = value;
+  }
+
+  return samples >= 2 && first !== null ? Math.max(0, last - first) : 0;
+}
+
 export function ratePerSecond(
   ticks: readonly TickData[], archetypeId: number, select: (row: SpatialTickTelemetry) => number,
 ): number {

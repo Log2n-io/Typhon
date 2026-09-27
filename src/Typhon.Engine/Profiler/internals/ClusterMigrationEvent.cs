@@ -210,6 +210,78 @@ internal ref partial struct SpatialArchetypeTelemetryEvent
     [BeginParam] public float MeasuredNsPerEntity;
     /// <summary>The throttle's multiplier on the drift target (step 14, D2): 1 is none; at its cap relocation detection is off.</summary>
     [BeginParam] public float DriftTargetBoost;
+
+    // ── Appended for the realm census (#WB-05). Not a realm dimension: everything above stays summed across realms, because the counters are owned per
+    //    archetype. These two exist so a consumer of the per-realm rows can say how many rows it is NOT showing. ──────────────────────────────────────
+
+    /// <summary>Realms this archetype has cluster state in, runnable or not. The denominator of the per-realm rows.</summary>
+    [BeginParam] public int PresentRealms;
+    /// <summary>How many of those were runnable this tick — the number of <c>SpatialRealmTelemetry</c> rows emitted beside this record.</summary>
+    [BeginParam] public int RunnableRealms;
+}
+
+/// <summary>
+/// Per-realm, per-archetype snapshot of one realm's partition SHAPE (#WB-05). Instant-shaped.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A TRANSPORT, like <see cref="SpatialArchetypeTelemetryEvent"/>, and for the same reason: the Workbench's attach session is a one-way trace stream with no
+/// way to call an accessor on the engine it is watching. Every value is a field the realm already owns.
+/// </para>
+/// <para>
+/// <b>Why shape and not rates.</b> After #1050 a realm owns its grid, its cell size, its dimensionality and its own maintenance budget, so "is spatial
+/// healthy" became a per-realm question — a 16 km planet and a 50 m dungeon have different pathologies and a thrashing dungeon is invisible behind a calm
+/// planet. What is per-realm TODAY is the shape: the grid, the reach, the outliers, the promoted and blocked cells, the configured budget. The per-tick rate
+/// counters are not — they live one-per-archetype on <c>ArchetypeClusterState</c> — so they are absent here rather than copied under a realm's name.
+/// </para>
+/// <para>
+/// <b>Runnable realms only</b>, per <c>Realms/02-runtime-lifecycle.md</c> §6. The realms left out are accounted for by
+/// <see cref="SpatialArchetypeTelemetryEvent.PresentRealms"/> / <see cref="SpatialArchetypeTelemetryEvent.RunnableRealms"/> on the same tick.
+/// </para>
+/// </remarks>
+[TraceEvent(TraceEventKind.SpatialRealmTelemetry, Shape = TraceEventShape.Instant, Gate = "SpatialRealmTelemetryActive")]
+internal ref partial struct SpatialRealmTelemetryEvent
+{
+    [BeginParam] public ushort RealmId;
+    [BeginParam] public ushort ArchetypeId;
+    /// <summary>The realm's run state this tick: <see cref="RealmRunState"/> — Dormant 0, Simulated 1, Active 2, Closing 3.</summary>
+    [BeginParam] public byte RunState;
+    /// <summary>The realm's tick divisor: 1 every tick, N once every N ticks. Saturates at 255, which no policy reaches.</summary>
+    [BeginParam] public byte Divisor;
+    /// <summary>This realm's own cell edge, in world units. The whole point of the record: it differs per realm.</summary>
+    [BeginParam] public float CellSize;
+    /// <summary>Cells in this realm's grid — what separates a planet from an interior more plainly than its bounds do.</summary>
+    [BeginParam] public int CellCount;
+    /// <summary>Cells along the third axis. 1 for a flat realm, so the record says the dimensionality without a separate flag.</summary>
+    [BeginParam] public int GridDepth;
+    /// <summary>This archetype's clusters in this realm. Zero for a realm whose entities have all left, which is a real state, not a missing row.</summary>
+    [BeginParam] public int Clusters;
+    /// <summary>
+    /// How far past its own cell a query must reach for this archetype's clusters IN THIS REALM, in world units. Read against
+    /// <see cref="CellSize"/>: a reach of 180 in a 64 m realm means the cell-level broadphase is pruning nothing.
+    /// </summary>
+    [BeginParam] public float ClusterReach;
+    /// <summary>Clusters excluded from the reach and visited by name instead. A handful is the design; a growing count is not.</summary>
+    [BeginParam] public int EscapedClusters;
+    /// <summary>Cell halves currently carrying a per-cell R-Tree in this realm.</summary>
+    [BeginParam] public int PromotedCells;
+    /// <summary>Cells whose tightness blocked a promotion in this realm.</summary>
+    [BeginParam] public int BlockedCells;
+    /// <summary>
+    /// This realm's <b>declared</b> <c>ReclusterBudgetMs</c> — what its <c>RealmConfig</c> asks for, NOT what the engine enforces.
+    /// </summary>
+    /// <remarks>
+    /// The distinction is load-bearing and a consumer must carry it. Maintenance is budgeted per ARCHETYPE (Realms D-6: "budget and repair queue stay per
+    /// archetype"), and the one budget actually spent is taken from realm 0's grid — <c>ApplyMigrationThrottle(PrimaryGrid, …)</c>. So two realms declaring
+    /// different values both get realm 0's, and a panel that presents this as the ceiling a grant was measured against would be comparing the grant to a
+    /// number nothing used. It is reported per row because the declaration is a real per-realm fact worth seeing — not least when it differs from what runs.
+    /// </remarks>
+    [BeginParam] public float BudgetConfiguredMs;
+    /// <summary>
+    /// This realm's <b>declared</b> <c>QueryEfficiencyTolerance</c>. Declared, for the same reason as <see cref="BudgetConfiguredMs"/>: one controller per
+    /// archetype steers the one budget, from every realm's queries mixed, using realm 0's tolerance. Zero declares the controller off for this realm.
+    /// </summary>
+    [BeginParam] public float EfficiencyTolerance;
 }
 
 /// <summary>

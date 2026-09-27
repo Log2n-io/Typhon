@@ -268,7 +268,14 @@ public enum TraceEventKind : byte
     /// <c>budgetGrantedMs: f32</c>, <c>efficiencyTolerance: f32</c>, <c>candidatesPerHitSmoothed: f32</c>, <c>candidatesPerHitBest: f32</c>,
     /// <c>ticksAtWholeBudget: i32</c>, <c>controllerFlags: u8</c>, <c>efficiencyRebases: i32</c>, <c>repairCellsCooling: i32</c>,
     /// <c>repairValveFires: i32</c>, <c>repairedEntities: i32</c>, <c>repairQueueEvicted: i64</c>, <c>measuredNsPerEntity: f32</c>,
-    /// <c>driftTargetBoost: f32</c>. 139 bytes. Emitted every tick for every archetype with cluster state, whatever path its fence took.
+    /// <c>driftTargetBoost: f32</c> (139 bytes); then, appended for the realm census: <c>presentRealms: i32</c>, <c>runnableRealms: i32</c>. 147 bytes.
+    /// Emitted every tick for every archetype with cluster state, whatever path its fence took.
+    /// <para>
+    /// <b>The two realm counts are a census, not a dimension.</b> Every other field on this record is summed across every realm the archetype lives in, and
+    /// stays that way: the per-tick counters are owned per archetype, not per realm. The counts exist so a consumer reading
+    /// <see cref="SpatialRealmTelemetry"/> rows — emitted for runnable realms only — can say how many realms it is NOT showing, instead of presenting a
+    /// partial list as the whole.
+    /// </para>
     /// <para><b>Grow it only by appending — never reorder or remove a field.</b> The Workbench decoder reads it by offset, and a record written before an
     /// append must stay a prefix of one written after. A record shorter than 139 bytes predates the fields it lacks: treat them as absent, which its size
     /// says, not as zero, because several read zero as a meaning — a configured budget of 0 is "no enforcement". The generated C# decoder zero-fills
@@ -281,6 +288,36 @@ public enum TraceEventKind : byte
     /// surface has to ride an event. Shaped after <see cref="SchedulerSystemArchetype"/>, which is already a per-archetype per-tick record.
     /// </remarks>
     SpatialArchetypeTelemetry = 66,
+
+    /// <summary>
+    /// Per-REALM, per-archetype snapshot of the SHAPE of one realm's partition, so a live consumer can ask "which realm is hot / which realm is shaped
+    /// badly" instead of reading one number summed across every realm an archetype lives in. Instant-shaped.
+    /// Payload, all REQUIRED and in wire order: <c>realmId: u16</c>, <c>archetypeId: u16</c>, <c>runState: u8</c>
+    /// (the engine's <c>RealmRunState</c>: Dormant 0, Simulated 1, Active 2, Closing 3 — this assembly does not reference the engine, so the
+    /// values are named here rather than linked), <c>divisor: u8</c>, <c>cellSize: f32</c>, <c>cellCount: i32</c>, <c>gridDepth: i32</c>,
+    /// <c>clusters: i32</c>, <c>clusterReach: f32</c>, <c>escapedClusters: i32</c>, <c>promotedCells: i32</c>, <c>blockedCells: i32</c>,
+    /// <c>budgetConfiguredMs: f32</c>, <c>efficiencyTolerance: f32</c>. 46 bytes. Grow it only by appending, as with kind 66.
+    /// <para>
+    /// <b>The last two are DECLARED, not enforced.</b> Maintenance is budgeted per archetype and the budget actually spent comes from realm 0's grid, so two
+    /// realms declaring different values both run under realm 0's. A consumer must label them as the realm's declaration; kind 66's
+    /// <c>budgetConfiguredMs</c> is the ceiling a grant was measured against.
+    /// </para>
+    /// <para>
+    /// <b>Structure, not rates.</b> Every field here is per-realm state the realm itself owns — its grid, its own cell size, its own reach, its own
+    /// configured budget. The per-tick RATE counters (migrations, repair units, budget spent, the tightness means) are deliberately NOT here: they live on
+    /// <c>ArchetypeClusterState</c>, one set per archetype rather than one per realm, so a realm-keyed copy of them would report the sum across every realm
+    /// under one realm's name. That is worse than their absence, because it would look right. Splitting them is its own change; until then kind 66 remains
+    /// the only source for them and is archetype-wide by construction.
+    /// </para>
+    /// <para>
+    /// <b>Emitted for RUNNABLE realms only</b> (<c>Realms/02-runtime-lifecycle.md</c> §6: per realm-archetype telemetry is "thousands/tick → runnable
+    /// only"). A galaxy of a few thousand sleeping interiors would otherwise spend its trace bandwidth on rows that are all zero by definition. The realms
+    /// left out are not silently missing: kind 66 carries <c>presentRealms</c> and <c>runnableRealms</c> for the same archetype and tick, so a consumer can
+    /// state how many rows it is not showing — and a realm going dormant is then visible as a row disappearing while the skipped count rises.
+    /// </para>
+    /// Gated on <c>SpatialRealmTelemetryActive</c>.
+    /// </summary>
+    SpatialRealmTelemetry = 67,
 
     // ── .NET runtime GC suspension (span) ──
 
@@ -1159,9 +1196,10 @@ public static class TraceEventKindExtensions
         {
             return false;
         }
-        // #911: 64 is a span, 65 and 66 are instants. Their numeric neighbours (60-63) are all spans, so the two instants need an explicit carve-out — the
-        // EcsSpawnBatch lesson one group along. TraceEventShapeConsistencyTests holds this against the producers' declared Shape.
-        if (v == 65 || v == 66)
+        // #911: 64 is a span, 65 and 66 are instants; 67 joined them for the per-realm record. Their numeric neighbours (60-63) are all spans, so the
+        // instants need an explicit carve-out — the EcsSpawnBatch lesson one group along. TraceEventShapeConsistencyTests holds this against the producers'
+        // declared Shape.
+        if (v is 65 or 66 or 67)
         {
             return false;
         }
