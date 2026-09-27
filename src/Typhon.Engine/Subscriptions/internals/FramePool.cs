@@ -540,6 +540,11 @@ internal sealed unsafe class FramePool : ResourceNode, IMemoryResource, IMetricS
         // ResourceNode.Dispose frees the slabs, which are children of this node — unless a send is still reading out of one (#1006).
         if (disposing && Volatile.Read(ref _keepSlabsForOutstandingSends) != 0)
         {
+            // Unlink anyway. The slab leak on this path is deliberate; leaking the NODE too is not, and it was the more visible of the two: `RemoveChild`
+            // only drops this node from the parent's child map and raises the mutation event — it disposes nothing — so the slabs and their pointers are
+            // untouched by it, while the resource tree stops advertising a pool that no longer works. Skipping it also broke the very thing the removal below
+            // exists for: a pool recreated under the same id found the dead one still occupying it.
+            Parent?.RemoveChild(this);
             return;
         }
 
