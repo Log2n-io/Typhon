@@ -1,8 +1,10 @@
 import {
   assembleTickViewAndNumbers,
+  budgetForSession,
   computePendingRangesUs,
   createChunkCache,
   ensureRangeLoaded,
+  setCacheBudget,
   type ChunkCacheState,
   viewRangeToTickRange,
 } from '@/libs/profiler/cache/chunkCache';
@@ -160,6 +162,9 @@ export function acquireSessionCache(sessionId: string, isLive: boolean): Session
     // live-tail prefetch effect only adds work, doesn't conflict with replay loads.
     if (isLive && !entry.isLive) {
       entry.isLive = true;
+      // A live tail retains far less than a replay scrub, and the flip has to carry the budget with it — otherwise this
+      // session spends the rest of its life under the replay number. See `LIVE_BUDGET`.
+      setCacheBudget(entry.cache, budgetForSession(true));
       // Re-run live-tail prefetch immediately if the manifest already grew while we weren't watching.
       runLiveTailPrefetch(entry);
     }
@@ -251,7 +256,7 @@ function createEntry(sessionId: string, isLive: boolean): SessionCacheEntry {
     isLive,
     refCount: 1,
     fingerprint,
-    cache: createChunkCache(),
+    cache: createChunkCache(budgetForSession(isLive)),
     metadataDto,
     traceMetadata: null,
     manifest: [],

@@ -104,6 +104,23 @@ export interface ChunkCacheState {
  */
 const FAILED_CHUNK_RETRY_AFTER_MS = 30_000;
 
+/**
+ * Budget for a LIVE (attach) session, which is a different problem from replay and needs a different number.
+ *
+ * **Why live gets its own, far smaller budget.** `DEFAULT_BUDGET` is sized so a *scrub* keeps plenty warm — the user drags
+ * across a finished trace and refetching what they just looked at is the cost to avoid. A live tail never scrubs: it renders
+ * the newest window and the older chunks are history the server still holds, so retaining them buys nothing and costs the one
+ * thing that matters here. A live session ingests continuously (measured against the SWG demo at 50 Hz with only the default
+ * gates on: 5 chunks/s × ~7 600 events = ~38 000 events/s, ~19 MB/s), and **full-GC cost scales with the live set**. At the
+ * replay budget the live set settles at ~500 MB and the collector then spends most of the main thread on it: measured with a
+ * `longtask` PerformanceObserver, 81 % of wall clock blocked by t=35 s, 95 % by t=40 s, and single tasks of 2.0-2.3 s from
+ * t=50 s — the window stops responding to a menu click, which is exactly the reported symptom. The reassembly per chunk was
+ * *not* the cause (measured 33 ms worst, ~2 % of wall); the heap was.
+ *
+ * 96 MB is ~25 chunks at this workload's density, against a visible+prefetch working set of 5-9. Scrolling back in a live
+ * session refetches from the server, which is what replay already does on any cache miss.
+ */
+const LIVE_BUDGET = 96 * 1024 * 1024;
 const DEFAULT_BUDGET = 500 * 1024 * 1024;     // 500 MB client-side in-memory cache (separate from the OPFS persistence layer). Bumped
                                               // from 200 MB after observing that dense end-of-trace regions (readBurst, heavy allocation
                                               // aftermath) routinely push a single viewport's visible+prefetch set close to — or past —
@@ -124,6 +141,25 @@ const AVG_BYTES_PER_EVENT = 500;
  * zero-risk. Module-scope const rather than a runtime flag because we want it tree-shaken out of one code path in production builds.
  */
 const USE_BINARY_CHUNK_TRANSPORT = true;
+
+/** The budget a session of this kind should run under. Live tails and replay scrubs want different numbers — see {@link LIVE_BUDGET}. */
+export function budgetForSession(isLive: boolean): number {
+  return isLive ? LIVE_BUDGET : DEFAULT_BUDGET;
+}
+
+/**
+ * Re-point a live cache at a different budget and immediately reclaim down to it.
+ *
+ * Needed because `isLive` can flip after the cache exists — `acquireSessionCache` upgrades a replay entry when a later
+ * consumer asks for live mode — and a budget that only applied at construction would leave that session running under the
+ * replay number for the rest of its life. `pinnedIdxs` is empty because the caller has no viewport at the moment of the flip;
+ * the next `ensureRangeLoaded` re-pins and reloads whatever the viewport still needs.
+ */
+export function setCacheBudget(cache: ChunkCacheState, budgetBytes: number): void {
+  if (cache.budgetBytes === budgetBytes) return;
+  cache.budgetBytes = budgetBytes;
+  evictIfOverBudget(cache, new Set());
+}
 
 export function createChunkCache(budgetBytes: number = DEFAULT_BUDGET, opfsStore: OpfsChunkStore | null = null): ChunkCacheState {
   return {
