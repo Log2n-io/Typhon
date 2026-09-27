@@ -7,6 +7,8 @@ import { realmArchetypeKey } from '@/libs/profiler/model/traceModel';
 import { GaugeId } from '@/libs/profiler/model/types';
 import SpatialMaintenancePanel from '../SpatialMaintenancePanel';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
+import type { ProfilerMetadataDto } from '@/api/generated/model';
 
 // The panel's only data source. Stubbed rather than driven through the chunk cache: this fixture is about what the panel
 // SHOWS for a given set of counters, and building a real decoded trace to reach three numbers would test the decoder.
@@ -374,5 +376,42 @@ describe('Spatial Maintenance panel (#911 O3)', () => {
     // The gauge carries hundredths of a percent — 4250 is 42.5 %, and rendering it as 4,250 % is the mistake to catch.
     expect(text).toContain('42.5 %');
     expect(text).not.toContain('no spatial grid');
+  });
+});
+
+describe('Spatial Maintenance panel — the archetype selector is named, not numbered', () => {
+  // Reported from a live session: the combo showed "#1", "#2". The id alone is meaningless to whoever reads this panel,
+  // and the name has been available in an attach session since the engine started pushing its archetype table over the
+  // Init frame (#WB-01) — `AttachSessionRuntime.ProjectArchetypes` builds it from `reader.ArchetypeDefinitions`. The
+  // panel simply never looked it up.
+
+  it('labels each option with the archetype name and keeps the id beside it', () => {
+    useProfilerSessionStore.setState({
+      metadata: {
+        archetypes: [
+          { archetypeId: 1, name: 'Swg.Creatures' },
+          { archetypeId: 2, name: 'Swg.Players' },
+        ],
+      } as unknown as ProfilerMetadataDto,
+    });
+    setLive([tick(1, [row({ archetypeId: 1 }), row({ archetypeId: 2 })])]);
+
+    render(<SpatialMaintenancePanel {...NO_PROPS} />);
+    const select = screen.getByTestId('spatial-maintenance-archetype');
+    const labels = Array.from(select.querySelectorAll('option')).map((o) => o.textContent);
+
+    expect(labels).toContain('Swg.Creatures (#1)');
+    expect(labels).toContain('Swg.Players (#2)');
+  });
+
+  it('falls back to the bare id for an engine that sends no archetype table', () => {
+    // The same session shape that hides the Schema Explorer: an older engine, or a schema too large for one Init
+    // frame. A bare id is honest there; inventing a name would not be.
+    useProfilerSessionStore.setState({ metadata: { archetypes: [] } as unknown as ProfilerMetadataDto });
+    setLive([tick(1, [row({ archetypeId: 7 })])]);
+
+    render(<SpatialMaintenancePanel {...NO_PROPS} />);
+    const select = screen.getByTestId('spatial-maintenance-archetype');
+    expect(Array.from(select.querySelectorAll('option')).map((o) => o.textContent)).toEqual(['#7']);
   });
 });

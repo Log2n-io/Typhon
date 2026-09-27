@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { useSessionStore } from '@/stores/useSessionStore';
+import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useLiveGaugeData } from '@/hooks/profiler/useLiveGaugeData';
 import { GaugeId } from '@/libs/profiler/model/types';
 import type { GaugeSeries, SpatialTickTelemetry } from '@/libs/profiler/model/traceModel';
@@ -40,6 +41,21 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
   const { windowedTicks, gaugeData, hasData } = useLiveGaugeData(sessionKind === 'attach' ? sessionId : null);
 
   const archetypeIds = useMemo(() => archetypeIdsIn(windowedTicks), [windowedTicks]);
+  // Read the archetype table out of the store rather than through `useProfilerNameMaps`, which issues its own
+  // TanStack query for metadata the Init SSE frame already delivered — an extra fetch for data in hand, and it drags
+  // a QueryClientProvider into every test that renders this panel. Selecting `metadata?.archetypes` rather than
+  // `metadata` matters: the DTO's identity flips on every live batch as tick summaries are appended, and subscribing
+  // to the whole thing would re-render this panel at the batch rate for a table that never changes.
+  const archetypes = useProfilerSessionStore((s) => s.metadata?.archetypes);
+  const archetypeNames = useMemo(() => {
+    const m = new Map<number, string>();
+    for (const a of archetypes ?? []) {
+      if (a.name) {
+        m.set(Number(a.archetypeId), a.name);
+      }
+    }
+    return m;
+  }, [archetypes]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const archetypeId = selectedId !== null && archetypeIds.includes(selectedId) ? selectedId : archetypeIds[0] ?? null;
 
@@ -83,7 +99,13 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
           value={archetypeId}
           onChange={(e) => setSelectedId(Number(e.target.value))}
         >
-          {archetypeIds.map((id) => <option key={id} value={id}>#{id}</option>)}
+          {/* Named, with the id kept beside it. The id alone is meaningless to whoever reads this panel, and the name is
+              available in an attach session since the engine started pushing its archetype table over the Init frame
+              (#WB-01) — `ProjectArchetypes` builds these from `reader.ArchetypeDefinitions`. Falls back to the bare id
+              for an engine that sends no schema, which is the same session shape that hides the Schema Explorer. */}
+          {archetypeIds.map((id) => (
+            <option key={id} value={id}>{archetypeNames.get(id) ? `${archetypeNames.get(id)} (#${id})` : `#${id}`}</option>
+          ))}
         </select>
         {/* The tick is named, never implied. A per-tick counter without the tick it came from is not a reading. */}
         <span className="ml-auto font-mono text-muted-foreground" data-testid="spatial-maintenance-tick">
