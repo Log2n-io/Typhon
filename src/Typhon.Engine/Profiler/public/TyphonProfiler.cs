@@ -441,6 +441,18 @@ public static class TyphonProfiler
         {
             // Normal shutdown via the cancellation token — exit silently.
         }
+        catch (ObjectDisposedException)
+        {
+            // The exporter's queue was disposed under this thread. Within one session that cannot happen — Stop joins every exporter thread before it
+            // disposes any exporter — so reaching here means this thread is draining an exporter that belongs to a FINISHED session: the exporter list is
+            // static and Stop does not clear it, so a host that attaches a new exporter and starts again gets a thread spawned over the old, disposed one.
+            //
+            // Caught rather than left to propagate because this is a background thread with no owner: an unhandled exception here does not fail an operation,
+            // it terminates the PROCESS. That turned a stale exporter into a dead test host that aborted the run mid-pass, so the remaining tests reported as
+            // "not run" rather than as failures — an observability subsystem taking down the thing it observes, for a condition it could have declined. The
+            // count is published so the condition is survivable without being silent; a non-zero reading means a host is leaking exporters across sessions.
+            Interlocked.Increment(ref SExporterThreadsAbandoned);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -458,6 +470,13 @@ public static class TyphonProfiler
     /// </summary>
     public static long TotalDroppedExporterBatches => STotalDroppedExporterBatches;
     private static long STotalDroppedExporterBatches;
+
+    /// <summary>
+    /// Exporter consume threads that exited because their queue had already been disposed. Non-zero means a host attached an exporter, stopped the profiler,
+    /// disposed that exporter and started again without detaching it — the thread this session spawned over it had nothing to drain. Process-lifetime total.
+    /// </summary>
+    public static long ExporterThreadsAbandoned => Volatile.Read(ref SExporterThreadsAbandoned);
+    private static long SExporterThreadsAbandoned;
 
     /// <summary>Diagnostic: batches/records the consumer fanned out (snapshot at Stop).</summary>
     public static long TotalBatchesFannedOut { get; private set; }

@@ -24,6 +24,22 @@ class RealmPolicyTests : TestBase<RealmPolicyTests>
 {
     private const int SleepAfter = 2;
 
+    /// <summary>
+    /// Detaches whatever exporter a case attached, because <c>TyphonProfiler</c>'s exporter list is static and <c>Stop</c> does not clear it.
+    /// </summary>
+    /// <remarks>
+    /// Without this, a later <c>Start</c> in the same process spawns a consume thread over THIS fixture's already-disposed observer, and
+    /// <c>GetConsumingEnumerable</c> on a disposed <c>BlockingCollection</c> throws on a background thread — which kills the test host outright. It aborted
+    /// the whole gated pass after its first case, so the remaining gated tests reported as "not run" rather than as failures. Every other profiler fixture
+    /// already does this (<c>ConcurrencyTracingStressTests</c>, <c>FileExporterIntegrationTests</c>, …); this one was the exception.
+    /// </remarks>
+    [TearDown]
+    public void DetachProfilerExporters()
+    {
+        try { TyphonProfiler.Stop(); } catch { /* a case that never started one, or already stopped it */ }
+        TyphonProfiler.ResetForTests();
+    }
+
     private static SpatialGridConfig Grid() => SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(100, 100), 10);
 
     /// <summary>The least metadata a profiler session needs — this fixture asserts on records, never on the session header.</summary>
