@@ -132,6 +132,22 @@ class SubscriptionsOperatorTelemetryTests : TestBase<SubscriptionsOperatorTeleme
     {
         using var world = new World(ProjectionTestSchema.SetupEngine(ServiceProvider));
         var stats = world.Subscriptions.Stats;
+
+        // Quiesce before touching the encoder. These two methods fill and `Span.Sort` the encoder's own `_samples` scratch, and in the gated process the tick
+        // driver calls the same two every tick for the operator record — so asserting against a live runtime had two threads sorting one array. Not
+        // memory-unsafe, but it could fail for a reason that has nothing to do with an empty ring, which is the worst kind of red. `Shutdown` stops new ticks
+        // and does not wait for the one in flight, so the tick number is watched until it stops moving.
+        world.Shutdown();
+        var settled = SpinWait.SpinUntil(
+            () =>
+            {
+                var before = world.CurrentTickNumber;
+                Thread.Sleep(2);
+                return world.CurrentTickNumber == before;
+            },
+            TimeSpan.FromSeconds(5));
+        Assume.That(settled, Is.True, "the runtime did not stop ticking, so this case cannot own the encoder's scratch");
+
         stats.AttachTelemetry(new TickTelemetryRing(capacity: 64, systemCount: 0));
 
         Assert.Multiple(() =>
@@ -199,6 +215,12 @@ class SubscriptionsOperatorTelemetryTests : TestBase<SubscriptionsOperatorTeleme
 
         /// <summary>The context the emission is called from, so a case can read its fault counter.</summary>
         public SubscriptionsContext Context => _runtime.SubscriptionsContextForTest;
+
+        /// <summary>The tick the runtime is on, for a case that needs to watch ticking stop.</summary>
+        public long CurrentTickNumber => _runtime.CurrentTickNumber;
+
+        /// <summary>Stops new ticks. NOT a quiescence point — the tick in flight finishes, so a caller that needs silence watches the tick number.</summary>
+        public void Shutdown() => _runtime.Shutdown();
 
         public void Dispose()
         {

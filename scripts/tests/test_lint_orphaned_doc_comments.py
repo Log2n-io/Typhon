@@ -36,7 +36,7 @@ class OrphanDetection(unittest.TestCase):
 
     def scan(self, name, text):
         self.write(name, text)
-        return lint.scan(self.root, ["src"])
+        return lint.scan(self.root, ["src"])[0]
 
     def test_two_summaries_in_a_row_is_an_orphan(self):
         found = self.scan("A.cs", """
@@ -167,7 +167,7 @@ class A { }
         path = os.path.join(self.root, "src", "Bom.cs")
         with open(path, "wb") as fh:
             fh.write(b"\xef\xbb\xbf/// <summary>Orphan.</summary>\r\n/// <summary>Real.</summary>\r\nclass E { }\r\n")
-        self.assertEqual({"src/Bom.cs": [2]}, lint.scan(self.root, ["src"]))
+        self.assertEqual({"src/Bom.cs": [2]}, lint.scan(self.root, ["src"])[0])
 
     def test_a_doc_comment_on_the_same_line_as_code_is_not_an_orphan(self):
         found = self.scan("J.cs", "/// <summary>Only one.</summary> class F { }\n")
@@ -190,7 +190,7 @@ class B { }
         os.makedirs(os.path.join(self.root, "src", "obj"))
         with open(os.path.join(self.root, "src", "obj", "Generated.cs"), "w", encoding="utf-8") as fh:
             fh.write("/// <summary>A.</summary>\n/// <summary>B.</summary>\nclass X { }\n")
-        self.assertEqual({}, lint.scan(self.root, ["src"]))
+        self.assertEqual({}, lint.scan(self.root, ["src"])[0])
 
 
 class Ratchet(unittest.TestCase):

@@ -127,8 +127,9 @@ def scan_file(path):
 
 
 def scan(root, roots):
-    """{relative path: [line numbers]} for every .cs file under `roots` inside `root`."""
+    """({relative path: [line numbers]}, files visited) for every .cs file under `roots` inside `root`."""
     found = {}
+    visited = 0
     for top in roots:
         base = os.path.join(root, top)
         if not os.path.isdir(base):
@@ -139,19 +140,21 @@ def scan(root, roots):
                 if not name.endswith(".cs"):
                     continue
                 full = os.path.join(directory, name)
+                visited += 1
                 hits = scan_file(full)
                 if hits:
                     found[os.path.relpath(full, root).replace(os.sep, "/")] = hits
-    return found
+    return found, visited
 
 
-def ratchet(found, baseline_path, update):
+def ratchet(found, baseline_path, update, quiet=False):
     if update:
         os.makedirs(os.path.dirname(baseline_path), exist_ok=True)
         with open(baseline_path, "w", encoding="utf-8") as fh:
             json.dump({p: len(h) for p, h in sorted(found.items())}, fh, indent=2, sort_keys=True)
             fh.write("\n")
-        print(f"baseline written: {baseline_path} ({sum(len(h) for h in found.values())} in {len(found)} file(s))")
+        if not quiet:
+            print(f"baseline written: {baseline_path} ({sum(len(h) for h in found.values())} in {len(found)} file(s))")
         return []
 
     if not os.path.exists(baseline_path):
@@ -172,7 +175,8 @@ def ratchet(found, baseline_path, update):
                 "ORPHANED_DOC_COMMENT", f"{path}:{lines}",
                 f"{actual} orphaned doc comment(s), baseline allows {allowed} — one `///` block holds more than one "
                 f"<summary>, so all but the last document nothing. Move each back onto its own member "
-                f"(or delete it if that member is gone)"))
+                f"(or delete it if that member is gone). If this file was RENAMED and its comments are unchanged, the "
+                f"new path simply has no entry yet: run --update-baseline"))
         elif actual < allowed:
             findings.append(Finding(
                 "BASELINE_STALE", path,
@@ -190,8 +194,16 @@ def main():
     args = parser.parse_args()
 
     baseline_path = args.baseline or os.path.join(args.root, "coverage", "orphaned-doc-comments-baseline.json")
-    found = scan(args.root, args.roots)
-    findings = ratchet(found, baseline_path, args.update_baseline)
+    found, visited = scan(args.root, args.roots)
+
+    # A run that scanned NOTHING must not report success. `scan` skips a root that is not a directory, so a wrong --root, `--roots` given zero values, or an
+    # invocation from a tree without src/ left every baselined path resolving to "0, below its allowance" — which is the advisory BASELINE_STALE, not a block.
+    # The whole value of this gate is that it cannot be decoration, and "0 over baseline" printed after visiting no files is exactly that.
+    if visited == 0:
+        print(f"scanned 0 files under {args.root} (roots: {', '.join(args.roots) or '<none>'}) — refusing to report a verdict on nothing")
+        return 2
+
+    findings = ratchet(found, baseline_path, args.update_baseline, args.quiet)
 
     if args.update_baseline:
         return 0

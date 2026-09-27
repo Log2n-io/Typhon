@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -1892,42 +1892,49 @@ public partial class DatabaseEngine
         var present = clusterState.PresentRealmSpatial;
         var runnable = CountRunnableRealms(present, clusterState.RealmTableOrNull);
 
-        var samples = clusterState.LastTickTightnessSamples;
-        TyphonEvent.EmitSpatialArchetypeTelemetry(
-            archetypeId: archetypeId,
-            activeClusters: clusterState.ActiveClusterCount,
-            migrations: clusterState.LastTickMigrationCount,
-            migrationCpuMs: (float)clusterState.LastTickMigrationTotalMs,
-            hysteresisAbsorbed: clusterState.LastTickHysteresisAbsorbedCount,
-            driftersDetected: clusterState.LastTickDriftersDetected,
-            repairUnits: clusterState.LastTickRepairUnitCount,
-            repairUnitsRefused: clusterState.LastTickRepairUnitsRefused,
-            repairQueueDepth: clusterState.RepairQueue?.Count ?? 0,
-            budgetUsedMs: (float)clusterState.LastTickReclusterBudgetUsedMs,
-            tightnessSamples: samples,
-            extentRatio: samples > 0 ? (float)(clusterState.LastTickTightnessExtentSum / samples) : 0f,
-            packingBound: samples > 0 ? (float)(clusterState.LastTickTightnessBoundSum / samples) : 0f,
-            cellTreePromotions: clusterState.LastTickCellTreePromotions,
-            cellTreeDemotions: clusterState.LastTickCellTreeDemotions,
-            queryClustersOpened: clusterState.LastTickQueryClustersOpened,
-            queryCandidates: clusterState.LastTickQueryCandidates,
-            queryHits: clusterState.LastTickQueryHits,
-            budgetConfiguredMs: grid != null ? grid.Config.ReclusterBudgetMs : 0f,
-            budgetGrantedMs: (float)clusterState.LastTickReclusterBudgetGrantedMs,
-            efficiencyTolerance: grid != null ? grid.Config.QueryEfficiencyTolerance : 0f,
-            candidatesPerHitSmoothed: (float)clusterState.QueryCandidatesPerHitSmoothed,
-            candidatesPerHitBest: (float)clusterState.QueryCandidatesPerHitBest,
-            ticksAtWholeBudget: clusterState.TicksAtWholeBudget,
-            controllerFlags: clusterState.ControllerFlags,
-            efficiencyRebases: (int)clusterState.TotalEfficiencyRebases,
-            repairCellsCooling: clusterState.RepairQueue?.CoolingCount ?? 0,
-            repairValveFires: clusterState.LastTickRepairValveFires,
-            repairedEntities: clusterState.LastTickRepairedEntityCount,
-            repairQueueEvicted: clusterState.RepairQueue?.TotalEvicted ?? 0L,
-            measuredNsPerEntity: (float)clusterState.LastTickMeasuredNsPerEntity,
-            driftTargetBoost: clusterState.DriftTargetBoost,
-            presentRealms: present.Length,
-            runnableRealms: runnable);
+        // Gate kind 66's own emission too, not only the pair above. The generator puts `if (!TelemetryConfig.<Gate>) return;` INSIDE the emit body and C#
+        // evaluates a call's arguments first, so with ONLY the realm gate on this call still computed ~35 arguments — four divisions and several `?.Count`
+        // chains — every tick, per archetype, to be discarded on entry. That is the identical trap `FrameAssembler.EmitOperatorTelemetry` reads its flags up
+        // front to avoid; the two gates being independent is exactly what makes the combination reachable.
+        if (TelemetryConfig.SpatialArchetypeTelemetryActive)
+        {
+            var samples = clusterState.LastTickTightnessSamples;
+            TyphonEvent.EmitSpatialArchetypeTelemetry(
+                archetypeId: archetypeId,
+                activeClusters: clusterState.ActiveClusterCount,
+                migrations: clusterState.LastTickMigrationCount,
+                migrationCpuMs: (float)clusterState.LastTickMigrationTotalMs,
+                hysteresisAbsorbed: clusterState.LastTickHysteresisAbsorbedCount,
+                driftersDetected: clusterState.LastTickDriftersDetected,
+                repairUnits: clusterState.LastTickRepairUnitCount,
+                repairUnitsRefused: clusterState.LastTickRepairUnitsRefused,
+                repairQueueDepth: clusterState.RepairQueue?.Count ?? 0,
+                budgetUsedMs: (float)clusterState.LastTickReclusterBudgetUsedMs,
+                tightnessSamples: samples,
+                extentRatio: samples > 0 ? (float)(clusterState.LastTickTightnessExtentSum / samples) : 0f,
+                packingBound: samples > 0 ? (float)(clusterState.LastTickTightnessBoundSum / samples) : 0f,
+                cellTreePromotions: clusterState.LastTickCellTreePromotions,
+                cellTreeDemotions: clusterState.LastTickCellTreeDemotions,
+                queryClustersOpened: clusterState.LastTickQueryClustersOpened,
+                queryCandidates: clusterState.LastTickQueryCandidates,
+                queryHits: clusterState.LastTickQueryHits,
+                budgetConfiguredMs: grid != null ? grid.Config.ReclusterBudgetMs : 0f,
+                budgetGrantedMs: (float)clusterState.LastTickReclusterBudgetGrantedMs,
+                efficiencyTolerance: grid != null ? grid.Config.QueryEfficiencyTolerance : 0f,
+                candidatesPerHitSmoothed: (float)clusterState.QueryCandidatesPerHitSmoothed,
+                candidatesPerHitBest: (float)clusterState.QueryCandidatesPerHitBest,
+                ticksAtWholeBudget: clusterState.TicksAtWholeBudget,
+                controllerFlags: clusterState.ControllerFlags,
+                efficiencyRebases: (int)clusterState.TotalEfficiencyRebases,
+                repairCellsCooling: clusterState.RepairQueue?.CoolingCount ?? 0,
+                repairValveFires: clusterState.LastTickRepairValveFires,
+                repairedEntities: clusterState.LastTickRepairedEntityCount,
+                repairQueueEvicted: clusterState.RepairQueue?.TotalEvicted ?? 0L,
+                measuredNsPerEntity: (float)clusterState.LastTickMeasuredNsPerEntity,
+                driftTargetBoost: clusterState.DriftTargetBoost,
+                presentRealms: present.Length,
+                runnableRealms: runnable);
+        }
 
         EmitSpatialRealmRows(clusterState, archetypeId, present);
     }
