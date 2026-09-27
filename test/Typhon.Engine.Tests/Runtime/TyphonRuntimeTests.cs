@@ -385,6 +385,144 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
         view.Dispose();
     }
 
+    /// <summary>
+    /// #ENG-07 — <c>ReadStats</c> answers on an engine with no replication and no application metrics: the two gates that kept these numbers inside the
+    /// <c>STATS</c> wire block.
+    /// </summary>
+    /// <remarks>
+    /// This is the whole point of the API. The same figures were computed once a second by the subscriptions runtime, only when the application's catalog
+    /// declared metrics, and written into a game client's frame — so a host with replication off had no way to ask "is my tick overrunning". Every assertion
+    /// below therefore runs against a runtime with no sessions at all.
+    /// </remarks>
+    [Test]
+    public void ReadStats_AnswersWithoutReplicationOrDeclaredMetrics()
+    {
+        using var dbe = SetupEngine();
+        var executeCount = 0;
+
+        using var runtime = TyphonRuntime.Create(dbe, schedule =>
+        {
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => Interlocked.Increment(ref executeCount));
+        }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+
+        runtime.Start();
+        var ring = runtime.Telemetry;
+        SpinWait.SpinUntil(() => ring.TotalTicksRecorded >= 3, TimeSpan.FromSeconds(5));
+        runtime.Shutdown();
+
+        var stats = runtime.ReadStats();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(stats.TicksInWindow, Is.GreaterThanOrEqualTo(3), "the window covers the ticks that ran");
+            Assert.That(stats.Tick, Is.EqualTo(ring.NewestTick), "the snapshot names the tick it ends at");
+            Assert.That(stats.TargetTickMs, Is.EqualTo(1.0).Within(1e-9), "1000 Hz is a 1 ms target");
+            Assert.That(stats.TickP50Ms, Is.GreaterThan(0), "a tick that ran took time");
+            Assert.That(stats.TickP99Ms, Is.GreaterThanOrEqualTo(stats.TickP50Ms), "p99 cannot be below p50 over one window");
+            Assert.That(stats.DurabilityWaitP99Ms, Is.GreaterThan(0), "#CLI-04: the flush is timed unconditionally, so the wait is a real number here");
+
+            // The named system is what makes the figure usable: an index would be meaningless to an operator, and system indices are global so index 0 is an
+            // engine track's, not this test's.
+            Assert.That(Array.ConvertAll(stats.Systems, x => x.Name), Contains.Item("Noop"), "the system is named");
+            Assert.That(stats.Systems.Length, Is.EqualTo(runtime.Systems.Length), "one entry per scheduled system, in schedule order");
+
+            Assert.That(stats.Archetypes, Is.Not.Empty, "the engine has registered archetypes whatever the ring holds");
+
+            // Zero is what tells a reader the session figures are zero because nothing is replicated, not because a replicating server is idle. A
+            // subscriptions runtime is built on every Start, so its existence would have said nothing.
+            Assert.That(stats.ReplicatedArchetypes, Is.Zero, "this runtime declares no replicated archetype");
+            Assert.That(stats.Sessions, Is.Zero);
+            Assert.That(stats.NetOutBytesTotal, Is.Zero);
+            Assert.That(stats.ReplicationTrackP99Ms, Is.Zero, "no replication track ran, so its cost is zero rather than absent");
+        });
+    }
+
+    /// <summary>
+    /// #ENG-07 — a runtime that has never ticked reports zeros for what it has not measured, and the archetype counts it CAN answer.
+    /// </summary>
+    /// <remarks>
+    /// The distinction matters for a host that is scraped during startup: percentiles over an empty ring must be zero rather than a division by no samples,
+    /// and the entity counts come from the engine rather than the ring, so they are real before the first tick. A reader that returned nothing at all here
+    /// would make "the server is starting" indistinguishable from "the server is broken".
+    /// </remarks>
+    [Test]
+    public void ReadStats_BeforeTheFirstTick_IsZerosAndStillCountsEntities()
+    {
+        using var dbe = SetupEngine();
+        using var runtime = TyphonRuntime.Create(dbe, schedule =>
+        {
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", static _ => { });
+        }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+
+        var stats = runtime.ReadStats();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(stats.TicksInWindow, Is.Zero);
+            Assert.That(stats.Tick, Is.EqualTo(-1), "no tick has been recorded");
+            Assert.That(stats.TickP50Ms, Is.Zero);
+            Assert.That(stats.TickP99Ms, Is.Zero);
+            Assert.That(stats.DurabilityWaitP99Ms, Is.Zero);
+            Assert.That(stats.Overruns, Is.Zero);
+            Assert.That(stats.TargetTickMs, Is.EqualTo(1.0).Within(1e-9), "the configured target is known before the first tick");
+            Assert.That(stats.Archetypes, Is.Not.Empty, "the engine's archetypes are registered, whatever the ring holds");
+        });
+    }
+
+    /// <summary>
+    /// #CLI-04 — every recorded tick carries the duration of its Unit-of-Work flush, which in WAL mode is the tick's durability wait.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The field exists because the metric that needs it, <c>typhon.durability.wait.p99</c>, emitted a hard zero: the flush was timed only inside the
+    /// profiler's <c>TickPhase.UowFlush</c> span, which does not exist when the profiler is off. So the assertion that matters is that the number is there
+    /// with nothing enabled — no profiler output channel, no subscriptions, no telemetry flags.
+    /// </para>
+    /// <para>
+    /// Asserted as "every recorded tick has a wait" rather than as a threshold. A threshold would be a timing assertion on CI hardware; that EVERY tick
+    /// carries one is a statement about the code path — the stamp is in a <c>finally</c> around the flush, so a tick can only miss it by not reaching the
+    /// flush at all.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void EveryRecordedTickCarriesItsDurabilityWait()
+    {
+        using var dbe = SetupEngine();
+        var executeCount = 0;
+
+        using var runtime = TyphonRuntime.Create(dbe, schedule =>
+        {
+            schedule.PublicTrack.DeclareDag("Test").CallbackSystem("Noop", _ => Interlocked.Increment(ref executeCount));
+        }, new RuntimeOptions { WorkerCount = 1, BaseTickRate = 1000 });
+
+        runtime.Start();
+        var ring = runtime.Telemetry;
+        SpinWait.SpinUntil(() => ring.TotalTicksRecorded >= 3, TimeSpan.FromSeconds(5));
+        runtime.Shutdown();
+
+        Assert.That(ring.TotalTicksRecorded, Is.GreaterThanOrEqualTo(3), "the runtime ran and recorded");
+
+        var oldest = ring.OldestAvailableTick;
+        var newest = ring.NewestTick;
+        var withWait = 0;
+        var ticks = 0;
+        for (var t = oldest; t <= newest; t++)
+        {
+            ref readonly var tick = ref ring.GetTick(t);
+            ticks++;
+            if (tick.UowFlushMs > 0f)
+            {
+                withWait++;
+            }
+        }
+
+        // Counted, not timed: the claim is that the stamp reaches the ring on every tick, so the count of ticks carrying one equals the count of ticks.
+        Assert.That(ticks, Is.GreaterThanOrEqualTo(3), "the window covers the ticks that ran");
+        Assert.That(withWait, Is.EqualTo(ticks),
+            $"{ticks - withWait} of {ticks} recorded ticks carry no flush duration — the stamp is not reaching the ring, which is the state the metric "
+            + "reported as a hard zero before #CLI-04");
+    }
+
     [Test]
     public void Telemetry_CallbackSystem_ZeroEntities()
     {

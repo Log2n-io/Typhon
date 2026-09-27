@@ -72,10 +72,14 @@ public static class TatooineHost
 
         app.MapTyphonSubscriptions("/ws");
         app.MapTyphonCatalog("/typhon/catalog.json");
+        // 08-hosting.md § 7's stats page, now that the engine can answer it (#ENG-07). The same numbers the STATS block sends to game clients, plus the
+        // overrun count and the compute-vs-durability split — readable with curl, which is what makes them watchable on a box nobody has a client for.
+        // It writes its JSON with a Utf8JsonWriter, so the slim builder's source-generated serialization is not involved.
+        app.MapTyphonStats("/typhon/stats.json");
         // Plain text, not JSON: the slim builder uses source-generated serialization, and a health check is not worth a serializer context.
         app.MapGet("/healthz", () => Results.Text($"tick {runtime.CurrentTickNumber}"));
 
-        Console.WriteLine($"  Tatooine is serving on http://localhost:{port}  (websocket /ws, catalog /typhon/catalog.json)");
+        Console.WriteLine($"  Tatooine is serving on http://localhost:{port}  (websocket /ws, catalog /typhon/catalog.json, stats /typhon/stats.json)");
         if (!string.IsNullOrEmpty(clientRoot) && !Directory.Exists(clientRoot))
         {
             Console.WriteLine($"  !! no client build at {clientRoot}; run `npm run build` in demo/SwgTatooine.Client to serve the viewer");

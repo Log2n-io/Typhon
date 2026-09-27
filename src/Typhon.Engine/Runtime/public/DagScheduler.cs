@@ -1004,6 +1004,32 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
     /// <summary>Telemetry ring buffer for diagnostic inspection.</summary>
     public TickTelemetryRing Telemetry => _telemetryRing;
 
+    /// <summary>
+    /// This tick's Unit-of-Work flush duration in milliseconds, staged between the flush and the telemetry record
+    /// (#CLI-04). Both live on the TICK DRIVER thread — the flush runs inside <c>TickEndCallback</c>, the record in
+    /// <c>ComputeAndRecordTelemetry</c> immediately after — so a plain field is the whole protocol; nothing else reads it.
+    /// </summary>
+    private float _uowFlushMs;
+
+    /// <summary>
+    /// Records how long the Unit-of-Work flush took, for this tick's <see cref="TickTelemetry.UowFlushMs"/>.
+    /// </summary>
+    /// <param name="milliseconds">Wall-clock duration of the flush phase.</param>
+    /// <remarks>
+    /// Called once per tick from the runtime's flush phase, including when the flush THREW: a failed flush still waited,
+    /// and a tick that reported zero because its flush failed would hide the slowest durability event the engine can have.
+    /// </remarks>
+    internal void NoteUowFlushMs(float milliseconds) => _uowFlushMs = milliseconds;
+
+    /// <summary>Takes this tick's staged flush duration and clears it, so the next tick cannot inherit it.</summary>
+    /// <returns>The duration in milliseconds, or 0 when this tick did not flush.</returns>
+    private float ConsumeUowFlushMs()
+    {
+        var ms = _uowFlushMs;
+        _uowFlushMs = 0f;
+        return ms;
+    }
+
     /// <summary>Returns a ref to the current tick's SystemTelemetry for the given system index. Used by TyphonRuntime to write entity counts.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal ref SystemTelemetry GetCurrentSystemMetrics(int sysIdx) => ref _currentTickSystemMetrics[sysIdx];

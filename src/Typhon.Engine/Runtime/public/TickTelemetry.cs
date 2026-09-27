@@ -54,6 +54,32 @@ public struct TickTelemetry
     public int EventQueueDepth;
 
     /// <summary>
+    /// Wall-clock time this tick spent in the Unit-of-Work flush, in milliseconds — which in WAL mode is
+    /// <c>WalManager.RequestFlush</c> followed by <c>WaitForDurable</c>, i.e. the tick's DURABILITY WAIT (#CLI-04).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A wall-clock span, not CPU, and not a per-commit figure.</b> The tick driver blocks here until the WAL writer has
+    /// published the tick's records, so this is the latency a tick pays for durability. The per-COMMIT wait is a different
+    /// population: it is measured inside <c>WalWriter.WaitForDurableSlow</c>, has no always-on accumulator, and its fast
+    /// path (already durable) returns without touching a timer at all. A consumer reporting this as
+    /// <c>typhon.durability.wait.p99</c> must say which of the two it means.
+    /// </para>
+    /// <para>
+    /// <b>Why here rather than on a profiler span.</b> The flush is already wrapped in a <c>TickPhase.UowFlush</c> span, but
+    /// a span exists only while the profiler is recording: with the profiler off the wrapper folds away and the number does
+    /// not exist, which is exactly why the metric emitted a hard zero before this field. The ring is single-writer from the
+    /// tick driver and stamped at tick end, so carrying it here costs one <c>Stopwatch</c> pair per tick — on a path that
+    /// just waited on an fsync — and no synchronisation at all.
+    /// </para>
+    /// <para>
+    /// Zero is a real reading: a tick whose records were already durable, or a no-WAL configuration, genuinely waited for
+    /// nothing. It is not "unknown".
+    /// </para>
+    /// </remarks>
+    public float UowFlushMs;
+
+    /// <summary>
     /// Lost wakes caught this tick: a parked worker's between-tick backstop (50 ms) fired after a dispatch whose Set never reached it. Non-zero means the
     /// wake protocol is broken; zero does not prove it is not, since a lost wake that the next dispatch's Set rescues before the backstop leaves nothing to
     /// count. Counted when caught, so a wake lost late in one tick lands in the next. Cumulative: <see cref="DagScheduler.LostWakeCount"/>.

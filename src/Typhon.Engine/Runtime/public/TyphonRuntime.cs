@@ -464,6 +464,120 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>The scheduled systems' names, in schedule order — the labels of the built-in per-system metric the catalog declares.</summary>
+    /// <summary>
+    /// Reads the numbers an operator watches: tick percentiles against the target, overruns, the durability wait, per-system cost, entities per archetype,
+    /// and the session figures when replication is running.
+    /// </summary>
+    /// <param name="windowTicks">
+    /// How many recorded ticks to compute the percentiles over. <c>0</c> (the default) means one second's worth at the configured tick rate, which is the
+    /// window the <c>STATS</c> wire block uses — so a caller comparing the two reads the same thing. Clamped to what the ring still holds.
+    /// </param>
+    /// <returns>A snapshot. Never null; every figure is zero on an engine that has not ticked.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the read the <c>STATS</c> block could not be.</b> Those values are computed once a second inside the subscriptions runtime, held in a
+    /// private array, and written into a game client's frame — so nothing else could see one of them, and an engine with replication off, or whose
+    /// application declared no metrics, computed none at all. This reads the ring and the engine directly: it answers on any running engine, with or without
+    /// replication, whatever the application declared.
+    /// </para>
+    /// <para>
+    /// <b>Not for the tick path.</b> It allocates a snapshot and two arrays and walks the window. Call it from an HTTP endpoint, a CLI verb or a log timer,
+    /// at human rate. It takes no lock and blocks no tick: the ring is a single-writer diagnostic structure, so a sample read while the driver is writing it
+    /// may be torn, perturbing one sample in a percentile — the same trade the encoder makes, for the same reason.
+    /// </para>
+    /// </remarks>
+    public RuntimeStatsSnapshot ReadStats(int windowTicks = 0)
+    {
+        var ring = Telemetry;
+        var targetMs = Options.BaseTickRate > 0 ? 1000.0 / Options.BaseTickRate : 0.0;
+        var window = windowTicks > 0
+            ? windowTicks
+            : Math.Max(1, (int)Math.Round((double)Options.BaseTickRate, MidpointRounding.AwayFromZero));
+
+        var newest = ring?.NewestTick ?? -1;
+        if (ring == null || newest < 0)
+        {
+            // An engine that has not ticked has no percentiles, and saying so with zeros beats inventing a window over no samples. The archetype counts are
+            // still real — they come from the engine, not the ring — so they are read anyway.
+            return new RuntimeStatsSnapshot
+            {
+                Tick = newest,
+                TargetTickMs = targetMs,
+                Archetypes = ReadArchetypeStats(),
+                ReplicatedArchetypes = _subscriptionsRuntime?.Registry?.Archetypes?.Count ?? 0,
+            };
+        }
+
+        var oldest = Math.Max(ring.OldestAvailableTick, newest - window + 1);
+        var ticks = (int)(newest - oldest + 1);
+        var durations = new double[ticks];
+        var waits = new double[ticks];
+        var systemSums = new double[Scheduler.AllSystemCount];
+        var overruns = 0;
+        var i = 0;
+        for (var t = oldest; t <= newest; t++)
+        {
+            ref readonly var tick = ref ring.GetTick(t);
+            durations[i] = tick.ActualDurationMs;
+            waits[i] = tick.UowFlushMs;
+            i++;
+            if (targetMs > 0 && tick.ActualDurationMs > targetMs)
+            {
+                overruns++;
+            }
+
+            var systems = ring.GetSystemMetrics(t);
+            var upTo = Math.Min(systems.Length, systemSums.Length);
+            for (var sys = 0; sys < upTo; sys++)
+            {
+                systemSums[sys] += systems[sys].DurationUs;
+            }
+        }
+
+        var systemStats = new SystemStat[systemSums.Length];
+        for (var sys = 0; sys < systemStats.Length; sys++)
+        {
+            systemStats[sys] = new SystemStat(Scheduler.Systems[sys]?.Name ?? string.Empty, ticks > 0 ? systemSums[sys] / ticks : 0.0);
+        }
+
+        var subscriptions = _subscriptionsRuntime;
+        return new RuntimeStatsSnapshot
+        {
+            Tick = newest,
+            TicksInWindow = ticks,
+            TargetTickMs = targetMs,
+            // The same nearest-rank definition the STATS block uses, from the same helper, so the HTTP figure and the wire figure cannot drift apart on the
+            // meaning of "p99" while both look plausible.
+            TickP50Ms = TelemetryPercentile.NearestRank(durations, ticks, 0.50),
+            TickP99Ms = TelemetryPercentile.NearestRank(durations, ticks, 0.99),
+            Overruns = overruns,
+            DurabilityWaitP99Ms = TelemetryPercentile.NearestRank(waits, ticks, 0.99),
+            Systems = systemStats,
+            Archetypes = ReadArchetypeStats(),
+            ReplicatedArchetypes = subscriptions?.Registry?.Archetypes?.Count ?? 0,
+            Sessions = subscriptions?.Sessions?.OpenCount ?? 0,
+            NetOutBytesTotal = subscriptions?.SendPump?.BytesSent ?? 0L,
+            ReplicationTrackP99Ms = (_subscriptionsContext.Telemetry?.Percentile(newest, window, 0.99, new double[ticks]) ?? 0.0) / 1000.0,
+        };
+    }
+
+    /// <summary>Live entity count per registered archetype, named. Read from the engine, so it is meaningful before the first tick.</summary>
+    private ArchetypeStat[] ReadArchetypeStats()
+    {
+        var stats = new List<ArchetypeStat>();
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            if (meta == null)
+            {
+                continue;
+            }
+
+            stats.Add(new ArchetypeStat(meta.Name, Engine.GetArchetypeEntityCount(meta.ArchetypeId)));
+        }
+
+        return stats.ToArray();
+    }
+
     private string[] SystemNames()
     {
         var names = new string[Scheduler.AllSystemCount];
@@ -2835,31 +2949,46 @@ public sealed partial class TyphonRuntime : IDisposable
         // Flush the UoW to make all Deferred writes (including the tick fence publishes above) durable, then dispose. UoW.Flush in WAL mode calls
         // WalManager.RequestFlush + WaitForDurable(currentLsn), where currentLsn is captured at the moment of the call — so it includes every publish made
         // in WriteTickFence.
-        InspectorPhase(TickPhase.UowFlush, () =>
+        //
+        // Timed unconditionally (#CLI-04). The InspectorPhase span below measures the same thing but exists only while the profiler records, so with the
+        // profiler off there was no durability number at all and typhon.durability.wait.p99 emitted a hard zero. One Stopwatch pair per tick, on the path
+        // that just waited for an fsync, is not a cost worth gating — and a gated measurement is how the metric came to be unsourced in the first place.
+        var flushStart = Stopwatch.GetTimestamp();
+        try
         {
-            try
+            InspectorPhase(TickPhase.UowFlush, () =>
             {
-                _currentUow?.Flush();
-            }
-            catch (Exception)
-            {
-                // SUB-02's fourth clause, at the only point it can be observed: the flush throws out of this phase and the publication gate below is never
-                // reached, so the frames this tick produced would sit in their slots forever. Every session that produced one is closed here instead.
-                _subscriptionsRuntime?.DiscardFrames();
-                throw;
-            }
-            finally
-            {
-                _currentUow?.Dispose();
-                _currentUow = null;
-                TyphonEvent.EmitRuntimePhaseUoWFlush(scheduler.CurrentTickNumber, 0);
+                try
+                {
+                    _currentUow?.Flush();
+                }
+                catch (Exception)
+                {
+                    // SUB-02's fourth clause, at the only point it can be observed: the flush throws out of this phase and the publication gate below is never
+                    // reached, so the frames this tick produced would sit in their slots forever. Every session that produced one is closed here instead.
+                    _subscriptionsRuntime?.DiscardFrames();
+                    throw;
+                }
+                finally
+                {
+                    _currentUow?.Dispose();
+                    _currentUow = null;
+                    TyphonEvent.EmitRuntimePhaseUoWFlush(scheduler.CurrentTickNumber, 0);
 
-                // In the `finally`, so a flush that THREW still stamps. SUB-02's fourth clause is about exactly that tick — a flush that fails after
-                // frames were produced has to close every session, because produced-but-unpublished frames leave client baselines ahead of the
-                // clients — and a verifier for it needs to see that the flush was reached at all.
-                _subscriptionsContext.NoteFlush();
-            }
-        });
+                    // In the `finally`, so a flush that THREW still stamps. SUB-02's fourth clause is about exactly that tick — a flush that fails after
+                    // frames were produced has to close every session, because produced-but-unpublished frames leave client baselines ahead of the
+                    // clients — and a verifier for it needs to see that the flush was reached at all.
+                    _subscriptionsContext.NoteFlush();
+                }
+            });
+        }
+        finally
+        {
+            // In a `finally` for the same reason the stamp above is: a flush that THREW still waited, and it is the slowest durability event the engine can
+            // have. A tick reporting zero because its flush failed would hide exactly the outlier the percentile exists to show. A field write on the tick
+            // driver's own thread cannot itself throw, so this cannot displace the flush's exception.
+            scheduler.NoteUowFlushMs((float)Stopwatch.GetElapsedTime(flushStart).TotalMilliseconds);
+        }
 
         // Issue #234: compute per-tier budget metrics from this tick's system telemetry, for the next tick's TickContext.
         ComputeTierBudgetMetrics();
