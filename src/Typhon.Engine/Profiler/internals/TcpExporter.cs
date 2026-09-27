@@ -108,6 +108,18 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
     /// </summary>
     public bool SchemaOmittedFromInit { get; private set; }
 
+    /// <summary>
+    /// Payload size, in bytes, of an Init frame that is still over <see cref="LiveStreamProtocol.MaxFrameBytes"/> AFTER the schema was omitted; 0 when the
+    /// frame is sendable.
+    /// </summary>
+    /// <remarks>
+    /// Non-zero means attach cannot succeed at all against this engine, and the failure mode is silent and endless: the receiver rejects an over-long frame by
+    /// declaring the stream malformed, the Workbench reconnects, and the same frame arrives again. Omitting the schema is the remedy for a large schema; it is
+    /// no remedy for a large system/archetype/track/DAG set. Surfaced as state rather than a throw because refusing to start the exporter would take the
+    /// engine's own trace file down with it, and a trace to disk is still worth having.
+    /// </remarks>
+    public long InitPayloadUnsendableBytes { get; private set; }
+
     /// <inheritdoc />
     public void Initialize(ProfilerSessionMetadata metadata)
     {
@@ -603,12 +615,24 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
         // does not fit must send the schema-less Init it used to send rather than a frame that drops the connection. Attach then degrades to what
         // it was before this change — the Workbench's existing "schema unavailable for this session type" state — instead of failing to attach at
         // all. SchemaOmittedFromInit is how a test sees which branch ran; nothing else can tell them apart from the outside.
-        if (LiveStreamProtocol.FrameHeaderSize + ms.Length > LiveStreamProtocol.MaxFrameBytes)
+        // The predicate is the RECEIVER's, over the payload alone: `AttachSessionRuntime`'s read loop rejects on `length > MaxFrameBytes` where `length` is
+        // the payload it is about to read, so measuring the header in here made the producer five bytes stricter than the consumer while a comment on the
+        // other side claimed the two checked the same thing. Five bytes never mattered; two subtly different predicates around one shared constant would.
+        if (ms.Length > LiveStreamProtocol.MaxFrameBytes)
         {
             ms.SetLength(staticSectionsStart);
             ms.Position = staticSectionsStart;
             staticWriter.WriteEmptyStaticStructures();
             SchemaOmittedFromInit = true;
+
+            // Omitting the schema is only a remedy when the REST of the Init fits. If the header plus the system, archetype, component-type, track and DAG
+            // tables alone exceed the limit, this still returns a frame the receiver will refuse, and because it refuses by declaring the stream malformed
+            // the Workbench drops the connection, reconnects, and is handed the identical frame — forever, with nothing in either log saying why. That is the
+            // one outcome worse than failing to carry the schema, so it is stated once, loudly, at the point the size is known.
+            if (ms.Length > LiveStreamProtocol.MaxFrameBytes)
+            {
+                InitPayloadUnsendableBytes = ms.Length;
+            }
         }
 
         return ms.ToArray();

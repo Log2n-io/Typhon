@@ -59,6 +59,33 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const archetypeId = selectedId !== null && archetypeIds.includes(selectedId) ? selectedId : archetypeIds[0] ?? null;
 
+  // All nine readings in ONE memo keyed on the window and the selected archetype. Each is a full walk of the window, and
+  // the component re-renders far more often than the window changes — the store's `metadata` identity flips on every live
+  // batch, so an unmemoized body re-walked the window about sixty times a second to produce the same numbers. The sibling
+  // Subscriptions panel memoizes the equivalent set; this one did not.
+  //
+  // ABOVE the cold-state returns below, because a hook after an early return is called on some renders and not others —
+  // `react-hooks/rules-of-hooks` rejects it and React would mis-pair the hook state. With no archetype selected the key is
+  // -1, which no archetype carries, so every helper returns its empty reading; nothing below the guards reads them then.
+  const {
+    sample, identity, repairPin, migrationsPerSec, driftersPerSec, efficiency, evictedInWindow, realms, rebasesInWindow,
+  } = useMemo(() => {
+    const id = archetypeId ?? -1;
+    return {
+      sample: latestSampleFor(windowedTicks, id),
+      identity: checkDrifterIdentity(windowedTicks, id),
+      repairPin: detectRepairPin(windowedTicks, id),
+      migrationsPerSec: ratePerSecond(windowedTicks, id, (r) => r.migrations),
+      driftersPerSec: ratePerSecond(windowedTicks, id, (r) => r.driftersDetected),
+      // #944 — the appended controller half. Efficiency is a WINDOW sum (the field's own instruction) while the controller's
+      // state is read off the latest record: one is a cost over time, the other is where the controller stands right now.
+      efficiency: readQueryEfficiency(windowedTicks, id),
+      evictedInWindow: windowGrowth(windowedTicks, id, (r) => r.repairQueueEvicted),
+      realms: readRealmShapes(windowedTicks, id),
+      rebasesInWindow: windowGrowth(windowedTicks, id, (r) => r.efficiencyRebases),
+    };
+  }, [windowedTicks, archetypeId]);
+
   if (sessionKind !== 'attach') {
     return (
       <ColdState>
@@ -76,18 +103,6 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
       </ColdState>
     );
   }
-
-  const sample = latestSampleFor(windowedTicks, archetypeId);
-  const identity = checkDrifterIdentity(windowedTicks, archetypeId);
-  const repairPin = detectRepairPin(windowedTicks, archetypeId);
-  const migrationsPerSec = ratePerSecond(windowedTicks, archetypeId, (r) => r.migrations);
-  const driftersPerSec = ratePerSecond(windowedTicks, archetypeId, (r) => r.driftersDetected);
-  // #944 — the appended controller half. Efficiency is a WINDOW sum (the field's own instruction) while the controller's
-  // state is read off the latest record: one is a cost over time, the other is where the controller stands right now.
-  const efficiency = readQueryEfficiency(windowedTicks, archetypeId);
-  const evictedInWindow = windowGrowth(windowedTicks, archetypeId, (r) => r.repairQueueEvicted);
-  const realms = readRealmShapes(windowedTicks, archetypeId);
-  const rebasesInWindow = windowGrowth(windowedTicks, archetypeId, (r) => r.efficiencyRebases);
 
   return (
     <div className="flex h-full w-full flex-col overflow-auto bg-background" data-testid="spatial-maintenance">

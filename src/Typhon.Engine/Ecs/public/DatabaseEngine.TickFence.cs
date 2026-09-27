@@ -1877,9 +1877,18 @@ public partial class DatabaseEngine
             pinsRejected: clusterState.LastTickPinsRejected,
             crossingsQueued: clusterState.LastTickCrossingsQueued);
 
-        // The realm census, walked once for both records. O(present realms) — the same walk MaxClusterReachAcrossRealms already does, and behind the
-        // profiler gate above. Counted here rather than inside the per-realm emitter so the two records agree even when the per-realm kind is gated off:
-        // "runnable 3 of 1 188" must stay true whether or not the rows are being sent.
+        // The realm census, walked once for both records. Counted here rather than inside the per-realm emitter so the two records agree even when the
+        // per-realm kind is gated off: "runnable 3 of 1 188" must stay true whether or not the rows are being sent.
+        //
+        // Behind BOTH spatial gates, not merely the profiler's. An earlier comment here claimed this was "the same walk MaxClusterReachAcrossRealms already
+        // does" and therefore free — it is not: kind 66 carries no reach field and that method is not called on this path, so the walk is additive. With the
+        // profiler attached and both spatial kinds off, every archetype was paying O(present realms) plus a RealmTable.IsRunnable per realm every tick for
+        // records nobody asked for — on the galaxy of a few thousand sleeping interiors this file's own docs invoke, that is the wrong order of magnitude.
+        if (!TelemetryConfig.SpatialArchetypeTelemetryActive && !TelemetryConfig.SpatialRealmTelemetryActive)
+        {
+            return;
+        }
+
         var present = clusterState.PresentRealmSpatial;
         var runnable = CountRunnableRealms(present, clusterState.RealmTableOrNull);
 
@@ -2000,7 +2009,9 @@ public partial class DatabaseEngine
                 gridDepth: config.GridDepth,
                 clusters: rs.CellClusterPool?.ClusterListCount ?? 0,
                 clusterReach: Volatile.Read(ref rs.ClusterReach),
-                escapedClusters: rs.EscapedClusters.Count,
+                // Volatile, like every other read of this field in the engine: `RealmArchetypeSpatial` documents it as published with a release store, and the
+            // two reads on the lines around this one already pair with it. A plain load here can see a stale reference on arm64, hence a stale Count.
+            escapedClusters: Volatile.Read(ref rs.EscapedClusters).Count,
                 promotedCells: Volatile.Read(ref rs.PromotedCellCount),
                 blockedCells: rs.TightnessBlockedCells?.Count ?? 0,
                 budgetConfiguredMs: config.ReclusterBudgetMs,

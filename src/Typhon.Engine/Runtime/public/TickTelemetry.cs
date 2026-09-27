@@ -73,8 +73,9 @@ public struct TickTelemetry
     /// just waited on an fsync — and no synchronisation at all.
     /// </para>
     /// <para>
-    /// Zero is a real reading: a tick whose records were already durable, or a no-WAL configuration, genuinely waited for
-    /// nothing. It is not "unknown".
+    /// Zero is a real reading: a tick whose records were already durable, or one that committed nothing, genuinely waited
+    /// for nothing. It is not "unknown". (It is also zero for a tick that did not reach its flush at all — see the clear at
+    /// the top of the scheduler's tick driver, which is what keeps a failed flush from donating its wait to the next tick.)
     /// </para>
     /// </remarks>
     public float UowFlushMs;

@@ -463,7 +463,6 @@ public sealed partial class TyphonRuntime : IDisposable
         Scheduler.Start();
     }
 
-    /// <summary>The scheduled systems' names, in schedule order — the labels of the built-in per-system metric the catalog declares.</summary>
     /// <summary>
     /// Reads the numbers an operator watches: tick percentiles against the target, overruns, the durability wait, per-system cost, entities per archetype,
     /// and the session figures when replication is running.
@@ -578,6 +577,7 @@ public sealed partial class TyphonRuntime : IDisposable
         return stats.ToArray();
     }
 
+    /// <summary>The scheduled systems' names, in schedule order — the labels of the built-in per-system metric the catalog declares.</summary>
     private string[] SystemNames()
     {
         var names = new string[Scheduler.AllSystemCount];

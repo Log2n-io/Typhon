@@ -413,6 +413,15 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             // WaitAsync's own timeout. The session lives; it simply has no schema to advertise yet.
             runtime.LogInitHandshakeTimedOut(handshakeTimeout.TotalSeconds);
         }
+        catch (OperationCanceledException)
+        {
+            // The CALLER gave up mid-handshake. This is the one path that must not merely log: the runtime already owns a connected socket, a detached read
+            // loop, the periodic timers and — once Init landed — a temp file and a cache builder, and because we are about to throw instead of returning it,
+            // nothing else will ever hold the reference that could dispose them. The connect loop above is careful to dispose its `TcpClient` on
+            // cancellation; without this the wait we added after it undoes that discipline and leaks the whole runtime for the process's lifetime.
+            runtime.Dispose();
+            throw;
+        }
         catch (TimeoutException)
         {
             runtime.LogInitHandshakeTimedOut(handshakeTimeout.TotalSeconds);
@@ -1210,6 +1219,19 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     }
 
     /// <summary>
+    /// Deliver any buffered summaries to the CURRENT subscribers, before a new one is added and handed a metadata snapshot.
+    /// </summary>
+    /// <remarks>
+    /// A summary is appended to <c>_tickSummaries</c> — and so appears in the next metadata snapshot — the moment the builder finalizes its tick, but its
+    /// delta waits on the coalescing timer. A subscriber that attaches inside that window receives the summary twice: once inside the snapshot it seeds its
+    /// store from, and again in the next batch. Before coalescing, that window was one summary wide and closed in the same statement; it is now up to
+    /// <see cref="TickSummaryFlushMs"/> or <see cref="TickSummaryFlushThreshold"/> entries. Duplicates in a sorted array that
+    /// <c>viewRangeToTickRange</c> binary-searches give wrong ranges rather than an error, so the caller must drain BEFORE it subscribes: the drain reaches
+    /// the existing subscribers, and the new one gets those summaries exactly once, from the snapshot.
+    /// </remarks>
+    internal void FlushPendingSummariesBeforeSubscribe() => FlushPendingSummaryDeltas();
+
+    /// <summary>
     /// Drain <see cref="_pendingSummaryDeltas"/> into one <c>tickSummariesAdded</c> delta. Safe to call from the flush
     /// timer, from the producer when the buffer crosses <see cref="TickSummaryFlushThreshold"/>, and from shutdown —
     /// an empty buffer broadcasts nothing.
@@ -1249,6 +1271,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         _chunkManifest.Add(dto);
         _metadataSnapshot = null;
         ChunkAdded?.Invoke(dto);
+
+        // Deliver any buffered summaries BEFORE this chunk, because coalescing them bought batching at the cost of an ordering guarantee that used to be
+        // free. A chunk covers ticks the builder finalized earlier, so their summaries are already sitting in `_pendingSummaryDeltas` waiting on the timer;
+        // broadcasting the chunk first hands a client a chunk entry for ticks it has never heard of. That is not a cosmetic inversion — the client resolves a
+        // chunk lookup by binary-searching `metadata.tickSummaries`, so the symptom is a silently wrong chunk rather than a visible gap. Coalescing preserved
+        // ordering WITHIN the summary kind and lost it ACROSS kinds; this is the other half.
+        FlushPendingSummaryDeltas();
         BroadcastDelta(new LiveStreamEventDto(Kind: "chunkAdded", ChunkEntry: dto));
     }
 
@@ -1564,16 +1593,18 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         // Idempotent — a window already saved by a shutdown frame is not written twice.
         try { AutoSaveOnTeardown("session_closed"); } catch { }
 
-        // Drain before the timer goes away, so the ticks finalized in the last sub-100 ms window still reach a client
-        // that is watching the shutdown.
-        try { FlushPendingSummaryDeltas(); } catch { }
-
         _disposed = true;
         try { _flushChunkTimer?.Dispose(); } catch { }
         try { _trailingTickTimer?.Dispose(); } catch { }
         try { _globalMetricsTimer?.Dispose(); } catch { }
         try { _tickSummaryFlushTimer?.Dispose(); } catch { }
         try { _cts.Cancel(); } catch { }
+
+        // Drain AFTER the read loop has been told to stop, not before. Draining first left a window — the loop was still live across the flush, the
+        // `_disposed` store and the cancel — in which a finalized tick could land in `_pendingSummaryDeltas` and never be sent, which is exactly the loss the
+        // flush exists to prevent. Cancelling first closes the producer, so this drain sees everything there will ever be. The timers are already gone, so
+        // nothing else can race this call.
+        try { FlushPendingSummaryDeltas(); } catch { }
         try { _cts.Dispose(); } catch { }
         try
         {

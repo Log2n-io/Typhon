@@ -291,7 +291,10 @@ function createEntry(sessionId: string, isLive: boolean): SessionCacheEntry {
         // proceeds (the new cache starts at `entriesVersion = 0`, which a -1 sentinel guarantees
         // we treat as "newer than what we last assembled").
         entry.fingerprint = nextFingerprint;
-        entry.cache = createChunkCache();
+        // Carry the session's budget across the reset. Without `budgetForSession` this silently restored DEFAULT_BUDGET on a
+        // live entry, undoing `setCacheBudget` above — latent only because the attach runtime sends an empty fingerprint
+        // today, so the branch never fires for a live session. One server change makes it real.
+        entry.cache = createChunkCache(budgetForSession(entry.isLive));
         entry.assembled = null;
         entry.lastBumpedCacheVersion = -1;
         entry.eagerChunkLoaded = false;

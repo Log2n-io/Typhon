@@ -48,6 +48,9 @@ public static class ProfilerLiveStream
         await SseExtensions.WriteSseHeadersAsync(ctx, ct);
 
         var runtime = liveRuntime;
+        // Drain buffered summaries to the existing subscribers BEFORE joining, so this connection does not receive them twice — once in the metadata
+        // snapshot written below, once in the next coalesced batch. See FlushPendingSummariesBeforeSubscribe.
+        runtime.FlushPendingSummariesBeforeSubscribe();
         var (subscriberId, reader) = runtime.Subscribe();
 
         try

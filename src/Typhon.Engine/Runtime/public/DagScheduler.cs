@@ -628,6 +628,13 @@ public sealed partial class DagScheduler : HighResolutionTimerServiceBase
         // no other net; the multi-threaded path's worker exceptions are already netted in WorkerLoop, but its coordination code runs here too. Mirror
         // the WorkerLoop net: log loudly, surface via the hook, drop this tick. (A persistently-throwing tick keeps being surfaced every tick rather
         // than silently — the hook can escalate to graceful shutdown.)
+        // Clear the staged flush duration HERE, before the tick runs, not when telemetry consumes it. `NoteUowFlushMs` is stamped in the runtime's `finally`
+        // so a flush that threw still reports its wait — but the throw propagates out of `TickEndCallback`, which this method's own catch below turns into
+        // "log it and drop the tick", so `ComputeAndRecordTelemetry` never runs and never consumes the value. The next successful tick then reported the
+        // FAILED tick's wait, which is precisely what `DagScheduler.Telemetry.cs`'s "a tick that did not flush reports 0 rather than the previous tick's wait"
+        // promises cannot happen. Clearing at the start makes that promise true on every path out of the tick.
+        _uowFlushMs = 0f;
+
         try
         {
             if (_workerCount == 1)
