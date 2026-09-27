@@ -121,8 +121,14 @@ export function differentiate(
   if (!(seconds > 0)) {
     return { total, perSecond: null };
   }
-  // Clamped at zero: a counter that appears to go backwards means the engine restarted inside the window, and a negative rate is not a
-  // reading about anything.
+  // Clamped at zero, and the reason is ordinary rather than exceptional. `framesSkipped` on the server record is the SUM of per-session
+  // counters that each count since their own session opened, over a population that changes — so a session disconnecting removes its whole
+  // contribution and the total drops, with no restart and nothing wrong. (A restart does it too; it is the rarer cause.)
+  //
+  // The consequence to know, because the clamp hides it: in a window where a session left, skips by the sessions that stayed are subtracted
+  // away with it, so this reads 0 while skipping was happening. Reading 0 here means "no NET growth in a changing population", not "no skips".
+  // The fix belongs on the wire — a server-wide counter that does not leave with its session — not in this arithmetic, which cannot recover
+  // information the record does not carry.
   return { total, perSecond: Math.max(0, total - pick(oldest)) / seconds };
 }
 

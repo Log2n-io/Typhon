@@ -44,8 +44,17 @@ internal ref partial struct SubscriptionsServerTelemetryEvent
     [BeginParam] public float DurabilityWaitP99Ms;
     /// <summary>Frames skipped since each session opened, summed over open sessions. Cumulative — a consumer differentiates it over its own window.</summary>
     /// <remarks>
+    /// <para>
     /// The most diagnostic counter on this record: a skip is the engine deciding a session could not keep up, so a rising slope here is the shape of "why did
     /// this client not see that entity" before anyone thinks to ask it.
+    /// </para>
+    /// <para>
+    /// <b>It is a sum over a population that changes, so it is not monotonic.</b> Each term counts since its own session opened, and a session that
+    /// disconnects takes its whole contribution out of the sum — so this can fall between two emissions with nothing wrong, and a difference across such a
+    /// window is smaller than the skipping that actually happened (a consumer clamping at zero reads 0). That is a limitation of the field, not of the
+    /// consumer: recovering the real figure needs a server-wide counter that does not leave with its session, which this record does not yet carry and should
+    /// gain by APPENDING when it does. Until then, read a rising slope as a real signal and a flat one as inconclusive.
+    /// </para>
     /// </remarks>
     [BeginParam] public long FramesSkipped;
     /// <summary>Frame-pool blocks currently rented (<c>FramePool.RentedCount</c>).</summary>

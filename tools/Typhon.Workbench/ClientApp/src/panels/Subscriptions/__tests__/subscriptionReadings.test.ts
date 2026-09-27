@@ -115,9 +115,21 @@ describe('differentiate', () => {
     expect(r?.perSecond).toBeNull();
   });
 
-  it('clamps a counter that went backwards, because that means the engine restarted', () => {
+  // The commonest cause is not a restart: framesSkipped is a SUM over per-session counters, so a session disconnecting takes its whole
+  // contribution out of the total and the sum falls with nothing wrong. A negative rate is not a reading about anything either way.
+  it('clamps a counter that went backwards, which a session disconnecting is enough to cause', () => {
     const ticks = [tick(0, server({ framesSkipped: 900 })), tick(50, server({ framesSkipped: 4 }))];
     expect(differentiate(ticks, (x) => x.framesSkipped, tickSeconds)?.perSecond).toBe(0);
+  });
+
+  // The limitation the clamp hides, pinned so it is a known property rather than a surprise: in a window where a session left, the skipping
+  // done by the sessions that stayed is subtracted away with it. 0 here means "no NET growth across a changing population", not "no skips".
+  it('reads zero when a departing session\'s counter outweighs the skips of the sessions that stayed', () => {
+    // 700 leaves with one session; the remaining sessions skipped 60 more in the same window. Net is negative, so the real 60 is invisible.
+    const ticks = [tick(0, server({ framesSkipped: 900, sessions: 4 })), tick(50, server({ framesSkipped: 260, sessions: 3 }))];
+    const r = differentiate(ticks, (x) => x.framesSkipped, tickSeconds);
+    expect(r?.perSecond).toBe(0);
+    expect(r?.total).toBe(260);
   });
 
   it('returns null when nothing in the window carried a record', () => {

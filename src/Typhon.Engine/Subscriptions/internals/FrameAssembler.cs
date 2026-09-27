@@ -1158,7 +1158,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
         // The window is this emission's own, in ticks, and never zero — the first emission would otherwise divide by the absolute tick number.
         var window = _operatorEmissionTick < 0 ? period : (int)Math.Min(period, Math.Max(1, tickNumber - _operatorEmissionTick));
-        var seconds = window * _tickSeconds;
+        // Volatile.Read, pairing with SetTickState's Volatile.Write, exactly as the two readers in FrameAssembler.Push.cs do. The runtime publishes the live
+        // period from the tick's start and this runs on the tick driver, so the ordering is real; on x64 the acquire is a plain mov, so the pairing is free.
+        var seconds = window * Volatile.Read(ref _tickSeconds);
         var sent = stats.SentBytes;
         var outBytesPerSec = seconds <= 0 ? 0 : Math.Max(0, sent - _operatorSentBytesMark) / seconds;
 
