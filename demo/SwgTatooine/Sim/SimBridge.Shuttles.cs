@@ -39,7 +39,16 @@ public sealed partial class SimBridge
     private long _shuttleBoardings;
     private long _probeCursor;
     private long _probeHits;
-    private readonly List<int> _arrivalBursts = [];
+    // The arrival report as five running counters rather than one entry per port-tick (SWG-07). The list this replaced grew forever — one `int` per port that
+    // saw an arrival, every tick, for the life of the process — and the report it fed needs a total, a count, a maximum and two thresholds, none of which
+    // needs the samples kept. In a measured run that was a bounded leak nobody noticed; under `--serve`, which never ends, it was unbounded. Subtracting the
+    // list is strictly better than capping it: the report is identical, and there is nothing left to bound.
+    private long _arrivalTotal;
+    private long _arrivalPortTicks;
+    private int _arrivalLargest;
+    private long _arrivalAtLeast16;
+    private long _arrivalAtLeast64;
+
     private readonly List<double> _probeSteadyNs = [];
     private readonly List<double>[] _probePostNs = NewBuckets(ProbeWindowTicks + 1);
     private readonly List<double> _probeSteadyHits = [];
@@ -54,6 +63,14 @@ public sealed partial class SimBridge
     /// <summary>One probe of one port: the queries timed cold and re-run warm, and the work the engine's traversal does for them — all per query.</summary>
     private readonly record struct ProbeSample(double Ns, double WarmNs, double Hits, double Cells, double Scanned, double Overlapping, double Tested,
         double Pages, bool First);
+
+    /// <summary>What <see cref="PrintShuttleReport"/> reports about arrivals — the whole of it, in five numbers.</summary>
+    /// <remarks>
+    /// Exposed so a check can assert the counters that replaced the per-port-tick list. The bound is structural rather than asserted: five scalars cannot
+    /// grow, which is a stronger statement than any cap a test could measure.
+    /// </remarks>
+    public (long Total, long PortTicks, int Largest, long AtLeast16, long AtLeast64) ArrivalSummary
+        => (_arrivalTotal, _arrivalPortTicks, _arrivalLargest, _arrivalAtLeast16, _arrivalAtLeast64);
 
     private int ShuttleIntervalTicks => Math.Max(1, (int)(_config.ShuttleIntervalS * _config.TickRateHz));
 
@@ -303,7 +320,11 @@ public sealed partial class SimBridge
             if (n > 0)
             {
                 _lastArrivalTick[p] = tick;
-                _arrivalBursts.Add(n);
+                _arrivalTotal += n;
+                _arrivalPortTicks++;
+                _arrivalLargest = Math.Max(_arrivalLargest, n);
+                _arrivalAtLeast16 += n >= 16 ? 1 : 0;
+                _arrivalAtLeast64 += n >= 64 ? 1 : 0;
             }
         }
 
@@ -513,22 +534,10 @@ public sealed partial class SimBridge
             return;
         }
 
-        long arrivals = 0;
-        var largest = 0;
-        var atLeast16 = 0;
-        var atLeast64 = 0;
-        foreach (var n in _arrivalBursts)
-        {
-            arrivals += n;
-            largest = Math.Max(largest, n);
-            atLeast16 += n >= 16 ? 1 : 0;
-            atLeast64 += n >= 64 ? 1 : 0;
-        }
-
         Console.WriteLine();
         Console.WriteLine($"  shuttles ({(_config.ShuttleBurst ? "burst" : "trickle")}, every {_config.ShuttleIntervalS:G} s, {_config.BoardingWindowS:G} s window, "
-            + $"share {_config.ShuttleShare:G}): {arrivals:N0} arrivals in {_arrivalBursts.Count:N0} port-ticks; largest {largest} in one port-tick, "
-            + $">= 16 in {atLeast16}, >= 64 in {atLeast64}");
+            + $"share {_config.ShuttleShare:G}): {_arrivalTotal:N0} arrivals in {_arrivalPortTicks:N0} port-ticks; largest {_arrivalLargest} in one "
+            + $"port-tick, >= 16 in {_arrivalAtLeast16}, >= 64 in {_arrivalAtLeast64}");
         if (!_config.Probe)
         {
             return;

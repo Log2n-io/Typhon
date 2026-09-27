@@ -6,6 +6,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using Typhon.Subscriptions.AspNetCore;
 
@@ -79,6 +80,10 @@ public static class TatooineHost
         // Plain text, not JSON: the slim builder uses source-generated serialization, and a health check is not worth a serializer context.
         app.MapGet("/healthz", () => Results.Text($"tick {runtime.CurrentTickNumber}"));
 
+        // Tell every client the server is going, before Kestrel drops their sockets (SWG-07). ApplicationStopping runs before the listeners are closed and
+        // blocks shutdown until it returns, which is exactly the window in which the runtime is still ticking and a KICK can still be staged and sent.
+        app.Lifetime.ApplicationStopping.Register(() => KickEveryone(runtime));
+
         Console.WriteLine($"  Tatooine is serving on http://localhost:{port}  (websocket /ws, catalog /typhon/catalog.json, stats /typhon/stats.json)");
         if (!string.IsNullOrEmpty(clientRoot) && !Directory.Exists(clientRoot))
         {
@@ -88,4 +93,53 @@ public static class TatooineHost
         await app.RunAsync().ConfigureAwait(false);
     }
 
+    /// <summary>How long the shutdown waits for the kicks to be staged and written before it stops listening.</summary>
+    /// <remarks>
+    /// Two ticks at 10 Hz plus the pump's wake, rounded up. It is a ceiling, not a delay: the wait ends as soon as every session the tick saw has been
+    /// staged. A server with no client connected stops as fast as it did before.
+    /// </remarks>
+    private const int ShutdownDrainMs = 1500;
+
+    /// <summary>
+    /// Asks the tick to kick every open session, and waits for it to have done so.
+    /// </summary>
+    /// <param name="runtime">The still-ticking runtime.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the wait is on a staged count and then a short settle.</b> <c>KICK</c> is a session request: the tick's prologue applies it, and only then does
+    /// the send pump write the frame and close the link. So there are two boundaries to cross, and neither is observable as a single flag. The wait is
+    /// therefore in two parts — spin until the tick reports the kicks staged, then give the pump a short settle — both inside one ceiling, so a runtime that
+    /// has already stopped ticking cannot hang the process.
+    /// </para>
+    /// <para>
+    /// It is deliberately not <c>async</c>: <c>ApplicationStopping</c> is a synchronous callback, and blocking in it is what holds the listeners open long
+    /// enough for the frames to leave.
+    /// </para>
+    /// </remarks>
+    private static void KickEveryone(TyphonRuntime runtime)
+    {
+        var expected = TatooineReplication.LiveSessions;
+        var sessions = expected.Clients + expected.Spectators;
+        TatooineReplication.RequestShutdown("server shutting down");
+        if (sessions == 0)
+        {
+            return;
+        }
+
+        var deadline = Environment.TickCount64 + ShutdownDrainMs;
+        while (TatooineReplication.KicksStaged < sessions && Environment.TickCount64 < deadline)
+        {
+            Thread.Sleep(5);
+        }
+
+        // The pump writes on a pool thread after the request is applied; there is no public count of frames written per session to wait on, so the settle is
+        // a bounded sleep rather than a condition. Bounded by the same deadline, so it cannot extend the ceiling above.
+        var settle = (int)Math.Clamp(deadline - Environment.TickCount64, 0, 250);
+        if (settle > 0)
+        {
+            Thread.Sleep(settle);
+        }
+
+        Console.WriteLine($"  shutdown: {TatooineReplication.KicksStaged} of {sessions} sessions kicked");
+    }
 }

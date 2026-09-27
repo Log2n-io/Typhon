@@ -16,7 +16,36 @@ public sealed partial class TatooineSim
     private EcsView<Starship> _shipView;
     private EcsView<CreatureLair> _lairView;
     private EcsView<WorldObject> _structureView;
-    private Transaction _viewTx;
+
+    /// <summary>
+    /// Builds the six views the systems read, and gives back the transaction that created them before returning.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The transaction is disposed here, and holding it was a leak (SWG-07).</b> Both entry points used to keep it in a field for the life of the object.
+    /// <c>Transaction</c>'s constructor calls <c>EpochManager.EnterScope</c> and its <c>Dispose</c> calls <c>ExitScopeUnordered</c>, so an undisposed
+    /// transaction holds an epoch scope open — and nothing deferred behind that epoch can be reclaimed while it is. A measured run ends, so there it was a
+    /// bounded cost nobody noticed; <c>--serve</c> never ends, so there it was a server that could not reclaim for as long as it was up. It also held a UoW
+    /// registry slot, which <c>CreateQuickTransaction</c>'s own remarks call the expensive half.
+    /// </para>
+    /// <para>
+    /// <b>Disposing it is safe by rule, not by inspection.</b> <c>VIEW-01</c> (<c>rules/ecs.md</c>) states that a retained view query holds no transaction
+    /// between operations and <i>enforces</i> that "every <c>EcsView</c> constructor calls <c>EcsQuery.DetachTransaction</c> on its own copy — the creator's
+    /// lease ends at construction, not at first refresh". Each later refresh binds the transaction it is handed by the tick and detaches it in a
+    /// <c>finally</c>. Nothing here reads the creator again, which is what <c>RunHygieneChecks</c> asserts by ticking a world whose creating transaction is
+    /// gone.
+    /// </para>
+    /// </remarks>
+    private void BuildViews()
+    {
+        using var tx = Dbe.CreateQuickTransaction();
+        _playerView = tx.Query<Player>().ToView();
+        _creatureView = tx.Query<Creature>().ToView();
+        _npcView = tx.Query<CityNpc>().ToView();
+        _shipView = SpaceRealm >= 0 ? tx.Query<Starship>().ToView() : null;
+        _lairView = tx.Query<CreatureLair>().ToView();
+        _structureView = tx.Query<WorldObject>().ToView();
+    }
 
     /// <summary>Per-tick behavioural totals, drained by the telemetry system.</summary>
     public TickStats LastStats { get; private set; }
@@ -26,6 +55,10 @@ public sealed partial class TatooineSim
 
     /// <summary>With <c>--chunk-stats</c>, how evenly the awareness system's chunks shared its work and the pool.</summary>
     public void PrintChunkStats() => _bridge?.PrintChunkStats();
+
+    /// <summary>The systems' shared state, once a run or a serve has built it; null before that.</summary>
+    /// <remarks>Public for the same reason <see cref="Runtime"/> is: the checks beside this demo read what it accumulated, and reflection is not a test.</remarks>
+    public SimBridge Bridge => _bridge;
 
     /// <summary>
     /// Build the views, wire the schedule and run the configured number of ticks.
@@ -41,13 +74,7 @@ public sealed partial class TatooineSim
     /// </remarks>
     public RunResult Run()
     {
-        _viewTx = Dbe.CreateQuickTransaction();
-        _playerView = _viewTx.Query<Player>().ToView();
-        _creatureView = _viewTx.Query<Creature>().ToView();
-        _npcView = _viewTx.Query<CityNpc>().ToView();
-        _shipView = SpaceRealm >= 0 ? _viewTx.Query<Starship>().ToView() : null;
-        _lairView = _viewTx.Query<CreatureLair>().ToView();
-        _structureView = _viewTx.Query<WorldObject>().ToView();
+        BuildViews();
 
         _bridge = new SimBridge(_config, Map, Index)
         {

@@ -27,13 +27,39 @@ public sealed partial class TatooineSim
     /// <returns>A task that completes when the host has stopped.</returns>
     public async Task ServeAsync(int port, string clientRoot)
     {
-        _viewTx = Dbe.CreateQuickTransaction();
-        _playerView = _viewTx.Query<Player>().ToView();
-        _creatureView = _viewTx.Query<Creature>().ToView();
-        _npcView = _viewTx.Query<CityNpc>().ToView();
-        _shipView = SpaceRealm >= 0 ? _viewTx.Query<Starship>().ToView() : null;
-        _lairView = _viewTx.Query<CreatureLair>().ToView();
-        _structureView = _viewTx.Query<WorldObject>().ToView();
+        StartReplication();
+        try
+        {
+            await TatooineHost.ServeAsync(_runtime, port, clientRoot).ConfigureAwait(false);
+        }
+        finally
+        {
+            _runtime.Shutdown();
+        }
+    }
+
+    /// <summary>
+    /// The runtime this simulation is ticking, once <see cref="StartReplication"/> or <see cref="Run"/> has started one.
+    /// </summary>
+    /// <remarks>
+    /// Public for the same reason <see cref="Dbe"/> is: this is a demo whose purpose is to be driven from outside — by <c>Program</c>, by a sweep, and by
+    /// the checks beside it. A test that has to reach a private field through reflection is a test that breaks when the field is renamed, and stops
+    /// testing when the field is removed.
+    /// </remarks>
+    public TyphonRuntime Runtime => _runtime;
+
+    /// <summary>
+    /// Everything <see cref="ServeAsync"/> does except the web host: the views, the bridge, the replication declarations and a started runtime.
+    /// </summary>
+    /// <remarks>
+    /// <b>Split out so that replication can be exercised without a socket.</b> A transport is a seam
+    /// (<c>design/Subscriptions/04-transport.md § 2</c>): a test starts its own in-process transport against
+    /// <see cref="TyphonRuntime.StartSubscriptionTransport"/> and receives the same frames a WebSocket would carry. Going through the web host instead would
+    /// test Kestrel, bind a port, and make a check that is about a <c>KICK</c> fail for a reason that has nothing to do with one.
+    /// </remarks>
+    public void StartReplication()
+    {
+        BuildViews();
 
         _bridge = new SimBridge(_config, Map, Index)
         {
@@ -77,6 +103,8 @@ public sealed partial class TatooineSim
         TatooineReplication.GodRegionMaxEdgeM = _config.GodRegionMaxEdgeM;
         TatooineReplication.GodNearBudget = _config.GodNearBudget;
         TatooineReplication.Planets = _config.Planets;
+        TatooineReplication.MaxClients = _config.MaxClients;
+        TatooineReplication.MaxSpectators = _config.MaxSpectators;
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
@@ -90,15 +118,6 @@ public sealed partial class TatooineSim
         // declarations against the builder ones this way).
         var catalog = _runtime.SubscriptionsCatalogJson;
         Console.WriteLine($"  catalog {Typhon.Protocol.CatalogSerializer.HashBytes(catalog.Span):X16}, {catalog.Length} B");
-
-        try
-        {
-            await TatooineHost.ServeAsync(_runtime, port, clientRoot).ConfigureAwait(false);
-        }
-        finally
-        {
-            _runtime.Shutdown();
-        }
     }
 
     /// <summary>The simulation's own schedule, plus the one system a server needs that a benchmark does not.</summary>

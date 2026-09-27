@@ -313,6 +313,19 @@ public sealed class SimConfig
     /// </summary>
     public int IngressBytesPerSecond = 16 * 1024;
 
+    /// <summary>
+    /// <c>--max-clients N</c>: how many player sessions are admitted at once; 0 (the default) is unlimited.
+    /// </summary>
+    /// <remarks>
+    /// <b>A cap is what makes the refusal path exist at all (SWG-07).</b> Without one the demo accepted every connection, so the one thing every real server
+    /// does under load — say no, with a reason a client can act on — was never exercised, and neither was the engine's admission hook. The cap counts
+    /// admitted sessions of each role separately because a full house of spectators must not lock players out of their own world.
+    /// </remarks>
+    public int MaxClients;
+
+    /// <summary><c>--max-spectators N</c>: how many god-camera sessions are admitted at once; 0 (the default) is unlimited.</summary>
+    public int MaxSpectators;
+
     /// <summary><c>--player-leave M</c>: the players' leave radius, metres; 0 (the default) for none. The Phase 2 criteria run at 192/208 m.</summary>
     public double PlayerLeaveM;
 
@@ -427,6 +440,32 @@ public sealed class SimConfig
 
     /// <summary>Seed for every random decision, so a run is reproducible and two arms see the same world.</summary>
     public int Seed = 20260907;
+
+    // ── Mode ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// <c>--serve P</c>: the port to serve the world on instead of measuring it; 0 (the default) measures.
+    /// </summary>
+    /// <remarks>
+    /// Parsed with every other flag rather than separately in <c>Program</c>, so that the strict parser can account for it. A mode flag the argument reader
+    /// does not know about is a token it would have to refuse — see <see cref="ArgReader"/>.
+    /// </remarks>
+    public int ServePort;
+
+    /// <summary><c>--sweep</c>: run the partitioning matrix instead of one configuration.</summary>
+    public bool RunSweep;
+
+    /// <summary><c>--sweep-worlds</c>: the sweep's world-edge axis, km.</summary>
+    public float[] SweepWorlds;
+
+    /// <summary><c>--sweep-pops</c>: the sweep's population-scale axis.</summary>
+    public float[] SweepPops;
+
+    /// <summary><c>--sweep-cells</c>: the sweep's cell-size axis, metres at the real planet's scale.</summary>
+    public float[] SweepCells;
+
+    /// <summary>The flag list, set instead of a configuration when the command line asked for <c>--help</c>; null otherwise.</summary>
+    public string HelpText;
 
     // ── Derived ─────────────────────────────────────────────────────────────────────────────────────────────────────
 

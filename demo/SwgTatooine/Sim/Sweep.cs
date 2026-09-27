@@ -18,11 +18,18 @@ namespace SwgTatooine;
 public static class Sweep
 {
     /// <summary>Run the matrix and write a markdown report beside the executable.</summary>
-    public static int Run(SimConfig template, string[] args)
+    /// <param name="template">The configuration every point starts from; its three sweep axes say what the matrix is.</param>
+    /// <returns>The process exit code.</returns>
+    /// <remarks>
+    /// The axes arrive on the configuration rather than being re-parsed from <c>args</c> here. Parsing them twice meant the strict parser could not account
+    /// for them, and a mistyped <c>--sweep-cells</c> silently swept the default five sizes while the report named the run as the operator intended it.
+    /// </remarks>
+    public static int Run(SimConfig template)
     {
-        var worlds = Floats(args, "--sweep-worlds", [TatooineData.PlanetEdgeM / 1000f, 64f, 128f]);
-        var pops = Floats(args, "--sweep-pops", [1f, 4f, 16f]);
-        var cells = Floats(args, "--sweep-cells", [64f, 128f, 256f, 512f, 1024f]);
+        ArgumentNullException.ThrowIfNull(template);
+        var worlds = template.SweepWorlds;
+        var pops = template.SweepPops;
+        var cells = template.SweepCells;
         var rows = new List<SweepRow>();
 
         Console.WriteLine($"── Sweep: {worlds.Length} worlds x {pops.Length} populations x {cells.Length} cell sizes "
@@ -247,26 +254,6 @@ public static class Sweep
         SimdNarrowphase = c.SimdNarrowphase,
     };
 
-    private static float[] Floats(string[] args, string name, float[] fallback)
-    {
-        var i = Array.IndexOf(args, name);
-        if (i < 0 || i + 1 >= args.Length)
-        {
-            return fallback;
-        }
-
-        var parts = args[i + 1].Split(',', StringSplitOptions.RemoveEmptyEntries);
-        var result = new float[parts.Length];
-        for (var k = 0; k < parts.Length; k++)
-        {
-            if (!float.TryParse(parts[k], NumberStyles.Float, CultureInfo.InvariantCulture, out result[k]))
-            {
-                return fallback;
-            }
-        }
-
-        return result;
-    }
 }
 
 /// <summary>One point of the sweep.</summary>

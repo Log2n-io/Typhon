@@ -5,27 +5,39 @@ namespace SwgTatooine;
 
 internal static class Program
 {
-    /// <summary>The port <c>--serve</c> names, or 0 when it is absent.</summary>
+    /// <summary>
+    /// Parses the command line, then runs whichever of the three modes it named.
+    /// </summary>
     /// <param name="args">The command line.</param>
-    /// <returns>The port.</returns>
-    /// <remarks>Read here rather than in <see cref="CommandLine"/> because it selects a mode rather than configuring the simulation.</remarks>
-    private static int PortArgument(string[] args)
+    /// <returns>0 on success, 2 when the command line is wrong.</returns>
+    /// <remarks>
+    /// <b>A wrong command line exits 2 and names the token (SWG-07).</b> It used to fall back to the default for anything it could not read, so a typo in a
+    /// sweep script produced a complete, plausible report of the wrong configuration. Exiting non-zero is what lets a script notice; naming the token is what
+    /// lets a person fix it. Only <see cref="ArgumentException"/> is caught, and only around the parse: a failure inside the simulation is a crash and should
+    /// look like one.
+    /// </remarks>
+    private static int Main(string[] args)
     {
-        var at = Array.IndexOf(args, "--serve");
-        if (at < 0)
+        SimConfig config;
+        try
         {
+            config = CommandLine.Parse(args);
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine($"SwgTatooine: {ex.Message}");
+            return 2;
+        }
+
+        if (config.HelpText != null)
+        {
+            Console.Write(config.HelpText);
             return 0;
         }
 
-        return at + 1 < args.Length && int.TryParse(args[at + 1], out var port) && port is > 0 and <= 65535 ? port : 8080;
-    }
-
-    private static int Main(string[] args)
-    {
-        var config = CommandLine.Parse(args);
-        if (Array.IndexOf(args, "--sweep") >= 0)
+        if (config.RunSweep)
         {
-            return Sweep.Run(config, args);
+            return Sweep.Run(config);
         }
 
         Console.WriteLine($"── SWG Tatooine — {config.Label} ──────────────");
@@ -49,10 +61,9 @@ internal static class Program
         // `--serve <port>` turns the benchmark into a server: the same world and the same systems, ticking forever behind a WebSocket, with the browser
         // client served beside it. It returns from here rather than falling through to the measurement report, which has nothing to say about a run with no
         // end.
-        var servePort = PortArgument(args);
-        if (servePort > 0)
+        if (config.ServePort > 0)
         {
-            sim.ServeAsync(servePort, TatooineSim.DefaultClientRoot(AppContext.BaseDirectory)).GetAwaiter().GetResult();
+            sim.ServeAsync(config.ServePort, TatooineSim.DefaultClientRoot(AppContext.BaseDirectory)).GetAwaiter().GetResult();
             return 0;
         }
         Console.WriteLine($"  {sim.Census}");

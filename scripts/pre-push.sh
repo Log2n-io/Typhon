@@ -176,6 +176,30 @@ if [ "$BUILD" -eq 1 ]; then
   step "build websocket adapter tests (Release)" dotnet build "$WSADAPTER" -c Release
 fi
 suite_step "websocket adapter suite (Release)" "$WSADAPTER" pre-push-ws-adapter.trx
+
+# ── the rest of the gate's aux-tests job ─────────────────────────────────────────────────────────────────────────────
+#
+# The `aux-tests` job runs eight projects; this script ran two of them. The other six were only ever exercised on a billed
+# c6id instance — the same gap that sent one bug to the gate five times through test/Typhon.Workbench.Tests, which is the
+# founding story of this whole script. They are seconds each, and two of them (the demo suites) are where WP-3's own
+# checks live, so a WP-3 change that breaks a demo world would otherwise be discovered by CI rather than here.
+AUX=(
+  test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj
+  test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj
+  test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj
+  test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj
+  test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj
+  demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj
+  demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj
+)
+# Built unconditionally, unlike the suites above. `suite_step` passes `--no-build`, and a project that has never been built
+# in Release on this box then fails with "test assembly not found" — which reads as a broken script rather than a missing
+# build, and would do so on every fresh worktree. These are small; the build is seconds.
+for proj in "${AUX[@]}"; do
+  name="$(basename "$proj" .csproj)"
+  step "build ${name} (Release)" dotnet build "$proj" -c Release
+  suite_step "${name} (Release, gate: aux-tests)" "$proj" "pre-push-${name}.trx"
+done
 if command -v npm >/dev/null 2>&1; then
   step "TypeScript SDK check (gate: subscriptions-sdk)" bash -c 'cd src/Typhon.Client.TypeScript && npm ci --silent && npm run check'
 else

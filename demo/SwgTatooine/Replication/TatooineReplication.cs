@@ -126,6 +126,162 @@ public static class TatooineReplication
     /// <summary>How many planets a god camera may look at with <see cref="ViewRealm"/> (<c>--planets</c>); planet p is realm p.</summary>
     public static int Planets { get; set; } = 1;
 
+    // ── Admission and shutdown (SWG-07) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Player sessions admitted at once (<c>--max-clients</c>); 0 is unlimited.</summary>
+    public static int MaxClients { get; set; }
+
+    /// <summary>God-camera sessions admitted at once (<c>--max-spectators</c>); 0 is unlimited.</summary>
+    public static int MaxSpectators { get; set; }
+
+    /// <summary>The close code a session refused for a full house carries; the application range starts at 4100.</summary>
+    public const ushort HouseFullCloseCode = 4101;
+
+    /// <summary>The close code a session kicked by <see cref="RequestShutdown"/> carries.</summary>
+    public const ushort ShutdownCloseCode = 4100;
+
+    // Live sessions of each role, as the last tick counted them from the session table, and admissions granted since that count. The hook runs on the
+    // transport thread and the count runs in the tick, so neither alone is the truth: the hook admits against live + pending, and the tick zeroes pending
+    // BEFORE it walks. That ordering is what makes the cap safe — a session admitted during the walk is either seen by the walk or still in pending, so it
+    // is counted at least once and possibly twice. Double-counting refuses one client a tick early; under-counting would let the cap be exceeded, and only
+    // one of those is a correctness failure.
+    private static int _liveClients;
+    private static int _liveSpectators;
+    private static int _pendingClients;
+    private static int _pendingSpectators;
+    private static long _refusedFull;
+
+    /// <summary>Sessions refused because their role's cap was reached, for the shutdown report.</summary>
+    public static long RefusedFull => System.Threading.Interlocked.Read(ref _refusedFull);
+
+    /// <summary>Live sessions of each role as the last tick counted them.</summary>
+    public static (int Clients, int Spectators) LiveSessions
+        => (System.Threading.Volatile.Read(ref _liveClients), System.Threading.Volatile.Read(ref _liveSpectators));
+
+    // Set from any thread when the process is going away; read by the tick, which kicks every open session once. A string rather than a bool so that the
+    // reason reaching the client is the operator's, and so that "not shutting down" is unambiguously null.
+    private static volatile string _shutdownReason;
+    private static long _kicksStaged;
+
+    // Sessions already kicked. Tick-thread only, and never cleared: the process is on its way out, and a set bounded by the connections made during a
+    // shutdown window is not a leak worth a lifetime for.
+    private static readonly HashSet<SessionId> Kicked = [];
+
+    /// <summary>
+    /// Asks the next tick to send every open session a <c>KICK</c> carrying <paramref name="reason"/>, then close it. Callable from any thread.
+    /// </summary>
+    /// <param name="reason">Why, as the client will see it.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Why a client is told rather than dropped (SWG-07).</b> The host used to stop Kestrel and let every socket die, which a client cannot distinguish
+    /// from its own network failing: an SDK's reconnect policy then backs off and retries a server that is deliberately gone. A <c>KICK</c> with an
+    /// application close code says "this was on purpose", and the code is in the application range because a protocol code would tell the SDK something
+    /// different about whether to come back.
+    /// </para>
+    /// <para>
+    /// The kick is staged, not sent: <c>SessionRequest</c> is applied by the next tick's prologue, and the send pump writes the frame and then closes the
+    /// link. So the caller must let the runtime tick — see <see cref="KicksStaged"/>, which is what the host waits on.
+    /// </para>
+    /// </remarks>
+    public static void RequestShutdown(string reason) => _shutdownReason = string.IsNullOrEmpty(reason) ? "server shutting down" : reason;
+
+    /// <summary>How many sessions have been staged a shutdown <c>KICK</c>.</summary>
+    public static long KicksStaged => System.Threading.Interlocked.Read(ref _kicksStaged);
+
+    /// <summary>Whether a shutdown has been asked for.</summary>
+    public static bool ShuttingDown => _shutdownReason != null;
+
+    /// <summary>
+    /// The application's admission hook: a role by session kind, and a refusal when that role's house is full.
+    /// </summary>
+    /// <param name="request">What the client presented.</param>
+    /// <returns>An acceptance carrying the role, or a refusal.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Roles are not cosmetic here.</b> A <c>god</c> session is a <see cref="SessionRole.Spectator"/> and gets the tooling limits, because the god camera
+    /// is allowed to see how the server is arranged; a <c>player</c> session is a <see cref="SessionRole.Player"/> on the operator's defaults. Counting them
+    /// against separate caps is deliberate: a full house of spectators must not lock players out of their own world, which one shared cap would allow.
+    /// </para>
+    /// <para>
+    /// A kind the registry never declared does not reach here at all — the engine refuses it with
+    /// <see cref="Typhon.Protocol.CloseCodes.AuthenticationRejected"/> before the hook — so this only ever sees <c>god</c> or <c>player</c>.
+    /// </para>
+    /// </remarks>
+    public static Admission Admit(in AdmissionRequest request)
+    {
+        if (_shutdownReason != null)
+        {
+            return Admission.Reject(ShutdownCloseCode, _shutdownReason);
+        }
+
+        var player = string.Equals(request.Kind, PlayerKind, StringComparison.Ordinal);
+        if (player)
+        {
+            // The byte budget stays with BindOpenedSessions' SetBudget rather than moving into these limits. Both would work, and setting it in two places
+            // would mean two numbers to keep equal — and that one is what the Phase 2 criteria measure with.
+            return TryReserve(ref _pendingClients, System.Threading.Volatile.Read(ref _liveClients), MaxClients)
+                ? Admission.Accept(SessionRole.Player)
+                : Full("player", MaxClients);
+        }
+
+        return TryReserve(ref _pendingSpectators, System.Threading.Volatile.Read(ref _liveSpectators), MaxSpectators)
+            ? Admission.Accept(SessionRole.Spectator, SessionLimits.God)
+            : Full("spectator", MaxSpectators);
+    }
+
+    /// <summary>
+    /// Clears the session accounting and the shutdown request, so one check's caps and kicks do not decide the next one's.
+    /// </summary>
+    /// <remarks>
+    /// This class is static because the declarations it makes are process-wide — the schedule holds delegates to its methods — so its counters are too, and
+    /// a fixture that ran second would otherwise inherit the first one's full house. Called from a <c>SetUp</c>; never from the demo itself.
+    /// </remarks>
+    public static void ResetSessionAccounting()
+    {
+        _shutdownReason = null;
+        System.Threading.Volatile.Write(ref _liveClients, 0);
+        System.Threading.Volatile.Write(ref _liveSpectators, 0);
+        System.Threading.Volatile.Write(ref _pendingClients, 0);
+        System.Threading.Volatile.Write(ref _pendingSpectators, 0);
+        System.Threading.Interlocked.Exchange(ref _refusedFull, 0);
+        System.Threading.Interlocked.Exchange(ref _kicksStaged, 0);
+        Kicked.Clear();
+        MaxClients = 0;
+        MaxSpectators = 0;
+    }
+
+    /// <summary>A refusal for a full house, counted.</summary>
+    /// <param name="role">The role whose cap was reached, for the message.</param>
+    /// <param name="cap">The cap.</param>
+    /// <returns>The refusal.</returns>
+    private static Admission Full(string role, int cap)
+    {
+        System.Threading.Interlocked.Increment(ref _refusedFull);
+        return Admission.Reject(HouseFullCloseCode, $"the {role} house is full ({cap})");
+    }
+
+    /// <summary>Claims a place under a cap, atomically against every other transport thread.</summary>
+    /// <param name="pending">The role's pending counter.</param>
+    /// <param name="live">The role's live count, as the last tick saw it.</param>
+    /// <param name="cap">The cap; 0 or less is unlimited.</param>
+    /// <returns>Whether a place was claimed.</returns>
+    private static bool TryReserve(ref int pending, int live, int cap)
+    {
+        if (cap <= 0)
+        {
+            System.Threading.Interlocked.Increment(ref pending);
+            return true;
+        }
+
+        if (live + System.Threading.Interlocked.Increment(ref pending) <= cap)
+        {
+            return true;
+        }
+
+        System.Threading.Interlocked.Decrement(ref pending);
+        return false;
+    }
+
     // Whether the declarations were made: a measurement run has no replication, and an announcement there has nobody to reach.
     private static bool _declared;
 
@@ -155,6 +311,10 @@ public static class TatooineReplication
         ArgumentNullException.ThrowIfNull(subs);
 
         subs.Sessions.Kinds(GodKind, PlayerKind);
+
+        // The admission hook. Without one the engine accepts every connection as a Spectator, so the demo had no role distinction, no cap, and no refusal
+        // path — and neither the engine's admission surface nor an SDK's handling of a refusal was exercised by anything (SWG-07).
+        subs.Sessions.Admit = Admit;
 
         // What each archetype replicates is declared on the data — [Replicated] on the archetype, [Motion] / [Position] on its placement, [Replicate],
         // [OnEnter], [Fraction] and [Owner] on its components' fields (Ecs/Archetypes.cs, Ecs/Components.cs; design/Subscriptions/11 § 5). Everyone sees a
@@ -244,6 +404,25 @@ public static class TatooineReplication
 
         _pushCommands = subs;
 
+        // Once a shutdown has been asked for, every open session is told and nothing else about this tick matters: binding a session that is about to be
+        // kicked would give it one frame of world it cannot use.
+        var shutdown = _shutdownReason;
+        if (shutdown != null)
+        {
+            foreach (var session in subs.OpenSessions)
+            {
+                if (Kicked.Add(session))
+                {
+                    subs.Session(session).Kick(ShutdownCloseCode, shutdown);
+                    System.Threading.Interlocked.Increment(ref _kicksStaged);
+                }
+            }
+
+            return;
+        }
+
+        RecountSessions(subs);
+
         foreach (ref readonly var e in subs.SessionEvents)
         {
             if (e.Kind == SessionEventKind.Opened)
@@ -274,6 +453,44 @@ public static class TatooineReplication
                 subs.Enter(command.Session, new RealmId((ushort)command.Value.Realm));
             }
         }
+    }
+
+    /// <summary>
+    /// Recounts the live sessions of each role from the session table, so that the admission hook has a number it did not derive from its own increments.
+    /// </summary>
+    /// <param name="subs">This tick's replication surface.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the truth is recomputed rather than maintained.</b> A counter incremented at admission and decremented on <c>Closed</c> is exact only if every
+    /// acceptance produces exactly one of each, and it does not: <c>SessionTable.TryAdmit</c> can still fail to lease a slot, or throw while opening, after
+    /// the hook has said yes. Each such case leaks a place under the cap permanently, and a server whose cap has silently shrunk to zero stops accepting for
+    /// a reason nothing reports. Walking the open sessions is O(sessions) once a tick against a table the tick is already touching.
+    /// </para>
+    /// <para>
+    /// The pending counters are cleared BEFORE the walk, not after — see their declaration for why that direction is the safe one.
+    /// </para>
+    /// </remarks>
+    private static void RecountSessions(SubscriptionsCommands subs)
+    {
+        System.Threading.Interlocked.Exchange(ref _pendingClients, 0);
+        System.Threading.Interlocked.Exchange(ref _pendingSpectators, 0);
+
+        var players = 0;
+        var spectators = 0;
+        foreach (var session in subs.OpenSessions)
+        {
+            if (string.Equals(subs.SessionKindOf(session), PlayerKind, StringComparison.Ordinal))
+            {
+                players++;
+            }
+            else
+            {
+                spectators++;
+            }
+        }
+
+        System.Threading.Volatile.Write(ref _liveClients, players);
+        System.Threading.Volatile.Write(ref _liveSpectators, spectators);
     }
 
     /// <summary>

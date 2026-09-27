@@ -315,7 +315,6 @@ public sealed partial class TatooineSim : IDisposable
         _shipView?.Dispose();
         _lairView?.Dispose();
         _structureView?.Dispose();
-        _viewTx?.Dispose();
         _scope?.Dispose();
         _serviceProvider?.Dispose();
         Typhon.Engine.Internals.SpatialQueryTuning.SimdNarrowphase = _simdNarrowphaseBefore;
