@@ -124,6 +124,30 @@ internal void M() { }
 """)
         self.assertEqual({}, found)
 
+    def test_a_bom_and_crlf_do_not_hide_an_orphan(self):
+        # Probed because a miss here would be invisible: the file reads normally and the check simply says nothing.
+        path = os.path.join(self.root, "src", "Bom.cs")
+        with open(path, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf/// <summary>Orphan.</summary>\r\n/// <summary>Real.</summary>\r\nclass E { }\r\n")
+        self.assertEqual({"src/Bom.cs": [2]}, lint.scan(self.root, ["src"]))
+
+    def test_a_doc_comment_on_the_same_line_as_code_is_not_an_orphan(self):
+        found = self.scan("J.cs", "/// <summary>Only one.</summary> class F { }\n")
+        self.assertEqual({}, found)
+
+    def test_a_preprocessor_directive_between_them_is_a_known_miss(self):
+        # Documented as a limit, not a target: `#region` ends the `///` block, so the pair is not seen. Asserted so the
+        # behaviour is a decision on record — if someone later makes the check span directives, this test tells them
+        # they changed something deliberate rather than fixing an oversight.
+        found = self.scan("K.cs", """
+/// <summary>Orphaned, and not caught.</summary>
+#region Stuff
+/// <summary>The member's own.</summary>
+class B { }
+#endregion
+""")
+        self.assertEqual({}, found)
+
     def test_obj_and_bin_are_skipped(self):
         os.makedirs(os.path.join(self.root, "src", "obj"))
         with open(os.path.join(self.root, "src", "obj", "Generated.cs"), "w", encoding="utf-8") as fh:

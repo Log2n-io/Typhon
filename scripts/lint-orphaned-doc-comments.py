@@ -29,6 +29,20 @@ Checks:
     ORPHANED_DOC_COMMENT  a second (or later) `<summary>` inside one contiguous `///` block
     BASELINE_STALE        a file with FEWER than its baseline records (advisory: run --update-baseline)
 
+Known limits, all of them misses rather than false alarms — deliberate, because a gate that blocks a correct push gets
+switched off, while one that lets some cases through still stops the shape that actually happens. Probed when it landed:
+
+  * A preprocessor directive between the two comments (`#region`, `#if`) ends the block, so the pair is not seen. The
+    mistake this exists to catch is a member inserted directly above a doc comment, which leaves them adjacent.
+  * `/** … */` delimited doc comments are not read at all. This repo has none; `///` is universal here.
+  * An UNESCAPED `<summary>` inside an `<example><code>` sample would count. In practice such a sample writes the
+    inner comment's own `///` first (`/// /// <summary>`), which does not match, or escapes the angle brackets — and a
+    real instance is absorbed by the baseline rather than blocking anyone.
+
+Verified as handled, not limits: a BOM, CRLF line endings, a one-line `/// <summary>Text.</summary>`, a doc comment on
+the same line as code, and element order within one comment (`<remarks>` before `<summary>` is legal and is not
+flagged — see the note on DOC_LINE below).
+
 Ratchet: per-file counts are compared against `coverage/orphaned-doc-comments-baseline.json` and may not INCREASE.
 Per file rather than one total so that fixing one file cannot pay for breaking another, and so a failure names where
 to look. The baseline is data, not a target; it exists so that the 39 already here do not have to be fixed in the same
