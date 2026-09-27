@@ -502,6 +502,8 @@ public sealed partial class TyphonRuntime : IDisposable
             {
                 Tick = newest,
                 TargetTickMs = targetMs,
+                // 1 rather than the default 0: a runtime that has not ticked is not modulating, and 0 is not a multiplier any tick ever runs under.
+                TickMultiplier = 1,
                 Archetypes = ReadArchetypeStats(),
                 ReplicatedArchetypes = _subscriptionsRuntime?.Registry?.Archetypes?.Count ?? 0,
             };
@@ -515,12 +517,16 @@ public sealed partial class TyphonRuntime : IDisposable
         var waits = new double[ticks];
         var systemSums = new double[Scheduler.AllSystemCount];
         var overruns = 0;
+        var multiplier = 1;
         var i = 0;
         for (var t = oldest; t <= newest; t++)
         {
             ref readonly var tick = ref ring.GetTick(t);
             durations[i] = tick.ActualDurationMs;
             waits[i] = tick.UowFlushMs;
+            // The newest tick's, so it ends up holding the last one the loop sees. Published beside Overruns because that count is measured against the 1×
+            // target and a modulated tick legitimately exceeds it — see RuntimeStatsSnapshot.Overruns.
+            multiplier = tick.TickMultiplier;
             i++;
             if (targetMs > 0 && tick.ActualDurationMs > targetMs)
             {
@@ -552,6 +558,7 @@ public sealed partial class TyphonRuntime : IDisposable
             TickP50Ms = TelemetryPercentile.NearestRank(durations, ticks, 0.50),
             TickP99Ms = TelemetryPercentile.NearestRank(durations, ticks, 0.99),
             Overruns = overruns,
+            TickMultiplier = multiplier,
             DurabilityWaitP99Ms = TelemetryPercentile.NearestRank(waits, ticks, 0.99),
             Systems = systemStats,
             Archetypes = ReadArchetypeStats(),

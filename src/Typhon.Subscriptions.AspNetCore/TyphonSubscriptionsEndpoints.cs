@@ -158,6 +158,10 @@ public static class TyphonSubscriptionsEndpoints
             writer.WriteNumber("p50"u8, stats.TickP50Ms);
             writer.WriteNumber("p99"u8, stats.TickP99Ms);
             writer.WriteNumber("overruns"u8, stats.Overruns);
+            // Beside `overruns` because it is what makes that count readable: the count is measured against `target`, the 1x rate, so while the multiplier is
+            // above 1 it includes ticks doing exactly what the overload manager told them to. Rising overruns at multiplier 1 is the engine falling behind;
+            // rising overruns with a rising multiplier is load being shed. See RuntimeStatsSnapshot.Overruns.
+            writer.WriteNumber("multiplier"u8, stats.TickMultiplier);
             writer.WriteEndObject();
 
             // Beside the tick, because the pair IS the reading: 12 ms of tick with 9 of it here is a disk problem, and the same 12 with 0.2 here is not.

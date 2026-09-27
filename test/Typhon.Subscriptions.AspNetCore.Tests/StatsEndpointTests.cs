@@ -96,6 +96,11 @@ public class StatsEndpointTests
                 Assert.That(tick.GetProperty("p99").GetDouble(), Is.EqualTo(expected.TickP99Ms));
                 Assert.That(tick.GetProperty("overruns").GetInt32(), Is.EqualTo(expected.Overruns));
 
+                // Beside `overruns` because it is what makes that count readable — the count is against the 1x target, so a modulated tick counts as an
+                // overrun while doing what it was told. 1 on a runtime that is not being throttled, and never 0: no tick runs at multiplier 0.
+                Assert.That(tick.GetProperty("multiplier").GetInt32(), Is.EqualTo(expected.TickMultiplier));
+                Assert.That(tick.GetProperty("multiplier").GetInt32(), Is.GreaterThanOrEqualTo(1));
+
                 // In its own object beside the tick, because the pair is the reading an operator needs: 12 ms of tick with 9 of it here is a disk problem.
                 Assert.That(root.GetProperty("durabilityMs").GetProperty("waitP99").GetDouble(), Is.EqualTo(expected.DurabilityWaitP99Ms));
 

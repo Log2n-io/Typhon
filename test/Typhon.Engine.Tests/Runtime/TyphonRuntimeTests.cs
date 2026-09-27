@@ -423,6 +423,8 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
             Assert.That(stats.TicksInWindow, Is.GreaterThanOrEqualTo(3), "the window covers the ticks that ran");
             Assert.That(stats.Tick, Is.InRange(newestBefore, newestAfter), "the snapshot names the tick it ends at");
             Assert.That(stats.TargetTickMs, Is.EqualTo(1.0).Within(1e-9), "1000 Hz is a 1 ms target");
+            // Published so Overruns can be read: that count is measured against the 1x target, so a modulated tick counts as one while doing what it was told.
+            Assert.That(stats.TickMultiplier, Is.GreaterThanOrEqualTo(1), "a tick always runs under some multiplier, and 0 is not one");
             Assert.That(stats.TickP50Ms, Is.GreaterThan(0), "a tick that ran took time");
             Assert.That(stats.TickP99Ms, Is.GreaterThanOrEqualTo(stats.TickP50Ms), "p99 cannot be below p50 over one window");
             Assert.That(stats.DurabilityWaitP99Ms, Is.GreaterThan(0), "#CLI-04: the flush is timed unconditionally, so the wait is a real number here");
@@ -470,6 +472,7 @@ class TyphonRuntimeTests : TestBase<TyphonRuntimeTests>
             Assert.That(stats.TickP99Ms, Is.Zero);
             Assert.That(stats.DurabilityWaitP99Ms, Is.Zero);
             Assert.That(stats.Overruns, Is.Zero);
+            Assert.That(stats.TickMultiplier, Is.EqualTo(1), "a runtime that has not ticked is not modulating, and 0 is not a multiplier any tick runs under");
             Assert.That(stats.TargetTickMs, Is.EqualTo(1.0).Within(1e-9), "the configured target is known before the first tick");
             Assert.That(stats.Archetypes, Is.Not.Empty, "the engine's archetypes are registered, whatever the ring holds");
         });

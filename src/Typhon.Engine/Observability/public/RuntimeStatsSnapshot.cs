@@ -45,7 +45,31 @@ public sealed class RuntimeStatsSnapshot
     public double TickP99Ms { get; init; }
 
     /// <summary>Ticks in the window whose duration exceeded the target. A count, not a rate — read it against <see cref="TicksInWindow"/>.</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Against <see cref="TargetTickMs"/>, the 1× base-rate target — not against the multiplier-adjusted budget a throttled tick is actually given.</b> That
+    /// is the same display semantic the scheduler's <c>OverrunRatio</c> carries, and deliberately so (the #289 follow-up in
+    /// <c>DagScheduler.Telemetry.cs</c>): the effective ratio exists to drive the overload detector, because a workload that fits comfortably at multiplier N
+    /// still exceeds the 1× target and a detector reading it that way never deescalates. An operator's question is the other one — "is the engine holding the
+    /// rate it was configured for" — and the answer to that is measured against the configured rate.
+    /// </para>
+    /// <para>
+    /// The consequence to know: while <see cref="TickMultiplier"/> is above 1, ticks counted here include ones doing exactly what the overload manager told
+    /// them to. A rising count with a rising multiplier is load being shed, not the engine falling behind; a rising count at multiplier 1 is the engine falling
+    /// behind. The two readings need each other, which is why the multiplier is on this snapshot at all.
+    /// </para>
+    /// </remarks>
     public int Overruns { get; init; }
+
+    /// <summary>
+    /// The tick-rate multiplier the newest tick in the window ran under: 1 at the configured rate, 2 or more while the overload manager is modulating.
+    /// </summary>
+    /// <remarks>
+    /// Present so <see cref="Overruns"/> can be read correctly — see its remarks. The newest tick's rather than the window's maximum, because it answers "what
+    /// is the engine doing now"; a window that changed multiplier mid-way is visible as a mismatch between this and the overrun count, which is a truer signal
+    /// than either a maximum or a mean would give.
+    /// </remarks>
+    public int TickMultiplier { get; init; }
 
     /// <summary>
     /// 99th-percentile per-tick durability wait over the window, in milliseconds: the Unit-of-Work flush, which in WAL mode is <c>RequestFlush</c> followed
