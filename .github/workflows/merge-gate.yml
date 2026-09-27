@@ -594,6 +594,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/lint-test-suppressions.py
 
+      # A doc comment must document the member below it. Inserting a member immediately ABOVE an existing doc comment
+      # leaves that comment on the new member and silently strips the old one, and nothing catches it: the compiler does
+      # not validate one <summary> per member, the build is clean, every test passes, and the diff reads as a pure
+      # addition because the orphaned lines are untouched context — the only detector is a reader who is looking at the
+      # new member. Ratcheted per file against coverage/orphaned-doc-comments-baseline.json (49 already here when it
+      # landed, three of them introduced in one session by one author), so the backlog need not be fixed to stop the
+      # next one. Pure source analysis, like its neighbours here.
+      - name: Orphaned doc-comment lint
+        run: python3 scripts/lint-orphaned-doc-comments.py
+
       # A malformed .runsettings makes `dotnet test` run ZERO tests while the job still looks configured — the
       # nightly's seeded and suppressed tiers were both silently empty because a comment in nightly.runsettings
       # contained `--`. That is a false green one layer BELOW the suppression lints, which reason about which

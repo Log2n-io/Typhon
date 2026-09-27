@@ -883,14 +883,6 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         return chunks;
     }
 
-    /// <summary>
-    /// The frame stage's parallel efficiency: CPU summed over chunks against the slowest chunk, averaged over the ticks measured.
-    /// </summary>
-    /// <remarks>
-    /// <b>Effective workers = sum / max, and efficiency = that over the chunk count.</b> A stage whose sessions cost the same would sit near 1; one whose
-    /// slowest chunk does ten times the median sits near 0.1, and every worker but that one is idle for nine tenths of the stage. Zero unless phase timing
-    /// is enabled.
-    /// </remarks>
     /// <summary>The single-threaded prologue's cost per tick, and the two halves of it, in ms.</summary>
     public (double Prologue, double Sweep, double Prepare) PrologueMs
     {
@@ -902,6 +894,14 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         }
     }
 
+    /// <summary>
+    /// The frame stage's parallel efficiency: CPU summed over chunks against the slowest chunk, averaged over the ticks measured.
+    /// </summary>
+    /// <remarks>
+    /// <b>Effective workers = sum / max, and efficiency = that over the chunk count.</b> A stage whose sessions cost the same would sit near 1; one whose
+    /// slowest chunk does ten times the median sits near 0.1, and every worker but that one is idle for nine tenths of the stage. Zero unless phase timing
+    /// is enabled.
+    /// </remarks>
     public (double Effective, double Efficiency, long Ticks) ChunkBalance
     {
         get

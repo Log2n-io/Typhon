@@ -9,14 +9,6 @@ using Typhon.Protocol;
 namespace Typhon.Engine.Internals;
 
 /// <summary>
-/// One session's inbound path: the ring a transport thread frames into, the per-type token buckets that gate it, and the region and sequence the tick keeps.
-/// </summary>
-/// <remarks>
-/// <b>Two owners, split by field and not by lock.</b> The ring is SPSC and needs neither side to hold anything; the buckets and the drop counters belong to
-/// the transport thread that owns the connection; the region, the last sequence and the delivered counters belong to the tick. Nothing here is written by
-/// both, which is what makes the whole path lock-free once a session exists (SUB-05's shape, one level below the session table).
-/// </remarks>
-/// <summary>
 /// A session's realm as its client holds it, for the transport's command decode (12-realms § 2.5): the realm of its last published <c>RESET</c> with its
 /// frame, the one before with its frame, and the tick of the switch between them. Immutable, replaced whole by the frame stage BEFORE the switching frame
 /// is published — so a command a client built in the new realm can never meet the old view — and read by the transport with one acquire load; the
@@ -48,6 +40,14 @@ internal sealed class SessionRealmView
     public uint SwitchTick { get; }
 }
 
+/// <summary>
+/// One session's inbound path: the ring a transport thread frames into, the per-type token buckets that gate it, and the region and sequence the tick keeps.
+/// </summary>
+/// <remarks>
+/// <b>Two owners, split by field and not by lock.</b> The ring is SPSC and needs neither side to hold anything; the buckets and the drop counters belong to
+/// the transport thread that owns the connection; the region, the last sequence and the delivered counters belong to the tick. Nothing here is written by
+/// both, which is what makes the whole path lock-free once a session exists (SUB-05's shape, one level below the session table).
+/// </remarks>
 internal sealed class SessionIngress
 {
     /// <summary>Creates a row for a session that has just taken a ring.</summary>

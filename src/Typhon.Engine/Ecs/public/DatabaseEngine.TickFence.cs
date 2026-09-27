@@ -371,11 +371,6 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
-    /// Serializes dirty cluster entity data to WAL for all cluster-eligible archetypes.
-    /// Called from <see cref="WriteTickFence"/> after per-ComponentTable processing.
-    /// </summary>
-    /// <summary>Create a fresh CBS&lt;TransientStore&gt; for cluster Transient component storage.</summary>
-    /// <summary>
     /// Give a cluster state the means to build its shared per-cell R-Tree segment on first promotion (#872 step 9), and apply the configured thresholds.
     /// </summary>
     /// <remarks>
@@ -418,6 +413,7 @@ public partial class DatabaseEngine
     /// </summary>
     internal float ClusterCellTreePromoteTightness { get; set; } = SpatialOptions.DefaultCellTreePromoteTightness;
 
+    /// <summary>Create a fresh CBS&lt;TransientStore&gt; for cluster Transient component storage.</summary>
     private void CreateTransientClusterSegment(int stride, out TransientStore? store, out ChunkBasedSegment<TransientStore> segment)
     {
         store = new TransientStore(TransientOptions, MemoryAllocator, EpochManager, this);
@@ -484,6 +480,10 @@ public partial class DatabaseEngine
         }
     }
 
+    /// <summary>
+    /// Serializes dirty cluster entity data to WAL for all cluster-eligible archetypes.
+    /// Called from <see cref="WriteTickFence"/> after per-ComponentTable processing.
+    /// </summary>
     private void WriteClusterTickFence(long tickNumber, ref long highestLSN, ChangeSet changeSet)
     {
         // Issue #233: drain the wake requests collected during parallel system execution. Must run once BEFORE the per-archetype loop so each

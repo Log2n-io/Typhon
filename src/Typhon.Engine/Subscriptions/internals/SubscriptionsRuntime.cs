@@ -412,10 +412,6 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     public StatsEncoder Stats { get; }
 
     /// <summary>
-    /// The inbound path: a session's ring, the transport-side decode, and the Engine-Pre drain that turns it into the tick's typed buffers.
-    /// <see langword="null"/> on an inactive runtime.
-    /// </summary>
-    /// <summary>
     /// The nominal tick period a base tick rate implies, in microseconds.
     /// </summary>
     /// <param name="baseTickRate">The runtime's base tick rate, in hertz.</param>
@@ -428,6 +424,10 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     internal static uint NominalTickPeriodUsFor(int baseTickRate)
         => (uint)Math.Round(1_000_000.0 / Math.Max(1, baseTickRate), MidpointRounding.AwayFromZero);
 
+    /// <summary>
+    /// The inbound path: a session's ring, the transport-side decode, and the Engine-Pre drain that turns it into the tick's typed buffers.
+    /// <see langword="null"/> on an inactive runtime.
+    /// </summary>
     public SubscriptionsIngress Ingress => _ingress;
 
     /// <summary>
@@ -632,13 +632,13 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <summary>The declared events' hub, or <see langword="null"/> when no event is declared.</summary>
     public EventHub Events { get; }
 
+    /// <summary>The engine-wide half of push replication: the collector and the served realms' replications (R4.1); null without a push path.</summary>
+    public PushHub Hub { get; private set; }
+
     /// <summary>
     /// Realm 0's frame (<c>typhon.3</c>), or <see langword="null"/> without a spatial grid: the <c>REALM</c> block every session's first frame carries, and
     /// the frame its positions — records, events, commands, regions, aggregate grids — are quantized over (SUB-30).
     /// </summary>
-    /// <summary>The engine-wide half of push replication: the collector and the served realms' replications (R4.1); null without a push path.</summary>
-    public PushHub Hub { get; private set; }
-
     public RealmFrame Realm0Frame { get; }
 
     /// <summary>Realm 0's frame: its grid's bounds, the replication cell, the default width, flat when the replication grid is one cell deep.</summary>
