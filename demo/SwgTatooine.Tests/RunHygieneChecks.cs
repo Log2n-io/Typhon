@@ -19,6 +19,9 @@ public sealed class RunHygieneChecks
 {
     private string _dir;
 
+    /// <summary>The harness a case built, so teardown can unhook it from <c>SessionHarness.Until</c>'s keepalive.</summary>
+    private SessionHarness _harness;
+
     [SetUp]
     public void SetUp()
     {
@@ -29,6 +32,8 @@ public sealed class RunHygieneChecks
     [TearDown]
     public void TearDown()
     {
+        _harness?.Release();
+        _harness = null;
         TatooineReplication.ResetSessionAccounting();
         Worlds.Delete(_dir);
     }
@@ -243,7 +248,7 @@ public sealed class RunHygieneChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
 
-        var harness = new SessionHarness(sim);
+        var harness = _harness = new SessionHarness(sim);
         var link = harness.Connect(TatooineReplication.GodKind);
 
         // The handshake answers WELCOME from the transport thread; the session becomes a row in the table on the next tick's prologue, which is when
@@ -290,7 +295,7 @@ public sealed class RunHygieneChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
 
-        var harness = new SessionHarness(sim);
+        var harness = _harness = new SessionHarness(sim);
         var first = harness.Connect(TatooineReplication.GodKind);
         var second = harness.Connect(TatooineReplication.GodKind);
         SessionHarness.Until(() => TatooineReplication.LiveSessions.Spectators == 2, "both sessions to be counted by a tick");

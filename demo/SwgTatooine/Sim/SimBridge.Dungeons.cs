@@ -125,7 +125,12 @@ public sealed partial class SimBridge
             for (var i = 0; i < players.Count && party.Count < _config.DungeonParty; i++)
             {
                 var id = players[(offset + i) % players.Count];
+
+                // A possessed player is never drawn (SWG-01). Without this, a client that had connected and not yet sent an intent was still Idle, so a
+                // dungeon took it, teleported it into another realm and pinned ActivityTicks at int.MaxValue / 2 — a pin PlayerThink respects and which
+                // therefore survived the client disconnecting, leaving a player parked in a dungeon for the life of the process.
                 if (_interiorPins.ContainsKey(id) || _closedThisTick.Contains(id) || !tx.TryOpen(id, out var candidate)
+                    || candidate.Read(Player.Control).Kind != ControllerKind.InProcess
                     || candidate.Read(Player.Realm).Value != 0 || candidate.Read(Player.State).Activity != PlayerActivity.Idle)
                 {
                     continue;   // read-only first: a rejected candidate's page is not dirtied

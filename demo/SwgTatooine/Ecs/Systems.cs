@@ -54,6 +54,10 @@ internal sealed class PlayerThinkSystem : QuerySystem
         .Parallel()
         .ChunksPerWorker(2f)
         .Reads<PlayerPlacement>()
+
+        // Declared, because the loop reads it to decide whether this player is the client's (SWG-01). Ordering against PlayerSessions, which writes it,
+        // currently survives only through the unrelated PlayerMotion edge — which is rule ED-05's definition of the DAG being lucky rather than informed.
+        .Reads<PlayerControl>()
         .Writes<PlayerState>()
         .Writes<PlayerMotion>()
         .Input(() => _bridge.PlayerView);
@@ -523,7 +527,12 @@ internal sealed class ReplicationReportSystem : CallbackSystem
 {
     protected override void Configure(SystemBuilder b) => b
         .Name("ReplicationReport")
-        .Phase(SimPhases.Report);
+        .Phase(SimPhases.Report)
+
+        // A declaration, because a phase alone does not order a system: AccessDagDeriver skips any pair where either side declares no access, so with none this
+        // was a DAG ROOT — free to run at the head of the tick, concurrently with PlayerSessions and PlayerThink, doing blocking Console I/O on a pool worker.
+        // Reading what the input system writes is what actually puts it last.
+        .Reads<PlayerState>();
 
     protected override void Execute(TickContext ctx) => TatooineReplication.ReportTick(ctx);
 }

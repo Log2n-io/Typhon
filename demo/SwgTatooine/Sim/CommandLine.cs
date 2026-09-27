@@ -30,87 +30,87 @@ public static class CommandLine
         var r = new ArgReader(args ?? []);
 
         r.Group("mode");
-        r.Switch("--help", "print this list and exit");
-        c.ServePort = r.Int("--serve", 0, "serve over WebSocket on this port instead of measuring; 0 measures");
+        r.Switch("--help", "print this list and exit (or -h as the first argument)");
+        c.ServePort = r.Int("--serve", 0, "serve over WebSocket on this port instead of measuring; 0 measures", min: 0, max: 65535);
         c.RunSweep = r.Switch("--sweep", "run the partitioning matrix instead of one configuration");
         c.SweepWorlds = r.Floats("--sweep-worlds", [TatooineData.PlanetEdgeM / 1000f, 64f, 128f], "sweep axis: world edges, km");
         c.SweepPops = r.Floats("--sweep-pops", [1f, 4f, 16f], "sweep axis: population scales");
         c.SweepCells = r.Floats("--sweep-cells", [64f, 128f, 256f, 512f, 1024f], "sweep axis: cell sizes, m at the real planet's scale");
 
         r.Group("world and population");
-        c.WorldEdgeKm = r.Float("--world", c.WorldEdgeKm, "planet edge, km; 16.384 is the real Tatooine");
-        c.PopulationScale = r.Float("--pop", c.PopulationScale, "multiplier on every population count");
-        c.CellSizeM = r.Float("--cell", c.CellSizeM, "spatial cell edge, m; 0 derives 256 m scaled with the world");
-        c.Planets = r.Int("--planets", c.Planets, "how many planet realms to build");
+        c.WorldEdgeKm = r.Float("--world", c.WorldEdgeKm, "planet edge, km; 16.384 is the real Tatooine", min: 0.001f);
+        c.PopulationScale = r.Float("--pop", c.PopulationScale, "multiplier on every population count", min: 0.0001f);
+        c.CellSizeM = r.Float("--cell", c.CellSizeM, "spatial cell edge, m; 0 derives 256 m scaled with the world", min: 0f);
+        c.Planets = r.Int("--planets", c.Planets, "how many planet realms to build", min: 1);
         c.Interiors = r.Switch("--interiors", "give buildings interior realms");
-        c.InteriorNpcs = r.Int("--interior-npcs", c.InteriorNpcs, "NPCs per interior");
-        c.InteriorShare = r.Float("--interior-share", c.InteriorShare, "share of players that go indoors, 0-1");
-        c.InteriorStayS = r.Float("--interior-stay", c.InteriorStayS, "seconds a player stays indoors");
-        c.InteriorSleepS = r.Float("--interior-sleep", c.InteriorSleepS, "seconds an empty interior waits before going dormant");
-        c.InterPlanetShare = r.Float("--interplanet-share", c.InterPlanetShare, "share of shuttle trips that cross planets, 0-1");
+        c.InteriorNpcs = r.Int("--interior-npcs", c.InteriorNpcs, "NPCs per interior", min: 0);
+        c.InteriorShare = r.Float("--interior-share", c.InteriorShare, "share of players that go indoors", min: 0f, max: 1f);
+        c.InteriorStayS = r.Float("--interior-stay", c.InteriorStayS, "seconds a player stays indoors", min: 0.001f);
+        c.InteriorSleepS = r.Float("--interior-sleep", c.InteriorSleepS, "seconds an empty interior waits before going dormant", min: 0f);
+        c.InterPlanetShare = r.Float("--interplanet-share", c.InterPlanetShare, "share of shuttle trips that cross planets", min: 0f, max: 1f);
         c.Space = r.Switch("--space", "build the space realm");
-        c.Starships = r.Int("--starships", c.Starships, "starships in space");
-        c.PlanetDivisor = r.Int("--planet-divisor", c.PlanetDivisor, "divide each planet's population by this");
-        c.SpaceDivisor = r.Int("--space-divisor", c.SpaceDivisor, "divide space's population by this");
-        c.Dungeons = r.Int("--dungeons", c.Dungeons, "dungeon realms per planet");
-        c.DungeonIntervalS = r.Float("--dungeon-interval", c.DungeonIntervalS, "seconds between dungeon runs");
-        c.DungeonStayS = r.Float("--dungeon-stay", c.DungeonStayS, "seconds a party stays in a dungeon");
-        c.DungeonParty = r.Int("--dungeon-party", c.DungeonParty, "players per dungeon party");
-        c.DungeonMobs = r.Int("--dungeon-mobs", c.DungeonMobs, "creatures per dungeon");
+        c.Starships = r.Int("--starships", c.Starships, "starships in space", min: 0);
+        c.PlanetDivisor = r.Int("--planet-divisor", c.PlanetDivisor, "divide each planet's population by this", min: 1);
+        c.SpaceDivisor = r.Int("--space-divisor", c.SpaceDivisor, "divide space's population by this", min: 1);
+        c.Dungeons = r.Int("--dungeons", c.Dungeons, "dungeon realms per planet", min: 0);
+        c.DungeonIntervalS = r.Float("--dungeon-interval", c.DungeonIntervalS, "seconds between dungeon runs", min: 0.001f);
+        c.DungeonStayS = r.Float("--dungeon-stay", c.DungeonStayS, "seconds a party stays in a dungeon", min: 0.001f);
+        c.DungeonParty = r.Int("--dungeon-party", c.DungeonParty, "players per dungeon party", min: 1);
+        c.DungeonMobs = r.Int("--dungeon-mobs", c.DungeonMobs, "creatures per dungeon", min: 0);
         c.ScaleContentWithWorld = !r.Switch("--no-content-scale", "keep authentic coordinates instead of stretching content to the world");
         c.Seed = r.Int("--seed", c.Seed, "seed for every random decision");
 
         r.Group("spatial partitioning");
-        c.CellTreePromoteThreshold = r.Int("--promote", c.CellTreePromoteThreshold, "entities in a cell before it is promoted to a tree");
-        c.CellTreePromoteTightness = r.Float("--tightness", c.CellTreePromoteTightness, "extent/bound ratio a cell must exceed to be promoted");
-        c.ReclusterBudgetMs = r.Float("--repair-budget", c.ReclusterBudgetMs, "per-tick cluster repair budget, ms; 0 is unbounded");
-        c.ClusterTargetPackingSlack = r.Float("--packing-slack", c.ClusterTargetPackingSlack, "spare capacity a new cluster is given");
-        c.ClusterTargetExtentRatio = r.Float("--target-ratio", c.ClusterTargetExtentRatio, "extent/bound a new cluster aims for");
-        c.ClusterRepairExtentRatio = r.Float("--repair-ratio", c.ClusterRepairExtentRatio, "extent/bound above which a cluster is repaired");
-        c.ClusterRepairCriticalExtentRatio = r.Float("--repair-critical", c.ClusterRepairCriticalExtentRatio, "extent/bound that makes a repair urgent");
-        c.RepairWorstClustersPerUnit = r.Int("--repair-unit", c.RepairWorstClustersPerUnit, "clusters repaired per unit of budget");
-        c.RepairCooldownTicks = r.Int("--repair-cooldown", c.RepairCooldownTicks, "ticks before a repaired cluster may be repaired again");
-        c.QueryEfficiencyTolerance = r.Float("--eff-tol", c.QueryEfficiencyTolerance, "reported query efficiency tolerance");
+        c.CellTreePromoteThreshold = r.Int("--promote", c.CellTreePromoteThreshold, "entities in a cell before it is promoted to a tree", min: 1);
+        c.CellTreePromoteTightness = r.Float("--tightness", c.CellTreePromoteTightness, "extent/bound ratio a cell must exceed to be promoted", min: 0f);
+        c.ReclusterBudgetMs = r.Float("--repair-budget", c.ReclusterBudgetMs, "per-tick cluster repair budget, ms; 0 is unbounded", min: 0f);
+        c.ClusterTargetPackingSlack = r.Float("--packing-slack", c.ClusterTargetPackingSlack, "spare capacity a new cluster is given", min: 1f);
+        c.ClusterTargetExtentRatio = r.Float("--target-ratio", c.ClusterTargetExtentRatio, "extent/bound a new cluster aims for", min: 0f);
+        c.ClusterRepairExtentRatio = r.Float("--repair-ratio", c.ClusterRepairExtentRatio, "extent/bound above which a cluster is repaired", min: 0f);
+        c.ClusterRepairCriticalExtentRatio = r.Float("--repair-critical", c.ClusterRepairCriticalExtentRatio, "extent/bound that makes a repair urgent", min: 0f);
+        c.RepairWorstClustersPerUnit = r.Int("--repair-unit", c.RepairWorstClustersPerUnit, "clusters repaired per unit of budget", min: 1);
+        c.RepairCooldownTicks = r.Int("--repair-cooldown", c.RepairCooldownTicks, "ticks before a repaired cluster may be repaired again", min: 0);
+        c.QueryEfficiencyTolerance = r.Float("--eff-tol", c.QueryEfficiencyTolerance, "reported query efficiency tolerance", min: 0f);
         c.GridWideBound = r.Switch("--grid-wide-bound", "bound clusters by the grid rather than by the cell");
         c.SimdNarrowphase = !r.Switch("--scalar-narrowphase", "use the scalar narrowphase instead of SIMD");
-        c.BatchSpawnSortThreshold = r.Int("--batch-sort", c.BatchSpawnSortThreshold, "batch size above which a spawn batch is sorted");
+        c.BatchSpawnSortThreshold = r.Int("--batch-sort", c.BatchSpawnSortThreshold, "batch size above which a spawn batch is sorted", min: 1);
         c.BatchedSpatialWrites = !r.Switch("--per-entity-writespatial", "write spatial positions one entity at a time (P9 off)");
 
         r.Group("shuttles");
         c.Shuttles = !r.Switch("--no-shuttles", "do not run shuttles at all");
-        c.ShuttleShare = r.Float("--shuttle-share", c.ShuttleShare, "share of players that travel, 0-1");
-        c.ShuttleIntervalS = r.Float("--shuttle-interval", c.ShuttleIntervalS, "seconds between departures");
-        c.BoardingWindowS = r.Float("--boarding-window", c.BoardingWindowS, "seconds a shuttle boards for");
+        c.ShuttleShare = r.Float("--shuttle-share", c.ShuttleShare, "share of players that travel", min: 0f, max: 1f);
+        c.ShuttleIntervalS = r.Float("--shuttle-interval", c.ShuttleIntervalS, "seconds between departures", min: 0.001f);
+        c.BoardingWindowS = r.Float("--boarding-window", c.BoardingWindowS, "seconds a shuttle boards for", min: 0.001f);
         c.ShuttleBurst = r.Switch("--shuttle-burst", "land every passenger on one tick instead of trickling");
 
         r.Group("sessions and replication");
-        c.MaxClients = r.Int("--max-clients", c.MaxClients, "player sessions admitted at once; 0 is unlimited");
-        c.MaxSpectators = r.Int("--max-spectators", c.MaxSpectators, "god-camera sessions admitted at once; 0 is unlimited");
-        c.SessionBudgetBytesPerSecond = r.Int("--session-budget", 0, "per-player outbound budget, bytes per second; 0 is none");
-        c.IngressBytesPerSecond = r.Int("--ingress-budget", c.IngressBytesPerSecond, "per-session inbound budget, bytes per second");
-        c.PlayerLeaveM = r.Dbl("--player-leave", 0d, "players' leave radius, m; 0 is none");
-        c.GodRegionMaxEdgeM = r.Dbl("--god-region", 0d, "god camera's largest region edge, m; 0 keeps the whole-world camera");
-        c.GodNearBudget = r.Int("--god-near", c.GodNearBudget, "god camera's near budget, entities");
+        c.MaxClients = r.Int("--max-clients", c.MaxClients, "player sessions admitted at once; 0 is unlimited", min: 0);
+        c.MaxSpectators = r.Int("--max-spectators", c.MaxSpectators, "god-camera sessions admitted at once; 0 is unlimited", min: 0);
+        c.SessionBudgetBytesPerSecond = r.Int("--session-budget", 0, "per-player outbound budget, bytes per second; 0 is none", min: 0);
+        c.IngressBytesPerSecond = r.Int("--ingress-budget", c.IngressBytesPerSecond, "per-session inbound budget, bytes per second", min: 0);
+        c.PlayerLeaveM = r.Dbl("--player-leave", 0d, "players' leave radius, m; 0 is none", min: 0d);
+        c.GodRegionMaxEdgeM = r.Dbl("--god-region", 0d, "god camera's largest region edge, m; 0 keeps the whole-world camera", min: 0d);
+        c.GodNearBudget = r.Int("--god-near", c.GodNearBudget, "god camera's near budget, entities", min: 0);
         c.SubscriptionsPushAutomatic = r.Choice("--subs-mode", "push", ["push", "push-auto"], "who detects a change: the simulation, or the engine")
             == "push-auto";
         c.SubscriptionsCollapseWorkUnits = r.Choice("--subs-pipeline", "staged", ["staged", "collapsed"], "run the frame pipeline staged or collapsed")
             == "collapsed" ? int.MaxValue : 0;
         c.SubscriptionsPhaseTiming = r.Switch("--subs-phases", "report per-phase replication timing");
-        c.DormancyTicks = r.Int("--dormancy", 0, "ticks of stillness before a cluster sleeps; 0 is never");
+        c.DormancyTicks = r.Int("--dormancy", 0, "ticks of stillness before a cluster sleeps; 0 is never", min: 0);
 
         r.Group("runtime and scheduling");
-        c.TickRateHz = r.Int("--hz", c.TickRateHz, "tick rate; 10 is the baseline the published numbers are quoted at");
+        c.TickRateHz = r.Int("--hz", c.TickRateHz, "tick rate; 10 is the baseline the published numbers are quoted at", min: 1, max: 100_000);
         c.Unpaced = r.Switch("--unpaced", "tick back to back, for count-only comparisons; never for timings");
-        c.WorkerCount = r.Int("--workers", c.WorkerCount, "worker threads; 0 takes the processor count");
-        c.WarmTicks = r.Int("--warm", c.WarmTicks, "ticks run before measuring starts");
-        c.MeasuredTicks = r.Int("--ticks", c.MeasuredTicks, "ticks measured");
-        c.PageCacheMiB = r.Int("--cache-mib", c.PageCacheMiB, "page cache size, MiB");
-        c.ParallelQueryMinChunkSize = r.Int("--min-chunk", c.ParallelQueryMinChunkSize, "global parallel-query chunk floor");
-        c.AwarenessMinChunk = r.Int("--awareness-min-chunk", c.AwarenessMinChunk, "chunk floor for the awareness system alone; 0 uses the global one");
+        c.WorkerCount = r.Int("--workers", c.WorkerCount, "worker threads; 0 takes the processor count", min: 0, max: 4096);
+        c.WarmTicks = r.Int("--warm", c.WarmTicks, "ticks run before measuring starts", min: 0);
+        c.MeasuredTicks = r.Int("--ticks", c.MeasuredTicks, "ticks measured", min: 1);
+        c.PageCacheMiB = r.Int("--cache-mib", c.PageCacheMiB, "page cache size, MiB", min: 1);
+        c.ParallelQueryMinChunkSize = r.Int("--min-chunk", c.ParallelQueryMinChunkSize, "global parallel-query chunk floor", min: 0);
+        c.AwarenessMinChunk = r.Int("--awareness-min-chunk", c.AwarenessMinChunk, "chunk floor for the awareness system alone; 0 uses the global one", min: 0);
         c.CostBasedChunking = !r.Switch("--entity-chunking", "chunk by entity count instead of by cost (P2 off)");
         c.ParallelFence = !r.Switch("--serial-fence", "run the tick fence serially");
         c.RankWhenStarved = r.Switch("--rank-when-starved", "rank work when the pool is starved");
-        c.WorkerIdleSpin = r.Int("--idle-spin", c.WorkerIdleSpin, "worker idle spin iterations");
+        c.WorkerIdleSpin = r.Int("--idle-spin", c.WorkerIdleSpin, "worker idle spin iterations", min: 0);
         c.WorkerHotSpinners = r.IntOrNull("--sched-hot", "how many workers hot-spin; absent leaves the engine's own number");
         c.WorkerParkAfterUs = r.IntOrNull("--sched-park-us", "park a worker after this many idle microseconds; absent leaves the engine's own number");
         c.ForceAwareness = r.Switch("--awareness", "keep the awareness system even when replication is declared");
@@ -127,8 +127,8 @@ public static class CommandLine
             "movenext" => CombatApi.MoveNext,
             _ => CombatApi.Batch,
         };
-        c.IdleCreatureFraction = Math.Clamp(r.Dbl("--idle-creatures", 0d, "share of creatures that never think, 0-1"), 0d, 1d);
-        c.RespawnSeconds = r.Float("--respawn-s", c.RespawnSeconds, "seconds before a lair revives a killed creature");
+        c.IdleCreatureFraction = r.Dbl("--idle-creatures", 0d, "share of creatures that never think", min: 0d, max: 1d);
+        c.RespawnSeconds = r.Float("--respawn-s", c.RespawnSeconds, "seconds before a lair revives a killed creature", min: 0.001f);
 
         r.Group("persistence and output");
         c.DatabaseDirectory = r.Str("--db-dir", c.DatabaseDirectory, "where the database file is written", "<path>");
@@ -159,52 +159,16 @@ public static class CommandLine
     /// <remarks>
     /// Separate from the reads so that <c>--help</c> reaches the flag list without passing through them. Every message names the flag rather than the
     /// field, because the flag is what the operator typed.
+    /// <para>
+    /// It used to hold the single-flag ranges too, and it was incomplete in exactly the class of error it exists for: <c>--pop -1</c>, <c>--world -5</c>,
+    /// <c>--ticks -1</c>, <c>--cache-mib 0</c> and seven more parsed and ran, and <c>--pop -1</c> built an empty world and reported it as a measurement. A
+    /// range written beside its declaration cannot be forgotten when a flag is added; one written in a list at the end of the parse can, and was.
+    /// </para>
     /// </remarks>
     private static void Validate(SimConfig c)
     {
-        if (c.ServePort != 0 && c.ServePort is < 1 or > 65535)
-        {
-            throw new ArgumentException($"--serve takes a port in 1-65535, not {c.ServePort}");
-        }
-
-        if (c.Planets < 1)
-        {
-            throw new ArgumentException($"--planets takes 1 or more, not {c.Planets}");
-        }
-
-        if (!(c.InteriorStayS > 0f) || c.InterPlanetShare is < 0f or > 1f)
-        {
-            throw new ArgumentException($"--interior-stay takes a positive value and --interplanet-share one in [0, 1], not {c.InteriorStayS} / "
-                + $"{c.InterPlanetShare}");
-        }
-
-        if (c.InteriorSleepS < 0f || c.PlanetDivisor < 1 || c.SpaceDivisor < 1 || c.Dungeons < 0 || !(c.DungeonIntervalS > 0f) || !(c.DungeonStayS > 0f)
-            || c.DungeonParty < 1 || c.DungeonMobs < 0)
-        {
-            throw new ArgumentException("--interior-sleep >= 0, --planet-divisor/--space-divisor >= 1, --dungeons >= 0, positive dungeon interval and stay, "
-                + "--dungeon-party >= 1, --dungeon-mobs >= 0");
-        }
-
-        if (c.Starships < 0)
-        {
-            throw new ArgumentException($"--starships takes 0 or more, not {c.Starships}");
-        }
-
-        if (c.InteriorNpcs < 0 || c.InteriorShare is < 0f or > 1f)
-        {
-            throw new ArgumentException($"--interior-npcs takes 0 or more and --interior-share a value in [0, 1], not {c.InteriorNpcs} / {c.InteriorShare}");
-        }
-
-        if (c.TickRateHz < 1)
-        {
-            throw new ArgumentException($"--hz takes 1 or more, not {c.TickRateHz}");
-        }
-
-        if (c.MaxClients < 0 || c.MaxSpectators < 0)
-        {
-            throw new ArgumentException($"--max-clients and --max-spectators take 0 (unlimited) or more, not {c.MaxClients} / {c.MaxSpectators}");
-        }
-
+        // Every single-flag range now lives on its own declaration, where it cannot be forgotten when a flag is added — see ArgReader.OutOfRange. What is left
+        // here is what no single declaration can see: combinations.
         if (c.ServePort == 0)
         {
             return;

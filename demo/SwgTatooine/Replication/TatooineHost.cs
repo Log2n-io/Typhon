@@ -82,7 +82,7 @@ public static class TatooineHost
 
         // Tell every client the server is going, before Kestrel drops their sockets (SWG-07). ApplicationStopping runs before the listeners are closed and
         // blocks shutdown until it returns, which is exactly the window in which the runtime is still ticking and a KICK can still be staged and sent.
-        app.Lifetime.ApplicationStopping.Register(() => KickEveryone(runtime));
+        app.Lifetime.ApplicationStopping.Register(KickEveryone);
 
         Console.WriteLine($"  Tatooine is serving on http://localhost:{port}  (websocket /ws, catalog /typhon/catalog.json, stats /typhon/stats.json)");
         if (!string.IsNullOrEmpty(clientRoot) && !Directory.Exists(clientRoot))
@@ -93,53 +93,68 @@ public static class TatooineHost
         await app.RunAsync().ConfigureAwait(false);
     }
 
-    /// <summary>How long the shutdown waits for the kicks to be staged and written before it stops listening.</summary>
+    /// <summary>
+    /// The ceiling on waiting for the kicks to be STAGED — three ticks at the slowest rate a server is likely to run, rounded up.
+    /// </summary>
     /// <remarks>
-    /// Two ticks at 10 Hz plus the pump's wake, rounded up. It is a ceiling, not a delay: the wait ends as soon as every session the tick saw has been
-    /// staged. A server with no client connected stops as fast as it did before.
+    /// A ceiling, not a delay: the wait ends as soon as every session has been kicked or none is left to kick. A server with no client stops as fast as it did
+    /// before this existed.
     /// </remarks>
-    private const int ShutdownDrainMs = 1500;
+    private const int StageCeilingMs = 400;
+
+    /// <summary>
+    /// The unconditional wait for the send pump, once the kicks are staged.
+    /// </summary>
+    /// <remarks>
+    /// <b>A delay, and called one honestly.</b> The pump writes the <c>KICK</c> and closes the link on a pool thread after the tick applies the request, and
+    /// there is no public count of frames written that this could wait on instead — so this is the one part of the shutdown that cannot be made a condition.
+    /// It is paid only when a client was connected. If the engine ever exposes the pump's kick count, this becomes a spin and goes away.
+    /// </remarks>
+    private const int PumpSettleMs = 150;
 
     /// <summary>
     /// Asks the tick to kick every open session, and waits for it to have done so.
     /// </summary>
-    /// <param name="runtime">The still-ticking runtime.</param>
     /// <remarks>
     /// <para>
-    /// <b>Why the wait is on a staged count and then a short settle.</b> <c>KICK</c> is a session request: the tick's prologue applies it, and only then does
-    /// the send pump write the frame and close the link. So there are two boundaries to cross, and neither is observable as a single flag. The wait is
-    /// therefore in two parts — spin until the tick reports the kicks staged, then give the pump a short settle — both inside one ceiling, so a runtime that
-    /// has already stopped ticking cannot hang the process.
+    /// <b>Two boundaries, and only one of them is observable.</b> <c>KICK</c> is a session request: the tick's prologue applies it, and only then does the send
+    /// pump write the frame and close the link. The first boundary is a condition and is spun on; the second is <see cref="PumpSettleMs"/>, which is a delay
+    /// and says so.
+    /// </para>
+    /// <para>
+    /// <b>The loop re-reads the live count rather than fixing it up front.</b> Taking a snapshot before <c>RequestShutdown</c> meant a client that
+    /// disconnected of its own accord in the same window could never be reached, so <c>KicksStaged</c> never caught up and the loop spun the whole ceiling —
+    /// with <c>Thread.Sleep(5)</c>, which is about 15 ms at the default timer quantum, so eighty-odd iterations of waiting for a client that had already gone.
     /// </para>
     /// <para>
     /// It is deliberately not <c>async</c>: <c>ApplicationStopping</c> is a synchronous callback, and blocking in it is what holds the listeners open long
     /// enough for the frames to leave.
     /// </para>
     /// </remarks>
-    private static void KickEveryone(TyphonRuntime runtime)
+    private static void KickEveryone()
     {
-        var expected = TatooineReplication.LiveSessions;
-        var sessions = expected.Clients + expected.Spectators;
+        var before = TatooineReplication.LiveSessions;
+        var sessions = before.Clients + before.Spectators;
         TatooineReplication.RequestShutdown("server shutting down");
         if (sessions == 0)
         {
             return;
         }
 
-        var deadline = Environment.TickCount64 + ShutdownDrainMs;
-        while (TatooineReplication.KicksStaged < sessions && Environment.TickCount64 < deadline)
+        // Done when every session the tick can still see has been kicked. Re-read, so a client that left on its own ends the wait instead of extending it.
+        var deadline = Environment.TickCount64 + StageCeilingMs;
+        while (Environment.TickCount64 < deadline)
         {
+            var live = TatooineReplication.LiveSessions;
+            if (TatooineReplication.KicksStaged >= live.Clients + live.Spectators)
+            {
+                break;
+            }
+
             Thread.Sleep(5);
         }
 
-        // The pump writes on a pool thread after the request is applied; there is no public count of frames written per session to wait on, so the settle is
-        // a bounded sleep rather than a condition. Bounded by the same deadline, so it cannot extend the ceiling above.
-        var settle = (int)Math.Clamp(deadline - Environment.TickCount64, 0, 250);
-        if (settle > 0)
-        {
-            Thread.Sleep(settle);
-        }
-
-        Console.WriteLine($"  shutdown: {TatooineReplication.KicksStaged} of {sessions} sessions kicked");
+        Thread.Sleep(PumpSettleMs);
+        Console.WriteLine($"  shutdown: {TatooineReplication.KicksStaged} sessions kicked");
     }
 }

@@ -40,7 +40,12 @@ internal sealed class ArgReader
     private readonly bool _lenient;
 
     /// <summary>One declared flag, or a group header when <see cref="Name"/> is null.</summary>
-    private readonly record struct Entry(string Name, string Kind, string Default, string Help);
+    /// <param name="Name">The flag, or null for a group header.</param>
+    /// <param name="Kind">How the value is described.</param>
+    /// <param name="Default">The default, as <c>--help</c> prints it.</param>
+    /// <param name="Help">One line of prose.</param>
+    /// <param name="Range">The accepted range, as <c>--help</c> prints it, or an empty string when unbounded.</param>
+    private readonly record struct Entry(string Name, string Kind, string Default, string Help, string Range = "");
 
     /// <summary>Wraps a command line.</summary>
     /// <param name="args">The tokens, as the process received them.</param>
@@ -48,7 +53,12 @@ internal sealed class ArgReader
     {
         _args = args ?? [];
         _used = new bool[_args.Length];
-        _lenient = Array.IndexOf(_args, "--help") >= 0 || Array.IndexOf(_args, "-h") >= 0;
+
+        // `--help` anywhere, `-h` only as the FIRST token. Leniency has to be decided before anything is parsed, so it cannot know which tokens are values —
+        // and `--db-dir -h` would otherwise print the flag list instead of running, because `-h` is a legitimate path. `--help` is safe anywhere because a
+        // value beginning with `--` is refused outright, so no flag can ever legitimately be followed by it. `-h` is safe at index 0 for the same reason
+        // nothing precedes it. This is the whole of why the two are not treated alike.
+        _lenient = Array.IndexOf(_args, "--help") >= 0 || (_args.Length > 0 && _args[0] == "-h");
     }
 
     /// <summary>Whether the line asks for the flag list rather than a run.</summary>
@@ -72,21 +82,29 @@ internal sealed class ArgReader
     /// <param name="name">The flag.</param>
     /// <param name="fallback">The value when the flag is absent.</param>
     /// <param name="help">One line, for <c>--help</c>.</param>
+    /// <param name="min">The smallest accepted value.</param>
+    /// <param name="max">The largest accepted value.</param>
     /// <returns>The value.</returns>
-    public float Float(string name, float fallback, string help)
+    public float Float(string name, float fallback, string help, float min = float.NegativeInfinity, float max = float.PositiveInfinity)
     {
-        var text = Value(name, "<number>", Show(fallback), help);
+        var text = Value(name, "<number>", Show(fallback), help, Range(min, max));
         if (text == null)
         {
             return fallback;
         }
 
-        if (float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
+        if (!float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
+        {
+            Malformed(name, text, "a number");
+            return fallback;
+        }
+
+        if (v >= min && v <= max)
         {
             return v;
         }
 
-        Malformed(name, text, "a number");
+        OutOfRange(name, text, Show(min), Show(max), min, max);
         return fallback;
     }
 
@@ -94,21 +112,31 @@ internal sealed class ArgReader
     /// <param name="name">The flag.</param>
     /// <param name="fallback">The value when the flag is absent.</param>
     /// <param name="help">One line, for <c>--help</c>.</param>
+    /// <param name="min">The smallest accepted value.</param>
+    /// <param name="max">The largest accepted value.</param>
     /// <returns>The value.</returns>
-    public int Int(string name, int fallback, string help)
+    public int Int(string name, int fallback, string help, int min = int.MinValue, int max = int.MaxValue)
     {
-        var text = Value(name, "<integer>", Show(fallback), help);
+        var text = Value(name, "<integer>", Show(fallback), help, Range(min == int.MinValue ? float.NegativeInfinity : min,
+            max == int.MaxValue ? float.PositiveInfinity : max));
         if (text == null)
         {
             return fallback;
         }
 
-        if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+        if (!int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var v))
+        {
+            Malformed(name, text, "a whole number");
+            return fallback;
+        }
+
+        if (v >= min && v <= max)
         {
             return v;
         }
 
-        Malformed(name, text, "a whole number");
+        OutOfRange(name, text, Show(min), Show(max), min == int.MinValue ? float.NegativeInfinity : min,
+            max == int.MaxValue ? float.PositiveInfinity : max);
         return fallback;
     }
 
@@ -138,21 +166,29 @@ internal sealed class ArgReader
     /// <param name="name">The flag.</param>
     /// <param name="fallback">The value when the flag is absent.</param>
     /// <param name="help">One line, for <c>--help</c>.</param>
+    /// <param name="min">The smallest accepted value.</param>
+    /// <param name="max">The largest accepted value.</param>
     /// <returns>The value.</returns>
-    public double Dbl(string name, double fallback, string help)
+    public double Dbl(string name, double fallback, string help, double min = double.NegativeInfinity, double max = double.PositiveInfinity)
     {
-        var text = Value(name, "<number>", Show(fallback), help);
+        var text = Value(name, "<number>", Show(fallback), help, Range((float)min, (float)max));
         if (text == null)
         {
             return fallback;
         }
 
-        if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
+        if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var v))
+        {
+            Malformed(name, text, "a number");
+            return fallback;
+        }
+
+        if (v >= min && v <= max)
         {
             return v;
         }
 
-        Malformed(name, text, "a number");
+        OutOfRange(name, text, Show(min), Show(max), (float)min, (float)max);
         return fallback;
     }
 
@@ -291,6 +327,9 @@ internal sealed class ArgReader
         text.AppendLine("  usage: SwgTatooine [flags]          measure a fixed number of ticks and report");
         text.AppendLine("         SwgTatooine --serve <port>    serve the same world over WebSocket, forever");
         text.AppendLine("         SwgTatooine --sweep           run the partitioning matrix and write a report");
+        text.AppendLine();
+        text.AppendLine("  --serve now REQUIRES its port. A bare --serve used to mean 8080, and so did a malformed one:");
+        text.AppendLine("  `--serve 808O` listened on 8080 and said nothing. Every flag names its value or is refused.");
         foreach (var e in _declared)
         {
             if (e.Name == null)
@@ -304,7 +343,13 @@ internal sealed class ArgReader
             text.Append("  ").Append(left.PadRight(width)).Append("  ").Append(e.Help);
             if (e.Kind.Length > 0)
             {
-                text.Append("  [").Append(e.Default).Append(']');
+                text.Append("  [").Append(e.Default);
+                if (e.Range.Length > 0)
+                {
+                    text.Append(", ").Append(e.Range);
+                }
+
+                text.Append(']');
             }
 
             text.AppendLine();
@@ -342,9 +387,10 @@ internal sealed class ArgReader
     /// <param name="help">One line, for <c>--help</c>.</param>
     /// <returns>The value token, or null when the flag is absent.</returns>
     /// <exception cref="ArgumentException">The flag is last on the line, or its value is itself a flag.</exception>
-    private string Value(string name, string kind, string shownDefault, string help)
+    /// <param name="range">The accepted range, as <c>--help</c> prints it; empty when unbounded.</param>
+    private string Value(string name, string kind, string shownDefault, string help, string range = "")
     {
-        _declared.Add(new Entry(name, kind, shownDefault, help));
+        _declared.Add(new Entry(name, kind, shownDefault, help, range));
         var at = Locate(name);
         if (at < 0)
         {
@@ -393,6 +439,45 @@ internal sealed class ArgReader
 
         throw new ArgumentException($"'{name}' takes {expected}, not '{text}'.");
     }
+
+    /// <summary>
+    /// Reports a well-formed number outside its accepted range.
+    /// </summary>
+    /// <param name="name">The flag.</param>
+    /// <param name="text">The token.</param>
+    /// <param name="shownMin">The minimum, as it is printed.</param>
+    /// <param name="shownMax">The maximum, as it is printed.</param>
+    /// <param name="min">The minimum, for deciding whether it is worth printing.</param>
+    /// <param name="max">The maximum, likewise.</param>
+    /// <exception cref="ArgumentException">Unless the line asked for help.</exception>
+    /// <remarks>
+    /// <b>Refused rather than clamped, which is the repository's rule for a load-bearing parameter</b> — a clamp lets an operator ask for something and never
+    /// learn they did not get it, and the number they read in the report is then not the number they ran. This is the sixth way to be wrong and the reason the
+    /// range lives on the DECLARATION: a bound written beside the flag cannot be forgotten when a flag is added, which is what a separate validation pass at
+    /// the end of the parse could not promise — and did not deliver, since `--pop -1` built an empty world and reported it as a measurement.
+    /// </remarks>
+    private void OutOfRange(string name, string text, string shownMin, string shownMax, float min, float max)
+    {
+        if (_lenient)
+        {
+            return;
+        }
+
+        var bound = float.IsNegativeInfinity(min) ? $"at most {shownMax}"
+            : float.IsPositiveInfinity(max) ? $"at least {shownMin}"
+            : $"between {shownMin} and {shownMax}";
+        throw new ArgumentException($"'{name}' takes a value {bound}, not '{text}'.");
+    }
+
+    /// <summary>The accepted range as <c>--help</c> prints it, or an empty string when it is unbounded both ways.</summary>
+    /// <param name="min">The minimum.</param>
+    /// <param name="max">The maximum.</param>
+    /// <returns>The text.</returns>
+    private static string Range(float min, float max)
+        => float.IsNegativeInfinity(min) && float.IsPositiveInfinity(max) ? string.Empty
+            : float.IsNegativeInfinity(min) ? $"<= {Show(max)}"
+            : float.IsPositiveInfinity(max) ? $">= {Show(min)}"
+            : $"{Show(min)}..{Show(max)}";
 
     /// <summary>The declared flag closest to a token, when one is close enough to be worth suggesting.</summary>
     /// <param name="token">The unknown token.</param>

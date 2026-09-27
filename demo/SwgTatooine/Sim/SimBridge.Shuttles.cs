@@ -202,10 +202,15 @@ public sealed partial class SimBridge
             // find out would be work the fence pays for.
             var queued = 0UL;
             var peek = cluster.GetReadOnlySpan(Player.State);
+
+            // A possessed player is never boarded (SWG-01). It cannot newly become AwaitingShuttle — PlayerThink is what sets that and it skips possessed
+            // players — but one possessed WHILE already queued would otherwise be flown away, and with several planets flown to another realm, by a system
+            // its client cannot see. `PossessPlayers` normalises the activity on claim so the state is not merely ignored; this is the second half of that.
+            var control = cluster.GetReadOnlySpan(Player.Control);
             for (var bits = bits0; bits != 0; bits &= bits - 1)
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
-                if (peek[idx].Activity == PlayerActivity.AwaitingShuttle)
+                if (peek[idx].Activity == PlayerActivity.AwaitingShuttle && control[idx].Kind == ControllerKind.InProcess)
                 {
                     queued |= 1UL << idx;
                 }

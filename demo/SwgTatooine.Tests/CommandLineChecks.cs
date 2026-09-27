@@ -83,12 +83,112 @@ public sealed class CommandLineChecks
         Assert.That(ex.Message, Does.Contain("--hz"));
     }
 
-    /// <summary>A negative number is a value, not a flag: one dash, not two.</summary>
+    /// <summary>A negative number is a value, not a flag: one dash, not two. It is then refused on its range, which is a different message.</summary>
     [Test]
-    public void ANegativeValueIsStillAValue()
+    public void ANegativeValueIsReadAsAValueAndThenRangeChecked()
     {
-        var config = CommandLine.Parse(["--player-leave", "-1"]);
-        Assert.That(config.PlayerLeaveM, Is.EqualTo(-1d));
+        var ex = Assert.Throws<ArgumentException>(() => CommandLine.Parse(["--player-leave", "-1"]));
+        Assert.Multiple(() =>
+        {
+            Assert.That(ex.Message, Does.Contain("--player-leave"));
+            Assert.That(ex.Message, Does.Not.Contain("is a flag"), "it was read as a value, so the complaint is about its range");
+            Assert.That(ex.Message, Does.Contain("at least"));
+        });
+    }
+
+    /// <summary>
+    /// A well-formed number outside its range is refused, and the range is on the declaration so it cannot be forgotten.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>These ten all parsed and ran before the ranges moved onto the declarations</b>, and <c>--pop -1</c> in particular built an empty world and reported
+    /// it as a measurement — which is the exact failure SWG-07 exists to prevent, surviving inside SWG-07. A validation list at the end of the parse had them
+    /// missing; a bound written beside the flag cannot be.
+    /// </para>
+    /// <para>They are <c>[TestCase]</c>s rather than one case with ten asserts, so a regression names the flag it broke.</para>
+    /// </remarks>
+    /// <param name="flag">The flag.</param>
+    /// <param name="value">A value outside its range.</param>
+    [TestCase("--pop", "-1")]
+    [TestCase("--world", "-5")]
+    [TestCase("--cell", "-1")]
+    [TestCase("--ticks", "-1")]
+    [TestCase("--ticks", "0")]
+    [TestCase("--warm", "-1")]
+    [TestCase("--workers", "-1")]
+    [TestCase("--cache-mib", "0")]
+    [TestCase("--shuttle-share", "5")]
+    [TestCase("--tightness", "-1")]
+    [TestCase("--idle-creatures", "2")]
+    [TestCase("--hz", "0")]
+    [TestCase("--planets", "0")]
+    [TestCase("--max-clients", "-1")]
+    [TestCase("--serve", "99999")]
+    public void AValueOutsideItsRangeIsRefused(string flag, string value)
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CommandLine.Parse([flag, value]));
+        Assert.Multiple(() =>
+        {
+            Assert.That(ex.Message, Does.Contain(flag));
+            Assert.That(ex.Message, Does.Contain(value));
+        });
+    }
+
+    /// <summary>
+    /// <c>--idle-creatures</c> is refused rather than clamped, which is what every other share does.
+    /// </summary>
+    /// <remarks>
+    /// It used to go through <c>Math.Clamp</c>, so <c>--idle-creatures 2</c> ran at 1 and said nothing — a sixth, silent way to be wrong inside a file whose
+    /// thesis is that there are five and all are fatal. The repository's rule for a load-bearing parameter is to refuse at start, never to clamp.
+    /// </remarks>
+    [Test]
+    public void AShareIsRefusedRatherThanClamped()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.Throws<ArgumentException>(() => CommandLine.Parse(["--idle-creatures", "2"]), "above the range");
+            Assert.Throws<ArgumentException>(() => CommandLine.Parse(["--idle-creatures", "-0.5"]), "below the range");
+            Assert.That(CommandLine.Parse(["--idle-creatures", "0.25"]).IdleCreatureFraction, Is.EqualTo(0.25d), "inside the range it is taken as given");
+        });
+    }
+
+    /// <summary>
+    /// <c>-h</c> asks for help only as the first argument, because leniency is decided before anything is parsed.
+    /// </summary>
+    /// <remarks>
+    /// <b>The case this rules out is <c>--db-dir -h</c>.</b> Help has to be recognised before the parse begins, so it cannot know which tokens are values —
+    /// and <c>-h</c> is a legitimate directory name. <c>--help</c> is safe anywhere, because a value beginning with <c>--</c> is refused outright and so no
+    /// flag can legitimately be followed by it; <c>-h</c> is safe at index 0 because nothing precedes it.
+    /// </remarks>
+    [Test]
+    public void ShortHelpIsOnlyTheFirstArgument()
+    {
+        Assert.Multiple(() =>
+        {
+            Assert.That(CommandLine.Parse(["-h"]).HelpText, Is.Not.Null, "the first argument");
+            Assert.That(CommandLine.Parse(["-h", "--pop", "2"]).HelpText, Is.Not.Null, "still the first argument");
+            Assert.That(CommandLine.Parse(["--db-dir", "-h"]).HelpText, Is.Null, "a value, not a request for help");
+            Assert.That(CommandLine.Parse(["--db-dir", "-h"]).DatabaseDirectory, Is.EqualTo("-h"));
+            Assert.That(CommandLine.Parse(["--help"]).HelpText, Does.Contain("-h"), "the alias is listed, or it is a flag nobody can discover");
+        });
+    }
+
+    /// <summary>
+    /// A configuration built directly — by a test, or by anything that is not the parser — has sweep axes, rather than nulls.
+    /// </summary>
+    /// <remarks>
+    /// The three axes were defaulted in the parser only, so `Sweep.Run` over a hand-built configuration dereferenced null inside the matrix loop.
+    /// </remarks>
+    [Test]
+    public void AHandBuiltConfigurationHasSweepAxes()
+    {
+        var config = new SimConfig();
+        Assert.Multiple(() =>
+        {
+            Assert.That(config.SweepWorlds, Is.Not.Null.And.Not.Empty);
+            Assert.That(config.SweepPops, Is.Not.Null.And.Not.Empty);
+            Assert.That(config.SweepCells, Is.Not.Null.And.Not.Empty);
+        });
     }
 
     /// <summary>A choice outside its set is refused and the set is printed.</summary>
@@ -267,28 +367,40 @@ public sealed class CommandLineChecks
         });
     }
 
-    /// <summary><c>--help</c> is grouped, so a list of seventy flags is readable.</summary>
+    /// <summary><c>--help</c> is grouped, so a list of eighty flags is readable.</summary>
+    /// <remarks>
+    /// <b>The rendered header, not the bare word.</b> <c>Does.Contain("mode")</c> passed with every group header deleted, because <c>--subs-mode</c> contains
+    /// "mode" — a vacuous assertion of exactly the kind that makes a green suite mean nothing.
+    /// </remarks>
     [Test]
     public void HelpIsGrouped()
     {
         var help = CommandLine.Parse(["--help"]).HelpText;
         Assert.Multiple(() =>
         {
-            Assert.That(help, Does.Contain("mode"));
-            Assert.That(help, Does.Contain("sessions and replication"));
-            Assert.That(help, Does.Contain("persistence and output"));
+            Assert.That(help, Does.Contain("── mode ──"));
+            Assert.That(help, Does.Contain("── sessions and replication ──"));
+            Assert.That(help, Does.Contain("── persistence and output ──"));
         });
     }
 
-    /// <summary>Each valued flag prints its default, which is the only place a reader can learn what a run with no flags does.</summary>
+    /// <summary>
+    /// Each valued flag prints its default and, where it has one, its range — the only place a reader can learn either.
+    /// </summary>
+    /// <remarks>
+    /// The bracket is <c>[default]</c> or <c>[default, range]</c>, so the pattern ends at a comma or a bracket rather than assuming which. A reader who cannot
+    /// see that <c>--max-clients 0</c> means unlimited will set it to 1 and wonder why the second client is refused.
+    /// </remarks>
     [Test]
-    public void HelpPrintsDefaults()
+    public void HelpPrintsDefaultsAndRanges()
     {
         var help = CommandLine.Parse(["--help"]).HelpText;
         Assert.Multiple(() =>
         {
-            Assert.That(help, Does.Match(@"--hz\s+<integer>\s+.*\[10\]"), "the baseline tick rate");
-            Assert.That(help, Does.Match(@"--max-clients\s+<integer>\s+.*\[0\]"), "0 is unlimited, and a reader has to be able to see that");
+            Assert.That(help, Does.Match(@"--hz\s+<integer>\s+.*\[10[,\]]"), "the baseline tick rate");
+            Assert.That(help, Does.Match(@"--max-clients\s+<integer>\s+.*\[0[,\]]"), "0 is unlimited, and a reader has to be able to see that");
+            Assert.That(help, Does.Match(@"--pop\s+<number>\s+.*>= 0\.0001"), "a flag with a lower bound prints it");
+            Assert.That(help, Does.Match(@"--shuttle-share\s+<number>\s+.*0\.\.1"), "a flag bounded both ways prints both");
         });
     }
 }

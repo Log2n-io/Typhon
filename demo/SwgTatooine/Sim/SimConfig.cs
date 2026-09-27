@@ -456,13 +456,18 @@ public sealed class SimConfig
     public bool RunSweep;
 
     /// <summary><c>--sweep-worlds</c>: the sweep's world-edge axis, km.</summary>
-    public float[] SweepWorlds;
+    /// <remarks>
+    /// <b>Defaulted here as well as in the parser, because a configuration is not always parsed.</b> A test, or any code that builds a
+    /// <see cref="SimConfig"/> directly and calls <c>Sweep.Run</c>, would otherwise hand it a null axis and get a <c>NullReferenceException</c> out of the
+    /// matrix loop. The same three defaults appear in <see cref="CommandLine"/> so that <c>--help</c> can print them.
+    /// </remarks>
+    public float[] SweepWorlds = [TatooineData.PlanetEdgeM / 1000f, 64f, 128f];
 
     /// <summary><c>--sweep-pops</c>: the sweep's population-scale axis.</summary>
-    public float[] SweepPops;
+    public float[] SweepPops = [1f, 4f, 16f];
 
     /// <summary><c>--sweep-cells</c>: the sweep's cell-size axis, metres at the real planet's scale.</summary>
-    public float[] SweepCells;
+    public float[] SweepCells = [64f, 128f, 256f, 512f, 1024f];
 
     /// <summary>The flag list, set instead of a configuration when the command line asked for <c>--help</c>; null otherwise.</summary>
     public string HelpText;

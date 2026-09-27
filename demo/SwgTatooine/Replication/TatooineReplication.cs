@@ -339,6 +339,24 @@ public static class TatooineReplication
         return Admission.Reject(HouseFullCloseCode, $"the {role} house is full ({cap})");
     }
 
+    /// <summary>Gives back a reservation, never below zero.</summary>
+    /// <param name="pending">The role's pending counter.</param>
+    /// <remarks>
+    /// A compare-and-swap loop rather than a decrement, because a decrement that ran once too often would make <c>live + pending</c> smaller than the truth,
+    /// and that is the direction in which the cap is exceeded. Reading one too many refuses a client a moment early; reading one too few admits one too many.
+    /// </remarks>
+    private static void Release(ref int pending)
+    {
+        int seen;
+        while ((seen = System.Threading.Volatile.Read(ref pending)) > 0)
+        {
+            if (System.Threading.Interlocked.CompareExchange(ref pending, seen - 1, seen) == seen)
+            {
+                return;
+            }
+        }
+    }
+
     /// <summary>Claims a place under a cap, atomically against every other transport thread.</summary>
     /// <param name="pending">The role's pending counter.</param>
     /// <param name="live">The role's live count, as the last tick saw it.</param>
@@ -573,6 +591,12 @@ public static class TatooineReplication
             {
                 // By kind, so one run can carry both shapes and a measurement can say which it measured.
                 var player = e.SessionKind == PlayerKind;
+
+                // The reservation this session's admission made is now accounted for by RecountSessions, which can see it in OpenSessions from this tick on.
+                // Released here rather than by zeroing the counters before the walk, because between the hook and this event the session is in neither — see
+                // RecountSessions. Clamped at zero: a reservation whose session never opened leaks one place until the next admission, which is the safe
+                // direction, and a decrement that ran twice would be the unsafe one.
+                Release(ref player ? ref _pendingClients : ref _pendingSpectators);
                 var request = subs.Session(e.Session).Profile(player ? PlayerProfile : GodRegionMaxEdgeM > 0 ? GodRegionProfile : GodProfile);
                 if (player && PlayerBudgetBytesPerSecond > 0)
                 {
@@ -598,8 +622,30 @@ public static class TatooineReplication
             }
         }
 
+        // Reclaim reservations nobody ever claimed. A reservation is released where its session's `Opened` event is seen, and a session that was accepted but
+        // then failed to open — `SessionTable.TryAdmit` can still fail to lease a slot, or throw, after the hook has said yes — produces no such event, so its
+        // place under the cap would be held for the life of the process. Two consecutive ticks with no session event at all means nothing is in flight: an
+        // admission that happened before the first of them has had a whole tick for its event to be drained. One tick would not be enough, because an
+        // admission concurrent with this check has not reached the event buffer yet, and discarding THAT reservation is the direction in which the cap is
+        // exceeded rather than the direction in which a client waits.
+        if (subs.SessionEvents.Length == 0)
+        {
+            if (++_quietTicks >= 2)
+            {
+                System.Threading.Interlocked.Exchange(ref _pendingClients, 0);
+                System.Threading.Interlocked.Exchange(ref _pendingSpectators, 0);
+            }
+        }
+        else
+        {
+            _quietTicks = 0;
+        }
+
         return true;
     }
+
+    /// <summary>Consecutive ticks with no session event, after which an unclaimed reservation is known to be a leak rather than an admission in flight.</summary>
+    private static int _quietTicks;
 
     /// <summary>
     /// Recounts the live sessions of each role from the session table, so that the admission hook has a number it did not derive from its own increments.
@@ -613,14 +659,16 @@ public static class TatooineReplication
     /// a reason nothing reports. Walking the open sessions is O(sessions) once a tick against a table the tick is already touching.
     /// </para>
     /// <para>
-    /// The pending counters are cleared BEFORE the walk, not after — see their declaration for why that direction is the safe one.
+    /// <b>It does not clear the pending counters, and an earlier version that did could be made to exceed the cap.</b> A reservation has to stay in
+    /// <c>pending</c> until the session it reserved for appears in <c>OpenSessions</c>, and that is not the next tick: <c>SessionTable.TryAdmit</c> runs the
+    /// hook, leases a slot and appends an <c>Opened</c> event, and the session only enters the open set when <c>BeginTick</c> drains that event. Between the
+    /// hook and that drain the session is in the table but not in the walk — so zeroing pending before walking counted it in neither, published a live count
+    /// that did not include it, and let the next admission accept over the cap. Each reservation is now released where its <c>Opened</c> event is observed,
+    /// which is the one place both facts are in hand.
     /// </para>
     /// </remarks>
     private static void RecountSessions(SubscriptionsCommands subs)
     {
-        System.Threading.Interlocked.Exchange(ref _pendingClients, 0);
-        System.Threading.Interlocked.Exchange(ref _pendingSpectators, 0);
-
         var players = 0;
         var spectators = 0;
         foreach (var session in subs.OpenSessions)
@@ -1032,6 +1080,7 @@ public static class TatooineReplication
                         control.Kind = ControllerKind.Human;
                         control.Controller = session.Value;
                         control.Target = EntityId.Null;
+                        Normalise(ref possessed);
                         System.Threading.Interlocked.Increment(ref _possessions);
                     }
                 }
@@ -1061,6 +1110,7 @@ public static class TatooineReplication
                     control.Kind = ControllerKind.InProcess;
                     control.Controller = 0u;
                     control.Target = EntityId.Null;
+                    Normalise(ref released);
                     System.Threading.Interlocked.Increment(ref _releases);
                 }
             }
@@ -1070,6 +1120,37 @@ public static class TatooineReplication
         {
             BoundPlayer.Remove(Retired[i]);
         }
+    }
+
+    /// <summary>
+    /// Brings a player to a standstill with no half-finished activity, at both ends of a possession.
+    /// </summary>
+    /// <param name="player">The player, already opened for writing.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>On CLAIM, because a mid-activity player would otherwise be frozen in it.</b> <c>PlayerThink</c> is what advances an activity and it now skips a
+    /// possessed player, so one claimed while <c>ToShuttle</c>, <c>AwaitingShuttle</c>, <c>ToPortal</c> or <c>Inside</c> would sit in that state for as long as
+    /// the client held it — and the systems that act on those states would act on it from outside the client's view. They now skip a possessed player too, but
+    /// leaving the state set would be leaving a trap for the next system that reads it.
+    /// </para>
+    /// <para>
+    /// <b>On RELEASE, because a stale activity outlives the session.</b> A player given back mid-intent would return to the simulation as <c>Travelling</c>
+    /// towards wherever its last client pointed it, with a timer of zero — which <c>PlayerThink</c> reads as "arrived, decide again", so this is belt to that
+    /// brace rather than load-bearing. What it does buy is that a released player is indistinguishable from one that was never possessed, which is the property
+    /// the measurement checks assert.
+    /// </para>
+    /// </remarks>
+    private static void Normalise(ref EntityRefMut player)
+    {
+        ref var state = ref player.Write(Player.State);
+        state.Activity = PlayerActivity.Idle;
+        state.ActivityTicks = 0;
+        state.ShuttleFrom = -1;
+        state.ShuttleDest = -1;
+
+        ref var move = ref player.Write(Player.Move);
+        move.VelX = 0f;
+        move.VelZ = 0f;
     }
 
     // ── Intents (SWG-01) ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -1297,17 +1378,57 @@ public static class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _releases, 0);
         BoundPlayer.Clear();
         BoundIds.Clear();
+
+        // The rest of the statics a runtime leaves behind. _pushCommands in particular holds the LAST runtime's SubscriptionsCommands, so Replicate() from a
+        // system of the next one would mark a slot in an object belonging to a disposed engine; the others make a second run in one process inherit the
+        // first one's configuration.
+        _pushCommands = null;
+        Scheduler = null;
+        _declared = false;
+        System.Threading.Interlocked.Exchange(ref _announced, 0);
+        _placeTicks = 0;
+        _quietTicks = 0;
+        WorldEdgeM = 16_384d;
+        MetresPerTickForIntents = 0.1f;
+        PlayerBudgetBytesPerSecond = 0;
+        PlayerLeaveM = 0d;
+        GodRegionMaxEdgeM = 0d;
+        GodNearBudget = 10_000;
+        Planets = 1;
     }
 
-    /// <summary>The player a session controls, or <c>EntityId.Null</c>.</summary>
+    /// <summary>
+    /// The player a session controls, found by asking the WORLD rather than the claim table.
+    /// </summary>
+    /// <param name="dbe">The engine, for a short read transaction of its own.</param>
     /// <param name="session">The session.</param>
-    /// <returns>The entity.</returns>
+    /// <returns>The entity, or <c>EntityId.Null</c> when the session controls nothing.</returns>
     /// <remarks>
-    /// The claim table is this system's alone at run time — nothing else may read it, because nothing else is on its thread. A check reads it between ticks,
-    /// which is a different situation and the only one in which this is safe.
+    /// <b>It scans for the mark instead of reading <see cref="BoundPlayer"/>, because that dictionary is written by a live tick.</b> A
+    /// <c>Dictionary&lt;,&gt;</c> read concurrent with an insert can throw or spin indefinitely, and a caller that is spinning on a condition — which is what
+    /// every check that needs this is doing — runs exactly then. A "call it between ticks" contract in a comment cannot be honoured by a spin loop, so the
+    /// contract is removed rather than documented. The scan is over the players of one realm-less query and costs microseconds, which is free at the only
+    /// place it is called from.
     /// </remarks>
-    public static EntityId ControlledForTest(SessionId session)
-        => BoundPlayer.TryGetValue(session.Value, out var entity) ? entity : EntityId.Null;
+    public static EntityId ControlledBy(DatabaseEngine dbe, SessionId session)
+    {
+        ArgumentNullException.ThrowIfNull(dbe);
+        using var tx = dbe.CreateQuickTransaction();
+        foreach (var cluster in tx.For<Player>().GetClusterEnumerator())
+        {
+            var control = cluster.GetReadOnlySpan(Player.Control);
+            for (var bits = cluster.OccupancyBits; bits != 0; bits &= bits - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(bits);
+                if (control[slot].Controller == session.Value && control[slot].Kind != ControllerKind.InProcess)
+                {
+                    return cluster.GetEntityId(slot);
+                }
+            }
+        }
+
+        return EntityId.Null;
+    }
 
     /// <summary>The world's edge in metres, so an intent's destination can be clamped to it.</summary>
     /// <remarks>Set from the configuration before <c>Start</c>, like every other value here that the simulation owns and replication reads.</remarks>

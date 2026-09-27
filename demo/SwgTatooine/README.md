@@ -253,7 +253,23 @@ demo's CPU time is bimodal run to run; comparing two configurations needs interl
 
 ```bash
 dotnet run -c Release --project demo/SwgTatooine -- --pop 16 --cell 1024
+dotnet run -c Release --project demo/SwgTatooine -- --help          # every flag, its default and its range
 ```
+
+> ### The command line refuses what it does not understand (SWG-07, 2026-09-27)
+>
+> It used to read every flag with `IndexOf` + `TryParse` and fall back to the default on any failure, so a misspelt flag, a
+> malformed value and an absent flag were reported identically — which is to say not at all. **Five things are now fatal,
+> with exit code 2 and the token named:** an unknown flag (the nearest declared name is suggested), a value that will not
+> parse, a flag at the end of the line with no value, a value that is itself a flag, and **the same flag given twice** — the
+> last because `IndexOf` took the first occurrence, so appending a corrected `--hz 50` to a line that already said `--hz 10`
+> ran at 10. A well-formed value outside its range is refused as well, rather than clamped.
+>
+> **Two behaviour changes worth knowing:** `--serve` now requires its port — a bare `--serve`, and a malformed one such as
+> `--serve 808O`, both used to mean 8080 silently — and `--probe`, `--work-probe`, `--chunk-stats`, `--sweep` and
+> `--unpaced` are refused together with `--serve`, because they report at the end of a run that has an end.
+>
+> `--help` is generated from the declarations the parse walks, so a flag cannot exist without being listed.
 
 Each run creates `SwgTatooine_<pid>.typhon` beside the binary — about 180 MB of it at `--pop 64` — and deletes only a
 database of its own name at startup. Because the name carries the process id, finished runs leave theirs behind; delete

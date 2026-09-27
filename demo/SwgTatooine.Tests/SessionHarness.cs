@@ -104,8 +104,27 @@ internal sealed class FakeLink : ISubscriptionLink
 
     private ushort _seq = 1;
 
-    /// <summary>The close code and reason the engine asked for, or null while the link is open.</summary>
-    public (ushort Code, string Reason)? Closed { get; private set; }
+    /// <summary>
+    /// The close code and reason the engine asked for, or null while the link is open.
+    /// </summary>
+    /// <remarks>
+    /// <b>Published under the same lock as <see cref="Sent"/>, because the writer and the readers are different threads.</b> <c>Close</c> runs on the send
+    /// pump's pool thread; every reader is the test thread, and it reads twice — once to see that a close happened and once for the code. A
+    /// <c>Nullable&lt;(ushort, string)&gt;</c> is several words, so an unsynchronized publication can be seen half-written, and on arm64 the reads can be
+    /// reordered against the writes that set it. The lock is free here and the alternative is a flake nobody would diagnose.
+    /// </remarks>
+    public (ushort Code, string Reason)? Closed
+    {
+        get
+        {
+            lock (_sent)
+            {
+                return _closed;
+            }
+        }
+    }
+
+    private (ushort Code, string Reason)? _closed;
 
     /// <inheritdoc/>
     public bool SupportsUnreliable => false;
@@ -140,12 +159,17 @@ internal sealed class FakeLink : ISubscriptionLink
     /// <inheritdoc/>
     public void Close(ushort code, string reason)
     {
-        if (Closed != null)
+        lock (_sent)
         {
-            return;
+            if (_closed != null)
+            {
+                return;
+            }
+
+            _closed = (code, reason);
         }
 
-        Closed = (code, reason);
+        // Outside the lock: OnClosed reaches into the engine, and holding a lock a send could also want across that call is how a deadlock is built.
         Connection?.OnClosed(code, null);
     }
 
@@ -170,13 +194,20 @@ internal sealed class FakeLink : ISubscriptionLink
     /// <summary>Whether any message of a type arrived, for the types whose contents this does not need to read.</summary>
     /// <param name="type">Its <see cref="MessageTypes"/> byte.</param>
     /// <returns>Whether one arrived.</returns>
+    /// <remarks>
+    /// <b>Under the lock rather than over <see cref="Sent"/>, because this is called from inside a spin loop.</b> <see cref="Sent"/> copies the whole list,
+    /// so every poll of a wait allocated one array per link — in a predicate that runs hundreds of times per case.
+    /// </remarks>
     public bool Received(byte type)
     {
-        foreach (var message in Sent)
+        lock (_sent)
         {
-            if (message.Length > 0 && message[0] == type)
+            for (var i = 0; i < _sent.Count; i++)
             {
-                return true;
+                if (_sent[i].Length > 0 && _sent[i][0] == type)
+                {
+                    return true;
+                }
             }
         }
 
@@ -280,6 +311,7 @@ internal sealed class SessionHarness
         sim.Runtime.StartSubscriptionTransport(transport);
         Assert.That(transport.Acceptor, Is.Not.Null, "the runtime did not hand the transport an acceptor, so replication is not running");
         _acceptor = transport.Acceptor;
+        _current = this;
     }
 
     /// <summary>Connects one client and completes its handshake.</summary>
@@ -294,20 +326,39 @@ internal sealed class SessionHarness
         link.Connection = connection;
         connection.OnMessage(ClientSays.Hello(kind));
         _links.Add(link);
-        Current = this;
         return link;
     }
 
     private readonly List<FakeLink> _links = [];
 
     /// <summary>
-    /// The harness whose clients <see cref="Until"/> keeps alive. One per fixture, because a check runs one server at a time.
+    /// The harness whose clients <see cref="Until"/> keeps alive, or null between fixtures.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// A static because <see cref="Until"/> is one: a wait for a condition reads nicely as a free function and every wait in every check has to keep the
     /// clients alive, so making it an instance method would mean every call site carrying the harness for that one reason.
+    /// </para>
+    /// <para>
+    /// <b>Set in the constructor and cleared by <see cref="Release"/>, which every fixture calls from its teardown.</b> It used to be assigned in
+    /// <c>Connect</c> and never cleared, which worked only because no case happened to call <see cref="Until"/> before its own <c>Connect</c>. The first one
+    /// that did would have kept alive a DISPOSED simulation from the previous fixture, and the exception would have surfaced from inside a
+    /// <c>SpinWait.SpinUntil</c> predicate as a failure of whatever that case was actually waiting for.
+    /// </para>
     /// </remarks>
-    private static SessionHarness Current;
+    private static SessionHarness _current;
+
+    /// <summary>
+    /// Stops <see cref="Until"/> keeping this harness's clients alive. Every fixture that builds one calls this from its teardown.
+    /// </summary>
+    /// <remarks>Idempotent, and it only clears the static when this harness is the one holding it — so an out-of-order teardown cannot unhook a live one.</remarks>
+    public void Release()
+    {
+        if (ReferenceEquals(_current, this))
+        {
+            _current = null;
+        }
+    }
 
     /// <summary>Waits until the runtime has ticked past where it is now.</summary>
     /// <param name="count">How many ticks.</param>
@@ -354,7 +405,7 @@ internal sealed class SessionHarness
             SpinWait.SpinUntil(
                 () =>
                 {
-                    Current?.Keepalive();
+                    _current?.Keepalive();
                     return condition();
                 },
                 TimeSpan.FromSeconds(10)),

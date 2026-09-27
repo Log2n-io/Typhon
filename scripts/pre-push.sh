@@ -192,12 +192,16 @@ AUX=(
   demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj
   demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj
 )
-# Built unconditionally, unlike the suites above. `suite_step` passes `--no-build`, and a project that has never been built
-# in Release on this box then fails with "test assembly not found" — which reads as a broken script rather than a missing
-# build, and would do so on every fresh worktree. These are small; the build is seconds.
+# Built when --build asks, OR when the Release assembly is simply not there. `suite_step` passes `--no-build`, so a project
+# never built in Release on this box fails with "test assembly not found" — which reads as a broken script rather than a
+# missing build, and would do so on every fresh worktree. Building all seven unconditionally was the first attempt and it
+# broke the promise in this script's own usage block: without --build there are no builds. ~20-40 s of MSBuild startup on
+# every run is not a rounding error on a script people are meant to run before every push.
 for proj in "${AUX[@]}"; do
   name="$(basename "$proj" .csproj)"
-  step "build ${name} (Release)" dotnet build "$proj" -c Release
+  if [ "$BUILD" -eq 1 ] || [ -z "$(find "$(dirname "$proj")/bin/Release" -name "${name}.dll" -print -quit 2>/dev/null)" ]; then
+    step "build ${name} (Release)" dotnet build "$proj" -c Release
+  fi
   suite_step "${name} (Release, gate: aux-tests)" "$proj" "pre-push-${name}.trx"
 done
 if command -v npm >/dev/null 2>&1; then

@@ -31,6 +31,9 @@ public sealed class ClientIntentChecks
 
     private string _dir;
 
+    /// <summary>The harness a case built, so teardown can unhook it from <c>SessionHarness.Until</c>'s keepalive.</summary>
+    private SessionHarness _harness;
+
     [SetUp]
     public void SetUp()
     {
@@ -42,6 +45,8 @@ public sealed class ClientIntentChecks
     [TearDown]
     public void TearDown()
     {
+        _harness?.Release();
+        _harness = null;
         TatooineReplication.ResetSessionAccounting();
         TatooineReplication.ResetIntentAccounting();
         Worlds.Delete(_dir);
@@ -71,7 +76,7 @@ public sealed class ClientIntentChecks
             // sending an intent to a session that controls nothing, which is a legitimate state with its own counter and not what any of these are about.
             SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the possession to be claimed by a tick");
             Harness.Ticks(2);
-            Entity = TatooineReplication.ControlledForTest(Link.Session);
+            Entity = TatooineReplication.ControlledBy(Sim.Dbe, Link.Session);
             Assert.That(Entity, Is.Not.EqualTo(EntityId.Null), "the session controls nothing, so there is nothing to drive");
         }
 
@@ -96,7 +101,12 @@ public sealed class ClientIntentChecks
             return (place.X, place.Z, move.DestX, move.DestZ, move.VelX, move.VelZ, state.Activity, control.Target);
         }
 
-        public void Dispose() => Sim.Dispose();
+        /// <summary>Unhooks the harness from the keepalive before disposing the world, so no later wait can tick a disposed runtime.</summary>
+        public void Dispose()
+        {
+            Harness.Release();
+            Sim.Dispose();
+        }
     }
 
     // ── The principle: intents, never positions ────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -298,21 +308,34 @@ public sealed class ClientIntentChecks
         });
     }
 
-    /// <summary>A netId of zero clears the target without being counted as a refusal — it is a client saying "nothing", not guessing wrong.</summary>
+    /// <summary>
+    /// A netId of zero is a client saying "nothing" and is not counted as a refusal; a netId it was never shown is, and the two are told apart.
+    /// </summary>
+    /// <remarks>
+    /// <b>Both are sent, because either alone proves nothing.</b> A freshly possessed player's target is already <c>EntityId.Null</c>, so a case that sent only
+    /// <c>SetTarget(0)</c> and asserted the target was null passed whether the command did anything or not — and would pass with the whole zero branch deleted.
+    /// What is falsifiable is the DIFFERENCE: an unknown identity moves the refusal counter and zero does not, with both arriving at the same tick from the
+    /// same client.
+    /// </remarks>
     [Test]
-    public void ATargetOfZeroClearsWithoutBeingARefusal()
+    public void AClearIsToldApartFromARefusal()
     {
         using var world = new Possessed(Config());
 
+        world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(0xFFFF_FF00u));
+        SessionHarness.Until(() => TatooineReplication.Intents.TargetsRefused >= 1, "the unknown identity to be refused");
+        var refusedAfterBogus = TatooineReplication.Intents.TargetsRefused;
+
         world.Link.SendCommand(nameof(SetTarget), ClientSays.SetTarget(0u));
-        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 1, "the command to reach a tick");
-        world.Harness.Ticks(1);
+        SessionHarness.Until(() => TatooineReplication.Intents.Applied >= 2, "the clear to reach a tick");
+        world.Harness.Ticks(2);
 
         Assert.Multiple(() =>
         {
+            Assert.That(refusedAfterBogus, Is.EqualTo(1), "an identity the session was never shown is refused and counted");
+            Assert.That(TatooineReplication.Intents.TargetsRefused, Is.EqualTo(1), "the clear was counted as a refusal too");
+            Assert.That(TatooineReplication.Intents.TargetsSet, Is.Zero, "neither command set a target");
             Assert.That(world.Read().Target, Is.EqualTo(EntityId.Null));
-            Assert.That(TatooineReplication.Intents.TargetsRefused, Is.Zero, "clearing a target is not a refusal");
-            Assert.That(TatooineReplication.Intents.TargetsSet, Is.Zero, "clearing a target is not setting one");
         });
     }
 
@@ -372,10 +395,10 @@ public sealed class ClientIntentChecks
         using var sim = new TatooineSim(config);
         sim.Initialize();
 
-        var harness = new SessionHarness(sim);
+        var harness = _harness = new SessionHarness(sim);
         var link = harness.Connect(TatooineReplication.PlayerKind);
         SessionHarness.Until(() => TatooineReplication.Intents.Possessions >= 1, "the possession to be claimed");
-        var entity = TatooineReplication.ControlledForTest(link.Session);
+        var entity = TatooineReplication.ControlledBy(sim.Dbe, link.Session);
 
         link.Close(CloseCodes.Normal, "leaving");
         SessionHarness.Until(() => TatooineReplication.Intents.Releases >= 1, "the player to be given back by a tick");
@@ -388,6 +411,80 @@ public sealed class ClientIntentChecks
             Assert.That(control.Kind, Is.EqualTo(ControllerKind.InProcess), "the player is still possessed by a session that has gone");
             Assert.That(control.Controller, Is.Zero);
             Assert.That(control.Target, Is.EqualTo(EntityId.Null));
+        });
+    }
+
+    /// <summary>
+    /// Claiming a player brings it to a standstill with no half-finished activity, so no system can act on a state its client cannot see.
+    /// </summary>
+    /// <remarks>
+    /// <b>The failure this rules out is a player frozen in an activity for ever.</b> <c>PlayerThink</c> is what advances an activity and it skips a possessed
+    /// player, so one claimed while walking to a shuttleport, queued at one, walking to a door or inside a building would sit in that state for as long as the
+    /// client held it — while the systems that act on those states went on acting on it.
+    /// </remarks>
+    [Test]
+    public void ClaimingAPlayerNormalisesItsActivity()
+    {
+        using var world = new Possessed(Config());
+        var after = world.Read();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(after.Activity, Is.EqualTo(PlayerActivity.Idle), "a possessed player starts at a standstill, whatever it was doing");
+            Assert.That(after.VelX, Is.Zero);
+            Assert.That(after.VelZ, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// A dungeon never draws a possessed player into its party.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the case the review found and it was live.</b> A dungeon party is drawn from <c>Idle</c> players on planet 0 — which a client that has
+    /// connected and not yet sent an intent is, exactly. It was teleported into the dungeon's realm and pinned with
+    /// <c>ActivityTicks = int.MaxValue / 2</c>, a pin <c>PlayerThink</c> deliberately respects, so it survived the client disconnecting: a player parked in a
+    /// dungeon for the life of the process, still in every awareness query.
+    /// </para>
+    /// <para>
+    /// The dungeon interval is shortened so a draw happens inside the run, and the party is larger than the world's player count so that a draw which ignored
+    /// possession would certainly take this one rather than possibly missing it.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void ADungeonNeverDrawsAPossessedPlayer()
+    {
+        var config = Config();
+        config.Dungeons = 2;
+        config.DungeonIntervalS = 0.2f;
+        config.DungeonStayS = 60f;
+        config.DungeonParty = 64;
+        config.DungeonMobs = 2;
+
+        using var world = new Possessed(config);
+        world.Harness.Ticks(20);
+
+        // Read out before asserting: an EntityRef is a ref struct, so it cannot be captured by the lambdas Assert.Multiple takes.
+        ushort realm;
+        int activity;
+        int activityTicks;
+        byte kind;
+        using (var tx = world.Sim.Dbe.CreateQuickTransaction())
+        {
+            var entity = tx.For<Player>().Open(world.Entity);
+            realm = entity.Read(Player.Realm).Value;
+            var state = entity.Read(Player.State);
+            activity = state.Activity;
+            activityTicks = state.ActivityTicks;
+            kind = entity.Read(Player.Control).Kind;
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(realm, Is.Zero, "a possessed player was teleported into a dungeon realm");
+            Assert.That(activity, Is.Not.EqualTo(PlayerActivity.Inside), "a possessed player was drawn into a dungeon party");
+            Assert.That(activityTicks, Is.LessThan(int.MaxValue / 4), "a possessed player was pinned by a dungeon");
+            Assert.That(kind, Is.EqualTo(ControllerKind.Human), "the player stopped being possessed, so this proves nothing");
         });
     }
 
