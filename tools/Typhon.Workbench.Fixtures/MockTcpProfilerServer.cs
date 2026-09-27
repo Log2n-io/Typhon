@@ -81,6 +81,12 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
     public long CreatedUtcTicks { get; set; }
 
     /// <summary>
+    /// When set, the Init frame carries populated v7 static-structure sections instead of empty ones — the shape a real engine sends since #WB-01.
+    /// Off by default so every existing fixture keeps describing an engine that pushes no schema, which is still what an older engine does.
+    /// </summary>
+    public bool IncludeSchema { get; set; }
+
+    /// <summary>
     /// Number of client connections accepted so far. A restart scenario expects this to reach 2: the original attach,
     /// then the reconnect after <see cref="DropClientAsync"/> or <see cref="SendShutdownAsync"/>.
     /// </summary>
@@ -151,7 +157,7 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
                 var stream = accepted.GetStream();
 
                 // Send Init frame immediately on connect.
-                var initPayload = BuildInitPayload(CreatedUtcTicks);
+                var initPayload = BuildInitPayload(CreatedUtcTicks, IncludeSchema);
                 await WriteFrameAsync(stream, LiveFrameType.Init, initPayload, _cts.Token).ConfigureAwait(false);
 
                 lock (_clientLock)
@@ -292,7 +298,13 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
     }
 
     /// <summary>Minimal Init payload: header + empty system / archetype / component-type tables.</summary>
-    private static byte[] BuildInitPayload(long createdUtcTicks)
+    /// <summary>The component id the schema's single component definition carries, when <see cref="IncludeSchema"/> is set.</summary>
+    public const int SchemaComponentTypeId = 11;
+
+    /// <summary>The component name the schema's single component definition carries, when <see cref="IncludeSchema"/> is set.</summary>
+    public const string SchemaComponentName = "Position";
+
+    private static byte[] BuildInitPayload(long createdUtcTicks, bool includeSchema = false)
     {
         using var ms = new MemoryStream();
         var header = new TraceFileHeader
@@ -317,15 +329,44 @@ public sealed class MockTcpProfilerServer : IAsyncDisposable
         bw.Write((ushort)0); // component-type count = 0
         bw.Write((ushort)0); // tracks count = 0 (v11+ Track→DAG hierarchy)
         bw.Write((ushort)0); // dags count = 0
-        // v7 static-structure tables — empty placeholders so the wire layout matches the source format
-        // and AttachSessionRuntime can drive a TraceFileReader through it without throwing.
-        bw.Write((ushort)0); // ComponentDefinitions count
-        bw.Write((ushort)0); // ArchetypeDefinitions count
-        bw.Write((ushort)0); // IndexCatalog count
-        bw.Write(false);     // RuntimeConfig presence flag
-        bw.Write((ushort)0); // EventQueueCatalog count
-        bw.Write(0);         // ResourceGraphSnapshot count (i32)
         bw.Flush();
+
+        // v7 static-structure tables. Written through the real TraceFileWriter either way — the empty case is a wire layout the reader must be able
+        // to walk, not six numbers this fixture is free to guess at, and that is exactly the kind of hand-mirroring #WB-01 removed from TcpExporter.
+        // Not disposed on purpose: its Dispose would close `ms`, which still owes us its bytes.
+        var writer = new TraceFileWriter(ms);
+        if (includeSchema)
+        {
+            writer.WriteComponentDefinitions(
+            [
+                new ComponentDefinitionRecord
+                {
+                    ComponentTypeId = SchemaComponentTypeId, Name = SchemaComponentName, Revision = 1,
+                    ComponentStorageSize = 8, ComponentStorageTotalSize = 8,
+                    Fields =
+                    [
+                        new FieldDefinitionRecord { FieldId = 0, Name = "X", Offset = 0, Size = 4 },
+                        new FieldDefinitionRecord { FieldId = 1, Name = "Z", Offset = 4, Size = 4 },
+                    ],
+                },
+            ]);
+            writer.WriteArchetypeDefinitions(
+            [
+                new ArchetypeDefinitionRecord
+                {
+                    ArchetypeId = 2, Name = "Creature", Revision = 1, ComponentCount = 1, ComponentTypeIds = [SchemaComponentTypeId],
+                },
+            ]);
+            writer.WriteIndexCatalog([new IndexCatalogEntry { ComponentTypeId = SchemaComponentTypeId, FieldId = 0, IsSpatial = true }]);
+            writer.WriteRuntimeConfig(new RuntimeConfigRecord { BaseTickRate = 1_000, WorkerCount = 1 });
+            writer.WriteEventQueueCatalog([]);
+            writer.WriteResourceGraphSnapshot([new ResourceGraphNodeRecord { Id = 1, Name = "Engine", ParentId = -1 }]);
+        }
+        else
+        {
+            writer.WriteEmptyStaticStructures();
+        }
+
         return ms.ToArray();
     }
 

@@ -120,8 +120,12 @@ public sealed class OpenSession : ISession, ILiveProfilerHost, IDisposable
     public bool DetachProfile(Guid profileId) => _profileHost.Detach(profileId);
 
     /// <summary>The capability sets an Open session can have. Cached because <see cref="Capabilities"/> is read on every session projection.</summary>
-    private static readonly ImmutableHashSet<string> DatabaseOnly = [SessionCapability.Database];
-    private static readonly ImmutableHashSet<string> DatabaseAndProfiler = [SessionCapability.Database, SessionCapability.Profiler];
+    // Schema rides with the database: an Open session's schema comes from the live engine (LiveSchemaProvider), so it is available exactly when the
+    // engine is held and released when the session is paused. #WB-01 split the capability out because an ATTACH session now has schema without a
+    // browsable database; for an Open session the two still travel together.
+    private static readonly ImmutableHashSet<string> DatabaseOnly = [SessionCapability.Database, SessionCapability.Schema];
+    private static readonly ImmutableHashSet<string> DatabaseAndProfiler =
+        [SessionCapability.Database, SessionCapability.Schema, SessionCapability.Profiler];
     private static readonly ImmutableHashSet<string> ProfilerOnly = [SessionCapability.Profiler];
     private static readonly ImmutableHashSet<string> Nothing = [];
 

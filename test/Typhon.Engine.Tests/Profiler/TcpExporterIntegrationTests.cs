@@ -238,6 +238,146 @@ public class TcpExporterIntegrationTests
         try { client.Close(); } catch { }
     }
 
+    /// <summary>
+    /// #WB-01 — the Init frame carries the engine's schema, where it used to carry six zero counts.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The six v7 static-structure sections were written as literal zeros with a comment saying so, which made every attach session anonymous: the
+    /// Workbench could show a tick rate but not the name of a component, so every "what is this thing?" pivot dead-ended. This asserts the whole
+    /// round trip — the exporter writes the tables through <c>TraceFileWriter</c>, the client wraps the payload in a <see cref="TraceFileReader"/>,
+    /// and the records come back out.
+    /// </para>
+    /// <para>
+    /// The field-level assertions are the point, not decoration. A count that survives a layout mistake is exactly what a section-prefix-only check
+    /// would pass on: the sections are variable-size and self-delimiting, so a wrong offset inside one record is read as the *next* record's length
+    /// and the error surfaces as garbage three sections later, or as an exception that names the wrong table. Reading one field back per section is
+    /// what makes a layout divergence between the file writer and this frame fail here rather than in the Workbench.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void AnInitFrameCarriesTheEnginesSchema_NotSixZeroCounts()
+    {
+        int port;
+        using (var probe = new TcpListener(System.Net.IPAddress.Loopback, DiscoveryPort))
+        {
+            probe.Start();
+            port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+        }
+
+        var metadata = BuildMetadataWithSchema();
+        var tcpExporter = new TcpExporter(port, _registry.Profiler);
+        TyphonProfiler.AttachExporter(tcpExporter);
+        TyphonProfiler.Start(_registry.Profiler, metadata);
+
+        try
+        {
+            using var client = new TcpClient();
+            ConnectWithRetry(client, "127.0.0.1", port, timeoutMs: 2000);
+            using var stream = client.GetStream();
+            stream.ReadTimeout = 5000;
+
+            var (initType, initPayload) = ReadFrame(stream);
+            Assert.That(initType, Is.EqualTo(LiveFrameType.Init));
+            Assert.That(tcpExporter.SchemaOmittedFromInit, Is.False, "a two-record schema fits a frame by a wide margin; the fallback must not have run");
+
+            using var ms = new MemoryStream(initPayload, writable: false);
+            using var reader = new TraceFileReader(ms);
+            reader.ReadHeader();
+            reader.ReadSystemDefinitions();
+            reader.ReadArchetypes();
+            reader.ReadComponentTypes();
+            reader.ReadTracks();
+            reader.ReadDags();
+            reader.ReadStaticStructures();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(reader.ComponentDefinitions, Has.Count.EqualTo(1), "component definitions");
+                Assert.That(reader.ComponentDefinitions[0].Name, Is.EqualTo("Position"));
+                Assert.That(reader.ComponentDefinitions[0].Fields, Has.Length.EqualTo(2), "a component's field table travels with it");
+                Assert.That(reader.ComponentDefinitions[0].Fields[1].Name, Is.EqualTo("Z"));
+                Assert.That(reader.ComponentDefinitions[0].Fields[1].Offset, Is.EqualTo(4), "a field's byte offset is what the layout panel draws");
+
+                Assert.That(reader.ArchetypeDefinitions, Has.Count.EqualTo(1), "archetype definitions");
+                Assert.That(reader.ArchetypeDefinitions[0].Name, Is.EqualTo("Creature"));
+                Assert.That(reader.ArchetypeDefinitions[0].ComponentTypeIds, Is.EqualTo(new[] { 11 }));
+
+                Assert.That(reader.IndexCatalog, Has.Count.EqualTo(1), "index catalog");
+                Assert.That(reader.IndexCatalog[0].IsSpatial, Is.True);
+
+                Assert.That(reader.RuntimeConfig, Is.Not.Null, "runtime config presence flag");
+                Assert.That(reader.RuntimeConfig.BaseTickRate, Is.EqualTo(50));
+
+                Assert.That(reader.EventQueues, Has.Count.EqualTo(1), "event-queue catalog");
+                Assert.That(reader.EventQueues[0].Name, Is.EqualTo("DamageEvents"));
+
+                Assert.That(reader.ResourceGraphNodes, Has.Count.EqualTo(2), "resource graph");
+                Assert.That(reader.ResourceGraphNodes[1].ParentId, Is.EqualTo(1), "the tree is reconstructed from ParentId");
+            });
+        }
+        finally
+        {
+            TyphonProfiler.Stop();
+        }
+    }
+
+    /// <summary>
+    /// A schema too large for one frame is dropped from the Init rather than sent, because a receiver refuses an oversize frame and treats it as a
+    /// malformed stream — so the alternative to "attach without schema" is not "attach with a big schema", it is "cannot attach".
+    /// </summary>
+    /// <remarks>
+    /// Forced by a component table large enough to exceed <see cref="LiveStreamProtocol.MaxFrameBytes"/>. The assertion is the flag plus a parse of
+    /// the payload: the fallback has to leave a wire-legal frame behind, not a truncated one, which is the part a size check alone would not catch.
+    /// </remarks>
+    [Test]
+    public void ASchemaTooLargeForOneFrameIsOmitted_AndTheFrameStaysParseable()
+    {
+        int port;
+        using (var probe = new TcpListener(System.Net.IPAddress.Loopback, DiscoveryPort))
+        {
+            probe.Start();
+            port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+        }
+
+        var metadata = BuildMetadataWithOversizeSchema();
+        var tcpExporter = new TcpExporter(port, _registry.Profiler);
+        TyphonProfiler.AttachExporter(tcpExporter);
+        TyphonProfiler.Start(_registry.Profiler, metadata);
+
+        try
+        {
+            using var client = new TcpClient();
+            ConnectWithRetry(client, "127.0.0.1", port, timeoutMs: 2000);
+            using var stream = client.GetStream();
+            stream.ReadTimeout = 5000;
+
+            var (initType, initPayload) = ReadFrame(stream);
+            Assert.That(initType, Is.EqualTo(LiveFrameType.Init));
+            Assert.That(tcpExporter.SchemaOmittedFromInit, Is.True, "the oversize branch must have run");
+            Assert.That(LiveStreamProtocol.FrameHeaderSize + initPayload.Length, Is.LessThanOrEqualTo(LiveStreamProtocol.MaxFrameBytes),
+                "the frame a receiver would refuse is the one this branch exists to avoid sending");
+
+            using var ms = new MemoryStream(initPayload, writable: false);
+            using var reader = new TraceFileReader(ms);
+            reader.ReadHeader();
+            reader.ReadSystemDefinitions();
+            reader.ReadArchetypes();
+            reader.ReadComponentTypes();
+            reader.ReadTracks();
+            reader.ReadDags();
+            reader.ReadStaticStructures();
+            Assert.That(reader.ComponentDefinitions, Is.Empty, "empty sections, in the layout the reader expects");
+            Assert.That(reader.RuntimeConfig, Is.Null, "including the presence flag, which is the one section that is not a count");
+        }
+        finally
+        {
+            TyphonProfiler.Stop();
+        }
+    }
+
     [Test]
     public void TcpExporter_RejectsNegativeLiveConnectTimeout()
     {
@@ -257,6 +397,68 @@ public class TcpExporterIntegrationTests
             stopwatchFrequency: System.Diagnostics.Stopwatch.Frequency,
             startedUtc: DateTime.UtcNow,
             samplingSessionStartQpc: 0);
+    }
+
+    /// <summary>Metadata whose six static-structure tables are populated — one of each, with the inner tables (fields, component ids) non-empty.</summary>
+    private static ProfilerSessionMetadata BuildMetadataWithSchema() =>
+        new(
+            systems: [],
+            archetypes: [],
+            componentTypes: [],
+            workerCount: 1,
+            baseTickRate: 50.0f,
+            startTimestamp: System.Diagnostics.Stopwatch.GetTimestamp(),
+            stopwatchFrequency: System.Diagnostics.Stopwatch.Frequency,
+            startedUtc: DateTime.UtcNow,
+            componentDefinitions:
+            [
+                new ComponentDefinitionRecord
+                {
+                    ComponentTypeId = 11, Name = "Position", Revision = 3, ComponentStorageSize = 8, ComponentStorageTotalSize = 8, IndicesCount = 1,
+                    SpatialField = "X",
+                    Fields =
+                    [
+                        new FieldDefinitionRecord { FieldId = 0, Name = "X", Offset = 0, Size = 4 },
+                        new FieldDefinitionRecord { FieldId = 1, Name = "Z", Offset = 4, Size = 4 },
+                    ],
+                },
+            ],
+            archetypeDefinitions:
+            [
+                new ArchetypeDefinitionRecord { ArchetypeId = 2, Name = "Creature", Revision = 1, ComponentCount = 1, ComponentTypeIds = [11] },
+            ],
+            indexCatalog: [new IndexCatalogEntry { ComponentTypeId = 11, FieldId = 0, IsSpatial = true, IsAuto = true }],
+            runtimeConfig: new RuntimeConfigRecord { BaseTickRate = 50, WorkerCount = 8, TelemetryRingCapacity = 256 },
+            eventQueues: [new EventQueueRecord { QueueIndex = 0, Name = "DamageEvents", Capacity = 1024, EventTypeName = "Game.Damage" }],
+            resourceGraphNodes:
+            [
+                new ResourceGraphNodeRecord { Id = 1, Name = "Engine", ParentId = -1 },
+                new ResourceGraphNodeRecord { Id = 2, Name = "PageCache", ParentId = 1 },
+            ]);
+
+    /// <summary>
+    /// Metadata whose component table alone cannot fit a frame. Each record carries a 200-byte name, so 40 000 of them overshoot
+    /// <see cref="LiveStreamProtocol.MaxFrameBytes"/> without needing a field table to do it.
+    /// </summary>
+    private static ProfilerSessionMetadata BuildMetadataWithOversizeSchema()
+    {
+        var name = new string('c', 200);
+        var components = new ComponentDefinitionRecord[40_000];
+        for (var i = 0; i < components.Length; i++)
+        {
+            components[i] = new ComponentDefinitionRecord { ComponentTypeId = i, Name = name };
+        }
+
+        return new ProfilerSessionMetadata(
+            systems: [],
+            archetypes: [],
+            componentTypes: [],
+            workerCount: 1,
+            baseTickRate: 50.0f,
+            startTimestamp: System.Diagnostics.Stopwatch.GetTimestamp(),
+            stopwatchFrequency: System.Diagnostics.Stopwatch.Frequency,
+            startedUtc: DateTime.UtcNow,
+            componentDefinitions: components);
     }
 
     private static void ConnectWithRetry(TcpClient client, string host, int port, int timeoutMs)

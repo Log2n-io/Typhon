@@ -101,6 +101,13 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
     /// <summary>Number of frames dropped because the socket was not write-ready or partially sent.</summary>
     public long DroppedFrames => Interlocked.Read(ref _droppedFrames);
 
+    /// <summary>
+    /// Set when the Init frame carried empty static-structure sections because the populated ones would not fit under
+    /// <see cref="LiveStreamProtocol.MaxFrameBytes"/>. The attach session then has no schema, exactly as it had none before #WB-01 — the only way to
+    /// tell that branch from a genuinely empty schema is this flag.
+    /// </summary>
+    public bool SchemaOmittedFromInit { get; private set; }
+
     /// <inheritdoc />
     public void Initialize(ProfilerSessionMetadata metadata)
     {
@@ -467,7 +474,7 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
 
     /// <summary>
     /// Build the INIT frame payload — identical layout to the leading sections of a <c>.typhon-trace</c> file: header + system defs
-    /// + archetype table + component type table + tracks table + DAGs table.
+    /// + archetype table + component type table + tracks table + DAGs table + the six v7 static-structure sections (schema).
     /// </summary>
     private byte[] BuildInitPayload()
     {
@@ -577,19 +584,33 @@ internal sealed class TcpExporter : ResourceNode, IProfilerExporter
             WriteStringArray(bw, d.PhaseNames);
         }
 
-        // v7 static-structure tables. The TCP init frame mirrors the source-file layout exactly so receivers can
-        // wrap the bytes in a TraceFileReader (which now requires v7+). For now the engine doesn't push schema
-        // over the live attach socket — the AttachSession's runtime reads what's here and reports an empty schema
-        // to the Workbench (per plan: AttachSession is out of scope for static-data parity, follow-up). We still
-        // emit the section count prefixes so the wire format is self-consistent.
-        bw.Write((ushort)0); // ComponentDefinitions count
-        bw.Write((ushort)0); // ArchetypeDefinitions count
-        bw.Write((ushort)0); // IndexCatalog count
-        bw.Write(false);     // RuntimeConfig presence flag
-        bw.Write((ushort)0); // EventQueueCatalog count
-        bw.Write(0);         // ResourceGraphSnapshot count (i32)
-
+        // v7 static-structure tables (#WB-01). The TCP init frame mirrors the source-file layout exactly so receivers can wrap the bytes in a
+        // TraceFileReader, which is why these six sections go through TraceFileWriter rather than being hand-mirrored here: a divergence in this
+        // method is not a bug in this method, it is a decode failure in the Workbench, and the tables above have already had to carry
+        // "must match TraceFileWriter" comments to stay honest. The writer is deliberately not disposed — its Dispose would close `ms`, which
+        // still owes us its bytes — and every section writer flushes, so nothing is buffered when the last one returns.
         bw.Flush();
+        var staticSectionsStart = ms.Position;
+        var staticWriter = new TraceFileWriter(ms);
+        staticWriter.WriteComponentDefinitions(_metadata.ComponentDefinitions);
+        staticWriter.WriteArchetypeDefinitions(_metadata.ArchetypeDefinitions);
+        staticWriter.WriteIndexCatalog(_metadata.IndexCatalog);
+        staticWriter.WriteRuntimeConfig(_metadata.RuntimeConfig);
+        staticWriter.WriteEventQueueCatalog(_metadata.EventQueues);
+        staticWriter.WriteResourceGraphSnapshot(_metadata.ResourceGraphNodes);
+
+        // A receiver refuses a frame longer than LiveStreamProtocol.MaxFrameBytes and treats it as a malformed stream, so an engine whose schema
+        // does not fit must send the schema-less Init it used to send rather than a frame that drops the connection. Attach then degrades to what
+        // it was before this change — the Workbench's existing "schema unavailable for this session type" state — instead of failing to attach at
+        // all. SchemaOmittedFromInit is how a test sees which branch ran; nothing else can tell them apart from the outside.
+        if (LiveStreamProtocol.FrameHeaderSize + ms.Length > LiveStreamProtocol.MaxFrameBytes)
+        {
+            ms.SetLength(staticSectionsStart);
+            ms.Position = staticSectionsStart;
+            staticWriter.WriteEmptyStaticStructures();
+            SchemaOmittedFromInit = true;
+        }
+
         return ms.ToArray();
     }
 

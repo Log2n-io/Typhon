@@ -103,11 +103,15 @@ export const ANY_ZONE_D_VIEW_ACTIVE: boolean = Object.values(ZONE_D_VIEW_ACTIVE)
 // shell-structural navigators (SchemaExplorer / SystemsQueriesNav / ResourceTree) are listed here even though they
 // are not in ZONE_D_VIEW_ACTIVE — they are still session-scoped. Unlisted ids default to `any` (Detail/Logs/Options
 // and every non-view command).
-export type ViewSessionScope = 'open' | 'profiler' | 'any';
+export type ViewSessionScope = 'open' | 'profiler' | 'schema' | 'any';
 
 const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
+  // Schema is its own scope since the engine started pushing its static-structure tables over the attach socket
+  // (#WB-01): an attach session has component layouts, archetype composition and the index catalog while having no
+  // browsable database at all. Scoping the Schema Explorer to `open` would hide it in precisely the mode — remote
+  // attach — the engine change exists to serve.
+  SchemaExplorer: 'schema',
   // Open (.typhon) views
-  SchemaExplorer: 'open',
   DataBrowserEntities: 'open',
   DbMap: 'open',
   StorageHealth: 'open',
@@ -165,6 +169,8 @@ export function isViewAvailableInKind(viewId: string | undefined, session: Sessi
       return session.kind === 'open';
     case 'profiler':
       return session.capabilities.includes('profiler');
+    case 'schema':
+      return session.capabilities.includes('schema');
   }
 }
 

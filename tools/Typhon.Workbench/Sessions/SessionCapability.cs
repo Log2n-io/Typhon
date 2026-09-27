@@ -22,6 +22,16 @@ public static class SessionCapability
     /// </summary>
     public const string Profiler = "profiler";
 
-    /// <summary>The session has a live database behind it — schema, data browser, storage map. Open sessions only.</summary>
+    /// <summary>The session has a live database behind it — data browser, storage map, query console. Open sessions only.</summary>
     public const string Database = "database";
+
+    /// <summary>
+    /// The session can serve <c>/api/sessions/{id}/schema/*</c> — component layouts, archetype composition, the index catalog.
+    /// </summary>
+    /// <remarks>
+    /// Split from <see cref="Database"/> in #WB-01, when schema stopped implying a reachable database. An Open session reads it from its live engine;
+    /// an Attach session reads it from the static-structure tables in the Init frame, and so has schema over a database it cannot browse (blocker B1).
+    /// Deriving the Schema Inspector's availability from <see cref="Database"/> would have hidden it in exactly the mode the engine was changed to serve.
+    /// </remarks>
+    public const string Schema = "schema";
 }

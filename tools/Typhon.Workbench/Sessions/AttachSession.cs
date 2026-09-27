@@ -24,19 +24,29 @@ public sealed class AttachSession : ISession, ILiveProfilerHost, IDisposable
 
     /// <inheritdoc />
     /// <remarks>
-    /// Live attach doesn't currently push schema over the socket — TcpExporter's BuildInitPayload writes empty
-    /// placeholder sections (count=0 for each v7 table). Returning null here surfaces the right "schema unavailable
-    /// for this session type" empty state in the UI rather than rendering as "schema present but empty". Surfacing
-    /// real schema for attach sessions is a follow-up — engine needs to publish the static-data tables on the wire.
+    /// Since #WB-01 the engine writes its six v7 static-structure tables into the Init frame, so an attach session has real schema — the same
+    /// <see cref="TraceSchemaProvider"/> a trace session uses, over tables that arrived down the socket instead of off a disk. It stays <c>null</c>
+    /// until the first Init, and for an engine that sends the tables empty (an older build, or a schema too large for one frame), which surfaces the
+    /// "schema unavailable for this session type" empty state rather than rendering as "schema present but empty".
     /// </remarks>
-    public IStaticSchemaProvider StaticSchemaProvider => null;
+    public IStaticSchemaProvider StaticSchemaProvider => Runtime.StaticSchema;
+
+    /// <summary>The two capability sets an attach session can have. Cached because <see cref="Capabilities"/> is read on every session projection.</summary>
+    private static readonly System.Collections.Immutable.ImmutableHashSet<string> ProfilerOnly = [SessionCapability.Profiler];
+    private static readonly System.Collections.Immutable.ImmutableHashSet<string> ProfilerAndSchema = [SessionCapability.Profiler, SessionCapability.Schema];
 
     /// <inheritdoc />
     /// <remarks>
+    /// <para>
     /// An attach session streams a capture live, so it profiles. It advertises no database capability: the engine it watches has one, but the Workbench
     /// reaches it over TCP and cannot browse it — see blocker B1, a running engine holds its database exclusively.
+    /// </para>
+    /// <para>
+    /// The schema capability is acquired when the first Init frame arrives carrying static-structure tables (#WB-01), which is why this cannot be a
+    /// fixed set: a session is projected to the client before its first frame, and an engine that sends the tables empty never acquires it at all.
+    /// </para>
     /// </remarks>
-    public IReadOnlySet<string> Capabilities { get; } = System.Collections.Immutable.ImmutableHashSet.Create(SessionCapability.Profiler);
+    public IReadOnlySet<string> Capabilities => Runtime.StaticSchema != null ? ProfilerAndSchema : ProfilerOnly;
 
     // ── Profiles (#621) ──────────────────────────────────────────────────────────────────────────────────────────
     //

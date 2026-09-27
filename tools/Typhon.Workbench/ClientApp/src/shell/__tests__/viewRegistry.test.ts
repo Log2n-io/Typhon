@@ -87,7 +87,10 @@ describe('viewRegistry — Stage 0 deactivation gate', () => {
 describe('viewRegistry — session-kind scope (IA §5.1)', () => {
   it('classifies views by the session kind that can open them', () => {
     expect(viewSessionScope('DbMap')).toBe('open');
-    expect(viewSessionScope('SchemaExplorer')).toBe('open');
+    // #WB-01: schema is its own scope now that an attach session carries the engine's static-structure tables. It is
+    // deliberately NOT 'open' — that would hide the Schema Explorer in remote-attach mode, the mode the engine change
+    // exists to serve.
+    expect(viewSessionScope('SchemaExplorer')).toBe('schema');
     expect(viewSessionScope('ResourceTree')).toBe('open');
     expect(viewSessionScope('Profiler')).toBe('profiler');
     expect(viewSessionScope('SystemsQueriesNav')).toBe('profiler');

@@ -12,7 +12,7 @@ export type SessionState = 'Ready' | 'MigrationRequired' | 'Incompatible' | 'Att
  * open database: the session is still `kind === 'open'`, and it can now profile. The capability is acquired and released
  * during the session's life while its kind never changes, so no kind check can express it.
  */
-export type SessionCapability = 'profiler' | 'database';
+export type SessionCapability = 'profiler' | 'database' | 'schema';
 
 interface SessionStoreState {
   kind: SessionKind;

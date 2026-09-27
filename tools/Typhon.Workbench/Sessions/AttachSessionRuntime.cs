@@ -8,6 +8,7 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Typhon.Profiler;
 using Typhon.Workbench.Dtos.Profiler;
+using Typhon.Workbench.Schema;
 
 namespace Typhon.Workbench.Sessions;
 
@@ -44,7 +45,8 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     private const int ConnectRetryCount = 3;
     private const int ConnectRetryDelayMs = 2000;
     private const int ReconnectDelayMs = 2000;
-    private const int MaxFrameBytes = 8 * 1024 * 1024;
+    /// <summary>The wire's own limit, not this reader's preference — the producer checks the same constant before it sends (#WB-01).</summary>
+    private const int MaxFrameBytes = LiveStreamProtocol.MaxFrameBytes;
 
     /// <summary>Force-flush the in-progress chunk every N ms so partial chunks become visible to clients.</summary>
     private const int FlushChunkTimerMs = 200;
@@ -88,6 +90,15 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// source <c>.typhon-trace</c>.
     /// </summary>
     private byte[] _initialMetadataBytes;
+
+    /// <summary>
+    /// Schema over the six v7 static-structure sections of the first Init frame, or <c>null</c> when the engine sent them empty (#WB-01).
+    /// </summary>
+    /// <remarks>
+    /// Built once, on first Init, and never rebuilt: the Init signature includes the schema fingerprint, so a reconnect whose schema differs is
+    /// already an unrecoverable session rather than a session whose schema quietly changes underneath the panels.
+    /// </remarks>
+    private volatile IStaticSchemaProvider _staticSchema;
 
     private LiveCacheTempFile _tempFile;
     private IncrementalCacheBuilder _builder;
@@ -211,6 +222,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
 
     /// <summary>True while the TCP socket is currently held open.</summary>
     public bool IsConnected => _connectionStatus == "connected";
+
+    /// <summary>
+    /// The attached engine's schema, or <c>null</c> until the first Init arrives and when that Init carried no static-structure tables.
+    /// <see cref="AttachSession"/> surfaces it as the session's <c>StaticSchemaProvider</c> and advertises
+    /// <see cref="SessionCapability.Schema"/> only while it is non-null.
+    /// </summary>
+    public IStaticSchemaProvider StaticSchema => _staticSchema;
 
     /// <summary>Set when an Init mismatch on reconnect made the session unrecoverable.</summary>
     public bool IsUnrecoverable => _unrecoverable;
@@ -808,6 +826,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             _initialMetadataBytes = new byte[length];
             Array.Copy(payload, 0, _initialMetadataBytes, 0, length);
 
+            // #WB-01. An engine older than the change, or one whose schema did not fit the frame, sends these sections empty; a provider over
+            // nothing would render as "schema present but empty", which is a worse answer than the honest "unavailable" state. Component
+            // definitions are the discriminator because everything the Schema Inspector shows hangs off them.
+            _staticSchema = reader.ComponentDefinitions.Count > 0
+                ? new TraceSchemaProvider(reader.ComponentDefinitions, reader.ArchetypeDefinitions, reader.IndexCatalog)
+                : null;
+
             _tempFile = LiveCacheTempFile.Create(_sessionId);
             var profilerHeader = new ProfilerHeader { Version = (ushort)headerDto.Version, TimestampFrequency = headerDto.TimestampFrequency };
             // Use the sessionId as the fingerprint (no source file to hash). The 32-byte fingerprint slot in the cache header isn't
@@ -1267,6 +1292,10 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         bw.Write(header.SystemCount);
         bw.Write(header.ArchetypeCount);
         bw.Write(header.ComponentTypeCount);
+        // #WB-01: the fingerprint is the only part of the signature that moves when a component's LAYOUT changes without its name or id — a
+        // revision bump, a field added, a field's offset moved. Before schema crossed the wire that was invisible and harmless; now the panels
+        // render field offsets read from this Init, so a reconnect that silently swapped them would draw the wrong bytes for the right names.
+        bw.Write(header.SchemaFingerprint ?? "0");
         foreach (var s in systems)
         {
             bw.Write(s.Index);
