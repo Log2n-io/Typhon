@@ -246,6 +246,10 @@ public static class Sweep
         MeasuredTicks = c.MeasuredTicks,
         PageCacheMiB = c.PageCacheMiB,
         DatabaseDirectory = c.DatabaseDirectory,
+
+        // The name carries; Persist deliberately does NOT. Every sweep point must build its own world, and --persist with --sweep is refused at the command
+        // line anyway (CommandLine.Validate) — this is the second half of that, so a sweep called from code cannot reopen either.
+        DatabaseName = c.DatabaseName,
         Seed = c.Seed,
         ParallelFence = c.ParallelFence,
         // Not part of the workload, so not part of the label either (SimConfig.Label) — but an A/B arm set on the command line must reach every sweep arm.

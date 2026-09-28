@@ -131,6 +131,8 @@ public static class CommandLine
 
         r.Group("persistence and output");
         c.DatabaseDirectory = r.Str("--db-dir", c.DatabaseDirectory, "where the database file is written", "<path>");
+        c.DatabaseName = r.Str("--db-name", c.DatabaseName, "the database's file name, without directory or extension", "<name>");
+        c.Persist = r.Switch("--persist", "keep the database across runs and reopen it instead of building a fresh world");
         c.ReportDirectory = r.Str("--report-dir", null, "where --sweep writes its report", "<path>");
         c.TickLogPath = r.Str("--tick-log", null, "write one line per tick here", "<path>");
 
@@ -138,6 +140,7 @@ public static class CommandLine
         c.Probe = r.Switch("--probe", "time port queries around shuttle arrivals");
         c.WorkProbe = r.Switch("--work-probe", "replay each awareness query and report the work it did");
         c.ChunkStats = r.Switch("--chunk-stats", "report per-chunk parallel-query statistics");
+        c.FaultAtTick = r.Int("--fault-at-tick", c.FaultAtTick, "throw from a system on this tick, to exercise the crash artefact; 0 never faults", min: 0);
 
         if (r.WantsHelp)
         {
@@ -168,6 +171,22 @@ public static class CommandLine
     {
         // Every single-flag range now lives on its own declaration, where it cannot be forgotten when a flag is added — see ArgReader.OutOfRange. What is left
         // here is what no single declaration can see: combinations.
+
+        // --persist reopens one world; --sweep builds forty-five. Combined, every point after the first would measure whatever the point before it left behind,
+        // at a different world size and a different cell size, and report it as its own. That is the exact failure --persist defaults to off to avoid, so a
+        // command line asking for both is refused rather than silently resolved either way (P-1).
+        if (c.Persist && c.RunSweep)
+        {
+            throw new ArgumentException("--persist reopens one world and --sweep builds a fresh one per point, so every point after the first would measure "
+                + "the point before it. Pick one.");
+        }
+
+        if (string.IsNullOrWhiteSpace(c.DatabaseName) || c.DatabaseName.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0)
+        {
+            throw new ArgumentException($"--db-name must be a bare file name with no directory and no invalid characters; got '{c.DatabaseName}'. "
+                + "Use --db-dir for the directory.");
+        }
+
         if (c.ServePort == 0)
         {
             return;
@@ -180,6 +199,11 @@ public static class CommandLine
         {
             throw new ArgumentException("--probe, --work-probe and --chunk-stats collect samples for a report printed when a measured run ends, so they "
                 + "cannot be combined with --serve, which never ends. Run them without --serve.");
+        }
+
+        if (c.FaultAtTick > 0)
+        {
+            throw new ArgumentException("--fault-at-tick deliberately kills a tick, to exercise the crash artefact. It cannot be combined with --serve.");
         }
 
         if (c.RunSweep)

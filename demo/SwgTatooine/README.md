@@ -324,6 +324,32 @@ Useful flags:
 | `--dungeon-party N` / `--dungeon-mobs N` | 8 / 24 | Players per party / mobs per dungeon |
 | `--tick-log <path>` | — | Every measured tick's duration, one per line |
 | `--seed <n>` | fixed | Every random decision, so two runs build the same world |
+| `--db-name <name>` | `SwgTatooine` | The database's file name, no directory and no extension. **No process id**, so a killed run leaves one database rather than one per run |
+| `--persist` | off | Keep the database across runs and **reopen** it instead of building a fresh world. The index is rebuilt from the entities on disk |
+| `--fault-at-tick N` | 0 | Throw from a system on tick N, to exercise the crash artefact. Refused with `--serve` |
+
+### Persistence, and what a crash leaves behind
+
+**Delete-on-start is the default and `--persist` opts in**, because the two ways of getting it wrong are not symmetrical: a run that wrongly persists measures a
+world some earlier run left behind — a different population, creatures that have already wandered — and reports it as its own, while a run that wrongly starts
+fresh loses a world and is obvious. There is deliberately no `--fresh`. `--persist` with `--sweep` is refused: every point after the first would measure the point
+before it.
+
+With `--persist`, a second run **reopens** rather than builds. Everything that is a statement about the database rather than about its contents — the grid, the
+realm registrations, `SetSpatialBarrierOnly`, the dormancy declarations — is re-issued, because none of it is persisted; only the contents are. The
+`WorldIndex` is then rebuilt **from the entities**, not by re-running the generator: cities and points of interest come from the map, which states them, while
+everything the generator's RNG produced (which building is a city's shuttleport, which buildings have doors and in what order) is read back off
+`Structure.OwnerRegion` and `Structure.PortalIndex`. Re-running the generator would describe the world as it was born rather than as it is, and would mean the
+demo could never open a database it had not made itself.
+
+Possession does not survive a restart: a player that some client was driving when the world was saved comes back on the simulation's own activity mix, because
+the session is gone and nothing else would ever release it.
+
+**A system that throws ends the run.** The engine's default is to isolate the fault — skip the failing system's branch, finish the tick, report it as a success —
+which for a measured run is the worst available outcome: the world is missing whatever that system was going to do and the report still prints a median. The demo
+runs with `SystemExceptionPolicy.AbortTickAndStop` instead, and writes a **crash artefact** beside the database: `reason.txt` (the tick and the failing system),
+`exception.txt` (the whole exception, stack included), `ticks.csv` (the durations leading up to it) and `census.txt` / `config.txt` (what world was running, and
+enough to run it again).
 
 Served (`--serve`), each kind of realm is replicated at its own scale (Realms G3): planets at the planet cell, an interior or a dungeon as one cell
 whose player sessions see everything in it, space at its 500 m cell. A player's session follows its player through doors, shuttles and dungeons, each

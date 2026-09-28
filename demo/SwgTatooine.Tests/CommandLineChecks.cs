@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using NUnit.Framework;
@@ -21,6 +21,84 @@ namespace SwgTatooine.Tests;
 [TestFixture]
 public sealed class CommandLineChecks
 {
+    // ── P-1: the persistence surface ────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>The default is delete-on-start, and the name carries no process id.</summary>
+    /// <remarks>
+    /// Both halves are the settled answer to the one question WP-3's scoping had to decide (§6 Q1), and both are asserted here rather than left to the two
+    /// source items' opposite assumptions. The asymmetry is the reason: a run that wrongly persists measures a world some earlier run left behind and says
+    /// nothing about it, while a run that wrongly starts fresh loses a demonstration and is obvious.
+    /// </remarks>
+    [Test]
+    public void PersistenceDefaultsToOff_AndTheDatabaseNameIsBare()
+    {
+        var c = CommandLine.Parse([]);
+        Assert.Multiple(() =>
+        {
+            Assert.That(c.Persist, Is.False, "delete-on-start is the default");
+            Assert.That(c.DatabaseName, Is.EqualTo(SimConfig.DefaultDatabaseName));
+            Assert.That(c.DatabaseName, Does.Not.Contain("_"), "the process id used to be suffixed here — that is the 154 GB incident");
+        });
+    }
+
+    /// <summary>There is no <c>--fresh</c>: two flags with opposite senses is how the two source items came to disagree.</summary>
+    [Test]
+    public void ThereIsNoFreshFlag()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CommandLine.Parse(["--fresh"]));
+        Assert.That(ex.Message, Does.Contain("--fresh"), "the message has to name the token it refused");
+    }
+
+    /// <summary><c>--persist</c> and <c>--sweep</c> are different intentions and the combination is refused rather than resolved.</summary>
+    [Test]
+    public void PersistWithSweepIsRefused()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CommandLine.Parse(["--persist", "--sweep"]));
+        Assert.Multiple(() =>
+        {
+            Assert.That(ex.Message, Does.Contain("--persist"));
+            Assert.That(ex.Message, Does.Contain("--sweep"));
+        });
+    }
+
+    /// <summary><c>--db-name</c> is a name, not a path: <c>--db-dir</c> is the directory.</summary>
+    /// <remarks>
+    /// Without this a name containing a separator would be composed into a path the storage layer cannot open, and the failure would arrive as an I/O error
+    /// from inside the engine rather than as a refusal naming the flag.
+    /// </remarks>
+    [TestCase("worlds/mine")]
+    [TestCase("a\b")]
+    [TestCase(" ")]
+    public void ADatabaseNameThatIsAPathIsRefused(string name)
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CommandLine.Parse(["--db-name", name]));
+        Assert.That(ex.Message, Does.Contain("--db-name"));
+    }
+
+    /// <summary><c>--fault-at-tick</c> exists to exercise the crash artefact, so it cannot be combined with a server that must not kill itself.</summary>
+    [Test]
+    public void FaultAtTickWithServeIsRefused()
+    {
+        var ex = Assert.Throws<ArgumentException>(() => CommandLine.Parse(["--serve", "8080", "--fault-at-tick", "10"]));
+        Assert.That(ex.Message, Does.Contain("--fault-at-tick"));
+    }
+
+    /// <summary>The three new flags are in <c>--help</c>, which is generated from the declarations the parse walks.</summary>
+    [Test]
+    public void TheNewPersistenceFlagsAreDocumented()
+    {
+        var help = CommandLine.Parse(["--help"]).HelpText;
+        Assert.Multiple(() =>
+        {
+            Assert.That(help, Does.Contain("--persist"));
+            Assert.That(help, Does.Contain("--db-name"));
+            Assert.That(help, Does.Contain("--fault-at-tick"));
+
+            // The default has to be visible, because --help is the only place a reader learns what a run with no flags does.
+            Assert.That(help, Does.Contain(SimConfig.DefaultDatabaseName), "--db-name's default must be printed");
+        });
+    }
+
     /// <summary>A flag nobody declared is named, not ignored.</summary>
     [Test]
     public void AnUnknownFlagIsRefusedAndNamed()

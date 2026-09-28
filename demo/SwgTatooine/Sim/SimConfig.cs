@@ -258,6 +258,44 @@ public sealed class SimConfig
     /// </summary>
     public string DatabaseDirectory;
 
+    /// <summary>
+    /// The database's file name, without a directory or an extension. <c>--db-name</c>; <see cref="DefaultDatabaseName"/> by default (P-1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The process id used to be in here, and that is the 154 GB incident.</b> The name was
+    /// <c>SwgTatooine_{Environment.ProcessId}</c>, so every run — and every run KILLED before it could delete its own file — left a database of its own. A
+    /// campaign of a few dozen interrupted runs accumulated 154 GB of multi-gigabyte files that nothing would ever clean up, because the only process that knew
+    /// the name was gone.
+    /// </para>
+    /// <para>
+    /// A single stable name makes that structural rather than a rule to remember: a killed run leaves ONE database, and the next run reuses or deletes it.
+    /// That is also the precondition for <see cref="Persist"/> meaning anything — a world you cannot name is a world you cannot reopen.
+    /// </para>
+    /// </remarks>
+    public string DatabaseName = DefaultDatabaseName;
+
+    /// <summary>The database name a run uses when <c>--db-name</c> is not given.</summary>
+    public const string DefaultDatabaseName = "SwgTatooine";
+
+    /// <summary>
+    /// <c>--persist</c>: keep the database across runs and REOPEN it instead of building a fresh world (P-1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Delete-on-start stays the default, and the asymmetry of the two failure modes is the whole reason.</b> A run that wrongly persists measures a world
+    /// some earlier run left behind — a different population, a different cluster geometry, creatures that have already wandered — and says nothing about it,
+    /// so an A/B pair silently compares two different worlds. A run that wrongly starts fresh loses a demonstration world and is obvious the moment anybody
+    /// looks. The reproducibility of every number in this repository depends on the first of those not happening quietly, which is why the opt-in is the
+    /// persisting direction and not the other one.
+    /// </para>
+    /// <para>
+    /// There is deliberately no <c>--fresh</c>. Two flags with opposite senses is how the two source items (SWG-04 and CLI-05) came to propose opposite
+    /// defaults, and a surface with both would let a command line say the same thing twice or contradict itself.
+    /// </para>
+    /// </remarks>
+    public bool Persist;
+
     /// <summary>Run the tick fence on the worker pool rather than serially on the tick driver.</summary>
     public bool ParallelFence = true;
 
@@ -439,6 +477,23 @@ public sealed class SimConfig
 
     /// <summary>Seed for every random decision, so a run is reproducible and two arms see the same world.</summary>
     public int Seed = 20260907;
+
+    /// <summary>
+    /// <c>--fault-at-tick N</c>: throw from a system on tick <c>N</c>, to exercise the crash artefact (P-3). Zero never faults.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A real fault through the real path, because the artefact cannot be tested any other way.</b> AC-3 asks for an artefact produced by an induced
+    /// <c>OnTickAborted</c>, and the only honest way to induce one is for a system body to throw the way a defect would: the runtime then decides the tick is
+    /// aborted, raises the event, and the handler writes the directory. Calling the writer directly from a test would assert that a file-writing method writes
+    /// files — which is not the claim.
+    /// </para>
+    /// <para>
+    /// A measurement flag, and refused with <c>--serve</c> alongside the probes: a server that deliberately kills itself on a tick is not a server. It is also
+    /// kept out of <see cref="Label"/>, because a run that faults produces no measurement to label.
+    /// </para>
+    /// </remarks>
+    public int FaultAtTick;
 
     // ── Mode ────────────────────────────────────────────────────────────────────────────────────────────────────────
 

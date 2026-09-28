@@ -42,12 +42,40 @@ internal static class Program
 
         Console.WriteLine($"── SWG Tatooine — {config.Label} ──────────────");
 
-        var sw = Stopwatch.StartNew();
+        // The whole measured run, guarded (P-3). A fault anywhere in it — the world build, a tick, the summary, the report — leaves an artefact beside the
+        // database instead of a console line on a box nobody is watching. An ABORTED TICK is caught inside the runtime and writes its own artefact from the
+        // abort handler, which sees the failing system by name; this catches everything that is not a tick.
         using var sim = new TatooineSim(config);
+        try
+        {
+            return Measured(sim, config);
+        }
+        catch (Exception ex)
+        {
+            // Only when the tick loop has not already done it: a tick that aborted wrote the better artefact, naming the system, and a second one for the
+            // exception that unwound out of Run would describe the consequence rather than the cause.
+            if (sim.CrashArtefactPath == null)
+            {
+                sim.WriteCrashArtefact($"unhandled {ex.GetType().Name} outside the tick loop", ex);
+            }
+
+            Console.Error.WriteLine($"SwgTatooine: {ex}");
+            return 3;
+        }
+    }
+
+    /// <summary>One measured run, from the world build to the last report line.</summary>
+    /// <remarks>
+    /// Extracted from <c>Main</c> so the whole of it sits inside one guard (P-3). The body is unchanged; what is new is that a fault in it is reported to
+    /// disk rather than only to a console.
+    /// </remarks>
+    private static int Measured(TatooineSim sim, SimConfig config)
+    {
+        var sw = Stopwatch.StartNew();
         sim.Initialize();
         sw.Stop();
 
-        Console.WriteLine($"  world built in {sw.Elapsed.TotalSeconds:F1}s");
+        Console.WriteLine($"  world {(sim.Reopened ? "reopened" : "built")} in {sw.Elapsed.TotalSeconds:F1}s");
 
         // After the build, before any tick: what the world and its realms hold (Realms G1d compares runs with and without --interiors against README § 11).
         // The page cache is a fixed native block of --cache-mib, the same in every run, so it cancels in a difference.
@@ -67,6 +95,11 @@ internal static class Program
             return 0;
         }
         Console.WriteLine($"  {sim.Census}");
+        if (sim.Reopened)
+        {
+            // Said out loud, because a reopened run and a fresh one are different measurements and a census that matches cannot tell them apart (P-2).
+            Console.WriteLine("  the index was rebuilt from the entities on disk, not from the generator");
+        }
 
         // The composition, not just the size: two runs with the same creature count and different template mixes are not the same workload (S0-5).
         var composition = sim.Census.Composition();

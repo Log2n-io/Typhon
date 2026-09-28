@@ -59,6 +59,13 @@ public sealed partial class SimBridge
     /// <summary>Report phase, every tick past warm-up: fold the previous fence's per-archetype counters.</summary>
     public void SpatialTelemetryTick(TickContext ctx)
     {
+        // The induced fault (P-3), first because it must not depend on anything below it having run. Here rather than in a system of its own: this one runs every
+        // tick, on the worker pool, and owns no state a half-finished tick would corrupt — so the abort is a clean abort of a real tick rather than a torn write.
+        if (_config.FaultAtTick > 0 && ctx.TickNumber == _config.FaultAtTick)
+        {
+            throw new InvalidOperationException($"--fault-at-tick {_config.FaultAtTick}: deliberate fault to exercise the crash artefact (P-3).");
+        }
+
         // Measured ticks only. The run polls for its last tick and shuts down after it, and the ticks started in between (always one or two when unpaced)
         // used to land in a trailing window of their own, which every reader took for the last window.
         if (ctx.TickNumber < _config.WarmTicks || ctx.TickNumber >= _config.WarmTicks + _config.MeasuredTicks)

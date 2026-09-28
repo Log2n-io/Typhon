@@ -83,6 +83,12 @@ public sealed partial class TatooineSim
             CostBasedChunking = _config.CostBasedChunking,
             EnableParallelFence = _config.ParallelFence,
 
+            // The same strict policy the measured path takes (P-3), and for the server the argument is if anything stronger. Under the engine's default a
+            // faulting system's branch is skipped and the tick is reported as a SUCCESS, so a server whose combat resolution threw would keep publishing frames
+            // of a world in which nothing resolves — clients would see a frozen fight and no operator would learn why. A terminal stop is diagnosable and
+            // 08-hosting's systemd unit already answers it with Restart=on-failure, which restarts from a checkpoint rather than limping on.
+            SystemExceptionPolicy = SystemExceptionPolicy.AbortTickAndStop,
+
             // --subs-pipeline and --subs-mode. Every other field of the options is left at its default: these are the ones an A/B moves, and moving another
             // would make the two arms differ in more than the thing being measured.
             Subscriptions = new SubscriptionsOptions
@@ -112,8 +118,19 @@ public sealed partial class TatooineSim
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
-        _runtime.OnTickAborted += (_, outcome)
-            => Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}'");
+        var aborts = 0;
+        _runtime.OnTickAborted += (_, outcome) =>
+        {
+            Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}': {outcome.FailedSystemException}");
+
+            // The artefact, on the first abort only, exactly as the measured path does it (P-3). For a server this is the whole of the diagnosis: there is no
+            // report at the end of a run that never ends, so a fault that is not written down is a fault nobody can look at afterwards.
+            if (++aborts == 1)
+            {
+                CrashArtefactPath = WriteCrashArtefact(
+                    $"tick aborted: {outcome.Reason} in system '{outcome.FailedSystemName}'", outcome.FailedSystemException, outcome.TickNumber);
+            }
+        };
 
         TatooineReplication.Scheduler = _runtime.Scheduler;
         _runtime.Start();

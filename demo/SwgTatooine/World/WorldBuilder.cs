@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace SwgTatooine;
@@ -66,6 +66,7 @@ public static class WorldBuilder
     /// </remarks>
     private static void SpawnCities(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
     {
+        var cityIndex = 0;
         foreach (var city in map.Cities)
         {
             var buildings = city.Buildings;
@@ -78,6 +79,7 @@ public static class WorldBuilder
                 {
                     var (x, z) = rng.PointInDisc(city.X, city.Z, city.Radius);
                     var kind = i == 0 ? StructureKind.Shuttleport : (i % 9 == 0 ? StructureKind.Terminal : StructureKind.Building);
+                    var portalIndex = -1;
                     if (i == 0)
                     {
                         // Kept for shuttle travel (#910). Recording a coordinate the RNG already produced draws nothing, so the world is unchanged.
@@ -85,10 +87,13 @@ public static class WorldBuilder
                     }
                     else if (IsEnterable(i))
                     {
-                        index.Portals.Add((x, z));   // Realms G1b: this building's door. Draws nothing, like the shuttleport above.
+                        // Realms G1b: this building's door. Draws nothing, like the shuttleport above. The slot is written onto the ENTITY as well, so a world
+                        // reopened from disk can rebuild the same list in the same order (P-2) — the realm a door leads to depends on this index.
+                        portalIndex = index.Portals.Count;
+                        index.Portals.Add((x, z));
                     }
 
-                    SpawnStructure(tx, x, z, 12f, kind, ownerRegion: 0, tickPeriod: 0, ref rng);
+                    SpawnStructure(tx, x, z, 12f, kind, ownerRegion: cityIndex, tickPeriod: 0, ref rng, portalIndex);
                     census.StaticObjects++;
                 }
 
@@ -134,6 +139,7 @@ public static class WorldBuilder
 
             index.Cities.Add((city.X, city.Z, city.Radius, city.PlayerWeight));
             index.CityPortals.Add((firstPortal, index.Portals.Count - firstPortal));
+            cityIndex++;
         }
     }
 
@@ -255,6 +261,8 @@ public static class WorldBuilder
 
     private static void SpawnPointsOfInterest(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
     {
+        // A point of interest's region id continues the cities' numbering; see Structure.OwnerRegion.
+        var poiIndex = map.Cities.Count;
         foreach (var poi in map.Pois)
         {
             using (var tx = dbe.CreateQuickTransaction())
@@ -262,7 +270,7 @@ public static class WorldBuilder
                 for (var i = 0; i < poi.Props; i++)
                 {
                     var (x, z) = rng.PointInDisc(poi.X, poi.Z, poi.Radius);
-                    SpawnStructure(tx, x, z, 6f, StructureKind.PoiProp, ownerRegion: -1, tickPeriod: 0, ref rng);
+                    SpawnStructure(tx, x, z, 6f, StructureKind.PoiProp, ownerRegion: poiIndex, tickPeriod: 0, ref rng);
                     census.StaticObjects++;
                 }
 
@@ -273,6 +281,7 @@ public static class WorldBuilder
             var lairs = Scale(poi.Lairs, config.PopulationScale);
             SpawnLairsIn(dbe, poi.X, poi.Z, poi.Radius, lairs, CreatureTemplates.TuskenRaider, config, census, ref rng, index);
             index.Pois.Add((poi.X, poi.Z, poi.Radius));
+            poiIndex++;
         }
     }
 
@@ -696,7 +705,8 @@ public static class WorldBuilder
 
     internal static int AiTicksMin(SimConfig config) => Math.Max(1, TatooineData.AiIntervalMinMs * config.TickRateHz / 1000);
 
-    private static void SpawnStructure(Transaction tx, float x, float z, float halfExtent, int kind, int ownerRegion, int tickPeriod, ref Rng rng)
+    private static void SpawnStructure(Transaction tx, float x, float z, float halfExtent, int kind, int ownerRegion, int tickPeriod, ref Rng rng,
+        int portalIndex = -1)
     {
         var bounds = default(StructurePlacement);
         bounds.SetAt(x, z, halfExtent);
@@ -704,6 +714,7 @@ public static class WorldBuilder
         {
             Kind = kind,
             OwnerRegion = ownerRegion,
+            PortalIndex = portalIndex,
             TickPeriod = tickPeriod,
 
             // Staggered, so the economy does not arrive as a once-a-minute spike that the median tick never sees.

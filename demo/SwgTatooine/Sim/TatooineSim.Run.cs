@@ -108,6 +108,19 @@ public sealed partial class TatooineSim
 
             // Every measured tick must still be in the ring when the run is summarised, or a long run's tail loses its oldest ticks.
             TelemetryRingCapacity = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(1024, _config.WarmTicks + _config.MeasuredTicks + 16)),
+
+            // A SYSTEM THAT THROWS ENDS THE RUN (P-3). The engine's default is Isolate: the failing system's branch is skipped, the rest of the tick proceeds,
+            // and the tick is reported as a SUCCESS — which for a measured run is the worst of the available outcomes. The world is missing whatever that system
+            // was going to do, every tick after it compounds the omission, and the run still prints a median as though nothing had happened. That is precisely
+            // the class of silent measurement corruption this package exists to remove.
+            //
+            // It also makes the abort handler below reachable. It has been registered since before SWG-02 and could never once have fired, because under Isolate
+            // OnTickAborted is not raised for a system exception at all (design/Runtime/08-strict-tick-abort.md) — so the demo's own "tick aborted" reporting was
+            // dead code that looked like coverage.
+            //
+            // AbortTickAndStop is terminal by design: no resumption. For a server that is right too — a system fault leaves the world undefined, and
+            // 08-hosting's systemd unit already says Restart=on-failure, which is a restart from a checkpoint rather than a limp onwards.
+            SystemExceptionPolicy = SystemExceptionPolicy.AbortTickAndStop,
         });
 
         // A tick that aborts leaves the measurement meaningless, so surface it rather than reporting a median over
@@ -119,6 +132,14 @@ public sealed partial class TatooineSim
             {
                 // The whole exception, stack included: a type and a message name a symptom, not the line that raised it.
                 Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}': {outcome.FailedSystemException}");
+            }
+
+            // The artefact, on the FIRST abort only (P-3). A tick that aborts usually aborts again on the next one, and one directory per tick would bury the
+            // first — which is the one that has the cause in it rather than the consequences.
+            if (aborts == 1)
+            {
+                CrashArtefactPath = WriteCrashArtefact(
+                    $"tick aborted: {outcome.Reason} in system '{outcome.FailedSystemName}'", outcome.FailedSystemException, outcome.TickNumber);
             }
         };
 
@@ -156,6 +177,54 @@ public sealed partial class TatooineSim
         var result = Summarise(Math.Min(reached, total));
         LastStats = _bridge.DrainStats();
         return result;
+    }
+
+    /// <summary>The crash artefact this run wrote, or <see langword="null"/> when it did not crash (P-3).</summary>
+    public string CrashArtefactPath { get; private set; }
+
+    /// <summary>
+    /// Writes a crash artefact for this run: the fault, the ticks leading to it, the world and the configuration.
+    /// </summary>
+    /// <param name="reason">One line saying what happened.</param>
+    /// <param name="exception">The fault, if there is one.</param>
+    /// <param name="tickNumber">The tick it happened on; -1 when it happened outside the tick loop.</param>
+    /// <returns>The directory written, or <see langword="null"/>.</returns>
+    /// <remarks>
+    /// <b>Public, because the two callers are in different places and one of them is not in the tick loop at all.</b> An aborted tick is caught by the handler
+    /// above; an unhandled exception anywhere else — the world build, the summary, the report — is caught by <c>Program</c>, which has the simulation but not the
+    /// runtime. Both want the same artefact, so both call this.
+    /// </remarks>
+    public string WriteCrashArtefact(string reason, Exception exception, long tickNumber = -1)
+    {
+        // Read the ring defensively: a fault during the world build has no runtime, and one during Shutdown has a runtime whose telemetry is going away.
+        float[] ticks = [];
+        try
+        {
+            if (_runtime?.Telemetry is { } ring)
+            {
+                var newest = ring.NewestTick;
+                var oldest = Math.Max(ring.OldestAvailableTick, newest - CrashArtefact.TickHistory + 1);
+                var list = new List<float>(CrashArtefact.TickHistory);
+                for (var t = oldest; t <= newest; t++)
+                {
+                    var ms = ring.GetTick(t).ActualDurationMs;
+                    if (ms > 0f)
+                    {
+                        list.Add(ms);
+                    }
+                }
+
+                ticks = list.ToArray();
+            }
+        }
+        catch (Exception ringFailure)
+        {
+            // The ring is a diagnostic, not the point. Losing it must not lose the exception.
+            Console.WriteLine($"  !! crash artefact: the tick history could not be read ({ringFailure.GetType().Name}); writing the rest");
+        }
+
+        return CrashArtefact.Write(_config.DatabaseDirectory, _config.DatabaseName, reason, exception, ticks, Census, _config,
+            tickNumber >= 0 ? tickNumber : (_runtime?.CurrentTickNumber ?? -1));
     }
 
     /// <summary>What the shuttles did and, with <c>--probe</c>, what their arrivals cost the ports' queries (#910).</summary>

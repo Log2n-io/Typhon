@@ -724,8 +724,34 @@ public struct Structure
     /// <summary>See <see cref="StructureKind"/>.</summary>
     [Field, OnEnter(CodecKind.U8, Name = "kind")] public int Kind;
 
-    /// <summary>Which city or point of interest this belongs to; -1 for a structure standing alone in the wild.</summary>
+    /// <summary>
+    /// Which region this belongs to: a city by its index, a point of interest as <c>Cities.Count + poiIndex</c>, and -1 for a structure standing alone in
+    /// the wild.
+    /// </summary>
+    /// <remarks>
+    /// <b>It was documented to hold this and held 0 for every city building on the planet</b> (P-2). Nothing read it, so nothing noticed — but it is the only
+    /// thing that says which city a shuttleport serves, and a world reopened from disk has to answer that without the generator. Cities and points of interest
+    /// share one index space because they are one question ("which region?"), and separating them would need a second field to say which kind of index this is.
+    /// </remarks>
     [Field, OnEnter(CodecKind.I16, Name = "region")] public int OwnerRegion;
+
+    /// <summary>
+    /// This building's slot in the planet's door list — the index that decides which interior realm it leads to — or -1 when the building is not enterable.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Enterability was a property of the loop counter and of nothing else</b> (P-2): <c>WorldBuilder.IsEnterable(i)</c> over the building's index within
+    /// its city, with the result kept only in a <c>List</c> the generator built. So the door list — and with it the mapping "portal <c>j</c> of planet
+    /// <c>p</c> is realm <c>Planets + p·N + j</c>" — existed only in the process that generated the world, and a reopened world could not reconstruct it at
+    /// all. Nothing on the entity distinguished an enterable building from any other.
+    /// </para>
+    /// <para>
+    /// Storing the slot rather than a boolean is what makes the rebuild need no ordering convention: a spatial query returns clusters in whatever order the
+    /// index holds them, and sorting by position to recover the build's order would be a second rule to keep in step with the first.
+    /// </para>
+    /// <para>It costs no memory: five ints plus this one is 24 bytes, which is what the struct already occupied.</para>
+    /// </remarks>
+    [Field] public int PortalIndex;
 
     /// <summary>
     /// Ticks between updates. A building is 0 and never ticks. SWG's own arithmetic sets the others: manufacturing is

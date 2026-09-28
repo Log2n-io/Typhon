@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.IO;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -48,6 +49,54 @@ public sealed partial class TatooineSim : IDisposable
     /// is per-tick.
     /// </remarks>
     public long Executed { get; private set; }
+
+    /// <summary>
+    /// True when this instance opened a database that already held a world, so the world was REOPENED rather than built (P-2).
+    /// </summary>
+    /// <remarks>
+    /// Decided before the engine opens the file, because opening it creates it — after that there is no way to tell a world that was already there from one
+    /// this process has just made.
+    /// </remarks>
+    public bool Reopened { get; private set; }
+
+    /// <summary>This planet's interior realm ids (Realms G1b), or empty without <c>--interiors</c>.</summary>
+    private ushort[] InteriorRealmsOf(int planet)
+    {
+        if (InteriorsPerPlanet == 0)
+        {
+            return [];
+        }
+
+        var first = _config.Planets + (planet * InteriorsPerPlanet);
+        var realms = new ushort[InteriorsPerPlanet];
+        for (var i = 0; i < InteriorsPerPlanet; i++)
+        {
+            realms[i] = (ushort)(first + i);
+        }
+
+        return realms;
+    }
+
+    /// <summary>Is there already a database where this configuration would open one?</summary>
+    /// <remarks>
+    /// <para>
+    /// <b><c>GetFileSystemEntries</c>, not <c>GetFiles</c>, and the difference is the whole method.</b> A Typhon database is a DIRECTORY — <c>&lt;name&gt;.typhon</c>
+    /// — so <c>GetFiles</c> answers "no database here" for every database that exists. Measured: with <c>GetFiles</c> the reopen path never fired once, and three
+    /// consecutive <c>--persist</c> runs each built a fresh world on top of the last while reporting a census that matched perfectly, because the census counts
+    /// what the generator made rather than what the database holds.
+    /// </para>
+    /// <para>Any entry matching the name counts. Treating a half-written database as absent would delete the rest of it by building on top.</para>
+    /// </remarks>
+    private bool DatabaseFileExists()
+    {
+        var dir = _config.DatabaseDirectory ?? AppContext.BaseDirectory;
+        if (!Directory.Exists(dir))
+        {
+            return false;
+        }
+
+        return Directory.GetFileSystemEntries(dir, _config.DatabaseName + ".*").Length > 0;
+    }
 
     /// <summary>Entity handles and place geometry the systems address after the build.</summary>
     /// <summary>Each planet's destinations and handles, indexed by its realm (Realms G1).</summary>
@@ -114,7 +163,10 @@ public sealed partial class TatooineSim : IDisposable
             .AddDeadlineWatchdog()
             .AddScopedManagedPagedMemoryMappedFile(opt =>
             {
-                opt.DatabaseName = $"SwgTatooine_{Environment.ProcessId}";
+                // NO process id (P-1). It used to be `SwgTatooine_{Environment.ProcessId}`, so every run had a database of its own and every run KILLED before
+                // it could delete its own file left one behind — 154 GB of them, once, because the only process that knew the name was gone. One stable name
+                // makes "a killed run leaves ONE database" structural instead of a rule somebody has to remember.
+                opt.DatabaseName = _config.DatabaseName;
                 opt.DatabaseDirectory = _config.DatabaseDirectory ?? AppContext.BaseDirectory;
                 opt.DatabaseCacheSize = (ulong)_config.PageCacheMiB * 1024UL * 1024UL;
             })
@@ -133,7 +185,17 @@ public sealed partial class TatooineSim : IDisposable
             });
 
         _serviceProvider = services.BuildServiceProvider();
-        _serviceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+
+        // The one persistence decision in the program (P-1), taken here and nowhere else. Without --persist the file goes, which is the benchmark's default
+        // because a run that quietly measures a world some earlier run left behind is a corrupted A/B that says nothing about itself.
+        if (!_config.Persist)
+        {
+            _serviceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        }
+
+        // Whether this open found a world already there is what decides between building one and rebuilding the index over one (P-2). Read BEFORE the engine
+        // opens the file, because opening it creates it.
+        Reopened = _config.Persist && DatabaseFileExists();
         _scope = _serviceProvider.CreateScope();
         Dbe = _scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
@@ -288,7 +350,14 @@ public sealed partial class TatooineSim : IDisposable
         for (var planet = 0; planet < _config.Planets; planet++)
         {
             Indexes[planet] = new WorldIndex();
-            var census = WorldBuilder.Populate(Dbe, Map, _config, Indexes[planet], (ushort)planet);
+
+            // BUILD or REBUILD, and everything above this line runs either way (P-2). The realm registrations, the grid, SetSpatialBarrierOnly, the dormancy
+            // declarations and InitializeArchetypes are all statements about the database rather than about its contents, and a reopened database needs every
+            // one of them re-issued — none of them is persisted. Only the contents are, which is why this is the single branch.
+            var census = Reopened
+                ? WorldRebuild.Rebuild(Dbe, Map, Indexes[planet], (ushort)planet, InteriorRealmsOf(planet))
+                : WorldBuilder.Populate(Dbe, Map, _config, Indexes[planet], (ushort)planet);
+
             if (InteriorsPerPlanet > 0)
             {
                 // Portal j of planet p is realm Planets + p·N + j: every planet must have exactly N portals, or the decode reads another door.
@@ -298,7 +367,11 @@ public sealed partial class TatooineSim : IDisposable
                         $"Planet {planet} has {Indexes[planet].Portals.Count} portals where the realm layout reserved {InteriorsPerPlanet}.");
                 }
 
-                WorldBuilder.PopulateInteriors(Dbe, _config, Indexes[planet], _config.Planets + (planet * InteriorsPerPlanet), census);
+                // An interior's NPCs are already on disk when the world is reopened; re-populating would put a second set in every building.
+                if (!Reopened)
+                {
+                    WorldBuilder.PopulateInteriors(Dbe, _config, Indexes[planet], _config.Planets + (planet * InteriorsPerPlanet), census);
+                }
             }
 
             Census = planet == 0 ? census : Census.Plus(census);
@@ -306,12 +379,35 @@ public sealed partial class TatooineSim : IDisposable
 
         if (SpaceRealm >= 0)
         {
-            Census.Starships = WorldBuilder.PopulateSpace(Dbe, _config, (ushort)SpaceRealm);
+            Census.Starships = Reopened
+                ? WorldRebuild.CountStarships(Dbe, (ushort)SpaceRealm)
+                : WorldBuilder.PopulateSpace(Dbe, _config, (ushort)SpaceRealm);
         }
     }
 
     public void Dispose()
     {
+        // A CHECKPOINT before the engine closes, when the world is meant to survive (P-1).
+        //
+        // The engine writes the clean-shutdown watermark on its own Dispose, strictly after it has flushed dirty pages, so a clean close is already recorded
+        // without this. What this adds is that the checkpoint LSN is ADVANCED first: without it every page this run dirtied reaches disk through the close
+        // flush but the checkpoint watermark still names whatever LSN the last automatic cycle reached, so the next open replays the WAL from there. On a
+        // world of a million entities that is the difference between a reopen that reads pages and one that replays a run.
+        //
+        // Guarded, and it must be: ForceCheckpoint on a run that is about to have its file deleted is pure cost, and this is a Dispose — it runs on the
+        // failure path too, where the engine may be in no state to checkpoint and where throwing would mask the original fault.
+        if (_config.Persist && Dbe != null)
+        {
+            try
+            {
+                Dbe.ForceCheckpoint();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  !! final checkpoint failed, the next open will replay the WAL instead: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         _runtime?.Dispose();
         _playerView?.Dispose();
         _creatureView?.Dispose();
