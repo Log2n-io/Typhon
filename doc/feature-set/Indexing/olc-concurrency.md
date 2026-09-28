@@ -26,9 +26,10 @@ lock. Readers traverse by reading a node's version, reading its data, then re-va
 unchanged — no lock is ever taken, so a reader and a writer can touch the same node at the same instant
 without either blocking. Writers descend the same lock-free way, then take an exclusive latch on just the leaf
 they're modifying — and, on the rare structural change (split or merge), its parent too, latched bottom-up to
-stay deadlock-free. If a version check fails mid-traversal because of a concurrent split, the operation
-follows a right-link to the node's new sibling, or restarts from the root if the failure is higher up;
-structurally retired nodes are only reclaimed once Typhon's epoch mechanism confirms no in-flight reader can
+stay deadlock-free. If a version check fails mid-traversal, the operation always restarts from the root; right-link following
+(the B-link protocol) is a separate mechanism that activates when a descent succeeds but the key is absent
+from the leaf — indicating a concurrent split moved it to the sibling — not on version-check failure.
+Structurally retired nodes are only reclaimed once Typhon's epoch mechanism confirms no in-flight reader can
 still see them.
 
 ## 💻 Usage
@@ -57,8 +58,9 @@ No tuning knobs — there is nothing to configure. OLC is the only concurrency p
 
 - Readers never acquire a lock and never block a writer; a writer latches only the node(s) it mutates — one
   for a simple insert/remove, up to two during a split or merge, acquired bottom-up to prevent deadlock.
-- A reader whose version check fails re-reads just the affected node (or follows a right-link after a
-  concurrent split) — it never restarts an entire scan, only the step that raced.
+- A version-check failure retries the full descent from the root (bounded by `MaxOptimisticRestarts = 3`),
+  then falls back to pessimistic latch-coupling if all attempts fail — the retry is a complete re-descent, not
+  a re-read of only the failing node.
 - The same protocol covers both the B+Tree (primary and secondary indexes) and the spatial R-Tree — one
   concurrency model for all index access in Typhon.
 - Nodes retired by a merge are kept alive until epoch reclamation confirms no reader still references them —

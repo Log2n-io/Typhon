@@ -24,8 +24,9 @@ Each entity carries one `EnabledBits` bitmask on its `EntityRecord` — one bit 
 `Enable<T>(Comp<T>)`/`Disable<T>(Comp<T>)` on an `EntityRefMut` (from `OpenMut`) flip that bit locally and stage the change via
 `StageEnableDisable` for commit; a read-only `EntityAccessor`/`PointInTimeAccessor` worker throws, since only a full
 `Transaction` supports staging structural changes. If the entity lives in cluster (batched SoA) storage, the
-cluster's own enabled-bit vector is updated immediately too, so bulk cluster iteration sees the change without
-waiting for commit. Because `EnabledBits` is entity-level metadata independent of each component's own
+cluster's own enabled-bit vector is updated at commit by `FlushPendingEnableDisable`, not at staging; bulk
+cluster iteration therefore reflects committed enabled state only (rule ENABLE-01 prohibits staging writes to
+the cluster word to prevent rolled-back changes from persisting in the shared, unversioned cluster bits). Because `EnabledBits` is entity-level metadata independent of each component's own
 `StorageMode`, it carries its own MVCC snapshot isolation through an engine-wide exception dictionary
 (`EnabledBitsOverrides`): a fast path (`_overrideCount == 0`, a single volatile-int read) skips it entirely when no
 concurrent transaction is mid-toggle; when one is, older transactions still resolve the pre-change bits via a
@@ -75,8 +76,10 @@ HashSet<EntityId> moving2 = rtx.Query<Unit>().Enabled<Velocity>().Execute();
   `EnabledBitsOverrides` — zero overhead (one volatile-int check) when no transaction is mid-toggle.
 - Visible within the same transaction immediately (read-your-own-writes) — `.Enabled<T>()`/`.Disabled<T>()` query
   filters see a pending, uncommitted toggle before that transaction commits.
-- Cluster-stored (batched SoA) entities update the cluster's own enabled-bit vector immediately on toggle, not just
-  at commit, so bulk cluster iteration reflects it right away.
+- Cluster-stored (batched SoA) entities have their cluster enabled-bit vector updated at commit by
+  `FlushPendingEnableDisable`, not at staging — bulk cluster iteration shows committed state only. The staging
+  change is visible to the same transaction's own point reads and queries via the pending overlay
+  (`EnabledBitsOverrides` / `EnabledBitsHistory`).
 - `TryRead<T>` returns a copy, not a ref (an `out` parameter can't be `ref readonly`) — for zero-copy access, check
   `IsEnabled` first, then call `Read` directly.
 
