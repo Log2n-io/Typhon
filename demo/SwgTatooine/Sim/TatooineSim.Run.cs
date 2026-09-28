@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -182,6 +182,21 @@ public sealed partial class TatooineSim
     /// <summary>The fence's per-archetype drift and repair counters, as per-tick means over the measured window.</summary>
     public void PrintSpatialTelemetry() => _bridge?.PrintSpatialTelemetry();
 
+    /// <summary>Measured ticks on which the WAL's durable LSN moved (SWG-02). See <c>SimBridge.WalAdvances</c>.</summary>
+    public long WalAdvances => _bridge?.WalAdvances ?? 0L;
+
+    /// <summary>LSNs the durability watermark gained across the measured window.</summary>
+    public long WalLsnGained => _bridge?.WalLsnGained ?? 0L;
+
+    /// <summary>Combat events dropped at the queue's growth ceiling — a dropped effect, and expected to be zero (SWG-02).</summary>
+    public long CombatQueueOverflow => _bridge?.CombatQueue?.OverflowCount ?? 0L;
+
+    /// <summary>The deepest the combat queue got on the last tick — what says whether the 1 024 budget is anywhere near binding.</summary>
+    public long CombatQueuePeak => _bridge?.CombatQueue?.PeakDepth ?? 0L;
+
+    /// <summary>Player-ticks the activity mix did not decide, because a session was driving (SWG-01).</summary>
+    public long PossessedSkipped => _bridge?.PossessedSkipped ?? 0L;
+
     /// <summary>With <c>--work-probe</c>, what a sample of interest queries did, per queried archetype.</summary>
     public void PrintWorkProbe() => _bridge?.PrintWorkProbe();
 
@@ -205,6 +220,7 @@ public sealed partial class TatooineSim
     {
         var ring = _runtime.Telemetry;
         var samples = new List<float>(_config.MeasuredTicks);
+        var flushes = new List<float>(_config.MeasuredTicks);
         var oldest = Math.Max(_config.WarmTicks, ring.OldestAvailableTick);
 
         var defs = _runtime.Scheduler.Systems;
@@ -235,6 +251,11 @@ public sealed partial class TatooineSim
             }
 
             samples.Add(tick.ActualDurationMs);
+
+            // The wall-clock the tick driver spent blocked on the WAL writer publishing THIS tick's records (TickTelemetry.UowFlushMs). Before SWG-02 it was a
+            // hard zero for every tick of every run, because nothing wrote a Versioned component after the world build; it is reported beside compute rather
+            // than folded into it, because a budget spent waiting on an fsync and a budget spent computing are answered by different hardware.
+            flushes.Add(tick.UowFlushMs);
             var metrics = ring.GetSystemMetrics(t);
             var row = new float[defs.Length];
             Array.Fill(row, float.NaN);
@@ -272,6 +293,7 @@ public sealed partial class TatooineSim
         }
 
         samples.Sort();
+        flushes.Sort();
         var budgetMs = 1000f / _config.TickRateHz;
         var median = samples.Count == 0 ? 0f : samples[samples.Count / 2];
         var spikes = Spikes(ordered, tickSystems, perSystem, defs, median);
@@ -316,6 +338,10 @@ public sealed partial class TatooineSim
             TickP99Ms = Percentile(samples, 0.99),
             TickP999Ms = Percentile(samples, 0.999),
             TickMaxMs = samples.Count == 0 ? 0f : samples[^1],
+            DurabilityMedianMs = flushes.Count == 0 ? 0f : flushes[flushes.Count / 2],
+            DurabilityP99Ms = Percentile(flushes, 0.99),
+            DurabilityMaxMs = flushes.Count == 0 ? 0f : flushes[^1],
+            TicksWithDurabilityWait = CountOver(flushes, 0f),
             TicksOver125 = Count(ordered, median * 1.25f),
             TicksOver150 = Count(ordered, median * 1.5f),
             TicksOver200 = Count(ordered, median * 2f),
@@ -329,6 +355,18 @@ public sealed partial class TatooineSim
             // — their durations are per-system wall-clock and add up to more than the tick if they ran concurrently.
             ResidualUs = (median * 1000f) - systemsUs,
         };
+    }
+
+    /// <summary>How many of a sorted sample list are strictly above a threshold. Used for "how many ticks waited on durability at all".</summary>
+    private static int CountOver(List<float> sorted, float threshold)
+    {
+        var n = 0;
+        for (var i = sorted.Count - 1; i >= 0 && sorted[i] > threshold; i--)
+        {
+            n++;
+        }
+
+        return n;
     }
 
     /// <summary>Nearest rank: the p99.9 of 1000 ticks is the 999th, not the slowest.</summary>
@@ -411,8 +449,12 @@ public sealed partial class TatooineSim
     {
         var dag = schedule.PublicTrack.DeclareDag("Tatooine")
             .Phases(SimPhases.Input, SimPhases.Spawn, SimPhases.Think, SimPhases.Move, SimPhases.Awareness, SimPhases.Resolve,
-                SimPhases.Economy, SimPhases.Report)
+                SimPhases.Apply, SimPhases.Economy, SimPhases.Report)
             .DefaultPhase(SimPhases.Report);
+
+        // The demo's one and only event queue (SWG-02). Created on the schedule rather than with `new`, which is what binds it to the resolved worker count:
+        // an EventQueue built outside a scheduler keeps its single-slot default and GetWriter then throws for every worker but zero.
+        _bridge.CombatQueue = dag.CreateEventQueue<CombatEvent>("Combat", 1024);
 
         dag.Add(new MissionSystem(_bridge));
         if (_config.Shuttles)
@@ -466,6 +508,16 @@ public sealed partial class TatooineSim
         }
 
         dag.Add(new CreatureCombatSystem(_bridge));
+        dag.Add(new PlayerCombatSystem(_bridge));
+        dag.Add(new CombatResolveSystem(_bridge));
+
+        // The event edges. Declared by name after the systems are added, and load-bearing rather than documentation: without them the consumer is a DAG root
+        // with respect to its producers, free to drain a queue in the Apply phase before the Resolve phase has pushed anything into it. The Missions edge spans
+        // four phases, which the deriver handles the same way — a producer in an earlier phase, a consumer in a later one.
+        dag.Produces("PlayerCombat", _bridge.CombatQueue)
+            .Produces("CreatureCombat", _bridge.CombatQueue)
+            .Produces("Missions", _bridge.CombatQueue)
+            .Consumes("CombatResolve", _bridge.CombatQueue);
 
         dag.Add(new EconomySystem(_bridge));
 
@@ -511,6 +563,28 @@ public sealed class RunResult
     public float TickP999Ms;
 
     public float TickMaxMs;
+
+    /// <summary>
+    /// Median of the per-tick wall-clock the tick driver spent blocked on the WAL writer publishing that tick's records.
+    /// </summary>
+    /// <remarks>
+    /// <b>Reported beside compute, never folded into it.</b> The tick median already contains this wait — it is wall-clock — so the pair says how the budget
+    /// was spent rather than only how much of it went. Zero is a real reading for a tick that committed nothing or whose records were already durable, which is
+    /// why <see cref="TicksWithDurabilityWait"/> is carried too: a median of zero over a window where a tenth of the ticks waited 3 ms is a true median and a
+    /// misleading summary.
+    /// </remarks>
+    public float DurabilityMedianMs;
+
+    /// <summary>99th percentile durability wait — the figure a per-tick fsync's viability is decided on.</summary>
+    public float DurabilityP99Ms;
+
+    public float DurabilityMaxMs;
+
+    /// <summary>Ticks whose durability wait was above zero: how often the WAL was actually in the loop.</summary>
+    public int TicksWithDurabilityWait;
+
+    /// <summary>The median durability wait as a share of the median tick — what decides whether an instance family's fsync is the binding constraint.</summary>
+    public float DurabilityShareOfMedianPct => TickMedianMs <= 0f ? 0f : 100f * DurabilityMedianMs / TickMedianMs;
 
     /// <summary>Ticks over 1.25x, 1.5x and 2x the median: how often a frame spikes, which no percentile of the whole window says.</summary>
     public int TicksOver125;

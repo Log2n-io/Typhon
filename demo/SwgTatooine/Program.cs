@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 
 namespace SwgTatooine;
@@ -96,9 +96,24 @@ internal static class Program
         Console.WriteLine($"  per tick: {s.AwarenessQueries / (double)Math.Max(1, result.TicksMeasured):F0} awareness queries "
             + $"({s.HitsPerAwarenessQuery:F1} hits each), {s.AggroQueries / (double)Math.Max(1, result.TicksMeasured):F0} aggro queries, "
             + $"{s.EconomyTicks / (double)Math.Max(1, result.TicksMeasured):F1} economy updates");
-        Console.WriteLine($"  combat: {s.PlayersEngaged} attacks, {s.CreaturesKilled} creatures killed, "
-            + $"{s.CreaturesRespawned} revived over {result.TicksMeasured} ticks");
-        Console.WriteLine($"  missions: {s.MissionsIssued} issued, {s.MissionsCompleted} completed");
+        Console.WriteLine($"  combat over {result.TicksMeasured} ticks: {s.PlayerShots} player shots, {s.CreatureAttacks} creature attacks, "
+            + $"{s.DamageApplied} hits applied, {s.CreaturesKilled} creatures killed, {s.CreaturesRespawned} revived, "
+            + $"{s.PlayersIncapacitated} players cloned");
+
+        // Every one of these is a refusal, and each is printed because the claim it supports is about what does NOT happen: a player that is not fighting does
+        // no damage, a shot beyond weapon range does no damage, a chase past 75 m is abandoned. A silent zero cannot tell those apart from a system that never
+        // ran. `stale` is the exception — it is expected to be zero, and a non-zero value means an assumption has stopped holding.
+        Console.WriteLine($"  combat refusals: {s.ShotsSkippedNotFighting} player-ticks not fighting, {s.ShotsRefusedRange} shots out of range, "
+            + $"{s.ShotsWithoutTarget} with nothing in range, {s.CreaturesLostTarget} chases dropped, {s.ChaseGivenUp} chases given up past "
+            + $"{TatooineData.MaxChaseRangeM * config.ContentScale:F0} m, {s.EventsStale} stale events");
+        Console.WriteLine($"  missions: {s.MissionsIssued} issued, {s.MissionsAssigned} assigned, {s.MissionsCompleted} completed, {s.MissionRewards} paid; {s.LairHits} lair hits");
+        Console.WriteLine($"  durability wait: {result.DurabilityMedianMs:F3} ms median, {result.DurabilityP99Ms:F3} p99, {result.DurabilityMaxMs:F3} max; "
+            + $"{result.TicksWithDurabilityWait} of {result.TicksMeasured} ticks waited at all "
+            + $"({result.DurabilityShareOfMedianPct:F1} % of the median tick)");
+
+        // The watermark, which is the evidence that the loot and the rewards reached the WAL rather than only a component: UowFlushMs above is a few
+        // microseconds even on a tick that persisted nothing, because it times the flush call.
+        Console.WriteLine($"  wal watermark: advanced on {sim.WalAdvances} of {result.TicksMeasured} measured ticks, {sim.WalLsnGained} LSNs gained");
         var gc = sim.LastGc;
         Console.WriteLine($"  gc while ticking: {gc.Gen0} gen0, {gc.Gen1} gen1, {gc.Gen2} gen2 collections, {gc.PauseMs:F1} ms paused "
             + $"({100 * gc.PauseMs / Math.Max(1d, gc.ElapsedMs):F2} % of {gc.ElapsedMs / 1000:F1} s), {gc.AllocatedBytes / 1048576.0:F1} MB allocated");

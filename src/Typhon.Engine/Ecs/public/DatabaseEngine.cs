@@ -776,6 +776,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>The per-DB routing id for a catalog archetype id — for tooling (Workbench) that holds catalog ids from the schema and needs the routing id
     /// that routing-based APIs (e.g. <see cref="Transaction.EnumerateArchetypeEntities"/>) expect. Returns <see cref="NoRoutingId"/> if unmapped.</summary>
     internal ushort RoutingIdForCatalog(ushort catalogId) => catalogId < (uint)_routingByCatalog.Length ? _routingByCatalog[catalogId] : NoRoutingId;
+
+    /// <summary>
+    /// What <see cref="EntityId.ArchetypeId"/> carries for <typeparamref name="TArch"/> in THIS database, so an application can tell which archetype an
+    /// entity id names. <see cref="NoRoutingId"/> when this database has no such archetype.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="EntityId.ArchetypeId"/> is public and, until this method existed, there was nothing to compare it against: the catalog-to-routing map is
+    /// internal, so an application holding an id of unknown provenance — one a client named, one read out of a spatial query over a union, one stored in a
+    /// component — could not discover which archetype it belonged to without opening it and guessing from a component read.
+    /// </para>
+    /// <para>
+    /// <b>Routing ids are per database and assigned in registration order</b> (resumed above the persisted high-water mark on reopen), so the value is stable
+    /// for the life of a database and must not be persisted by an application as if it were the schema's own id — that is
+    /// <see cref="ArchetypeMetadata.ArchetypeId"/>, the catalog id.
+    /// </para>
+    /// </remarks>
+    /// <typeparam name="TArch">The archetype.</typeparam>
+    public ushort ArchetypeIdOf<TArch>() where TArch : Archetype<TArch> => RoutingIdForCatalog(Archetype<TArch>.CatalogId);
     private Dictionary<string, FieldR1[]> _persistedFieldsByComponent;
     private ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>> _componentCollectionSegmentByStride;
     private ConcurrentDictionary<Type, VariableSizedBufferSegmentBase<PersistentStore>> _componentCollectionVSBSByType;

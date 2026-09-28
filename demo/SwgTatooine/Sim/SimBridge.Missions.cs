@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Threading;
 
@@ -51,6 +51,7 @@ public sealed partial class SimBridge
         var half = _config.WorldEdgeM * 0.5f;
         long issued = 0;
         long completed = 0;
+        var writer = ctx.Writer(CombatQueue);
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<CreatureLair>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -85,10 +86,28 @@ public sealed partial class SimBridge
 
                 if (lair.MissionId != 0)
                 {
-                    // Live. A destroyed lair ends its mission and goes back in the pool.
+                    // Live. A destroyed lair ends its mission, pays its owner and goes back in the pool.
+                    //
+                    // SWG-02 is what makes this branch reachable at all: until players could damage a lair, nothing in the world ever wrote LairVitals.Health
+                    // downward, so the 80-lair pool was issued within the first minutes of a run and no mission ever completed or was issued again (gap G1).
                     if (v.Health <= 0)
                     {
+                        // The payout, as an EVENT: this walk owns CreatureLair and may not write a Player's Versioned inventory from a parallel system. The
+                        // resolver applies it in the Resolve phase of THIS tick, in the tick's own unit of work.
+                        if (!lair.Owner.IsNull)
+                        {
+                            writer.Push(new CombatEvent
+                            {
+                                Target = lair.Owner,
+                                Attacker = EntityId.Null,
+                                Amount = lair.MissionId * TatooineData.MissionRewardPerDifficulty,
+                                Kind = CombatEventKind.MissionReward,
+                                TargetKind = CombatTargetKind.Player,
+                            });
+                        }
+
                         lair.MissionId = 0;
+                        lair.Owner = EntityId.Null;
                         v.Health = v.MaxHealth;
                         completed++;
                     }
@@ -109,6 +128,7 @@ public sealed partial class SimBridge
                 var sphere = new BSphere2F { CenterX = lx, CenterY = lz, Radius = seek };
                 var e = Dbe.ClusterSpatialQuery<Player>(cluster.Realm).Radius(in sphere);
                 var foundPlayer = false;
+                var owner = EntityId.Null;
                 float px = 0f, pz = 0f;
                 try
                 {
@@ -117,6 +137,9 @@ public sealed partial class SimBridge
                         var hit = e.Current;
                         px = (float)((hit.MinX + hit.MaxX) * 0.5);   // f64 world frame (#914) to the simulation's f32
                         pz = (float)((hit.MinY + hit.MaxY) * 0.5);
+
+                        // The identity as well as the point (SWG-02). The query already had it; throwing it away is why a completed mission had nobody to pay.
+                        owner = hit.Entity;
                         foundPlayer = true;
                     }
                 }
@@ -149,6 +172,7 @@ public sealed partial class SimBridge
                     v.MaxHealth = difficulty * (900 + (int)(Hash01(Salt(tick, key, 0x1E35A7BDu)) * 200));
                     v.Health = v.MaxHealth;
                     lair.MissionId = difficulty;
+                    lair.Owner = owner;
                     lair.AliveCount = 1;
 
                     // The teleport, done here rather than handed to a placement system: this walk owns CreatureLair, so
@@ -158,6 +182,19 @@ public sealed partial class SimBridge
                     var nb = default(LairPlacement);
                     nb.SetAt(tx, tz, places[idx].HalfExtent);
                     cluster.WriteSpatial(CreatureLair.Bounds, idx, nb);
+
+                    // And TELL the player, which is the half of this loop that was missing: the lair moved, the waypoint did not exist, and a player "going to
+                    // fight" walked to a random point in a point-of-interest disc kilometres wide. Sent as an event for the same reason the payout is — this
+                    // walk owns CreatureLair and may not write a Player from a parallel system.
+                    writer.Push(new CombatEvent
+                    {
+                        Target = owner,
+                        Attacker = EntityId.Null,
+                        Kind = CombatEventKind.MissionAssigned,
+                        TargetKind = CombatTargetKind.Player,
+                        X = tx,
+                        Z = tz,
+                    });
                     issued++;
                     break;
                 }

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -33,6 +33,9 @@ public sealed partial class SimBridge
         var thinkSpan = Math.Max(1, WorldBuilder.AiTicksMax(_config) - thinkMin + 1);
         long aggroQueries = 0;
         long aggroHits = 0;
+        long chaseLost = 0;
+        long chaseGivenUp = 0;
+        long revived = 0;
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Creature>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -57,7 +60,10 @@ public sealed partial class SimBridge
             // Scheduling: written every tick by design, read by nobody on the wire, and in a component no projection names.
             var timers = cluster.GetSpan(Creature.Timers);
             var motions = cluster.GetSpan(Creature.Move);
+
+            // Read-only for the aggro gate, taken mutably only on the tick a creature is actually revived — the same discipline as the brains above.
             var vitals = cluster.GetReadOnlySpan(Creature.Vitals);
+            Span<CreatureVitals> vitalsRw = default;
 
             var bits = bits0;
             while (bits != 0)
@@ -70,6 +76,13 @@ public sealed partial class SimBridge
                 ref var t = ref timers[idx];
                 if (ai.Mode == AiMode.Dead)
                 {
+                    // The respawn countdown and the revival, which used to live in the combat system (SWG-02).
+                    //
+                    // Moved here because it is a MODE TRANSITION on the AI cadence, which is this system's whole subject — and because keeping it beside
+                    // combat made this the only writer of CreatureVitals in the Resolve phase, where the player's side of a fight has to read them. The
+                    // deriver is right to refuse that: a plain read facing a same-phase writer is an error, and the only in-phase fix would have ordered the
+                    // shooter after the corpse-counter for no reason anyone could state.
+                    Revive(in cluster, vitals, ref vitalsRw, ref brainsRw, ref t, idx, ref revived);
                     continue;
                 }
 
@@ -125,6 +138,47 @@ public sealed partial class SimBridge
 
                 if (ai.Mode is AiMode.Pursue or AiMode.Fighting)
                 {
+                    // SWG-02: a pursuer chases an ENTITY, and re-reads where that entity is on every decision.
+                    //
+                    // Before this the destination was the point the target occupied on the tick the aggro query found it, and it was never refreshed — so a
+                    // creature walked to a place its target had left and parked there for the rest of its life, with the parked population growing over a long
+                    // run (gap G6). The chase is also now finite: past MaxChaseRangeM the creature gives up, which is the constant Core3 calls MAX_OOS_RANGE
+                    // and which this world declared and never used.
+                    if (ai.Target.IsNull || !ctx.Accessor.TryOpen(ai.Target, out var quarry))
+                    {
+                        SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
+                        ClearTarget(in cluster, ref brainsRw, idx);
+                        PickWanderDestination(ref move, in ai, tick, key);
+                        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                        chaseLost++;
+                        continue;
+                    }
+
+                    var quarryAt = quarry.Read(Player.Bounds);
+                    var dxT = quarryAt.X - x;
+                    var dzT = quarryAt.Z - z;
+                    var targetSq = (dxT * dxT) + (dzT * dzT);
+
+                    // AC-3's leash. Distinct from LeashRadius above, which measures from the lair: this one measures from the QUARRY, and it is what stops a
+                    // creature following a mounted player across the planet at a speed it can never match.
+                    if (targetSq > MaxChaseRange * MaxChaseRange)
+                    {
+                        SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
+                        ClearTarget(in cluster, ref brainsRw, idx);
+                        PickWanderDestination(ref move, in ai, tick, key);
+                        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                        chaseGivenUp++;
+                        continue;
+                    }
+
+                    // Guarded, like StandStill and for the same reason: this span is GetSpan-backed, so an unconditional store on a quarry that has not moved
+                    // marks the cluster changed for nothing.
+                    if (move.DestX != quarryAt.X || move.DestZ != quarryAt.Z)
+                    {
+                        move.DestX = quarryAt.X;
+                        move.DestZ = quarryAt.Z;
+                    }
+
                     // Close to weapon range, then STAND AND SHOOT.
                     //
                     // A pursuer that keeps steering once it is already in range writes a new position on every tick of every fight, which is the same
@@ -133,10 +187,6 @@ public sealed partial class SimBridge
                     //
                     // The break range is deliberately wider than the attack range. At equal thresholds a creature sitting on the boundary alternates
                     // between stopping and closing on successive decisions, which writes MORE than pursuing would.
-                    var dxT = move.DestX - x;
-                    var dzT = move.DestZ - z;
-                    var targetSq = (dxT * dxT) + (dzT * dzT);
-
                     if (ai.Mode == AiMode.Fighting)
                     {
                         var breakRange = _creatureAttackRange * AttackRangeHysteresis;
@@ -199,6 +249,7 @@ public sealed partial class SimBridge
                     {
                         var bestSq = double.MaxValue;
                         var found = false;
+                        var bestEntity = EntityId.Null;
                         float tx = 0f, tz = 0f;
                         while (e.MoveNext())
                         {
@@ -209,6 +260,7 @@ public sealed partial class SimBridge
                                 bestSq = hit.DistanceSq;
                                 tx = (float)((hit.MinX + hit.MaxX) * 0.5);
                                 tz = (float)((hit.MinY + hit.MaxY) * 0.5);
+                                bestEntity = hit.Entity;
                                 found = true;
                             }
                         }
@@ -217,6 +269,10 @@ public sealed partial class SimBridge
                         {
                             aggroHits++;
                             SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
+
+                            // The identity, not only the point (SWG-02). Without it the pursuit below has nothing to re-read and nothing to attack: shooter
+                            // and quarry identities were never captured anywhere, which is gap G7.
+                            BrainsRw(in cluster, ref brainsRw)[idx].Target = bestEntity;
                             move.DestX = tx;
                             move.DestZ = tz;
                             Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, tx, tz);
@@ -234,6 +290,21 @@ public sealed partial class SimBridge
         {
             Interlocked.Add(ref _aggroQueries, aggroQueries);
             Interlocked.Add(ref _aggroHits, aggroHits);
+        }
+
+        if (chaseLost != 0)
+        {
+            Interlocked.Add(ref _creaturesLostTarget, chaseLost);
+        }
+
+        if (chaseGivenUp != 0)
+        {
+            Interlocked.Add(ref _chaseGivenUp, chaseGivenUp);
+        }
+
+        if (revived != 0)
+        {
+            Interlocked.Add(ref _creaturesRespawned, revived);
         }
     }
 

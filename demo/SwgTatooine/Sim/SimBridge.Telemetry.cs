@@ -1,5 +1,6 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace SwgTatooine;
 
@@ -39,6 +40,22 @@ public sealed partial class SimBridge
 
     private long _telemetryTicks;
 
+    // The durability watermark, sampled once per measured tick in the Report phase (SWG-02). It is the evidence for AC-2 that the loot and the reward reach the
+    // WAL rather than merely reaching a component: TickTelemetry.UowFlushMs is a few microseconds even on a tick that wrote nothing, because it times the flush
+    // CALL, so it cannot distinguish a tick that persisted something from one that did not.
+    //
+    // Sampled in Report, which runs BEFORE this tick's fence and flush, so an advance observed on tick T is the publication of tick T-1's records. That one-tick
+    // skew is why the assertion is over a window rather than per tick.
+    private long _walLsnLast = -1;
+    private long _walAdvances;
+    private long _walLsnGained;
+
+    /// <summary>Measured ticks on which the durable LSN moved — how often the WAL was genuinely in the loop.</summary>
+    public long WalAdvances => Interlocked.Read(ref _walAdvances);
+
+    /// <summary>Total LSNs the durability watermark gained across the measured window.</summary>
+    public long WalLsnGained => Interlocked.Read(ref _walLsnGained);
+
     /// <summary>Report phase, every tick past warm-up: fold the previous fence's per-archetype counters.</summary>
     public void SpatialTelemetryTick(TickContext ctx)
     {
@@ -48,6 +65,15 @@ public sealed partial class SimBridge
         {
             return;
         }
+
+        var lsn = Dbe.DurableLsn;
+        if (_walLsnLast >= 0 && lsn > _walLsnLast)
+        {
+            _walAdvances++;
+            _walLsnGained += lsn - _walLsnLast;
+        }
+
+        _walLsnLast = lsn;
 
         _telemetryIds ??=
         [

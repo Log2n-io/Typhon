@@ -1,4 +1,4 @@
-# SWG Tatooine — a game-shaped workload for Typhon's spatial layer
+﻿# SWG Tatooine — a game-shaped workload for Typhon's spatial layer
 
 A server-side simulation of *Star Wars Galaxies*' planet Tatooine, built as a load for Typhon's spatial partitioning. No
 client, no rendering, no network: the planet is reconstructed into a real on-disk Typhon database and then ticked through
@@ -27,7 +27,7 @@ should constrain the other.
 | **World** | 16 384 m square, coordinates −8 192…+8 192 on X and Z, from Core3's own `coordinateMin`/`coordinateMax` |
 | **Content** | 7 cities, 7 points of interest, 8 creature spawn regions, player cities in 5 size tiers, player structures |
 | **Archetypes** | 5 — static world objects, creature lairs, creatures, city NPCs, players |
-| **Systems** | 12 (10 with `--no-shuttles`) over 7 phases, dispatched by `TyphonRuntime` |
+| **Systems** | 14 (12 with `--no-shuttles`) over 9 phases, dispatched by `TyphonRuntime` |
 | **Storage** | a real database with a real WAL; per-archetype `ClusterDurability.Checkpoint`, plus one `Versioned` component |
 | **Rate** | 10 Hz by default — SWG's server ran its AI and movement broadcast at roughly that |
 
@@ -43,7 +43,9 @@ The systems, in phase order:
 | `PlayerMove` | Move | Player position integration |
 | `NpcMove` | Move | City NPC drift — overwhelmingly stationary |
 | `Awareness` | Awareness | The interest query: for every player, everything within 192 m, per queried archetype |
-| `CreatureCombat` | Resolve | A 75 m query per creature; a creature in a player's line of fire takes damage, dies, and is revived by its lair |
+| `PlayerCombat` | Resolve | A fighting player fires at its own target, acquiring one within 75 m when it has none; pushes the damage as an event |
+| `CreatureCombat` | Resolve | A creature that has closed on its quarry attacks it — no query: it knows what it is fighting and reads that entity's position |
+| `CombatResolve` | Apply | Drains the event queue and applies every effect: damage, death, loot, mission payouts, cloning. The only writer of `Inventory` |
 | `Economy` | Economy | Harvesters and factories ticking their own counters |
 | `ShuttleProbe` | Report | Times queries at shuttleports after an arrival |
 | `SpatialTelemetry` | Report | Folds the previous fence's per-archetype maintenance counters |
@@ -126,6 +128,12 @@ the unit of work sync pages itself, which measured 4× slower in an earlier demo
 migration and AABB growth inline, so the fence never scans a dirty bitmap to discover what moved. For the scenery that
 means the largest population in the world costs the fence nothing per tick.
 
+**Two of the nine phases exist because the access deriver refused the alternative.** `Input` carries the tick's client
+intents, because applying one writes components that `Shuttle` also writes in `Spawn`. `Apply` carries the combat
+consumer, because it writes the very components the two combat producers read, and the only in-phase resolutions on offer
+would order the producers after the consumer that depends on them — a cycle. In both cases a phase boundary says the true
+thing an explicit edge would only enforce.
+
 **Phases do not imply a barrier.** Ordering comes from declared component access; a system that queries an archetype it
 does not declare runs concurrently with that archetype's writers. Every system here declares the placements its queries
 read, which is why `Awareness` names creature, NPC and structure placements it never writes.
@@ -197,6 +205,12 @@ Reading it:
 
 ### Where the time goes at `--pop 64`
 
+> **The `CreatureCombat` row below is superseded and should not be cited.** It was measured when combat ran from the
+> creature's side — one 75 m radius query per living creature per weapon cycle, which is what made it 18 % of the tick at
+> this population. SWG-02 inverted the model: a creature that is fighting runs **no query at all**, and a player runs one
+> only when it is fighting and has nobody to shoot. The table has not been re-measured; the rest of it is unaffected by
+> that change, and the combat row is the only one that is.
+
 One run at 1 024 m cells, 200 measured ticks — 1 072 848 entities, median tick **21.93 ms**. "Span" is wall-clock from
 the system's first chunk to its last; "worker time" is the CPU its chunks consumed across the pool:
 
@@ -220,8 +234,9 @@ the system's first chunk to its last; "worker time" is the CPU its chunks consum
 The shares sum past 100 % because systems that share no write run concurrently — the spans overlap. Adding the worker
 time up gives **≈ 553 ms of CPU compressed into a 21.9 ms tick**, a 25× speed-up on 32 threads, or 79 % of perfect.
 
-Two systems are the workload: interest management (`Awareness` walks only the 20 480 players, and spends 354 ms of CPU
-doing it) and combat's per-creature radius query. The five fence phases together cost 3.1 ms of the tick, of which `FencePrep` — which cannot
+Two systems were the workload: interest management (`Awareness` walks only the 20 480 players, and spends 354 ms of CPU
+doing it) and combat's per-creature radius query — the second of which SWG-02 removed, so this table's second-largest row
+no longer exists in the shape it describes. The five fence phases together cost 3.1 ms of the tick, of which `FencePrep` — which cannot
 parallelise for barrier-only archetypes — is half.
 
 ### What the tick fence costs
@@ -290,7 +305,6 @@ Useful flags:
 | `--chunk-stats` | off | Per-chunk timing for the awareness system: how evenly the chunks shared the pool |
 | `--work-probe` | off | Counts a sample of interest queries: cells walked, clusters opened, entities tested, hits, pages |
 | `--awareness-api <mode>` | count | `count`, `movenext`, `fill` or `batch` — how each interest query is drained |
-| `--combat-api <mode>` | movenext | `movenext` or `batch` — one query per creature, or one per creature cluster |
 | `--eff-tol <r>` / `--repair-cooldown <n>` | 0.1 / 50 | The two maintenance knobs above; `0` disables either |
 | `--promote <n>` / `--tightness <r>` | off / 1 | Turn per-cell R-tree promotion on |
 | `--no-shuttles` | shuttles on | Drop the shuttle systems and the mass-arrival traffic they produce |

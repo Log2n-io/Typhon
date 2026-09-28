@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Threading;
 
@@ -25,7 +25,22 @@ public sealed partial class SimBridge
     private long _aggroQueries;
     private long _aggroHits;
     private long _creaturesKilled;
-    private long _playersEngaged;
+
+    // SWG-02's combat counters. Every one of them exists because an acceptance criterion is a claim about what does NOT happen — a player that is not fighting
+    // does no damage, a shot beyond weapon range does no damage — and a silent zero cannot tell that apart from a system that never ran.
+    private long _playerShots;
+    private long _creatureAttacks;
+    private long _damageApplied;
+    private long _shotsSkippedNotFighting;
+    private long _shotsRefusedRange;
+    private long _shotsWithoutTarget;
+    private long _creaturesLostTarget;
+    private long _chaseGivenUp;
+    private long _lairHits;
+    private long _playersIncapacitated;
+    private long _missionRewards;
+    private long _missionsAssigned;
+    private long _eventsStale;
     private long _economyTicks;
     private long _missionsIssued;
     private long _missionsCompleted;
@@ -43,6 +58,7 @@ public sealed partial class SimBridge
         AwarenessRadius = TatooineData.AwarenessRadiusM * config.ContentScale;
         MeleeRange = TatooineData.MeleeRangeM * config.ContentScale;
         RangedRange = TatooineData.RangedRangeM * config.ContentScale;
+        MaxChaseRange = TatooineData.MaxChaseRangeM * config.ContentScale;
         MetresPerTick = 1f / config.TickRateHz;
 
         // A leg is about a second and a half of ambling, and a rest four times that, so a wandering creature is stationary roughly 80 % of the time. Both
@@ -98,6 +114,9 @@ public sealed partial class SimBridge
 
     public float RangedRange { get; }
 
+    /// <summary>How far a creature will chase its quarry before giving up, in world units, scaled with the world (SWG-02).</summary>
+    public float MaxChaseRange { get; }
+
     /// <summary>Seconds of simulated time per tick — what converts a speed in m/s into a displacement.</summary>
     public float MetresPerTick { get; }
 
@@ -126,7 +145,19 @@ public sealed partial class SimBridge
         AggroQueries = Interlocked.Exchange(ref _aggroQueries, 0),
         AggroHits = Interlocked.Exchange(ref _aggroHits, 0),
         CreaturesKilled = Interlocked.Exchange(ref _creaturesKilled, 0),
-        PlayersEngaged = Interlocked.Exchange(ref _playersEngaged, 0),
+        PlayerShots = Interlocked.Exchange(ref _playerShots, 0),
+        CreatureAttacks = Interlocked.Exchange(ref _creatureAttacks, 0),
+        DamageApplied = Interlocked.Exchange(ref _damageApplied, 0),
+        ShotsSkippedNotFighting = Interlocked.Exchange(ref _shotsSkippedNotFighting, 0),
+        ShotsRefusedRange = Interlocked.Exchange(ref _shotsRefusedRange, 0),
+        ShotsWithoutTarget = Interlocked.Exchange(ref _shotsWithoutTarget, 0),
+        CreaturesLostTarget = Interlocked.Exchange(ref _creaturesLostTarget, 0),
+        ChaseGivenUp = Interlocked.Exchange(ref _chaseGivenUp, 0),
+        LairHits = Interlocked.Exchange(ref _lairHits, 0),
+        PlayersIncapacitated = Interlocked.Exchange(ref _playersIncapacitated, 0),
+        MissionRewards = Interlocked.Exchange(ref _missionRewards, 0),
+        MissionsAssigned = Interlocked.Exchange(ref _missionsAssigned, 0),
+        EventsStale = Interlocked.Exchange(ref _eventsStale, 0),
         EconomyTicks = Interlocked.Exchange(ref _economyTicks, 0),
         MissionsIssued = Interlocked.Exchange(ref _missionsIssued, 0),
         MissionsCompleted = Interlocked.Exchange(ref _missionsCompleted, 0),
@@ -174,7 +205,45 @@ public struct TickStats
     public long AggroQueries;
     public long AggroHits;
     public long CreaturesKilled;
-    public long PlayersEngaged;
+
+    /// <summary>Shots a fighting player fired at its target.</summary>
+    public long PlayerShots;
+
+    /// <summary>Attacks a fighting creature made on the player it was fighting.</summary>
+    public long CreatureAttacks;
+
+    /// <summary>Damage events the resolver applied — the two counters above, less whatever arrived at a target that had already gone.</summary>
+    public long DamageApplied;
+
+    /// <summary>Player-ticks that did no damage because the player was not in <see cref="PlayerActivity.Combat"/>. AC-4's first refusal.</summary>
+    public long ShotsSkippedNotFighting;
+
+    /// <summary>Shots refused because the player's target was beyond weapon range. AC-4's second refusal.</summary>
+    public long ShotsRefusedRange;
+
+    /// <summary>Weapon cycles a fighting player wasted because nothing shootable was within range to acquire.</summary>
+    public long ShotsWithoutTarget;
+
+    /// <summary>Creatures that dropped out of a fight because what they were fighting had gone or been incapacitated.</summary>
+    public long CreaturesLostTarget;
+
+    /// <summary>Chases abandoned because the quarry got further away than <see cref="TatooineData.MaxChaseRangeM"/>. AC-3's leash, and the proof it holds.</summary>
+    public long ChaseGivenUp;
+
+    /// <summary>Hits landed on a destroy-mission lair — what closes the mission loop.</summary>
+    public long LairHits;
+
+    /// <summary>Players reduced to zero health, each one cloned at the nearest city.</summary>
+    public long PlayersIncapacitated;
+
+    /// <summary>Destroy missions that paid their owner, each one a <c>Versioned</c> write in the tick's unit of work.</summary>
+    public long MissionRewards;
+
+    /// <summary>Missions whose owner was actually sent to the lair. Below <c>MissionsIssued</c> by however many were offered to a possessed player.</summary>
+    public long MissionsAssigned;
+
+    /// <summary>Events whose target had gone by the time the resolver opened it. Expected to be zero; a non-zero value means an assumption has stopped holding.</summary>
+    public long EventsStale;
     public long EconomyTicks;
     public long MissionsIssued;
     public long MissionsCompleted;

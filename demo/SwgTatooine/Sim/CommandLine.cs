@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace SwgTatooine;
 
@@ -125,11 +125,6 @@ public static class CommandLine
             "count" => AwarenessApi.Count,
             "fill" => AwarenessApi.Fill,
             _ => AwarenessApi.Batch,
-        };
-        c.CombatApi = r.Choice("--combat-api", "movenext", ["movenext", "batch"], "how creature combat asks which players are in range") switch
-        {
-            "movenext" => CombatApi.MoveNext,
-            _ => CombatApi.Batch,
         };
         c.IdleCreatureFraction = r.Dbl("--idle-creatures", c.IdleCreatureFraction, "share of creatures that never think", min: 0d, max: 1d);
         c.RespawnSeconds = r.Float("--respawn-s", c.RespawnSeconds, "seconds before a lair revives a killed creature", min: 0.001f);

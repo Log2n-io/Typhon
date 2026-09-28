@@ -1,4 +1,4 @@
-namespace SwgTatooine;
+﻿namespace SwgTatooine;
 
 /// <summary>
 /// Tatooine as Star Wars Galaxies had it, in the game's own coordinates.
@@ -100,6 +100,16 @@ public static class TatooineData
 
     /// <summary>[WIKI] A mission terminal lets a player hold two missions at a time.</summary>
     public const int MaxConcurrentMissions = 2;
+
+    /// <summary>
+    /// [EST] Credits a destroy mission pays per difficulty level, so a level-9 lair is worth 4 500 and a level-1 lair 500.
+    /// </summary>
+    /// <remarks>
+    /// Core3 computes the reward from the same difficulty term the lair's hit points come from, so scaling it linearly with the difficulty this world already
+    /// draws is the shape of the real rule even though the coefficient is an estimate. The number matters to nothing in the engine — what matters is that a
+    /// completion writes <see cref="Inventory"/>, which is the only <c>Versioned</c> component in the world, inside the tick's unit of work.
+    /// </remarks>
+    public const int MissionRewardPerDifficulty = 500;
 
     /// <summary>
     /// [CORE3] Minimum and maximum distance from the player at which a destroy mission places its target.
@@ -246,6 +256,13 @@ public static class CreatureTemplates
 
     /// <summary>Damage per attack. [EST].</summary>
     public static readonly int[] Damage = [12, 18, 45, 38, 30, 26];
+
+    /// <summary>[EST] Credits a kill drops, roughly a quarter of the creature's hit points — big game pays more.</summary>
+    /// <remarks>
+    /// The value is arbitrary and says so; what is not arbitrary is that a kill writes it into <see cref="Inventory"/> on the tick the creature dies, which
+    /// is the first steady-state <c>Versioned</c> write this world has ever made (gap G3).
+    /// </remarks>
+    public static readonly int[] LootCredits = [45, 65, 225, 160, 275, 105];
 
     /// <summary>Movement speed in metres per second. [EST], below a player's 5 m/s so a player can always disengage.</summary>
     public static readonly float[] SpeedMps = [3.4f, 3.0f, 2.2f, 4.2f, 2.0f, 3.6f];

@@ -1,4 +1,4 @@
-using SwgTatooine.Replication;
+﻿using SwgTatooine.Replication;
 using System;
 using System.IO;
 using System.Threading.Tasks;
@@ -108,7 +108,7 @@ public sealed partial class TatooineSim
 
         // What an intent is validated against: the world it must stay inside, and the tick it gets one step of (SWG-01). Required rather than defaulted, so a
         // path that forgot it would refuse to start rather than clamp to the wrong world silently.
-        TatooineReplication.ConfigureIntents(_config.WorldEdgeM, _config.TickRateHz);
+        TatooineReplication.ConfigureIntents(Dbe, _config.WorldEdgeM, _config.TickRateHz);
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
 
@@ -189,6 +189,13 @@ public static class TatooineReplication
     /// <param name="cluster">The cluster being iterated.</param>
     /// <param name="slots">The slots.</param>
     public static void Replicate<T>(in ClusterRef<T> cluster, ulong slots) where T : class => _pushCommands?.Replicate(in cluster, slots);
+
+    /// <summary>
+    /// Marks an entity opened through a transaction as changed for replication (ADR-067). The form the combat resolver needs: it writes entities it opened by
+    /// id rather than cluster slots it walked.
+    /// </summary>
+    /// <param name="entity">The entity, already written.</param>
+    public static void Replicate(in EntityRefMut entity) => _pushCommands?.Replicate(in entity);
 
     /// <summary>Each player session's outbound byte budget, bytes per second; 0 for none (<c>--session-budget</c>).</summary>
     public static int PlayerBudgetBytesPerSecond { get; set; }
@@ -1296,6 +1303,11 @@ public static class TatooineReplication
             if (subs.TryResolve(command.Session, command.Value.NetId, out var target))
             {
                 owner.Target = target;
+
+                // Classified here, once, rather than on every shot: EntityId.ArchetypeId is comparable only against DatabaseEngine.ArchetypeIdOf<T>(), and the
+                // system that fires needs to know which components its target has. An id that is none of the three shootable archetypes — a city NPC, a
+                // building — resolves to a target the combat system will refuse, which is the right answer for "attack that cantina".
+                owner.TargetKind = ClassifyTarget(target);
                 System.Threading.Interlocked.Increment(ref _targetsSet);
             }
             else
@@ -1470,6 +1482,33 @@ public static class TatooineReplication
     /// <summary>One tick's share of a second, for turning a speed into a step. Zero until <see cref="ConfigureIntents"/> is called.</summary>
     public static float MetresPerTickForIntents { get; private set; }
 
+    // Routing ids of the three shootable archetypes, cached by ConfigureIntents. See ClassifyTarget.
+    private static ushort _creatureRouting;
+    private static ushort _lairRouting;
+    private static ushort _playerRouting;
+
+    /// <summary>Which of the shootable archetypes an entity belongs to, for <c>PlayerSession.TargetKind</c> (SWG-02).</summary>
+    /// <param name="target">The entity a client named.</param>
+    /// <returns>
+    /// The <c>CombatTargetKind</c> of <paramref name="target"/>. An entity of any other archetype — a city NPC, a building, a starship — answers
+    /// <c>CombatTargetKind.Player</c>, which the combat system then refuses on the first shot because the entity carries no <c>PlayerVitals</c>.
+    /// </returns>
+    /// <remarks>
+    /// <b>Refused rather than validated at the command.</b> Rejecting a targetable-but-unshootable entity here would mean the client could not select a
+    /// building to inspect it, which is what <c>SetTarget</c> is also for; the combat path is the place that cares whether the target can be damaged, and it is
+    /// the place that counts the refusal.
+    /// </remarks>
+    private static byte ClassifyTarget(EntityId target)
+    {
+        var routing = target.ArchetypeId;
+        if (routing == _creatureRouting)
+        {
+            return CombatTargetKind.Creature;
+        }
+
+        return routing == _lairRouting ? CombatTargetKind.Lair : CombatTargetKind.Player;
+    }
+
     /// <summary>
     /// States the two figures every intent is validated against: the world it must stay inside, and the tick it gets one step of.
     /// </summary>
@@ -1482,10 +1521,19 @@ public static class TatooineReplication
     /// destination to the wrong world and moved a player five times too far per tick at 50 Hz, with nothing to see. The repository's rule for a parameter of
     /// that kind is that it is required and explicit, refused at start rather than silently clamped, which is what this is.
     /// </remarks>
-    public static void ConfigureIntents(double worldEdgeM, int tickRateHz)
+    public static void ConfigureIntents(DatabaseEngine dbe, double worldEdgeM, int tickRateHz)
     {
+        ArgumentNullException.ThrowIfNull(dbe);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(worldEdgeM);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(tickRateHz);
+
+        // The three archetypes a client may name as a target, by the routing id its EntityIds carry in THIS database. Resolved once here rather than per
+        // command: ArchetypeIdOf is a lookup, but a per-command classification would also have to hold the engine, and the engine is what this method already
+        // has. Ids are per database and assigned in registration order, so they are cached for a database rather than for a process — which is why this takes
+        // the engine and not a static.
+        _creatureRouting = dbe.ArchetypeIdOf<Creature>();
+        _lairRouting = dbe.ArchetypeIdOf<CreatureLair>();
+        _playerRouting = dbe.ArchetypeIdOf<Player>();
         WorldEdgeM = worldEdgeM;
         MetresPerTickForIntents = 1f / tickRateHz;
     }

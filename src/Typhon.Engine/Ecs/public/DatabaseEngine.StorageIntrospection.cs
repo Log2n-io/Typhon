@@ -98,6 +98,23 @@ public partial class DatabaseEngine
     public long GetWalTotalBytes() => WalManager?.SegmentManager?.TotalWalBytes ?? 0L;
 
     /// <summary>
+    /// The highest LSN the WAL writer has made durable — the watermark every commit's durability wait is measured against. Zero when there is no WAL.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Public because "has my write reached the disk yet?" is an application question, and until now there was no way to ask it.</b>
+    /// <see cref="GetWalTotalBytes"/> is public for the same class of reason, but it answers in segment-sized steps, so it cannot say whether a particular
+    /// tick's records were persisted — a preallocated segment absorbs thousands of records without changing size.
+    /// </para>
+    /// <para>
+    /// <b>It advances asynchronously, from the writer thread.</b> Read it twice and the second value may be higher for reasons that have nothing to do with the
+    /// caller. The guarantee worth relying on is directional: once a commit's wait has returned, this is at or above that commit's LSN, and it never goes
+    /// backwards.
+    /// </para>
+    /// </remarks>
+    public long DurableLsn => WalManager?.DurableLsn ?? 0L;
+
+    /// <summary>
     /// The schema-assembly manifest persisted in this database: the identity of every .NET assembly that declares a stored component or archetype. Read from the
     /// <see cref="AssemblyR1"/> catalog, which is loaded on every open (including schemaless), so this is available without any user schema DLL. The core engine
     /// assembly is intentionally excluded — it is always loaded. Consumed by tooling (the Workbench) to locate and load the schema assemblies a file depends on.

@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using Typhon.Protocol;
 using Typhon.Schema.Definition;
 
@@ -376,6 +376,22 @@ public struct CreatureBrain
     /// <summary>The lair that owns this creature, so a kill can decrement its live count.</summary>
     [Field] public EntityId Lair;
 
+    /// <summary>The player this creature is fighting, or <c>EntityId.Null</c> when it is not fighting anybody (SWG-02).</summary>
+    /// <remarks>
+    /// <para>
+    /// <b>An entity, not a point, and that is the whole of what SWG-02 adds to the creature's side of a fight.</b> Pursuit used to steer at
+    /// <c>CreatureMotion.DestX/DestZ</c> — the position a player occupied on the tick the aggro query found it — and never refreshed it, so a pursuer walked
+    /// to a place its target had left and parked there for the rest of its life (gap G6). Holding the identity is what lets the decision re-read the target's
+    /// current position, notice it has gone beyond <see cref="TatooineData.MaxChaseRangeM"/>, and give up.
+    /// </para>
+    /// <para>
+    /// It costs eight bytes on the largest population in the world, taking <c>CreatureBrain</c> from 40 to 48. That is a real cost and it is measured rather
+    /// than waved away: the alternative — keeping it in <c>CreatureTimers</c>, which is already written every tick and reaches no subscriber — was rejected
+    /// because who a creature is fighting is behaviour a client renders, not scheduling.
+    /// </para>
+    /// </remarks>
+    [Field] public EntityId Target;
+
     /// <summary>Which <see cref="CreatureTemplates"/> entry this creature was spawned from — a womp rat, a bantha, a mission defender (S0-5).</summary>
     /// <remarks>
     /// <b>A creature that does not carry its template cannot be reasoned about after it is spawned.</b> Its stats were baked from the template at spawn and
@@ -614,6 +630,18 @@ public struct PlayerSession
     /// It is what <c>TatooineReplication.ControlledBy</c> scans for, so the world rather than a dictionary answers which player a session holds.
     /// </remarks>
     [Field] public uint Controller;
+
+    /// <summary>Which archetype <see cref="Target"/> belongs to — see <c>CombatTargetKind</c>; meaningless when the target is null (SWG-02).</summary>
+    /// <remarks>
+    /// <para>
+    /// Carried rather than derived at the point of use, because the code that decides what to write to a target must know its archetype and an
+    /// <see cref="EntityId"/> alone does not say: the routing id it carries is comparable only against
+    /// <c>DatabaseEngine.ArchetypeIdOf&lt;T&gt;()</c>, which is exactly the classification this field caches. The sim's own acquisition knows what it aimed at
+    /// for free; a client's <c>SetTarget</c> classifies once, when the netId is resolved, instead of on every shot.
+    /// </para>
+    /// <para>It costs nothing: <see cref="Controller"/> leaves four bytes of padding before the struct's 8-byte alignment.</para>
+    /// </remarks>
+    [Field] public byte TargetKind;
 }
 
 /// <summary>What a simulated player is doing this tick.</summary>
@@ -671,6 +699,14 @@ public struct Lair
 
     /// <summary>Non-zero if this lair belongs to a destroy mission and dies with it.</summary>
     [Field] public int MissionId;
+
+    /// <summary>The player this destroy mission was built around, and the one its completion pays (SWG-02); <c>EntityId.Null</c> on a wild lair.</summary>
+    /// <remarks>
+    /// The seek query already found a player — it just threw the identity away and kept the position, which is why nothing could be rewarded when a mission
+    /// finished. Recording it is also what makes the completion branch mean something: before SWG-02 nothing wrote <see cref="LairVitals.Health"/> downward,
+    /// so the branch never ran at all.
+    /// </remarks>
+    [Field] public EntityId Owner;
 }
 
 /// <summary>

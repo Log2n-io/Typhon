@@ -1,4 +1,4 @@
-namespace SwgTatooine;
+﻿namespace SwgTatooine;
 
 /// <summary>
 /// The DAG-local phases the simulation runs in. The phase list is the causal order, but it binds only through the access
@@ -56,10 +56,34 @@ public static class SimPhases
     public static readonly Phase Awareness = new("Awareness");
 
     /// <summary>
-    /// Combat resolution and its consequences: damage, death, loot. The only phase that opens a real transaction against
-    /// a <see cref="StorageMode.Versioned"/> component, and so the only one that puts anything in the WAL.
+    /// Who fires at whom. Every system here walks its own archetype in parallel, decides what happens to somebody else's
+    /// entity, and pushes it as a <c>CombatEvent</c> — writing nothing outside its own archetype.
     /// </summary>
+    /// <remarks>
+    /// The two producers share no component in either direction, which is why they run concurrently: the player's side
+    /// writes the shooter's cooldown and target, the creature's side writes the attacker's cooldown and mode, and each
+    /// only READS the other archetype's vitals and placement.
+    /// </remarks>
     public static readonly Phase Resolve = new("Resolve");
+
+    /// <summary>
+    /// The consequences: damage, death, loot, mission payouts, cloning. One serial system, and the only phase that opens
+    /// a real transaction against a <see cref="StorageMode.Versioned"/> component — so the only one that puts anything in
+    /// the WAL.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Its own phase rather than an explicit edge inside <see cref="Resolve"/>, and the access deriver is what settles
+    /// it.</b> The consumer writes the very components the two producers read — a creature's vitals, a lair's vitals, a
+    /// player's placement — and a plain <c>Reads&lt;T&gt;</c> facing a same-phase writer is a <c>Build()</c> error by
+    /// design (rule ED-05). The only in-phase resolutions offered are <c>ReadsFresh</c>, which would order all three
+    /// producers AFTER the consumer that depends on them, and <c>ReadsSnapshot</c>, which needs a Versioned component.
+    /// Either way the graph is a cycle. A phase boundary is the disambiguator the deriver accepts, and it also says the
+    /// true thing: this tick's exchanges are all decided before any of them lands.
+    /// </para>
+    /// <para>Same reasoning as <see cref="Input"/>, arrived at the same way — by the deriver refusing the alternative.</para>
+    /// </remarks>
+    public static readonly Phase Apply = new("Apply");
 
     /// <summary>
     /// The economy: harvesters extracting, factories manufacturing, structures ageing. Ticks on periods of seconds to
