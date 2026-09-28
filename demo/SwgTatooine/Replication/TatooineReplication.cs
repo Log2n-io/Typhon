@@ -934,6 +934,14 @@ public static class TatooineReplication
             Console.Error.WriteLine(
                 $"  identities: {idf.Minted} minted, {idf.Released} released, {idf.Reused} reused; "
                 + $"{subs.EntriesMigrated} entries relocated between clusters; {System.Threading.Volatile.Read(ref _announced)} realm news announced");
+
+            // What the intent path did (SWG-01). These counters were built "for the report and for the checks beside the demo" — the checks read them, and the
+            // report never did, so a served run printed nothing about the one thing a connected client changes. The refusals are printed beside the applications
+            // deliberately: "only what the server allows is applied" is a claim about what does NOT happen, and a report that shows only successes cannot carry it.
+            var it = Intents;
+            Console.Error.WriteLine(
+                $"  intents: {it.Applied} applied of {it.Owned} owned, {it.Unowned} unowned, {it.RefusedSpeed} refused for speed; "
+                + $"targets {it.TargetsSet} set, {it.TargetsRefused} refused; possession {it.Possessions} taken, {it.Releases} released");
             var sendPath = subs.SendPath;
             var st = subs.SendTotals;
             var now = System.Diagnostics.Stopwatch.GetTimestamp();
