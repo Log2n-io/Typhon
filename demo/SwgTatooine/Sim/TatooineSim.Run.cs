@@ -410,7 +410,7 @@ public sealed partial class TatooineSim
             DurabilityMedianMs = flushes.Count == 0 ? 0f : flushes[flushes.Count / 2],
             DurabilityP99Ms = Percentile(flushes, 0.99),
             DurabilityMaxMs = flushes.Count == 0 ? 0f : flushes[^1],
-            TicksWithDurabilityWait = CountOver(flushes, 0f),
+            TicksWithDurabilityWait = CountOver(flushes, RunResult.DurabilityWaitFloorMs),
             TicksOver125 = Count(ordered, median * 1.25f),
             TicksOver150 = Count(ordered, median * 1.5f),
             TicksOver200 = Count(ordered, median * 2f),
@@ -649,8 +649,17 @@ public sealed class RunResult
 
     public float DurabilityMaxMs;
 
-    /// <summary>Ticks whose durability wait was above zero: how often the WAL was actually in the loop.</summary>
+    /// <summary>Ticks whose durability wait exceeded <see cref="DurabilityWaitFloorMs"/> — how often the WAL was actually in the loop.</summary>
+    /// <remarks>
+    /// <b>A floor, not zero, because zero is not the floor.</b> <c>UowFlushMs</c> times the flush CALL, so it reads five to eleven microseconds on a tick that
+    /// persisted nothing at all; counting ticks above zero therefore counted every tick in the run and reported "600 of 600 ticks waited", which is true of the
+    /// timer and false of the claim a reader takes from it. The threshold is two orders of magnitude above that floor and two below anything that would matter to
+    /// a 20 ms budget, so it separates a tick that waited from a tick that was merely measured.
+    /// </remarks>
     public int TicksWithDurabilityWait;
+
+    /// <summary>The wait below which a tick is taken not to have waited at all — the cost of the flush call itself. See <see cref="TicksWithDurabilityWait"/>.</summary>
+    public const float DurabilityWaitFloorMs = 0.1f;
 
     /// <summary>The median durability wait as a share of the median tick — what decides whether an instance family's fsync is the binding constraint.</summary>
     public float DurabilityShareOfMedianPct => TickMedianMs <= 0f ? 0f : 100f * DurabilityMedianMs / TickMedianMs;

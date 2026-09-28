@@ -141,7 +141,7 @@ internal static class Program
             + $"{TatooineData.MaxChaseRangeM * config.ContentScale:F0} m, {s.EventsStale} stale events");
         Console.WriteLine($"  missions: {s.MissionsIssued} issued, {s.MissionsAssigned} assigned, {s.MissionsCompleted} completed, {s.MissionRewards} paid; {s.LairHits} lair hits");
         Console.WriteLine($"  durability wait: {result.DurabilityMedianMs:F3} ms median, {result.DurabilityP99Ms:F3} p99, {result.DurabilityMaxMs:F3} max; "
-            + $"{result.TicksWithDurabilityWait} of {result.TicksMeasured} ticks waited at all "
+            + $"{result.TicksWithDurabilityWait} of {result.TicksMeasured} ticks over {RunResult.DurabilityWaitFloorMs:F1} ms "
             + $"({result.DurabilityShareOfMedianPct:F1} % of the median tick)");
 
         // The watermark, which is the evidence that the loot and the rewards reached the WAL rather than only a component: UowFlushMs above is a few
