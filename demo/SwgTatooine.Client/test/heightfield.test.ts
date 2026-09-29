@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { CITIES, PLANET_EDGE_M, POIS } from '../src/data/world-data';
 import { FIELD_ORIGIN_M, Heightfield, POSTS, POST_SPACING_M, flatHeightfield } from '../src/terrain/heightfield';
-import { bakeLayers, createHeightGrid, slopeAtPost } from '../src/terrain/layers';
+import { applyLayers, bakeLayers, createHeightGrid, riserWidthM, slopeAtPost } from '../src/terrain/layers';
 import { NODE_GRID, TREE_LEVELS } from '../src/render/terrain-quadtree';
 import { MIN_FEATURE_M, bakeTatooine, landformLayers } from '../src/terrain/tatooine-terrain';
+import { finestFeatureM } from '../src/terrain/hash';
 
 /**
  * The baked field and the authored planet.
@@ -108,24 +109,130 @@ describe('the shipping field geometry', () => {
     expect(finestNodeM / NODE_GRID).toBe(POST_SPACING_M);
   });
 
-  it('authors nothing narrower than four posts — the rule the pyramids came from breaking', () => {
+  it('authors nothing narrower than four posts — EVERY layer, not just the fractals', () => {
     // A feature narrower than two posts collapses to a single raised post, and bilinear over one raised post is exactly a
-    // four-sided pyramid. Four posts is where the measured spike count reaches zero. `cliff detail` used to put its finest
-    // octave at 9.9 m against a 16 m limit and covered the planet in ~1 500 cones; this is that defect as an assertion,
-    // stated against the FINEST octave rather than the base wavelength, because the base is not what aliases.
+    // four-sided pyramid. Four posts is where the measured spike count reaches zero.
+    //
+    // This assertion existed and the pyramids came back anyway, because it was wrong twice over:
+    //
+    //   1. It recomputed the finest octave inline and never read `ridged`. The fold at `ridge()` turns one hump into two,
+    //      so a ridged layer authors at HALF its finest octave — `cliff detail` passed at 17.5 m while putting 8.8 m
+    //      creases on a 4 m grid. It now asks `finestFeatureM`, which is the same expression the tree's own comments
+    //      quote, so a layer and its check cannot disagree about what the rule says.
+    //
+    //   2. It `continue`d past every affector that is not a fractal, which is every TERRACE — and a terrace riser is a
+    //      feature with a width like any other. `mesa strata` spent 5.17 m of height on its riser, which on a 0.35 grade
+    //      is 14.8 m of ground, on a layer whose slope filter admitted anything up to 40.
     expect(MIN_FEATURE_M).toBe(4 * POST_SPACING_M);
+
+    let fractals = 0;
+    let terraces = 0;
     for (const layer of landformLayers()) {
-      if (layer.affector.kind !== 'fractal') {
+      if (layer.affector.kind === 'fractal') {
+        fractals++;
+        const finest = finestFeatureM(layer.affector.fractal);
+        expect(finest, `${layer.name} finest feature`).toBeGreaterThanOrEqual(MIN_FEATURE_M);
         continue;
       }
 
-      const { octaves, lacunarity, wavelengthXM, wavelengthZM } = layer.affector.fractal;
-      const shrink = lacunarity ** (octaves - 1);
-      const finest = Math.min(wavelengthXM, wavelengthZM) / shrink;
-      expect(finest, `${layer.name} finest octave`).toBeGreaterThanOrEqual(MIN_FEATURE_M);
+      if (layer.affector.kind !== 'terrace') {
+        continue;
+      }
+
+      terraces++;
+      // Measured at a REFERENCE GRADE, not at the slope filter's ceiling.
+      //
+      // The ceiling was tried and it was the wrong control. A terrace has no natural steepest case — the filter admits up
+      // to 40, and no riser of any height is a post wide on ground that steep — so the obvious remedy was to cap the
+      // filter. Capping it at 0.5 took the cone census from 120 to 157 and capping at 0.35 made it worse again: the cap is
+      // itself a spatial boundary whose feather lands on exactly the steep ground where a feather is sub-post.
+      //
+      // So the rule is stated where it can be met and is worth meeting: at 45°, the steepest ground a walker treats as
+      // ground rather than as a wall, a riser must still span four posts. Above that the terrain is a cliff face and the
+      // banding is not what the eye is reading. The hard guard on what this rule is a proxy FOR is the cone census below.
+      const width = riserWidthM(layer.affector.stepM, layer.affector.sharpness, REFERENCE_GRADE);
+      expect(width, `${layer.name} riser at a 45-degree grade`).toBeGreaterThanOrEqual(MIN_FEATURE_M);
     }
+
+    // The premise: both loops above ran. A rename that made every `kind` miss would leave this test green and silent.
+    expect(fractals, 'fractal layers checked').toBeGreaterThan(3);
+    expect(terraces, 'terrace layers checked').toBe(2);
+  });
+
+  it('leaves almost no one-post cones in the ground it bakes', () => {
+    // **The assertion the other two are proxies for.** Every rule above is about what a layer may author; this counts what
+    // the bake actually produced, which is the only thing a screenshot shows.
+    //
+    // A cone is a strict local maximum that drops on ALL FOUR sides — real terrain has ridges and saddles, but a ridge
+    // post is high along one axis and level along the other, so only an isolated raised post qualifies. That is precisely
+    // what bilinear interpolation makes of a feature narrower than two posts.
+    //
+    // It also catches what neither rule could: `cliff detail` and the terraces are NOT independent. Alone they leave 45
+    // and 38 cones over this window; together they left 271, because the terraces build risers, `cliff detail` is filtered
+    // on slope, and slope is a central difference over adjacent posts — so a riser reads as a cliff face and gets the
+    // finest noise in the tree painted onto it. No per-layer rule can see an interaction between two layers.
+    //
+    // The thresholds are the measured figures with room to move: 41/9/1 as authored, against 212/105/24 before the
+    // retune. A regression puts them back into the hundreds, which is the range these bound.
+    const posts = 1024;
+    const grid = createHeightGrid(posts, POST_SPACING_M, -2048);
+    grid.height.fill(0);
+    applyLayers(grid, landformLayers());
+
+    const census = (dropM: number): number => {
+      let count = 0;
+      for (let z = 1; z < posts - 1; z++) {
+        for (let x = 1; x < posts - 1; x++) {
+          const h = grid.height[z * posts + x]!;
+          const drop = Math.min(
+            h - grid.height[z * posts + x - 1]!,
+            h - grid.height[z * posts + x + 1]!,
+            h - grid.height[(z - 1) * posts + x]!,
+            h - grid.height[(z + 1) * posts + x]!,
+          );
+          if (drop > dropM) {
+            count++;
+          }
+        }
+      }
+
+      return count;
+    };
+
+    expect(census(1), 'cones dropping more than 1 m on all four sides').toBeLessThan(80);
+    expect(census(1.5), 'cones dropping more than 1.5 m').toBeLessThan(25);
+    expect(census(3), 'cones dropping more than 3 m').toBeLessThan(6);
+
+    // And the planet was not flattened to get there: the retune is supposed to spread the relief, not remove it.
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const h of grid.height) {
+      lo = Math.min(lo, h);
+      hi = Math.max(hi, h);
+    }
+
+    expect(hi - lo, 'relief over the probe window').toBeGreaterThan(200);
+  });
+
+  it('counts the fold: a ridged spec authors at half its finest octave', () => {
+    // The unit behind the rule above, pinned on its own so the halving cannot be quietly dropped from `finestFeatureM`
+    // and leave every layer passing again.
+    const base = { seed: 1, octaves: 3, wavelengthXM: 260, wavelengthZM: 220, lacunarity: 2.09, gain: 0.55 };
+    const plain = finestFeatureM({ ...base, ridged: false });
+    const ridged = finestFeatureM({ ...base, ridged: true });
+
+    expect(plain).toBeCloseTo(220 / 2.09 ** 2, 6);
+    expect(ridged).toBeCloseTo(plain / 2, 6);
   });
 });
+
+/**
+ * The grade a terrace riser's width is measured at: 45 degrees.
+ *
+ * Not the slope filter's ceiling — see the rule below for why that was tried and withdrawn. This is the steepest ground a
+ * walker reads as ground rather than as a wall, and therefore the steepest at which banding is a thing the eye resolves.
+ */
+const REFERENCE_GRADE = 1.0;
 
 describe('the authored planet', () => {
   const field = coarsePlanet();

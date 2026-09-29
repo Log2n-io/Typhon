@@ -403,6 +403,22 @@ function affectorAt(affector: Affector, x: number, z: number, current: number, w
   }
 }
 
+/**
+ * How wide a terrace riser is **on the ground**, in metres, where the underlying landform has the given slope.
+ *
+ * The other half of the feature rule, and the half that had no expression at all — the Nyquist check walked straight past
+ * every terrace layer because it only understood fractals.
+ *
+ * {@link terraceAt} spends `1 / gain` of a band on the rise, so the riser is `stepM / gain` of INPUT HEIGHT. What that
+ * costs horizontally depends on the ground it is laid over: on a 0.35 grade, 5 m of height happens over 14.8 m — under the
+ * four-post floor, on a layer whose slope filter admitted anything up to 40.
+ */
+export function riserWidthM(stepM: number, sharpness: number, slope: number): number {
+  // Transcribed from `terraceAt`; the two must not drift.
+  const gain = 1 + sharpness * 8;
+  return stepM / gain / slope;
+}
+
 /** Quantises a height into bands of `stepM`, with `sharpness` controlling how much of a band the rise occupies. */
 export function terraceAt(h: number, stepM: number, sharpness: number): number {
   const k = h / stepM;
@@ -424,7 +440,7 @@ export function terraceAt(h: number, stepM: number, sharpness: number): number {
 export function boundaryWeight(boundary: Boundary, x: number, z: number): number {
   switch (boundary.kind) {
     case 'circle':
-      return feather(boundary.radiusM - Math.hypot(x - boundary.x, z - boundary.z), boundary.featherM);
+      return feather(boundary.radiusM - distance(x - boundary.x, z - boundary.z), boundary.featherM);
     case 'rect': {
       const dx = boundary.halfXM - Math.abs(x - boundary.x);
       const dz = boundary.halfZM - Math.abs(z - boundary.z);
@@ -459,8 +475,20 @@ function filterWeight(filter: Filter, grid: HeightGrid, ix: number, iz: number):
   return bandWeight(slopeAtPost(grid, ix, iz), filter.min, filter.max, filter.feather);
 }
 
-/** 1 inside `[min, max]`, ramping to 0 over `feather` on each side. */
+/**
+ * 1 inside `[min, max]`, ramping to 0 over `feather` on each side.
+ *
+ * **NaN weighs nothing.** A slope read outside a row window is NaN by design (see `slopeAtPost`), and both `value < min`
+ * and `value > max` are false for it — so without this line the function falls through to `return 1` and applies the layer
+ * at **full strength** exactly where it knows nothing. Today the halo is wide enough that the NaN never reaches a row the
+ * band keeps, so the guard changes no baked value; it stops a fourth slope-filtered layer, or one reading two posts out,
+ * from turning that margin into a stripe of rock along every band boundary whose shape depends on the core count.
+ */
 function bandWeight(value: number, min: number, max: number, feather: number): number {
+  if (Number.isNaN(value)) {
+    return 0;
+  }
+
   if (value < min) {
     return feather <= 0 ? 0 : rampUp((value - (min - feather)) / feather);
   }
@@ -496,7 +524,19 @@ export function slopeAtPost(grid: HeightGrid, ix: number, iz: number): number {
   const here = (iz - rowOffset) * posts;
   const dx = runX === 0 ? 0 : (height[here + x1] - height[here + x0]) / runX;
   const dz = runZ === 0 ? 0 : (height[(z1 - rowOffset) * posts + ix] - height[(z0 - rowOffset) * posts + ix]) / runZ;
-  return Math.hypot(dx, dz);
+  return distance(dx, dz);
+}
+
+/**
+ * Length of a 2-D vector, spelled out rather than `Math.hypot`.
+ *
+ * **`Math.hypot` is not specified to be correctly rounded and `Math.sqrt` is** (IEEE-754, as are `*` and `+`). Every
+ * distance below feeds a boundary weight or a slope filter, and both feed the baked heights that a C# twin must
+ * reproduce bit for bit — so a function whose last bit is the engine's business has no place in the bake. Checked when
+ * this changed: the golden did not move, so V8's `hypot` happened to agree. Happening to agree is not the contract.
+ */
+function distance(dx: number, dz: number): number {
+  return Math.sqrt(dx * dx + dz * dz);
 }
 
 /** Positive inside the polygon, negative outside; the magnitude is the distance to the nearest edge. */
@@ -539,7 +579,7 @@ function distanceToSegment(px: number, pz: number, ax: number, az: number, bx: n
   const abz = bz - az;
   const denominator = abx * abx + abz * abz;
   const t = denominator <= 0 ? 0 : Math.min(Math.max(((px - ax) * abx + (pz - az) * abz) / denominator, 0), 1);
-  return Math.hypot(px - (ax + abx * t), pz - (az + abz * t));
+  return distance(px - (ax + abx * t), pz - (az + abz * t));
 }
 
 /** Re-exported so a layer tree can be written without importing two modules. */

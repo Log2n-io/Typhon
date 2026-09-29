@@ -104,6 +104,30 @@ for (let iz = 3; iz < GRID_POSTS; iz += 17) {
   }
 }
 
+/**
+ * FNV-1a over the field's raw bytes, as two 32-bit halves so neither runtime needs 64-bit integers.
+ *
+ * The 128-post grid above pins the tree; this pins the WHOLE field at a resolution where the parts that depend on
+ * resolution actually differ — boundary ranges in posts, the grid rim the slope filter reads, and the f32 rounding of
+ * sixteen times as many accumulated values. A digest rather than a fixture because the alternative is a 1 MB file in the
+ * repository, and a digest is the same evidence.
+ */
+function digestOf(values: Float32Array): string {
+  const bytes = new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
+  let hi = 0x811c9dc5;
+  let lo = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    lo = Math.imul(lo ^ bytes[i], 0x01000193) >>> 0;
+    hi = Math.imul(hi ^ lo, 0x01000193) >>> 0;
+  }
+
+  return hi.toString(16).padStart(8, '0') + lo.toString(16).padStart(8, '0');
+}
+
+const FIELD_POSTS = 512;
+const fieldField = new Heightfield(createHeightGrid(FIELD_POSTS, 16384 / FIELD_POSTS, -8192));
+bakeTatooine(fieldField);
+
 mkdirSync('test/golden', { recursive: true });
 writeFileSync(
   'test/golden/terrain-hash.json',
@@ -123,6 +147,12 @@ writeFileSync(
         minHeightM: bitsOf(field.minHeightM),
         maxHeightM: bitsOf(field.maxHeightM),
         posts_: grid,
+      },
+      field: {
+        posts: FIELD_POSTS,
+        spacingM: 16384 / FIELD_POSTS,
+        originM: -8192,
+        digest: digestOf(fieldField.grid.height),
       },
     },
     null,

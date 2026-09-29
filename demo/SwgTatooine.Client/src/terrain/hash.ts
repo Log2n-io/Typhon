@@ -136,6 +136,23 @@ export function fractalAt(spec: FractalSpec, x: number, z: number): number {
   return sum / total;
 }
 
+/**
+ * The narrowest feature a fractal spec can author, in metres.
+ *
+ * **This is the number a layer has to be checked against, and the ridged case is why it is a function and not a comment.**
+ * Plain fBm's finest octave is its shortest wavelength divided by `lacunarity^(octaves−1)`. A RIDGED octave is folded
+ * about its midline by {@link ridge}, which turns one smooth hump into two creases — so the period the post grid actually
+ * has to carry is **half** the octave's own wavelength.
+ *
+ * Missing that halving is exactly how `cliff detail` passed a 17.5 m check while authoring 8.8 m creases on a 4 m grid,
+ * and put the one-post pyramids back that the same layer had been retuned to remove. The check had the right formula for
+ * the wrong signal.
+ */
+export function finestFeatureM(spec: FractalSpec): number {
+  const finest = Math.min(spec.wavelengthXM, spec.wavelengthZM) / spec.lacunarity ** (spec.octaves - 1);
+  return spec.ridged ? finest * 0.5 : finest;
+}
+
 /** One ridged octave: fold about the midline, then square. */
 function ridge(n: number): number {
   const folded = 1 - Math.abs(2 * n - 1);

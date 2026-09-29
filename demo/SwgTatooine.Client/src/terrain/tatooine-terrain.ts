@@ -275,13 +275,20 @@ export function landformLayers(seed = TERRAIN_SEED): readonly TerrainLayer[] {
       // the plain. Slope is what the layer actually means — terrace the flanks, leave the tops and the flats alone — and
       // it is the same filter mechanism, so this costs nothing.
       //
-      // `sharpness` came down from 0.9 because the riser at 0.9 is about a ninth of a step, which on a steep face is under
-      // one post wide. That was the other 7 % of the spikes.
+      // `sharpness` came down from 0.9, then 0.6, then to this — and the last step is the only one that was measured
+      // rather than reasoned. At 0.6 the riser is 30 / 5.8 = 5.17 m of height, which on a 0.35 grade is 14.8 m of ground,
+      // under the four-post floor. At 0.08 it is 30 / 1.64 = 18.3 m of height, which is over four posts wide at 45°.
+      //
+      // **A slope ceiling was tried here and made the terrain worse, which is worth recording so it is not tried again.**
+      // Capping the filter at 0.5 seemed right — a cliff face does not want banding — but the cap is itself a spatial
+      // boundary, and it lands exactly on the steep ground where its own feather is a sub-post feature. Measured over a
+      // 16.8 km² window, capping at 0.5 took the cone count from 120 to 157 and capping at 0.35 made it worse again. The
+      // riser's HEIGHT is the honest control; the filter's ceiling is not.
       name: 'mesa strata',
       boundary: { kind: 'polygon', points: [...MESA_BELT], featherM: 1100 },
       filters: [{ kind: 'slope', min: 0.1, max: 40, feather: 0.06 }],
       blend: 'replace',
-      affector: { kind: 'terrace', stepM: 30, sharpness: 0.6 },
+      affector: { kind: 'terrace', stepM: 30, sharpness: 0.08 },
     },
     {
       // Same idea over the highlands, one step shallower so the two regions do not band at the same altitudes.
@@ -289,29 +296,45 @@ export function landformLayers(seed = TERRAIN_SEED): readonly TerrainLayer[] {
       boundary: { kind: 'polygon', points: [...BROKEN_HIGHLANDS], featherM: 1000 },
       filters: [{ kind: 'slope', min: 0.12, max: 40, feather: 0.07 }],
       blend: 'replace',
-      affector: { kind: 'terrace', stepM: 26, sharpness: 0.55 },
+      // 0.07 rather than the mesa belt's 0.08: the step is 26 m, so the same sharpness leaves a 15.85 m riser — a
+      // whisker under the four-post floor. The rule is the constraint; the constant follows it.
+      affector: { kind: 'terrace', stepM: 26, sharpness: 0.07 },
     },
     {
       // Rock where the ground is ALREADY steep. This is the mechanism that makes terrain look caused rather than drawn,
       // and it is four lines of configuration over the slope of the layers above.
       //
-      // Its wavelength nearly doubled (90 m → 190 m) for one reason: at 90 m over four octaves the finest octave was
-      // 9.9 m, below the 16 m the field could carry, and the result was ~1 500 one-post pyramids. The finest octave is the
-      // number that matters and it is set by the SHORTER of the two wavelengths — 160 / 2.09³ = 17.5 m, above
-      // {@link MIN_FEATURE_M}. Grade 7.9 %.
+      // **This layer put the pyramids back, the check that was supposed to stop it agreed with it, and the first attempt
+      // to fix it by reasoning alone made the count worse.**
+      //
+      // The earlier retune (90 m → 190 m) reasoned that the finest octave is 160 / 2.09³ = 17.5 m, above MIN_FEATURE_M,
+      // and the test computed the same expression and passed. Both ignored `ridged`: the fold at {@link ridge} turns one
+      // hump into two creases, so the period the grid has to carry is HALF the octave — 8.8 m on a 4 m field.
+      //
+      // Fixing only that was not enough, and the reason is the one thing neither the rule nor the test could see: **this
+      // layer and the terraces are not independent.** Over a 16.8 km² window, `cliff detail` alone leaves 45 cones and the
+      // terraces alone leave 38 — but together they leave 271, five times the sum. The terraces build risers, this layer
+      // is filtered to fire on steep ground, and slope is a central difference over ADJACENT POSTS, so a riser a few posts
+      // wide reads as a cliff face and gets decorated with the finest noise in the tree. A layer filtered on a signal that
+      // is itself at post resolution inherits that resolution however long its own wavelengths are.
+      //
+      // So the two were swept together rather than argued about. This point — three octaves at 400 m, amplitude 9 — takes
+      // the census from 212/105/24 cones (dropping more than 1 / 1.5 / 3 m to all four neighbours) to **41/9/1**, with the
+      // relief unchanged at 234 m against 238 m. `finestFeatureM` puts its finest feature at 400 / 2.09² / 2 = 45.8 m,
+      // which is eleven posts. Grade 1.9 %: broader and smoother, which is what was asked for.
       name: 'cliff detail',
       boundary: null,
       filters: [{ kind: 'slope', min: 0.35, max: 40, feather: 0.2 }],
       blend: 'add',
       affector: {
         kind: 'fractal',
-        amplitudeM: 15,
-        biasM: -5,
+        amplitudeM: 9,
+        biasM: -3,
         fractal: {
           seed: seed ^ 0xd7,
-          octaves: 4,
-          wavelengthXM: 190,
-          wavelengthZM: 160,
+          octaves: 3,
+          wavelengthXM: 472,
+          wavelengthZM: 400,
           lacunarity: 2.09,
           gain: 0.55,
           ridged: true,

@@ -86,7 +86,8 @@ export class Heightfield {
     const s = this.grid.spacingM;
     const dx = (this.heightAt(x + s, z) - this.heightAt(x - s, z)) / (2 * s);
     const dz = (this.heightAt(x, z + s) - this.heightAt(x, z - s)) / (2 * s);
-    return Math.hypot(dx, dz);
+    // See `layers.ts`'s `distance`: `Math.sqrt` is correctly rounded and `Math.hypot` is not.
+    return Math.sqrt(dx * dx + dz * dz);
   }
 
   /** Recomputes {@link minHeightM} and {@link maxHeightM}. Call once after a bake. */
