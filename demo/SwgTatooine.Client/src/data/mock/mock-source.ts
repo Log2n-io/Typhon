@@ -90,6 +90,27 @@ export class MockSource implements DataSource, LatencyControl {
     return MOCK_PLANET;
   }
 
+  /** Never: the mock's world is one realm on one profile, and nothing in it can empty the store. */
+  get resetCount(): number {
+    return 0;
+  }
+
+  /** The mock has one profile and no sessions to move between them, so the control hides rather than pretending. */
+  get canSpectate(): boolean {
+    return false;
+  }
+
+  get spectatingNetId(): number {
+    return 0;
+  }
+
+  spectate(): void {}
+
+  /** The mock controls nothing: it has no sessions and no SELF block. */
+  get selfNetId(): number {
+    return 0;
+  }
+
   /** The mock's own worker stops on demand, so pausing has always worked here. */
   get canPause(): boolean {
     return true;

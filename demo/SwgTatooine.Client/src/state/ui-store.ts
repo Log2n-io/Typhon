@@ -23,6 +23,13 @@ export interface RealmRequest {
   readonly seq: number;
 }
 
+/** A pending ask to ride an entity, or to stop riding. Sequenced for {@link RealmRequest}'s reason: the server may refuse. */
+export interface SpectateRequest {
+  /** The subject, or 0 to stop. */
+  readonly netId: number;
+  readonly seq: number;
+}
+
 /** A set of archetype names held as a map, so a missing name reads as its default rather than as `false`. */
 export type NameFlags = Readonly<Record<string, boolean>>;
 
@@ -70,6 +77,8 @@ export interface UiState {
    * indistinguishable from no pick at all, and a viewer whose first attempt was rate-limited could never retry.
    */
   readonly realmRequest: RealmRequest | null;
+  /** A pending ask to ride an entity, or `null`. */
+  readonly spectateRequest: SpectateRequest | null;
   /** The realms this server says it has, or `null` from the mock and from a server that publishes none. */
   readonly realms: RealmDirectory | null;
   /**
@@ -101,6 +110,10 @@ export interface UiState {
   readonly flyTo: (x: number, z: number, distance: number) => void;
   /** Asks the server to put this session in a realm. An ask: the server may refuse it. */
   readonly viewRealm: (realmId: number) => void;
+  /** Asks to ride an entity, or to stop with 0. The selection is KEPT — see the action. */
+  readonly spectate: (netId: number) => void;
+  /** Puts the selection and the camera on the entity the server says this session is riding, in ONE update. */
+  readonly rideSubject: (netId: number) => void;
   readonly setRealms: (realms: RealmDirectory | null) => void;
   readonly setTransition: (transition: TransitionState) => void;
 }
@@ -125,6 +138,7 @@ export const useUi = create<UiState>()((set) => ({
   follow: false,
   cameraRequest: null,
   realmRequest: null,
+  spectateRequest: null,
   realms: null,
   transition: IDLE,
 
@@ -201,6 +215,26 @@ export const useUi = create<UiState>()((set) => ({
   },
   setTransition: (transition) => {
     set({ transition });
+  },
+  rideSubject: (netId) => {
+    // One `set`, because the two halves are one fact. Done as `select` then `setCameraMode` it was two store updates
+    // and two renders, and the first of them had `cameraMode: 'god'` still in place — a visible flip out of the eye
+    // and back into it on every crossing, sixty times a second apart but on screen.
+    set({ selectedNetId: netId, follow: false, cameraMode: 'eye' });
+  },
+  spectate: (netId) => {
+    // The selection is NOT dropped here, and that is the difference from `viewRealm`. A crossing invalidates the
+    // selection because the viewer is going somewhere else; a ride is the viewer saying "this one". The RESET that
+    // follows drops it anyway — netIds are re-allocated for the new view — and `ClientApp` then re-selects the subject
+    // from the `SELF` block the server fills for the entity it anchored the session on, which is the only source that
+    // survives the reset.
+    //
+    // No fade either. There is no crossing to hide unless the subject is in another realm, and when it is the arrival
+    // raises the server-initiated branch on its own.
+    set((s) => ({
+      spectateRequest: { netId, seq: (s.spectateRequest?.seq ?? 0) + 1 },
+      cameraMode: netId === 0 ? 'god' : 'eye',
+    }));
   },
   viewRealm: (realmId) => {
     // The selection is dropped here as well as on arrival: the entity it names belongs to the realm being left, and

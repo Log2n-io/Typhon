@@ -9,10 +9,13 @@ export function Inspector() {
   const select = useUi((s) => s.select);
   const setFollow = useUi((s) => s.setFollow);
   const viewRealm = useUi((s) => s.viewRealm);
+  const spectate = useUi((s) => s.spectate);
   const realms = useUi((s) => s.realms);
   const published = useStats((s) => s.stats?.inspection ?? null);
   const realm = useStats((s) => s.stats?.realm ?? null);
   const canViewRealm = useStats((s) => s.stats?.canViewRealm) ?? false;
+  const canSpectate = useStats((s) => s.stats?.canSpectate) ?? false;
+  const ridingNetId = useStats((s) => s.stats?.ridingNetId) ?? 0;
   if (selectedNetId === 0) {
     return null;
   }
@@ -25,6 +28,12 @@ export function Inspector() {
   // shows every field the server sent, and a second path for one of them would be a second thing to keep in step.
   const portal = Number(inspection?.fields.find((f) => f.name === 'portal')?.value ?? -1);
   const door = canViewRealm ? interiorRealmOf(realm, portal, realms?.interiors ?? null) : null;
+
+  // The session is anchored on THIS entity. One comparison, because `ride.ts` has already decided which of the ride's
+  // two ids is the live one — the asked id before its frame lands, the server's after. Comparing against both here
+  // would keep the asked one live for the whole ride, and netIds are reused: an unrelated entity that inherited it in
+  // the new view would offer Stop for a ride it has nothing to do with.
+  const riding = ridingNetId !== 0 && selectedNetId === ridingNetId;
 
   return (
     <div className="panel inspector">
@@ -85,6 +94,24 @@ export function Inspector() {
             }}
           >
             Enter
+          </button>
+        )}
+        {/* Riding is the SESSION following the subject, which is a different thing from the camera doing it: the
+            server re-centres replication on the entity, so it cannot walk out of view and a door takes the viewer with
+            it. Hidden against a catalog that does not declare the command, as the realm control is. */}
+        {canSpectate && door === null && (
+          <button
+            className={riding ? 'active' : ''}
+            title={
+              riding
+                ? 'Stop riding: the session goes back to its own camera, in the realm you are in.'
+                : 'Make the session follow this entity, through doors and shuttles. The server may refuse it.'
+            }
+            onClick={() => {
+              spectate(riding ? 0 : selectedNetId);
+            }}
+          >
+            {riding ? 'Stop' : 'Ride'}
           </button>
         )}
         <button

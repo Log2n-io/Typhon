@@ -51,7 +51,8 @@ import {
 import { useChat } from '../state/chat-store';
 import { crossingKindOf, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
 import { advance, arrived } from './realm-transition';
-import { resetForRealm } from './realm-switch';
+import { resetForRealm, resetForSession, type RealmSwitchTargets } from './realm-switch';
+import { nextRide, NOT_RIDING, rideOwnsTheView, rideSubjectOf, type RideState } from './ride';
 import { useStats, type Inspection } from '../state/stats-store';
 import { useUi, type UiState } from '../state/ui-store';
 
@@ -265,6 +266,12 @@ export class ClientApp {
    * reused by a later realm is not mistaken for the one it replaced.
    */
   private realm: RealmView | null = null;
+  /** The source's `resetCount` as of the last frame: what {@link adoptSourceReset} compares against. */
+  private resetCount = 0;
+  /** Whether this session is anchored on an entity, and on which one; see {@link nextRide}. */
+  private ride: RideState = NOT_RIDING;
+  /** When the last release was asked for, so a subject that stays gone is retried at the command rate, not the frame rate. */
+  private lastReleaseMs = Number.NEGATIVE_INFINITY;
   /** The altitude of whichever camera drew the last frame, for the HUD. */
   private activeAltitude = 0;
   private selectionText = '';
@@ -545,6 +552,76 @@ export class ClientApp {
    * `onRealmChanged` fires inside `applier.apply()`, and a scene swap belongs to the frame that draws it, not to the
    * decode that caused it. Steady state is one reference compare against a string.
    */
+  /**
+   * Notices that the store was emptied under the app without the realm moving.
+   *
+   * <b>The door {@link adoptSourceRealm} does not cover.</b> A `RESET` invalidates every netId, and only some resets
+   * carry a realm change: a profile switch — which is what spectating an entity is — empties the store in the realm
+   * the session is already in, so `onRealmChanged` never fires and nothing would drop the selection. netIds are dense
+   * and reused, so the held one then resolves to a stranger.
+   *
+   * Runs BEFORE {@link adoptSourceRealm}, so a crossing is cleared once here and then again by the realm path, which
+   * adds the camera. The clearing is idempotent by construction — a selection already 0, a chat log already empty, a
+   * region already NaN — so the double call costs nothing, and the alternative, a flag saying which of the two has
+   * already run, is a second source of truth for "has this frame been reset".
+   */
+  private adoptSourceReset(): void {
+    const count = this.source?.resetCount ?? 0;
+    if (count === this.resetCount) {
+      return;
+    }
+
+    this.resetCount = count;
+    resetForSession(this.resetTargets());
+  }
+
+  /**
+   * Keeps the selection on the entity the SESSION is riding, across the resets that riding causes.
+   *
+   * <b>A ride cannot survive by netId.</b> Anchoring the session re-sends the whole view and netIds are allocated
+   * densely per view, so the subject almost never keeps the id that was clicked — and {@link adoptSourceReset} has just
+   * dropped the selection for exactly that reason. The server names the anchored entity in `SELF`, which is what
+   * `Control` is for, so this re-selects by being told rather than by guessing.
+   *
+   * <b>And it is how a lost subject ends the ride.</b> A subject that dies leaves the session anchored on nothing —
+   * `BoundLost`, 12-realms § 1.3: the engine keeps the session's realm and last point until the app re-anchors it — and
+   * `SELF` goes to 0. Releasing here rather than waiting for the viewer is what stops the camera riding a corpse, and
+   * the release is a real command, so the session gets its own camera back in the realm it was left in.
+   */
+  private adoptSubject(now: number): void {
+    const source = this.source;
+    if (source === null) {
+      return;
+    }
+
+    const ui = useUi.getState();
+    const step = nextRide(this.ride, source.spectatingNetId, source.selfNetId, ui.selectedNetId, source.resetCount);
+    this.ride = step.state;
+    if (step.action.kind === 'adopt') {
+      // The camera as well as the selection, because the reset dropped both: `select(0)` returns the camera to god
+      // mode, so re-selecting alone would leave the viewer looking at their subject from above after every door.
+      // Riding IS riding — the viewer can still leave eye mode by hand, and the next crossing puts them back in it.
+      ui.rideSubject(step.action.netId);
+      return;
+    }
+
+    if (step.action.kind !== 'release') {
+      return;
+    }
+
+    // A subject that died or left leaves the session anchored on nothing (`BoundLost`, 12-realms § 1.3: the engine
+    // keeps the session's realm and last point until the app re-anchors it). RETRIED rather than asked once, because
+    // the ask is rate-limited and a refused one would otherwise strand the ride with no control on screen to try
+    // again from — the selection is already 0, so the inspector is not even open. At the command's rate, not the
+    // frame's.
+    if (now - this.lastReleaseMs < REGION_INTERVAL_MS) {
+      return;
+    }
+
+    this.lastReleaseMs = now;
+    ui.spectate(0);
+  }
+
   private adoptSourceRealm(): void {
     const next = this.source?.realm ?? null;
     if (sameRealm(next, this.realm)) {
@@ -577,7 +654,17 @@ export class ClientApp {
     const asked = next !== null && ui.realmRequest?.realmId === next.realmId;
     ui.setTransition(arrived(ui.transition, crossingKindOf(previous, next, asked), performance.now()));
 
-    resetForRealm(next, {
+    resetForRealm(next, this.resetTargets());
+  }
+
+  /**
+   * The three things a reset has to reach that live in here and nowhere a test can get at.
+   *
+   * One object for both callers, so the reset path cannot drift between "the store was emptied" and "the store was
+   * emptied and we moved".
+   */
+  private resetTargets(): RealmSwitchTargets {
+    return {
       setCameraBounds: (bounds) => {
         this.mapCamera.setBounds(bounds);
       },
@@ -594,7 +681,7 @@ export class ClientApp {
         this.regionRadius = Number.NaN;
         this.lastRegionMs = Number.NEGATIVE_INFINITY;
       },
-    });
+    };
   }
 
   /**
@@ -742,6 +829,13 @@ export class ClientApp {
       this.source?.viewRealm(state.realmRequest.realmId);
     }
 
+    // The same contract as the realm ask: the server anchors the session or refuses, and nothing here pretends either
+    // happened. What follows is a RESET, which `adoptSourceReset` handles, and then `adoptSubject` re-finds the subject
+    // by the netId the server names in SELF.
+    if (state.spectateRequest !== null && state.spectateRequest !== previous.spectateRequest) {
+      this.source?.spectate(state.spectateRequest.netId);
+    }
+
     this.applyUi(state);
   }
 
@@ -762,7 +856,9 @@ export class ClientApp {
     const dt = Math.min(0.1, (now - this.lastFrameMs) / 1000);
     this.lastFrameMs = now;
     this.adoptSourceWorld();
+    this.adoptSourceReset();
     this.adoptSourceRealm();
+    this.adoptSubject(now);
     this.advanceTransition(now);
     this.clock.update(now);
     // Held keys may stop following: read the UI state after them.
@@ -931,6 +1027,10 @@ export class ClientApp {
   private sendRegion(now: number, radius: number, x: number, z: number): void {
     if (
       this.source === null ||
+      // A ride anchors the session on an entity, so the profile is a sphere around IT and the region is not read at all.
+      // Sending one anyway is not merely waste: a 1 500 m disc quantized into a 64 m interior collapses to a degenerate
+      // hull, which the server refuses and counts — so the HUD grew a refusal warning that meant nothing was wrong.
+      rideOwnsTheView(this.ride) ||
       !regionDue(
         x,
         z,
@@ -1072,6 +1172,8 @@ export class ClientApp {
       realm: this.source?.realm ?? null,
       canPause: this.source?.canPause ?? false,
       canViewRealm: this.source?.canViewRealm ?? false,
+      canSpectate: this.source?.canSpectate ?? false,
+      ridingNetId: rideSubjectOf(this.ride),
       replication: replicationStatsOf(this.source?.debug ?? null),
       inspection: ui.selectedNetId === 0 ? null : this.inspect(ui.selectedNetId),
       held: this.world.entityCount,

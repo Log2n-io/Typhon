@@ -92,6 +92,16 @@ export function Hud() {
               {stats.realm === null ? '' : ` (#${stats.realm.realmId})`}
             </td>
           </tr>
+          {stats.ridingNetId !== 0 && (
+            <tr>
+              {/* Immediately under the realm, because it is the reason the realm is what it is: a spectating session's
+                  realm is its subject's, and it changes when the subject walks through a door. */}
+              <td title="The session is anchored on this entity: replication is centred on it and follows it between realms.">
+                Riding
+              </td>
+              <td>#{stats.ridingNetId}</td>
+            </tr>
+          )}
           <tr>
             <td>World</td>
             <td>{server?.worldEntities.toLocaleString() ?? '—'} entities</td>

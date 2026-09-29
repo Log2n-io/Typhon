@@ -22,37 +22,52 @@ export interface RealmSwitchTargets {
 }
 
 /**
- * Everything that stops being true when a session crosses into another realm.
+ * Everything that stops being true when the store is emptied under the app, whatever emptied it.
  *
- * <b>A `RESET|REALM` empties the store and nothing else.</b> The SDK clears the netId map and every archetype and
- * relays the aggregate grids; every piece of state the app keeps ALONGSIDE the store survives, still describing a
- * realm that is no longer on screen. `ClientApp.adopt` faces the identical hazard when the store OBJECT is replaced,
- * and its comment states it exactly — netIds are dense and reused, so one held across the swap very often resolves
- * in the new store to a different entity. A realm switch keeps the same store object and empties it, so `adopt`
- * never runs, and every hazard it guards against is live.
+ * <b>A `RESET` empties the store and nothing else.</b> The SDK clears the netId map and every archetype and relays the
+ * aggregate grids; every piece of state the app keeps ALONGSIDE the store survives, still describing entities that no
+ * longer exist. `ClientApp.adopt` faces the identical hazard when the store OBJECT is replaced, and its comment states
+ * it exactly — netIds are dense and reused, so one held across the swap very often resolves in the new store to a
+ * different entity. A `RESET` keeps the same store object and empties it, so `adopt` never runs, and every hazard it
+ * guards against is live.
+ *
+ * <b>A realm change is only one of the ways it arrives.</b> A profile switch — which is what spectating an entity is —
+ * resets the store in the realm the session is already in, so `onRealmChanged` never fires and the crossing path never
+ * runs. That is the same defect one door further along, which is why this is the whole of what a reset invalidates and
+ * {@link resetForRealm} is it plus the camera.
  *
  * <b>What is kept is as considered as what is dropped.</b> The view radius, the layer and heatmap toggles, the grid,
  * label and debug switches, the terrain tolerance and the pause are the viewer's preferences, not facts about a
  * world. Re-deriving them at every door would make the client feel as though it had crashed and restarted.
- *
- * @param next The realm arrived in, or `null` when the session was left in none.
  */
-export function resetForRealm(next: RealmView | null, targets: RealmSwitchTargets): void {
-  // netIds are dense PER REALM, so the id that named a creature outside names an unrelated one inside with
+export function resetForSession(targets: RealmSwitchTargets): void {
+  // netIds are dense and reused, so the id that named a creature before the reset names an unrelated one after it with
   // near-certainty rather than by chance. `select(0)` also drops `follow` and returns the camera to god mode.
   useUi.getState().select(0);
 
   // The app's own half of the selection, which `select(0)` cannot reach. Left set, the next entry into eye mode reads
-  // as "same subject" and GLIDES from wherever the old realm's entity happened to be.
+  // as "same subject" and GLIDES from wherever the old entity happened to be.
   targets.forgetSelectionCaches();
 
   // The SDK's `RegionSender` forgets its half on `realmChanged`; this half was left holding "already sent this",
-  // which suppresses the first region of the new realm until the camera happens to move.
+  // which suppresses the first region after the reset until the camera happens to move.
   targets.forgetRegion();
 
   // Chat is fifty metres of earshot, routed within one realm. Carrying a shop's conversation onto another planet is
   // the visible form of this whole class of bug.
   useChat.getState().clear();
+}
+
+/**
+ * A reset that also moved the session to another realm: {@link resetForSession}, and then the camera.
+ *
+ * The camera is the half that is specific to a crossing. A reset inside one realm leaves every coordinate it holds
+ * valid, so moving it would be a jump the viewer did not ask for; a crossing invalidates all of them at once.
+ *
+ * @param next The realm arrived in, or `null` when the session was left in none.
+ */
+export function resetForRealm(next: RealmView | null, targets: RealmSwitchTargets): void {
+  resetForSession(targets);
 
   if (next === null) {
     return;

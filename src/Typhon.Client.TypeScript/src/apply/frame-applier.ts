@@ -64,6 +64,16 @@ export interface FrameApplierOptions {
    */
   readonly onRealmChanged?: (previous: RealmFrame | null, current: RealmFrame | null) => void;
   /**
+   * Called when a frame carries `RESET`, after the store, the grids and `SELF` are cleared and before any of the frame's
+   * records apply.
+   *
+   * **Every netId the consumer holds is invalid from here.** They are dense and reused, so one kept across a reset
+   * resolves in the refilled store to an unrelated entity rather than to nothing — a selection, a camera subject, a
+   * label cache. A realm change is only one of the ways a reset arrives; a reconnect, a profile switch and a variant
+   * switch are the others, and none of them raises {@link onRealmChanged}. A crossing raises both, this one first.
+   */
+  readonly onReset?: () => void;
+  /**
    * The realm the session is already in, for an applier that starts mid-stream — a recording replayed from a later
    * frame, a test — whose first frame will not carry the `REALM` that placed it. Normally absent: a session's first
    * frame is a `RESET` that carries its `REALM`.
@@ -271,6 +281,11 @@ export class FrameApplier implements TickSink, EntitiesTarget {
       }
 
       this.selfState.clear();
+
+      // After the clear and before any record applies, so a consumer that drops its netIds here cannot be handed one
+      // from the refilled store first. A crossing also raises onRealmChanged, later in the same frame, once the REALM
+      // block is read.
+      this.options.onReset?.();
     }
   }
 

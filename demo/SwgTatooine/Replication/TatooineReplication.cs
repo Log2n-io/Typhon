@@ -13,6 +13,27 @@ public struct ViewRealm
 }
 
 /// <summary>
+/// A god camera asks to ride an entity: the session itself follows it, wherever it goes (CLI3D-10 rung 2).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>The session, not the camera.</b> The client could already point its eye camera at any entity it held, but the SESSION stayed a region around a point
+/// the camera chose: the subject could walk out of it, and a subject that walked through a door simply left the store. This makes the subject the anchor —
+/// the profile becomes the player's <c>AroundControlled</c> sphere and the engine takes both the realm and the centre from the entity, carrying the session
+/// through portals and shuttles in the same tick the entity crosses (12-realms § 1.3).
+/// </para>
+/// <para>
+/// <b>It names a netId, never an entity.</b> The resolution is <c>TryResolve</c>, which admits only what this session was shown (SUB-26), so the command
+/// cannot be used to look at something the viewer was never sent.
+/// </para>
+/// </remarks>
+public struct Spectate
+{
+    /// <summary>The subject's network identity, or 0 to stop and go back to a camera of one's own.</summary>
+    public uint NetId;
+}
+
+/// <summary>
 /// "Walk to this point." The one movement intent a client needs and the only one it gets (SWG-01).
 /// </summary>
 /// <remarks>
@@ -260,6 +281,10 @@ public static class TatooineReplication
     /// </summary>
     public const string PlayerProfile = "player-lite";
 
+    /// <summary>The profile a camera riding an entity is served: <see cref="PlayerProfile"/>'s shape plus the buildings. See its declaration for why it is
+    /// a separate profile and not a flag on the player's.</summary>
+    public const string SpectateProfile = "spectate";
+
     /// <summary>The session kind a small-view client names in <c>HELLO</c>.</summary>
     public const string PlayerKind = "player";
 
@@ -282,6 +307,21 @@ public static class TatooineReplication
 
     /// <summary><c>ACKS</c> reason: the realm asked for is not registered — never was, or is a dungeon nobody is inside.</summary>
     public const byte ViewRealmNoSuchRealm = AckReasons.FirstApplicationReason + 1;
+
+    /// <summary>
+    /// <c>ACKS</c> reason: the netId names nothing this session was shown — it left the view between the click and the tick.
+    /// </summary>
+    /// <remarks>
+    /// <b>There is deliberately no "a player may not spectate" code beside it.</b> <see cref="Spectate"/> declares <c>Roles(SessionRole.Spectator)</c>, and
+    /// the engine answers a command a role may not send with <see cref="AckReasons.Forbidden"/> before any system sees it — so an application check for the
+    /// same thing is unreachable, and a reason code for it would be a constant nothing can ever send. Measured, not assumed: a case that asserted the
+    /// application's own refusal timed out, and the same case asserting <c>Forbidden</c> passes.
+    /// </remarks>
+    public const byte SpectateNoSuchEntity = AckReasons.FirstApplicationReason + 2;
+
+    // There is deliberately no "you are riding" refusal code. Asking for a realm while riding ENDS the ride and goes there — see the ViewRealm loop. The
+    // first version refused it instead, which needed the application to know whether the engine considered the session anchored; it got that wrong once, in
+    // the tick between asking for the god profile and the prologue applying it, and the wrong answer was a throw on the tick thread.
 
     /// <summary>The realm kind of a building's interior (Realms G3): a one-cell realm, served whole.</summary>
     public const string InteriorKind = "interior";
@@ -403,6 +443,55 @@ public static class TatooineReplication
     private static readonly HashSet<SessionId> Kicked = [];
 
     /// <summary>
+    /// The sessions riding an entity, and which one — the ANCHOR, which is what the realm command consults to decide whether to place the session or to
+    /// end its ride and defer the placement by a tick.
+    /// </summary>
+    /// <remarks>
+    /// Tick-thread only, entered when a <see cref="Spectate"/> is accepted and removed when it is released or its session closes. It is not a cache of
+    /// something the engine knows: the engine has the anchor, but nothing public reads it back, and asking <c>Enter</c> and catching the throw would be
+    /// finding out by crashing.
+    /// </remarks>
+    private static readonly Dictionary<SessionId, EntityId> Spectators = [];
+
+    /// <summary>
+    /// Sessions whose god profile has been asked for and which still need putting somewhere, with the realm to put them in.
+    /// </summary>
+    /// <remarks>
+    /// <b>Releasing takes two ticks, and it is the engine's shape rather than a workaround.</b> A profile requested through <c>Session</c> is applied by the
+    /// NEXT tick's prologue (<c>SubscriptionsCommands.SetRadius</c> remarks), and <c>Enter</c> is refused while the profile applied NOW is entity-anchored.
+    /// So the release asks for the god profile on one tick and enters the realm on the next, which is the "two resets, one tick apart" 12-realms § 1.4 names
+    /// when it rejects app-driven profile switches as the mechanism for realm variants.
+    /// </remarks>
+    private static readonly Dictionary<SessionId, RealmId> Releasing = [];
+
+    /// <summary>
+    /// The entity <paramref name="session"/> is riding, or <see cref="EntityId.Null"/>.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The subject.</returns>
+    /// <remarks>
+    /// <b>Tick thread only</b>, like the map it reads: it is a plain <see cref="Dictionary{TKey,TValue}"/> written by the replication system. A test may
+    /// call it between ticks to stage something; nothing may call it from another thread while the world is running.
+    /// <para>
+    /// <b>Not the same question as <see cref="ControlledBy"/>, which is why both exist.</b> That one reads
+    /// <c>Player.Session.Controller</c> — the demo's own possession record, written when a client is given a player to play. This is the ENGINE's control,
+    /// set by <c>Session(s).Control(e)</c>, which writes nothing on the entity: a ridden bot is not possessed and keeps deciding for itself, which is the
+    /// whole difference between spectating and playing.
+    /// </para>
+    /// </remarks>
+    public static EntityId SubjectOf(SessionId session) => Spectators.TryGetValue(session, out var subject) ? subject : EntityId.Null;
+
+    /// <summary>The sessions whose subject died this tick, collected before any is released because releasing writes to <see cref="Spectators"/>.</summary>
+    private static readonly List<SessionId> Dead = [];
+
+    /// <summary>The profile a camera session gets: the region shape when one is configured, and the whole world otherwise.</summary>
+    /// <remarks>
+    /// One property because it is asked twice — when a session opens, and when a ride is released — and a session that came back on a different profile
+    /// than it opened with would be a difference nobody would look for.
+    /// </remarks>
+    private static string GodProfileName => GodRegionMaxEdgeM > 0 ? GodRegionProfile : GodProfile;
+
+    /// <summary>
     /// Asks the next tick to send every open session a <c>KICK</c> carrying <paramref name="reason"/>, then close it. Callable from any thread.
     /// </summary>
     /// <param name="reason">Why, as the client will see it.</param>
@@ -481,6 +570,9 @@ public static class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _refusedFull, 0);
         System.Threading.Interlocked.Exchange(ref _kicksStaged, 0);
         Kicked.Clear();
+        Spectators.Clear();
+        Releasing.Clear();
+        Dead.Clear();
         MaxClients = 0;
         MaxSpectators = 0;
     }
@@ -721,6 +813,33 @@ public static class TatooineReplication
             p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
         });
 
+        // What a human WATCHING a bot is served: the player's own shape plus the buildings, because a town a rider walks through has to be there.
+        //
+        // <b>A profile of its own rather than WorldObject added to the player's, and the reason is a measurement.</b> Adding an archetype to a Sphere is not
+        // free for a sphere that MOVES: the crescent sweep queries every archetype in the set over every cell the sphere newly covers, so one more archetype
+        // is a real spatial query per crescent cell on every tick the anchor moves further than its slack — about 0.7 extra cell-queries per tick per session
+        // at walking pace. A first version put it on PlayerProfile with a comment claiming it cost "nothing per tick", which was read off the GOD profiles,
+        // where it is true: a World observer's geometry never moves, so it fills once from a monotone cursor and never sweeps.
+        //
+        // Paying that on PlayerProfile would have put it on every simulated player, watched or not — and that is the profile the demo's CPU numbers are
+        // taken on, so it would also have made every measurement across this change incomparable. Riders are one per human; players are the population.
+        //
+        // The player profile is not deficient for lacking it: its sessions are headless bots that render nothing.
+        subs.Profile(SpectateProfile, p =>
+        {
+            p.Detection(detection)
+                .Sphere(PlayerRadiusM, leave: PlayerLeaveM)
+                .AroundControlled()
+                .Of<Player>()
+                .Of<CityNpc>()
+                .Of<Creature>()
+                .Of<WorldObject>();
+
+            // Free here, unlike on the sphere above: a World observer fills once per realm from a cursor and has no crescent to sweep.
+            p.In(InteriorKind, v => v.World().AroundControlled().Of<Player>().Of<CityNpc>().Of<WorldObject>());
+            p.In(SpaceKind, v => v.World().AroundControlled().Of<Player>());
+        });
+
         // Realms G3: a planet's news reaches its subtree, and a god camera moves between planets with a command.
         // SWG-09's first event: the blow a client draws a line for. Routed to whoever knows either end rather than by
         // position, because that is exactly the set of sessions with something to draw it between.
@@ -740,6 +859,10 @@ public static class TatooineReplication
         // this file sends "x", "z", "paused". Nothing had ever sent it, so nothing had ever noticed; the first client to try got a catalog lookup failure
         // at the point of sending. Named here rather than worked around in the client, because the client was right.
         subs.Command<ViewRealm>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(v => v.Realm, Codec.VarUInt, "realm"));
+
+        // Spectators only, and at ViewRealm's rate for ViewRealm's reason: an accepted ask changes the session's profile, and a profile change is a whole
+        // RESET. It is a camera's control, not a player's — a possessed player already follows itself.
+        subs.Command<Spectate>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(s => s.NetId, Codec.VarUInt, "netId"));
 
         // The movement and targeting intents (SWG-01). Players and bots only: a spectator has no entity to move, so the engine refuses the message rather
         // than the system dropping it after the wire has already been paid for.
@@ -866,6 +989,10 @@ public static class TatooineReplication
                 }
             }
 
+            // This branch returns before the session-event walk below, so a kicked spectator never reaches the Closed case that would drop its entry. The
+            // rides are over either way; clearing here is what keeps the maps from being the one thing a shutdown leaks.
+            Spectators.Clear();
+            Releasing.Clear();
             return false;
         }
 
@@ -883,7 +1010,7 @@ public static class TatooineReplication
                 // RecountSessions. Clamped at zero: a reservation whose session never opened leaks one place until the next admission, which is the safe
                 // direction, and a decrement that ran twice would be the unsafe one.
                 Release(ref player ? ref _pendingClients : ref _pendingSpectators);
-                var request = subs.Session(e.Session).Profile(player ? PlayerProfile : GodRegionMaxEdgeM > 0 ? GodRegionProfile : GodProfile);
+                var request = subs.Session(e.Session).Profile(player ? PlayerProfile : GodProfileName);
                 if (player && PlayerBudgetBytesPerSecond > 0)
                 {
                     request.SetBudget(PlayerBudgetBytesPerSecond);
@@ -896,6 +1023,52 @@ public static class TatooineReplication
                     subs.Enter(e.Session, RealmId.Default);
                 }
             }
+            else if (e.Kind == SessionEventKind.Closed)
+            {
+                // A spectator that closed mid-ride leaves nothing behind. NOT because a stale entry could be mistaken for the next session on that slot —
+                // a SessionId carries its generation and compares on both, so a recycled slot is a different key and never collides. It is bounded growth:
+                // these maps are process-lifetime statics, and a long run that admits and drops spectators would otherwise accumulate one entry per ride.
+                Spectators.Remove(e.Session);
+                Releasing.Remove(e.Session);
+            }
+        }
+
+        // The second half of a release, one tick after the god profile was asked for; see Releasing. Drained before the commands below so that a viewer who
+        // stops spectating and immediately picks a realm is not refused by an anchor that is already gone.
+        if (Releasing.Count > 0)
+        {
+            ReleaseSpectators(subs);
+        }
+
+        if (Spectators.Count > 0)
+        {
+            DropDeadSubjects(subs, tick.Transaction);
+        }
+
+        // A possessed player's session never reaches here: Spectate declares Roles(SessionRole.Spectator) and the engine answers a player's with
+        // AckReasons.Forbidden before any system is offered it. See SpectateNoSuchEntity for why there is no application check for the same thing.
+        foreach (var command in subs.Commands<Spectate>())
+        {
+            if (command.Value.NetId == 0u)
+            {
+                StopSpectating(subs, command.Session, RealmId.None);
+                continue;
+            }
+
+            // TryResolve, not TryResolveAny: a client may only name what it was shown (SUB-26). A refusal is not an error — the subject may have left the
+            // view between the click and this tick — so it is answered rather than the session being closed.
+            if (!subs.TryResolve(command.Session, command.Value.NetId, out var subject))
+            {
+                subs.Reject(command, SpectateNoSuchEntity);
+                continue;
+            }
+
+            // The profile carries the anchor and Control names the entity; together they make the session's realm and centre the subject's, which is what
+            // takes the viewer through a door without a command (12-realms § 1.3). Control is set even when the session is already spectating something
+            // else, so switching subjects is one ask rather than a release and a re-ask.
+            subs.Session(command.Session).Profile(SpectateProfile).Control(subject);
+            Spectators[command.Session] = subject;
+            Releasing.Remove(command.Session);
         }
 
         // Stop or start the world. Logged on every change and never folded into a counter: a server that stopped
@@ -926,14 +1099,28 @@ public static class TatooineReplication
             }
 
             // Anything outside the permanent realms is the same answer to a client: there is nothing there to look at. See ViewableRealms for why this is a
-            // range check and not a registry lookup — the realms it admits are the ones that exist for the whole run, so the two cannot differ.
+            // range check and not a registry lookup — the realms it admits are the ones that exist for the whole run, so the two cannot differ. Checked
+            // before the ride is ended, so a bad id costs the viewer nothing.
             if (command.Value.Realm >= (uint)ViewableRealms)
             {
                 subs.Reject(command, ViewRealmNoSuchRealm);
                 continue;
             }
 
-            subs.Enter(command.Session, new RealmId((ushort)command.Value.Realm));
+            var wanted = new RealmId((ushort)command.Value.Realm);
+
+            // <b>A rider asking for a realm stops riding and goes there, and this branch is why Enter is unreachable from an anchored session.</b> Enter
+            // THROWS on one (12-realms § 1.3, CheckNotAnchored), and the dropdown is on screen throughout a ride — so rather than guard the call, the call
+            // is not made: the ask joins the release that is already deferred by a tick, and lands from the drain once the god profile has been applied.
+            // Refusing instead was the first design; it needed the application to predict the engine's two-phase apply, and the tick between asking for the
+            // god profile and the prologue applying it was a window in which the guard said "not anchored" and the engine still said it was.
+            if (Spectators.ContainsKey(command.Session) || Releasing.ContainsKey(command.Session))
+            {
+                StopSpectating(subs, command.Session, wanted);
+                continue;
+            }
+
+            subs.Enter(command.Session, wanted);
         }
 
         // Reclaim reservations nobody ever claimed. A reservation is released where its session's `Opened` event is seen, and a session that was accepted but
@@ -962,6 +1149,113 @@ public static class TatooineReplication
     /// Consecutive ticks with no session event, after which an unclaimed reservation is known to be a leak rather than an admission in flight.
     /// </summary>
     private static int _quietTicks;
+
+    /// <summary>
+    /// Ends every ride whose subject has been destroyed, so the session is not left anchored to nothing.
+    /// </summary>
+    /// <param name="subs">This tick's replication surface.</param>
+    /// <param name="tx">The tick's transaction, for the liveness test.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>The engine will not do this.</b> A destroyed subject leaves the session holding its realm and last point —
+    /// <c>BoundLost</c>, 12-realms § 1.3 — until the application re-anchors it, and the only thing the client is told is a <c>SELF</c> of 0. Without this the
+    /// server goes on treating that session as a rider for the rest of its life — every realm it picks costs it a pointless extra tick, and nothing ever
+    /// clears the anchor, because the only other thing that does is a release the client has no particular reason to think it needs. A demo with combat in
+    /// it reaches that.
+    /// </para>
+    /// <para>
+    /// One <c>IsAlive</c> per RIDING session per tick, and rides are counted on one hand: this is not a walk of the sessions, it is a walk of the map.
+    /// </para>
+    /// </remarks>
+    private static void DropDeadSubjects(SubscriptionsCommands subs, Transaction tx)
+    {
+        if (tx == null)
+        {
+            return;
+        }
+
+        Dead.Clear();
+        foreach (var (session, subject) in Spectators)
+        {
+            if (!tx.IsAlive(subject))
+            {
+                Dead.Add(session);
+            }
+        }
+
+        foreach (var session in Dead)
+        {
+            // Collected first and released after: StopSpectating writes to Spectators, and a dictionary may not be
+            // modified while it is being enumerated.
+            StopSpectating(subs, session, RealmId.None);
+        }
+    }
+
+    /// <summary>
+    /// Starts giving a spectating session its own camera back: asks for the god profile and notes where to put it.
+    /// </summary>
+    /// <param name="subs">This tick's replication surface.</param>
+    /// <param name="session">The session that asked to stop.</param>
+    /// <remarks>
+    /// <b>The realm is read BEFORE the anchor is dropped</b>, because it is the subject's and there is nowhere else to get it. A viewer who rode a bot into
+    /// a cantina and then stopped should be standing in that cantina, not thrown back to planet 0 — the realm they are looking at is the one they were last
+    /// shown, and any other answer is a teleport they did not ask for. The <c>Enter</c> itself waits a tick; see <see cref="Releasing"/>.
+    /// <para>
+    /// <paramref name="target"/> overrides that: a viewer who picks a realm while riding is saying where they want to be, so the ride ends and the drain
+    /// puts them there instead of back where the subject was.
+    /// </para>
+    /// <para>
+    /// <c>RealmOf</c> is the last realm PUBLISHED to this session, not the subject's this instant, so a release in the tick after the subject crossed a
+    /// portal leaves the viewer one realm behind. Accepted deliberately: it is the realm they were looking at when they pressed stop, which is a better
+    /// answer to "where am I now" than one they were never shown.
+    /// </para>
+    /// </remarks>
+    private static void StopSpectating(SubscriptionsCommands subs, SessionId session, RealmId target)
+    {
+        // RealmId.None is the "no opinion" sentinel and default(RealmId) cannot be: it is realm 0, which is planet 0 and a place a viewer may really want.
+        var wanted = target;
+        if (!Spectators.Remove(session))
+        {
+            // Not riding. A release is accepted rather than refused — a client asking for a state it is already in is not an error — but a realm asked for
+            // while a release is already pending must still land, so the pending target is updated rather than dropped.
+            if (wanted.IsNone || !Releasing.ContainsKey(session))
+            {
+                return;
+            }
+
+            Releasing[session] = wanted;
+            return;
+        }
+
+        var realm = wanted.IsNone ? subs.RealmOf(session) : wanted;
+        subs.Session(session).Profile(GodProfileName).Control(EntityId.Null);
+        Releasing[session] = realm.IsNone ? RealmId.Default : realm;
+    }
+
+    /// <summary>
+    /// Finishes every release whose god profile has had a tick to apply: puts the session in the realm it was last shown.
+    /// </summary>
+    /// <param name="subs">This tick's replication surface.</param>
+    /// <remarks>
+    /// <para>
+    /// Drained whole, once a tick. The anchor <c>Enter</c> would throw on is gone by construction — the profile was requested a tick ago and the prologue
+    /// between then and now applied it — and a session that closed in the meantime is answered with <see langword="false"/> rather than a throw.
+    /// </para>
+    /// <para>
+    /// <b>The realm is clamped to the permanent ones, because <c>Enter</c>'s other two refusals ARE throws.</b> It raises for a realm that is unregistered
+    /// and for one that is closing, and the realm here was read a tick ago: a dungeon unregistered in between would take the tick down. Realms below
+    /// <see cref="ViewableRealms"/> are registered at start-up and never unregistered, which is the same reason the realm command accepts only those.
+    /// </para>
+    /// </remarks>
+    private static void ReleaseSpectators(SubscriptionsCommands subs)
+    {
+        foreach (var (session, realm) in Releasing)
+        {
+            subs.Enter(session, realm.Value < ViewableRealms ? realm : RealmId.Default);
+        }
+
+        Releasing.Clear();
+    }
 
     /// <summary>
     /// Walks the open sessions once: publishes the live count per role for the admission hook, and collects which sessions need a player and which

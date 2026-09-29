@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { RealmFrame } from '@typhondb/client';
 import { MapCamera } from '../src/camera/map-camera';
 import { defaultDistanceFor, realmViewOf, type RealmView } from '../src/data/realm-view';
-import { resetForRealm, type RealmSwitchTargets } from '../src/app/realm-switch';
+import { resetForRealm, resetForSession, type RealmSwitchTargets } from '../src/app/realm-switch';
 import type { CameraBounds } from '../src/render/scene-profile';
 import { useChat } from '../src/state/chat-store';
 import { useUi } from '../src/state/ui-store';
@@ -164,5 +164,42 @@ describe('the camera actually lands inside the realm', () => {
     expect(camera.targetX).toBeLessThan(INTERIOR.maxX);
     expect(camera.targetZ).toBeGreaterThan(INTERIOR.minZ);
     expect(camera.targetZ).toBeLessThan(INTERIOR.maxZ);
+  });
+});
+
+describe('resetForSession — a reset that did not move the session', () => {
+  it('drops everything a crossing drops, because netId reuse does not need a realm change to bite', () => {
+    // Spectating an entity switches the session's PROFILE. The store is emptied and refilled in the realm it was
+    // already in, so `onRealmChanged` never fires — and the held netId names a stranger just as surely as it would
+    // through a door.
+    settleInARealm();
+    const calls = spy();
+    resetForSession(calls);
+
+    const ui = useUi.getState();
+    expect([ui.selectedNetId, ui.follow, ui.cameraMode]).toEqual([0, false, 'god']);
+    expect([calls.selectionCaches, calls.regions, useChat.getState().lines.length]).toEqual([1, 1, 0]);
+  });
+
+  it('leaves the camera exactly where it was, because nothing it holds became invalid', () => {
+    // The one thing a crossing does that this must NOT: every coordinate the camera holds is still in the realm it
+    // is still in. A jump here would throw the viewer across the planet for a reason they could not see.
+    settleInARealm();
+    const calls = spy();
+    resetForSession(calls);
+    expect([calls.jumps, calls.bounds, calls.order]).toEqual([[], [], []]);
+  });
+
+  it('is idempotent, which is what lets a crossing run it twice — once for the reset, once for the realm', () => {
+    settleInARealm();
+    const calls = spy();
+    resetForSession(calls);
+    resetForRealm(PLANET, calls);
+
+    const ui = useUi.getState();
+    expect([ui.selectedNetId, useChat.getState().lines.length]).toEqual([0, 0]);
+    // The second pass still did the camera work, which is the half only a crossing has.
+    expect(calls.jumps).toHaveLength(1);
+    expect(calls.order).toEqual(['bounds', 'jump']);
   });
 });

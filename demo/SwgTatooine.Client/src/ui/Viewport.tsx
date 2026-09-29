@@ -54,6 +54,12 @@ function factoryFor(kind: SourceKind): SourceFactory {
         const state = useUi.getState();
         state.setTransition(refused(state.transition, performance.now()));
       },
+      onSpectateRefused: () => {
+        // A refused ride leaves nothing behind on its own: no frame arrives, so nothing takes the camera out of the
+        // eye mode the ask put it in optimistically, and the viewer is left at head height on an entity the session
+        // was never anchored to. The rate-limited case says nothing at all without this.
+        useUi.getState().setCameraMode('god');
+      },
     });
 }
 

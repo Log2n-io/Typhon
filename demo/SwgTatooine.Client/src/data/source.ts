@@ -139,6 +139,15 @@ export interface DataSource {
    */
   readonly realm: RealmView | null;
   /**
+   * How many `RESET` frames this source has applied — a counter the app compares, never a callback.
+   *
+   * <b>{@link realm} does not cover it.</b> A realm change is one of the ways the store is emptied; a reconnect, a
+   * profile switch and a variant switch are the others, and none of them moves the realm. Spectating an entity in the
+   * realm the session is already in is exactly that case: every netId the app holds is invalidated and nothing in
+   * {@link realm} moves. Polled for the same reason as {@link realm} — the SDK raises it on the tick path.
+   */
+  readonly resetCount: number;
+  /**
    * The near tier's radius the source is actually being served, in metres, or 0 when it is not known yet.
    *
    * Its own accessor because the renderer reads it EVERY frame, and {@link stats} is a snapshot that allocates.
@@ -161,6 +170,29 @@ export interface DataSource {
    * than a camera's, is refused — so nothing here may assume the realm changed.
    */
   viewRealm(realmId: number): void;
+  /** Whether {@link spectate} does anything: a live session whose catalog declares the command. */
+  readonly canSpectate: boolean;
+  /**
+   * Asks the server to anchor this session on an entity, so the session follows it wherever it goes; 0 releases.
+   *
+   * <b>An ask, not a move</b>, like {@link viewRealm}: a netId the session was never shown, and a player's session
+   * rather than a camera's, are refused. Accepted, the answer is a `RESET` — the session's profile changed — which may
+   * or may not carry a new realm.
+   */
+  spectate(netId: number): void;
+  /**
+   * The netId this source last asked to ride, or 0. What the client BELIEVES, which is the only thing it can report:
+   * the anchor itself lives on the server and reaches the client as the shape of what it is served.
+   */
+  readonly spectatingNetId: number;
+  /**
+   * The netId of the entity this session controls, from the `SELF` block, or 0.
+   *
+   * <b>This is how a ride survives its own `RESET`.</b> Anchoring the session re-sends the whole view, and netIds are
+   * allocated densely per view, so the subject almost never keeps the id the viewer clicked. The server names it in
+   * `SELF` — that is what `Control` is for — so the client re-finds its subject by being told rather than by guessing.
+   */
+  readonly selfNetId: number;
   readonly stats: SourceStats;
   /** The simulated link's control, or null for a real connection. */
   readonly latency: LatencyControl | null;
@@ -169,6 +201,8 @@ export interface DataSource {
 export interface TyphonSourceOptions {
   /** The server refused a realm change, or the local rate limit did. Nothing else will ever say so. */
   readonly onRealmRefused?: () => void;
+  /** The server refused a ride, or the local rate limit did. Nothing else will ever say so. */
+  readonly onSpectateRefused?: () => void;
   /** The server's WebSocket URL, which must speak `typhon.3`. */
   readonly url: string;
   /** The clock render time comes from; the source feeds it every frame. */
@@ -207,10 +241,17 @@ export class TyphonSource implements DataSource {
   private chat: MessagePlan | null = null;
   private pauseCommand: MessagePlan | null = null;
   private viewRealmCommand: MessagePlan | null = null;
+  private spectateCommand: MessagePlan | null = null;
+  /** The sequence of the `Spectate` still awaiting an answer, or -1. */
+  private pendingSpectateSeq = -1;
+  /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
+  private spectating = 0;
   /** The sequence of the `ViewRealm` still awaiting an answer, or -1. See {@link viewRealm}. */
   private pendingRealmSeq = -1;
   /** The realm the last `REALM` block put this session in, derived once per change rather than per frame. */
   private currentRealm: RealmView | null = null;
+  /** How many `RESET` frames have been applied; see {@link DataSource.resetCount}. */
+  private resets = 0;
   private pendingRegion: { x: number; z: number; radius: number } | null = null;
   private lastSentRegion: { x: number; z: number; radius: number } | null = null;
   private paused = false;
@@ -408,6 +449,12 @@ export class TyphonSource implements DataSource {
     // already arrived.
     const seq = this.commands?.enqueue(this.viewRealmCommand, { realm: realmId }) ?? CommandRefused.RateLimited;
     this.pendingRealmSeq = seq >= 0 ? seq : -1;
+    if (seq >= 0) {
+      // Asking for a realm ENDS a ride, server-side: an anchored session cannot be placed, so the server stops the ride
+      // and puts the session where it asked instead. Mirrored here so the HUD stops naming a subject the moment the
+      // viewer has said they want to be somewhere else, rather than a frame later when SELF reports it.
+      this.spectating = 0;
+    }
     if (seq < 0) {
       // The local bucket was empty, so nothing was sent and no ack will ever come for it. Refused here, immediately,
       // rather than by a timeout later.
@@ -415,9 +462,52 @@ export class TyphonSource implements DataSource {
     }
   }
 
+  /** Whether this session may ask to ride an entity: the catalog declares the command. */
+  get canSpectate(): boolean {
+    return this.spectateCommand !== null;
+  }
+
+  /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
+  get spectatingNetId(): number {
+    return this.spectating;
+  }
+
+  /**
+   * Asks to ride an entity, or to stop.
+   *
+   * Rate-limited at one per tick with a burst of two, as `ViewRealm` is and for the same reason: every accepted ask
+   * changes the session's profile, and a profile change is a whole `RESET`.
+   */
+  spectate(netId: number): void {
+    if (this.spectateCommand === null) {
+      return;
+    }
+
+    const seq = this.commands?.enqueue(this.spectateCommand, { netId }) ?? CommandRefused.RateLimited;
+    this.pendingSpectateSeq = seq >= 0 ? seq : -1;
+    if (seq < 0) {
+      // Nothing was sent, so no ack will ever come for it. The belief is not updated: the client is still riding
+      // whatever it was riding, which is the truth.
+      this.options.onSpectateRefused?.();
+      return;
+    }
+
+    this.spectating = netId;
+  }
+
+  /** The controlled entity's netId, from `SELF`; see {@link DataSource.selfNetId}. */
+  get selfNetId(): number {
+    return this.applier?.selfState.netId ?? 0;
+  }
+
   /** The realm this session is in, or `null` before its first `REALM` block and after a `REALM(NONE)`. */
   get realm(): RealmView | null {
     return this.currentRealm;
+  }
+
+  /** How many `RESET` frames have been applied; see {@link DataSource.resetCount}. */
+  get resetCount(): number {
+    return this.resets;
   }
 
   /** Whether the session can stop the server's simulation: the catalog declares the command. */
@@ -431,6 +521,12 @@ export class TyphonSource implements DataSource {
       clock: this.options.clock,
       onEvent: (event) => {
         this.onEvent(event);
+      },
+      // Counted rather than acted on, for the same reason as the realm below: this runs inside `applier.apply()`, and
+      // dropping the app's selection there would do it in the middle of a decode. The app compares the count at the
+      // top of its frame.
+      onReset: () => {
+        this.resets++;
       },
       // The server drops the region it held on a realm change: the sender forgets it and the camera's goes out again.
       //
@@ -461,6 +557,7 @@ export class TyphonSource implements DataSource {
     // case pausing does what it did before — nothing but hold the region.
     this.pauseCommand = plan.commandByName('SetPaused');
     this.viewRealmCommand = plan.commandByName('ViewRealm');
+    this.spectateCommand = plan.commandByName('Spectate');
     this.commands = new CommandQueue({ plan });
     this.region =
       plan.clientRegion === null
@@ -520,6 +617,15 @@ export class TyphonSource implements DataSource {
     this.ping?.stop();
     this.ping = null;
     this.commands?.clear();
+
+    // Every belief about an outstanding ASK dies with the session that made it, and both halves matter. The ride:
+    // a resumed session is re-anchored by the server or it is not, and `SELF` says which — keeping the belief instead
+    // would leave the region suppressed for a god camera that is no longer riding anything, so it would be served
+    // nothing at all and never ask again. The sequences: a new `CommandQueue` starts again at 1, so a kept
+    // `pendingSpectateSeq` of 3 matches an unrelated post-reconnect command and rolls a live ride back on its ack.
+    this.spectating = 0;
+    this.pendingSpectateSeq = -1;
+    this.pendingRealmSeq = -1;
     // The store stays: a resume refills it with a RESET frame, and the renderer keeps drawing meanwhile.
     // So does the realm, for the same reason and more strongly — a resumed session's first frame is a
     // `RESET|REALM` of the realm its token recorded (12-realms § 1.6), so clearing it here would tear the scene
@@ -556,6 +662,14 @@ export class TyphonSource implements DataSource {
       if (seq === this.pendingRealmSeq) {
         this.pendingRealmSeq = -1;
         this.options.onRealmRefused?.();
+      }
+
+      // A refused ride. The belief has to be rolled back here or the HUD keeps naming a subject the server declined,
+      // and the client's own release would then be a no-op against a server that never started.
+      if (seq === this.pendingSpectateSeq) {
+        this.pendingSpectateSeq = -1;
+        this.spectating = 0;
+        this.options.onSpectateRefused?.();
       }
     }
 

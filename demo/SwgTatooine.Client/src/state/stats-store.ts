@@ -100,6 +100,17 @@ export interface FrameStats {
   readonly canPause: boolean;
   /** Whether the source can ask to look at another realm: a live session whose catalog declares `ViewRealm`. */
   readonly canViewRealm: boolean;
+  /** Whether the source can ask to ride an entity: a live session whose catalog declares `Spectate`. */
+  readonly canSpectate: boolean;
+  /**
+   * The netId of the entity this session is anchored on, or 0.
+   *
+   * <b>One number, deliberately.</b> A ride has two ids — the one the viewer clicked and the one the subject holds in
+   * the view the server is now sending — and they are different, because anchoring re-sends the view. `ride.ts`
+   * reconciles them; everything downstream compares against this. Reported at all because a still frame of a ridden
+   * bot is otherwise indistinguishable from a god camera that happens to be low down.
+   */
+  readonly ridingNetId: number;
   /** What the server's `DEBUG` block says about this session, or `null` when it sends none (CLI3D-03). */
   readonly replication: ReplicationStats | null;
   readonly inspection: Inspection | null;
