@@ -211,36 +211,110 @@ describe('the terrain quadtree', () => {
     expect(out.count).toBeGreaterThan(1);
   });
 
-  it('finishes the morph BEFORE the node is replaced, not exactly at the swap', () => {
-    // The error fudge, pinned against the node's OWN switch distance rather than against itself. Ending the blend exactly
-    // at the switch leaves it fractionally short on the last frame before the split, which is a hairline crack along the
-    // whole LOD boundary. Checked on the root, because its switch distance is the one this test can compute exactly.
+  it('gives a drawn node a morph that is LIVE at the distance it is drawn', () => {
+    // The test the morph never had, and the reason a total defect survived a green suite.
+    //
+    // Its predecessors asserted the band's SHAPE — `end > start`, `end < the node's own switch distance`, `end > half of
+    // it`. Every one of those passes while the band sits entirely inside the distances at which the node is NEVER DRAWN,
+    // which is what it did: a node is only emitted when `near >= enough`, and the band ran from `0.7 * enough` to
+    // `0.997 * enough`. So every vertex of every node had `toCamera > morphEnd`, `morph` clamped to 1, and the shader used
+    // the coarse grid unconditionally — the planet drawn at half its vertex density with three quarters of its triangles
+    // collapsed, while the tolerance measured a grid that was not on screen.
+    //
+    // So this one does not look at the band. It evaluates the shader's own expression at the nearest vertex each drawn
+    // node can have, and requires that the blend is somewhere other than hard against its stop.
+    const tree = new TerrainQuadtree();
+    tree.measure(roughEverywhere());
+    const out = selectionBuffers(16384);
+    const camX = 0;
+    const camY = 400;
+    const camZ = 0;
+    selectNodes(tree, out, camX, camY, camZ, 1200, 2, 1e9);
+    expect(out.count).toBeGreaterThan(4);
+
+    let live = 0;
+    for (let i = 0; i < out.count; i++) {
+      const x0 = out.data[i * 4]!;
+      const z0 = out.data[i * 4 + 1]!;
+      const size = out.data[i * 4 + 2]!;
+      // The closest point of this node's footprint to the camera: the smallest `toCamera` any of its vertices can take.
+      const nx = Math.min(Math.max(camX, x0), x0 + size);
+      const nz = Math.min(Math.max(camZ, z0), z0 + size);
+      const toCamera = Math.sqrt((nx - camX) ** 2 + camY ** 2 + (nz - camZ) ** 2);
+      const start = out.morph[i * 2]!;
+      const end = out.morph[i * 2 + 1]!;
+      // GROUND_VERTEX, transcribed.
+      const morph = Math.min(Math.max((toCamera - start) / Math.max(end - start, 1e-3), 0), 1);
+      if (morph < 1) {
+        live++;
+      }
+    }
+
+    // Under the defect this is exactly zero, at every camera position and every tolerance.
+    expect(live).toBeGreaterThan(0);
+  });
+
+  it('never morphs the root, which has no coarser grid to morph toward', () => {
+    // The root is not replaced by anything, so blending it onto "its parent's" grid would throw away half its vertices for
+    // nothing. Its band is placed beyond every distance the planet is drawn at — and finitely, because an Infinity in the
+    // Float32Array makes the shader's `(toCamera - start) / (end - start)` a NaN and a NaN mix factor puts the vertex
+    // nowhere at all.
     const tree = new TerrainQuadtree();
     tree.measure(cliffInOneCorner());
     const ppm = 1000;
     const tolerance = 2;
-    const rootSwitch = (tree.error[0] * ppm) / tolerance;
+    const rootSwitch = (tree.error[0]! * ppm) / tolerance;
     const out = selectionBuffers(8192);
     selectNodes(tree, out, 0, rootSwitch * 2, 0, ppm, tolerance, 1e9);
 
     expect(out.count).toBe(1);
     expect(out.data[2]).toBe(PLANET_EDGE_M);
-    expect(out.morph[1]).toBeLessThan(rootSwitch);
-    // And it closes late enough to be a blend rather than a jump: within the last third of the range.
-    expect(out.morph[1]).toBeGreaterThan(rootSwitch * 0.5);
+    expect(Number.isFinite(out.morph[0]!)).toBe(true);
+    expect(Number.isFinite(out.morph[1]!)).toBe(true);
+    expect(out.morph[0]!).toBeGreaterThan(PLANET_EDGE_M * 1000);
   });
 
-  it('gives every node a morph band that starts inside its range and ends at it', () => {
+  it('gives two nodes at one level the SAME band, or their shared edge cracks', () => {
+    // The morph band is per LEVEL and not per node, and this is the whole reason. The coarse snap moves an edge vertex
+    // ALONG the shared edge as well as across it, so two neighbours blending by different amounts put the same vertex in
+    // two places and the seam opens onto the sky. Deriving the band from each node's own error — which differs between
+    // neighbours, since that per-node error is the point of a quadtree — is what would reintroduce it.
+    const tree = new TerrainQuadtree();
+    tree.measure(roughEverywhere());
+    const out = selectionBuffers(16384);
+    selectNodes(tree, out, 0, 300, 0, 1200, 2, 1e9);
+    expect(out.count).toBeGreaterThan(4);
+
+    const bandBySize = new Map<number, [number, number]>();
+    for (let i = 0; i < out.count; i++) {
+      const size = out.data[i * 4 + 2]!;
+      const band: [number, number] = [out.morph[i * 2]!, out.morph[i * 2 + 1]!];
+      const seen = bandBySize.get(size);
+      if (seen === undefined) {
+        bandBySize.set(size, band);
+        continue;
+      }
+
+      expect(band[0]).toBe(seen[0]);
+      expect(band[1]).toBe(seen[1]);
+    }
+
+    // And the premise: more than one node was drawn at some level, or the loop above compared nothing.
+    expect(bandBySize.size).toBeLessThan(out.count);
+  });
+
+  it('gives every node a band that opens no earlier than the node is drawn', () => {
     const tree = new TerrainQuadtree();
     tree.measure(cliffInOneCorner());
     const out = selectionBuffers(8192);
     selectNodes(tree, out, 500, 120, -500, 1200, 2, 1e9);
     expect(out.count).toBeGreaterThan(0);
     for (let i = 0; i < out.count; i++) {
-      const start = out.morph[i * 2];
-      const end = out.morph[i * 2 + 1];
+      const start = out.morph[i * 2]!;
+      const end = out.morph[i * 2 + 1]!;
       expect(end).toBeGreaterThan(start);
       expect(start).toBeGreaterThanOrEqual(0);
+      expect(Number.isFinite(end)).toBe(true);
     }
   });
 });

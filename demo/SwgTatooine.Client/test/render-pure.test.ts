@@ -3,6 +3,7 @@ import { NullEngine } from '@babylonjs/core/Engines/nullEngine';
 import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import { Scene } from '@babylonjs/core/scene';
 import { AggregateGrid } from '@typhondb/client';
+import { altitudeOf, Placement } from '../src/data/placement';
 import { describe, expect, it } from 'vitest';
 import { fillHeatmap, slabAt } from '../src/render/heatmap-fill';
 import { PrefixUploader } from '../src/render/prefix-upload';
@@ -10,7 +11,18 @@ import { buildShape, type ShapeKind } from '../src/render/shapes';
 import * as shaders from '../src/render/shaders';
 import { KNOWN_ARCHETYPES } from '../src/data/archetypes';
 import { SELECTED_MESH_SCALE, STYLE_COUNT, styleFor, TINT_COUNT, type LayerStyle } from '../src/render/styles';
-import { packState, pickInstances, type PickHit } from '../src/render/view-math';
+import {
+  invertMatrix4,
+  packState,
+  pickInstances,
+  pickShapes,
+  rayGroundT,
+  unprojectRay,
+  type PickHit,
+  type PickRay,
+} from '../src/render/view-math';
+import { Heightfield } from '../src/terrain/heightfield';
+import { createHeightGrid } from '../src/terrain/layers';
 
 describe('shapes', () => {
   const closed: ShapeKind[] = ['box', 'arrow', 'prism', 'mound'];
@@ -242,21 +254,47 @@ describe('pickInstances', () => {
 
     return data;
   };
-  const fresh = (): PickHit => ({ archetype: -1, netId: 0, pixels: Infinity, depth: Infinity });
+  const fresh = (): PickHit => ({ archetype: -1, netId: 0, pixels: Infinity, depth: Infinity, inside: false });
   const screen = { x: 0, y: 0, w: 0 };
+  const inverse = new Float64Array(16);
+  /** The ray through a viewport pixel, by the same route the client takes. */
+  const rayAt = (px: number, py: number): PickRay => {
+    const ray: PickRay = { ox: 0, oy: 0, oz: 0, dx: 0, dy: 0, dz: 1 };
+    expect(invertMatrix4(m, inverse)).toBe(true);
+    expect(unprojectRay(inverse, px, py, 800, 800, ray)).toBe(true);
+    return ray;
+  };
 
   it('picks the instance nearest the cursor, and the nearer one on a tie, reporting the netId packed with it', () => {
     const data = pack(0, 100, 0, 50, 30, 100);
     const netIds = new Uint32Array([11, 22, 33]);
     const best = fresh();
-    pickInstances(m, data, netIds, 3, 0, 800, 800, 400, 400, 8, 4, best, screen);
+    pickInstances(rayAt(400, 400), m, data, netIds, 3, 0, 0, 1, 800, 800, 400, 400, 8, 4, best, screen);
     expect(best.netId).toBe(22);
     expect(best.archetype).toBe(4);
   });
 
   it('keeps what it holds when nothing is within reach; a point behind the camera projects to NaN, never within reach', () => {
     const best = fresh();
-    pickInstances(m, pack(0, -50, 30, 100), new Uint32Array([1, 2]), 2, 0, 800, 800, 400, 400, 8, 0, best, screen);
+    const data = pack(0, -50, 30, 100);
+    pickInstances(
+      rayAt(400, 400),
+      m,
+      data,
+      new Uint32Array([1, 2]),
+      2,
+      0,
+      0,
+      1,
+      800,
+      800,
+      400,
+      400,
+      8,
+      0,
+      best,
+      screen,
+    );
     expect(best.netId).toBe(0);
   });
 
@@ -266,7 +304,24 @@ describe('pickInstances', () => {
     const lift = new Float64Array(16);
     lift[1] = 10; // 10 m up at 100 m: 40 px above the centre on an 800 px viewport
     const best = fresh();
-    pickInstances(m, data, new Uint32Array([5]), 1, lift, 800, 800, 400, 360, 2, 0, best, screen);
+    pickInstances(
+      rayAt(400, 360),
+      m,
+      data,
+      new Uint32Array([5]),
+      1,
+      lift,
+      0,
+      1,
+      800,
+      800,
+      400,
+      360,
+      2,
+      0,
+      best,
+      screen,
+    );
     expect(best.netId).toBe(5);
   });
 
@@ -275,12 +330,188 @@ describe('pickInstances', () => {
     const data = pack(0, 100);
     data[1] = 10;
     const atGround = fresh();
-    pickInstances(m, data, new Uint32Array([7]), 1, 0, 800, 800, 400, 400, 2, 0, atGround, screen);
+    pickInstances(
+      rayAt(400, 400),
+      m,
+      data,
+      new Uint32Array([7]),
+      1,
+      0,
+      0,
+      1,
+      800,
+      800,
+      400,
+      400,
+      2,
+      0,
+      atGround,
+      screen,
+    );
     expect(atGround.netId, 'the cursor on the ground point must not pick a thing 10 m above it').toBe(0);
 
     const aloft = fresh();
-    pickInstances(m, data, new Uint32Array([7]), 1, 0, 800, 800, 400, 360, 2, 0, aloft, screen);
+    pickInstances(rayAt(400, 360), m, data, new Uint32Array([7]), 1, 0, 0, 1, 800, 800, 400, 360, 2, 0, aloft, screen);
     expect(aloft.netId, 'the cursor on the entity itself must pick it').toBe(7);
+  });
+
+  /** An 18 × 9 × 18 m building, the size `styles.ts` gives `StructureKind.Building`. */
+  const buildingSizes = (): Float64Array => {
+    const sizes = new Float64Array(16 * 3);
+    sizes[0] = 18;
+    sizes[1] = 9;
+    sizes[2] = 18;
+    return sizes;
+  };
+
+  it('picks a big shape anywhere on it, not only within a few pixels of its centre', () => {
+    // THE defect. At 60 m on an 800 px, 90° view a metre is 400/60 px, so an 18 m building spans 120 px and a 9 m wall
+    // reaches 60 px above the ground point. Clicking the top of that wall is 50-odd pixels from the centre the old pick
+    // measured against, and it selected nothing at all — which is exactly what was reported.
+    const data = pack(0, 60);
+    const yaws = new Float32Array([0]);
+    const netIds = new Uint32Array([42]);
+    const sizes = buildingSizes();
+
+    for (const [px, py, where] of [
+      [400, 400, 'the centre'],
+      [455, 400, 'the right edge'],
+      [345, 400, 'the left edge'],
+      [400, 345, 'the top of the wall'],
+      [450, 350, 'a top corner'],
+    ] as const) {
+      const best = fresh();
+      pickShapes(rayAt(px, py), data, yaws, netIds, 1, sizes, -1, 1.4, 3, best);
+      expect(best.netId, `clicking ${where}`).toBe(42);
+      expect(best.inside, `clicking ${where}`).toBe(true);
+    }
+
+    // And it still refuses the sky beside it, which is the other half of picking working.
+    const miss = fresh();
+    pickShapes(rayAt(700, 400), data, yaws, netIds, 1, sizes, -1, 1.4, 3, miss);
+    expect(miss.netId).toBe(0);
+  });
+
+  it('turns the box by the instance yaw, as the shader does', () => {
+    // A 4 × 2 × 40 m sliver: end-on it is 4 m wide, broadside 40 m. Turned a quarter turn, the two swap — and a test that
+    // did not check both sides of that would pass on a box test that ignored yaw entirely.
+    const sizes = new Float64Array(16 * 3);
+    sizes[0] = 4;
+    sizes[1] = 2;
+    sizes[2] = 40;
+    const data = pack(0, 100);
+    const netIds = new Uint32Array([9]);
+    // 100 m away, a metre is 4 px. 10 m to the side is 40 px: inside the 40 m length, outside the 4 m width.
+    const aside = rayAt(440, 399);
+
+    const along = fresh();
+    pickShapes(aside, data, new Float32Array([0]), netIds, 1, sizes, -1, 1.4, 0, along);
+    expect(along.netId, 'facing +Z, 10 m to the side is outside the 4 m width').toBe(0);
+
+    const across = fresh();
+    pickShapes(aside, data, new Float32Array([Math.PI / 2]), netIds, 1, sizes, -1, 1.4, 0, across);
+    expect(across.netId, 'turned a quarter turn, the same point is inside the 40 m length').toBe(9);
+  });
+
+  it('grows the box for a selected instance and flattens it in the flatten mode, exactly as the shader does', () => {
+    const sizes = new Float64Array(16 * 3);
+    sizes[0] = 10;
+    sizes[1] = 10;
+    sizes[2] = 10;
+    const yaws = new Float32Array([0]);
+    const netIds = new Uint32Array([3]);
+    // 100 m away, a metre is 4 px. The unselected box reaches 5 m (20 px); grown by 1.4 it reaches 7 m (28 px).
+    const edge = rayAt(424, 399);
+
+    const plain = pack(0, 100);
+    const unselected = fresh();
+    pickShapes(edge, plain, yaws, netIds, 1, sizes, -1, 1.4, 0, unselected);
+    expect(unselected.netId).toBe(0);
+
+    const chosen = pack(0, 100);
+    chosen[3] = packState(0, 0, true);
+    const selected = fresh();
+    pickShapes(edge, chosen, yaws, netIds, 1, sizes, -1, 1.4, 0, selected);
+    expect(selected.netId, 'a selected shape is drawn 1.4× bigger, so it is that much bigger to click').toBe(3);
+
+    // A corpse is a quarter of its height: 10 m becomes 2.5 m, which at 100 m is 10 px above the ground point.
+    const corpse = pack(0, 100);
+    corpse[3] = packState(0, 2, false);
+    const high = rayAt(400, 385);
+    const standing = fresh();
+    pickShapes(high, corpse, yaws, netIds, 1, sizes, -1, 1.4, 0, standing);
+    expect(standing.netId, 'without the flatten it still reaches 15 px up').toBe(3);
+
+    const flattened = fresh();
+    pickShapes(high, corpse, yaws, netIds, 1, sizes, 2, 1.4, 0, flattened);
+    expect(flattened.netId, 'flattened to 2.5 m it does not reach 15 px up').toBe(0);
+  });
+
+  it('prefers what the cursor is ON over what it is merely NEAR, and the nearest of those', () => {
+    // A creature standing in front of a building: the cursor is inside the building's silhouette and also within a few
+    // pixels of the creature. The creature is nearer along the ray, so it wins — which is the case that makes a town
+    // usable, since a building covers most of the screen there.
+    const sizes = buildingSizes();
+    const building = pack(0, 60);
+    const best = fresh();
+    pickShapes(rayAt(420, 380), building, new Float32Array([0]), new Uint32Array([100]), 1, sizes, -1, 1.4, 1, best);
+    expect(best.netId).toBe(100);
+    expect(best.inside).toBe(true);
+
+    // A far-band sprite 30 m away, 4 px across, whose centre is 2 px from the cursor.
+    const creature = pack(0, 30);
+    creature[0] = (420 - 400) / (400 / 30);
+    creature[1] = (400 - 380) / (400 / 30);
+    pickInstances(
+      rayAt(420, 380),
+      m,
+      creature,
+      new Uint32Array([7]),
+      1,
+      0,
+      3,
+      2.5,
+      800,
+      800,
+      420,
+      380,
+      8,
+      2,
+      best,
+      screen,
+    );
+    expect(best.netId, 'the nearer thing the cursor is also on must win').toBe(7);
+    expect(best.depth).toBeLessThan(60);
+  });
+
+  it('lets nothing that is merely near a centre displace something the cursor is on', () => {
+    const sizes = buildingSizes();
+    const best = fresh();
+    pickShapes(rayAt(400, 400), pack(0, 60), new Float32Array([0]), new Uint32Array([100]), 1, sizes, -1, 1.4, 1, best);
+    expect(best.netId).toBe(100);
+
+    // A point entity 200 m away whose centre is a pixel from the cursor: nearer in SCREEN terms, and not what was
+    // clicked. Before the shape test existed this is what a click in a town always found.
+    const distant = pack(0, 200);
+    pickInstances(
+      rayAt(400, 400),
+      m,
+      distant,
+      new Uint32Array([55]),
+      1,
+      0,
+      0,
+      1,
+      800,
+      800,
+      400,
+      400,
+      8,
+      2,
+      best,
+      screen,
+    );
+    expect(best.netId).toBe(100);
   });
 });
 
@@ -298,5 +529,144 @@ describe('shaders', () => {
 
     expect(shaders.ENTITY_VERTEX).toContain(`uColors[${STYLE_COUNT}]`);
     expect(shaders.ENTITY_VERTEX).toContain(`uTints[${TINT_COUNT}]`);
+  });
+});
+
+describe('altitudeOf', () => {
+  /**
+   * Which altitude the client draws an entity at, and it is the only place that decision is made.
+   *
+   * The client used to add its own ground to whatever the server sent, which was right only because the server always
+   * sent 0 — correct the way a stopped clock is. Terrain rung (b) gives the server an opinion, sampled from the same
+   * baked field this client draws, so adding to it would double the relief.
+   */
+  const flat = { heightAt: (): number => 0 };
+  const hilly = { heightAt: (x: number, z: number): number => 100 + x + z };
+  const at = new Placement();
+
+  it('takes the server field as the whole answer, adding nothing to it', () => {
+    at.read(2, new Float64Array([7, 9, 0, 0]), 0);
+    const served = new Float32Array([250, -30]);
+    expect(altitudeOf(served, 0, at, hilly)).toBe(250);
+    expect(altitudeOf(served, 1, at, hilly)).toBe(-30);
+  });
+
+  it('falls back to the position axis plus its own ground when the catalog has no such field', () => {
+    // The browser-side mock, and any catalog older than rung (b).
+    at.read(2, new Float64Array([7, 9, 0, 0]), 0);
+    expect(altitudeOf(null, 0, at, hilly)).toBe(100 + 7 + 9);
+    expect(altitudeOf(null, 0, at, flat)).toBe(0);
+  });
+
+  it('keeps the third position axis in the fallback, which is what a space realm has', () => {
+    // A three-dimensional store carries altitude in the position itself; the ground under a ship is not a thing.
+    at.read(3, new Float64Array([7, 9, 40, 0, 0, 0]), 0);
+    expect(at.y).toBe(40);
+    expect(altitudeOf(null, 0, at, flat)).toBe(40);
+  });
+
+  it('is not fooled by a zero the server actually meant', () => {
+    // An entity inside a building stands on that realm's flat floor, and 0 is the right answer there however much mesa
+    // the door sits on. The fallback would have added the mesa.
+    at.read(2, new Float64Array([7, 9, 0, 0]), 0);
+    expect(altitudeOf(new Float32Array([0]), 0, at, hilly)).toBe(0);
+    expect(altitudeOf(null, 0, at, hilly)).toBe(116);
+  });
+});
+
+
+describe('the ground stands between the cursor and what is behind it', () => {
+  /**
+   * A 200 m wall of ground across the middle of an otherwise flat field.
+   *
+   * Cheaper than the real planet and it isolates the question: everything the tests below turn on is whether the march
+   * finds a crossing, not what shape the crossing has.
+   */
+  function mesaAcrossTheMiddle(): Heightfield {
+    const field = new Heightfield(createHeightGrid(64, 16, -512));
+    const posts = field.grid.posts;
+    for (let z = 0; z < posts; z++) {
+      for (let x = 0; x < posts; x++) {
+        // Planet x of post `x` is `-512 + x * 16`; the wall occupies x ∈ [0, 128).
+        field.grid.height[z * posts + x] = x >= 32 && x < 40 ? 200 : 0;
+      }
+    }
+
+    field.measure();
+    return field;
+  }
+
+  const flatRay = (ox: number, oy: number, dx: number, dy: number): PickRay => {
+    const len = Math.hypot(dx, dy);
+    return { ox, oy, oz: 0, dx: dx / len, dy: dy / len, dz: 0 };
+  };
+
+  it('finds the near face of a wall, and nothing at all when the ray clears it', () => {
+    const field = mesaAcrossTheMiddle();
+    // Level, at 100 m, straight at a wall whose top is 200 m: it must stop at the wall's near face, x = 0.
+    const hit = rayGroundT(flatRay(-400, 100, 1, 0), field, 32000);
+    expect(hit).toBeLessThan(420);
+    expect(hit).toBeGreaterThan(380);
+
+    // The same ray above the wall's top clears it, and the field is flat beyond, so it never comes down.
+    expect(rayGroundT(flatRay(-400, 300, 1, 0), field, 32000)).toBe(Infinity);
+  });
+
+  it('reports no ground for an eye already under it, rather than zero', () => {
+    // Zero would make everything unpickable. This is reachable: the eye camera clamps to the ground, and a frame taken
+    // mid-bake sees a field that is still flat while the camera is not.
+    const field = mesaAcrossTheMiddle();
+    expect(rayGroundT(flatRay(0, -50, 1, 0), field, 32000)).toBe(Infinity);
+  });
+
+  it('refuses to pick a box the ground is in front of, and still picks the one in front of it', () => {
+    // THE defect: with no ground test, clicking a mesa's visible rock face selects the creature standing behind it — an
+    // entity that is not on screen at any pixel. Depth testing does this for the GPU; the pick was never told.
+    const field = mesaAcrossTheMiddle();
+    const ray = flatRay(-400, 100, 1, 0);
+    const groundT = rayGroundT(ray, field, 32000);
+
+    // Two boxes on the ray: one this side of the wall, one behind it.
+    const data = new Float32Array([-200, 100, 0, packState(0, 0, false), 200, 100, 0, packState(0, 0, false)]);
+    const yaws = new Float32Array([0, 0]);
+    const netIds = new Uint32Array([7, 9]);
+    const sizes = new Float64Array([40, 40, 40]);
+
+    const behindOnly = new Float32Array(data.subarray(4));
+    const hidden: PickHit = { archetype: -1, netId: 0, pixels: Infinity, depth: Infinity, inside: false };
+    pickShapes(ray, behindOnly, new Float32Array([0]), new Uint32Array([9]), 1, sizes, -1, 1, 3, hidden, groundT);
+    expect(hidden.netId).toBe(0);
+
+    // Unbounded — the behaviour before this fix — it is picked, which is what makes the assertion above meaningful.
+    const unbounded: PickHit = { archetype: -1, netId: 0, pixels: Infinity, depth: Infinity, inside: false };
+    pickShapes(ray, behindOnly, new Float32Array([0]), new Uint32Array([9]), 1, sizes, -1, 1, 3, unbounded);
+    expect(unbounded.netId).toBe(9);
+
+    // And the near one is unaffected.
+    const visible: PickHit = { archetype: -1, netId: 0, pixels: Infinity, depth: Infinity, inside: false };
+    pickShapes(ray, data, yaws, netIds, 2, sizes, -1, 1, 3, visible, groundT);
+    expect(visible.netId).toBe(7);
+  });
+});
+
+describe('the view matrix inverse', () => {
+  it('refuses a near-singular matrix instead of filling the inverse with Infinity', () => {
+    // `det === 0` is not the failure that happens. A determinant of 1e-320 is not zero, `1 / det` is Infinity, and the
+    // inverse comes back full of Infinity and NaN — so `unprojectRay` yields a NaN ray, every comparison against it is
+    // false, and the pick selects nothing while reporting success.
+    const out = new Float64Array(16);
+    const tiny = 1e-110;
+    const nearSingular = [
+      tiny, 0, 0, 0,
+      0, tiny, 0, 0,
+      0, 0, tiny, 0,
+      0, 0, 0, 1,
+    ];
+    expect(invertMatrix4(nearSingular, out)).toBe(false);
+
+    // A well-conditioned matrix of the same shape still inverts.
+    const fine = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1];
+    expect(invertMatrix4(fine, out)).toBe(true);
+    expect(out[0]).toBeCloseTo(0.5, 12);
   });
 });

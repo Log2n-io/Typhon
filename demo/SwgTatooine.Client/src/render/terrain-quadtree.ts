@@ -73,6 +73,21 @@ export class TerrainQuadtree {
   /** Lowest and highest ground inside each node, for a bounding box the selection can measure distance to. */
   readonly minY = new Float32Array(NODE_COUNT);
   readonly maxY = new Float32Array(NODE_COUNT);
+  /**
+   * The largest error at each level, which is what the **morph band** is derived from.
+   *
+   * Selection stays per node — that is the whole reason this is a quadtree and not a clipmap. The morph cannot be, and
+   * the reason is the shared edge: the coarse snap moves an edge vertex *along* the edge as well as across it, so two
+   * neighbours blending by different amounts put the same edge vertex in two places and the seam opens onto the sky. A
+   * band computed from the level rather than from the node is identical for every node at that level, so neighbours agree
+   * by construction. This is why Strugar keys the morph to the LOD level.
+   *
+   * What it costs, stated rather than discovered later: a node whose parent is much flatter than its level's worst is
+   * replaced by that parent before its blend has finished, and that boundary pops. The alternative — a band from the
+   * node's own parent — trades that pop for a crack, which is worse. Closing both needs an edge-consistency rule
+   * between neighbours, which is a bigger change than this one.
+   */
+  readonly levelError = new Float32Array(TREE_LEVELS);
 
   /** The flat index of a node. */
   static indexOf(level: number, ix: number, iz: number): number {
@@ -101,8 +116,12 @@ export class TerrainQuadtree {
       for (let iz = 0; iz < across; iz++) {
         for (let ix = 0; ix < across; ix++) {
           const at = TerrainQuadtree.indexOf(level, ix, iz);
-          const px0 = Math.round((ix * size + PLANET_HALF_EXTENT_M + originM) / spacingM);
-          const pz0 = Math.round((iz * size + PLANET_HALF_EXTENT_M + originM) / spacingM);
+          // A node's world x is `-PLANET_HALF_EXTENT_M + ix * size`, and a post index is `(world - originM) / spacing`
+          // — the convention `Heightfield.heightAt` and the ground shader both use. Written with both signs flipped this
+          // agreed only because `FIELD_ORIGIN_M === -PLANET_HALF_EXTENT_M`; a windowed bake or a re-centred planet would
+          // have measured the wrong cells and keyed every node's LOD to ground it does not cover.
+          const px0 = Math.round((ix * size - PLANET_HALF_EXTENT_M - originM) / spacingM);
+          const pz0 = Math.round((iz * size - PLANET_HALF_EXTENT_M - originM) / spacingM);
           const px1 = Math.min(px0 + postsPerNode, posts - 1);
           const pz1 = Math.min(pz0 + postsPerNode, posts - 1);
 
@@ -158,6 +177,30 @@ export class TerrainQuadtree {
         }
       }
     }
+
+    this.measureLevels();
+  }
+
+  /**
+   * Fills {@link levelError} from {@link error}.
+   *
+   * Derived rather than transferred: the worker hands over three arrays and this is one pass over 21 845 floats, so
+   * widening the worker protocol to carry it would be a fourth thing to keep in step for no gain.
+   */
+  private measureLevels(): void {
+    for (let level = 0; level < TREE_LEVELS; level++) {
+      const across = nodesAcross(level);
+      let worst = 0;
+      const from = TerrainQuadtree.indexOf(level, 0, 0);
+      const to = from + across * across;
+      for (let at = from; at < to; at++) {
+        if (this.error[at]! > worst) {
+          worst = this.error[at]!;
+        }
+      }
+
+      this.levelError[level] = worst;
+    }
   }
 
   /** Adopts errors and bounds measured elsewhere — the worker measures, the main thread receives. */
@@ -165,6 +208,7 @@ export class TerrainQuadtree {
     this.error.set(error);
     this.minY.set(minY);
     this.maxY.set(maxY);
+    this.measureLevels();
   }
 }
 
@@ -289,12 +333,22 @@ function visit(
     // The morph runs over the outer part of the range in which this node is the chosen one, so that by the time the
     // camera is close enough to split it, its grid has already become its parent's and the swap moves nothing.
     const m = out.count * 2;
-    const start = enough * MORPH_BEGIN;
+    // The band runs over the outer part of the range in which this node is the CHOSEN one, so that by the time the camera
+    // is far enough to hand it to its parent, its grid has already become its parent's and the swap moves nothing.
+    //
+    // That range is `[enough(self), replacedAt)`, and `replacedAt` is the distance the PARENT becomes good enough — not
+    // this node's own `enough`, which is where the range BEGINS. Deriving the band from `enough` was the defect: a node is
+    // only ever emitted when `near >= enough`, so a band ending below `enough` is entirely inside the distances at which
+    // the node is not drawn. Every vertex of every node had `toCamera > morphEnd`, `morph` clamped to 1, and the shader
+    // used the coarse grid unconditionally — the whole planet drawn at half its vertex density, three quarters of its
+    // triangles degenerate, and a pixel tolerance measuring a grid that was not the one on screen.
+    const replacedAt = level === 0 ? NEVER_MORPH_M : accurateBeyond(tree.levelError[level - 1]!, pixelsPerMetre, pixelTolerance);
+    const start = Math.max(enough, replacedAt * MORPH_BEGIN);
     out.morph[m] = start;
     // The band ENDS a hair before the distance at which this node is replaced, so the morph has already reached 1 when the
     // swap happens. Strugar calls it the error fudge and it is not cosmetic: ending exactly at the switch leaves the blend
-    // at 0.999 on the last frame before the split, which is a hairline crack along the whole LOD boundary.
-    out.morph[m + 1] = Math.max(start + 1, start + (enough - start) * (1 - MORPH_FUDGE));
+    // at 0.999 on the last frame before the swap, which is a hairline crack along the whole LOD boundary.
+    out.morph[m + 1] = Math.max(start + 1, replacedAt * (1 - MORPH_FUDGE));
     out.count++;
     return;
   }
@@ -326,6 +380,15 @@ function visit(
  * its own detail rather than half-way to its parent's.
  */
 export const MORPH_BEGIN = 0.7;
+
+/**
+ * The band the root is given, in metres — far enough that `morph` is 0 at every distance the planet is drawn at.
+ *
+ * The root has no parent, so it has no coarser grid to blend toward and is never replaced by anything. Finite on purpose:
+ * `Infinity` in the `Float32Array` makes the shader's `(toCamera - start) / (end - start)` a NaN, and a NaN `mix` factor
+ * puts the vertex nowhere.
+ */
+export const NEVER_MORPH_M = 1e9;
 
 /**
  * How far before the switch distance the morph must be complete, as a fraction of the band.

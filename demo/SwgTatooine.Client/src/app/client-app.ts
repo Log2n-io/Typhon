@@ -22,14 +22,14 @@ import { EyeCamera } from '../camera/eye-camera';
 import { MapCamera } from '../camera/map-camera';
 import { meanAndP95, regionDue } from './frame-policy';
 import { resolveArchetypes, type ArchetypeInfo, type ArchetypeView } from '../data/archetypes';
-import { Placement } from '../data/placement';
+import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { replicationStatsOf } from '../data/replication-stats';
 import type { DataSource, EventSink } from '../data/source';
 import { describeFields } from '../data/swg-format';
 import { AGG_GRID, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
 import { CITIES } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
-import { EntityLayer, type FrameView, type PickHit } from '../render/entity-layer';
+import { EntityLayer, type FrameView, type PickHit, type PickRay } from '../render/entity-layer';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
 import { Ground, GroundView, SKY } from '../render/ground';
 import { startTerrainBake, type TerrainBake } from '../terrain/bake-client';
@@ -37,7 +37,13 @@ import { Heightfield } from '../terrain/heightfield';
 import type { TerrainBaked } from '../terrain/terrain.worker';
 import { Labels } from '../render/labels';
 import { styleFor } from '../render/styles';
-import { extractFrustumPlanes, RenderOrigin } from '../render/view-math';
+import {
+  RenderOrigin,
+  extractFrustumPlanes,
+  invertMatrix4,
+  rayGroundT,
+  unprojectRay,
+} from '../render/view-math';
 import { useChat } from '../state/chat-store';
 import { useStats, type Inspection, type LayerStats } from '../state/stats-store';
 import { useUi, type UiState } from '../state/ui-store';
@@ -52,6 +58,14 @@ const ERROR_LOG_INTERVAL_MS = 5000;
  * Babylon applies its own `limitDeviceRatio` only at construction, so the client sets the scaling itself on every resize.
  */
 const MAX_DEVICE_RATIO = 1.5;
+
+/**
+ * How far the pick's ground march looks, in metres.
+ *
+ * A diagonal of the planet plus its relief. Beyond it the march gives up and reports no ground, which leaves the pick
+ * exactly as permissive as it was before the march existed — the safe direction to fail in.
+ */
+const PICK_MAX_DISTANCE_M = 32000;
 
 /**
  * Stands in for an aggregate grid the session does not have. A live server declares one only under `--god-region`; the
@@ -116,6 +130,10 @@ export class ClientApp {
   private readonly ground: Ground;
   /** The planet's heightfield: flat until the worker's bake lands, then the one source of ground height for everything. */
   private readonly field: Heightfield;
+  /** Retained across clicks: the inverse view-projection, the ray through the cursor, and the winning hit. */
+  private readonly pickInverse = new Float64Array(16);
+  private readonly pickRay: PickRay = { ox: 0, oy: 0, oz: 0, dx: 0, dy: 0, dz: 1 };
+  private readonly pickBest: PickHit = { archetype: -1, netId: 0, pixels: Infinity, depth: Infinity, inside: false };
   private readonly terrainBake: TerrainBake;
   /** How long the bake took, reported once in the HUD's session block. */
   private terrainBakeMs = 0;
@@ -136,6 +154,10 @@ export class ClientApp {
 
   /** Canvas size in CSS pixels, kept by the resize observer: reading layout every frame would be a forced reflow. */
   private readonly cssSize = { width: 1, height: 1 };
+  /** Rendered pixels per CSS pixel, as {@link resize} last set it on the engine. */
+  private renderScale = 1;
+  /** {@link pickRay} shifted back into PLANET space, which is the frame the heightfield is sampled in. */
+  private readonly pickPlanetRay: PickRay = { ox: 0, oy: 0, oz: 0, dx: 0, dy: 0, dz: 1 };
   /** The canvas or the device pixel ratio changed: resized at the top of the next frame, never between a draw and its paint. */
   private sizeDirty = true;
   private ratioQuery: MediaQueryList | null = null;
@@ -386,8 +408,9 @@ export class ClientApp {
     this.sizeDirty = false;
     this.cssSize.width = Math.max(1, this.canvas.clientWidth);
     this.cssSize.height = Math.max(1, this.canvas.clientHeight);
+    this.renderScale = Math.min(MAX_DEVICE_RATIO, window.devicePixelRatio || 1);
     // Resizes the canvas too.
-    this.engine.setHardwareScalingLevel(1 / Math.min(MAX_DEVICE_RATIO, window.devicePixelRatio || 1));
+    this.engine.setHardwareScalingLevel(1 / this.renderScale);
   }
 
   /** A media query that matches only the current device pixel ratio: it fires on browser zoom and on a monitor change. */
@@ -605,7 +628,12 @@ export class ClientApp {
     g.viewCenterZ = this.regionZ;
     g.centerX = cam.targetX;
     g.centerZ = cam.targetZ;
-    g.pixelsPerMetre = view.pixelsPerMetre;
+    // The terrain's tolerance is spent in RENDERED pixels; everything else in this frame is in CSS pixels and stays
+    // that way. `pixelsPerMetre` is built from the CSS height while the canvas renders at up to MAX_DEVICE_RATIO times
+    // it, so passing it unscaled solved `d = ε·P/τ` in the wrong units and delivered 1.5× the geometric error the Detail
+    // slider asked for on every HiDPI display. Sprites, labels, lines and the pick are deliberately CSS-pixel
+    // quantities — a 12 px dot is 12 px to the viewer whatever the backing store does — so only this one is scaled.
+    g.pixelsPerMetre = view.pixelsPerMetre * this.renderScale;
     g.pixelTolerance = ui.terrainPixelError;
     g.nearRadius = nearRadius;
     g.heatMask = this.heatMask;
@@ -693,12 +721,42 @@ export class ClientApp {
     this.lastRegionMs = now;
   }
 
-  /** The entity drawn nearest a click, in CSS pixels relative to the canvas; 0 when none is within reach. */
+  /**
+   * The entity under a click, in CSS pixels relative to the canvas; 0 when none is under it or near it.
+   *
+   * The ray comes from inverting the very matrix the frame was drawn with, so the pick cannot disagree with the picture
+   * about where anything is. Each layer tests it against what it actually drew — boxes in the near band, sprite discs in
+   * the far one — and falls back to the nearest centre within {@link PICK_RADIUS_PX} only when nothing was hit at all.
+   */
   private pickAt(x: number, y: number): number {
     const matrix = this.scene.getTransformMatrix().m;
-    const best: PickHit = { archetype: -1, netId: 0, pixels: Infinity, depth: Infinity };
+    if (!invertMatrix4(matrix, this.pickInverse)) {
+      return 0;
+    }
+
+    if (!unprojectRay(this.pickInverse, x, y, this.view.viewportWidth, this.view.viewportHeight, this.pickRay)) {
+      return 0;
+    }
+
+    // What the viewer can actually see past. The ray is in render space and the field is in planet space, so the march
+    // is handed an origin shifted by the render origin — the same shift `layer-packer` applies to every instance.
+    const planet = this.pickPlanetRay;
+    planet.ox = this.pickRay.ox + this.view.originX;
+    planet.oy = this.pickRay.oy;
+    planet.oz = this.pickRay.oz + this.view.originZ;
+    planet.dx = this.pickRay.dx;
+    planet.dy = this.pickRay.dy;
+    planet.dz = this.pickRay.dz;
+    const groundT = rayGroundT(planet, this.field, PICK_MAX_DISTANCE_M);
+
+    const best = this.pickBest;
+    best.archetype = -1;
+    best.netId = 0;
+    best.pixels = Infinity;
+    best.depth = Infinity;
+    best.inside = false;
     for (const layer of this.layers) {
-      layer.pick(matrix, this.view, x, y, PICK_RADIUS_PX, best);
+      layer.pick(this.pickRay, matrix, this.view, x, y, PICK_RADIUS_PX, best, groundT);
     }
 
     return best.netId;
@@ -723,7 +781,7 @@ export class ClientApp {
     this.selectedZ = selected.z;
     // Altitude and heading, for the eye camera (CLI3D-10). A still entity keeps the heading it last had, the way the
     // renderer's own meshes do: `headingOf`'s fallback, not a snap to north.
-    this.selectedY = selected.y + this.field.heightAt(selected.x, selected.z);
+    this.selectedY = altitudeOf(altitudeField(store), slotOf(location), selected, this.field);
     this.selectedHeading = headingOf(selected.vx, selected.vz, this.selectedHeading);
     if (this.selectionTextNetId !== netId || this.selectionTextArchetype !== archetype) {
       this.selectionTextNetId = netId;

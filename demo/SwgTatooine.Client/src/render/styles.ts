@@ -25,8 +25,15 @@ export interface StyleBounds {
   readonly centerY: Float64Array;
   /** Largest size component: the projected size that picks the LOD band. */
   readonly extent: Float64Array;
-  /** Height of the drawn (not grown) mesh's centre: where a click aims. */
+  /** Height of the drawn (not grown) mesh's centre: where a click aims when nothing is hit exactly. */
   readonly pickY: Float64Array;
+  /**
+   * `(width, height, length)` per style index, flat at stride 3.
+   *
+   * The same numbers as {@link LayerStyle.sizes}, in the layout the pick's box test wants. A pick runs over every drawn
+   * instance, and an array of tuples costs it a pointer chase each.
+   */
+  readonly sizesFlat: Float64Array;
 }
 
 export interface LayerStyle {
@@ -54,8 +61,12 @@ function withBounds(style: StyleInput): LayerStyle {
   const centerY = new Float64Array(STYLE_COUNT);
   const extent = new Float64Array(STYLE_COUNT);
   const pickY = new Float64Array(STYLE_COUNT);
+  const sizesFlat = new Float64Array(STYLE_COUNT * 3);
   for (let i = 0; i < STYLE_COUNT; i++) {
     const [w, h, l] = style.sizes[i] ?? style.sizes[0];
+    sizesFlat[i * 3] = w;
+    sizesFlat[i * 3 + 1] = h;
+    sizesFlat[i * 3 + 2] = l;
     // Every shape spans x and z in [−½, ½] and y in [0, 1] before scaling (`meshes.ts`), whatever its yaw. The sphere
     // around the grown shape also holds the plain one: its centre moves up by 0.2 h ≤ 0.4 r.
     radius[i] = SELECTED_MESH_SCALE * 0.5 * Math.hypot(w, h, l);
@@ -64,7 +75,7 @@ function withBounds(style: StyleInput): LayerStyle {
     pickY[i] = 0.5 * h;
   }
 
-  return { ...style, bounds: { radius, centerY, extent, pickY } };
+  return { ...style, bounds: { radius, centerY, extent, pickY, sizesFlat } };
 }
 
 const NO_TINT: [number, number, number, number] = [0, 0, 0, 0];

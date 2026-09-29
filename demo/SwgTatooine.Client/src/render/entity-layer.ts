@@ -9,11 +9,19 @@ import { createShapeMesh } from './meshes';
 import { PrefixUploader } from './prefix-upload';
 import { SCENE_GROUP } from './render-groups';
 import { ENTITY_FRAGMENT, ENTITY_VERTEX, SPRITE_FRAGMENT, SPRITE_VERTEX } from './shaders';
-import type { LayerStyle } from './styles';
-import { packedStyle, pickInstances, projectToScreen, type PickHit, type ScreenPoint } from './view-math';
+import { SELECTED_MESH_SCALE, SELECTED_SPRITE_SCALE, type LayerStyle } from './styles';
+import {
+  packedStyle,
+  pickInstances,
+  pickShapes,
+  projectToScreen,
+  type PickHit,
+  type PickRay,
+  type ScreenPoint,
+} from './view-math';
 
 export type { FrameView } from './layer-packer';
-export type { PickHit } from './view-math';
+export type { PickHit, PickRay } from './view-math';
 
 const SUN = new Vector3(-0.45, -0.8, -0.4).normalize();
 
@@ -174,7 +182,27 @@ export class EntityLayer {
     return null;
   }
 
-  pick(matrix: ArrayLike<number>, view: FrameView, px: number, py: number, maxPixels: number, best: PickHit): void {
+  /**
+   * Updates `best` with anything of this layer's under the cursor, or near it when nothing is under it.
+   *
+   * The near band is tested as the boxes it is DRAWN as, not as points. That is the fix for the defect this had: an
+   * 18 m building 60 m away covers about 320 screen pixels and only the 16 around its centre used to be clickable, so
+   * clicking its wall or its roof selected nothing. The far band is a fixed-size sprite, so its silhouette is a disc.
+   *
+   * @param maxT How far along the ray the ground is. Nothing beyond it is on screen, so nothing beyond it is pickable:
+   * the GPU gets this from depth testing and the pick has to be told. Without it, clicking a mesa's visible rock face
+   * selects whatever is standing behind the mesa.
+   */
+  pick(
+    ray: PickRay,
+    matrix: ArrayLike<number>,
+    view: FrameView,
+    px: number,
+    py: number,
+    maxPixels: number,
+    best: PickHit,
+    maxT: number,
+  ): void {
     if (!this.visible) {
       return;
     }
@@ -184,12 +212,30 @@ export class EntityLayer {
     const h = view.viewportHeight;
     const a = this.archetype;
     const s = this.screen;
+    pickShapes(
+      ray,
+      p.nearData,
+      p.nearYaw,
+      p.nearNetIds,
+      this.nearCount,
+      this.style.bounds.sizesFlat,
+      this.style.flattenMode,
+      SELECTED_MESH_SCALE,
+      a,
+      best,
+      maxT,
+    );
+    // The near band's silhouette is settled above; 0 leaves this as the near-miss fallback for a mesh only a few pixels
+    // across, which is a fiddly target to hit exactly at the band boundary.
     pickInstances(
+      ray,
       matrix,
       p.nearData,
       p.nearNetIds,
       this.nearCount,
       this.style.bounds.pickY,
+      0,
+      SELECTED_MESH_SCALE,
       w,
       h,
       px,
@@ -198,13 +244,17 @@ export class EntityLayer {
       a,
       best,
       s,
+      maxT,
     );
     pickInstances(
+      ray,
       matrix,
       p.farData,
       p.farNetIds,
       this.farCount,
       this.style.spriteLift,
+      this.style.spritePixels * 0.5,
+      SELECTED_SPRITE_SCALE,
       w,
       h,
       px,
@@ -213,6 +263,7 @@ export class EntityLayer {
       a,
       best,
       s,
+      maxT,
     );
   }
 
