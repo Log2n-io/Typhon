@@ -183,12 +183,12 @@ describe('the shipping field geometry', () => {
       let count = 0;
       for (let z = 1; z < posts - 1; z++) {
         for (let x = 1; x < posts - 1; x++) {
-          const h = grid.height[z * posts + x]!;
+          const h = grid.height[z * posts + x];
           const drop = Math.min(
-            h - grid.height[z * posts + x - 1]!,
-            h - grid.height[z * posts + x + 1]!,
-            h - grid.height[(z - 1) * posts + x]!,
-            h - grid.height[(z + 1) * posts + x]!,
+            h - grid.height[z * posts + x - 1],
+            h - grid.height[z * posts + x + 1],
+            h - grid.height[(z - 1) * posts + x],
+            h - grid.height[(z + 1) * posts + x],
           );
           if (drop > dropM) {
             count++;

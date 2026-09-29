@@ -194,7 +194,7 @@ export class TerrainQuadtree {
       const from = TerrainQuadtree.indexOf(level, 0, 0);
       const to = from + across * across;
       for (let at = from; at < to; at++) {
-        if (this.error[at]! > worst) {
+        if (this.error[at] > worst) {
           worst = this.error[at]!;
         }
       }
@@ -342,7 +342,7 @@ function visit(
     // the node is not drawn. Every vertex of every node had `toCamera > morphEnd`, `morph` clamped to 1, and the shader
     // used the coarse grid unconditionally — the whole planet drawn at half its vertex density, three quarters of its
     // triangles degenerate, and a pixel tolerance measuring a grid that was not the one on screen.
-    const replacedAt = level === 0 ? NEVER_MORPH_M : accurateBeyond(tree.levelError[level - 1]!, pixelsPerMetre, pixelTolerance);
+    const replacedAt = level === 0 ? NEVER_MORPH_M : accurateBeyond(tree.levelError[level - 1], pixelsPerMetre, pixelTolerance);
     const start = Math.max(enough, replacedAt * MORPH_BEGIN);
     out.morph[m] = start;
     // The band ENDS a hair before the distance at which this node is replaced, so the morph has already reached 1 when the

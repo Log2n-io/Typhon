@@ -1,4 +1,4 @@
-import { Heightfield, POST_SPACING_M } from '../src/terrain/heightfield';
+import { POST_SPACING_M } from '../src/terrain/heightfield';
 import { applyLayers, createHeightGrid, type TerrainLayer } from '../src/terrain/layers';
 import { landformLayers } from '../src/terrain/tatooine-terrain';
 
@@ -33,12 +33,12 @@ function cones(height: Float32Array, dropM: number): number {
   let count = 0;
   for (let z = 1; z < POSTS - 1; z++) {
     for (let x = 1; x < POSTS - 1; x++) {
-      const h = height[z * POSTS + x]!;
+      const h = height[z * POSTS + x];
       const drop = Math.min(
-        h - height[z * POSTS + x - 1]!,
-        h - height[z * POSTS + x + 1]!,
-        h - height[(z - 1) * POSTS + x]!,
-        h - height[(z + 1) * POSTS + x]!,
+        h - height[z * POSTS + x - 1],
+        h - height[z * POSTS + x + 1],
+        h - height[(z - 1) * POSTS + x],
+        h - height[(z + 1) * POSTS + x],
       );
       if (drop > dropM) {
         count++;
@@ -100,7 +100,7 @@ const noCliff: Tweak = (layers) => {
 
 const noTerraces: Tweak = (layers) => {
   for (let i = layers.length - 1; i >= 0; i--) {
-    if (layers[i]!.affector.kind === 'terrace') {
+    if (layers[i].affector.kind === 'terrace') {
       layers.splice(i, 1);
     }
   }

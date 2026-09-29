@@ -234,15 +234,15 @@ describe('the terrain quadtree', () => {
 
     let live = 0;
     for (let i = 0; i < out.count; i++) {
-      const x0 = out.data[i * 4]!;
-      const z0 = out.data[i * 4 + 1]!;
-      const size = out.data[i * 4 + 2]!;
+      const x0 = out.data[i * 4];
+      const z0 = out.data[i * 4 + 1];
+      const size = out.data[i * 4 + 2];
       // The closest point of this node's footprint to the camera: the smallest `toCamera` any of its vertices can take.
       const nx = Math.min(Math.max(camX, x0), x0 + size);
       const nz = Math.min(Math.max(camZ, z0), z0 + size);
       const toCamera = Math.sqrt((nx - camX) ** 2 + camY ** 2 + (nz - camZ) ** 2);
-      const start = out.morph[i * 2]!;
-      const end = out.morph[i * 2 + 1]!;
+      const start = out.morph[i * 2];
+      const end = out.morph[i * 2 + 1];
       // GROUND_VERTEX, transcribed.
       const morph = Math.min(Math.max((toCamera - start) / Math.max(end - start, 1e-3), 0), 1);
       if (morph < 1) {
@@ -263,15 +263,15 @@ describe('the terrain quadtree', () => {
     tree.measure(cliffInOneCorner());
     const ppm = 1000;
     const tolerance = 2;
-    const rootSwitch = (tree.error[0]! * ppm) / tolerance;
+    const rootSwitch = (tree.error[0] * ppm) / tolerance;
     const out = selectionBuffers(8192);
     selectNodes(tree, out, 0, rootSwitch * 2, 0, ppm, tolerance, 1e9);
 
     expect(out.count).toBe(1);
     expect(out.data[2]).toBe(PLANET_EDGE_M);
-    expect(Number.isFinite(out.morph[0]!)).toBe(true);
-    expect(Number.isFinite(out.morph[1]!)).toBe(true);
-    expect(out.morph[0]!).toBeGreaterThan(PLANET_EDGE_M * 1000);
+    expect(Number.isFinite(out.morph[0])).toBe(true);
+    expect(Number.isFinite(out.morph[1])).toBe(true);
+    expect(out.morph[0]).toBeGreaterThan(PLANET_EDGE_M * 1000);
   });
 
   it('gives two nodes at one level the SAME band, or their shared edge cracks', () => {
@@ -287,8 +287,8 @@ describe('the terrain quadtree', () => {
 
     const bandBySize = new Map<number, [number, number]>();
     for (let i = 0; i < out.count; i++) {
-      const size = out.data[i * 4 + 2]!;
-      const band: [number, number] = [out.morph[i * 2]!, out.morph[i * 2 + 1]!];
+      const size = out.data[i * 4 + 2];
+      const band: [number, number] = [out.morph[i * 2], out.morph[i * 2 + 1]];
       const seen = bandBySize.get(size);
       if (seen === undefined) {
         bandBySize.set(size, band);
@@ -310,8 +310,8 @@ describe('the terrain quadtree', () => {
     selectNodes(tree, out, 500, 120, -500, 1200, 2, 1e9);
     expect(out.count).toBeGreaterThan(0);
     for (let i = 0; i < out.count; i++) {
-      const start = out.morph[i * 2]!;
-      const end = out.morph[i * 2 + 1]!;
+      const start = out.morph[i * 2];
+      const end = out.morph[i * 2 + 1];
       expect(end).toBeGreaterThan(start);
       expect(start).toBeGreaterThanOrEqual(0);
       expect(Number.isFinite(end)).toBe(true);

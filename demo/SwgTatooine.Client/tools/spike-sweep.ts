@@ -22,12 +22,12 @@ function cones(height: Float32Array, dropM: number): number {
   let count = 0;
   for (let z = 1; z < POSTS - 1; z++) {
     for (let x = 1; x < POSTS - 1; x++) {
-      const h = height[z * POSTS + x]!;
+      const h = height[z * POSTS + x];
       const drop = Math.min(
-        h - height[z * POSTS + x - 1]!,
-        h - height[z * POSTS + x + 1]!,
-        h - height[(z - 1) * POSTS + x]!,
-        h - height[(z + 1) * POSTS + x]!,
+        h - height[z * POSTS + x - 1],
+        h - height[z * POSTS + x + 1],
+        h - height[(z - 1) * POSTS + x],
+        h - height[(z + 1) * POSTS + x],
       );
       if (drop > dropM) {
         count++;
@@ -68,7 +68,7 @@ function build({ sharpness, slopeMax, cliffMin, cliffAmp, octaves, waveZ }: Knob
   for (const layer of layers) {
     if (layer.affector.kind === 'terrace') {
       layer.affector = { ...layer.affector, sharpness };
-      const slope = layer.filters[0]!;
+      const slope = layer.filters[0];
       layer.filters = [{ ...slope, kind: 'slope', max: slopeMax } as typeof slope];
     }
 
