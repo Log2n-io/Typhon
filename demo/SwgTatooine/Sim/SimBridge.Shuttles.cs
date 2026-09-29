@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -174,6 +174,13 @@ public sealed partial class SimBridge
     /// </summary>
     public void ShuttleTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         if (!ShuttlesActive)
         {
             return;
@@ -312,6 +319,13 @@ public sealed partial class SimBridge
     /// </remarks>
     public void ShuttleProbeTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var ports = _index.Shuttleports;
         if (ports.Count == 0)
         {

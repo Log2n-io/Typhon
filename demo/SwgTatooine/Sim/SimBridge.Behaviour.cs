@@ -28,6 +28,13 @@ public sealed partial class SimBridge
     /// </remarks>
     public void CreatureThinkTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         var thinkMin = WorldBuilder.AiTicksMin(_config);
         var thinkSpan = Math.Max(1, WorldBuilder.AiTicksMax(_config) - thinkMin + 1);
@@ -426,6 +433,27 @@ public sealed partial class SimBridge
     public long PossessedSkipped => Interlocked.Read(ref _possessedSkipped);
 
     /// <summary>
+    /// How often a simulated player says something, in seconds of simulated time (SWG-09).
+    /// </summary>
+    /// <remarks>
+    /// A minute is a compromise between a town that feels alive and a wire that is mostly chatter. It is a demo figure
+    /// and not an engine one: what it sets is how much work the 50 m fan-out is given to do, which is the thing worth
+    /// watching. Players are slower than the townsfolk below because there are far fewer of them per square metre.
+    /// </remarks>
+    private const float ChatEverySeconds = 60f;
+
+    /// <summary>
+    /// How often a city NPC says something, in seconds of simulated time (SWG-09).
+    /// </summary>
+    /// <remarks>
+    /// <b>Set by the geometry, not by taste.</b> A listener hears what is within 50 m of ITS OWN viewpoint — for a map
+    /// client, the centre of its region — and a town at these populations puts only about two NPCs in that disc. A
+    /// leisurely cadence there is a line every half minute at the point the camera is aimed at, which reads as broken,
+    /// so this is deliberately brisk.
+    /// </remarks>
+    private const float NpcChatEverySeconds = 8f;
+
+    /// <summary>
     /// Player behaviour: an activity mix rather than one loop.
     /// </summary>
     /// <remarks>
@@ -440,8 +468,20 @@ public sealed partial class SimBridge
     /// </remarks>
     public void PlayerThinkTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         var hz = _config.TickRateHz;
+
+        // About one line per simulated player per minute: enough that a town is audible and little enough that the wire
+        // is not mostly chat. Chat routes to sessions within 50 m, so what this costs a client scales with how crowded
+        // the place it is looking at is, not with the population.
+        var chatChance = 1f / MathF.Max(1f, ChatEverySeconds * hz);
 
         // Accumulated locally and added once, rather than an interlocked increment per possessed player per tick from every parallel chunk. It is a diagnostic
         // counter sitting next to its siblings in the same cache line, so the contended form would have chunks invalidating each other's line to maintain a
@@ -494,6 +534,20 @@ public sealed partial class SimBridge
 
                 // Per player per tick, unlike the creatures': a player draws on nearly every branch below, and there are orders of magnitude fewer of them.
                 var key = cluster.GetEntityId(idx).EntityKey;
+
+                // SWG-09: the world talks to itself, so the 50 m fan-out is something you can watch rather than a counter.
+                // A hashed cadence rather than a per-player timer: it needs no state, no component field and no extra
+                // write, and it spreads the utterances across ticks instead of bunching them on a shared countdown.
+                if (Hash01(Salt(tick, key, 0x5A17C8A7u)) < chatChance)
+                {
+                    TatooineReplication.Speak(
+                        ctx,
+                        cluster.GetEntityId(idx),
+                        in ChatLines.For(state.Activity, Salt(tick, key, 0x0C4A771Eu)),
+                        x,
+                        z,
+                        realm);
+                }
 
                 if (state.ActivityTicks > 0)
                 {
@@ -676,6 +730,13 @@ public sealed partial class SimBridge
     /// <summary>Integrate creature positions. The only creature system that writes a placement component.</summary>
     public void CreatureMoveTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var half = _config.WorldEdgeM * 0.5f;
         var batched = _config.BatchedSpatialWrites;
         var dormancy = _config.DormancyTicks > 0;
@@ -785,6 +846,13 @@ public sealed partial class SimBridge
     /// <summary>Integrate player positions.</summary>
     public void PlayerMoveTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var half = _config.WorldEdgeM * 0.5f;
         var batched = _config.BatchedSpatialWrites;
         Span<PlayerPlacement> next = stackalloc PlayerPlacement[64];
@@ -852,8 +920,19 @@ public sealed partial class SimBridge
     /// </remarks>
     public void NpcMoveTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         var batched = _config.BatchedSpatialWrites;
+
+        // A townsperson speaks about this often. They are the dense population, so this is the figure that decides
+        // whether a town sounds alive; the players' cadence is slower because there are far fewer of them per square.
+        var npcChatChance = 1f / MathF.Max(1f, NpcChatEverySeconds * _config.TickRateHz);
         Span<NpcPlacement> next = stackalloc NpcPlacement[64];
 
         using var clusters = ctx.ClusterIds != null
@@ -883,6 +962,25 @@ public sealed partial class SimBridge
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
+
+                // SWG-09: the town talks. BEFORE the wander gate, because the NPCs standing still are most of them and a
+                // stall-holder who never speaks is exactly the one you would expect to. This is what makes a 50 m fan-out
+                // visible from a camera — players are one per few hundred square metres, and a town is dozens in one
+                // square.
+                // The key once, not three times: this roll is paid by EVERY townsperson every tick — that is the point of
+                // its placement — and the NPCs are the demo's densest population, so a repeated cluster lookup here is the
+                // one that multiplies. The surrounding loops hoist theirs for the same reason.
+                var npcId = cluster.GetEntityId(idx);
+                if (Hash01(Salt(tick, npcId.EntityKey, 0x70171CE1u)) < npcChatChance)
+                {
+                    TatooineReplication.Speak(
+                        ctx,
+                        npcId,
+                        in ChatLines.Townsperson(Salt(tick, npcId.EntityKey, 0x7A1C0FFEu)),
+                        places[idx].X,
+                        places[idx].Z,
+                        cluster.Realm.Value);
+                }
 
                 if (brains[idx].Mode != AiMode.Wander)
                 {
@@ -1236,6 +1334,13 @@ public sealed partial class SimBridge
     /// </remarks>
     public void EconomyTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         long ticked = 0;
 
         using var clusters = ctx.ClusterIds != null

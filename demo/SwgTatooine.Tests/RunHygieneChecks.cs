@@ -220,6 +220,12 @@ public sealed class RunHygieneChecks
             Assert.That(TatooineReplication.Admit(Asking(TatooineReplication.GodKind)).Role, Is.EqualTo(SessionRole.Spectator));
             Assert.That(TatooineReplication.Admit(Asking(TatooineReplication.GodKind)).Limits.AllowDebug, Is.True,
                 "a god camera is the tooling preset: it is allowed to see how the server is arranged");
+
+            // The other half, which the web client's replication overlay now depends on being true (CLI3D-03): DEBUG carries the
+            // replication grid, the session's shape and its delivered cells, which is a map of where everyone is. A player asks
+            // for the cap — the SDK requests STATS | DEBUG for every session — and must simply not be granted it.
+            Assert.That(TatooineReplication.Admit(Asking(TatooineReplication.PlayerKind)).Limits.AllowDebug, Is.False,
+                "a player was granted DEBUG: the engine's own map of the world is a spectator tool, not a gameplay one");
         });
     }
 

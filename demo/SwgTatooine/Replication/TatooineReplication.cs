@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
+using Typhon.Protocol;
 
 namespace SwgTatooine;
 
@@ -91,6 +92,116 @@ public struct SetTarget
 }
 
 /// <summary>
+/// What a client says out loud (SWG-09). Spatial <c>/say</c>, which SWG carried 50 m.
+/// </summary>
+/// <remarks>
+/// <b>Queued rather than coalesced, at one a second.</b> Every utterance matters and they matter in order — coalescing
+/// would keep the newest and drop the sentence before it, which is the one thing chat must not do. The rate is the
+/// protocol's (04-protocol § 4); a client that exceeds it has its extra messages dropped and counted by the engine before
+/// any system sees them.
+/// </remarks>
+public struct Say
+{
+    /// <summary>What was said. Capped at 256 UTF-8 bytes by the wire and by the type alike.</summary>
+    public Utf8Text256 Text;
+}
+
+/// <summary>
+/// Something said, heard by everyone near enough — and only in the speaker's own realm (SWG-09).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>The realm is the half that is easy to get wrong.</b> Two players standing at the same local coordinates in two
+/// different cantinas are 0 m apart by arithmetic and must not hear each other; <c>RouteNear(point, realm, radius)</c> is
+/// what makes that true, and it is the engine's to enforce rather than the demo's to remember.
+/// </para>
+/// <para>
+/// <see cref="X"/>, <see cref="Z"/> and <see cref="Realm"/> are routing only and are kept off the wire: a listener has
+/// the speaker's position from the entity it already holds, and sending it again would be a second copy that can
+/// disagree with the first.
+/// </para>
+/// </remarks>
+public struct Chat
+{
+    /// <summary>Who spoke.</summary>
+    public EntityId Speaker;
+
+    /// <summary>What they said.</summary>
+    public Utf8Text256 Text;
+
+    /// <summary>Where they were, for the routing.</summary>
+    public float X;
+
+    /// <summary>Where they were, for the routing.</summary>
+    public float Z;
+
+    /// <summary>Which realm they were in, for the routing.</summary>
+    public ushort Realm;
+}
+
+/// <summary>
+/// Stop and start the whole simulation. <b>A demo control, and a temporary one.</b>
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>It pauses the world for EVERYONE, and any spectator may send it.</b> That is indefensible for a server with more
+/// than one viewer, and it is deliberate: the browser client had a Pause button that could only ever pause the mock, and
+/// a control that does nothing is worse than none. Pausing for real is what makes the world inspectable — you cannot
+/// click a creature that is moving at 12 m/s across your screen.
+/// </para>
+/// <para>
+/// <b>What has to happen before this is anything but a demo control:</b> it needs an entitlement (an operator role, not
+/// <see cref="SessionRole.Spectator"/>), or it needs to become a per-session view freeze that stops the client's clock
+/// instead of the server's tick. The second is the better answer for a real server and costs nothing to anyone else.
+/// </para>
+/// </remarks>
+public struct SetPaused
+{
+    /// <summary>Non-zero to pause, zero to resume.</summary>
+    public byte Paused;
+}
+
+/// <summary>
+/// One blow landed: what a client draws an attack line for (SWG-09, 04-protocol § 3).
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Routed to the sessions that know either end</b> — a spectator watching the fight, and the player at one end of it.
+/// A session that has never been shown either entity has nothing to draw and is not billed for the bytes.
+/// </para>
+/// <para>
+/// <b>It does not carry the target's health, which 04-protocol § 3 lists.</b> A hit changes the target's replicated
+/// <c>hp</c>, and events are delivered inside the frame that already carries this tick's updates — so the health after
+/// the blow is in the store by the time the client's handler runs, and sending it again would be a second copy of a value
+/// the client has. The client reads it from the store (<c>data/source.ts</c>, <c>healthOf</c>). Recorded as a deviation
+/// rather than silently narrowed.
+/// </para>
+/// </remarks>
+public struct Attack
+{
+    /// <summary>Who struck. Every blow in this demo has one; the field is nullable because the wire's is.</summary>
+    /// <remarks>
+    /// A session that was never shown the attacker receives this as netId 0 — the engine cannot name an entity a client
+    /// has no identity for — so a client must treat either end as possibly unknown whatever the server intends.
+    /// </remarks>
+    public EntityId Attacker;
+
+    /// <summary>What was struck.</summary>
+    public EntityId Target;
+
+    /// <summary>
+    /// Health taken off, in the simulation's own absolute health units — NOT in the fraction the target's replicated
+    /// <c>hp</c> carries.
+    /// </summary>
+    /// <remarks>
+    /// The two are deliberately different scales and a client cannot convert between them: <c>hp</c> travels as an 8-bit
+    /// fraction of a maximum that is not replicated at all (04-protocol § 2). So this is a magnitude for a hit marker, not
+    /// a number to subtract from a health bar — the bar's new value arrives as state in the same frame.
+    /// </remarks>
+    public ushort Amount;
+}
+
+/// <summary>
 /// News of a realm, heard by every session in it and in the realms under it (Realms G3: <c>RouteToRealm</c> over the parent tree) — a planet's news
 /// reaches the players in its buildings and dungeons.
 /// </summary>
@@ -169,12 +280,21 @@ public static class TatooineReplication
     /// <summary>The replication grid's cell side (<see cref="SubscriptionsOptions.ReplicationCellM"/>): a third of <see cref="PlayerRadiusM"/>.</summary>
     public const double ReplicationCellM = PlayerRadiusM / 3d;
 
-    /// <summary>The fastest anything on Tatooine moves, in metres per second — a mounted player.</summary>
+    /// <summary>The teleport threshold, in metres per second: the fastest anything on Tatooine moves, plus headroom.</summary>
     /// <remarks>
+    /// <para>
     /// It sizes the motion codec: the teleport threshold is what separates "it moved" from "it was put somewhere else", and the velocity width is derived from
     /// it together with the tick period. Declaring it too high wastes a bit per segment; too low turns a sprint into a teleport.
+    /// </para>
+    /// <para>
+    /// <b>The 5 % headroom over <c>PlayerMountSpeedMps</c> (12 m/s) is not padding, and declaring the true maximum here is broken.</b> The engine's test is
+    /// <c>step² &gt; (TeleportMaxSpeedMps × tickPeriod)²</c> over QUANTIZED positions, with no margin — so an entity travelling at exactly the declared
+    /// maximum sits on the boundary and the ~1 mm position quantum tips it over on about half its ticks. Every tip is reported to clients as a teleport,
+    /// which forbids interpolation, so a mounted player stood still for 112 frames of 180 and then jumped at 86 m/s. Measured in the browser client, which is
+    /// how it was found. At 12.6 every mover is smooth (11 of 11, no stalls). The engine should carry the margin itself; until it does, it lives here.
+    /// </para>
     /// </remarks>
-    internal const double MaxSpeedMps = 12.0;
+    internal const double MaxSpeedMps = 12.6;
 
     private static SubscriptionsCommands _pushCommands;
 
@@ -404,6 +524,88 @@ public static class TatooineReplication
         }
     }
 
+    // Attacks put on the wire, for the periodic report.
+    private static long _strikes;
+
+    // Things said that reached the wire, and things said that did not, for the periodic report.
+    private static long _chatHeard;
+    private static long _chatRefusedEmpty;
+    private static long _chatRefusedNoSpeaker;
+
+    /// <summary>What has been said, what was refused for having no speaker, and what was refused for being empty.</summary>
+    public static (long Heard, long NoSpeaker, long Empty) Chatter => (
+        System.Threading.Volatile.Read(ref _chatHeard),
+        System.Threading.Volatile.Read(ref _chatRefusedNoSpeaker),
+        System.Threading.Volatile.Read(ref _chatRefusedEmpty));
+
+    // Whether the simulation is stopped, as an int because Volatile has no bool overload worth the cast.
+    private static int _simulationPaused;
+
+    /// <summary>
+    /// Whether the simulation's own systems should do nothing this tick (<see cref="SetPaused"/>).
+    /// </summary>
+    /// <remarks>
+    /// <b>Volatile because it crosses threads within a tick.</b> It is written by the serial session system in an early
+    /// phase and read by the parallel movement, behaviour and combat systems in later ones; the phase barrier between
+    /// them orders the write before the reads, and the volatile pair is what makes that ordering hold on arm64 as well
+    /// as on x64.
+    /// </remarks>
+    public static bool SimulationPaused => System.Threading.Volatile.Read(ref _simulationPaused) != 0;
+
+    /// <summary>
+    /// Puts one landed blow on the wire, to the sessions that know either end. From a serial system, after the damage has
+    /// been written — the frame carries this tick's state first and its events after (03-wire-protocol § 5), so a client's
+    /// handler sees the target's new health.
+    /// </summary>
+    /// <param name="tick">The tick context of the system this is called from.</param>
+    /// <param name="attack">The blow.</param>
+    public static void Strike(TickContext tick, in Attack attack)
+    {
+        if (_declared && tick.Subscriptions != null)
+        {
+            tick.Subscriptions.Emit(in attack);
+            System.Threading.Interlocked.Increment(ref _strikes);
+        }
+    }
+
+    /// <summary>
+    /// Puts one utterance on the wire, to whoever is near enough in the speaker's own realm.
+    /// </summary>
+    /// <param name="tick">The tick context of the system this is called from.</param>
+    /// <param name="speaker">Who spoke.</param>
+    /// <param name="text">What they said; empty is refused rather than sent.</param>
+    /// <param name="x">The speaker's position, for the routing.</param>
+    /// <param name="z">The speaker's position, for the routing.</param>
+    /// <param name="realm">The speaker's realm, for the routing.</param>
+    /// <returns>Whether it was emitted.</returns>
+    /// <remarks>
+    /// Empty text and a null speaker are refused HERE and counted, rather than reaching the wire as a bubble with nothing
+    /// in it — the engine would carry either perfectly happily, and a client would have to decide what to do with them.
+    /// </remarks>
+    public static bool Speak(TickContext tick, EntityId speaker, in Utf8Text256 text, float x, float z, ushort realm)
+    {
+        if (speaker.IsNull)
+        {
+            System.Threading.Interlocked.Increment(ref _chatRefusedNoSpeaker);
+            return false;
+        }
+
+        if (text.IsEmpty)
+        {
+            System.Threading.Interlocked.Increment(ref _chatRefusedEmpty);
+            return false;
+        }
+
+        if (!_declared || tick.Subscriptions == null)
+        {
+            return false;
+        }
+
+        tick.Subscriptions.Emit(new Chat { Speaker = speaker, Text = text, X = x, Z = z, Realm = realm });
+        System.Threading.Interlocked.Increment(ref _chatHeard);
+        return true;
+    }
+
     /// <summary>The god region's aggregate tile, metres; its counts refresh once a second.</summary>
     private const double GodAggregateTileM = 256d;
 
@@ -484,6 +686,14 @@ public static class TatooineReplication
         });
 
         // Realms G3: a planet's news reaches its subtree, and a god camera moves between planets with a command.
+        // SWG-09's first event: the blow a client draws a line for. Routed to whoever knows either end rather than by
+        // position, because that is exactly the set of sessions with something to draw it between.
+        subs.Event<Attack>(e => e
+            .RouteToKnown(a => a.Attacker, a => a.Target)
+            .Entity(a => a.Attacker, "attacker")
+            .Entity(a => a.Target, "target")
+            .Field(a => a.Amount, Codec.U16, "amount"));
+
         subs.Event<RealmNews>(e => e.RouteToRealm(n => new RealmId(n.Realm), subtree: true));
 
         // Every accepted ask is a RESET of a whole planet, the dearest frame there is: once a second, a burst of two. Spectators only — a possessed player
@@ -521,6 +731,32 @@ public static class TatooineReplication
             .Rate(4, 8)
             .Roles(SessionRole.Player)
             .Field(t => t.NetId, Codec.VarUInt, "netId"));
+
+        // SWG-09. Queued, because each utterance matters and their order is the conversation; one a second, which is the
+        // rate 04-protocol § 4 gives it and roughly what a person types.
+        subs.Command<Say>(c => c
+            .Rate(1, 2)
+            .Roles(SessionRole.Player)
+            .Field(s => s.Text, Codec.Str(Utf8Text256.Capacity), "text"));
+
+        // Heard within 50 m of the speaker AND in the speaker's realm. The realm clause is what makes two players at the
+        // same coordinates in two different cantinas unable to hear each other, and it is the engine's to enforce.
+        subs.Event<Chat>(e => e
+            .RouteNear(c => new Vector3D(c.X, c.Z, 0d), c => new RealmId(c.Realm), TatooineData.SayRangeM)
+            .Entity(c => c.Speaker, "speaker")
+            .Field(c => c.Text, Codec.Str(Utf8Text256.Capacity), "text")
+            .Ignore(c => c.X)
+            .Ignore(c => c.Z)
+            .Ignore(c => c.Realm));
+
+        // Stop and start the world (see SetPaused). Spectators, because the god camera is one and a possessed player has
+        // no business stopping everyone else's — which is the narrowest this can be while the button still works, and is
+        // not narrow enough for anything but a demo.
+        subs.Command<SetPaused>(c => c
+            .Coalesce(CommandCoalesce.LatestPerSession)
+            .Rate(2, 4)
+            .Roles(SessionRole.Spectator)
+            .Field(p => p.Paused, Codec.U8, "paused"));
 
         _declared = true;
     }
@@ -619,6 +855,17 @@ public static class TatooineReplication
                 {
                     subs.Enter(e.Session, RealmId.Default);
                 }
+            }
+        }
+
+        // Stop or start the world. Logged on every change and never folded into a counter: a server that stopped
+        // simulating must say so where an operator reading the console will see it.
+        foreach (var command in subs.Commands<SetPaused>())
+        {
+            var wanted = command.Value.Paused != 0 ? 1 : 0;
+            if (System.Threading.Interlocked.Exchange(ref _simulationPaused, wanted) != wanted)
+            {
+                Console.WriteLine($"  !! simulation {(wanted != 0 ? "PAUSED" : "RESUMED")} by session {command.Session.Value}");
             }
         }
 
@@ -933,7 +1180,10 @@ public static class TatooineReplication
             var idf = subs.IdentityFlow;
             Console.Error.WriteLine(
                 $"  identities: {idf.Minted} minted, {idf.Released} released, {idf.Reused} reused; "
-                + $"{subs.EntriesMigrated} entries relocated between clusters; {System.Threading.Volatile.Read(ref _announced)} realm news announced");
+                + $"{subs.EntriesMigrated} entries relocated between clusters; {System.Threading.Volatile.Read(ref _announced)} realm news announced, "
+                + $"{System.Threading.Volatile.Read(ref _strikes)} attacks sent, "
+                + $"{System.Threading.Volatile.Read(ref _chatHeard)} said ({System.Threading.Volatile.Read(ref _chatRefusedNoSpeaker)} no speaker, "
+                + $"{System.Threading.Volatile.Read(ref _chatRefusedEmpty)} empty)");
 
             // What the intent path did (SWG-01). These counters were built "for the report and for the checks beside the demo" — the checks read them, and the
             // report never did, so a served run printed nothing about the one thing a connected client changes. The refusals are printed beside the applications
@@ -1324,6 +1574,20 @@ public static class TatooineReplication
                 System.Threading.Interlocked.Increment(ref _targetsRefused);
             }
         }
+
+        // SWG-09. What a client says becomes a Chat heard by whoever is near enough IN THE SPEAKER'S REALM — the speaker's
+        // place and realm are read here, from the player it controls, rather than taken from the client: a client that
+        // could name where its voice comes from could be heard anywhere.
+        foreach (var command in subs.Commands<Say>())
+        {
+            if (!TryOpenControlled(subs, accessor, command.Session, out var player))
+            {
+                continue;
+            }
+
+            var place = player.Read(Player.Bounds);
+            Speak(tick, BoundPlayer[command.Session.Value], command.Value.Text, place.X, place.Z, player.Realm.Value);
+        }
     }
 
     /// <summary>The player a session controls, opened for writing.</summary>
@@ -1439,6 +1703,11 @@ public static class TatooineReplication
         Scheduler = null;
         _declared = false;
         System.Threading.Interlocked.Exchange(ref _announced, 0);
+        System.Threading.Interlocked.Exchange(ref _strikes, 0);
+        System.Threading.Interlocked.Exchange(ref _simulationPaused, 0);
+        System.Threading.Interlocked.Exchange(ref _chatHeard, 0);
+        System.Threading.Interlocked.Exchange(ref _chatRefusedEmpty, 0);
+        System.Threading.Interlocked.Exchange(ref _chatRefusedNoSpeaker, 0);
         _placeTicks = 0;
         _quietTicks = 0;
         WorldEdgeM = 0d;

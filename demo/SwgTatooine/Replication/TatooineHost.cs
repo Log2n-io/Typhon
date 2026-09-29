@@ -1,4 +1,4 @@
-using Microsoft.AspNetCore.Builder;
+﻿using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.FileProviders;
@@ -79,6 +79,29 @@ public static class TatooineHost
         app.MapTyphonStats("/typhon/stats.json");
         // Plain text, not JSON: the slim builder uses source-generated serialization, and a health check is not worth a serializer context.
         app.MapGet("/healthz", () => Results.Text($"tick {runtime.CurrentTickNumber}"));
+
+        // What this process was started with, for the browser client it is serving.
+        //
+        // <b>It exists because a client cannot discover the god camera's region ceiling any other way.</b> A ClientRegion
+        // larger than the profile's `maxEdgeM` is silently shrunk about its centroid, and the ceiling is on no wire the
+        // client can read (#1075) — so a viewer asking for a 4 km radius was served 1.5 km and told it had 4. The engine
+        // should eventually say so itself; until it does, the one process that owns BOTH ends publishes its own
+        // configuration rather than leaving the page to guess.
+        //
+        // Written by hand for the same reason /healthz is plain text: the slim builder's source-generated serialization
+        // would want a serializer context for one object holding two numbers.
+        app.MapGet("/typhon/demo.json", () =>
+        {
+            var edge = TatooineReplication.GodRegionMaxEdgeM;
+
+            // The client sends the smallest square containing its disc, so the side is twice the radius: the largest
+            // radius that survives the clamp is half the ceiling. Zero means this server gives its god cameras the whole
+            // world and no client-driven region at all, in which case a radius means nothing.
+            var radius = edge > 0 ? edge / 2 : 0;
+            return Results.Text(
+                FormattableString.Invariant($"{{\"godRegionMaxEdgeM\":{edge},\"maxViewRadiusM\":{radius}}}"),
+                "application/json");
+        });
 
         // Tell every client the server is going, before Kestrel drops their sockets (SWG-07). ApplicationStopping runs before the listeners are closed and
         // blocks shutdown until it returns, which is exactly the window in which the runtime is still ticking and a KICK can still be staged and sent.

@@ -87,7 +87,12 @@ internal static class CombatEventKind
 /// It is not derivable from the <see cref="EntityId"/> at the cost the consumer can afford — and even if it were, naming
 /// it at the producer is the honest form: the producer knows exactly what it aimed at.
 /// </remarks>
-internal static class CombatTargetKind
+/// <remarks>
+/// <b>Public although <see cref="CombatEvent"/> is internal</b>, because it is the domain of a PUBLIC field:
+/// <c>PlayerSession.TargetKind</c> is what a client sets through <c>SetTarget</c> and what the combat systems read, and a
+/// caller outside this assembly that has to spell 0 or 1 by hand is one that breaks silently if these are renumbered.
+/// </remarks>
+public static class CombatTargetKind
 {
     public const byte Creature = 0;
 

@@ -55,6 +55,13 @@ public sealed partial class SimBridge
     /// </remarks>
     public void PlayerCombatTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var writer = ctx.Writer(CombatQueue);
         var minDelay = (int)(TatooineData.MinAttackDelaySec * _config.TickRateHz);
         var delaySpan = Math.Max(1, (int)((TatooineData.MaxAttackDelaySec - TatooineData.MinAttackDelaySec) * _config.TickRateHz));
@@ -364,6 +371,13 @@ public sealed partial class SimBridge
     /// </remarks>
     public void CreatureCombatTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var writer = ctx.Writer(CombatQueue);
         long attacks = 0;
         long lostTarget = 0;
@@ -530,6 +544,13 @@ public sealed partial class SimBridge
     /// </remarks>
     public void CombatResolveTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var pending = CombatQueue.Count;
         if (pending == 0)
         {
@@ -589,14 +610,16 @@ public sealed partial class SimBridge
                 continue;
             }
 
+            var landed = false;
             switch (ev.TargetKind)
             {
                 case CombatTargetKind.Creature:
-                    ApplyToCreature(tx, ref target, in ev, respawnTicks, ref killed, ref damageApplied);
+                    landed = ApplyToCreature(tx, ref target, in ev, respawnTicks, ref killed, ref damageApplied);
                     break;
 
                 case CombatTargetKind.Lair:
-                    if (ApplyToLair(ref target, in ev))
+                    landed = ApplyToLair(ref target, in ev);
+                    if (landed)
                     {
                         lairHits++;
                         damageApplied++;
@@ -609,7 +632,8 @@ public sealed partial class SimBridge
                     break;
 
                 default:
-                    if (ApplyToPlayer(tx, ref target, in ev, ref incapacitated))
+                    landed = ApplyToPlayer(tx, ref target, in ev, ref incapacitated);
+                    if (landed)
                     {
                         damageApplied++;
                     }
@@ -619,6 +643,20 @@ public sealed partial class SimBridge
                     }
 
                     break;
+            }
+
+            // On the wire only when the blow actually landed: an event for a hit that was refused (already dead, mission
+            // over) would have a client draw a line for something that did not happen.
+            if (landed)
+            {
+                TatooineReplication.Strike(
+                    ctx,
+                    new Attack
+                    {
+                        Attacker = ev.Attacker,
+                        Target = ev.Target,
+                        Amount = (ushort)Math.Clamp(ev.Amount, 0, ushort.MaxValue),
+                    });
             }
         }
 
@@ -659,12 +697,13 @@ public sealed partial class SimBridge
     }
 
     /// <summary>Damage to a creature: health down, a grudge against the shooter, and loot to whoever landed the last hit.</summary>
-    private void ApplyToCreature(Transaction tx, ref EntityRefMut target, in CombatEvent ev, int respawnTicks, ref long killed, ref long damageApplied)
+    /// <returns>Whether the blow landed; <see langword="false"/> when the creature was already dead this tick.</returns>
+    private bool ApplyToCreature(Transaction tx, ref EntityRefMut target, in CombatEvent ev, int respawnTicks, ref long killed, ref long damageApplied)
     {
         ref var v = ref target.Write(Creature.Vitals);
         if (v.Health <= 0)
         {
-            return;   // already dead this tick, from another shooter's event in the same drain
+            return false;   // already dead this tick, from another shooter's event in the same drain
         }
 
         damageApplied++;
@@ -689,7 +728,7 @@ public sealed partial class SimBridge
             }
 
             TatooineReplication.Replicate(in target);
-            return;
+            return true;
         }
 
         v.Health = 0;
@@ -705,6 +744,7 @@ public sealed partial class SimBridge
         // another archetype's entity until #907 is fixed, so real items are S3's work and out of WP-3's scope. What the counter DOES exercise is the thing
         // worth exercising — a Versioned write on a cluster archetype, in the tick's unit of work, every time something dies.
         Loot(tx, ev.Attacker, ai.Template);
+        return true;
     }
 
     /// <summary>Damage to a mission lair. Its completion is <c>MissionTick</c>'s, on the next tick's Spawn phase.</summary>

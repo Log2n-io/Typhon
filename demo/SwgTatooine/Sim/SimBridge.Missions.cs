@@ -42,6 +42,13 @@ public sealed partial class SimBridge
     /// </summary>
     public void MissionTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         var scale = _config.ContentScale;
         var minD = TatooineData.DestroyMissionMinDistanceM * scale;

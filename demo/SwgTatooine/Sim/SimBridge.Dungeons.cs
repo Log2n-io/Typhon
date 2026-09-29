@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -52,6 +52,13 @@ public sealed partial class SimBridge
     /// <summary>Close the dungeons whose stay is over, then open the next one when it is due. Serial.</summary>
     public void DungeonTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         _closedThisTick.Clear();
         for (var i = _openDungeons.Count - 1; i >= 0; i--)
