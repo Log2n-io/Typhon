@@ -282,8 +282,11 @@ public sealed partial class SimBridge
                     var r = ArrivalScatterM * MathF.Sqrt(Hash01(Salt(tick, key, 0x2F9B1D63u)));
                     var a = Hash01(Salt(tick, key, 0x6C8E9CF5u)) * MathF.PI * 2f;
                     var nb = default(PlayerPlacement);
-                    nb.SetAt(Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h), Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h),
-                        h);
+                    var ax = Math.Clamp(portX + (MathF.Cos(a) * r), -half + h, half - h);
+                    var az = Math.Clamp(portZ + (MathF.Sin(a) * r), -half + h, half - h);
+                    // A local hop stays on the planet it left, so that planet's ground is the one that applies. Naming
+                    // RealmId.Default worked only because every planet currently shares one field.
+                    nb.SetAt(ax, az, GroundAt(cluster.Realm, ax, az), h);
                     cluster.WriteSpatial(Player.Bounds, idx, nb);
                 }
 

@@ -632,7 +632,7 @@ public sealed partial class SimBridge
                     break;
 
                 default:
-                    landed = ApplyToPlayer(tx, ref target, in ev, ref incapacitated);
+                    landed = ApplyToPlayer(tx, ref target, in ev, ref incapacitated, out var cloned);
                     if (landed)
                     {
                         damageApplied++;
@@ -640,6 +640,16 @@ public sealed partial class SimBridge
                     else
                     {
                         stale++;
+                    }
+
+                    // A clone restores full health, so the `Health <= 0` guard that keeps two shooters from both killing
+                    // one target stops applying to this player for the rest of the drain. Withdraw the rest of its events
+                    // here rather than leaving the guard to fail: the alternative is a blow landing on a player the
+                    // previous event moved to a city, drawn as a Strike between two entities kilometres apart. Bounded by
+                    // the events already drained, which is single digits on a normal tick.
+                    if (cloned)
+                    {
+                        stale += WithdrawAfterClone(events, i + 1, n, ev.Target);
                     }
 
                     break;
@@ -694,6 +704,34 @@ public sealed partial class SimBridge
         {
             Interlocked.Add(ref _eventsStale, stale);
         }
+    }
+
+    /// <summary>
+    /// Withdraws every <see cref="CombatEventKind.Damage"/> still to be drained that names a player just cloned.
+    /// </summary>
+    /// <remarks>
+    /// A clone restores full health, so the <c>Health &lt;= 0</c> guard that stops two shooters both killing one target
+    /// no longer applies to this player. Withdrawn by blanking the target, which the drain already treats as an event
+    /// whose world moved under it — it counts rather than swallows.
+    /// </remarks>
+    /// <param name="events">The drained span.</param>
+    /// <param name="from">The first index not yet applied.</param>
+    /// <param name="n">How many of the span are live.</param>
+    /// <param name="target">The player that was cloned.</param>
+    /// <returns>How many were withdrawn.</returns>
+    internal static long WithdrawAfterClone(Span<CombatEvent> events, int from, int n, EntityId target)
+    {
+        long withdrawn = 0;
+        for (var j = from; j < n; j++)
+        {
+            if (events[j].Kind == CombatEventKind.Damage && events[j].Target == target)
+            {
+                events[j].Target = EntityId.Null;
+                withdrawn++;
+            }
+        }
+
+        return withdrawn;
     }
 
     /// <summary>Damage to a creature: health down, a grudge against the shooter, and loot to whoever landed the last hit.</summary>
@@ -767,8 +805,15 @@ public sealed partial class SimBridge
     }
 
     /// <summary>Damage to a player, and the clone that follows when it runs out of health.</summary>
-    private bool ApplyToPlayer(Transaction tx, ref EntityRefMut target, in CombatEvent ev, ref long incapacitated)
+    /// <param name="cloned">
+    /// Set when this blow incapacitated the player and moved it to a city. The caller uses it to withdraw every later
+    /// event in the same drain that named this player: the clone restores full health, so the <c>Health &lt;= 0</c> guard
+    /// at the top of this method stops protecting it, and a second lethal blow pushed on the same tick would land on a
+    /// player now standing kilometres from whatever shot it.
+    /// </param>
+    private bool ApplyToPlayer(Transaction tx, ref EntityRefMut target, in CombatEvent ev, ref long incapacitated, out bool cloned)
     {
+        cloned = false;
         ref var v = ref target.Write(Player.Vitals);
         if (v.Health <= 0)
         {
@@ -813,9 +858,13 @@ public sealed partial class SimBridge
 
         var city = NearestCity(place.X, place.Z);
         var at = default(PlayerPlacement);
-        at.SetAt(city.X, city.Z, place.HalfExtent);
-        tx.Teleport(ev.Target, Player.Bounds, new RealmId((ushort)realm), in at);
+        // The realm the player is teleported INTO is the one that owns the ground, and it is the same one the teleport
+        // below names. Passing RealmId.Default here was right only because every planet currently shares one field.
+        var home = new RealmId((ushort)realm);
+        at.SetAt(city.X, city.Z, GroundAt(home, city.X, city.Z), place.HalfExtent);
+        tx.Teleport(ev.Target, Player.Bounds, home, in at);
         TatooineReplication.Replicate(in target);
+        cloned = true;
         return true;
     }
 

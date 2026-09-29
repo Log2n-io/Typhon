@@ -8,7 +8,7 @@ import type { Scene } from '@babylonjs/core/scene';
 import { archetypeOf, evaluateSlot, MAX_MOTION_STRIDE, NOT_FOUND, slotOf, type WorldStore } from '@typhondb/client';
 import type { EventSink } from '../data/source';
 import type { FrameView } from './entity-layer';
-import { Placement } from '../data/placement';
+import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { PrefixUploader } from './prefix-upload';
 import { SCENE_GROUP } from './render-groups';
 import { LINE_FRAGMENT, LINE_VERTEX } from './shaders';
@@ -224,10 +224,10 @@ export class AttackLines implements EventSink {
     const store = world.archetypeStore(archetypeOf(location));
     evaluateSlot(store, slotOf(location), view.renderTick, view.renderFrac, this.endpoint, 0);
 
-    // Rewritten in place as (x, y, z) in render space: the caller reads three, and a two-axis store's altitude is 0.
+    // Rewritten in place as (x, y, z) in render space: the caller reads three.
     const at = this.placement.read(store.dims, this.endpoint, 0);
     this.endpoint[0] = at.x - view.originX;
-    this.endpoint[1] = at.y + view.ground.heightAt(at.x, at.z);
+    this.endpoint[1] = altitudeOf(altitudeField(store), slotOf(location), at, view.ground);
     this.endpoint[2] = at.z - view.originZ;
     return true;
   }

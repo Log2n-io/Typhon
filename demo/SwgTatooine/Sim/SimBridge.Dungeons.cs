@@ -117,7 +117,8 @@ public sealed partial class SimBridge
                 var x = c + (MathF.Cos(a) * r);
                 var z = c + (MathF.Sin(a) * r);
                 var bounds = default(NpcPlacement);
-                bounds.SetAt(x, z, 0.5f);
+                // Inside a dungeon: its own realm, its own flat floor.
+                bounds.SetAt(x, z, 0f, 0.5f);
                 var ai = new NpcBrain { Mode = AiMode.Wander, HomeX = x, HomeZ = z, LeashRadius = 6f };
                 var timers = new NpcTimers { MoveUntilTick = 0, RestUntilTick = tick + 1 + m };
                 var move = new NpcMotion { SpeedMps = 1.2f };
@@ -155,7 +156,7 @@ public sealed partial class SimBridge
                 motion.VelX = 0f;
                 motion.VelZ = 0f;
                 var at = default(PlayerPlacement);
-                at.SetAt(c + ((party.Count % 5) - 2) * 2f, 6f, p.HalfExtent);
+                at.SetAt(c + ((party.Count % 5) - 2) * 2f, 6f, 0f, p.HalfExtent);
                 tx.Teleport(id, Player.Bounds, new RealmId(realm), in at);
             }
 
@@ -189,7 +190,9 @@ public sealed partial class SimBridge
                 state.Activity = PlayerActivity.Idle;
                 state.ActivityTicks = 10 * _config.TickRateHz;
                 var at = default(PlayerPlacement);
-                at.SetAt(dungeon.Home[i].X, dungeon.Home[i].Z, player.Read(Player.Bounds).HalfExtent);
+                // Home is on the planet — the teleport below names RealmId.Default — so the ground is the planet's.
+                var home = dungeon.Home[i];
+                at.SetAt(home.X, home.Z, GroundAt(RealmId.Default, home.X, home.Z), player.Read(Player.Bounds).HalfExtent);
                 tx.Teleport(id, Player.Bounds, RealmId.Default, in at);
             }
 

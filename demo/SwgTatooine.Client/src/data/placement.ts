@@ -1,3 +1,5 @@
+import type { ArchetypeStore, FieldArray } from '@typhondb/client';
+
 /**
  * Where an entity is, read from an evaluated motion record (CLI3D-04).
  *
@@ -10,6 +12,51 @@
  * realm's `pos2` is defined (axes 0 and 1, `03-wire-protocol.md` § 4). The renderer's own convention is x/y/z with **y
  * up**, so axis 1 becomes `z` and axis 2 becomes `y`: that swap happens once, here.
  */
+
+/**
+ * The wire name of the altitude a placement carries beside its position (terrain rung (b)).
+ *
+ * It is a component field and **not** a position axis, deliberately: a vertical step folded into `pos` is measured by the
+ * motion tolerance as a horizontal jump, so walking up a cliff would replicate as a teleport.
+ */
+export const ALTITUDE_FIELD = 'y';
+
+/**
+ * The store's altitude field, or `null` when it has none.
+ *
+ * Absent is a real case and not a failure: the browser-side mock serves no such field, and neither does any catalog
+ * older than rung (b). {@link altitudeOf} says what to do then.
+ */
+export function altitudeField(store: ArchetypeStore): FieldArray | null {
+  const index = store.fieldIndex(ALTITUDE_FIELD);
+  return index < 0 ? null : store.fieldAt(index);
+}
+
+/**
+ * Where to draw an entity, in metres above sea level.
+ *
+ * **With the server's field, its value is the answer and nothing is added to it.** The server samples the same baked
+ * heightfield this client draws — one spec, one golden, `TerrainGoldenChecks` — so adding the client's own ground on top
+ * would double the relief. It also carries the cases the client cannot know: an entity inside a building is on that
+ * realm's flat floor, not on the mesa the door happens to sit on.
+ *
+ * **Without it, the old guess.** `at.y` is the position's third axis, which is 0 in a flat realm and real in the space
+ * realm, and the ground underneath comes from this client's own field. That is what every frame did before rung (b) and
+ * it is still what the mock needs.
+ *
+ * @param field The store's altitude field from {@link altitudeField}, or `null`.
+ * @param slot The entity's slot in that store.
+ * @param at The evaluated placement, for the fallback.
+ * @param ground The client's own heightfield, for the fallback.
+ */
+export function altitudeOf(
+  field: FieldArray | null,
+  slot: number,
+  at: Placement,
+  ground: { heightAt(x: number, z: number): number },
+): number {
+  return field === null ? at.y + ground.heightAt(at.x, at.z) : field[slot];
+}
 
 /** The engine axis carrying the first ground coordinate. */
 export const AXIS_X = 0;

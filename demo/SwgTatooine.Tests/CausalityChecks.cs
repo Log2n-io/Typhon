@@ -292,7 +292,7 @@ public sealed class DriveByCombatIsGoneTests
 
             // Standing on the creature's toes: two metres, well inside both the 75 m weapon and the 6 m melee reach.
             var at = default(PlayerPlacement);
-            at.SetAt(chosen.X + 2f, chosen.Z, player.Read(Player.Bounds).HalfExtent);
+            at.SetAt(chosen.X + 2f, chosen.Z, 0f, player.Read(Player.Bounds).HalfExtent);
             tx.Teleport(id, Player.Bounds, RealmId.Default, in at);
             tx.Commit();
         }
@@ -406,7 +406,7 @@ public sealed class PlayerCloneTests
             move.DestZ = _diedAt.Z;
 
             var here = default(PlayerPlacement);
-            here.SetAt(_diedAt.X, _diedAt.Z, player.Read(Player.Bounds).HalfExtent);
+            here.SetAt(_diedAt.X, _diedAt.Z, 0f, player.Read(Player.Bounds).HalfExtent);
             tx.Teleport(_player, Player.Bounds, RealmId.Default, in here);
             tx.Commit();
         }

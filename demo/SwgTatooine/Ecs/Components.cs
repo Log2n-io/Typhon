@@ -116,17 +116,74 @@ public struct PlayerRealm
 // ── Placement ───────────────────────────────────────────────────────────────────────────────────────────────────────
 //
 // Two dimensions, not three, and that is the faithful choice: SWG's own server indexes a planet with a 2D QuadTree over
-// X and Z. Y is terrain height, looked up from the heightmap rather than searched, and over a 16 km map its range is
-// three orders below the horizontal extent — a third partitioned axis would be one cell deep.
+// X and Z. Y is terrain height, LOOKED UP from the heightfield rather than searched.
+//
+// The old wording here said the height range was "three orders below the horizontal extent". It was two when it was
+// written and it is now about 2.2 % of it — 360 m over 16 384 — because the relief cap came off on 2026-09-29. The
+// argument does not rest on that ratio and never did: what keeps the index 2D is that 360 m is ONE 256 m CELL DEEP, so a
+// third partitioned axis would hold one layer of cells and index nothing. Changing that is a decision about the engine's
+// indexing, not about scenery.
+//
+// `Y` below is therefore a plain `[Field]`, never a `[SpatialIndex]`. It is written where the entity is placed or moved
+// and read by anything that needs an altitude; it is never integrated, and no query is ordered by it.
+
+/// <summary>
+/// The altitude range every placement's wire codec is written against, in metres.
+/// </summary>
+/// <remarks>
+/// The authored planet measures −110.1 … 250.1 m (<c>TerrainField</c>), so this carries about 50 m of margin at each end
+/// — enough for the layer tree to be retuned without a protocol change, and tight enough that 16 bits give a 7.3 mm step.
+/// There is no <c>Saturate</c> — it applies to integer codecs and <c>quant</c> is not one — so the range has to be right
+/// rather than forgiving. <b>TerrainAltitudeChecks asserts the real field fits inside it with 25 m to spare at each
+/// end</b>, which is how the margin is kept from quietly disappearing under a retune of the layer tree.
+/// </remarks>
+public static class Ground
+{
+    /// <summary>Lowest altitude the wire can carry, metres.</summary>
+    public const double MinM = -160d;
+
+    /// <summary>Highest altitude the wire can carry, metres.</summary>
+    public const double MaxM = 320d;
+}
+
+/// <summary>
+/// What every planet placement has in common: where it is, and the ground under it.
+/// </summary>
+/// <remarks>
+/// A constraint rather than a base class, so a generic reader stays unboxed over a blittable struct. It exists for the
+/// things that must treat all five placements alike — the altitude checks, and anything that walks the world asking
+/// "is this on the ground" — and for nothing in the tick path, which always knows its own archetype.
+/// </remarks>
+public interface IGroundPlacement
+{
+    /// <summary>Centre of the placement on the planet's x axis.</summary>
+    float X { get; }
+
+    /// <summary>Centre of the placement on the planet's z axis.</summary>
+    float Z { get; }
+
+    /// <summary>Altitude in metres. Not indexed.</summary>
+    float Y { get; }
+}
 
 /// <summary>A building, prop, house, factory or harvester. Never moves.</summary>
 [Component("Swg.StructurePlacement", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
-public struct StructurePlacement
+public struct StructurePlacement : IGroundPlacement
 {
     [Field]
     [SpatialIndex(1.0f)]
     public AABB2F Bounds;
+
+    /// <summary>Altitude in metres: the ground under the building. <b>Not indexed</b> — see the note above this block.</summary>
+    /// <remarks>
+    /// On the wire as its own 16-bit quantised field and <b>never inside the position codec</b>: a vertical step folded
+    /// into <c>pos</c> would be measured by the motion tolerance as a horizontal jump, and a walk up a cliff would read
+    /// as a teleport. Over −160…+320 m the step is 7.3 mm, an order below anything a player can see, and the range
+    /// carries 50 m of margin over the planet's own −110…+250.
+    /// </remarks>
+    [Field, Replicate(CodecKind.Quant, Min = Ground.MinM, Max = Ground.MaxM, Bits = 16, Name = "y")]
+    public float Y;
 
     public readonly float X => (Bounds.MinX + Bounds.MaxX) * 0.5f;
 
@@ -134,17 +191,29 @@ public struct StructurePlacement
 
     public readonly float HalfExtent => (Bounds.MaxX - Bounds.MinX) * 0.5f;
 
-    public void SetAt(float x, float z, float halfExtent) => Place.At(ref Bounds, x, z, halfExtent);
+    public void SetAt(float x, float z, float y, float halfExtent) => Place.At(ref Bounds, ref Y, x, z, y, halfExtent);
+    readonly float IGroundPlacement.Y => Y;
+
 }
 
 /// <summary>A creature lair. Never moves, but its contents do.</summary>
 [Component("Swg.LairPlacement", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
-public struct LairPlacement
+public struct LairPlacement : IGroundPlacement
 {
     [Field]
     [SpatialIndex(1.0f)]
     public AABB2F Bounds;
+
+    /// <summary>Altitude in metres: the ground under the lair. <b>Not indexed</b> — see the note above this block.</summary>
+    /// <remarks>
+    /// On the wire as its own 16-bit quantised field and <b>never inside the position codec</b>: a vertical step folded
+    /// into <c>pos</c> would be measured by the motion tolerance as a horizontal jump, and a walk up a cliff would read
+    /// as a teleport. Over −160…+320 m the step is 7.3 mm, an order below anything a player can see, and the range
+    /// carries 50 m of margin over the planet's own −110…+250.
+    /// </remarks>
+    [Field, Replicate(CodecKind.Quant, Min = Ground.MinM, Max = Ground.MaxM, Bits = 16, Name = "y")]
+    public float Y;
 
     public readonly float X => (Bounds.MinX + Bounds.MaxX) * 0.5f;
 
@@ -152,7 +221,9 @@ public struct LairPlacement
 
     public readonly float HalfExtent => (Bounds.MaxX - Bounds.MinX) * 0.5f;
 
-    public void SetAt(float x, float z, float halfExtent) => Place.At(ref Bounds, x, z, halfExtent);
+    public void SetAt(float x, float z, float y, float halfExtent) => Place.At(ref Bounds, ref Y, x, z, y, halfExtent);
+    readonly float IGroundPlacement.Y => Y;
+
 }
 
 /// <summary>
@@ -202,11 +273,21 @@ public struct ShipMotion
 /// <summary>A city NPC. Densely packed inside a city, and overwhelmingly stationary.</summary>
 [Component("Swg.NpcPlacement", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
-public struct NpcPlacement
+public struct NpcPlacement : IGroundPlacement
 {
     [Field]
     [SpatialIndex(1.0f)]
     public AABB2F Bounds;
+
+    /// <summary>Altitude in metres: the ground under the townsperson. <b>Not indexed</b> — see the note above this block.</summary>
+    /// <remarks>
+    /// On the wire as its own 16-bit quantised field and <b>never inside the position codec</b>: a vertical step folded
+    /// into <c>pos</c> would be measured by the motion tolerance as a horizontal jump, and a walk up a cliff would read
+    /// as a teleport. Over −160…+320 m the step is 7.3 mm, an order below anything a player can see, and the range
+    /// carries 50 m of margin over the planet's own −110…+250.
+    /// </remarks>
+    [Field, Replicate(CodecKind.Quant, Min = Ground.MinM, Max = Ground.MaxM, Bits = 16, Name = "y")]
+    public float Y;
 
     public readonly float X => (Bounds.MinX + Bounds.MaxX) * 0.5f;
 
@@ -214,17 +295,29 @@ public struct NpcPlacement
 
     public readonly float HalfExtent => (Bounds.MaxX - Bounds.MinX) * 0.5f;
 
-    public void SetAt(float x, float z, float halfExtent) => Place.At(ref Bounds, x, z, halfExtent);
+    public void SetAt(float x, float z, float y, float halfExtent) => Place.At(ref Bounds, ref Y, x, z, y, halfExtent);
+    readonly float IGroundPlacement.Y => Y;
+
 }
 
 /// <summary>A creature. The bulk of the moving population.</summary>
 [Component("Swg.CreaturePlacement", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
-public struct CreaturePlacement
+public struct CreaturePlacement : IGroundPlacement
 {
     [Field]
     [SpatialIndex(1.0f)]
     public AABB2F Bounds;
+
+    /// <summary>Altitude in metres: the ground under the creature, resampled every time it moves. <b>Not indexed</b> — see the note above this block.</summary>
+    /// <remarks>
+    /// On the wire as its own 16-bit quantised field and <b>never inside the position codec</b>: a vertical step folded
+    /// into <c>pos</c> would be measured by the motion tolerance as a horizontal jump, and a walk up a cliff would read
+    /// as a teleport. Over −160…+320 m the step is 7.3 mm, an order below anything a player can see, and the range
+    /// carries 50 m of margin over the planet's own −110…+250.
+    /// </remarks>
+    [Field, Replicate(CodecKind.Quant, Min = Ground.MinM, Max = Ground.MaxM, Bits = 16, Name = "y")]
+    public float Y;
 
     public readonly float X => (Bounds.MinX + Bounds.MaxX) * 0.5f;
 
@@ -232,17 +325,29 @@ public struct CreaturePlacement
 
     public readonly float HalfExtent => (Bounds.MaxX - Bounds.MinX) * 0.5f;
 
-    public void SetAt(float x, float z, float halfExtent) => Place.At(ref Bounds, x, z, halfExtent);
+    public void SetAt(float x, float z, float y, float halfExtent) => Place.At(ref Bounds, ref Y, x, z, y, halfExtent);
+    readonly float IGroundPlacement.Y => Y;
+
 }
 
 /// <summary>A player character. The smallest population and the only one anyone queries around.</summary>
 [Component("Swg.PlayerPlacement", 1, StorageMode = StorageMode.SingleVersion)]
 [StructLayout(LayoutKind.Sequential)]
-public struct PlayerPlacement
+public struct PlayerPlacement : IGroundPlacement
 {
     [Field]
     [SpatialIndex(1.0f)]
     public AABB2F Bounds;
+
+    /// <summary>Altitude in metres: the ground under the player, resampled every time they move. <b>Not indexed</b> — see the note above this block.</summary>
+    /// <remarks>
+    /// On the wire as its own 16-bit quantised field and <b>never inside the position codec</b>: a vertical step folded
+    /// into <c>pos</c> would be measured by the motion tolerance as a horizontal jump, and a walk up a cliff would read
+    /// as a teleport. Over −160…+320 m the step is 7.3 mm, an order below anything a player can see, and the range
+    /// carries 50 m of margin over the planet's own −110…+250.
+    /// </remarks>
+    [Field, Replicate(CodecKind.Quant, Min = Ground.MinM, Max = Ground.MaxM, Bits = 16, Name = "y")]
+    public float Y;
 
     public readonly float X => (Bounds.MinX + Bounds.MaxX) * 0.5f;
 
@@ -250,18 +355,29 @@ public struct PlayerPlacement
 
     public readonly float HalfExtent => (Bounds.MaxX - Bounds.MinX) * 0.5f;
 
-    public void SetAt(float x, float z, float halfExtent) => Place.At(ref Bounds, x, z, halfExtent);
+    public void SetAt(float x, float z, float y, float halfExtent) => Place.At(ref Bounds, ref Y, x, z, y, halfExtent);
+    readonly float IGroundPlacement.Y => Y;
+
 }
 
 /// <summary>The one line of geometry the five placement components share.</summary>
 internal static class Place
 {
-    public static void At(ref AABB2F b, float x, float z, float halfExtent)
+    /// <summary>
+    /// Places a 2-D bound and the altitude beside it.
+    /// </summary>
+    /// <remarks>
+    /// The altitude is a parameter rather than something a caller may forget, because forgetting it is the bug this
+    /// exists to prevent: an entity at <c>Y = 0</c> on a planet with 360 m of relief is an entity the client draws in
+    /// the air or underground, and nothing about a zero looks wrong.
+    /// </remarks>
+    public static void At(ref AABB2F b, ref float groundY, float x, float z, float y, float halfExtent)
     {
         b.MinX = x - halfExtent;
         b.MaxX = x + halfExtent;
         b.MinY = z - halfExtent;
         b.MaxY = z + halfExtent;
+        groundY = y;
     }
 }
 

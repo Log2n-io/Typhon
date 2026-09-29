@@ -44,6 +44,17 @@ public static class WorldRebuild
         ArgumentNullException.ThrowIfNull(map);
         ArgumentNullException.ThrowIfNull(index);
 
+        // The "must be empty" above was a doc comment and nothing else. A second call appends a second copy of every city,
+        // shuttleport, door and player, and none of it fails loudly: `PickCityIndex` walks a weight list summing to 2 and
+        // returns early so half the cities stop being reachable, one dungeon can draw the same player into its party
+        // twice, and the door check below then throws a message blaming the map for a doubled count of its own making.
+        if (index.Cities.Count != 0 || index.Players.Count != 0 || index.Portals.Count != 0)
+        {
+            throw new InvalidOperationException(
+                $"Rebuild needs an empty index; this one already holds {index.Cities.Count} cities, {index.Players.Count} players and "
+                + $"{index.Portals.Count} doors. Rebuilding on top of a filled index doubles every list it appends to.");
+        }
+
         var census = new WorldCensus();
 
         // The map's own geometry, in the map's own order — the same values SpawnCities and SpawnPointsOfInterest record.
@@ -192,7 +203,10 @@ public static class WorldRebuild
             first += n;
         }
 
-        if (index.Portals.Count != 0 && index.Portals.Count != first)
+        // No `!= 0` escape hatch: zero doors on disk is exactly the mismatch worth catching. A world built without
+        // --interiors and reopened with it has none, while the map still accounts for `first` of them, and `TryWalkToPortal`
+        // then indexes an empty list inside PlayerThinkTick — a throw from the tick path, which is never allowed.
+        if (index.Portals.Count != first)
         {
             throw new InvalidOperationException(
                 $"Reopened world: {index.Portals.Count} doors on disk but the map's city layout accounts for {first}. The database was built from a "

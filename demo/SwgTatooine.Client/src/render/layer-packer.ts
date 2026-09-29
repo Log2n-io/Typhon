@@ -1,6 +1,6 @@
 import { evaluateSlot, MAX_MOTION_STRIDE, type ArchetypeStore, type FieldArray } from '@typhondb/client';
 import { SELECTED_SPRITE_SCALE, type LayerStyle } from './styles';
-import { Placement } from '../data/placement';
+import { altitudeField, altitudeOf, Placement } from '../data/placement';
 import { Band, chooseBand, packState, sphereInFrustum } from './view-math';
 import type { GroundSampler } from '../terrain/ground-sampler';
 
@@ -31,9 +31,11 @@ interface FieldReaders {
   /** The style field is a flag (a lair's mission id): any non-zero value selects style 1. */
   readonly styleIsFlag: boolean;
   readonly mode: FieldArray | null;
+  /** The server's own altitude for each entity, or `null` when the catalog has none (the mock). */
+  readonly ground: FieldArray | null;
 }
 
-const NO_FIELDS: FieldReaders = { style: null, styleIsFlag: false, mode: null };
+const NO_FIELDS: FieldReaders = { style: null, styleIsFlag: false, mode: null, ground: null };
 const INITIAL_CAPACITY = 1024;
 
 /**
@@ -47,15 +49,20 @@ const INITIAL_CAPACITY = 1024;
 function readersFor(name: string, store: ArchetypeStore): FieldReaders {
   switch (name) {
     case 'WorldObject':
-      return { style: optional(store, 'kind'), styleIsFlag: false, mode: null };
+      return { style: optional(store, 'kind'), styleIsFlag: false, mode: null, ground: altitudeField(store) };
     case 'CreatureLair':
-      return { style: optional(store, 'missionId'), styleIsFlag: true, mode: null };
+      return { style: optional(store, 'missionId'), styleIsFlag: true, mode: null, ground: altitudeField(store) };
     case 'Creature':
-      return { style: optional(store, 'template'), styleIsFlag: false, mode: optional(store, 'mode') };
+      return {
+        style: optional(store, 'template'),
+        styleIsFlag: false,
+        mode: optional(store, 'mode'),
+        ground: altitudeField(store),
+      };
     case 'CityNpc':
-      return { style: null, styleIsFlag: false, mode: optional(store, 'mode') };
+      return { style: null, styleIsFlag: false, mode: optional(store, 'mode'), ground: altitudeField(store) };
     case 'Player':
-      return { style: null, styleIsFlag: false, mode: optional(store, 'activity') };
+      return { style: null, styleIsFlag: false, mode: optional(store, 'activity'), ground: altitudeField(store) };
     default:
       return NO_FIELDS;
   }
@@ -176,10 +183,10 @@ export class LayerPacker {
       at.read(dims, motion, 0);
       const rx = at.x - view.originX;
       const rz = at.z - view.originZ;
-      // Altitude is not offset: the render origin only ever slides along the ground (`05-client.md` § 6). The server is
-      // deliberately 2D, so `at.y` is 0 and the GROUND's height is what puts an entity on the terrain — one bilinear
-      // sample, four loads and three lerps, inside a loop that already costs more than that per entity.
-      const ry = at.y + view.ground.heightAt(at.x, at.z);
+      // Altitude is not offset: the render origin only ever slides along the ground (`05-client.md` § 6). It comes from
+      // the SERVER when the catalog carries it (terrain rung (b)) and from this client's own field otherwise — see
+      // `altitudeOf`, which is the only place that decision is made.
+      const ry = altitudeOf(fields.ground, slot, at, view.ground);
 
       const raw = fields.style === null ? 0 : fields.style[slot];
       const styleIndex = fields.styleIsFlag ? (raw > 0 ? 1 : 0) : raw;

@@ -19,6 +19,66 @@ public sealed partial class SimBridge
     private readonly TatooineMap _map;
     private readonly WorldIndex _index;
 
+    /// <summary>
+    /// The planet's ground, shared across the process and baked once. See <see cref="GroundAt"/>.
+    /// </summary>
+    private readonly TerrainField _terrain;
+
+    /// <summary>
+    /// Ground height for a point in a realm: the planet's relief on a planet, and 0 anywhere else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Altitude is a property of the realm, not of the coordinate.</b> A cantina's interior is its own realm with its
+    /// own flat floor a few metres across, and its local (x, z) collides with a point on the planet that has 200 m of
+    /// mesa under it. Sampling the heightfield there would put the furniture inside a hill. The space realm is the same
+    /// argument in the other direction.
+    /// </para>
+    /// <para>
+    /// Realms below <see cref="SimConfig.Planets"/> are planets; interiors and space are allocated above them
+    /// (<c>TatooineSim</c>), so the test is an index comparison and not a lookup.
+    /// </para>
+    /// </remarks>
+    /// <summary>
+    /// The A/B switch for the cost of sampling the ground, read once from <c>SWG_NO_GROUND</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Rung (b) made <see cref="GroundAt"/> a per-tick cost — one sample per moved entity, in the Move phase — and
+    /// nothing measured it. The sample is a bilinear read of a 67 MB array whose two rows are 16 KB apart, in a field that
+    /// does not fit L3, for entities scattered over the whole planet: roughly two misses that go to memory, per mover,
+    /// per tick, at 50 Hz.
+    /// </para>
+    /// <para>
+    /// A <see langword="static readonly"/> <see cref="bool"/> and not a config field, deliberately: the JIT folds it
+    /// after the static constructor, so the OFF arm pays no branch and the two arms are the SAME BINARY. Two builds would
+    /// differ in inlining and layout and would measure that instead.
+    /// </para>
+    /// </remarks>
+    private static readonly bool GroundDisabled = ReadGroundSwitch();
+
+    /// <summary>Reads the switch, and SAYS SO — a run with the ground off must never be mistaken for a normal one.</summary>
+    private static bool ReadGroundSwitch()
+    {
+        if (Environment.GetEnvironmentVariable("SWG_NO_GROUND") != "1")
+        {
+            return false;
+        }
+
+        Console.WriteLine("SWG_NO_GROUND=1: every entity is at altitude 0. This is the A/B arm, not a world.");
+        return true;
+    }
+
+    internal float GroundAt(RealmId realm, float x, float z)
+    {
+        if (GroundDisabled)
+        {
+            return 0f;
+        }
+
+        return realm.Value < _config.Planets ? _terrain.GroundAt(x, z) : 0f;
+    }
+
     // Per-tick counters. Written with Interlocked from parallel workers, drained by the telemetry system.
     private long _awarenessQueries;
     private long _awarenessHits;
@@ -51,6 +111,7 @@ public sealed partial class SimBridge
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(map);
         ArgumentNullException.ThrowIfNull(index);
+        _terrain = TerrainField.Shared(config.ContentScale);
         _config = config;
         _map = map;
         _index = index;
@@ -254,4 +315,6 @@ public struct TickStats
 
     /// <summary>Mean objects returned by one interest query — the number that says how expensive awareness is.</summary>
     public readonly double HitsPerAwarenessQuery => AwarenessQueries == 0 ? 0d : (double)AwarenessHits / AwarenessQueries;
+
+
 }

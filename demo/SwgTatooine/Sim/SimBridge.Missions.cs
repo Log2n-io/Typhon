@@ -169,7 +169,11 @@ public sealed partial class SimBridge
                     var dist = minD + (Hash01(Salt(tick, key, 0x68E31DA4u + (uint)attempt)) * spanD);
                     var tx = px + (MathF.Cos(ang) * dist);
                     var tz = pz + (MathF.Sin(ang) * dist);
-                    if (tx < -half || tx > half || tz < -half || tz > half || InsideCity(tx, tz))
+                    // The lair's own extent counts, and so does the builder's edge margin: a lair centred exactly on
+                    // the rim has an AABB four metres outside the grid, which the engine clamps without a word — and the
+                    // ground was then sampled at the point asked for rather than the point written (#1073).
+                    var reach = (half * WorldBuilder.InsideEdge) - places[idx].HalfExtent;
+                    if (tx < -reach || tx > reach || tz < -reach || tz > reach || InsideCity(tx, tz))
                     {
                         continue;
                     }
@@ -187,7 +191,7 @@ public sealed partial class SimBridge
                     // kilometres is the most violent thing in this simulation from the index's point of view — a cell
                     // change and a cluster-bound recomputation in one write — and it is the point rather than a cost.
                     var nb = default(LairPlacement);
-                    nb.SetAt(tx, tz, places[idx].HalfExtent);
+                    nb.SetAt(tx, tz, GroundAt(cluster.Realm, tx, tz), places[idx].HalfExtent);
                     cluster.WriteSpatial(CreatureLair.Bounds, idx, nb);
 
                     // And TELL the player, which is the half of this loop that was missing: the lair moved, the waypoint did not exist, and a player "going to

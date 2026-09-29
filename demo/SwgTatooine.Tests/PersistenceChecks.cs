@@ -125,7 +125,7 @@ public sealed class PersistenceSurfaceTests
             marked = sim.Index.Players[0];
             using var tx = sim.Dbe.CreateQuickTransaction();
             var at = default(PlayerPlacement);
-            at.SetAt(Marker, Marker, tx.Open(marked).Read(Player.Bounds).HalfExtent);
+            at.SetAt(Marker, Marker, 0f, tx.Open(marked).Read(Player.Bounds).HalfExtent);
             tx.Teleport(marked, Player.Bounds, RealmId.Default, in at);
             tx.Commit();
         }
@@ -167,7 +167,7 @@ public sealed class PersistenceSurfaceTests
             move.DestX = Marker;
             move.DestZ = Marker;
             var at = default(PlayerPlacement);
-            at.SetAt(Marker, Marker, player.Read(Player.Bounds).HalfExtent);
+            at.SetAt(Marker, Marker, 0f, player.Read(Player.Bounds).HalfExtent);
             tx.Teleport(marked, Player.Bounds, RealmId.Default, in at);
             tx.Commit();
         }

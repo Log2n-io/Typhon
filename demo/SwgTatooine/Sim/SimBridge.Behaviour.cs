@@ -675,7 +675,10 @@ public sealed partial class SimBridge
                 pushSlots |= 1UL << idx;
             }
 
-            TatooineReplication.Replicate(in cluster, pushSlots);
+            if (pushSlots != 0)
+            {
+                TatooineReplication.Replicate(in cluster, pushSlots);
+            }
         }
 
         if (skipped != 0)
@@ -801,11 +804,10 @@ public sealed partial class SimBridge
                 // WriteSpatial rather than a plain span write: the barrier flags migration and AABB growth inline, which
                 // is what makes SetSpatialBarrierOnly correct for this archetype and lets the fence skip its slot scan.
                 var nb = default(CreaturePlacement);
-                nb.SetAt(x, z, h);
+                nb.SetAt(x, z, GroundAt(cluster.Realm, x, z), h);
                 if (batched)
                 {
                     next[idx] = nb;
-                    moved |= 1UL << idx;
                 }
                 else
                 {
@@ -891,7 +893,7 @@ public sealed partial class SimBridge
                 var x = Math.Clamp(p.X + (move.VelX * k), -half + h, half - h);
                 var z = Math.Clamp(p.Z + (move.VelZ * k), -half + h, half - h);
                 var nb = default(PlayerPlacement);
-                nb.SetAt(x, z, h);
+                nb.SetAt(x, z, GroundAt(cluster.Realm, x, z), h);
                 if (batched)
                 {
                     next[idx] = nb;
@@ -903,7 +905,9 @@ public sealed partial class SimBridge
                 }
             }
 
-            if (batched)
+            // The moved slots in one call, and only when something moved: 40 % of players are parked idle in a city, so
+            // without the mask test most clusters pay the barrier's bookkeeping for an empty write.
+            if (batched && moved != 0)
             {
                 cluster.WriteSpatial(Player.Bounds, moved, next);
             }
@@ -1028,7 +1032,9 @@ public sealed partial class SimBridge
                 }
 
                 var nb = default(NpcPlacement);
-                nb.SetAt(p.X + (move.VelX * k), p.Z + (move.VelZ * k), p.HalfExtent);
+                var nx = p.X + (move.VelX * k);
+                var nz = p.Z + (move.VelZ * k);
+                nb.SetAt(nx, nz, GroundAt(cluster.Realm, nx, nz), p.HalfExtent);
                 if (batched)
                 {
                     next[idx] = nb;
@@ -1040,7 +1046,8 @@ public sealed partial class SimBridge
                 }
             }
 
-            if (batched)
+            // Only 12 % of city NPCs wander at all, so the empty-mask case is the common one here.
+            if (batched && moved != 0)
             {
                 cluster.WriteSpatial(CityNpc.Bounds, moved, next);
             }

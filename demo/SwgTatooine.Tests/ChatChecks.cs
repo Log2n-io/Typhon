@@ -207,7 +207,7 @@ public sealed class ChatChecks
         move.VelZ = 0f;
 
         var at = default(PlayerPlacement);
-        at.SetAt(x, z, player.Read(Player.Bounds).HalfExtent);
+        at.SetAt(x, z, 0f, player.Read(Player.Bounds).HalfExtent);
         tx.Teleport(entity, Player.Bounds, new RealmId(realm), in at);
         tx.Commit();
         return entity;

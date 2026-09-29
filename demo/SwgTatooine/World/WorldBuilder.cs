@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Threading;
 
 namespace SwgTatooine;
 
@@ -66,6 +67,9 @@ public static class WorldBuilder
     /// </remarks>
     private static void SpawnCities(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
     {
+        // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
+        // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
+        var terrain = TerrainField.Shared(config.ContentScale);
         var cityIndex = 0;
         foreach (var city in map.Cities)
         {
@@ -93,7 +97,7 @@ public static class WorldBuilder
                         index.Portals.Add((x, z));
                     }
 
-                    SpawnStructure(tx, x, z, 12f, kind, ownerRegion: cityIndex, tickPeriod: 0, ref rng, portalIndex);
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), 12f, kind, ownerRegion: cityIndex, tickPeriod: 0, ref rng, portalIndex);
                     census.StaticObjects++;
                 }
 
@@ -109,7 +113,7 @@ public static class WorldBuilder
                 {
                     var (x, z) = rng.PointInDisc(city.X, city.Z, city.Radius);
                     var bounds = default(NpcPlacement);
-                    bounds.SetAt(x, z, 0.5f);
+                    bounds.SetAt(x, z, terrain.GroundAt(x, z), 0.5f);
 
                     // A city NPC stands still and thinks rarely. Its leash radius is a few metres because the ones that
                     // move at all are shuffling behind a counter, not patrolling.
@@ -231,7 +235,9 @@ public static class WorldBuilder
                     var c = InteriorEdgeM * 0.5f;
                     var (x, z) = rng.PointInDisc(c, c, InteriorEdgeM * 0.25f);
                     var bounds = default(NpcPlacement);
-                    bounds.SetAt(x, z, 0.5f);
+                    // An interior is its own realm with its own flat floor, so its altitude is 0 and NOT the planet's
+                    // ground under the building — which is what the building's own placement carries.
+                    bounds.SetAt(x, z, 0f, 0.5f);
                     var ai = new NpcBrain { Mode = rng.NextFloat() < 0.5f ? AiMode.Wander : AiMode.Idle, HomeX = x, HomeZ = z, LeashRadius = 6f };
                     var npcTimers = new NpcTimers { MoveUntilTick = 0, RestUntilTick = rng.NextInt(1, 40) };
                     var move = new NpcMotion { SpeedMps = 1.2f };
@@ -261,6 +267,9 @@ public static class WorldBuilder
 
     private static void SpawnPointsOfInterest(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
     {
+        // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
+        // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
+        var terrain = TerrainField.Shared(config.ContentScale);
         // A point of interest's region id continues the cities' numbering; see Structure.OwnerRegion.
         var poiIndex = map.Cities.Count;
         foreach (var poi in map.Pois)
@@ -270,7 +279,7 @@ public static class WorldBuilder
                 for (var i = 0; i < poi.Props; i++)
                 {
                     var (x, z) = rng.PointInDisc(poi.X, poi.Z, poi.Radius);
-                    SpawnStructure(tx, x, z, 6f, StructureKind.PoiProp, ownerRegion: poiIndex, tickPeriod: 0, ref rng);
+                    SpawnStructure(tx, x, z, terrain.GroundAt(x, z), 6f, StructureKind.PoiProp, ownerRegion: poiIndex, tickPeriod: 0, ref rng);
                     census.StaticObjects++;
                 }
 
@@ -309,6 +318,9 @@ public static class WorldBuilder
     private static void SpawnLairsIn(DatabaseEngine dbe, float cx, float cz, float radius, int lairCount, int template,
         SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
     {
+        // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
+        // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
+        var terrain = TerrainField.Shared(config.ContentScale);
         if (lairCount <= 0)
         {
             return;
@@ -325,9 +337,9 @@ public static class WorldBuilder
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < n; i++)
             {
-                var (lx, lz) = rng.PointInDisc(cx, cz, radius);
+                var (lx, lz) = Inside(rng.PointInDisc(cx, cz, radius), config);
                 var lairBounds = default(LairPlacement);
-                lairBounds.SetAt(lx, lz, 4f);
+                lairBounds.SetAt(lx, lz, terrain.GroundAt(lx, lz), 4f);
                 var lair = new Lair
                 {
                     CreatureTemplate = template,
@@ -348,7 +360,7 @@ public static class WorldBuilder
 
                 for (var k = 0; k < perLair; k++)
                 {
-                    SpawnCreature(tx, ref rng, lairId, template, lx, lz, spawnRadius, config);
+                    SpawnCreature(tx, ref rng, lairId, template, lx, lz, spawnRadius, config, terrain);
                     census.Creatures++;
                     census.CreaturesByTemplate[template]++;
                 }
@@ -360,12 +372,18 @@ public static class WorldBuilder
     }
 
     /// <summary>Create one creature belonging to a lair.</summary>
+    /// <param name="terrain">
+    /// The planet's ground, baked once per process (see <see cref="TerrainField"/>). A <b>parameter</b>, because this
+    /// method IS the per-entity call site — it runs once per creature, seventeen thousand times in a small world — and
+    /// <see cref="TerrainField.Shared"/> is a concurrent-dictionary probe. The comment that used to sit here claimed the
+    /// opposite of what the code did.
+    /// </param>
     internal static EntityId SpawnCreature(Transaction tx, ref Rng rng, EntityId lairId, int template,
-        float lairX, float lairZ, float spawnRadius, SimConfig config)
+        float lairX, float lairZ, float spawnRadius, SimConfig config, TerrainField terrain)
     {
-        var (x, z) = rng.PointInDisc(lairX, lairZ, spawnRadius);
+        var (x, z) = Inside(rng.PointInDisc(lairX, lairZ, spawnRadius), config);
         var bounds = default(CreaturePlacement);
-        bounds.SetAt(x, z, 1.5f);
+        bounds.SetAt(x, z, terrain.GroundAt(x, z), 1.5f);
 
         // AMBIENT: a creature that never thinks and never moves, so its cluster can actually go quiet.
         //
@@ -423,6 +441,9 @@ public static class WorldBuilder
     /// </remarks>
     private static void SpawnPlayerStructures(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng)
     {
+        // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
+        // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
+        var terrain = TerrainField.Shared(config.ContentScale);
         var total = Scale(BaselinePlayerStructures, config.PopulationScale);
         if (total <= 0)
         {
@@ -445,7 +466,10 @@ public static class WorldBuilder
                 if (made + i < inCities && sites.Count > 0)
                 {
                     var site = sites[rng.NextInt(0, sites.Count)];
-                    (x, z) = rng.PointInDisc(site.X, site.Z, site.Radius);
+                    // A site centre is drawn at 0.97 of the half-extent and then given a radius of up to 450 m, so a site
+                    // reaches 8 396 m against a half-extent of 8 192. Unbounded, the engine clamped the write in silence
+                    // and `GroundAt` sampled the point it asked for rather than the one it got (#1073).
+                    (x, z) = Inside(rng.PointInDisc(site.X, site.Z, site.Radius), config);
                 }
                 else
                 {
@@ -462,7 +486,8 @@ public static class WorldBuilder
                         ? (StructureKind.Harvester, 600)
                         : (StructureKind.Factory, 1800);
 
-                SpawnStructure(tx, x, z, kind == StructureKind.PlayerHouse ? 10f : 14f, kind, ownerRegion: -1, tickPeriod: period, ref rng);
+                SpawnStructure(tx, x, z, terrain.GroundAt(x, z), kind == StructureKind.PlayerHouse ? 10f : 14f, kind, ownerRegion: -1,
+                    tickPeriod: period, ref rng);
                 census.PlayerStructures++;
             }
 
@@ -515,6 +540,9 @@ public static class WorldBuilder
 
     private static void SpawnPlayers(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
     {
+        // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
+        // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
+        var terrain = TerrainField.Shared(config.ContentScale);
         var total = Scale(BaselinePlayers, config.PopulationScale);
         var made = 0;
         while (made < total)
@@ -574,11 +602,13 @@ public static class WorldBuilder
                 else
                 {
                     activity = PlayerActivity.Roaming;
-                    (x, z) = rng.PointInDisc(city.X, city.Z, city.Radius * 6f);
+                    // Six city radii clears the planet for any city near the rim. The shipped map happens to leave 688 m
+                    // of margin; a city edit or a radius retune is all it would take to spend it (#1073).
+                    (x, z) = Inside(rng.PointInDisc(city.X, city.Z, city.Radius * 6f), config);
                 }
 
                 var bounds = default(PlayerPlacement);
-                bounds.SetAt(x, z, 1f);
+                bounds.SetAt(x, z, terrain.GroundAt(x, z), 1f);
                 var state = new PlayerState
                 {
                     Activity = activity,
@@ -628,6 +658,9 @@ public static class WorldBuilder
     /// </remarks>
     private static void SpawnMissionLairPool(DatabaseEngine dbe, TatooineMap map, SimConfig config, WorldCensus census, ref Rng rng, WorldIndex index)
     {
+        // The planet's ground, baked once per process (see TerrainField). Taken here rather than per entity: the
+        // cache lookup is cheap but not free, and this loop runs seventeen thousand times.
+        var terrain = TerrainField.Shared(config.ContentScale);
         var count = Scale(BaselinePlayers / 4, config.PopulationScale);
         if (count <= 0)
         {
@@ -645,9 +678,9 @@ public static class WorldBuilder
             using var tx = dbe.CreateQuickTransaction();
             for (var i = 0; i < n; i++)
             {
-                var (lx, lz) = RandomWildernessPoint(map, config, ref rng);
+                var (lx, lz) = Inside(RandomWildernessPoint(map, config, ref rng), config);
                 var bounds = default(LairPlacement);
-                bounds.SetAt(lx, lz, 4f);
+                bounds.SetAt(lx, lz, terrain.GroundAt(lx, lz), 4f);
                 var lair = new Lair
                 {
                     CreatureTemplate = template,
@@ -670,7 +703,7 @@ public static class WorldBuilder
 
                 for (var k = 0; k < perLair; k++)
                 {
-                    SpawnCreature(tx, ref rng, lairId, template, lx, lz, spawnRadius, config);
+                    SpawnCreature(tx, ref rng, lairId, template, lx, lz, spawnRadius, config, terrain);
                     census.Creatures++;
                     census.CreaturesByTemplate[template]++;
                 }
@@ -700,16 +733,74 @@ public static class WorldBuilder
 
     private static int Scale(int baseline, float scale) => (int)MathF.Round(baseline * scale);
 
+    /// <summary>
+    /// The fraction of the half-extent a generated placement is kept inside (#1073).
+    /// </summary>
+    /// <remarks>
+    /// The structure path has used this since it was written; the lair path did not, and several spawn regions reach
+    /// past the planet on their own geometry — <c>Southern Wastes</c> is centred at z = −6 800 with a 2 300 m radius
+    /// against a half-extent of 8 192. A creature was directly observed alive at z = −8 285.9, 94 m outside the world.
+    /// </remarks>
+    internal const float InsideEdge = 0.97f;
+
+    /// <summary>
+    /// Keeps a generated point inside the world, and <b>counts every time it had to</b>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The counting is the point. The engine clamps a position written outside its grid and says nothing, so a region
+    /// whose geometry does not fit produces a knot of entities pressed against the boundary that looks like real
+    /// geography to anything measuring cell occupancy — which is what the cell-size sweep measures. A clamp that reports
+    /// itself is a finding; a silent one is a distortion of every number taken afterwards.
+    /// </para>
+    /// <para>
+    /// It clamps rather than rejects because the region definitions are authored data and a demo that refuses to build
+    /// its world helps nobody at 3 a.m.; <see cref="ClampedPlacements"/> is how it says so instead.
+    /// </para>
+    /// </remarks>
+    public static (float X, float Z) Inside((float X, float Z) at, SimConfig config) => Inside(at.X, at.Z, config);
+
+    public static (float X, float Z) Inside(float x, float z, SimConfig config)
+    {
+        var half = config.WorldEdgeM * 0.5f * InsideEdge;
+        var cx = Math.Clamp(x, -half, half);
+        var cz = Math.Clamp(z, -half, half);
+        if (cx != x || cz != z)
+        {
+            Interlocked.Increment(ref _clampedPlacements);
+        }
+
+        return (cx, cz);
+    }
+
+    private static long _clampedPlacements;
+
+    /// <summary>
+    /// How many generated placements the world edge had to move, since the process started (#1073).
+    /// </summary>
+    /// <remarks>
+    /// Non-zero means a spawn region's disc reaches past the planet. That is authored data being wrong rather than the
+    /// builder being wrong, and it is worth seeing rather than absorbing.
+    /// </remarks>
+    public static long ClampedPlacements => Interlocked.Read(ref _clampedPlacements);
+
+    /// <summary>Forgets the count. For a test that wants to attribute clamps to one world build.</summary>
+    public static void ResetClampedPlacements() => Interlocked.Exchange(ref _clampedPlacements, 0);
+
     /// <summary>Ticks between AI decisions, from Core3's 400-1000 ms behaviour interval at this simulation's tick rate.</summary>
     internal static int AiTicksMax(SimConfig config) => Math.Max(2, TatooineData.AiIntervalMaxMs * config.TickRateHz / 1000);
 
     internal static int AiTicksMin(SimConfig config) => Math.Max(1, TatooineData.AiIntervalMinMs * config.TickRateHz / 1000);
 
-    private static void SpawnStructure(Transaction tx, float x, float z, float halfExtent, int kind, int ownerRegion, int tickPeriod, ref Rng rng,
-        int portalIndex = -1)
+    /// <param name="groundY">
+    /// Altitude of the ground under it. A parameter rather than a lookup inside, because this helper places both planet
+    /// buildings and the props inside an interior, and an interior's floor is 0 rather than the planet's relief.
+    /// </param>
+    private static void SpawnStructure(Transaction tx, float x, float z, float groundY, float halfExtent, int kind, int ownerRegion, int tickPeriod,
+        ref Rng rng, int portalIndex = -1)
     {
         var bounds = default(StructurePlacement);
-        bounds.SetAt(x, z, halfExtent);
+        bounds.SetAt(x, z, groundY, halfExtent);
         var s = new Structure
         {
             Kind = kind,

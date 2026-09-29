@@ -130,7 +130,7 @@ public sealed class AttackEventChecks
 
         // Two metres: inside both the 75 m weapon and the 6 m melee reach.
         var at = default(PlayerPlacement);
-        at.SetAt(chosen.X + 2f, chosen.Z, player.Read(Player.Bounds).HalfExtent);
+        at.SetAt(chosen.X + 2f, chosen.Z, 0f, player.Read(Player.Bounds).HalfExtent);
         tx.Teleport(id, Player.Bounds, RealmId.Default, in at);
         tx.Commit();
         return chosen.Id;
