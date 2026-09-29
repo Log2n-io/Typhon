@@ -9,7 +9,15 @@ namespace Typhon.Engine.Internals;
 /// <summary>Where one wire field of an event is read from inside the event struct, resolved once at <c>Start</c> (09 § 11).</summary>
 internal readonly struct EventFieldBinding
 {
-    public EventFieldBinding(FieldPlan field, int offset, int components, CommandFieldElement element, int elementSize, bool entity, int textCapacity = 0)
+    public EventFieldBinding(
+        FieldPlan field,
+        int offset,
+        int components,
+        CommandFieldElement element,
+        int elementSize,
+        bool entity,
+        int textCapacity = 0,
+        int textWireCap = 0)
     {
         Field = field;
         Offset = offset;
@@ -18,6 +26,7 @@ internal readonly struct EventFieldBinding
         ElementSize = elementSize;
         Entity = entity;
         TextCapacity = textCapacity;
+        TextWireCap = textWireCap;
     }
 
     /// <summary>The wire field, in the catalog's wire order.</summary>
@@ -46,6 +55,18 @@ internal readonly struct EventFieldBinding
     /// </remarks>
     public int TextCapacity { get; }
 
+    /// <summary>
+    /// The bytes this field may actually put on the wire — its codec's cap, which may be <b>smaller</b> than the struct's.
+    /// </summary>
+    /// <remarks>
+    /// The binder deliberately admits a struct larger than the cap, so that a 24-byte name field does not have to admit
+    /// 256 bytes from every client on every message. What it did not do is honour the cap: the text was clamped to the
+    /// STRUCT's capacity and then handed to <c>WireWriter.WriteStr</c> with the codec's, which throws — and the throw was
+    /// caught around the whole encode, so a single over-long string discarded the <b>entire event</b>, every other field
+    /// included, and no session ever saw it. <see cref="LoadText"/> honours this bound instead.
+    /// </remarks>
+    public int TextWireCap { get; }
+
     /// <summary>Whether this field carries text rather than numbers.</summary>
     public bool IsText => TextCapacity > 0;
 
@@ -56,7 +77,25 @@ internal readonly struct EventFieldBinding
 
         // Clamped rather than trusted: the payload came from an application's struct, and a length past the capacity would
         // read a neighbouring field onto the wire. The setter refuses it; this is the second line.
-        return payload.Slice(Offset + sizeof(ushort), Math.Min(length, TextCapacity));
+        var bytes = payload.Slice(Offset + sizeof(ushort), Math.Min(length, TextCapacity));
+        if (bytes.Length <= TextWireCap)
+        {
+            return bytes;
+        }
+
+        // Past the codec's cap. Shortened here rather than left for WriteStr to refuse, because that refusal is an
+        // exception caught around the whole encode and it takes the event with it — a chat line one byte too long
+        // silently deleting its speaker, its sequence number and every other field of the message.
+        //
+        // Cut on a CODEPOINT boundary, never on a byte: a continuation byte left at the end is invalid UTF-8, which a
+        // strict reader is right to reject, and that would put the drop back one layer down.
+        var cut = TextWireCap;
+        while (cut > 0 && (bytes[cut] & 0xC0) == 0x80)
+        {
+            cut--;
+        }
+
+        return bytes[..cut];
     }
 
     /// <summary>Reads the stored numbers.</summary>
@@ -169,8 +208,9 @@ internal sealed class EventTypeInfo
         var max = 5 + body.PackBytes + 8;
         foreach (var b in bindings)
         {
-            // A str is a varu length and up to its capacity in bytes; everything else is at most five bytes a number.
-            max += b.IsText ? 5 + b.TextCapacity : b.Field.Packed ? 0 : 5 * Math.Max(1, b.Components);
+            // A str is a varu length and up to its WIRE cap in bytes — not the struct's, which may be far larger and is
+            // never what reaches the frame; everything else is at most five bytes a number.
+            max += b.IsText ? 5 + b.TextWireCap : b.Field.Packed ? 0 : 5 * Math.Max(1, b.Components);
         }
 
         MaxBytes = max;
@@ -419,10 +459,10 @@ internal sealed class EventHub
                                $"'{member.FieldType.Name}'. A str field is an inline text type — {MessageText.KnownTypes} — " +
                                "because an event struct owns its bytes.");
             // Only a capacity SMALLER than the wire cap is unsafe — then the wire admits more bytes than the struct can
-            // hold and the surplus is truncated silently. A capacity LARGER is strictly safe: the wire cap is the tighter
-            // of the two and nothing is lost. Demanding equality made one storage size the engine's ingress policy, since
-            // a 24-byte name field then had to admit 256 bytes from every client on every message — and the wire design
-            // names per-field `maxBytes` as exactly that knob.
+            // hold and the surplus is truncated silently. A capacity LARGER is allowed: the wire cap is then the tighter
+            // of the two, and `EventFieldBinding.LoadText` is what applies it. Demanding equality made one storage size
+            // the engine's ingress policy, since a 24-byte name field then had to admit 256 bytes from every client on
+            // every message — and the wire design names per-field `maxBytes` as exactly that knob.
             if (capacity < field.Codec.MaxBytes)
             {
                 throw new InvalidOperationException(
@@ -431,7 +471,15 @@ internal sealed class EventHub
                     "enforces, or the surplus is truncated without a word.");
             }
 
-            return new EventFieldBinding(field, offset, 1, CommandFieldElement.U8, sizeof(byte), entity: false, textCapacity: capacity);
+            return new EventFieldBinding(
+                field,
+                offset,
+                1,
+                CommandFieldElement.U8,
+                sizeof(byte),
+                entity: false,
+                textCapacity: capacity,
+                textWireCap: field.Codec.MaxBytes);
         }
 
         if (member.FieldType == typeof(EntityId))

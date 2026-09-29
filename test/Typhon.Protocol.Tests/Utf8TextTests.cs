@@ -93,6 +93,38 @@ public sealed class Utf8TextTests
         });
     }
 
+    /// <summary>An unpaired surrogate is refused, not quietly turned into a replacement character.</summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="Encoding.UTF8"/> carries a REPLACEMENT fallback: it encodes a lone surrogate as the three bytes of
+    /// U+FFFD and reports success. So the type that documents "it refuses rather than truncating" was committing, one
+    /// level down, exactly the silent corruption that sentence exists to forbid — a message reaching the reader altered
+    /// rather than rejected.
+    /// </para>
+    /// <para>
+    /// Not a hypothetical input: a JavaScript string sliced by length cuts between the two halves of an astral character,
+    /// and that is the ordinary way a client shortens a chat line to fit.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void AnUnpairedSurrogateIsRefused()
+    {
+        Assert.Multiple(() =>
+        {
+            // A high surrogate with nothing after it.
+            var lone = Assert.Throws<ArgumentException>(() => Utf8Text256.From("hi \ud83d"));
+            Assert.That(lone!.Message, Does.Contain("surrogate"));
+
+            // A low surrogate with nothing before it.
+            Assert.Throws<ArgumentException>(() => Utf8Text256.From("\ude00 there"));
+
+            // And the PAIR is fine — the guard must refuse invalid text, not astral text.
+            var pair = Utf8Text256.From("hi \ud83d\ude00");
+            Assert.That(pair.ToString(), Is.EqualTo("hi \ud83d\ude00"));
+            Assert.That(pair.Length, Is.EqualTo(7), "three ASCII plus a four-byte emoji");
+        });
+    }
+
     /// <summary>A copy carries its own bytes: the buffer is inline, so assigning the value is the copy.</summary>
     [Test]
     public void ACopyIsIndependent()

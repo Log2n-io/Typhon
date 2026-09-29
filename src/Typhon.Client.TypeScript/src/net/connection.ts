@@ -359,7 +359,7 @@ export class Connection {
   private onWelcome(message: Uint8Array): void {
     const welcome = parseWelcome(message);
     if (welcome.major !== ProtocolConstants.major) {
-      this.fail(CloseCode.ProtocolError, `the server speaks major ${welcome.major}, this client major 2`);
+      this.fail(CloseCode.ProtocolError, `the server speaks major ${welcome.major}, this client major ${ProtocolConstants.major}`);
       return;
     }
 
@@ -426,7 +426,10 @@ export class Connection {
       socket.close(wire, truncateUtf8(reason, ProtocolConstants.kickReasonMaxBytes));
     }
 
-    this.report(code, reason, local, local);
+    // `wasClean` is whether the session ENDED cleanly, which a local close does not by itself make it: `fail()` routes
+    // a protocol abort through here too, and reporting that as clean leaves a consumer unable to tell a user leaving from
+    // a malformed payload. Only a normal code is clean.
+    this.report(code, reason, local, code === CloseCode.Normal || code === CloseCode.GoingAway);
   }
 
   private onSocketClose(code: number, reason: string, wasClean: boolean): void {

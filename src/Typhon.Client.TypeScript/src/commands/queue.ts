@@ -81,6 +81,10 @@ export class CommandQueue {
     this.now = options.now ?? monotonicNow;
     this.maxMessageBytes = options.maxMessageBytes ?? options.plan.catalog.limits.clientMessageBytes;
     this.seq = (options.firstSeq ?? 1) & 0xffff;
+    const commands = this.plan.catalog.commands;
+    for (let i = 0; i < commands.length; i++) {
+      this.positionByIdx.set(commands[i]!.idx, i);
+    }
   }
 
   /** Commands waiting for the next {@link flush}. */
@@ -225,8 +229,18 @@ export class CommandQueue {
     return varuSize(type.idx) + 2 + this.measuring.position;
   }
 
+  /**
+   * Where a command sits in the catalog, by its `idx`.
+   *
+   * A map rather than the `findIndex` this was: `commandPosition` is called twice for every `enqueue` — once by `take`
+   * for the rate bucket and once for the delivery mode — so a catalog of C commands cost 2·C·N scans per frame of N
+   * commands, on the input path, to answer a question whose answer never changes.
+   */
+  /** Catalog position by command `idx`, built once — see {@link commandPosition}. */
+  private readonly positionByIdx = new Map<number, number>();
+
   private commandPosition(type: MessagePlan): number {
-    return this.plan.catalog.commands.findIndex((c) => c.idx === type.idx);
+    return this.positionByIdx.get(type.idx) ?? -1;
   }
 
   private take(type: MessagePlan): boolean {

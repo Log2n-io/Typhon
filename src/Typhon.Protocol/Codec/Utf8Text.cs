@@ -46,6 +46,12 @@ public struct Utf8Text256 : IInlineUtf8Text, IEquatable<Utf8Text256>
     /// <summary>The largest number of UTF-8 bytes this type holds.</summary>
     public const int Capacity = 256;
 
+    /// <summary>
+    /// The encoder <see cref="From"/> uses: it THROWS on a lone surrogate rather than emitting U+FFFD for it.
+    /// </summary>
+    /// <remarks>The same encoder <c>WireReader</c> decodes with, so the two ends agree on what this protocol calls text.</remarks>
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
     private ushort _length;
     private Utf8Buffer256 _bytes;
 
@@ -78,14 +84,31 @@ public struct Utf8Text256 : IInlineUtf8Text, IEquatable<Utf8Text256>
             return default;
         }
 
-        var needed = Encoding.UTF8.GetByteCount(value);
+        // STRICT, not the replacement fallback `Encoding.UTF8` carries. A lone surrogate — a string cut between the two
+        // halves of an astral character, which is what slicing a JavaScript string by length produces — encodes to the
+        // three bytes of U+FFFD under the default encoder and travels as a replacement character nobody asked for. That
+        // is precisely the silent corruption the remarks above refuse to commit one level up, so it is refused here too.
+        int needed;
+        try
+        {
+            needed = StrictUtf8.GetByteCount(value);
+        }
+        catch (EncoderFallbackException e)
+        {
+            throw new ArgumentException(
+                "'" + nameof(value) + "' is not valid text: it holds an unpaired surrogate, which has no UTF-8 encoding. " +
+                "A string cut between the halves of an astral character is the usual cause.",
+                nameof(value),
+                e);
+        }
+
         if (needed > Capacity)
         {
             throw new ArgumentException($"'{nameof(value)}' is {needed} UTF-8 bytes, past this type's capacity of {Capacity}.", nameof(value));
         }
 
         var text = default(Utf8Text256);
-        Encoding.UTF8.GetBytes(value, ((Span<byte>)text._bytes)[..needed]);
+        StrictUtf8.GetBytes(value, ((Span<byte>)text._bytes)[..needed]);
         text._length = (ushort)needed;
         return text;
     }

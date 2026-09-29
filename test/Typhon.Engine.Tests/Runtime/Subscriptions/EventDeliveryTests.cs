@@ -1,5 +1,7 @@
 ﻿using NUnit.Framework;
 using System;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Collections.Generic;
 using Typhon.Engine.Internals;
 using Typhon.Protocol;
@@ -937,6 +939,63 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
 
             Assert.DoesNotThrow(() => BindEvents(Codec.Str(64)), "a cap below the field's capacity is the tighter bound, not a fault");
         });
+    }
+
+    /// <summary>
+    /// Text past the field's wire cap is SHORTENED; the event still travels, and the cut lands on a codepoint boundary.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The missing half of <see cref="AnEventStrIsBoundAgainstItsFieldsCapacity"/>, which asserts that
+    /// <c>Codec.Str(64)</c> over a <see cref="Utf8Text256"/> binds and stops there. That assertion was the licence for a
+    /// real defect: the text was clamped to the STRUCT's 256 and then handed to <c>WriteStr</c> with the codec's 64, which
+    /// throws — and the throw was caught around the whole encode. A chat line one byte too long therefore deleted the
+    /// <b>entire event</b>, its speaker and sequence number included, and the application was told nothing.
+    /// </para>
+    /// <para>
+    /// The boundary half matters as much: cutting 64 bytes into a multi-byte character leaves a continuation byte at the
+    /// end, which is invalid UTF-8 and which a strict reader is right to reject — putting the drop back one layer down.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void TextPastTheWireCapIsShortened_NotDroppedWithItsEvent()
+    {
+        // The binding directly: its two capacities are the whole subject, and standing a hub up to reach one would test
+        // the binder as well and say less about either.
+        var binding = new EventFieldBinding(
+            null, offset: 0, components: 1, element: CommandFieldElement.U8, elementSize: sizeof(byte), entity: false,
+            textCapacity: Utf8Text256.Capacity, textWireCap: 8);
+
+        Span<byte> payload = stackalloc byte[Utf8Text256.Capacity + 8];
+        payload.Clear();
+
+        // Ten ASCII bytes into an 8-byte cap: a clean cut at 8.
+        Write(payload, binding.Offset, Utf8Text256.From("abcdefghij"));
+        Assert.That(Encoding.UTF8.GetString(binding.LoadText(payload)), Is.EqualTo("abcdefgh"));
+
+        // Three 3-byte characters into an 8-byte cap. Cutting at byte 8 lands mid-character, so the answer is two
+        // characters and six bytes — never eight bytes of half-formed text.
+        Write(payload, binding.Offset, Utf8Text256.From("\u4e00\u4e8c\u4e09"));
+        var cutLength = binding.LoadText(payload).Length;
+        var cutText = Encoding.UTF8.GetString(binding.LoadText(payload));
+        Assert.Multiple(() =>
+        {
+            Assert.That(cutLength, Is.EqualTo(6), "cut back to the last whole character, not to the cap");
+            Assert.That(cutText, Is.EqualTo("\u4e00\u4e8c"));
+        });
+
+        // And text that fits is untouched.
+        Write(payload, binding.Offset, Utf8Text256.From("abc"));
+        Assert.That(Encoding.UTF8.GetString(binding.LoadText(payload)), Is.EqualTo("abc"));
+    }
+
+    /// <summary>Lays a <see cref="Utf8Text256"/> out the way the arena holds it: a ushort length, then the bytes.</summary>
+    private static void Write(Span<byte> payload, int offset, Utf8Text256 text)
+    {
+        var utf8 = text.Utf8;
+        MemoryMarshal.Write(payload[offset..], (ushort)utf8.Length);
+        payload.Slice(offset + sizeof(ushort), Utf8Text256.Capacity).Clear();
+        utf8.CopyTo(payload[(offset + sizeof(ushort))..]);
     }
 
     /// <summary>Builds an event hub whose one text field carries the given codec, so a binder refusal surfaces here.</summary>
