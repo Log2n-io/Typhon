@@ -1,3 +1,4 @@
+import { monotonicNow } from '../clock/now.js';
 import type { PingMessage, PongMessage } from '../protocol/messages.js';
 import { systemTimers, type TimerApi, type TimerHandle } from './socket.js';
 
@@ -45,7 +46,7 @@ export class PingScheduler {
 
     this.options = options;
     this.timers = options.timers ?? systemTimers;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? monotonicNow;
     this.intervalMs = 1000 / options.pingHz;
     this.weight = options.rttWeight ?? 0.125;
   }

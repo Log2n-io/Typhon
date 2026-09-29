@@ -1,3 +1,4 @@
+import { monotonicNow } from '../clock/now.js';
 import { CloseCode } from '../protocol/constants.js';
 import {
   Connection,
@@ -144,7 +145,7 @@ export class ReconnectingClient {
     this.options = options;
     this.handlers = options.handlers ?? {};
     this.timers = options.timers ?? systemTimers;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? monotonicNow;
     this.backoff = new Backoff(options.backoff);
     this.cache = options.catalogCache ?? null;
   }

@@ -1,3 +1,4 @@
+import { monotonicNow } from '../clock/now.js';
 import { CatalogPlan, parseCatalog, type Catalog } from '../protocol/catalog.js';
 import { CloseCode, isValidClientCloseCode, MessageType, ProtocolConstants } from '../protocol/constants.js';
 import { WireFormatError } from '../protocol/errors.js';
@@ -172,7 +173,7 @@ export class Connection {
     this.options = options;
     this.handlers = options.handlers ?? {};
     this.timers = options.timers ?? systemTimers;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? monotonicNow;
     this.cache = options.catalogCache ?? null;
   }
 

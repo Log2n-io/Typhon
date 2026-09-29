@@ -1,3 +1,4 @@
+import { monotonicNow } from '../clock/now.js';
 import type { CatalogPlan, MessagePlan } from '../protocol/catalog.js';
 import { writeCommands, type CommandInput } from '../protocol/commands.js';
 import { writeSection, type FieldValues } from '../protocol/field-codec.js';
@@ -77,7 +78,7 @@ export class CommandQueue {
 
   constructor(options: CommandQueueOptions) {
     this.plan = options.plan;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? monotonicNow;
     this.maxMessageBytes = options.maxMessageBytes ?? options.plan.catalog.limits.clientMessageBytes;
     this.seq = (options.firstSeq ?? 1) & 0xffff;
   }

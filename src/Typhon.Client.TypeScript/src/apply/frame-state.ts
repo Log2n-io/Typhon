@@ -198,6 +198,15 @@ export class EventRecord {
     return index < 0 ? NaN : this.numbers[this.offsets[index]! + component]!;
   }
 
+  /**
+   * A text field's value, by field name. Empty for a field that is not text or was never received — an empty string is
+   * also a legitimate value, so a handler that must tell them apart checks the field's kind.
+   */
+  text(name: string): string {
+    const index = this.fieldIndex(name);
+    return index < 0 ? '' : this.texts[index]!;
+  }
+
   fieldIndex(name: string): number {
     return this.type.body.fields.findIndex((f) => f.name === name);
   }
