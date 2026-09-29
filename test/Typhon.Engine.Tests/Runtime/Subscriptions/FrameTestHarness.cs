@@ -1,4 +1,4 @@
-using NUnit.Framework;
+﻿using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using Typhon.Client;
@@ -993,13 +993,23 @@ sealed class FrameLog : ITickSink
     }
 }
 
-/// <summary>Records a replica's decoded events: each one's type and numeric fields, in order; <c>EventsLost</c> is summed, not listed.</summary>
+/// <summary>Records a replica's decoded events: each one's type, numeric fields and text, in order; <c>EventsLost</c> is summed, not listed.</summary>
 sealed class EventRecorder : IEventHandler
 {
     private Dictionary<string, double> _current;
+    private Dictionary<string, byte[]> _currentText;
 
     /// <summary>The events, in order: name and field values (a vector field's first component).</summary>
     public List<(string Name, Dictionary<string, double> Fields)> Received { get; } = [];
+
+    /// <summary>
+    /// The text fields of each received event, by index into <see cref="Received"/>, as the RAW decoded UTF-8.
+    /// </summary>
+    /// <remarks>
+    /// Bytes rather than strings, because what a test about text on the wire has to be able to say is that the bytes are
+    /// the ones that were sent — a string comparison would pass on a value that had been through a lossy decode.
+    /// </remarks>
+    public List<Dictionary<string, byte[]>> Texts { get; } = [];
 
     /// <summary>The sum of every <c>EventsLost</c> count received.</summary>
     public long Lost { get; private set; }
@@ -1020,9 +1030,11 @@ sealed class EventRecorder : IEventHandler
         LostOutOfPlace += _lost && _inFrame > 0 ? 1 : 0;
         _inFrame++;
         _current = new Dictionary<string, double>(StringComparer.Ordinal);
+        _currentText = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         if (!_lost)
         {
             Received.Add((type.Name, _current));
+            Texts.Add(_currentText);
         }
     }
 
@@ -1041,6 +1053,10 @@ sealed class EventRecorder : IEventHandler
     /// <inheritdoc />
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
     {
+        if (!_lost)
+        {
+            _currentText[field.Name] = utf8.ToArray();
+        }
     }
 
     /// <inheritdoc />
