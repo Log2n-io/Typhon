@@ -1,0 +1,6 @@
+{
+  // The probe is Node, not the browser bundle, and it lives beside the file it lints: the ESLint project service
+  // resolves a file through the nearest tsconfig.json, so listing `tools` in tsconfig.node.json was not enough.
+  "extends": "../tsconfig.node.json",
+  "include": ["."]
+}
