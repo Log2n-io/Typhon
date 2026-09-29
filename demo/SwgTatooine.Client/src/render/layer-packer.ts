@@ -1,7 +1,8 @@
 import { evaluateSlot, MAX_MOTION_STRIDE, type ArchetypeStore, type FieldArray } from '@typhondb/client';
-import { Archetype } from '../data/swg-schema';
 import { SELECTED_SPRITE_SCALE, type LayerStyle } from './styles';
+import { Placement } from '../data/placement';
 import { Band, chooseBand, packState, sphereInFrustum } from './view-math';
+import type { GroundSampler } from '../terrain/ground-sampler';
 
 /** What every layer needs to know about the frame being drawn. */
 export interface FrameView {
@@ -21,6 +22,8 @@ export interface FrameView {
   readonly viewportWidth: number;
   readonly viewportHeight: number;
   readonly selectedNetId: number;
+  /** The planet's ground, for standing entities on it. Flat until the bake lands (`terrain/heightfield.ts`). */
+  readonly ground: GroundSampler;
 }
 
 interface FieldReaders {
@@ -33,20 +36,40 @@ interface FieldReaders {
 const NO_FIELDS: FieldReaders = { style: null, styleIsFlag: false, mode: null };
 const INITIAL_CAPACITY = 1024;
 
-/** The SWG fields that pick an archetype's style and mode. */
-function readersFor(archetype: number, store: ArchetypeStore): FieldReaders {
-  switch (archetype) {
-    case Archetype.WorldObject:
-      return { style: store.field('kind'), styleIsFlag: false, mode: null };
-    case Archetype.CreatureLair:
-      return { style: store.field('missionId'), styleIsFlag: true, mode: null };
-    case Archetype.Creature:
-      return { style: store.field('template'), styleIsFlag: false, mode: store.field('mode') };
-    case Archetype.CityNpc:
-      return { style: null, styleIsFlag: false, mode: store.field('mode') };
+/**
+ * The SWG fields that pick an archetype's style and mode, chosen by the archetype's NAME: the catalog numbers archetypes
+ * in its own order, so an index says nothing (`data/archetypes.ts`).
+ *
+ * Every field is asked for by name and may be absent — a catalog that does not replicate it yields `null` here and the
+ * archetype draws in its base style rather than reading a neighbouring field's bytes. The live catalog does omit some:
+ * a `Creature` has no `template`, a `CreatureLair` no `missionId`.
+ */
+function readersFor(name: string, store: ArchetypeStore): FieldReaders {
+  switch (name) {
+    case 'WorldObject':
+      return { style: optional(store, 'kind'), styleIsFlag: false, mode: null };
+    case 'CreatureLair':
+      return { style: optional(store, 'missionId'), styleIsFlag: true, mode: null };
+    case 'Creature':
+      return { style: optional(store, 'template'), styleIsFlag: false, mode: optional(store, 'mode') };
+    case 'CityNpc':
+      return { style: null, styleIsFlag: false, mode: optional(store, 'mode') };
+    case 'Player':
+      return { style: null, styleIsFlag: false, mode: optional(store, 'activity') };
     default:
-      return { style: null, styleIsFlag: false, mode: store.field('activity') };
+      return NO_FIELDS;
   }
+}
+
+/**
+ * A field the store may not have. `ArchetypeStore.field` THROWS on a name the schema does not declare, which is right for
+ * a store that is asked for a field it must have and wrong here: which fields exist is the catalog's to decide, and it
+ * decides differently from the mock — a live `Creature` has no `template`, a live `CreatureLair` no `missionId`. Asking
+ * with `field` put an exception in the render loop on the first frame of the first live session.
+ */
+function optional(store: ArchetypeStore, name: string): FieldArray | null {
+  const index = store.fieldIndex(name);
+  return index < 0 ? null : store.fieldAt(index);
 }
 
 /**
@@ -58,8 +81,12 @@ export class LayerPacker {
   readonly archetype: number;
   readonly style: LayerStyle;
 
+  /** Per near instance: `(x, y, z, packed)` in render space, altitude included (CLI3D-04). */
   nearData = new Float32Array(0);
+  /** Per far instance: the same four, though a sprite ignores everything but the point and the state word. */
   farData = new Float32Array(0);
+  /** Per near instance: its yaw, in its own buffer because `nearData`'s four slots are spoken for. */
+  nearYaw = new Float32Array(0);
   /** Entity packed at each instance, captured at pack time for picking. */
   nearNetIds = new Uint32Array(0);
   farNetIds = new Uint32Array(0);
@@ -73,6 +100,8 @@ export class LayerPacker {
   private storeVersion = -1;
   private fields: FieldReaders = NO_FIELDS;
   private readonly motion = new Float64Array(MAX_MOTION_STRIDE);
+  /** Rewritten per entity, never allocated: the one place that knows where altitude and velocity live. */
+  private readonly placement = new Placement();
   /** Per slot: the entity whose state the slot arrays describe, its LOD band and its last heading. */
   private seenNetId = new Uint32Array(0);
   private band = new Uint8Array(0);
@@ -109,7 +138,8 @@ export class LayerPacker {
 
     if (store.version !== this.storeVersion) {
       this.resizeSlotState(store);
-      this.fields = readersFor(this.archetype, store);
+      // From the STORE's own name, not from this layer's index: the catalog numbers archetypes in its order, not ours.
+      this.fields = readersFor(store.schema.name, store);
     }
 
     const count = store.liveCount;
@@ -130,6 +160,7 @@ export class LayerPacker {
     const yaws = this.yaw;
     const nearData = this.nearData;
     const farData = this.farData;
+    const nearYaw = this.nearYaw;
     const nearNetIds = this.nearNetIds;
     const farNetIds = this.farNetIds;
     const tick = view.renderTick;
@@ -137,22 +168,29 @@ export class LayerPacker {
     let near = 0;
     let far = 0;
 
+    const dims = store.dims;
+    const at = this.placement;
     for (let i = 0; i < count; i++) {
       const slot = live[i];
       evaluateSlot(store, slot, tick, frac, motion, 0);
-      const rx = motion[0] - view.originX;
-      const rz = motion[1] - view.originZ;
+      at.read(dims, motion, 0);
+      const rx = at.x - view.originX;
+      const rz = at.z - view.originZ;
+      // Altitude is not offset: the render origin only ever slides along the ground (`05-client.md` § 6). The server is
+      // deliberately 2D, so `at.y` is 0 and the GROUND's height is what puts an entity on the terrain — one bilinear
+      // sample, four loads and three lerps, inside a loop that already costs more than that per entity.
+      const ry = at.y + view.ground.heightAt(at.x, at.z);
 
       const raw = fields.style === null ? 0 : fields.style[slot];
       const styleIndex = fields.styleIsFlag ? (raw > 0 ? 1 : 0) : raw;
       const bound = styleIndex >= 0 && styleIndex < bounds.radius.length ? styleIndex : 0;
-      const cy = bounds.centerY[bound];
+      const cy = ry + bounds.centerY[bound];
       const dx = rx - view.eyeX;
       const dy = cy - view.eyeY;
       const dz = rz - view.eyeZ;
       const distance = Math.sqrt(dx * dx + dy * dy + dz * dz) + 1e-3;
       // The sphere holds the mesh, and the sprite too: drawn at its own lift, which may sit off the mesh's centre.
-      const spriteRadius = distance * spriteMetresPerMetre + Math.abs(cy - spriteLift);
+      const spriteRadius = distance * spriteMetresPerMetre + Math.abs(cy - (ry + spriteLift));
       const radius = Math.max(bounds.radius[bound], spriteRadius);
       if (!sphereInFrustum(view.planes, rx, cy, rz, radius)) {
         continue;
@@ -162,7 +200,7 @@ export class LayerPacker {
       if (seenNetId[slot] !== netId) {
         seenNetId[slot] = netId;
         bands[slot] = Band.Unset;
-        yaws[slot] = byVelocity ? (netId * 2.399963) % (Math.PI * 2) : gridYaw(motion[0], motion[1]);
+        yaws[slot] = byVelocity ? (netId * 2.399963) % (Math.PI * 2) : gridYaw(at.x, at.z);
       }
 
       const pixels = (bounds.extent[bound] * view.pixelsPerMetre) / distance;
@@ -171,22 +209,27 @@ export class LayerPacker {
       const packed = packState(styleIndex, fields.mode === null ? 0 : fields.mode[slot], netId === view.selectedNetId);
 
       if (band === Band.Near) {
-        // Heading only matters to a mesh. A still entity keeps the last heading it had as one.
-        if (byVelocity && (motion[2] !== 0 || motion[3] !== 0)) {
-          yaws[slot] = Math.atan2(motion[2], motion[3]);
+        // Heading only matters to a mesh, and it comes from the GROUND velocity: a ship climbing keeps its heading.
+        // A still entity keeps the last heading it had as one.
+        if (byVelocity && (at.vx !== 0 || at.vz !== 0)) {
+          yaws[slot] = Math.atan2(at.vx, at.vz);
         }
 
+        // (x, y, z, packed), with yaw in its own buffer: the four slots were full, and widening the state word to hold a
+        // yaw would have pushed it past the 24 bits a float32 carries exactly. Only the mesh reads yaw — a sprite is a
+        // disc — so the far band does not pay for it.
         const b = near * 4;
         nearData[b] = rx;
-        nearData[b + 1] = rz;
-        nearData[b + 2] = yaws[slot];
+        nearData[b + 1] = ry;
+        nearData[b + 2] = rz;
         nearData[b + 3] = packed;
+        nearYaw[near] = yaws[slot];
         nearNetIds[near++] = netId;
       } else {
         const b = far * 4;
         farData[b] = rx;
-        farData[b + 1] = rz;
-        farData[b + 2] = 0;
+        farData[b + 1] = ry;
+        farData[b + 2] = rz;
         farData[b + 3] = packed;
         farNetIds[far++] = netId;
       }
@@ -227,6 +270,7 @@ export class LayerPacker {
     this.capacity = capacity;
     this.nearData = new Float32Array(capacity * 4);
     this.farData = new Float32Array(capacity * 4);
+    this.nearYaw = new Float32Array(capacity);
     this.nearNetIds = new Uint32Array(capacity);
     this.farNetIds = new Uint32Array(capacity);
     this.arraysVersion++;

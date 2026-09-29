@@ -1,4 +1,5 @@
 import { CITIES, PLANET_HALF_EXTENT_M, POIS } from '../data/world-data';
+import { NODE_GRID } from './terrain-mesh';
 import { SELECTED_MESH_SCALE, SELECTED_SPRITE_SCALE, STYLE_COUNT, TINT_COUNT } from './styles';
 import { SELECTED_BIT, STYLE_LIMIT } from './view-math';
 
@@ -29,6 +30,7 @@ precision highp float;
 attribute vec3 position;
 attribute vec3 normal;
 attribute vec4 instData;
+attribute float instYaw;
 uniform mat4 viewProjection;
 uniform vec3 uColors[${STYLE_COUNT}];
 uniform vec3 uSizes[${STYLE_COUNT}];
@@ -45,11 +47,12 @@ void main(void) {
     size.y *= 0.25;
   }
 
-  float c = cos(instData.z);
-  float s = sin(instData.z);
+  // instData is (x, y, z, packed) with y the entity's altitude — 0 in a flat realm, so this is the old placement there.
+  float c = cos(instYaw);
+  float s = sin(instYaw);
   vec3 local = position * size;
   vec3 turned = vec3(local.x * c + local.z * s, local.y, -local.x * s + local.z * c);
-  gl_Position = viewProjection * vec4(instData.x + turned.x, turned.y, instData.y + turned.z, 1.0);
+  gl_Position = viewProjection * vec4(instData.xyz + turned, 1.0);
 
   // A normal transforms by the inverse transpose: for a scale, divide by it.
   vec3 n = normalize(normal / size);
@@ -95,7 +98,8 @@ varying vec2 vCorner;
 
 void main(void) {
   ${UNPACK}
-  vec4 clip = viewProjection * vec4(instData.x, uLift, instData.y, 1.0);
+  // The lift is above the ENTITY, not above the ground: at altitude the dot follows it up.
+  vec4 clip = viewProjection * vec4(instData.x, instData.y + uLift, instData.z, 1.0);
   float pixels = uPixels * (1.0 + selected * ${f(SELECTED_SPRITE_SCALE - 1)});
   clip.xy += position.xy * (pixels / uViewport) * clip.w;
   gl_Position = clip;
@@ -131,6 +135,8 @@ precision highp float;
 attribute vec3 position;
 attribute vec4 lineEnds;
 attribute vec2 lineStyle;
+/** Each end's altitude; 0 in a flat realm, so uHeight alone is the old behaviour (CLI3D-04). */
+attribute vec2 lineHeights;
 uniform mat4 viewProjection;
 uniform vec2 uViewport;
 uniform float uWidth;
@@ -141,7 +147,7 @@ const float MIN_W = 0.01;
 
 void main(void) {
   // lineStyle.x: alpha. lineStyle.y: 0 for a line; for a marker, its half-diagonal in CSS pixels, the sign picking the diagonal.
-  vec4 a = viewProjection * vec4(lineEnds.x, uHeight, lineEnds.y, 1.0);
+  vec4 a = viewProjection * vec4(lineEnds.x, lineHeights.x + uHeight, lineEnds.y, 1.0);
   vec4 b;
   float marker = lineStyle.y;
   if (marker != 0.0) {
@@ -156,7 +162,7 @@ void main(void) {
     a.xy -= d;
     b.xy += d;
   } else {
-    b = viewProjection * vec4(lineEnds.z, uHeight, lineEnds.w, 1.0);
+    b = viewProjection * vec4(lineEnds.z, lineHeights.y + uHeight, lineEnds.w, 1.0);
     if (a.w < MIN_W && b.w < MIN_W) {
       gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
       vColor = vec4(0.0);
@@ -193,17 +199,88 @@ void main(void) {
 }
 `;
 
+/**
+ * Bilinear sampling of the height field, spelled out rather than left to the sampler.
+ *
+ * `uField` is `(originM, spacingM, posts, 1 / posts)` and the texture is R32F sampled NEAREST, so these four taps and the
+ * two `mix`es are the **same four texels and the same weights** as `Heightfield.heightAt` on the CPU. Hardware filtering of
+ * a float texture is not specified to agree even that far, and the whole design rests on the GPU's displaced ground and
+ * the CPU's entity altitudes landing in the same place.
+ *
+ * It is not bit-identical and does not need to be: GLSL `mix(x, y, a)` is `x·(1−a) + y·a` where the CPU computes
+ * `x + (y − x)·a`, and the CPU works in float64. **Measured worst divergence over ±140 m of relief: 1.25e-5 m.**
+ */
+const HEIGHT_SAMPLER = `
+uniform sampler2D uHeight;
+uniform vec4 uField;
+
+float heightAt(vec2 planet) {
+  float last = uField.z - 1.0;
+  vec2 f = clamp((planet - uField.x) / uField.y, vec2(0.0), vec2(last));
+  vec2 i0 = floor(f);
+  vec2 t = f - i0;
+  vec2 i1 = min(i0 + 1.0, vec2(last));
+  vec2 uvA = (i0 + 0.5) * uField.w;
+  vec2 uvB = (i1 + 0.5) * uField.w;
+  float h00 = texture2D(uHeight, vec2(uvA.x, uvA.y)).r;
+  float h10 = texture2D(uHeight, vec2(uvB.x, uvA.y)).r;
+  float h01 = texture2D(uHeight, vec2(uvA.x, uvB.y)).r;
+  float h11 = texture2D(uHeight, vec2(uvB.x, uvB.y)).r;
+  return mix(mix(h00, h10, t.x), mix(h01, h11, t.x), t.y);
+}
+
+/*
+ * The ground's normal at a planet coordinate, from a central difference at the FIELD's post spacing.
+ *
+ * This is a function of the PLANET, and of nothing else. That is the whole point of computing it here rather than at the
+ * vertices: the mesh is camera-centred, so its vertices sit on different planet coordinates every time the camera moves,
+ * and a per-vertex normal interpolated across triangles tens to hundreds of metres wide therefore CRAWLED — a zig-zag of
+ * false shadows that slid over the ground as you flew, tracking the triangulation rather than the terrain. Sampling per
+ * pixel makes the shading stand still, and makes it independent of how finely the mesh happens to be tessellated there.
+ */
+vec3 groundNormal(vec2 planet) {
+  float e = uField.y;
+  float dx = heightAt(planet + vec2(e, 0.0)) - heightAt(planet - vec2(e, 0.0));
+  float dz = heightAt(planet + vec2(0.0, e)) - heightAt(planet - vec2(0.0, e));
+  return normalize(vec3(-dx, 2.0 * e, -dz));
+}
+`;
+
 export const GROUND_VERTEX = `
 precision highp float;
 attribute vec3 position;
+/** Per instance: the node's planet origin, its size in metres, spare. */
+attribute vec4 nodeData;
+/** Per instance: where the morph toward the parent grid begins and ends, in metres of camera distance. */
+attribute vec2 nodeMorph;
 uniform mat4 world;
 uniform mat4 viewProjection;
+/** Camera in planet metres (xz) and its altitude (y), for the morph's distance. */
+uniform vec3 uCameraPlanet;
 varying vec2 vPlanet;
 varying vec3 vRender;
+varying float vHeightM;
+${HEIGHT_SAMPLER}
 
 void main(void) {
-  vec4 w = world * vec4(position, 1.0);
-  vPlanet = position.xz;
+  // The vertex is a FRACTION of its node, and the node is a fixed cell of the world — so this planet coordinate is a
+  // constant of the terrain, not of the camera. That is the whole reason for the quadtree: two earlier meshes were
+  // centred on the camera, and their vertices slid across the ground whenever it moved sideways.
+  vec2 grid = position.xz;
+  vec2 planet = nodeData.xy + grid * nodeData.z;
+
+  // CDLOD morph. Approaching the distance at which this node is replaced by its four children, blend each vertex onto the
+  // grid its PARENT has — drop the odd half of the grid coordinate — so the swap, when it comes, moves nothing. This is
+  // what closes the T-junction at a level boundary and removes the pop, without a stitching strip or a skirt.
+  float toCamera = distance(vec3(planet.x, heightAt(planet), planet.y), uCameraPlanet);
+  float morph = clamp((toCamera - nodeMorph.x) / max(nodeMorph.y - nodeMorph.x, 1e-3), 0.0, 1.0);
+  vec2 coarse = floor(grid * ${f(NODE_GRID)} * 0.5 + 0.5) * 2.0 / ${f(NODE_GRID)};
+  planet = nodeData.xy + mix(grid, coarse, morph) * nodeData.z;
+
+  float h = heightAt(planet);
+  vec4 w = world * vec4(planet.x, h, planet.y, 1.0);
+  vPlanet = planet;
+  vHeightM = h;
   vRender = w.xyz;
   gl_Position = viewProjection * w;
 }
@@ -211,9 +288,13 @@ void main(void) {
 
 const PLANET = f(PLANET_HALF_EXTENT_M);
 
+/** Slots in the ground shader's hull array: the engine's own `PushGeometry.MaxVertices`, so a hull always fits whole. */
+export const HULL_SLOTS = 16;
+
 export const GROUND_FRAGMENT = `
 precision highp float;
 uniform vec3 uCamera;
+uniform vec2 uFog;
 uniform vec4 uCities[${CITIES.length}];
 uniform vec4 uPois[${POIS.length}];
 uniform sampler2D uHeat;
@@ -225,8 +306,17 @@ uniform float uHeatAlpha;
 uniform float uGrid;
 uniform vec4 uSelection;
 uniform vec3 uSkyColor;
+uniform sampler2D uCells;
+uniform vec4 uCellRect;
+uniform float uCellAlpha;
+uniform vec4 uReplGrid;
+uniform vec4 uHull[${HULL_SLOTS}];
+uniform float uHullCount;
+uniform vec4 uSessionDisc;
 varying vec2 vPlanet;
 varying vec3 vRender;
+varying float vHeightM;
+${HEIGHT_SAMPLER}
 
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -243,13 +333,23 @@ float noise(vec2 p) {
 
 float gridLine(vec2 p, float cell, float widthPx) {
   vec2 g = abs(fract(p / cell - 0.5) - 0.5) * cell;
-  vec2 w = fwidth(p) * widthPx;
+  // Capped for the same reason as the ring footprint below: on a slope at a grazing angle an uncapped fwidth turns a grid
+  // line into a wash.
+  vec2 w = min(fwidth(p), vec2(24.0)) * widthPx;
   vec2 l = 1.0 - smoothstep(vec2(0.0), w, g);
   return max(l.x, l.y);
 }
 
 float ring(float d, float radius, float widthPx, float footprint) {
   return 1.0 - smoothstep(0.0, footprint * widthPx, abs(d - radius));
+}
+
+// Distance from p to the segment ab, for the session hull's edges.
+float segment(vec2 p, vec2 a, vec2 b) {
+  vec2 ab = b - a;
+  vec2 ap = p - a;
+  float t = clamp(dot(ap, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+  return distance(p, a + ab * t);
 }
 
 vec3 heatRamp(float t) {
@@ -262,10 +362,26 @@ vec3 heatRamp(float t) {
 void main(void) {
   float edge = max(abs(vPlanet.x), abs(vPlanet.y));
   vec3 sand = vec3(0.78, 0.66, 0.47);
-  float dunes = noise(vPlanet * 0.0015) * 0.6 + noise(vPlanet * 0.011) * 0.3 + noise(vPlanet * 0.09) * 0.1;
-  vec3 color = sand * (0.82 + 0.28 * dunes);
+  // The fine-grain sand noise stays, at half its old weight: it used to carry ALL of the ground's variation and now only
+  // has to break up the surface between real landforms.
+  float dunes = noise(vPlanet * 0.011) * 0.65 + noise(vPlanet * 0.09) * 0.35;
+  vec3 color = sand * (0.9 + 0.14 * dunes);
 
-  float footprint = length(fwidth(vPlanet));
+  // Where the ground is steep it is rock, not sand — the one colour cue that makes relief legible without a texture, and
+  // it is free because the normal is already here. one minus n.y is the sine of the slope angle.
+  vec3 ground = groundNormal(vPlanet);
+  // Saturating at ~50 deg, not ~19, and at half the strength. At the old settings every modest slope took the full rock
+  // colour, so a ridge read as a uniform dark ribbon instead of a lit face beside a shaded one — the tint was doing the
+  // work the lighting should do, and drowning it.
+  float steep = clamp((1.0 - ground.y) * 1.5, 0.0, 1.0);
+  color = mix(color, vec3(0.54, 0.47, 0.39), steep * 0.45);
+  // And a pale crest tint high up, which reads as sun-bleached stone and separates the mesas from the flats.
+  color = mix(color, vec3(0.86, 0.80, 0.68), clamp((vHeightM - 12.0) / 30.0, 0.0, 1.0) * 0.35);
+
+  // fwidth(vPlanet) is the antialiasing footprint for every line and ring below, and on a slope seen at a grazing angle
+  // it explodes: one pixel spans a long stretch of ground. Left alone, a selection ring smears into a band. Capped, a ring
+  // at a grazing angle merely gets as wide as it would on flat ground — which is what the eye expects.
+  float footprint = min(length(fwidth(vPlanet)), 24.0);
   for (int i = 0; i < ${CITIES.length}; i++) {
     float d = distance(vPlanet, uCities[i].xy);
     float r = uCities[i].z;
@@ -297,6 +413,47 @@ void main(void) {
     color = mix(color, heatRamp(value), a * 0.75);
   }
 
+  // The DEBUG block, drawn last so it reads over everything else (CLI3D-03). All of it is the SERVER's account of this
+  // session: the grid it keys cells on, the cells it has actually delivered, and the shape it is serving after clamping.
+  if (uReplGrid.w > 0.5) {
+    float cells = gridLine(vPlanet - uReplGrid.xy, uReplGrid.z, 1.0);
+    color = mix(color, vec3(0.16, 0.34, 0.52), cells * 0.55 * (1.0 - smoothstep(2.0, 24.0, footprint)));
+  }
+
+  // Delivered cells are tinted FAINTLY and the gaps loudly, which is the way round that carries information: a settled
+  // view is almost all delivered, so shading what IS held paints the whole screen and says nothing, while the handful of
+  // cells still filling is the thing worth seeing. Drawn at full strength the first version was a green wash over the
+  // world.
+  if (uCellAlpha > 0.0) {
+    vec2 cellUv = (vPlanet - uCellRect.xy) / uCellRect.zw;
+    if (all(greaterThanEqual(cellUv, vec2(0.0))) && all(lessThan(cellUv, vec2(1.0)))) {
+      float held = texture2D(uCells, cellUv).a;
+      color = mix(color, vec3(0.30, 0.85, 0.55), held * uCellAlpha * 0.12);
+      color = mix(color, vec3(0.95, 0.35, 0.20), (1.0 - held) * uCellAlpha * 0.38);
+    }
+  }
+
+  // The hull is closed by carrying the previous vertex rather than indexing uHull[i + 1]: GLSL ES 1.0 only promises
+  // uniform-array indexing by a constant-index-expression, and the loop counter is the only one here that is certainly one.
+  if (uHullCount > 0.5) {
+    vec2 first = uHull[0].xy;
+    vec2 prev = first;
+    float hullEdge = 1e9;
+    for (int i = 0; i < ${HULL_SLOTS}; i++) {
+      if (float(i) >= uHullCount) { break; }
+      vec2 v = uHull[i].xy;
+      if (i > 0) { hullEdge = min(hullEdge, segment(vPlanet, prev, v)); }
+      prev = v;
+    }
+
+    hullEdge = min(hullEdge, segment(vPlanet, prev, first));
+    color = mix(color, vec3(0.98, 0.82, 0.25), (1.0 - smoothstep(0.0, footprint * 2.0, hullEdge)) * 0.95);
+  }
+
+  if (uSessionDisc.w > 0.5) {
+    color = mix(color, vec3(0.98, 0.82, 0.25), ring(distance(vPlanet, uSessionDisc.xy), uSessionDisc.z, 2.0, footprint) * 0.95);
+  }
+
   if (uSelection.z > 0.5) {
     float d = distance(vPlanet, uSelection.xy);
     color = mix(color, vec3(0.95, 0.30, 0.20), ring(d, 24.0, 1.5, footprint) * 0.9);
@@ -308,8 +465,19 @@ void main(void) {
     color *= 0.35;
   }
 
+  // Lighting last, over EVERY overlay rather than only the sand. An overlay is paint on the ground, so it takes the
+  // ground's light; shading the sand alone would leave a city disc looking like a decal hovering over the slope it is on.
+  // A fixed sun, because nothing in this demo has a time of day.
+  // A higher sun and more ambient: a desert at midday has bright sand and soft shadows, and the previous low sun with a
+  // 0.45 floor put near-black on any face turned away from it.
+  float lambert = clamp(dot(ground, normalize(vec3(0.42, 0.84, 0.34))), 0.0, 1.0);
+  color *= 0.66 + 0.5 * lambert;
+
   float dist = distance(vRender, uCamera);
-  float fog = 1.0 - exp(-dist * 0.00004);
-  gl_FragColor = vec4(mix(color, uSkyColor, clamp(fog, 0.0, 0.85)), 1.0);
+  // Haze density and its ceiling both come from the CPU, because they depend on the camera ALTITUDE: see fogFor in
+  // ground.ts. A fixed density cannot serve both views — the value that leaves a 22 km map view readable leaves the
+  // horizon at eye level as a dark band of ground, which is what the planet-edge darkening looks like from down there.
+  float fog = 1.0 - exp(-dist * uFog.x);
+  gl_FragColor = vec4(mix(color, uSkyColor, clamp(fog, 0.0, uFog.y)), 1.0);
 }
 `;

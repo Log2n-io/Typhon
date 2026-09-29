@@ -1,4 +1,3 @@
-import { ARCHETYPE_LABELS } from '../data/swg-schema';
 import { useStats } from '../state/stats-store';
 import { useUi } from '../state/ui-store';
 
@@ -19,7 +18,7 @@ export function Inspector() {
   return (
     <div className="panel inspector">
       <div className="hud-title">
-        {inspection === null ? `#${selectedNetId}` : `${ARCHETYPE_LABELS[inspection.archetype]} #${selectedNetId}`}
+        {inspection === null ? `#${selectedNetId}` : `${inspection.archetype} #${selectedNetId}`}
       </div>
       {inspection !== null && (
         <table>

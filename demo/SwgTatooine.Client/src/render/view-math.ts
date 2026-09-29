@@ -40,6 +40,11 @@ export function packedStyle(packed: number): number {
   return packed % STYLE_LIMIT;
 }
 
+/** Mode index of a packed instance. */
+export function packedMode(packed: number): number {
+  return Math.floor((packed % SELECTED_BIT) / STYLE_LIMIT);
+}
+
 /** Six frustum planes `(a, b, c, d)` from a view-projection matrix, normalised so `a·x + b·y + c·z + d` is a distance. */
 export function extractFrustumPlanes(m: ArrayLike<number>, out: Float64Array): void {
   // Gribb–Hartmann: plane = column 3 ± column k, where column k holds the coefficients of clip coordinate k.
@@ -160,7 +165,9 @@ export function pickInstances(
   for (let k = 0; k < count; k++) {
     const b = k * 4;
     const lift = typeof liftByStyle === 'number' ? liftByStyle : liftByStyle[packedStyle(data[b + 3])];
-    const s = projectToScreen(matrix, data[b], lift, data[b + 1], width, height, screen);
+    // (x, y, z, packed), y being the entity's altitude (CLI3D-04): the lift is measured from the ENTITY, so that a
+    // flying thing is picked where it is drawn and not at the point on the ground beneath it.
+    const s = projectToScreen(matrix, data[b], data[b + 1] + lift, data[b + 2], width, height, screen);
     // A point behind the camera projects to NaN, which is never within reach.
     const d = Math.hypot(s.x - px, s.y - py);
     if (d <= maxPixels && (d < best.pixels - 0.5 || (Math.abs(d - best.pixels) <= 0.5 && s.w < best.depth))) {

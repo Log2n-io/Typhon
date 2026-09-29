@@ -10,7 +10,18 @@
 export const DragKind = { None: 0, Pan: 1, Orbit: 2 } as const;
 export type DragKindValue = (typeof DragKind)[keyof typeof DragKind];
 
+/** How far the pointer must travel before a press becomes a drag rather than a press. */
 const DRAG_THRESHOLD_PX = 4;
+
+/**
+ * How far the pointer may wander and still have the release count as a click.
+ *
+ * <b>Separate from {@link DRAG_THRESHOLD_PX}, and that is the point.</b> Reusing the pan threshold to disqualify a click
+ * meant 4 px of hand movement silently lost the selection: measured through synthetic pointer events, 0–3 px selected 12
+ * of 12 and 4 px selected 0 of 12, which is exactly "it works sometimes on the same object". Panning should start early,
+ * because a drag that lags feels broken; selecting should forgive more, because a mouse is not a stylus.
+ */
+const CLICK_SLOP_PX = 10;
 
 /** `PointerEvent.button` → its bit in `PointerEvent.buttons`: left, middle, right. */
 function buttonBit(button: number): number {
@@ -19,15 +30,18 @@ function buttonBit(button: number): number {
 
 export class DragTracker {
   kind: DragKindValue = DragKind.None;
-  /** Whether the pointer moved past the threshold: a release without it is a click. */
+  /** Whether the pointer moved past {@link DRAG_THRESHOLD_PX}: the drag is acting on moves. */
   moved = false;
+  /** The farthest the pointer has been from where it was pressed, in pixels. A click is judged on this, not on {@link moved}. */
+  maxMoved = 0;
   lastX = 0;
   lastY = 0;
   /** The button that started the drag (0 left, 1 middle, 2 right), or -1. */
   button = -1;
   private pointerId = -1;
-  private startX = 0;
-  private startY = 0;
+  /** Where the press landed. A click is reported HERE, not at the release: you aim when you press. */
+  startX = 0;
+  startY = 0;
 
   /** Returns true when this press starts a drag: no drag in progress, and the left, middle or right button. */
   down(pointerId: number, button: number, x: number, y: number): boolean {
@@ -39,6 +53,7 @@ export class DragTracker {
     this.button = button;
     this.pointerId = pointerId;
     this.moved = false;
+    this.maxMoved = 0;
     this.startX = this.lastX = x;
     this.startY = this.lastY = y;
     return true;
@@ -59,7 +74,14 @@ export class DragTracker {
       return false;
     }
 
-    if (!this.moved && Math.hypot(x - this.startX, y - this.startY) < DRAG_THRESHOLD_PX) {
+    // Recorded on EVERY move, including the ones under the threshold: what makes a release a click is how far the
+    // pointer ever got, and the early return below would otherwise never see the small ones.
+    const travelled = Math.hypot(x - this.startX, y - this.startY);
+    if (travelled > this.maxMoved) {
+      this.maxMoved = travelled;
+    }
+
+    if (!this.moved && travelled < DRAG_THRESHOLD_PX) {
       return false;
     }
 
@@ -79,7 +101,9 @@ export class DragTracker {
       return false;
     }
 
-    const click = !this.moved && this.kind === DragKind.Pan;
+    // By distance, not by the `moved` latch: a press that wandered 5 px both panned a little and selected, which is what
+    // a person doing either one of them expects.
+    const click = this.maxMoved <= CLICK_SLOP_PX && this.kind === DragKind.Pan;
     this.cancel();
     return click;
   }
@@ -94,5 +118,6 @@ export class DragTracker {
     this.button = -1;
     this.pointerId = -1;
     this.moved = false;
+    this.maxMoved = 0;
   }
 }

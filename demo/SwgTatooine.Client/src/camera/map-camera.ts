@@ -47,6 +47,11 @@ export class MapCamera {
 
   eyeX = 0;
   eyeY = 0;
+  /**
+   * Terrain height under {@link targetX}, {@link targetZ}, in metres. The owner writes it each frame from the heightfield;
+   * the camera orbits the ground point rather than sea level, which is what keeps the eye above the terrain.
+   */
+  groundY = 0;
   eyeZ = 0;
 
   constructor() {
@@ -152,7 +157,7 @@ export class MapCamera {
    */
   maxGroundHitM(heightPx: number): number {
     const pixelAngle = (2 * Math.tan(this.fov / 2)) / Math.max(1, heightPx);
-    const height = Math.max(this.eyeY, 1e-3);
+    const height = Math.max(this.eyeY - this.groundY, 1e-3);
     const sinBelow = Math.min(1, Math.sqrt((height * pixelAngle) / (MAX_METRES_PER_PIXEL_RATIO * this.distance)));
     return height / sinBelow;
   }
@@ -193,16 +198,21 @@ export class MapCamera {
   }
 
   /**
-   * Where a ray meets the ground (y = 0), into `out` (x, z); false when it points at the sky or meets the ground farther than
+   * Where a ray meets the ground plane, into `out` (x, z); false when it points at the sky or meets the ground farther than
    * `maxDistance` from its origin.
+   *
+   * The plane is `y = planeY`, which the camera passes as {@link groundY} — the terrain height under its own target rather
+   * than sea level. It is an approximation of the real surface and a deliberate one: a drag must move the ground under the
+   * cursor by exactly what the cursor moved, and a ray marched against the true heightfield makes the pan speed depend on
+   * whatever slope the cursor happens to be over, which reads as the map sticking and slipping.
    */
-  static groundHit(ray: Ray, out: Float64Array, maxDistance = Infinity): boolean {
+  static groundHit(ray: Ray, out: Float64Array, maxDistance = Infinity, planeY = 0): boolean {
     if (ray.dy >= -1e-6) {
       return false;
     }
 
-    const t = -ray.oy / ray.dy;
-    if (!(t <= maxDistance)) {
+    const t = (planeY - ray.oy) / ray.dy;
+    if (!(t >= 0 && t <= maxDistance)) {
       return false;
     }
 
@@ -214,7 +224,11 @@ export class MapCamera {
   private updateEye(): void {
     const cp = Math.cos(this.pitch);
     this.eyeX = this.targetX - cp * Math.sin(this.yaw) * this.distance;
-    this.eyeY = Math.sin(this.pitch) * this.distance;
+    // Above the GROUND under the target, not above sea level. The pitch and distance floors were what kept the eye above
+    // the plane `y = 0`; once the ground can rise to 130 m they stop being enough, and a camera inside a mesa sees the
+    // inside of it — the ground draws with back faces on, so the symptom is a featureless brown screen rather than
+    // anything that looks like a camera bug.
+    this.eyeY = this.groundY + Math.sin(this.pitch) * this.distance;
     this.eyeZ = this.targetZ - cp * Math.cos(this.yaw) * this.distance;
   }
 }

@@ -59,7 +59,7 @@ describe('MockSource', () => {
       world,
       grid: new AggregateGrid(AGG_GRID),
       clock,
-      events: { onAttack: () => undefined },
+      events: { onAttack: () => undefined, onChat: () => undefined },
       seed: 1,
       population: 1,
       latencyMs: 40,

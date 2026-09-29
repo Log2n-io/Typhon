@@ -1,3 +1,4 @@
+import { Chat } from './Chat';
 import { Hud } from './Hud';
 import { Inspector } from './Inspector';
 import { Toolbar } from './Toolbar';
@@ -9,6 +10,7 @@ export function App() {
       <Viewport />
       <Toolbar />
       <Hud />
+      <Chat />
       <Inspector />
     </div>
   );

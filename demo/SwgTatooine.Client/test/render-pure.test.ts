@@ -4,11 +4,12 @@ import { Mesh } from '@babylonjs/core/Meshes/mesh';
 import { Scene } from '@babylonjs/core/scene';
 import { AggregateGrid } from '@typhondb/client';
 import { describe, expect, it } from 'vitest';
-import { fillHeatmap } from '../src/render/heatmap-fill';
+import { fillHeatmap, slabAt } from '../src/render/heatmap-fill';
 import { PrefixUploader } from '../src/render/prefix-upload';
 import { buildShape, type ShapeKind } from '../src/render/shapes';
 import * as shaders from '../src/render/shaders';
-import { LAYER_STYLES, SELECTED_MESH_SCALE, STYLE_COUNT, TINT_COUNT } from '../src/render/styles';
+import { KNOWN_ARCHETYPES } from '../src/data/archetypes';
+import { SELECTED_MESH_SCALE, STYLE_COUNT, styleFor, TINT_COUNT, type LayerStyle } from '../src/render/styles';
 import { packState, pickInstances, type PickHit } from '../src/render/view-math';
 
 describe('shapes', () => {
@@ -80,8 +81,8 @@ describe('shapes', () => {
 
 describe('style bounds', () => {
   it('holds every corner of every style, grown by the selection scale, whatever the yaw', () => {
-    for (const style of LAYER_STYLES) {
-      style.sizes.forEach(([w, h, l], i) => {
+    for (const style of KNOWN_ARCHETYPES.map((name): LayerStyle => styleFor(name))) {
+      style.sizes.forEach(([w, h, l]: readonly [number, number, number], i: number) => {
         const r = style.bounds.radius[i];
         const cy = style.bounds.centerY[i];
         for (const s of [1, SELECTED_MESH_SCALE]) {
@@ -177,6 +178,47 @@ describe('fillHeatmap', () => {
     // Texels beyond the grid are cleared, not left stale.
     expect(texel(3, 3)).toEqual([0, 0, 0, 0]);
   });
+
+  it('draws the slab it is asked for, not always the floor of a deep grid (CLI3D-04)', () => {
+    // 2 × 2 × 3: `cell = i₀ + 2·(i₁ + 2·i₂)`, so slab 1 starts at cell 4 and slab 2 at cell 8.
+    const grid = new AggregateGrid({ index: 0, origin: [0, 0, 0], cell: 100, dims: [2, 2, 3], archetypes: [7] });
+    grid.beginFrame();
+    grid.setCell(0, new Uint32Array([5]), 0); // slab 0, texel (0, 0)
+    grid.setCell(5, new Uint32Array([5]), 0); // slab 1, texel (1, 0)
+    grid.setCell(11, new Uint32Array([5]), 0); // slab 2, texel (1, 1)
+
+    const lit = (slab: number): string[] => {
+      const out = new Uint8Array(2 * 2 * 4);
+      fillHeatmap(grid, out, 2, 2, slab);
+      const on: string[] = [];
+      for (let z = 0; z < 2; z++) {
+        for (let x = 0; x < 2; x++) {
+          if (out[(z * 2 + x) * 4] > 0) {
+            on.push(`${x},${z}`);
+          }
+        }
+      }
+
+      return on;
+    };
+
+    expect(lit(0)).toEqual(['0,0']);
+    expect(lit(1)).toEqual(['1,0']);
+    expect(lit(2)).toEqual(['1,1']);
+  });
+
+  it('picks the slab the camera is in, clamped to the grid', () => {
+    const deep = new AggregateGrid({ index: 0, origin: [0, 0, -50], cell: 100, dims: [2, 2, 3], archetypes: [7] });
+    const flat = new AggregateGrid({ index: 0, origin: [0, 0], cell: 100, dims: [2, 2], archetypes: [7] });
+
+    // Slabs span [-50, 50), [50, 150), [150, 250) from the grid's own origin on the third axis.
+    expect(slabAt(deep, 0)).toBe(0);
+    expect(slabAt(deep, 100)).toBe(1);
+    expect(slabAt(deep, 200)).toBe(2);
+    expect(slabAt(deep, -9999), 'below the grid clamps to the floor').toBe(0);
+    expect(slabAt(deep, 9999), 'above it clamps to the ceiling').toBe(2);
+    expect(slabAt(flat, 9999), 'a flat grid has one slab whatever the altitude').toBe(0);
+  });
 });
 
 describe('pickInstances', () => {
@@ -189,11 +231,12 @@ describe('pickInstances', () => {
   m[11] = 1;
   m[14] = -2000 / 999;
 
+  /** Ground points into the packed layout `(x, y, z, packed)`, at altitude 0 — every SWG archetype's (CLI3D-04). */
   const pack = (...xz: number[]): Float32Array => {
     const data = new Float32Array((xz.length / 2) * 4);
     for (let k = 0; k < xz.length / 2; k++) {
       data[k * 4] = xz[k * 2];
-      data[k * 4 + 1] = xz[k * 2 + 1];
+      data[k * 4 + 2] = xz[k * 2 + 1];
       data[k * 4 + 3] = packState(0, 0, false);
     }
 
@@ -225,6 +268,19 @@ describe('pickInstances', () => {
     const best = fresh();
     pickInstances(m, data, new Uint32Array([5]), 1, lift, 800, 800, 400, 360, 2, 0, best, screen);
     expect(best.netId).toBe(5);
+  });
+
+  it('picks a flying entity where it is drawn, not on the ground beneath it (CLI3D-04)', () => {
+    // 100 m away at 10 m of altitude: 40 px above the viewport's centre on an 800 px, 90° view.
+    const data = pack(0, 100);
+    data[1] = 10;
+    const atGround = fresh();
+    pickInstances(m, data, new Uint32Array([7]), 1, 0, 800, 800, 400, 400, 2, 0, atGround, screen);
+    expect(atGround.netId, 'the cursor on the ground point must not pick a thing 10 m above it').toBe(0);
+
+    const aloft = fresh();
+    pickInstances(m, data, new Uint32Array([7]), 1, 0, 800, 800, 400, 360, 2, 0, aloft, screen);
+    expect(aloft.netId, 'the cursor on the entity itself must pick it').toBe(7);
   });
 });
 

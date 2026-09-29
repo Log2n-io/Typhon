@@ -52,6 +52,34 @@ export class MockSource implements DataSource, LatencyControl {
   private latencyMs: number;
   private jitterMs: number;
 
+  /** The world it was handed: the mock does not build its own, so the app is already drawing this one. */
+  get world(): WorldStore {
+    return this.options.world;
+  }
+
+  get grid(): AggregateGrid {
+    return this.options.grid;
+  }
+
+  /** What the mock server reports it is serving, the same figure its stats carry. */
+  get effectiveRadiusM(): number {
+    return this.current.server?.effectiveRadius ?? 0;
+  }
+
+  /** The mock's own worker stops on demand, so pausing has always worked here. */
+  get canPause(): boolean {
+    return true;
+  }
+
+  /**
+   * The mock has no `DEBUG` block, and inventing one would be worse than having none: the overlay exists to show what
+   * the ENGINE holds, so a mock that drew a plausible grid and window would be the one thing on screen that could not
+   * be believed.
+   */
+  get debug(): null {
+    return null;
+  }
+
   constructor(options: MockSourceOptions) {
     this.options = options;
     this.latencyMs = options.latencyMs;
@@ -65,6 +93,7 @@ export class MockSource implements DataSource, LatencyControl {
       wireBytesPerSec: 0,
       applyMs: 0,
       server: null,
+      session: null,
     };
   }
 
@@ -196,6 +225,10 @@ export class MockSource implements DataSource, LatencyControl {
         effectiveRadius: message.stats.effectiveRadius,
         worldEntities: message.stats.worldEntities,
       },
+
+      // The mock has no session: no PING loop, no session-scoped metrics, no RegionSender. Reporting zeros here would
+      // read as "this client costs the server nothing", which is a claim rather than an absence (CLI3D-06).
+      session: null,
     };
   }
 }

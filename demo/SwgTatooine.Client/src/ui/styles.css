@@ -220,3 +220,60 @@ button.active {
   bottom: 10px;
   width: 270px;
 }
+
+/* Chat (SWG-09): bottom left, opposite the inspector, so both can be open at once. */
+.chat {
+  left: 10px;
+  bottom: 10px;
+  width: 300px;
+  max-height: 34%;
+  display: flex;
+  flex-direction: column;
+}
+
+.chat h3 {
+  margin: 0 0 6px;
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.chat-count {
+  font-weight: normal;
+  opacity: 0.6;
+  font-size: 11px;
+}
+
+.chat-lines {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.chat-line {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  line-height: 1.35;
+}
+
+.chat-speaker {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  opacity: 0.65;
+  cursor: pointer;
+}
+
+.chat-speaker:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
+.chat-text {
+  word-break: break-word;
+}

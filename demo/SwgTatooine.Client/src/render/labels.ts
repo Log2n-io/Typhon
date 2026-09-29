@@ -1,4 +1,5 @@
 import { CITIES, POIS } from '../data/world-data';
+import type { GroundSampler } from '../terrain/ground-sampler';
 import { projectToScreen, type ScreenPoint } from './view-math';
 
 interface Label {
@@ -42,15 +43,31 @@ export class Labels {
   }
 
   /** Places every label for a view-projection matrix and a CSS viewport. */
-  update(matrix: ArrayLike<number>, originX: number, originZ: number, width: number, height: number): void {
+  update(
+    matrix: ArrayLike<number>,
+    originX: number,
+    originZ: number,
+    width: number,
+    height: number,
+    ground: GroundSampler,
+  ): void {
     for (const label of this.places) {
-      const s = projectToScreen(matrix, label.x - originX, label.lift, label.z - originZ, width, height, this.screen);
+      // The lift is above the GROUND, not above sea level: a town on a mesa keeps its name over the town.
+      const y = label.lift + ground.heightAt(label.x, label.z);
+      const s = projectToScreen(matrix, label.x - originX, y, label.z - originZ, width, height, this.screen);
       const inside = s.w > 0 && s.x > -200 && s.x < width + 200 && s.y > -50 && s.y < height + 50;
       this.place(label, inside, s.x, s.y);
     }
   }
 
-  /** The selected entity's tag at a planet position; `text` is written only when it differs from what is shown. */
+  /**
+   * The selected entity's tag at a planet position; `text` is written only when it differs from what is shown.
+   *
+   * `baseY` is the entity's OWN altitude — which already includes the ground under it — not a height re-derived from the
+   * terrain here. Re-deriving it agrees for anything standing on the ground and puts the tag on the ground beneath
+   * anything that is not, which is exactly the case `pickInstances` was corrected for: an entity picked where it is drawn
+   * and labelled somewhere else.
+   */
   updateSelection(
     matrix: ArrayLike<number>,
     originX: number,
@@ -60,9 +77,11 @@ export class Labels {
     x: number,
     z: number,
     text: string,
+    baseY: number,
   ): void {
     const label = this.selection;
-    const s = projectToScreen(matrix, x - originX, label.lift, z - originZ, width, height, this.screen);
+    const y = label.lift + baseY;
+    const s = projectToScreen(matrix, x - originX, y, z - originZ, width, height, this.screen);
     // Behind the camera the projection is NaN: hidden, never written.
     const shown = Number.isFinite(s.x);
     if (shown && label.element.textContent !== text) {
