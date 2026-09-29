@@ -27,11 +27,15 @@ import { replicationStatsOf } from '../data/replication-stats';
 import type { DataSource, EventSink } from '../data/source';
 import { describeFields } from '../data/swg-format';
 import { AGG_GRID, SWG_SCHEMA, TICK_PERIOD_MS } from '../data/swg-schema';
-import { CITIES } from '../data/world-data';
+import { CITIES, PLANET_HALF_EXTENT_M } from '../data/world-data';
 import { AttackLines } from '../render/attack-lines';
 import { EntityLayer, type FrameView, type PickHit, type PickRay } from '../render/entity-layer';
 import { FLAT_GROUND, type GroundSampler } from '../terrain/ground-sampler';
-import { Ground, GroundView, SKY } from '../render/ground';
+import { GroundView, SKY } from '../render/ground';
+import { PlanetProfile } from '../render/planet-profile';
+import { InteriorProfile } from '../render/interior-profile';
+import { SpaceProfile } from '../render/space-profile';
+import type { SceneProfile } from '../render/scene-profile';
 import { startTerrainBake, type TerrainBake } from '../terrain/bake-client';
 import { Heightfield } from '../terrain/heightfield';
 import type { TerrainBaked } from '../terrain/terrain.worker';
@@ -45,7 +49,10 @@ import {
   unprojectRay,
 } from '../render/view-math';
 import { useChat } from '../state/chat-store';
-import { useStats, type Inspection, type LayerStats } from '../state/stats-store';
+import { crossingKindOf, sameRealm, type RealmView, type SceneKind } from '../data/realm-view';
+import { advance, arrived } from './realm-transition';
+import { resetForRealm } from './realm-switch';
+import { useStats, type Inspection } from '../state/stats-store';
 import { useUi, type UiState } from '../state/ui-store';
 
 const STATS_INTERVAL_MS = 250;
@@ -76,6 +83,51 @@ const NO_GRID: GridSchema = { index: 0, origin: [0, 0], cell: 1, dims: [1, 1], a
 /** Whether two resolved schemas name the same archetypes, in the same order. */
 function sameArchetypes(a: ArchetypeView, b: ArchetypeView): boolean {
   return a.count === b.count && a.infos.every((info, index) => info.name === b.infos[index].name);
+}
+
+/**
+ * The edge of an interior realm, metres — `WorldBuilder.InteriorEdgeM`.
+ *
+ * The room mesh is built at this size once and scaled per realm, so a server whose interiors are a different size still
+ * draws correctly; this only decides what the geometry is authored at.
+ */
+const INTERIOR_EDGE_M = 64;
+
+/**
+ * The planet the client opens on, before any `REALM` block has arrived.
+ *
+ * Not a placeholder: a live session's first frame carries its realm, but the mock never sends one and the first second
+ * of any session is drawn before the socket has answered. This is the world those frames are of.
+ */
+const PLANET_AT_START: RealmView = {
+  scene: 'planet',
+  realmId: 0,
+  generation: 0,
+  key: '0:0',
+  appTag: 0,
+  palette: 0,
+  placeSet: 0,
+  slot: 0,
+  deep: false,
+  cellM: 64,
+  minX: -PLANET_HALF_EXTENT_M,
+  maxX: PLANET_HALF_EXTENT_M,
+  minY: 0,
+  maxY: 0,
+  minZ: -PLANET_HALF_EXTENT_M,
+  maxZ: PLANET_HALF_EXTENT_M,
+  centreX: 0,
+  centreZ: 0,
+  halfX: PLANET_HALF_EXTENT_M,
+  halfZ: PLANET_HALF_EXTENT_M,
+};
+
+/** {@link LayerStats} as this app holds it: the readonly face is what the store publishes. */
+interface MutableLayerStats {
+  archetype: ArchetypeInfo;
+  held: number;
+  near: number;
+  far: number;
 }
 
 /** What a data source fills: the SDK world the renderer reads. */
@@ -127,7 +179,16 @@ export class ClientApp {
   private readonly groundView = new GroundView();
   /** One per archetype of the CURRENT world's schema, rebuilt when a source brings a different one. */
   private layers: EntityLayer[];
-  private readonly ground: Ground;
+  /**
+   * The backdrop for each kind of realm, built lazily and kept.
+   *
+   * The planet's is built at start-up because that is the world this client opens on; the others appear the first time
+   * a session enters one and then stay, hidden. See {@link SceneProfile} for why none of them is ever disposed on a
+   * switch — the planet's terrain alone is 134 MB and a 13 s bake.
+   */
+  private readonly profiles = new Map<SceneKind, SceneProfile>();
+  private readonly planetProfile: PlanetProfile;
+  private profile: SceneProfile;
   /** The planet's heightfield: flat until the worker's bake lands, then the one source of ground height for everything. */
   private readonly field: Heightfield;
   /** Retained across clicks: the inverse view-projection, the ray through the cursor, and the winning hit. */
@@ -149,6 +210,13 @@ export class ClientApp {
   private archetypes: ArchetypeView;
   /** The far tier's channels, in the grid's own order. */
   private heatChannels: readonly ArchetypeInfo[] = [];
+
+  /**
+   * The HUD's per-archetype rows, one object each for the life of a schema.
+   *
+   * Rebuilt only in {@link adopt}, where the archetypes themselves change; `publishStats` rewrites the numbers into it.
+   */
+  private layerStats: MutableLayerStats[] = [];
   /** {@link heatChannels} as the ground shader wants it, refilled in place each frame rather than rebuilt. */
   private heatMask: boolean[] = [];
 
@@ -189,6 +257,14 @@ export class ClientApp {
   private selectedHeading = 0;
   /** Whose eyes the eye camera is in; 0 for nobody. A change is a cut, not a glide. */
   private eyeSubject = 0;
+
+  /**
+   * The realm the scene is currently set up for: what {@link adoptSourceRealm} compares against each frame.
+   *
+   * Held as the view rather than the frame so the comparison is on `key` — `realmId:generation` — and a realm id
+   * reused by a later realm is not mistaken for the one it replaced.
+   */
+  private realm: RealmView | null = null;
   /** The altitude of whichever camera drew the last frame, for the HUD. */
   private activeAltitude = 0;
   private selectionText = '';
@@ -226,7 +302,10 @@ export class ClientApp {
     this.terrainBake = startTerrainBake((baked) => {
       this.onTerrainBaked(baked);
     });
-    this.ground = new Ground(this.scene, this.field);
+    this.planetProfile = new PlanetProfile(this.scene, this.field, PLANET_HALF_EXTENT_M);
+    this.profiles.set('planet', this.planetProfile);
+    this.profile = this.planetProfile;
+    this.planetProfile.enter(PLANET_AT_START);
     this.attacks = new AttackLines(this.scene);
     this.labels = new Labels(overlay);
 
@@ -375,7 +454,10 @@ export class ClientApp {
       layer.dispose();
     }
 
-    this.ground.dispose();
+    for (const profile of this.profiles.values()) {
+      profile.dispose();
+    }
+
     this.terrainBake.terminate();
     this.scene.dispose();
     this.engine.dispose();
@@ -401,7 +483,7 @@ export class ClientApp {
     this.terrainBakeMs = baked.bakeMs;
     // The per-level error the worker measured: what the pixel tolerance is spent against. Measured there because it is a
     // pass over 4.19 M posts per level and the main thread has a 2 ms frame.
-    this.ground.refreshTerrain(baked.nodeError, baked.nodeMinY, baked.nodeMaxY);
+    this.planetProfile.refreshTerrain(baked.nodeError, baked.nodeMinY, baked.nodeMaxY);
   }
 
   private resize(): void {
@@ -456,6 +538,135 @@ export class ClientApp {
     this.adopt(world, this.source?.grid ?? new AggregateGrid(NO_GRID));
   }
 
+  /**
+   * Notices that the session has crossed into another realm, the same way {@link adoptSourceWorld} notices a new store.
+   *
+   * <b>A per-frame compare rather than a callback</b>, for the reason `adoptSourceWorld` gives: the SDK's
+   * `onRealmChanged` fires inside `applier.apply()`, and a scene swap belongs to the frame that draws it, not to the
+   * decode that caused it. Steady state is one reference compare against a string.
+   */
+  private adoptSourceRealm(): void {
+    const next = this.source?.realm ?? null;
+    if (sameRealm(next, this.realm)) {
+      return;
+    }
+
+    const previous = this.realm;
+    this.realm = next;
+    this.onRealmSwitched(previous, next);
+  }
+
+  /**
+   * Drops everything that belonged to the realm just left.
+   *
+   * The policy is in {@link resetForRealm}, which can be asserted without a canvas; this supplies the three things
+   * that live in here and nowhere a test can reach.
+   */
+  private onRealmSwitched(previous: RealmView | null, next: RealmView | null): void {
+    // The scene first, so that everything the reset then reads — the ground sampler the camera rides, the bounds it
+    // clamps to — is the new realm's rather than the old one's.
+    if (next !== null) {
+      this.showScene(next);
+    }
+
+    // Whether THIS crossing is the one the viewer asked for, from the outstanding request's realm id — not from
+    // "a ramp is running", which was wrong in three ways: a door landing inside a previous crossing's fade-in was
+    // captioned *Travelling…*, a late arrival after the safety valve had already returned to idle was classed as a
+    // door, and an ask for one realm interrupted by a door credited the door with the ask.
+    const ui = useUi.getState();
+    const asked = next !== null && ui.realmRequest?.realmId === next.realmId;
+    ui.setTransition(arrived(ui.transition, crossingKindOf(previous, next, asked), performance.now()));
+
+    resetForRealm(next, {
+      setCameraBounds: (bounds) => {
+        this.mapCamera.setBounds(bounds);
+      },
+      jumpCamera: (x, z, distanceM) => {
+        this.mapCamera.jumpTo(x, z, distanceM);
+      },
+      forgetSelectionCaches: () => {
+        this.eyeSubject = 0;
+        this.selectionTextNetId = 0;
+      },
+      forgetRegion: () => {
+        this.regionX = Number.NaN;
+        this.regionZ = Number.NaN;
+        this.regionRadius = Number.NaN;
+        this.lastRegionMs = Number.NEGATIVE_INFINITY;
+      },
+    });
+  }
+
+  /**
+   * Puts the backdrop for a realm on screen, building it the first time one of its kind is entered.
+   *
+   * <b>Built lazily and then kept.</b> A session that never leaves the planet never pays for a room, and one that walks
+   * in and out of twenty buildings builds the room once. Nothing is disposed on a switch: see {@link SceneProfile}.
+   *
+   * A realm kind this build has no scene for keeps the one on screen rather than showing nothing. It cannot happen
+   * against this server — every kind it declares has a profile — but a newer server naming a fifth kind should cost the
+   * viewer a backdrop that is merely wrong, not a black screen over a live world.
+   */
+  private showScene(next: RealmView): void {
+    const profile = this.profileFor(next.scene);
+    if (profile === null) {
+      return;
+    }
+
+    if (profile !== this.profile) {
+      this.profile.leave();
+      this.profile = profile;
+    }
+
+    profile.enter(next);
+    this.scene.clearColor = profile.sky.toColor4(1);
+
+    // The cameras read the ground through the profile, so both have to be re-pointed: the map camera rides it and the
+    // eye camera marches it for terrain clearance. A stale sampler is the quiet version of this bug — the picture
+    // changes and the camera keeps standing on the old world's hills.
+    this.view.ground = profile.ground;
+    this.eyeCamera.ground = profile.ground;
+  }
+
+  /**
+   * Runs the realm fade's clock, and writes it back only when it moved.
+   *
+   * <b>Only on a change.</b> The store is a zustand store React subscribes to, so publishing an identical object every
+   * frame would re-render the whole UI sixty times a second to show the same thing — which is the mistake the toolbar's
+   * narrow selectors were written to avoid.
+   */
+  private advanceTransition(nowMs: number): void {
+    const ui = useUi.getState();
+    const next = advance(ui.transition, nowMs);
+    if (next !== ui.transition) {
+      ui.setTransition(next);
+    }
+  }
+
+  /** The profile for a scene kind, built on first use, or `null` for a kind this build cannot draw. */
+  private profileFor(kind: SceneKind): SceneProfile | null {
+    const existing = this.profiles.get(kind);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    if (kind === 'space') {
+      const space = new SpaceProfile(this.scene);
+      this.profiles.set(kind, space);
+      return space;
+    }
+
+    if (kind !== 'interior' && kind !== 'dungeon') {
+      return null;
+    }
+
+    // A dungeon is served exactly as an interior is — one cell, the same size, the same flat floor — so it is the same
+    // room. They are distinct kinds because they differ in the simulation, not in what they look like.
+    const room = new InteriorProfile(this.scene, INTERIOR_EDGE_M);
+    this.profiles.set(kind, room);
+    return room;
+  }
+
   /** Binds this app to a world and its grid: archetype identity, one layer per archetype, the attack lines, the HUD rows. */
   private adopt(world: WorldStore, grid: AggregateGrid): void {
     const previous = this.archetypes;
@@ -481,6 +692,12 @@ export class ClientApp {
     }
 
     this.bindLayers();
+    this.layerStats = this.layers.map((_, index) => ({
+      archetype: this.archetypes.infos[index],
+      held: 0,
+      near: 0,
+      far: 0,
+    }));
     this.heatChannels = grid.schema.archetypes.map((index) => ({
       name: this.archetypes.name(index),
       label: this.archetypes.label(index),
@@ -519,6 +736,12 @@ export class ClientApp {
       this.mapCamera.glideTo(state.cameraRequest.x, state.cameraRequest.z, state.cameraRequest.distance);
     }
 
+    // An ask, and nothing here assumes it was granted: the scene changes when a REALM block says it did, which
+    // `adoptSourceRealm` notices. A refusal arrives in ACKS and leaves everything as it was.
+    if (state.realmRequest !== null && state.realmRequest !== previous.realmRequest) {
+      this.source?.viewRealm(state.realmRequest.realmId);
+    }
+
     this.applyUi(state);
   }
 
@@ -539,6 +762,8 @@ export class ClientApp {
     const dt = Math.min(0.1, (now - this.lastFrameMs) / 1000);
     this.lastFrameMs = now;
     this.adoptSourceWorld();
+    this.adoptSourceRealm();
+    this.advanceTransition(now);
     this.clock.update(now);
     // Held keys may stop following: read the UI state after them.
     this.input.update(dt);
@@ -576,7 +801,7 @@ export class ClientApp {
     }
 
     // The map camera orbits the ground under its target, so it needs the terrain height there BEFORE it recomputes its eye.
-    this.mapCamera.groundY = this.field.heightAt(this.mapCamera.targetX, this.mapCamera.targetZ);
+    this.mapCamera.groundY = this.profile.ground.heightAt(this.mapCamera.targetX, this.mapCamera.targetZ);
     this.mapCamera.update(dt);
     const cam = inEye ? this.eyeCamera : this.mapCamera;
     this.activeAltitude = cam.altitude;
@@ -642,12 +867,19 @@ export class ClientApp {
     g.hasSelection = hasSelection;
     g.selectionX = this.selectedX;
     g.selectionZ = this.selectedZ;
-    this.ground.update(g, this.grid, this.source?.debug ?? null);
+    this.profile.update(g, this.grid, this.source?.debug ?? null);
 
     if (!ui.showLabels) {
       this.labels.hideAll();
     } else {
-      this.labels.update(matrix, view.originX, view.originZ, this.cssSize.width, this.cssSize.height, this.field);
+      // Place names are the PLANET's: they are Tatooine's towns, and in a room or in space they name somewhere the
+      // viewer is not. The selection's tag below is realm-agnostic and stays either way.
+      if (this.profile.kind === 'planet') {
+        this.labels.update(matrix, view.originX, view.originZ, this.cssSize.width, this.cssSize.height, this.profile.ground);
+      } else {
+        this.labels.hidePlaces();
+      }
+
       if (hasSelection) {
         this.labels.updateSelection(
           matrix,
@@ -798,12 +1030,18 @@ export class ClientApp {
       return;
     }
 
-    const layers: LayerStats[] = this.layers.map((layer, index) => ({
-      archetype: this.archetypes.infos[index],
-      held: this.world.archetypeStore(index).liveCount,
-      near: layer.nearCount,
-      far: layer.farCount,
-    }));
+    // Rewritten in place, not rebuilt. The toolbar selects `stats.layers` narrowly ON PURPOSE — zustand compares by
+    // `Object.is`, so a fresh array four times a second re-rendered the whole panel at exactly the rate those narrow
+    // selectors were written to avoid, including the place buttons and the layer toggles. `heatChannels` was already
+    // stable for the same reason; this was the one that was not.
+    const layers = this.layerStats;
+    for (let i = 0; i < layers.length; i++) {
+      const row = layers[i];
+      row.archetype = this.archetypes.infos[i];
+      row.held = this.world.archetypeStore(i).liveCount;
+      row.near = this.layers[i].nearCount;
+      row.far = this.layers[i].farCount;
+    }
 
     const js = this.frameJsSummary;
     meanAndP95(this.frameJs, this.frameJsCount, this.sortScratch, js);
@@ -823,15 +1061,17 @@ export class ClientApp {
       // The ACTIVE camera's, not the map's: in eye view the map camera is still smoothing along at its own altitude,
       // and reporting that read as "you are 1 474 m up" while standing in a street.
       altitude: this.activeAltitude,
-      groundM: this.field.heightAt(this.groundView.centerX, this.groundView.centerZ),
+      groundM: this.profile.ground.heightAt(this.groundView.centerX, this.groundView.centerZ),
       terrainBakeMs: this.terrainBakeMs,
-      terrainTriangles: this.ground.terrainTriangles,
-      terrainNodes: this.ground.terrainNodes,
-      terrainFinestM: this.ground.terrainFinestM,
-      terrainCapped: this.ground.terrainCapped,
+      terrainTriangles: this.profile.stats.triangles,
+      terrainNodes: this.profile.stats.nodes,
+      terrainFinestM: this.profile.stats.finestM,
+      terrainCapped: this.profile.stats.capped,
       nearRadius,
       source,
+      realm: this.source?.realm ?? null,
       canPause: this.source?.canPause ?? false,
+      canViewRealm: this.source?.canViewRealm ?? false,
       replication: replicationStatsOf(this.source?.debug ?? null),
       inspection: ui.selectedNetId === 0 ? null : this.inspect(ui.selectedNetId),
       held: this.world.entityCount,

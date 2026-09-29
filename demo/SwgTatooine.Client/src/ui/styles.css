@@ -155,6 +155,40 @@ button.active {
   border-color: var(--accent);
 }
 
+/* The realm selector and its interior box. Built from the button's own colours so the coarsest control on the panel
+   does not read as a different application than the rest of it. */
+.realm-select,
+.row input[type='number'] {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--panel-fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
+.realm-select {
+  flex: 1;
+  cursor: pointer;
+}
+
+.row input[type='number'] {
+  width: 68px;
+  margin-left: 4px;
+}
+
+.row label {
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* `.hint` carries a top margin for its use under a section; inline in a row it must not push the row apart. */
+.row .hint {
+  margin-top: 0;
+}
+
 .slider {
   display: flex;
   flex-direction: column;
@@ -276,4 +310,26 @@ button.active {
 
 .chat-text {
   word-break: break-word;
+}
+
+/* The realm crossing curtain. Above the canvas AND the DOM label layer, which is the reason it is not a scene effect:
+   a room's arrival would otherwise show the previous planet's town names over it. Never accepts a pointer — every
+   failure mode of a crossing ends with this up, so it must not be able to take input away from a working world. */
+.realm-fade {
+  position: absolute;
+  inset: 0;
+  background: #06070b;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 40;
+}
+
+.realm-fade-caption {
+  color: var(--panel-fg);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.75;
 }

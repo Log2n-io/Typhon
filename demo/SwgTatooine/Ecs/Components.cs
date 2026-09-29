@@ -866,8 +866,14 @@ public struct Structure
     /// index holds them, and sorting by position to recover the build's order would be a second rule to keep in step with the first.
     /// </para>
     /// <para>It costs no memory: five ints plus this one is 24 bytes, which is what the struct already occupied.</para>
+    /// <para>
+    /// <b>Replicated on enter</b> so a viewer can walk into the building it picked. A client cannot derive this: the door
+    /// list is built from <c>IsEnterable(i)</c> over a building's index within its city, which is nowhere in what a
+    /// client is sent — so without this the only way to reach an interior is to type its number. Sent once with the
+    /// entity, like <c>kind</c> and <c>region</c>: a building's door never moves.
+    /// </para>
     /// </remarks>
-    [Field] public int PortalIndex;
+    [Field, OnEnter(CodecKind.I16, Name = "portal")] public int PortalIndex;
 
     /// <summary>
     /// Ticks between updates. A building is 0 and never ticks. SWG's own arithmetic sets the others: manufacturing is

@@ -2,6 +2,8 @@ import { useEffect, useRef } from 'react';
 import { ClientApp, type SourceFactory } from '../app/client-app';
 import { MockSource } from '../data/mock/mock-source';
 import { fetchServerConfig } from '../data/server-config';
+import { RealmFade } from './RealmFade';
+import { refused } from '../app/realm-transition';
 import { TyphonSource } from '../data/source';
 import { useUi } from '../state/ui-store';
 
@@ -46,6 +48,12 @@ function factoryFor(kind: SourceKind): SourceFactory {
       events: context.events,
       kind: 'god',
       altitudeM: ui.viewRadius,
+      onRealmRefused: () => {
+        // The one thing that will ever say the crossing is not coming: the realm never changes, so no frame ends the
+        // fade. Without this the viewer waits out the whole hold limit for an answer the server already gave.
+        const state = useUi.getState();
+        state.setTransition(refused(state.transition, performance.now()));
+      },
     });
 }
 
@@ -74,6 +82,7 @@ export function Viewport() {
       void fetchServerConfig().then((config) => {
         if (!cancelled && config !== null) {
           useUi.getState().setMaxViewRadius(config.maxViewRadiusM);
+          useUi.getState().setRealms(config.realms);
         }
       });
     }
@@ -88,6 +97,7 @@ export function Viewport() {
     <div className="viewport">
       <canvas ref={canvasRef} className="viewport-canvas" />
       <div ref={overlayRef} className="viewport-overlay" />
+      <RealmFade />
     </div>
   );
 }

@@ -31,6 +31,11 @@ export function Toolbar() {
   // Whether the server has actually sent a DEBUG block: a boolean, so this does not re-render with the numbers in it.
   const canDebug = useStats((s) => (s.stats?.replication ?? null) !== null);
   const canPause = useStats((s) => s.stats?.canPause) ?? false;
+  const canViewRealm = useStats((s) => s.stats?.canViewRealm) ?? false;
+  // The realm, narrowly: each field on its own, so the toolbar re-renders on a crossing and not four times a second.
+  const realmId = useStats((s) => s.stats?.realm?.realmId) ?? null;
+  const realmScene = useStats((s) => s.stats?.realm?.scene) ?? null;
+  const realmSlot = useStats((s) => s.stats?.realm?.slot) ?? 0;
   // Narrowly selected: these two change only when the tolerance or the viewport does, not four times a second.
   const terrainFinestM = useStats((s) => s.stats?.terrainFinestM);
   const terrainNodes = useStats((s) => s.stats?.terrainNodes);
@@ -43,6 +48,67 @@ export function Toolbar() {
 
       <section>
         <h3>{LIVE ? `World (${sourceName ?? 'connecting…'})` : 'World (mock server)'}</h3>
+        {/* The coarsest control on the panel, so it sits above the rest of it. Hidden entirely against a source that
+            cannot honour it — the mock, or a catalog without the command — for the reason Pause is: a control that
+            cannot work is worse than none. */}
+        {canViewRealm && ui.realms !== null && (
+          <>
+            <div className="row">
+              <select
+                className="realm-select"
+                title="Ask the server to put this session in another realm. Every accepted ask is a whole-realm RESET."
+                value={realmId ?? ''}
+                onChange={(e) => {
+                  ui.viewRealm(Number(e.target.value));
+                }}
+              >
+                {ui.realms.planets.map((planet) => (
+                  <option key={planet.id} value={planet.id}>
+                    Planet {planet.id}
+                  </option>
+                ))}
+                {ui.realms.space !== null && <option value={ui.realms.space.id}>Space</option>}
+                {/* The realm we are in, when it is one the directory does not list — an interior entered by number.
+                    Without this the select would show a planet while the world showed a room. */}
+                {realmId !== null && realmScene === 'interior' && <option value={realmId}>Interior {realmSlot}</option>}
+              </select>
+            </div>
+            {/* Interiors are a RANGE, not a list: the shipping map has about six hundred enterable buildings per
+                planet, so a menu of them would be unusable and enormous. The server publishes the rule instead and
+                this applies it to the planet currently on screen. */}
+            {realmScene === 'planet' && ui.realms.interiors.perPlanet > 0 && (
+              <div className="row">
+                <label>
+                  Interior #
+                  <input
+                    type="number"
+                    min={0}
+                    max={ui.realms.interiors.perPlanet - 1}
+                    defaultValue={0}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && ui.realms !== null) {
+                        // Truncated, not just clamped: `valueAsNumber` returns 3.7 for a typed 3.7, and the clamp
+                        // preserves it — so a fractional realm id reached a VarUInt field on the wire. `|| 0` already
+                        // handles the empty box (NaN) and the clamp handles a negative.
+                        const typed = Math.trunc(e.currentTarget.valueAsNumber || 0);
+                        const portal = Math.max(0, Math.min(ui.realms.interiors.perPlanet - 1, typed));
+                        const target = ui.realms.interiors.first + realmSlot * ui.realms.interiors.perPlanet + portal;
+
+                        // Asking for the realm you are already in produces no REALM block, so nothing would ever end
+                        // the fade — the viewer would sit behind an opaque screen until the safety valve fired. The
+                        // `<select>` is guarded by the DOM, which fires no change for an unchanged value; this is not.
+                        if (target !== realmId) {
+                          ui.viewRealm(target);
+                        }
+                      }
+                    }}
+                  />
+                </label>
+                <span className="hint">of {ui.realms.interiors.perPlanet} — press Enter</span>
+              </div>
+            )}
+          </>
+        )}
         <div className="row">
           {!LIVE &&
             POPULATIONS.map((p) => (

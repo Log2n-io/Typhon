@@ -1,3 +1,4 @@
+import { interiorRealmOf } from '../data/realm-view';
 import { useStats } from '../state/stats-store';
 import { useUi } from '../state/ui-store';
 
@@ -7,13 +8,23 @@ export function Inspector() {
   const follow = useUi((s) => s.follow);
   const select = useUi((s) => s.select);
   const setFollow = useUi((s) => s.setFollow);
+  const viewRealm = useUi((s) => s.viewRealm);
+  const realms = useUi((s) => s.realms);
   const published = useStats((s) => s.stats?.inspection ?? null);
+  const realm = useStats((s) => s.stats?.realm ?? null);
+  const canViewRealm = useStats((s) => s.stats?.canViewRealm) ?? false;
   if (selectedNetId === 0) {
     return null;
   }
 
   // Stats arrive four times a second: until then, what was published may describe the previous selection.
   const inspection = published?.netId === selectedNetId ? published : null;
+
+  // A door, when the thing picked has one. `portal` rides in with the entity (`Structure.PortalIndex`), so it is read
+  // from the replicated fields by name rather than given a slot of its own in `Inspection` — the inspector already
+  // shows every field the server sent, and a second path for one of them would be a second thing to keep in step.
+  const portal = Number(inspection?.fields.find((f) => f.name === 'portal')?.value ?? -1);
+  const door = canViewRealm ? interiorRealmOf(realm, portal, realms?.interiors ?? null) : null;
 
   return (
     <div className="panel inspector">
@@ -54,14 +65,28 @@ export function Inspector() {
         </table>
       )}
       <div className="row">
-        <button
-          className={follow ? 'active' : ''}
-          onClick={() => {
-            setFollow(!follow);
-          }}
-        >
-          Follow
-        </button>
+        {door === null ? (
+          <button
+            className={follow ? 'active' : ''}
+            onClick={() => {
+              setFollow(!follow);
+            }}
+          >
+            Follow
+          </button>
+        ) : (
+          /* A building that can be walked into gets Enter in place of Follow: following a structure works and means
+             nothing, because it never moves. Only an enterable one — most buildings have no door, and an Enter that
+             refused would be worse than no button. */
+          <button
+            title="Put this session inside the building. The server may refuse it."
+            onClick={() => {
+              viewRealm(door);
+            }}
+          >
+            Enter
+          </button>
+        )}
         <button
           onClick={() => {
             select(0);

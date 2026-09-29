@@ -271,6 +271,18 @@ public static class TatooineReplication
     /// </remarks>
     private const double PlayerRadiusM = 192d;
 
+    /// <summary>
+    /// <c>ACKS</c> reason: a possessed player's session asked to look at another realm.
+    /// </summary>
+    /// <remarks>
+    /// Application reason codes start at <see cref="AckReasons.FirstApplicationReason"/>; these are the demo's first two. A client that fades between
+    /// realms needs to hear a refusal, because the alternative is a fade it never comes out of.
+    /// </remarks>
+    public const byte ViewRealmRefusedPlayer = AckReasons.FirstApplicationReason;
+
+    /// <summary><c>ACKS</c> reason: the realm asked for is not registered — never was, or is a dungeon nobody is inside.</summary>
+    public const byte ViewRealmNoSuchRealm = AckReasons.FirstApplicationReason + 1;
+
     /// <summary>The realm kind of a building's interior (Realms G3): a one-cell realm, served whole.</summary>
     public const string InteriorKind = "interior";
 
@@ -329,8 +341,25 @@ public static class TatooineReplication
     /// <summary>The god region's near budget, entities (<c>--god-near</c>); 10 000 by default, AC-3's.</summary>
     public static int GodNearBudget { get; set; } = 10_000;
 
-    /// <summary>How many planets a god camera may look at with <see cref="ViewRealm"/> (<c>--planets</c>); planet p is realm p.</summary>
+    /// <summary>How many planets there are (<c>--planets</c>); planet p is realm p.</summary>
     public static int Planets { get; set; } = 1;
+
+    /// <summary>
+    /// How many realms a god camera may ask to look at with <see cref="ViewRealm"/>: realms <c>0 .. ViewableRealms - 1</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The permanent realms, and deliberately not the dungeons.</b> Planets, interiors and space are registered at start-up and never unregistered, so a
+    /// range check against this number is exactly a registration check and cannot be wrong. Dungeon realms are registered as parties form and unregistered
+    /// when they disperse, so an id inside their range is registered or not depending on the second it is asked about — and <c>Enter</c> into an unregistered
+    /// realm THROWS at the call site, which on the tick path is not a thing this may risk. They are refused here and absent from the realm directory; a
+    /// dungeon watcher is its own feature, with its own way of knowing which ones are live.
+    /// </para>
+    /// <para>
+    /// Set by <c>TatooineSim</c> when it registers the realms, so it cannot drift from what was registered.
+    /// </para>
+    /// </remarks>
+    public static int ViewableRealms { get; set; } = 1;
 
     // ── Admission and shutdown (SWG-07) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -652,8 +681,12 @@ public static class TatooineReplication
                     .Of<WorldObject>();
                 p.Aggregate(GodAggregateTileM, rateHz: 1).Of<Creature>().Of<CityNpc>().Of<Player>();
 
-                // A camera over a planet has nothing to show inside a building: the god camera is served nothing in an interior.
-                p.NotIn(InteriorKind);
+                // Inside a building, the whole realm: an interior is ONE 64 m cell, so a World observer is the room and a hull or a near budget would be
+                // describing a camera footprint larger than the world it is in. No aggregate either — a far tier over a single cell is one tile.
+                //
+                // This used to be `NotIn(InteriorKind)`, which served a god camera nothing indoors. That was right while nothing could render a room and
+                // wrong the moment something could: a viewer who picked a building got an empty realm and no way to tell it apart from an empty building.
+                p.In(InteriorKind, v => v.World().Of<Player>().Of<CityNpc>().Of<Creature>().Of<WorldObject>());
             });
         }
         else
@@ -667,7 +700,10 @@ public static class TatooineReplication
                     .Of<Player>()
                     .Of<CreatureLair>()
                     .Of<WorldObject>();
-                p.NotIn(InteriorKind);
+
+                // As above: the whole room, because the room is one cell. This profile is already a World over the planet, so indoors it is the same shape
+                // at a different scale — which is exactly what 12-realms § 1.4's variants are for.
+                p.In(InteriorKind, v => v.World().Of<Player>().Of<CityNpc>().Of<Creature>().Of<WorldObject>());
             });
         }
 
@@ -699,7 +735,11 @@ public static class TatooineReplication
         // Every accepted ask is a RESET of a whole planet, the dearest frame there is: once a second, a burst of two. Spectators only — a possessed player
         // moves between planets by taking a shuttle like everyone else, and now that admission assigns roles the engine can say so instead of this being a
         // string comparison in BindOpenedSessions (which stays, as the check that the god camera is not a player's).
-        subs.Command<ViewRealm>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(v => v.Realm, Codec.VarUInt));
+        //
+        // The field is NAMED, like every other command's. It was the one that was not, and so it travelled as "Realm" — the C# member — where the rest of
+        // this file sends "x", "z", "paused". Nothing had ever sent it, so nothing had ever noticed; the first client to try got a catalog lookup failure
+        // at the point of sending. Named here rather than worked around in the client, because the client was right.
+        subs.Command<ViewRealm>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(v => v.Realm, Codec.VarUInt, "realm"));
 
         // The movement and targeting intents (SWG-01). Players and bots only: a spectator has no entity to move, so the engine refuses the message rather
         // than the system dropping it after the wire has already been paid for.
@@ -869,14 +909,31 @@ public static class TatooineReplication
             }
         }
 
-        // A god camera's move to another planet: its next frame is a RESET carrying the planet's REALM (SUB-29). A player's session follows its player,
-        // and a realm that is not a planet is not the god camera's to enter.
+        // A god camera's move to another realm: its next frame is a RESET carrying that realm's REALM block (SUB-29). A player's session follows its player
+        // through doors and shuttles instead, so this is a spectator's control and the role check says so.
+        //
+        // It used to accept PLANETS only, and to drop anything else in silence. Both halves were wrong once the client could draw an interior: a viewer
+        // asking to look inside a building got no realm and no answer, which on a client that fades between realms is a black screen over a live world
+        // rather than a refusal. So the range is every registered realm, and every path out of here either enters or SAYS SOMETHING.
         foreach (var command in subs.Commands<ViewRealm>())
         {
-            if (command.Value.Realm < (uint)Planets && !string.Equals(subs.SessionKindOf(command.Session), PlayerKind, StringComparison.Ordinal))
+            if (string.Equals(subs.SessionKindOf(command.Session), PlayerKind, StringComparison.Ordinal))
             {
-                subs.Enter(command.Session, new RealmId((ushort)command.Value.Realm));
+                // A possessed player moves by walking and taking shuttles. Its session is bound to its player's realm, so entering here would fight the
+                // follow and the two would disagree about where it is.
+                subs.Reject(command, ViewRealmRefusedPlayer);
+                continue;
             }
+
+            // Anything outside the permanent realms is the same answer to a client: there is nothing there to look at. See ViewableRealms for why this is a
+            // range check and not a registry lookup — the realms it admits are the ones that exist for the whole run, so the two cannot differ.
+            if (command.Value.Realm >= (uint)ViewableRealms)
+            {
+                subs.Reject(command, ViewRealmNoSuchRealm);
+                continue;
+            }
+
+            subs.Enter(command.Session, new RealmId((ushort)command.Value.Realm));
         }
 
         // Reclaim reservations nobody ever claimed. A reservation is released where its session's `Opened` event is seen, and a session that was accepted but

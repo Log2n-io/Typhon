@@ -95,6 +95,20 @@ export class Labels {
     this.place(this.selection, false, 0, 0);
   }
 
+  /**
+   * Hides the place names, leaving the selection's tag alone.
+   *
+   * <b>Place names belong to the planet.</b> They are built once from `CITIES` and `POIS` and are Tatooine's towns; in a
+   * room or in space they are names of somewhere else entirely, and they were drawn there — "Port Sable" floating in
+   * orbit — because nothing had ever needed to turn them off separately from the selection, which is realm-agnostic
+   * and must keep working.
+   */
+  hidePlaces(): void {
+    for (const label of this.places) {
+      this.place(label, false, 0, 0);
+    }
+  }
+
   /** Hides every label until the next update. */
   hideAll(): void {
     for (const label of this.places) {

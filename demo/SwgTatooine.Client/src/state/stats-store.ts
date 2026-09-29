@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import type { ArchetypeInfo } from '../data/archetypes';
+import type { RealmView } from '../data/realm-view';
 import type { SourceStats } from '../data/source';
 
 /** A snapshot the renderer publishes four times a second for the HUD and the inspector. */
@@ -92,9 +93,13 @@ export interface FrameStats {
   /** True when the node budget, not the tolerance, decided the detail. */
   readonly terrainCapped: boolean;
   readonly nearRadius: number;
+  /** The realm the session is in, or `null` in none — what the scene on screen is supposed to be. */
+  readonly realm: RealmView | null;
   readonly source: SourceStats;
   /** Whether the source can stop the world: a live session only when the catalog declares the command for it. */
   readonly canPause: boolean;
+  /** Whether the source can ask to look at another realm: a live session whose catalog declares `ViewRealm`. */
+  readonly canViewRealm: boolean;
   /** What the server's `DEBUG` block says about this session, or `null` when it sends none (CLI3D-03). */
   readonly replication: ReplicationStats | null;
   readonly inspection: Inspection | null;

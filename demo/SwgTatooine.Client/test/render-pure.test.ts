@@ -519,7 +519,9 @@ describe('shaders', () => {
   const sources = Object.entries(shaders).filter((e): e is [string, string] => typeof e[1] === 'string');
 
   it('interpolate every constant into valid GLSL text', () => {
-    expect(sources.length).toBe(8);
+    // The count is the point of this line: a new shader that nobody added here would otherwise skip every check below
+    // it. Ten since CLI3D-02 added the room's pair.
+    expect(sources.length).toBe(12);
     for (const [, text] of sources) {
       const source = text.replace(/\/\/.*$/gm, '');
       expect(source).not.toMatch(/undefined|NaN|Infinity|\$\{/);

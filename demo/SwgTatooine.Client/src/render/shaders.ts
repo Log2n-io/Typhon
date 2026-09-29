@@ -286,6 +286,175 @@ void main(void) {
 }
 `;
 
+/**
+ * The inside of a room: a floor grid at the realm's own replication cell, and plain walls.
+ *
+ * <b>Its own program rather than a branch in the ground's.</b> An interior has no heightfield, so the whole CDLOD vertex
+ * path, the height sampler, the fog curve, the heatmap and the place discs are dead here — that is most of
+ * `GROUND_FRAGMENT`, not a corner of it, and the planet is the one profile whose ground fills the screen and would pay
+ * the dead ALU.
+ */
+export const ROOM_VERTEX = `
+precision highp float;
+attribute vec3 position;
+attribute vec3 normal;
+uniform mat4 world;
+uniform mat4 viewProjection;
+varying vec3 vRoom;
+varying vec3 vNormal;
+void main() {
+  vec4 w = world * vec4(position, 1.0);
+
+  // WORLD metres, not the mesh's own local space. The room geometry is authored at a nominal edge and SCALED per
+  // realm, so a grid measured in local units draws one cell per room whatever the room's size — a 200 m realm would
+  // get a single 200 m "cell" for a 64 m replication cell. In world space the lines land on the realm's own cell
+  // boundaries, which is what the grid is claiming to show.
+  vRoom = w.xyz;
+  vNormal = normal;
+  gl_Position = viewProjection * w;
+}
+`;
+
+export const ROOM_FRAGMENT = `
+precision highp float;
+uniform vec3 uFloor;
+uniform vec3 uWall;
+uniform float uCellM;
+uniform float uGrid;
+varying vec3 vRoom;
+varying vec3 vNormal;
+
+/**
+ * A line of constant screen width wherever the surface is, so the grid does not alias into a moiré at a distance.
+ *
+ * The derivative is CAPPED, for the reason GROUND_FRAGMENT caps its own: at a grazing angle one pixel spans a long
+ * stretch of surface and an uncapped fwidth() smears a line into a band. A room seen from a low pitch is exactly that
+ * case.
+ */
+float line(float v, float spacing) {
+  float g = abs(fract(v / spacing - 0.5) - 0.5) / min(fwidth(v / spacing), 4.0);
+  return 1.0 - clamp(g, 0.0, 1.0);
+}
+
+void main() {
+  bool floorFace = vNormal.y > 0.5;
+  vec3 color = floorFace ? uFloor : uWall;
+
+  // The grid is the realm's OWN cell, so what it draws is the replication cell an interior is served as — one square,
+  // which is the point: it is the picture of "this whole realm is a single cell".
+  //
+  // Computed UNCONDITIONALLY and applied by a mask. line() calls fwidth(), whose value is undefined in non-uniform
+  // control flow: floorFace varies per fragment, so a 2x2 quad straddling the floor/wall seam would have had some of
+  // its derivatives evaluated and some not. uGrid is a uniform and would have been safe on its own; the face test is
+  // what made it illegal.
+  float g = max(line(vRoom.x, uCellM), line(vRoom.z, uCellM));
+  float fine = max(line(vRoom.x, uCellM * 0.125), line(vRoom.z, uCellM * 0.125));
+  if (floorFace && uGrid > 0.5) {
+    color = mix(color, color * 0.55, fine * 0.35);
+    color = mix(color, color * 0.35, g * 0.8);
+  }
+
+  // A flat wash by face, so the corners of the room read without a light in it. Walls facing the default view are
+  // lifted slightly; the floor keeps its own colour so the grid stays legible.
+  float shade = floorFace ? 1.0 : 0.82 + 0.18 * abs(vNormal.z);
+  gl_FragColor = vec4(color * shade, 1.0);
+}
+`;
+
+/**
+ * Space: a star field, the realm's own cell grid, and a bright edge where the bounds meet.
+ *
+ * <b>All three on one box, seen from inside.</b> Space has no ground and no heightfield, so the ground program is dead
+ * here — and rather than a star mesh, a wire mesh and three grid quads, everything is a function of where you are on the
+ * inside surface of the realm's own bounds. One mesh, one material, one draw call, and the wire box is the realm's
+ * extent by construction rather than by a constant that could drift from it.
+ */
+export const SPACE_VERTEX = `
+precision highp float;
+attribute vec3 position;
+attribute vec3 normal;
+attribute vec2 uv;
+uniform mat4 world;
+uniform mat4 viewProjection;
+varying vec2 vFace;
+varying vec3 vWorld;
+varying vec3 vNormal;
+void main() {
+  vec4 w = world * vec4(position, 1.0);
+  vFace = uv;
+
+  // World metres as well as face coordinates: the rim and the stars belong to a FACE, the grid belongs to the REALM.
+  // Measuring the grid in uv would draw the same number of cells on every face however large the realm is, and on a
+  // realm that is not a cube it would draw a different cell size on each one.
+  vWorld = w.xyz;
+  vNormal = normal;
+  gl_Position = viewProjection * w;
+}
+`;
+
+export const SPACE_FRAGMENT = `
+precision highp float;
+uniform vec3 uGridColor;
+uniform float uCellM;
+uniform float uGrid;
+varying vec2 vFace;
+varying vec3 vWorld;
+varying vec3 vNormal;
+
+float hash(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+/**
+ * A line of constant screen width, so the grid does not alias into a moiré across a 16 km face.
+ *
+ * The derivative is capped for the reason GROUND_FRAGMENT caps its own, and space is the worst case for it: the camera
+ * is INSIDE the box, so the far end of every face is always at a grazing angle.
+ */
+float line(float v) {
+  float g = abs(fract(v - 0.5) - 0.5) / min(fwidth(v), 4.0);
+  return 1.0 - clamp(g, 0.0, 1.0);
+}
+
+void main() {
+  // Stars: one candidate per cell of a fine lattice over the face, most of them rejected, so the field is sparse and
+  // stable rather than a uniform speckle. Hashed from face coordinates, so it does not swim as the camera moves.
+  //
+  // The face's own NORMAL seeds the hash as well, or all six faces would carry the same field — mirrored across every
+  // edge, which inside a cube reads as structure rather than as sky.
+  vec2 star = vFace * 420.0;
+  vec2 cell = floor(star) + vNormal.xy * 37.0 + vNormal.z * 91.0;
+  float pick = hash(cell);
+  vec3 color = vec3(0.02, 0.025, 0.045);
+  if (pick > 0.983) {
+    vec2 at = fract(star) - vec2(hash(cell + 11.0), hash(cell + 23.0));
+    float d = length(at);
+    float brightness = 0.35 + 0.65 * hash(cell + 41.0);
+    color += vec3(brightness) * (1.0 - smoothstep(0.0, 0.35, d));
+  }
+
+  if (uGrid > 0.5) {
+    // The realm's OWN replication cell, in world metres. This is the picture of how space is partitioned, at the size
+    // the server actually partitions it — 500 m cells, 32 across a 16 km cube.
+    //
+    // Two of the three axes per face: the one the face is perpendicular to is constant across it and would draw a
+    // single line or none at all.
+    vec3 axis = vec3(line(vWorld.x / uCellM), line(vWorld.y / uCellM), line(vWorld.z / uCellM));
+    vec3 keep = 1.0 - abs(vNormal);
+    float g = max(max(axis.x * keep.x, axis.y * keep.y), axis.z * keep.z);
+    color = mix(color, uGridColor, g * 0.25);
+  }
+
+  // The bounds themselves: a bright edge wherever a face runs out. This IS the wire box — the realm's extent, drawn
+  // from the geometry that has it, not from a number kept beside it.
+  vec2 edge = min(vFace, 1.0 - vFace);
+  float rim = 1.0 - smoothstep(0.0, 0.004, min(edge.x, edge.y));
+  color = mix(color, uGridColor, rim * 0.85);
+
+  gl_FragColor = vec4(color, 1.0);
+}
+`;
+
 const PLANET = f(PLANET_HALF_EXTENT_M);
 
 /** Slots in the ground shader's hull array: the engine's own `PushGeometry.MaxVertices`, so a hull always fits whole. */
@@ -310,6 +479,9 @@ uniform sampler2D uCells;
 uniform vec4 uCellRect;
 uniform float uCellAlpha;
 uniform vec4 uReplGrid;
+uniform vec3 uPalette0;
+uniform vec3 uPalette1;
+uniform vec3 uPalette2;
 uniform vec4 uHull[${HULL_SLOTS}];
 uniform float uHullCount;
 uniform vec4 uSessionDisc;
@@ -361,7 +533,9 @@ vec3 heatRamp(float t) {
 
 void main(void) {
   float edge = max(abs(vPlanet.x), abs(vPlanet.y));
-  vec3 sand = vec3(0.78, 0.66, 0.47);
+  // The ground's three colours are uniforms, not literals: a further planet is the same terrain under a different
+  // palette (decision 3 — one bake for every planet), so this is what makes planet 1 read as somewhere else.
+  vec3 sand = uPalette0;
   // The fine-grain sand noise stays, at half its old weight: it used to carry ALL of the ground's variation and now only
   // has to break up the surface between real landforms.
   float dunes = noise(vPlanet * 0.011) * 0.65 + noise(vPlanet * 0.09) * 0.35;
@@ -374,9 +548,9 @@ void main(void) {
   // colour, so a ridge read as a uniform dark ribbon instead of a lit face beside a shaded one — the tint was doing the
   // work the lighting should do, and drowning it.
   float steep = clamp((1.0 - ground.y) * 1.5, 0.0, 1.0);
-  color = mix(color, vec3(0.54, 0.47, 0.39), steep * 0.45);
+  color = mix(color, uPalette1, steep * 0.45);
   // And a pale crest tint high up, which reads as sun-bleached stone and separates the mesas from the flats.
-  color = mix(color, vec3(0.86, 0.80, 0.68), clamp((vHeightM - 12.0) / 30.0, 0.0, 1.0) * 0.35);
+  color = mix(color, uPalette2, clamp((vHeightM - 12.0) / 30.0, 0.0, 1.0) * 0.35);
 
   // fwidth(vPlanet) is the antialiasing footprint for every line and ring below, and on a slope seen at a grazing angle
   // it explodes: one pixel spans a long stretch of ground. Left alone, a selection ring smears into a band. Capped, a ring

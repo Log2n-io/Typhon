@@ -1,3 +1,4 @@
+import { realmLabel } from '../data/realm-view';
 import { useStats } from '../state/stats-store';
 import { useUi } from '../state/ui-store';
 
@@ -80,6 +81,17 @@ export function Hud() {
       <div className="hud-title">Server ({stats.source.name})</div>
       <table>
         <tbody>
+          <tr>
+            {/* Where this session IS, above what it holds — because every count below it is a count within this realm
+                and nowhere else (SUB-28), and a viewer who cannot see which realm cannot read any of them. */}
+            <td title="The realm this session is in. Everything below is counted within it and nothing outside it exists for this session.">
+              Realm
+            </td>
+            <td>
+              {realmLabel(stats.realm)}
+              {stats.realm === null ? '' : ` (#${stats.realm.realmId})`}
+            </td>
+          </tr>
           <tr>
             <td>World</td>
             <td>{server?.worldEntities.toLocaleString() ?? '—'} entities</td>

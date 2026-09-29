@@ -120,9 +120,22 @@ public sealed partial class TatooineSim : IDisposable
 
     // How each kind of realm is served to sessions (Realms G3, 12-realms § 2.1): planets at the planet's replication cell, an interior as one cell,
     // space at its own 500 m cell. Planet 0 is ConfigureSpatialGrid's realm, served at SubscriptionsOptions.ReplicationCellM.
-    private static readonly RealmReplicationConfig PlanetReplication = new() { CellM = TatooineReplication.ReplicationCellM };
-    internal static readonly RealmReplicationConfig InteriorReplication = new() { Kind = TatooineReplication.InteriorKind, CellM = WorldBuilder.InteriorEdgeM };
-    private static readonly RealmReplicationConfig SpaceReplication = new() { Kind = TatooineReplication.SpaceKind, CellM = 500d };
+    //
+    // Each carries an AppTag (RealmTag): the one field a client reads to choose a scene, so a browser never has to
+    // reproduce "interior j of planet p is realm Planets + p*InteriorsPerPlanet + j" from flags it cannot see. They are
+    // built PER REALM rather than shared for that reason — the tag differs even where the rest of the config does not.
+    private static RealmReplicationConfig PlanetReplication(int planet) =>
+        new() { CellM = TatooineReplication.ReplicationCellM, AppTag = RealmTag.Planet(planet) };
+
+    internal static RealmReplicationConfig InteriorReplication(int portal) =>
+        new() { Kind = TatooineReplication.InteriorKind, CellM = WorldBuilder.InteriorEdgeM, AppTag = RealmTag.Interior(portal) };
+
+    /// <summary>A dungeon is served exactly like an interior and tagged as its own scene, so a client can tell them apart.</summary>
+    internal static RealmReplicationConfig DungeonReplication(int slot) =>
+        new() { Kind = TatooineReplication.InteriorKind, CellM = WorldBuilder.InteriorEdgeM, AppTag = RealmTag.Dungeon(slot) };
+
+    private static RealmReplicationConfig SpaceReplication() =>
+        new() { Kind = TatooineReplication.SpaceKind, CellM = 500d, AppTag = RealmTag.Space() };
 
     public TatooineSim(SimConfig config)
     {
@@ -255,10 +268,31 @@ public sealed partial class TatooineSim : IDisposable
         // Realms (G1): planet 0 is realm 0, configured as the single world always was; every further planet is a realm of its own with the same grid,
         // simulated always (per-realm policy is G2's). With --interiors, every enterable city building of every planet is a one-cell realm after the
         // planets: portal j of planet p is realm Planets + p·N + j. The map is built first because it fixes N, and realms are registered at open.
+        // Reset BEFORE anything can be registered. It is process-static, so a run whose Initialize threw part-way — a
+        // test fixture, a bad flag — would otherwise leave the previous run's larger value standing, and this one's
+        // ViewRealm would admit realm ids its own engine never registered. Enter into an unregistered realm throws, on
+        // the tick path.
+        TatooineReplication.ViewableRealms = 1;
+
         Map = TatooineMap.Build(_config);
         InteriorsPerPlanet = _config.Interiors ? WorldBuilder.CountEnterable(Map) : 0;
         var realms = _config.Planets * (1 + InteriorsPerPlanet);
         SpaceRealm = _config.Space ? realms++ : -1;
+
+        // Realm ids are ushort on the wire, and every registration below casts to one. With 617 interiors per planet the
+        // count passes 65 535 at about 107 planets, and an unchecked cast would silently alias a later realm onto an
+        // earlier one — while ViewableRealms, an int, still advertised the un-truncated range. Refused at start-up, where
+        // a flag can be corrected, rather than mis-rendered at run time.
+        if (realms + _config.Dungeons > ushort.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(_config.Planets),
+                realms + _config.Dungeons,
+                $"{realms + _config.Dungeons} realms exceeds the {ushort.MaxValue} a RealmId can hold: reduce --planets, --interiors or --dungeons.");
+        }
+
+        // What a god camera may ask to look at: everything registered at start-up, which is everything below the dungeon slots.
+        TatooineReplication.ViewableRealms = realms;
 
         // Dungeon slots (G2): ids after space, each used by one instance — an id unregistered this session is not registrable again (RLM-06).
         FirstDungeonRealm = realms;
@@ -272,30 +306,31 @@ public sealed partial class TatooineSim : IDisposable
         // Planet 0 runs at full rate always — it is the measured workload. A further planet is simulated at --planet-divisor (G2).
         for (var planet = 1; planet < _config.Planets; planet++)
         {
-            Dbe.Realms.Register(new RealmId((ushort)planet), Divided(planetGrid, _config.PlanetDivisor, PlanetReplication));
+            Dbe.Realms.Register(new RealmId((ushort)planet), Divided(planetGrid, _config.PlanetDivisor, PlanetReplication(planet)));
         }
 
         // Interiors sleep once unobserved for --interior-sleep seconds (G2): a player walking in wakes one, and pins it while inside.
         var interiorGridConfig = SpatialGridConfig.Flat(Vector2.Zero, new Vector2(WorldBuilder.InteriorEdgeM, WorldBuilder.InteriorEdgeM),
             WorldBuilder.InteriorEdgeM);
         // Each interior's parent is its planet (Realms G3): a planet's news reaches the players in its buildings (RouteToRealm, subtree).
-        RealmConfig InteriorOf(int planet) => new()
+        RealmConfig InteriorOf(int planet, int portal) => new()
         {
             Grid = interiorGridConfig,
             WhenUnobserved = _config.InteriorSleepS > 0f ? RealmUnobserved.Sleep : RealmUnobserved.Simulate,
             UnobservedTickDivisor = 1,
             SleepAfterTicks = _config.InteriorSleepS > 0f ? Math.Max(1, (int)(_config.InteriorSleepS * _config.TickRateHz)) : 0,
             Parent = new RealmId((ushort)planet),
-            Replication = InteriorReplication,
+            Replication = InteriorReplication(portal),
         };
 
         for (var planet = 0; planet < _config.Planets && InteriorsPerPlanet > 0; planet++)
         {
-            var interior = InteriorOf(planet);
             var first = _config.Planets + (planet * InteriorsPerPlanet);
             for (var realm = first; realm < first + InteriorsPerPlanet; realm++)
             {
-                Dbe.Realms.Register(new RealmId((ushort)realm), interior);
+                // One config per interior now, where a single shared one used to serve them all: the tag names which
+                // portal this is, and that is exactly what a client needs to label the room it walked into.
+                Dbe.Realms.Register(new RealmId((ushort)realm), InteriorOf(planet, realm - first));
             }
         }
 
@@ -304,7 +339,7 @@ public sealed partial class TatooineSim : IDisposable
         {
             var edge = WorldBuilder.SpaceEdgeM * 0.5;
             Dbe.Realms.Register(new RealmId((ushort)SpaceRealm),
-                Divided(new SpatialGridConfig(new Vector3D(-edge, -edge, -edge), new Vector3D(edge, edge, edge), 500d), _config.SpaceDivisor, SpaceReplication));
+                Divided(new SpatialGridConfig(new Vector3D(-edge, -edge, -edge), new Vector3D(edge, edge, edge), 500d), _config.SpaceDivisor, SpaceReplication()));
         }
 
         Dbe.InitializeArchetypes();

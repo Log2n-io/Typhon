@@ -14,6 +14,15 @@ export interface CameraRequest {
   readonly seq: number;
 }
 
+import type { RealmDirectory } from '../data/server-config';
+import { askedFor, IDLE, type TransitionState } from '../app/realm-transition';
+
+/** A pending ask to look at another realm. The sequence makes a repeat of the same realm a new ask. */
+export interface RealmRequest {
+  readonly realmId: number;
+  readonly seq: number;
+}
+
 /** A set of archetype names held as a map, so a missing name reads as its default rather than as `false`. */
 export type NameFlags = Readonly<Record<string, boolean>>;
 
@@ -53,6 +62,24 @@ export interface UiState {
   readonly selectedNetId: number;
   readonly follow: boolean;
   readonly cameraRequest: CameraRequest | null;
+  /**
+   * A pending ask to look at another realm, or `null`.
+   *
+   * Carries a sequence for the same reason {@link CameraRequest} does, and one that bites harder here: the server may
+   * REFUSE an ask, so picking the same realm twice has to send twice. Without the sequence the second pick would be
+   * indistinguishable from no pick at all, and a viewer whose first attempt was rate-limited could never retry.
+   */
+  readonly realmRequest: RealmRequest | null;
+  /** The realms this server says it has, or `null` from the mock and from a server that publishes none. */
+  readonly realms: RealmDirectory | null;
+  /**
+   * The realm crossing now on screen.
+   *
+   * Held in the store rather than in `ClientApp` because the thing that draws it is React: the overlay has to cover the
+   * DOM label layer as well as the canvas, which a scene post-process cannot do — it would leave a room's arrival
+   * showing the previous planet's town names over it.
+   */
+  readonly transition: TransitionState;
 
   readonly setPopulation: (population: Population) => void;
   readonly setSeed: (seed: number) => void;
@@ -72,6 +99,10 @@ export interface UiState {
   readonly select: (netId: number) => void;
   readonly setFollow: (follow: boolean) => void;
   readonly flyTo: (x: number, z: number, distance: number) => void;
+  /** Asks the server to put this session in a realm. An ask: the server may refuse it. */
+  readonly viewRealm: (realmId: number) => void;
+  readonly setRealms: (realms: RealmDirectory | null) => void;
+  readonly setTransition: (transition: TransitionState) => void;
 }
 
 export const useUi = create<UiState>()((set) => ({
@@ -93,6 +124,9 @@ export const useUi = create<UiState>()((set) => ({
   selectedNetId: 0,
   follow: false,
   cameraRequest: null,
+  realmRequest: null,
+  realms: null,
+  transition: IDLE,
 
   setPopulation: (population) => {
     set({ population, selectedNetId: 0, follow: false });
@@ -161,5 +195,26 @@ export const useUi = create<UiState>()((set) => ({
   },
   flyTo: (x, z, distance) => {
     set((s) => ({ cameraRequest: { x, z, distance, seq: (s.cameraRequest?.seq ?? 0) + 1 }, follow: false }));
+  },
+  setRealms: (realms) => {
+    set({ realms });
+  },
+  setTransition: (transition) => {
+    set({ transition });
+  },
+  viewRealm: (realmId) => {
+    // The selection is dropped here as well as on arrival: the entity it names belongs to the realm being left, and
+    // between the ask and the answer the inspector would otherwise keep showing it as though it were still relevant.
+    //
+    // The fade starts on the ASK, not on the arrival, and that is the whole reason a client-initiated crossing looks
+    // different from a door: this is the only moment the client knows a crossing is coming, so it is the only one where
+    // there is still a world on screen to fade out of. The kind is taken as `travel` here because the destination's is
+    // not known until it arrives; `arrived` re-reads it and a channel change simply ramps back in faster.
+    set((s) => ({
+      realmRequest: { realmId, seq: (s.realmRequest?.seq ?? 0) + 1 },
+      selectedNetId: 0,
+      follow: false,
+      transition: askedFor(s.transition, 'travel', performance.now()),
+    }));
   },
 }));

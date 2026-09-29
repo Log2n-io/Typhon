@@ -91,7 +91,7 @@ public sealed partial class SimBridge
             UnobservedTickDivisor = 1,
             SleepAfterTicks = Math.Max(1, _config.TickRateHz),
             Parent = RealmId.Default,
-            Replication = TatooineSim.InteriorReplication,
+            Replication = TatooineSim.DungeonReplication(_nextDungeonSlot - 1),
         });
 
         var dungeon = new Dungeon

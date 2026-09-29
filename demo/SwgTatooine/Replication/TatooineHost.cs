@@ -5,6 +5,7 @@ using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using System;
+using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -35,8 +36,9 @@ public static class TatooineHost
     /// <param name="port">The TCP port to listen on.</param>
     /// <param name="clientRoot">A directory of built client files to serve at the root, or <see langword="null"/> for none.</param>
     /// <param name="origins">Origins a browser may connect from; empty allows any, which is the right default for a demo on a developer's machine.</param>
+    /// <param name="realmsJson">The realm directory to publish at <c>/typhon/demo.json</c>, or <see langword="null"/> to publish none.</param>
     /// <returns>A task that completes when the host has stopped.</returns>
-    public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null)
+    public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null, string realmsJson = null)
     {
         ArgumentNullException.ThrowIfNull(runtime);
 
@@ -98,10 +100,24 @@ public static class TatooineHost
             // radius that survives the clamp is half the ceiling. Zero means this server gives its god cameras the whole
             // world and no client-driven region at all, in which case a radius means nothing.
             var radius = edge > 0 ? edge / 2 : 0;
+            // The realm directory rides in the same document rather than one of its own: it is the same kind of fact —
+            // what this process was started with — and a client that already fetches this should not make a second
+            // request for it. Absent when the caller published none, so a page written against a server that serves it
+            // must treat it as optional, exactly as it already must for the radius above.
+            var realms = realmsJson == null ? string.Empty : FormattableString.Invariant($",\"realms\":{realmsJson}");
+
+            // The two doubles are written with "R" and guarded against the non-finite. Interpolated raw, `--god-region 1e30`
+            // emits `1E+30` and a non-finite one emits `NaN` — neither is JSON, so the WHOLE document fails to parse and the
+            // client loses the realm directory it also carries, with no error path. A ceiling that cannot be expressed is
+            // reported as no ceiling, which is what a client already handles.
             return Results.Text(
-                FormattableString.Invariant($"{{\"godRegionMaxEdgeM\":{edge},\"maxViewRadiusM\":{radius}}}"),
+                FormattableString.Invariant($"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{realms}}}"),
                 "application/json");
         });
+
+        // A double as JSON, or 0 for one JSON cannot express. See the note at its call site.
+        static string Json(double value) =>
+            double.IsFinite(value) ? value.ToString("0.####", CultureInfo.InvariantCulture) : "0";
 
         // Tell every client the server is going, before Kestrel drops their sockets (SWG-07). ApplicationStopping runs before the listeners are closed and
         // blocks shutdown until it returns, which is exactly the window in which the runtime is still ticking and a KICK can still be staged and sent.

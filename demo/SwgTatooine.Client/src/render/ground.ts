@@ -45,7 +45,64 @@ export class GroundView {
   pixelTolerance = 2;
 }
 
-export const SKY = new Color3(0.83, 0.78, 0.7);
+/**
+ * A planet's ground and sky, keyed by the `palette` field of its `AppTag`.
+ *
+ * <b>Every planet is the same terrain.</b> One bake serves them all (decision 3), and the server populates every planet
+ * from one map — `TatooineMap.Build` is called once and every planet gets the same cities in the same places — so the
+ * colour is not a decoration on top of a difference, it IS the difference. Two planets with the same relief and the same
+ * towns are told apart by being sand and being green.
+ *
+ * Index 0 is Tatooine's, unchanged: the three literals the ground shader used to carry.
+ */
+export interface GroundPalette {
+  /** The flat ground. */
+  readonly base: Color3;
+  /** Steep faces — what a slope reveals under the surface. */
+  readonly rock: Color3;
+  /** High ground, mixed in above about 12 m. */
+  readonly peak: Color3;
+  readonly sky: Color3;
+}
+
+export const PALETTES: readonly GroundPalette[] = [
+  // 0 — desert. The colours this client shipped with.
+  {
+    base: new Color3(0.78, 0.66, 0.47),
+    rock: new Color3(0.54, 0.47, 0.39),
+    peak: new Color3(0.86, 0.8, 0.68),
+    sky: new Color3(0.83, 0.78, 0.7),
+  },
+  // 1 — temperate. Green ground over grey stone, under a cooler sky.
+  {
+    base: new Color3(0.34, 0.45, 0.26),
+    rock: new Color3(0.45, 0.44, 0.4),
+    peak: new Color3(0.62, 0.66, 0.55),
+    sky: new Color3(0.66, 0.74, 0.78),
+  },
+  // 2 — ochre. Iron-red, the colour a dry world goes when its dust is oxidised rather than silicate.
+  {
+    base: new Color3(0.56, 0.34, 0.24),
+    rock: new Color3(0.42, 0.3, 0.25),
+    peak: new Color3(0.74, 0.56, 0.44),
+    sky: new Color3(0.78, 0.63, 0.53),
+  },
+  // 3 — ice. Pale ground, blue-grey rock, a washed-out sky.
+  {
+    base: new Color3(0.78, 0.81, 0.85),
+    rock: new Color3(0.48, 0.53, 0.6),
+    peak: new Color3(0.92, 0.94, 0.97),
+    sky: new Color3(0.8, 0.85, 0.9),
+  },
+];
+
+/** The palette a realm's `AppTag` names, wrapping rather than failing: a fifth planet repeats the first's colour. */
+export function paletteFor(index: number): GroundPalette {
+  return PALETTES[index % PALETTES.length];
+}
+
+/** Tatooine's sky, and what the scene clears to before any realm frame has arrived. */
+export const SKY = PALETTES[0].sky;
 
 /** Haze density at sea level, per metre: the horizon goes to sky over a few kilometres, the way a hot desert does. */
 const FOG_GROUND = 0.00012;
@@ -166,6 +223,23 @@ export class Ground {
     material.setColor3('uSkyColor', SKY);
     mesh.material = material;
     this.material = material;
+
+    // After the field is assigned, not beside the other setters above: setPalette reads `this.material`.
+    this.setPalette(PALETTES[0]);
+  }
+
+  /**
+   * The ground's three colours and its sky, for the planet now on screen.
+   *
+   * Three `setColor3` calls on a realm switch, not per frame: a palette is a property of the world, and the shader is
+   * the same program either way — which is why the place tables and the colours could both stop being baked into the
+   * GLSL without a second material.
+   */
+  setPalette(palette: GroundPalette): void {
+    this.material.setColor3('uPalette0', palette.base);
+    this.material.setColor3('uPalette1', palette.rock);
+    this.material.setColor3('uPalette2', palette.peak);
+    this.material.setColor3('uSkyColor', palette.sky);
   }
 
   /** Re-uploads the height texture after the field has been re-baked, and takes the quadtree the worker measured. */
@@ -183,12 +257,12 @@ export class Ground {
     return this.terrain.nodeCount;
   }
 
-  /** The finest node the selection reached, in metres: how much detail the tolerance bought where it matters. */
   /** True when the node budget bound the selection, so a finer tolerance would change nothing. */
   get terrainCapped(): boolean {
     return this.terrain.capped;
   }
 
+  /** The finest node the selection reached, in metres: how much detail the tolerance bought where it matters. */
   get terrainFinestM(): number {
     return this.terrain.finestNodeM;
   }
@@ -293,6 +367,18 @@ export class Ground {
       sphere ? 1 : 0,
     );
     this.material.setVector4('uSessionDisc', this.sessionDisc);
+  }
+
+  /**
+   * Shows or hides the whole planet backdrop.
+   *
+   * <b>Hidden, never disposed.</b> Behind this mesh sit a 67 MB height field and its R32F texture, from a bake measured
+   * at 13.2 s across eight workers, and every planet in the world shares the one bake. A viewer steps into a shop for
+   * ten seconds; paying that again to walk back out is not a trade worth making. A disabled Babylon mesh costs no draw
+   * call, so the only thing keeping it costs is the memory it already occupies.
+   */
+  setEnabled(on: boolean): void {
+    this.terrain.mesh.setEnabled(on);
   }
 
   dispose(): void {

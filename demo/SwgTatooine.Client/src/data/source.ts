@@ -2,6 +2,7 @@ import {
   archetypeOf,
   Capabilities,
   CommandQueue,
+  CommandRefused,
   DebugGrid,
   DebugSubType,
   FrameApplier,
@@ -24,6 +25,7 @@ import {
   type WorldStore,
 } from '@typhondb/client';
 import { hullInRadiusM } from './replication-stats';
+import { realmViewOf, type RealmView } from './realm-view';
 
 /**
  * Where the client's world comes from. The renderer and the UI only ever see the SDK's store, clock and aggregate grid;
@@ -127,6 +129,16 @@ export interface DataSource {
   /** The far tier's counts for {@link world}, or `null` when the session has no aggregate grid. */
   readonly grid: AggregateGrid | null;
   /**
+   * The realm the session is in, or `null` in none — the scene the renderer must be drawing.
+   *
+   * <b>An accessor the app polls, not a callback it subscribes to.</b> The SDK's `onRealmChanged` fires inside
+   * `applier.apply()`, on the tick path: building a scene there would put the cost of a terrain swap inside the
+   * decode, and a throw would take the session down with it. So a source derives this once per change and the app
+   * notices it the way it already notices a new store — one reference compare at the top of the frame
+   * (`ClientApp.adoptSourceWorld`, whose comment explains why there is no other right moment).
+   */
+  readonly realm: RealmView | null;
+  /**
    * The near tier's radius the source is actually being served, in metres, or 0 when it is not known yet.
    *
    * Its own accessor because the renderer reads it EVERY frame, and {@link stats} is a snapshot that allocates.
@@ -140,12 +152,23 @@ export interface DataSource {
   /** The god camera's region of interest: a ground point and a radius (the built-in `ClientRegion` command). */
   setRegion(x: number, z: number, radius: number): void;
   setPaused(paused: boolean): void;
+  /** Whether {@link viewRealm} does anything: a live session whose catalog declares the command. */
+  readonly canViewRealm: boolean;
+  /**
+   * Asks the server to put this session in another realm. The answer is a `RESET|REALM` frame, or an `ACKS` refusal.
+   *
+   * <b>An ask, not a move.</b> The server decides — a realm that does not exist, or a session that is a player's rather
+   * than a camera's, is refused — so nothing here may assume the realm changed.
+   */
+  viewRealm(realmId: number): void;
   readonly stats: SourceStats;
   /** The simulated link's control, or null for a real connection. */
   readonly latency: LatencyControl | null;
 }
 
 export interface TyphonSourceOptions {
+  /** The server refused a realm change, or the local rate limit did. Nothing else will ever say so. */
+  readonly onRealmRefused?: () => void;
   /** The server's WebSocket URL, which must speak `typhon.3`. */
   readonly url: string;
   /** The clock render time comes from; the source feeds it every frame. */
@@ -183,6 +206,11 @@ export class TyphonSource implements DataSource {
   private attack: MessagePlan | null = null;
   private chat: MessagePlan | null = null;
   private pauseCommand: MessagePlan | null = null;
+  private viewRealmCommand: MessagePlan | null = null;
+  /** The sequence of the `ViewRealm` still awaiting an answer, or -1. See {@link viewRealm}. */
+  private pendingRealmSeq = -1;
+  /** The realm the last `REALM` block put this session in, derived once per change rather than per frame. */
+  private currentRealm: RealmView | null = null;
   private pendingRegion: { x: number; z: number; radius: number } | null = null;
   private lastSentRegion: { x: number; z: number; radius: number } | null = null;
   private paused = false;
@@ -357,6 +385,41 @@ export class TyphonSource implements DataSource {
     }
   }
 
+  /** Whether this session may ask to look at another realm: the catalog declares the command and the role may send it. */
+  get canViewRealm(): boolean {
+    return this.viewRealmCommand !== null;
+  }
+
+  /**
+   * Asks to be put in another realm.
+   *
+   * Rate-limited by the catalog at one per tick with a burst of two, because every accepted ask costs a whole-realm
+   * RESET — the dearest frame there is. A refused one is answered in `ACKS` rather than dropped, so a client that is
+   * waiting on the switch learns that it is not coming.
+   */
+  viewRealm(realmId: number): void {
+    if (this.viewRealmCommand === null) {
+      return;
+    }
+
+    // The sequence is KEPT, so the refusal the server sends can be matched to the ask that caused it. Without this the
+    // `ACKS` block — which the server was deliberately given reason codes to fill — reaches nothing, and a viewer whose
+    // crossing was refused waits out the fade's whole safety limit behind an opaque screen for an answer that had
+    // already arrived.
+    const seq = this.commands?.enqueue(this.viewRealmCommand, { realm: realmId }) ?? CommandRefused.RateLimited;
+    this.pendingRealmSeq = seq >= 0 ? seq : -1;
+    if (seq < 0) {
+      // The local bucket was empty, so nothing was sent and no ack will ever come for it. Refused here, immediately,
+      // rather than by a timeout later.
+      this.options.onRealmRefused?.();
+    }
+  }
+
+  /** The realm this session is in, or `null` before its first `REALM` block and after a `REALM(NONE)`. */
+  get realm(): RealmView | null {
+    return this.currentRealm;
+  }
+
   /** Whether the session can stop the server's simulation: the catalog declares the command. */
   get canPause(): boolean {
     return this.pauseCommand !== null;
@@ -370,9 +433,22 @@ export class TyphonSource implements DataSource {
         this.onEvent(event);
       },
       // The server drops the region it held on a realm change: the sender forgets it and the camera's goes out again.
-      onRealmChanged: () => {
+      //
+      // Deriving the view here rather than in the app is deliberate, and it is the only work this callback may do.
+      // It runs INSIDE `applier.apply()`, on the tick path: the app reads `realm` at the top of its frame instead,
+      // so a scene swap costs the frame that notices it rather than the decode that caused it.
+      onRealmChanged: (_previous, current) => {
+        this.currentRealm = realmViewOf(current);
+        this.pendingRealmSeq = -1;
         this.region?.realmChanged();
-        this.sendRegion();
+
+        // The PENDING region is dropped, not re-sent. It holds the camera's position in the realm being LEFT, and the
+        // camera does not move until `resetForRealm` runs at the top of the next frame — so re-sending it here encodes
+        // planet coordinates in the new realm's frame. `encodeQuant` clamps rather than throws, so a planet-sized quad
+        // collapses every corner onto one corner of a 64 m interior: a degenerate hull the server then refuses. The
+        // camera sends its own the moment it has moved.
+        this.pendingRegion = null;
+        this.lastSentRegion = null;
       },
       onDebug: (subType, data, offset, length) => {
         this.onDebug(subType, data, offset, length);
@@ -384,6 +460,7 @@ export class TyphonSource implements DataSource {
     // A demo control: the server stops simulating for everyone. Absent from a catalog that does not declare it, in which
     // case pausing does what it did before — nothing but hold the region.
     this.pauseCommand = plan.commandByName('SetPaused');
+    this.viewRealmCommand = plan.commandByName('ViewRealm');
     this.commands = new CommandQueue({ plan });
     this.region =
       plan.clientRegion === null
@@ -444,6 +521,9 @@ export class TyphonSource implements DataSource {
     this.ping = null;
     this.commands?.clear();
     // The store stays: a resume refills it with a RESET frame, and the renderer keeps drawing meanwhile.
+    // So does the realm, for the same reason and more strongly — a resumed session's first frame is a
+    // `RESET|REALM` of the realm its token recorded (12-realms § 1.6), so clearing it here would tear the scene
+    // down and build the same one back for the length of a reconnect.
   }
 
   private onTick(message: Uint8Array, recvMs: number): void {
@@ -467,9 +547,15 @@ export class TyphonSource implements DataSource {
 
     // Command outcomes arrive in the frame that carries their effects (§ 8): a refused region is one of them.
     const region = this.region;
-    if (region !== null) {
-      for (let i = 0; i < applier.acks.count; i++) {
-        region.onAck(applier.acks.seq[i], applier.acks.reason[i]);
+    for (let i = 0; i < applier.acks.count; i++) {
+      const seq = applier.acks.seq[i];
+      region?.onAck(seq, applier.acks.reason[i]);
+
+      // A refused realm change. The realm itself never arrives, so this is the only thing that will ever tell the app
+      // the crossing is not coming — everything else waits for a frame that was never going to be sent.
+      if (seq === this.pendingRealmSeq) {
+        this.pendingRealmSeq = -1;
+        this.options.onRealmRefused?.();
       }
     }
 
