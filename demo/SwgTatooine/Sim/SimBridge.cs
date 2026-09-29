@@ -25,21 +25,6 @@ public sealed partial class SimBridge
     private readonly TerrainField _terrain;
 
     /// <summary>
-    /// Ground height for a point in a realm: the planet's relief on a planet, and 0 anywhere else.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// <b>Altitude is a property of the realm, not of the coordinate.</b> A cantina's interior is its own realm with its
-    /// own flat floor a few metres across, and its local (x, z) collides with a point on the planet that has 200 m of
-    /// mesa under it. Sampling the heightfield there would put the furniture inside a hill. The space realm is the same
-    /// argument in the other direction.
-    /// </para>
-    /// <para>
-    /// Realms below <see cref="SimConfig.Planets"/> are planets; interiors and space are allocated above them
-    /// (<c>TatooineSim</c>), so the test is an index comparison and not a lookup.
-    /// </para>
-    /// </remarks>
-    /// <summary>
     /// The A/B switch for the cost of sampling the ground, read once from <c>SWG_NO_GROUND</c>.
     /// </summary>
     /// <remarks>
@@ -69,6 +54,21 @@ public sealed partial class SimBridge
         return true;
     }
 
+    /// <summary>
+    /// Ground height for a point in a realm: the planet's relief on a planet, and 0 anywhere else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Altitude is a property of the realm, not of the coordinate.</b> A cantina's interior is its own realm with its
+    /// own flat floor a few metres across, and its local (x, z) collides with a point on the planet that has 200 m of
+    /// mesa under it. Sampling the heightfield there would put the furniture inside a hill. The space realm is the same
+    /// argument in the other direction.
+    /// </para>
+    /// <para>
+    /// Realms below <see cref="SimConfig.Planets"/> are planets; interiors and space are allocated above them
+    /// (<c>TatooineSim</c>), so the test is an index comparison and not a lookup.
+    /// </para>
+    /// </remarks>
     internal float GroundAt(RealmId realm, float x, float z)
     {
         if (GroundDisabled)

@@ -408,6 +408,67 @@ public sealed partial class SimBridge
         return true;
     }
 
+    /// <summary>
+    /// The A/B switch for rung (c)'s cost, read once from <c>SWG_NO_SLOPE</c>.
+    /// </summary>
+    /// <remarks>
+    /// The claim rung (c) makes is that it adds a second ground sample only where the terrain actually slows something, so
+    /// the flat majority of the planet pays arithmetic and nothing else. That is a claim about a measurement, and this is
+    /// what measures it: a <see langword="static readonly"/> <see cref="bool"/> the JIT folds after the static
+    /// constructor, so both arms are the same binary and neither pays a branch.
+    /// </remarks>
+    private static readonly bool SlopeDisabled = Environment.GetEnvironmentVariable("SWG_NO_SLOPE") == "1";
+
+    /// <summary>
+    /// Shortens a step that climbs, in place — terrain rung (c).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Called from the MOVE phase and not from <see cref="Steer"/> on purpose. Steer sets a velocity once, when an entity
+    /// re-decides; a leg then runs for tens of ticks. Scaling there would fix the speed of a whole leg to the grade at the
+    /// moment it was chosen, so a creature that set off across a flat basin would cross the mesa beyond it at basin speed.
+    /// The step is what the terrain acts on, and the step is here.
+    /// </para>
+    /// <para>
+    /// <b>The second ground sample is taken only when the step actually shortens.</b> The caller has already sampled the
+    /// full-speed end for its own <c>Y</c>, and <paramref name="groundY"/> is that sample; on flat ground — which is most
+    /// of the planet and all of every interior — the factor is 1, nothing is re-read, and this costs three subtractions
+    /// and a square root. Where it does shorten, the step ends somewhere else, and rung (b)'s invariant is that <c>Y</c> is
+    /// the ground at the position actually written — so it is re-read there rather than approximated.
+    /// </para>
+    /// <para>
+    /// The run is measured from the CLAMPED positions rather than from the intended step, so a step the world edge cut
+    /// short reports the grade over the distance actually covered instead of a shallower one over a distance that was not.
+    /// </para>
+    /// </remarks>
+    /// <param name="realm">The realm being moved in; a flat one can never slow anything, since both ends read zero.</param>
+    /// <param name="from">Where the step began. Its <c>Y</c> is the ground there, which is what makes this free.</param>
+    /// <param name="x">The step's end, shortened in place.</param>
+    /// <param name="z">The step's end, shortened in place.</param>
+    /// <param name="groundY">The ground at that end — re-sampled in place if the step moves.</param>
+    /// <param name="halfExtent">The entity's half extent, for the world-edge clamp.</param>
+    /// <param name="half">The world's half extent.</param>
+    internal void Slow<TPlace>(RealmId realm, in TPlace from, ref float x, ref float z, ref float groundY, float halfExtent, float half)
+        where TPlace : unmanaged, IGroundPlacement
+    {
+        if (SlopeDisabled)
+        {
+            return;
+        }
+
+        var dx = x - from.X;
+        var dz = z - from.Z;
+        var factor = SlopeSpeed.FactorForStep(from.Y, groundY, MathF.Sqrt((dx * dx) + (dz * dz)));
+        if (factor >= 1f)
+        {
+            return;
+        }
+
+        x = Math.Clamp(from.X + (dx * factor), -half + halfExtent, half - halfExtent);
+        z = Math.Clamp(from.Z + (dz * factor), -half + halfExtent, half - halfExtent);
+        groundY = GroundAt(realm, x, z);
+    }
+
     /// <summary>The instance form, for the simulation's own systems: the same integration at this run's tick period.</summary>
     /// <param name="velX">The velocity's X component, written.</param>
     /// <param name="velZ">The velocity's Z component, written.</param>
@@ -804,7 +865,9 @@ public sealed partial class SimBridge
                 // WriteSpatial rather than a plain span write: the barrier flags migration and AABB growth inline, which
                 // is what makes SetSpatialBarrierOnly correct for this archetype and lets the fence skip its slot scan.
                 var nb = default(CreaturePlacement);
-                nb.SetAt(x, z, GroundAt(cluster.Realm, x, z), h);
+                var gy = GroundAt(cluster.Realm, x, z);
+                Slow(cluster.Realm, in p, ref x, ref z, ref gy, h, half);
+                nb.SetAt(x, z, gy, h);
                 if (batched)
                 {
                     next[idx] = nb;
@@ -893,7 +956,9 @@ public sealed partial class SimBridge
                 var x = Math.Clamp(p.X + (move.VelX * k), -half + h, half - h);
                 var z = Math.Clamp(p.Z + (move.VelZ * k), -half + h, half - h);
                 var nb = default(PlayerPlacement);
-                nb.SetAt(x, z, GroundAt(cluster.Realm, x, z), h);
+                var gy = GroundAt(cluster.Realm, x, z);
+                Slow(cluster.Realm, in p, ref x, ref z, ref gy, h, half);
+                nb.SetAt(x, z, gy, h);
                 if (batched)
                 {
                     next[idx] = nb;
@@ -1034,7 +1099,9 @@ public sealed partial class SimBridge
                 var nb = default(NpcPlacement);
                 var nx = p.X + (move.VelX * k);
                 var nz = p.Z + (move.VelZ * k);
-                nb.SetAt(nx, nz, GroundAt(cluster.Realm, nx, nz), p.HalfExtent);
+                var ngy = GroundAt(cluster.Realm, nx, nz);
+                Slow(cluster.Realm, in p, ref nx, ref nz, ref ngy, p.HalfExtent, _config.WorldEdgeM * 0.5f);
+                nb.SetAt(nx, nz, ngy, p.HalfExtent);
                 if (batched)
                 {
                     next[idx] = nb;
