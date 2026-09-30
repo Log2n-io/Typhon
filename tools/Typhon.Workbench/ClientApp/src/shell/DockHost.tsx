@@ -17,6 +17,7 @@ import SystemsQueriesNavigatorPanel from '@/panels/SystemsQueriesNavigator/Syste
 import { registerDockApi, registerResetLayout, focusPanelBody } from './commands/openSchemaBrowser';
 import { registerProfilerDockApi } from './commands/profilerCommands';
 import { isViewActive } from './viewRegistry';
+import { withIncompatibleShield } from './incompatibleShield';
 import MigrationRequiredBanner from './banners/MigrationRequiredBanner';
 import PausedBanner from './banners/PausedBanner';
 import IncompatibleBanner from './banners/IncompatibleBanner';
@@ -163,9 +164,12 @@ const components: Record<string, React.FC<IDockviewPanelProps>> = {
   DevFixture: lazyPanel(() => import('@/panels/DevFixture/DevFixturePanel')),
 };
 
-// Only the active (shell + ungated) components are handed to dockview. Gated zone-D ids drop out here.
+// Only the active (shell + ungated) components are handed to dockview. Gated zone-D ids drop out here, and what
+// survives is wrapped in its own Incompatible shield (see `withIncompatibleShield`).
 const activeComponents: Record<string, React.FC<IDockviewPanelProps>> = Object.fromEntries(
-  Object.entries(components).filter(([id]) => isViewActive(id)),
+  Object.entries(components)
+    .filter(([id]) => isViewActive(id))
+    .map(([id, Panel]) => [id, withIncompatibleShield(id, Panel)]),
 );
 
 // Stage 0 default layouts are the shell frame only: edge groups (navigator / inspector / drawer) around a
@@ -428,12 +432,9 @@ export default function DockHost() {
           // still works. View → Reset Layout to Default is the escape hatch if one slips away.
           disableFloatingGroups
         />
-        {showIncompatible && (
-          <div
-            className="pointer-events-auto absolute inset-0 cursor-not-allowed bg-background/40"
-            aria-hidden="true"
-          />
-        )}
+        {/* The Incompatible shield is NOT here any more. One sheet over the dock also covered the Options panel the
+            banner's own "Locate schema assembly…" action opens, so the state's only exit was unreachable from inside
+            it. Each panel now carries its own — see `withIncompatibleShield` and `PANELS_USABLE_WHEN_INCOMPATIBLE`. */}
       </div>
     </div>
   );
