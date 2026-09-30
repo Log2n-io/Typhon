@@ -72,6 +72,7 @@ export function isInstantKind(v: number): boolean {
   // would render both as phantom spans with a fabricated duration read out of their payload.
   if (v === 65 || v === 66 || v === 67) return true;                       // 67 joined them for the per-realm record (#WB-05)
   if (v === 68 || v === 69) return true;                                   // push replication's server record and its session rows (#WB-02)
+  if (v === 70) return true;                                               // per-realm maintenance RATE rows, the rate twin of 67
   if (v >= 90 && v <= 116) return true;                                    // Concurrency tracing (Phase 2, #280)
   // Spatial tracing (Phase 3, #281) — mixed; instants are 127-135, 137, 140-142, 144, 145.
   if ((v >= 127 && v <= 135) || v === 137 || (v >= 140 && v <= 142) || v === 144 || v === 145) return true;
@@ -295,6 +296,11 @@ function decodeInstant(
         // ── the realm census (#WB-05)
         presentRealms: at(139, 4, reader.readI32.bind(reader), 0),
         runnableRealms: at(143, 4, reader.readI32.bind(reader), 0),
+        // ── appended for the kind-70 row census. Through `at` like the block above: a trace captured before kind 70
+        //    existed is shorter here and must still decode, reading both as zero — which is also the right reading,
+        //    since such a trace carries no rate rows to be truncated.
+        ratesRealmsTouched: at(147, 4, reader.readI32.bind(reader), 0),
+        ratesRealmsEmitted: at(151, 4, reader.readI32.bind(reader), 0),
       };
     }
 
@@ -360,6 +366,48 @@ function decodeInstant(
         blockedCells: reader.readI32(payloadOffset + 34),
         budgetConfiguredMs: reader.readF32(payloadOffset + 38),
         efficiencyTolerance: reader.readF32(payloadOffset + 42),
+      };
+
+    // Kind 70 — one realm's per-tick maintenance RATES for one archetype. Field order is the engine counter block's own
+    // declaration order, so the offsets below run straight through: three f64 then thirty i32, no padding.
+    case TraceEventKind.SpatialRealmRates:
+      return {
+        kind, threadSlot, tickNumber, timestampUs,
+        realmId: reader.readU16(payloadOffset),
+        archetypeId: reader.readU16(payloadOffset + 2),
+        tightnessExtentSum: reader.readF64(payloadOffset + 4),
+        tightnessBoundSum: reader.readF64(payloadOffset + 12),
+        relocationSpendNs: reader.readF64(payloadOffset + 20),
+        clustersScanned: reader.readI32(payloadOffset + 28),
+        slotsScanned: reader.readI32(payloadOffset + 32),
+        driftersDetected: reader.readI32(payloadOffset + 36),
+        driftAbsorbed: reader.readI32(payloadOffset + 40),
+        driftersUnplaced: reader.readI32(payloadOffset + 44),
+        driftGatedClusters: reader.readI32(payloadOffset + 48),
+        driftSuppressedByDensity: reader.readI32(payloadOffset + 52),
+        driftersUnplacedNoCandidate: reader.readI32(payloadOffset + 56),
+        driftersSpilled: reader.readI32(payloadOffset + 60),
+        tightnessSamples: reader.readI32(payloadOffset + 64),
+        migrationCount: reader.readI32(payloadOffset + 68),
+        crossingsExecuted: reader.readI32(payloadOffset + 72),
+        relocationsExecuted: reader.readI32(payloadOffset + 76),
+        repairsExecuted: reader.readI32(payloadOffset + 80),
+        jumpCrossings: reader.readI32(payloadOffset + 84),
+        clampedDestinations: reader.readI32(payloadOffset + 88),
+        staleFlagsDropped: reader.readI32(payloadOffset + 92),
+        relocationsThrottled: reader.readI32(payloadOffset + 96),
+        relocationsSuperseded: reader.readI32(payloadOffset + 100),
+        relocationsAdmitted: reader.readI32(payloadOffset + 104),
+        crossingsQueued: reader.readI32(payloadOffset + 108),
+        pinsRejected: reader.readI32(payloadOffset + 112),
+        repairedEntityCount: reader.readI32(payloadOffset + 116),
+        repairUnitCount: reader.readI32(payloadOffset + 120),
+        repairUnitsRefused: reader.readI32(payloadOffset + 124),
+        repairValveFires: reader.readI32(payloadOffset + 128),
+        arrivalCellsTouched: reader.readI32(payloadOffset + 132),
+        largestArrivalRun: reader.readI32(payloadOffset + 136),
+        cellTreePromotions: reader.readI32(payloadOffset + 140),
+        cellTreeDemotions: reader.readI32(payloadOffset + 144),
       };
 
     case TraceEventKind.GcStart:

@@ -1,3 +1,4 @@
+import { useTelemetrySession } from '@/hooks/profiler/useTelemetrySession';
 import { useEffect, useRef, useState } from 'react';
 import { ChevronRight, Link2, Unlink2 } from 'lucide-react';
 import { useSessionStore, useSessionCapability } from '@/stores/useSessionStore';
@@ -61,6 +62,9 @@ export default function ContextBar() {
   const isProfiler = useSessionCapability('profiler');
   const hasDatabase = useSessionCapability('database');
   const hasRealms = useSessionCapability('realms');
+  // Telemetry populates the realm scope picker on a session with no readable catalog — an attach — which is exactly
+  // where the two panels it scopes live.
+  const { hasTelemetry } = useTelemetrySession();
 
   // The drift readout. Only an open database with a capture attached has both coordinates to compare — a standalone
   // trace has no database to be behind, and a bare database has no capture. The hook no-ops without a database.
@@ -114,12 +118,12 @@ export default function ContextBar() {
           database am I": the revision is when, the realm is where. Shown only when the session HAS realms, so a
           single-world database's bar is byte-for-byte what it was.
 
-          Also only with a database, and that is not a hedge: the chip narrows the Data Browser, the Query Console and
-          the storage map, every one of them an Open-session view, and it is populated from the realm catalog, which is
-          read out of the file. On a live attach session it would be an empty picker narrowing nothing — the dead
-          affordance IA §7 rules out. What attach gets instead is the live realm board, which needs no scope to say
-          which realms are awake. */}
-      {hasRealms && hasDatabase && (
+          It used to require a DATABASE too, because the picker was populated from the realm catalog — read out of the
+          file — so on a live attach it would have been an empty control narrowing nothing, the dead affordance IA §7
+          rules out. That is no longer true: the picker now lists realms from the per-realm RATE records as well, which
+          an attach session carries and a plain file does not, and the two telemetry panels it scopes are attach-first.
+          So the gate is a database OR telemetry — either source populates it, and with neither it is still hidden. */}
+      {hasRealms && (hasDatabase || hasTelemetry) && (
         <>
           <span aria-hidden="true">·</span>
           <RealmScopeChip />

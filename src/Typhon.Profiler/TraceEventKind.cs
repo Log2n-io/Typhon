@@ -319,6 +319,49 @@ public enum TraceEventKind : byte
     /// </summary>
     SpatialRealmTelemetry = 67,
 
+    /// <summary>
+    /// Per-REALM, per-archetype snapshot of what one realm's partition DID this tick — the maintenance rates, attributed to the realm that produced them.
+    /// The rate twin of <see cref="SpatialRealmTelemetry"/>'s shape. Instant-shaped.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Payload, all REQUIRED, tightly packed, in wire order: <c>realmId: u16</c>, <c>archetypeId: u16</c>, then three <c>f64</c>
+    /// (<c>tightnessExtentSum</c>, <c>tightnessBoundSum</c>, <c>relocationSpendNs</c>), then thirty <c>i32</c> in the order the engine's own counter block
+    /// declares them. 148 bytes. Grow it only by APPENDING, as with kinds 66 and 67.
+    /// </para>
+    /// <para>
+    /// <b>Why it is not part of kind 67.</b> The two have different absence meanings and neither row set contains the other. Kind 67 is emitted for
+    /// RUNNABLE realms, whether or not they did anything; this is emitted for realms the fence TOUCHED, runnable or not. One record carrying both would
+    /// make a missing row mean two things at once, which is the ambiguity SO-01's "zero means zero, never unknown" exists to forbid. Keeping them apart
+    /// also keeps the anomaly visible: a row here with no kind-67 row is a non-runnable realm that did maintenance work, which is worth an alert rather
+    /// than a silent drop.
+    /// </para>
+    /// <para>
+    /// <b>The tightness pair are SUMS, not means, and the sample count is beside them.</b> Kind 66 sends means because it is already archetype-wide and
+    /// has nothing left to fold. A consumer folding several realms cannot re-derive a mean from per-realm means — it would weight a realm that scanned one
+    /// cluster equally with one that scanned ten thousand, which is the exact error SO-01 names for the archetype fold. Sums over the summed sample count
+    /// are foldable across any set of realms; a zero sample count keeps "the fence wrote nothing" distinguishable from "the clusters are points".
+    /// </para>
+    /// <para>
+    /// <b><c>largestArrivalRun</c> folds with MAX, never with +.</b> It is the most crossings into one destination cell, so adding two realms' values
+    /// would report a burst neither cell received. Wire-identical to its neighbours; the contract is on the consumer, stated here because nothing in the
+    /// bytes says so — the same way kind 66 has to state that its migration time is CPU-milliseconds and not a span.
+    /// </para>
+    /// <para>
+    /// <b>No duration here is CPU-summed across workers</b>, so that clause does NOT bind this record. The two counters it was written for
+    /// (<c>migrationCpuMs</c> and the apply ticks) are archetype-wide and stay on kind 66; <c>relocationSpendNs</c> is computed once per archetype per tick
+    /// on the serial path, and the tightness pair are sums of ratios rather than elapsed time. Stated because the next reader will assume otherwise.
+    /// </para>
+    /// <para>
+    /// <b>Capped, and the cap is visible.</b> Volume scales with the realm count, so the emission stops at a bound per archetype per tick. Kind 66 carries
+    /// <c>ratesRealmsTouched</c> and <c>ratesRealmsEmitted</c> for the same archetype and tick: equal means nothing was truncated and an absent realm did
+    /// no work; <c>emitted &lt; touched</c> means a consumer must say how many realms that worked it is NOT showing. One count could not separate those,
+    /// because kind 66's other population figure is <c>presentRealms</c>, and present is not touched.
+    /// </para>
+    /// <para>Gated on <c>SpatialRealmRatesActive</c>, separately from kind 67 for the volume reason above.</para>
+    /// </remarks>
+    SpatialRealmRates = 70,
+
     // ── Push replication: the operator's view of Subscriptions (instants) ──
 
     /// <summary>
@@ -1241,10 +1284,10 @@ public static class TraceEventKindExtensions
         {
             return false;
         }
-        // #911: 64 is a span, 65 and 66 are instants; 67 joined them for the per-realm record, and 68-69 for push replication's server record and
-        // its per-session rows. Their numeric neighbours (60-63) are all spans, so the instants need an explicit carve-out — the EcsSpawnBatch lesson
-        // one group along. TraceEventShapeConsistencyTests holds this against the producers' declared Shape.
-        if (v is 65 or 66 or 67 or 68 or 69)
+        // #911: 64 is a span, 65 and 66 are instants; 67 joined them for the per-realm record, 68-69 for push replication's server record and
+        // its per-session rows, and 70 for the per-realm RATE rows. Their numeric neighbours (60-63) are all spans, so the instants need an explicit
+        // carve-out — the EcsSpawnBatch lesson one group along. TraceEventShapeConsistencyTests holds this against the producers' declared Shape.
+        if (v is 65 or 66 or 67 or 68 or 69 or 70)
         {
             return false;
         }

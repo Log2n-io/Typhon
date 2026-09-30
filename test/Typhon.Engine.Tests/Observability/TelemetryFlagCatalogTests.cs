@@ -21,7 +21,7 @@ public class TelemetryFlagCatalogTests
         // #WB-05's RealmTelemetry (kind 67, the per-realm shape record — its own gate because its volume scales with the realm count, not the archetype
         // count), then 219 -> 222 with #WB-02's push-replication operator telemetry: the `Subscriptions` subtree root plus ServerTelemetry (kind 68) and
         // SessionTelemetry (kind 69), split for the same volume-scaling reason as the realm record.
-        Assert.That(TelemetryFlagCatalog.All.Count, Is.EqualTo(239));
+        Assert.That(TelemetryFlagCatalog.All.Count, Is.EqualTo(240));
 
         var root = TelemetryFlagCatalog.All[0];
         Assert.That(root.Kind, Is.EqualTo(TelemetryFlagKind.Master));

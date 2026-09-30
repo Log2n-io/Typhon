@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useLiveGaugeData } from '@/hooks/profiler/useLiveGaugeData';
+import { readRealmRates } from '@/panels/Realms/realmRatesReading';
+import { activeRealmScope, useRealmScopeStore } from '@/stores/useRealmScopeStore';
 import { useTelemetrySession } from '@/hooks/profiler/useTelemetrySession';
 import { GaugeId } from '@/libs/profiler/model/types';
 import type { GaugeSeries, SpatialTickTelemetry } from '@/libs/profiler/model/traceModel';
@@ -31,9 +33,14 @@ import {
  * <b>Two clocks.</b> The per-tick figures are labelled with the tick they came from. Where a trend is more useful than an instant the
  * panel differentiates over the window instead of showing one arbitrary tick as if it were a rate.
  *
- * <b>Zero means zero.</b> No counter is ever rendered as "—" or "unknown". The one place the panel says something other than a number
- * is where the ENGINE makes a distinction: a tightness mean over zero samples is "no cluster was written", which is a fact about the
- * tick and not a missing measurement.
+ * <b>Zero means zero — on THIS panel, and the qualifier is new.</b> Every counter here comes from the per-archetype record, which is emitted on every
+ * tick the subtree is on, so a number is always a measurement and none is rendered as "—" or "unknown". The one place the panel says something other than
+ * a number is where the ENGINE makes a distinction: a tightness mean over zero samples is "no cluster was written", which is a fact about the tick and not
+ * a missing measurement.
+ *
+ * <b>That does not generalise to the per-REALM rates</b>, and the Realms panel is right to render "—" where this one does not. Kind 70 is emitted only for
+ * realms the fence touched, so an absent row is a measured silence and a zero would claim the realm was measured and found idle. The difference is not a
+ * style choice between two surfaces: it is whether the record on which each is built is gated.
  */
 export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
   // Not `kind === 'attach'`: a captured profile and a watching database session both carry these records and are both
@@ -68,6 +75,20 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
   // ABOVE the cold-state returns below, because a hook after an early return is called on some renders and not others —
   // `react-hooks/rules-of-hooks` rejects it and React would mis-pair the hook state. With no archetype selected the key is
   // -1, which no archetype carries, so every helper returns its empty reading; nothing below the guards reads them then.
+  // The global realm scope. Null when unscoped or unlinked, and then this panel behaves exactly as it did before the
+  // scope existed — which is the store's own contract, not a courtesy.
+  const scopedRealm = useRealmScopeStore((s) => activeRealmScope(s));
+
+  // ONLY the two window rates can be narrowed, because only they have a per-realm twin on the wire. Everything else in
+  // this panel — the latest sample, the efficiency block, the repair queue, the controller state — is archetype-wide
+  // in the engine and has no realm dimension at all. Narrowing what can be narrowed and leaving the rest silently
+  // archetype-wide would be the worst of both, so the banner below says which is which.
+  const scopedRates = useMemo(
+    () => (scopedRealm == null || archetypeId == null ? null : readRealmRates(windowedTicks, archetypeId)),
+    [scopedRealm, archetypeId, windowedTicks],
+  );
+  const scopedRow = scopedRealm == null ? null : scopedRates?.rows.find((r) => r.realmId === scopedRealm) ?? null;
+
   const {
     sample, identity, repairPin, migrationsPerSec, driftersPerSec, efficiency, evictedInWindow, realms, rebasesInWindow,
   } = useMemo(() => {
@@ -108,6 +129,20 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
 
   return (
     <div className="flex h-full w-full flex-col overflow-auto bg-background" data-testid="spatial-maintenance">
+      {scopedRealm != null && (
+        // Says exactly what the scope did and did NOT do. Only the two window rates have a per-realm twin on the wire;
+        // every other figure here is archetype-wide in the engine and has no realm dimension to narrow to. A banner
+        // claiming the panel is "showing realm N" would be false about most of what is on screen.
+        <p
+          className="border-b bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-300"
+          data-testid="spatial-maintenance-realm-scope"
+        >
+          Scoped to <b>realm {scopedRealm}</b>: the two window rates below are that realm's alone
+          {scopedRow == null && <> — and it reported no work in this window, so they read zero</>}. Everything else on
+          this panel is archetype-wide — the engine owns those counters per archetype, not per realm.
+        </p>
+      )}
+
       <div className="flex items-center gap-3 border-b border-border px-3 py-2 text-fs-sm" data-testid="spatial-maintenance-header">
         <span className="text-muted-foreground">Archetype</span>
         <select
@@ -145,7 +180,11 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
             <Stat label="Migrations" value={sample.row.migrations} />
             <Stat label="Hysteresis absorbed" value={sample.row.hysteresisAbsorbed} />
             <Stat label="Crossings queued" value={sample.row.crossingsQueued} />
-            <Stat label="Migrations/s (window)" value={migrationsPerSec} decimals={1} />
+            <Stat
+              label={scopedRealm == null ? 'Migrations/s (window)' : `Migrations/s (realm ${scopedRealm})`}
+              value={scopedRealm == null ? migrationsPerSec : scopedRow?.migrationsPerSec ?? 0}
+              decimals={1}
+            />
           </Group>
 
           <Group title="Relocation" testId="spatial-group-relocation" hint="Intra-cell drift. Quality — the budget may refuse it.">
@@ -157,7 +196,11 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
             <Stat label="— no candidate" value={sample.row.driftersUnplacedNoCandidate} />
             <Stat label="Spilled" value={sample.row.driftersSpilled} />
             <Stat label="Pins rejected" value={sample.row.pinsRejected} />
-            <Stat label="Drifters/s (window)" value={driftersPerSec} decimals={1} />
+            <Stat
+              label={scopedRealm == null ? 'Drifters/s (window)' : `Drifters/s (realm ${scopedRealm})`}
+              value={scopedRealm == null ? driftersPerSec : scopedRow?.driftersPerSec ?? 0}
+              decimals={1}
+            />
           </Group>
 
           <Group title="Repair" testId="spatial-group-repair" hint="A cell's worst clusters, Morton re-sorted. Whole units only.">

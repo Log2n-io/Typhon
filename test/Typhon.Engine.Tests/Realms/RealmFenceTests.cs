@@ -1,9 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
+using Typhon.Engine.Tests.Profiler;
+using Typhon.Profiler;
+using Typhon.Profiler.Events;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Realms;
@@ -23,6 +27,28 @@ class RealmFenceTests : TestBase<RealmFenceTests>
     private const int RealmCount = 3;
     private const int Rounds = 3;
     private const int SerialArm = 0;
+
+    /// <summary>
+    /// Stop and RESET the profiler after every case, not merely detach.
+    /// </summary>
+    /// <remarks>
+    /// Detaching fixes the disposed-exporter hazard; it does not clear session or thread-slot state, and a case that throws before its own cleanup leaves
+    /// the profiler started for whatever runs next. Every other profiler fixture already does this — <c>RealmPolicyTests</c> records what it cost to be the
+    /// exception: a background thread enumerating a disposed collection kills the test HOST, and the remaining gated tests then report as "not run" rather
+    /// than as failures.
+    /// </remarks>
+    [TearDown]
+    public void DetachProfilerExporters()
+    {
+        try { TyphonProfiler.Stop(); } catch { /* a case that never started one, or already stopped it */ }
+        TyphonProfiler.ResetForTests();
+    }
+
+    /// <summary>The minimum a profiler session needs to start; this fixture reads records, not the session's own metadata.</summary>
+    private static ProfilerSessionMetadata TraceMetadata() => new(
+        systems: [], archetypes: [], componentTypes: [], workerCount: 0, baseTickRate: 1000f,
+        startTimestamp: System.Diagnostics.Stopwatch.GetTimestamp(), stopwatchFrequency: System.Diagnostics.Stopwatch.Frequency,
+        startedUtc: DateTime.UtcNow);
 
     private static SpatialGridConfig Grid(double cellSize) => SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(World, World), cellSize);
 
@@ -558,6 +584,105 @@ class RealmFenceTests : TestBase<RealmFenceTests>
             Assert.That(rs.Counters.F.ClustersScanned, Is.Zero, $"realm {rs.Realm.Value} carried work across a quiet tick");
             Assert.That(rs.Counters.F.TightnessSamples, Is.Zero, $"realm {rs.Realm.Value} carried tightness across a quiet tick");
         }
+    }
+
+    /// <summary>
+    /// The per-realm RATE rows (kind 70) reach the trace, for the realms the fence touched and no others, and kind 66's two counts describe them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>[Category("TelemetryGated")]</c> because it needs the <c>Spatial</c> telemetry subtree on, and a subtree root defaults to off. <c>TelemetryConfig</c>
+    /// reads its configuration in a static constructor, before the first test, so no fixture can flip it; the merge gate runs this in a dedicated process
+    /// with the flag set. Locally:
+    /// <code>
+    /// $env:TYPHON__PROFILER__SPATIAL__ENABLED = 'true'; dotnet test --filter "Category=TelemetryGated"
+    /// </code>
+    /// </para>
+    /// <para>
+    /// <b>This is also the volume measurement.</b> Trace FILE SIZE cannot measure this record: across three interleaved 300-tick pairs of the 1 236-realm
+    /// demo the deltas were +296, -609 and +405 bytes per tick — one of them negative, because other producers' run-to-run variance is larger than the
+    /// whole record. Counting the rows is the only honest way to say how many there are, which is what the row count and kind 66's
+    /// <c>ratesRealmsEmitted</c> assert here.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    [Category("TelemetryGated")]
+    [VerifiesRule("SO-03")]
+    public void TouchedRealmsSendRateRows_AndTheArchetypeCensusDescribesThem()
+    {
+        var archetypeId = Archetype<RealmUnit>.Metadata.ArchetypeId;
+        using var observer = new TraceRingObserver(ResourceRegistry.Profiler, captureRawBytes: true);
+        try
+        {
+            // INSIDE the try, both of them. Attachment is process-global while `using` is scoped to this method, so a throw from Start with the attach
+            // already done would leave a disposed observer on the exporter list — the exact hazard the finally below exists to prevent.
+            TyphonProfiler.AttachExporter(observer);
+            TyphonProfiler.Start(ResourceRegistry.Profiler, TraceMetadata());
+            using var dbe = ThreeRealms();
+            SpawnMirrored(dbe);
+            var tick = 0L;
+            dbe.WriteTickFence(++tick);
+            for (var round = 1; round <= 2; round++)
+            {
+                MoveAll(dbe, round, viaOpenMut: false);
+                dbe.WriteTickFence(++tick);
+                dbe.WriteTickFence(++tick);
+            }
+        }
+        finally
+        {
+            TyphonProfiler.Stop();
+            // DETACH, or the observer stays on the global exporter list after this test disposes it — and the NEXT test's Stop() drains into a disposed
+            // BlockingCollection. Attachment is process-global and survives the fixture; `using` only disposes the observer, it does not unregister it.
+            TyphonProfiler.DetachExporter(observer);
+        }
+
+        var rows = new List<SpatialRealmRatesEventDto>();
+        var census = new List<(int Touched, int Emitted)>();
+        foreach (var (kind, bytes) in observer.GetRecords())
+        {
+            if (kind == TraceEventKind.SpatialRealmRates)
+            {
+                var dto = SpatialRealmRatesEventDto.Decode(bytes, 0, 1);
+                if (dto.ArchetypeId == archetypeId)
+                {
+                    rows.Add(dto);
+                }
+            }
+            else if (kind == TraceEventKind.SpatialArchetypeTelemetry)
+            {
+                var dto = SpatialArchetypeTelemetryEventDto.Decode(bytes, 0, 1);
+                if (dto.ArchetypeId == archetypeId)
+                {
+                    census.Add((dto.RatesRealmsTouched, dto.RatesRealmsEmitted));
+                }
+            }
+        }
+
+        Assert.That(rows, Is.Not.Empty, $"records seen: {observer.RecordsProcessed}; is TYPHON__PROFILER__SPATIAL__ENABLED set?");
+        Assert.Multiple(() =>
+        {
+            Assert.That(rows.Select(r => r.RealmId).Distinct().Count(), Is.GreaterThan(1),
+                "the population is mirrored across three realms, so a row set naming one realm is the attribution failing on the wire");
+            // ANY of the counters, not two named ones: the emitter's flag is set when any of the 33 moved, so a realm whose only motion was slots
+            // scanned or a tightness sample yields a legal row that a two-counter test would call a bug.
+            Assert.That(rows.All(r => r.MigrationCount != 0 || r.ClustersScanned != 0 || r.SlotsScanned != 0 || r.DriftersDetected != 0
+                || r.TightnessSamples != 0 || r.CrossingsQueued != 0 || r.RepairUnitCount != 0 || r.CellTreePromotions != 0
+                || r.RelocationsAdmitted != 0 || r.ArrivalCellsTouched != 0), Is.True,
+                "a row is emitted only for a realm the fence touched, so every row must carry something non-zero");
+            Assert.That(census, Is.Not.Empty, "the archetype record carries the census on every tick");
+            // Not >= : below the cap the two are equal, and equality is what tells a consumer that an absent realm did no work rather than being truncated.
+            Assert.That(census.All(c => c.Emitted == c.Touched), Is.True,
+                $"this fixture is far below the row cap, so nothing should be truncated: {string.Join(", ", census.Select(c => $"{c.Emitted}/{c.Touched}"))}");
+            Assert.That(census.Any(c => c.Touched > 1), Is.True, "more than one realm works on at least one tick, or the census proves nothing");
+        });
+
+        // The measurement, printed rather than asserted: an assertion on it would pin a number that legitimately moves with the workload.
+        var ticksWithRows = census.Count(c => c.Emitted > 0);
+        TestContext.Out.WriteLine(
+            $"kind 70: {rows.Count} rows over {census.Count} archetype-ticks ({ticksWithRows} with rows); "
+            + $"max realms touched on one tick = {(census.Count == 0 ? 0 : census.Max(c => c.Touched))}");
     }
 
     [Test]

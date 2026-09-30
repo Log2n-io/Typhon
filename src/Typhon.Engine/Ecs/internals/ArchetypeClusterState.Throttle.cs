@@ -661,17 +661,6 @@ internal sealed partial class ArchetypeClusterState
         // request for an answer that cannot have changed. Every other producer gets this for free from a realm-change branch it already had.
         var foldRealm = -1;
 
-        void SwitchFold(int realm)
-        {
-            if (realm == foldRealm)
-            {
-                return;
-            }
-
-            foldRealm = realm;
-            fold.Switch(RealmSpatialForFold(realm));
-        }
-
         {
             // -- 1. Classify in ONE pass. Mandatory requests are counted and charged; relocations are remembered by index --
             //
@@ -816,5 +805,16 @@ internal sealed partial class ArchetypeClusterState
         LastTickCrossingsQueued = crossings;
         LastTickRelocationSpendNs = admittedRelocations * estimateNs;
         return remainingNs > 0d ? remainingNs : 0d;
+
+        void SwitchFold(int realm)
+        {
+            if (realm == foldRealm)
+            {
+                return;
+            }
+
+            foldRealm = realm;
+            fold.Switch(RealmSpatialForFold(realm));
+        }
     }
 }

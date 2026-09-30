@@ -429,6 +429,18 @@ export interface TickData {
   spatialByRealm?: Map<number, SpatialRealmShape>;
 
   /**
+   * One row per (realm, archetype) that sent a kind-70 record this tick — what each TOUCHED realm's partition DID,
+   * keyed <c>realmId * 65536 + archetypeId</c>, the same key as {@link spatialByRealm}.
+   *
+   * <b>A different row set from <c>spatialByRealm</c>, and neither contains the other.</b> Kind 67 is emitted for
+   * runnable realms whether or not they worked; this is emitted for realms that worked whether or not they are
+   * runnable. Absent here means "did no work this tick" — the emitter gates on it — so a panel must not render an
+   * absent row as a zero. <c>ratesRealmsTouched</c> / <c>ratesRealmsEmitted</c> on the archetype row say whether the
+   * emitter's cap truncated the set.
+   */
+  spatialRatesByRealm?: Map<number, SpatialRealmRates>;
+
+  /**
    * Push replication's server-wide figures for this tick, from a kind-68 record (#WB-02). Present only on the ~1 Hz
    * stats ticks that emit one, so a panel reads the newest over a window rather than expecting one per tick.
    */
@@ -492,6 +504,99 @@ export const SESSION_REALM_UNKNOWN = 0xffff;
 /** Key for {@link TickData.spatialByRealm}. Both halves are u16 on the wire, so the pack is lossless. */
 export function realmArchetypeKey(realmId: number, archetypeId: number): number {
   return realmId * 65536 + archetypeId;
+}
+
+/**
+ * One realm's per-tick maintenance RATES for one archetype (kind 70) — the rate twin of {@link SpatialRealmShape}.
+ *
+ * **Emitted only for realms the fence TOUCHED**, which is a different set from kind 67's runnable realms and contains
+ * neither. An absent row means "this realm did no work this tick" — never "measured as zero", and never "no such
+ * realm". A row here with no {@link SpatialRealmShape} beside it is a non-runnable realm that did maintenance work,
+ * which is an anomaly worth surfacing rather than a row to drop.
+ *
+ * **These are RATES in SO-01's sense**: every counter resets each tick, so a single tick's value is not a rate. A
+ * consumer must differentiate across a window, and must fold `largestArrivalRun` with `max` rather than `+` — adding
+ * two realms' largest arrival runs reports a burst neither cell received.
+ *
+ * **The tightness pair are sums, with `tightnessSamples` as their denominator.** Re-derive a mean as
+ * `Σ tightnessExtentSum / Σ tightnessSamples` over whatever set is being folded; averaging per-realm means weights a
+ * realm that scanned one cluster like one that scanned ten thousand.
+ */
+export interface SpatialRealmRates {
+  realmId: number;
+  archetypeId: number;
+  /** Sum of the measured extent ratios behind `TightnessSamples`, for this realm. */
+  tightnessExtentSum: number;
+  /** Sum of the packing bounds behind `TightnessSamples`, for this realm. */
+  tightnessBoundSum: number;
+  /** Budget the admitted relocations of this realm were charged, in nanoseconds. */
+  relocationSpendNs: number;
+  /** Clusters of this realm examined by the intra-cell drifter scan this tick. */
+  clustersScanned: number;
+  /** Entity slots of this realm the AABB refresh actually walked this tick. */
+  slotsScanned: number;
+  /** Entities of this realm the intra-cell scan found outside their cluster's target region this tick. Detection, not outcome. */
+  driftersDetected: number;
+  /** Drifters of this realm left in place because they were inside the drift dead zone. */
+  driftAbsorbed: number;
+  /** Drifters of this realm for which placement found no better cluster. */
+  driftersUnplaced: number;
+  /** Clusters of this realm that passed the intra-cell drift gate. */
+  driftGatedClusters: number;
+  /** Clusters of this realm above the configured floor but below their cell's density-derived target, so the drift scan never ran. */
+  driftSuppressedByDensity: number;
+  /** The subset of `DriftersUnplaced` whose cell offered no candidate at all. */
+  driftersUnplacedNoCandidate: number;
+  /** Drifters of this realm whose cell had candidates but no capacity left this pass. */
+  driftersSpilled: number;
+  /** Clusters of this realm that contributed a tightness reading this tick — the denominator of the two sums above. */
+  tightnessSamples: number;
+  /** Migrations executed into this realm this tick. Its three kinds below sum to it exactly. */
+  migrationCount: number;
+  /** Cell-crossing migrations executed into this realm. */
+  crossingsExecuted: number;
+  /** Intra-cell relocations executed in this realm. */
+  relocationsExecuted: number;
+  /** Repair moves executed in this realm. */
+  repairsExecuted: number;
+  /** Crossings filed in this realm whose destination cell is not adjacent to the source cell. */
+  jumpCrossings: number;
+  /** Crossings filed in this realm whose position lay outside the grid and were clamped into an edge cell. */
+  clampedDestinations: number;
+  /** Write-time crossing flags of this realm that the drain found describing an entity that is home, and dropped rather than executed. */
+  staleFlagsDropped: number;
+  /** Intra-cell relocations of this realm the budget refused. */
+  relocationsThrottled: number;
+  /** Relocations of this realm dropped because a mandatory request already names the same source slot. */
+  relocationsSuperseded: number;
+  /** Intra-cell relocations of this realm the throttle admitted into the drain prefix. */
+  relocationsAdmitted: number;
+  /** Mandatory cell-crossing requests of this realm the throttle found queued and charged. */
+  crossingsQueued: number;
+  /** Pinned claims in this realm rejected at drain time and therefore executed as first fit. */
+  pinsRejected: number;
+  /** Entities of this realm re-packed by the repair path this tick. */
+  repairedEntityCount: number;
+  /** Repair units admitted in this realm this tick. */
+  repairUnitCount: number;
+  /** Repair units of this realm the remaining budget could not finish, and which were therefore never begun. */
+  repairUnitsRefused: number;
+  /** Safety-valve admissions in this realm — repair units begun with insufficient budget because the cell was critical. */
+  repairValveFires: number;
+  /** Distinct destination cells of this realm's drained cell crossings. */
+  arrivalCellsTouched: number;
+  /**
+   * The most cell crossings into one destination cell of this realm this tick.
+   *
+   * **A MAXIMUM, and the one member of this record that does not sum.** Folding it with `+` — across realms OR
+   * across the ticks of a window — reports a burst no cell ever received. Nothing in the record says so, which is
+   * why it is said here and in the engine's own declaration.
+   */
+  largestArrivalRun: number;
+  /** Cell halves of this realm promoted to a tree this tick. */
+  cellTreePromotions: number;
+  /** Cell halves of this realm that fell back from a tree this tick. */
+  cellTreeDemotions: number;
 }
 
 /**
@@ -562,7 +667,7 @@ function spatialRowFor(map: Map<number, SpatialTickTelemetry>, archetypeId: numb
       controllerFlags: 0, efficiencyRebases: 0,
       repairCellsCooling: 0, repairValveFires: 0, repairedEntities: 0, repairQueueEvicted: 0,
       measuredNsPerEntity: 0, driftTargetBoost: 0,
-      presentRealms: 0, runnableRealms: 0,
+      presentRealms: 0, runnableRealms: 0, ratesRealmsTouched: 0, ratesRealmsEmitted: 0,
     };
     map.set(archetypeId, row);
   }
@@ -639,6 +744,16 @@ export interface SpatialTickTelemetry {
    * summed, not a dimension to split by.
    */
   presentRealms: number;
+  /**
+   * Realms the fence touched this tick — the realms with a kind-70 row to send, counted BEFORE the emitter's cap.
+   *
+   * Read against {@link ratesRealmsEmitted}: equal means nothing was truncated, so a realm absent from
+   * {@link TickData.spatialRatesByRealm} did no work. A shortfall means a panel must say how many working realms it is
+   * NOT showing — and must not present the rows it has as the complete set.
+   */
+  ratesRealmsTouched: number;
+  /** Kind-70 rows actually emitted beside this record. See {@link ratesRealmsTouched}. */
+  ratesRealmsEmitted: number;
   /** How many of those sent a {@link SpatialRealmShape} row this tick. The rest are not runnable. */
   runnableRealms: number;
 }
@@ -843,6 +958,7 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
   // #911 O3 — built lazily so a tick with no spatial archetype carries no map at all rather than an empty one.
   let spatialByArchetype: Map<number, SpatialTickTelemetry> | undefined;
   let spatialByRealm: Map<number, SpatialRealmShape> | undefined;
+  let spatialRatesByRealm: Map<number, SpatialRealmRates> | undefined;
   let subscriptions: SubscriptionsServerTelemetry | undefined;
   let subscriptionSessions: Map<number, SubscriptionsSessionTelemetry> | undefined;
 
@@ -1031,6 +1147,8 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
         row.driftTargetBoost = evt.driftTargetBoost ?? 0;
         row.presentRealms = evt.presentRealms ?? 0;
         row.runnableRealms = evt.runnableRealms ?? 0;
+        row.ratesRealmsTouched = evt.ratesRealmsTouched ?? 0;
+        row.ratesRealmsEmitted = evt.ratesRealmsEmitted ?? 0;
         break;
       }
 
@@ -1054,6 +1172,51 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
           blockedCells: evt.blockedCells ?? 0,
           budgetConfiguredMs: evt.budgetConfiguredMs ?? 0,
           efficiencyTolerance: evt.efficiencyTolerance ?? 0,
+        });
+        break;
+      }
+
+      // The rate twin of the case above. Keyed identically, but a SEPARATE map: the two row sets differ, and merging
+      // them would have to invent one side's absence as a zero — which is the distinction both records exist to keep.
+      case TraceEventKind.SpatialRealmRates: {
+        const realmId = evt.realmId ?? 0;
+        const archetypeId = evt.archetypeId ?? 0;
+        (spatialRatesByRealm ??= new Map()).set(realmArchetypeKey(realmId, archetypeId), {
+          realmId,
+          archetypeId,
+          tightnessExtentSum: evt.tightnessExtentSum ?? 0,
+          tightnessBoundSum: evt.tightnessBoundSum ?? 0,
+          relocationSpendNs: evt.relocationSpendNs ?? 0,
+          clustersScanned: evt.clustersScanned ?? 0,
+          slotsScanned: evt.slotsScanned ?? 0,
+          driftersDetected: evt.driftersDetected ?? 0,
+          driftAbsorbed: evt.driftAbsorbed ?? 0,
+          driftersUnplaced: evt.driftersUnplaced ?? 0,
+          driftGatedClusters: evt.driftGatedClusters ?? 0,
+          driftSuppressedByDensity: evt.driftSuppressedByDensity ?? 0,
+          driftersUnplacedNoCandidate: evt.driftersUnplacedNoCandidate ?? 0,
+          driftersSpilled: evt.driftersSpilled ?? 0,
+          tightnessSamples: evt.tightnessSamples ?? 0,
+          migrationCount: evt.migrationCount ?? 0,
+          crossingsExecuted: evt.crossingsExecuted ?? 0,
+          relocationsExecuted: evt.relocationsExecuted ?? 0,
+          repairsExecuted: evt.repairsExecuted ?? 0,
+          jumpCrossings: evt.jumpCrossings ?? 0,
+          clampedDestinations: evt.clampedDestinations ?? 0,
+          staleFlagsDropped: evt.staleFlagsDropped ?? 0,
+          relocationsThrottled: evt.relocationsThrottled ?? 0,
+          relocationsSuperseded: evt.relocationsSuperseded ?? 0,
+          relocationsAdmitted: evt.relocationsAdmitted ?? 0,
+          crossingsQueued: evt.crossingsQueued ?? 0,
+          pinsRejected: evt.pinsRejected ?? 0,
+          repairedEntityCount: evt.repairedEntityCount ?? 0,
+          repairUnitCount: evt.repairUnitCount ?? 0,
+          repairUnitsRefused: evt.repairUnitsRefused ?? 0,
+          repairValveFires: evt.repairValveFires ?? 0,
+          arrivalCellsTouched: evt.arrivalCellsTouched ?? 0,
+          largestArrivalRun: evt.largestArrivalRun ?? 0,
+          cellTreePromotions: evt.cellTreePromotions ?? 0,
+          cellTreeDemotions: evt.cellTreeDemotions ?? 0,
         });
         break;
       }
@@ -1561,6 +1724,7 @@ export function processTickEvents(tickNumber: number, events: TraceEvent[], syst
     rawEvents: events,
     spatialByArchetype,
     spatialByRealm,
+    spatialRatesByRealm,
     subscriptions,
     subscriptionSessions,
   };

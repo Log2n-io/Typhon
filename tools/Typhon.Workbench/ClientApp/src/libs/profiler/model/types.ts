@@ -55,6 +55,8 @@ export const enum TraceEventKind {
   SpatialRelocationOutcome = 65,
   SpatialArchetypeTelemetry = 66,
   SpatialRealmTelemetry = 67,
+  /** Instant — per-realm per-archetype maintenance RATES, for realms the fence touched (mirrored in `isInstantKind`). */
+  SpatialRealmRates = 70,
   SubscriptionsServerTelemetry = 68,
   SubscriptionsSessionTelemetry = 69,
 
@@ -791,6 +793,29 @@ export interface TraceEvent {
   // Appended in #WB-05. A CENSUS, not a dimension: every counter above stays summed across realms.
   presentRealms?: number;         // realms this archetype has cluster state in, runnable or not
   runnableRealms?: number;        // how many of those sent a kind-67 row this tick
+
+  // SpatialRealmRates (kind 70) — one row per realm the fence TOUCHED, per archetype: that realm's share of the
+  // per-tick maintenance rates. Reuses `realmId` / `archetypeId` above, and every counter kind 66 already declares
+  // (`migrationCount`, `driftersDetected`, ...) — on a kind-70 record those carry ONE realm's value, not the sum.
+  ratesRealmsTouched?: number;    // realms with a row to send this tick, counted BEFORE the emitter's cap
+  ratesRealmsEmitted?: number;    // rows actually sent; less than touched means the cap truncated the set
+  tightnessExtentSum?: number;
+  tightnessBoundSum?: number;
+  relocationSpendNs?: number;
+  clustersScanned?: number;
+  driftAbsorbed?: number;
+  driftGatedClusters?: number;
+  driftSuppressedByDensity?: number;
+  crossingsExecuted?: number;
+  relocationsExecuted?: number;
+  repairsExecuted?: number;
+  jumpCrossings?: number;
+  clampedDestinations?: number;
+  staleFlagsDropped?: number;
+  repairedEntityCount?: number;
+  repairUnitCount?: number;
+  arrivalCellsTouched?: number;
+  largestArrivalRun?: number;
 
   // SpatialRealmTelemetry (kind 67) — one row per RUNNABLE realm per archetype: that realm's partition SHAPE. The
   // per-tick rate counters are absent on purpose — they are owned per archetype, so a realm-keyed copy would report

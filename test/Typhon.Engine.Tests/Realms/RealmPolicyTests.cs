@@ -177,6 +177,9 @@ class RealmPolicyTests : TestBase<RealmPolicyTests>
         finally
         {
             TyphonProfiler.Stop();
+            // DETACH, or the observer stays on the global exporter list after this test disposes it — and the NEXT test's Stop() drains into a disposed
+            // BlockingCollection. Attachment is process-global and survives the fixture; `using` only disposes the observer, it does not unregister it.
+            TyphonProfiler.DetachExporter(observer);
         }
 
         var archetypeId = Archetype<RealmUnit>.Metadata.ArchetypeId;

@@ -1,5 +1,6 @@
 import type { Realm } from '@/hooks/realms/types';
 import type { RealmBoardReading, RealmBoardRow } from './realmBoardReading';
+import type { RealmRateRow, RealmRatesReading } from './realmRatesReading';
 
 /**
  * One row per realm, from whichever sources this session has.
@@ -19,6 +20,14 @@ export interface RealmRow {
   readonly catalog: Realm | null;
   /** This tick's run state and spatial work, when this session has telemetry AND the realm reported on that tick. */
   readonly live: RealmBoardRow | null;
+  /**
+   * What this realm DID over the window, when it did anything at all.
+   *
+   * <b>A third half on a different clock, and that is why it is a separate field rather than more columns on
+   * <c>live</c>.</b> <c>live</c> is one tick; this is a window. Null means the realm did no work in the window — the
+   * emitter sends nothing for an untouched realm — which is not the same as working and counting zero.
+   */
+  readonly rates: RealmRateRow | null;
 }
 
 export interface RealmRowSet {
@@ -29,6 +38,10 @@ export interface RealmRowSet {
   readonly dormantRealms: number | null;
   /** Realms registered with the engine, per the census. Null without one. */
   readonly presentRealms: number | null;
+  /** The window the rate half was computed over, in milliseconds. Null when there is no rate half. */
+  readonly rateWindowMs: number | null;
+  /** True when the emitter's cap hid working realms from the rate half — the rows shown are then not the whole set. */
+  readonly ratesTruncated: boolean;
 }
 
 /**
@@ -38,24 +51,39 @@ export interface RealmRowSet {
  * telemetry-only realm is a real realm in a session that cannot read the catalog (or one registered at run time and not
  * yet persisted). Dropping either side would hide realms that exist.
  */
-export function mergeRealmRows(catalog: readonly Realm[], board: RealmBoardReading | null): RealmRowSet {
-  const byId = new Map<number, { catalog: Realm | null; live: RealmBoardRow | null }>();
+export function mergeRealmRows(
+  catalog: readonly Realm[],
+  board: RealmBoardReading | null,
+  rates: RealmRatesReading | null = null,
+): RealmRowSet {
+  const byId = new Map<number, { catalog: Realm | null; live: RealmBoardRow | null; rates: RealmRateRow | null }>();
 
   for (const realm of catalog) {
-    byId.set(realm.id, { catalog: realm, live: null });
+    byId.set(realm.id, { catalog: realm, live: null, rates: null });
   }
   for (const row of board?.rows ?? []) {
     const existing = byId.get(row.realmId);
     if (existing) {
       existing.live = row;
     } else {
-      byId.set(row.realmId, { catalog: null, live: row });
+      byId.set(row.realmId, { catalog: null, live: row, rates: null });
+    }
+  }
+  // A THIRD source, unioned like the other two: a realm can report rates on a tick it sent no shape row for — the two
+  // records gate differently, and kind 70 is emitted for realms policy is not running. Dropping such a row would hide
+  // exactly the anomaly worth seeing.
+  for (const row of rates?.rows ?? []) {
+    const existing = byId.get(row.realmId);
+    if (existing) {
+      existing.rates = row;
+    } else {
+      byId.set(row.realmId, { catalog: null, live: null, rates: row });
     }
   }
 
   const rows: RealmRow[] = [...byId.entries()]
     .sort((a, b) => a[0] - b[0])
-    .map(([id, sides]) => ({ id, catalog: sides.catalog, live: sides.live }));
+    .map(([id, sides]) => ({ id, catalog: sides.catalog, live: sides.live, rates: sides.rates }));
 
   return {
     rows,
@@ -65,6 +93,8 @@ export function mergeRealmRows(catalog: readonly Realm[], board: RealmBoardReadi
     // the runnable set — i.e. when telemetry is the only source.
     dormantRealms: board != null && catalog.length === 0 ? board.dormantRealms : null,
     presentRealms: board != null && catalog.length === 0 ? board.presentRealms : null,
+    rateWindowMs: rates != null && rates.rows.length > 0 ? rates.windowMs : null,
+    ratesTruncated: rates?.truncated ?? false,
   };
 }
 

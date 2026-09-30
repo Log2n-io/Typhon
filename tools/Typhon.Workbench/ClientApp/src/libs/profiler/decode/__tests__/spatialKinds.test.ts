@@ -406,4 +406,121 @@ describe('append-only prefixes decode without reading past the record', () => {
     });
     expect(() => decodeOne(bytes)).not.toThrow();
   });
+
+  // Kind 70 — the per-realm RATE rows. Every field gets a DISTINCT value, so a transposed pair fails rather than
+  // passing on two zeroes, and the assertion names the field it is checking so a failure says which offset moved.
+  //
+  // This test exists because its absence let the feature ship dead: the decoder had no case for kind 70 at all, so
+  // every record fell through to the default and was DROPPED, while the reading layer's own tests kept passing against
+  // hand-built ticks that never went near the wire. A pure-function test proves the arithmetic; only this proves the
+  // bytes arrive.
+  it('kind 70 SpatialRealmRates: two u16, three f64, then thirty i32 in the engine block\'s declaration order', () => {
+    const bytes = record(70, false, (v, o) => {
+      v.setUint16(o, 7, true);          // realmId
+      v.setUint16(o + 2, 3, true);      // archetypeId
+      v.setFloat64(o + 4, 1.5, true);
+      v.setFloat64(o + 12, 2.5, true);
+      v.setFloat64(o + 20, 3.5, true);
+      v.setInt32(o + 28, 4, true);
+      v.setInt32(o + 32, 5, true);
+      v.setInt32(o + 36, 6, true);
+      v.setInt32(o + 40, 7, true);
+      v.setInt32(o + 44, 8, true);
+      v.setInt32(o + 48, 9, true);
+      v.setInt32(o + 52, 10, true);
+      v.setInt32(o + 56, 11, true);
+      v.setInt32(o + 60, 12, true);
+      v.setInt32(o + 64, 13, true);
+      v.setInt32(o + 68, 14, true);
+      v.setInt32(o + 72, 15, true);
+      v.setInt32(o + 76, 16, true);
+      v.setInt32(o + 80, 17, true);
+      v.setInt32(o + 84, 18, true);
+      v.setInt32(o + 88, 19, true);
+      v.setInt32(o + 92, 20, true);
+      v.setInt32(o + 96, 21, true);
+      v.setInt32(o + 100, 22, true);
+      v.setInt32(o + 104, 23, true);
+      v.setInt32(o + 108, 24, true);
+      v.setInt32(o + 112, 25, true);
+      v.setInt32(o + 116, 26, true);
+      v.setInt32(o + 120, 27, true);
+      v.setInt32(o + 124, 28, true);
+      v.setInt32(o + 128, 29, true);
+      v.setInt32(o + 132, 30, true);
+      v.setInt32(o + 136, 31, true);
+      v.setInt32(o + 140, 32, true);
+      v.setInt32(o + 144, 33, true);
+      return o + 148;
+    });
+
+    const e = decodeOne(bytes);
+    expect(e.kind).toBe(TraceEventKind.SpatialRealmRates);
+    expect(e.realmId, 'realmId').toBe(7);
+    expect(e.archetypeId, 'archetypeId').toBe(3);
+    expect(e.tightnessExtentSum, 'tightnessExtentSum').toBe(1.5);
+    expect(e.tightnessBoundSum, 'tightnessBoundSum').toBe(2.5);
+    expect(e.relocationSpendNs, 'relocationSpendNs').toBe(3.5);
+    expect(e.clustersScanned, 'clustersScanned').toBe(4);
+    expect(e.slotsScanned, 'slotsScanned').toBe(5);
+    expect(e.driftersDetected, 'driftersDetected').toBe(6);
+    expect(e.driftAbsorbed, 'driftAbsorbed').toBe(7);
+    expect(e.driftersUnplaced, 'driftersUnplaced').toBe(8);
+    expect(e.driftGatedClusters, 'driftGatedClusters').toBe(9);
+    expect(e.driftSuppressedByDensity, 'driftSuppressedByDensity').toBe(10);
+    expect(e.driftersUnplacedNoCandidate, 'driftersUnplacedNoCandidate').toBe(11);
+    expect(e.driftersSpilled, 'driftersSpilled').toBe(12);
+    expect(e.tightnessSamples, 'tightnessSamples').toBe(13);
+    expect(e.migrationCount, 'migrationCount').toBe(14);
+    expect(e.crossingsExecuted, 'crossingsExecuted').toBe(15);
+    expect(e.relocationsExecuted, 'relocationsExecuted').toBe(16);
+    expect(e.repairsExecuted, 'repairsExecuted').toBe(17);
+    expect(e.jumpCrossings, 'jumpCrossings').toBe(18);
+    expect(e.clampedDestinations, 'clampedDestinations').toBe(19);
+    expect(e.staleFlagsDropped, 'staleFlagsDropped').toBe(20);
+    expect(e.relocationsThrottled, 'relocationsThrottled').toBe(21);
+    expect(e.relocationsSuperseded, 'relocationsSuperseded').toBe(22);
+    expect(e.relocationsAdmitted, 'relocationsAdmitted').toBe(23);
+    expect(e.crossingsQueued, 'crossingsQueued').toBe(24);
+    expect(e.pinsRejected, 'pinsRejected').toBe(25);
+    expect(e.repairedEntityCount, 'repairedEntityCount').toBe(26);
+    expect(e.repairUnitCount, 'repairUnitCount').toBe(27);
+    expect(e.repairUnitsRefused, 'repairUnitsRefused').toBe(28);
+    expect(e.repairValveFires, 'repairValveFires').toBe(29);
+    expect(e.arrivalCellsTouched, 'arrivalCellsTouched').toBe(30);
+    expect(e.largestArrivalRun, 'largestArrivalRun').toBe(31);
+    expect(e.cellTreePromotions, 'cellTreePromotions').toBe(32);
+    expect(e.cellTreeDemotions, 'cellTreeDemotions').toBe(33);
+  });
+
+  // The two counts kind 66 gained for kind 70's row census. They are APPENDED, so they are read through the decoder's
+  // short-record guard: a trace captured before they existed must still decode, with both reading zero.
+  it('kind 66 carries the rate-row census, and a record that predates it still decodes', () => {
+    const withCensus = record(66, false, (v, o) => {
+      v.setUint16(o, 3, true);
+      v.setInt32(o + 139, 1188, true);  // presentRealms
+      v.setInt32(o + 143, 2, true);     // runnableRealms
+      v.setInt32(o + 147, 312, true);   // ratesRealmsTouched — BEFORE the cap
+      v.setInt32(o + 151, 64, true);    // ratesRealmsEmitted — after it
+      return o + 155;
+    });
+
+    const e = decodeOne(withCensus);
+    expect(e.ratesRealmsTouched).toBe(312);
+    expect(e.ratesRealmsEmitted).toBe(64);
+
+    // The same record as an older producer wrote it: it stops after runnableRealms.
+    const older = record(66, false, (v, o) => {
+      v.setUint16(o, 3, true);
+      v.setInt32(o + 139, 1188, true);
+      v.setInt32(o + 143, 2, true);
+      return o + 147;
+    });
+
+    const e2 = decodeOne(older);
+    expect(e2.runnableRealms, 'the fields it does carry still decode').toBe(2);
+    // Zero is the right reading here, not a missing one: a producer with no kind 70 truncated nothing.
+    expect(e2.ratesRealmsTouched).toBe(0);
+    expect(e2.ratesRealmsEmitted).toBe(0);
+  });
 });

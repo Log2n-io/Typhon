@@ -34,7 +34,7 @@ function row(over: Partial<SpatialTickTelemetry> = {}): SpatialTickTelemetry {
     controllerFlags: 0, efficiencyRebases: 0,
     repairCellsCooling: 0, repairValveFires: 0, repairedEntities: 0, repairQueueEvicted: 0,
     measuredNsPerEntity: 0, driftTargetBoost: 0,
-    presentRealms: 0, runnableRealms: 0,
+    presentRealms: 0, runnableRealms: 0, ratesRealmsTouched: 0, ratesRealmsEmitted: 0,
     ...over,
   };
 }

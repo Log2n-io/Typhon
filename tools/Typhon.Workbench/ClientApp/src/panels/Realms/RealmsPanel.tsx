@@ -4,6 +4,9 @@ import { useRealmTelemetry } from '@/hooks/realms/useRealmTelemetry';
 import { realmAxis, realmCoord, realmLabel, type Realm } from '@/hooks/realms/types';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { readRealmBoard } from './realmBoardReading';
+import { readRealmRates } from './realmRatesReading';
+import { useLiveGaugeData } from '@/hooks/profiler/useLiveGaugeData';
+import { useTelemetrySession } from '@/hooks/profiler/useTelemetrySession';
 import { mergeRealmRows, awakeCount, type RealmRow } from './realmRows';
 
 /**
@@ -29,7 +32,25 @@ export default function RealmsPanel() {
   const selectedId = leaf?.type === 'realm' ? (leaf.ref as number) : null;
 
   const board = useMemo(() => (hasTelemetry ? readRealmBoard(ticks) : null), [hasTelemetry, ticks]);
-  const set = useMemo(() => mergeRealmRows(list, board), [list, board]);
+  // A SECOND clock, and a BOUNDED one. The board samples one tick because a realm's shape is a fact about an instant;
+  // rates reset every tick, so a single sample is not a rate and only a window is one (SO-01).
+  //
+  // `windowedTicks`, NOT `ticks`. `useRealmTelemetry` hands back every tick in scope, which while following the head is
+  // the whole session — so the divisor would grow without bound and a realm's migrations per second would FALL for as
+  // long as the session ran, comparable to nothing, least of all to the same realm ten minutes earlier. This is the
+  // same 60-second window every other rate on the surface is quoted over.
+  const { sessionId } = useTelemetrySession();
+  const { windowedTicks } = useLiveGaugeData(sessionId);
+  const rates = useMemo(() => (hasTelemetry ? readRealmRates(windowedTicks) : null), [hasTelemetry, windowedTicks]);
+  const set = useMemo(() => mergeRealmRows(list, board, rates), [list, board, rates]);
+  // The rate columns appear only when some realm actually reported work: a column of dashes over 1 237 realms is a
+  // column asserting it could have answered, and the banner already says why it cannot.
+  const showRates = set.rateWindowMs != null;
+  // How many columns the one-tick half occupies, so the spanning header above them stays right when a column is added.
+  const shapeColumnCount = 1 + (hasTelemetry ? 2 : 0) + (hasCatalog ? 3 : 0) + 2 + (hasTelemetry ? 3 : 0);
+  const rateWindowLabel = set.rateWindowMs == null
+    ? ''
+    : `${(set.rateWindowMs / 1000).toLocaleString(undefined, { maximumFractionDigits: 0 })} s · ${(rates?.windowTicks ?? 0).toLocaleString()} ticks`;
 
   if (!hasRealms) {
     return <div className="p-4 text-sm text-muted-foreground">This database holds one world, so it has no realms to list.</div>;
@@ -70,6 +91,16 @@ export default function RealmsPanel() {
         </span>
       </div>
 
+      {set.ratesTruncated && (
+        // The engine caps rate rows per archetype per tick, and truncates a PREFIX of present order rather than a
+        // rotating sample — so the realms missing here are the same ones on every tick. Without this line the table
+        // reads as "the realms that worked" when it is only some of them.
+        <p className="border-b bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+          More realms did work than the engine sends rate rows for, so the rates below are a subset — and the same
+          realms are omitted on every tick. Narrow the time scope, or read one realm at a time.
+        </p>
+      )}
+
       {hasCatalog && catalog && !catalog.liveState && !hasTelemetry && (
         // Once, at the top. A per-row "—" with a tooltip would ask the reader to discover the same fact per realm.
         <p className="border-b bg-muted/40 px-3 py-2 text-xs text-muted-foreground">{catalog.liveStateReason}</p>
@@ -78,6 +109,20 @@ export default function RealmsPanel() {
       <div className="min-h-0 flex-1 overflow-auto">
         <table className="w-full border-collapse">
           <thead className="sticky top-0 bg-background text-fs-2xs uppercase text-muted-foreground">
+            {showRates && (
+              // TWO CLOCKS, said out loud. Everything left of the rate group is one tick; the rate group is a window.
+              // SO-01's opening clause is that this surface carries both kinds, and a table that mixes them without
+              // saying which is which is how a reader comes to believe the average describes the tick they are on.
+              <tr className="border-b border-border/40">
+                <th className="px-2 py-1 text-left font-medium normal-case" colSpan={shapeColumnCount}>
+                  <span className="text-muted-foreground">this tick</span>
+                </th>
+                <th className="px-2 py-1 text-right font-medium normal-case" colSpan={4}>
+                  <span className="text-muted-foreground">per second, over {rateWindowLabel}</span>
+                </th>
+                {hasCatalog && <th />}
+              </tr>
+            )}
             <tr>
               <Th className="text-left">Realm</Th>
               {hasTelemetry && <Th className="text-left">State</Th>}
@@ -90,6 +135,14 @@ export default function RealmsPanel() {
               {hasTelemetry && <Th title="Archetypes that reported this realm on this tick">Arch</Th>}
               {hasTelemetry && <Th>Clusters</Th>}
               {hasTelemetry && <Th title="Clusters whose extent escaped their cell">Escaped</Th>}
+              {showRates && <Th title="Entities this realm moved between cells, per second of wall clock over the window">Migr/s</Th>}
+              {showRates && <Th title="Entities this realm's drift scan found out of place, per second of wall clock over the window">Drift/s</Th>}
+              {showRates && <Th title="Budget this realm's relocations were charged, in milliseconds per second of wall clock">Budget ms/s</Th>}
+              {showRates && (
+                <Th title="Ticks of the window this realm reported on. The rates divide by the WHOLE window, so a realm busy for a tenth of it reads at a tenth of its working rate — this is what says which.">
+                  Busy
+                </Th>
+              )}
               {hasCatalog && <Th className="text-left" title="Bootstrap grid record, persisted catalog, or the live realm table">Source</Th>}
             </tr>
           </thead>
@@ -100,6 +153,7 @@ export default function RealmsPanel() {
                 row={row}
                 showLive={hasTelemetry}
                 showCatalog={hasCatalog}
+                showRates={showRates}
                 selected={row.id === selectedId}
                 onSelect={() => select('realm', row.id)}
               />
@@ -123,12 +177,14 @@ function Row({
   row,
   showLive,
   showCatalog,
+  showRates,
   selected,
   onSelect,
 }: {
   row: RealmRow;
   showLive: boolean;
   showCatalog: boolean;
+  showRates: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -183,9 +239,33 @@ function Row({
         </td>
       )}
 
+
+      {showRates && <td className="px-2 py-1 text-right">{rateCell(row.rates?.migrationsPerSec)}</td>}
+      {showRates && <td className="px-2 py-1 text-right">{rateCell(row.rates?.driftersPerSec)}</td>}
+      {showRates && <td className="px-2 py-1 text-right">{rateCell(row.rates?.budgetMsPerSec, 2)}</td>}
+      {showRates && (
+        <td className="px-2 py-1 text-right text-muted-foreground">
+          {row.rates ? `${row.rates.ticksReporting}/${row.rates.windowTicks}` : <span title="Did no work in this window — the engine sends nothing for a realm it did not touch, so this is a measured silence, not a zero.">—</span>}
+        </td>
+      )}
+
       {showCatalog && <td className="px-2 py-1 text-left text-muted-foreground">{row.catalog?.source ?? 'live'}</td>}
     </tr>
   );
+}
+
+/**
+ * A per-second rate, or an em dash when the realm did no work in the window.
+ *
+ * <b>The dash is not decoration.</b> The engine emits nothing for a realm it did not touch, so an absent row means
+ * "measured, and it did nothing" — which a zero would also say, while additionally claiming the realm was measured and
+ * found idle on every tick. SO-01 reserves zero for a measured zero; absence is its own reading.
+ */
+function rateCell(value: number | undefined, digits = 1): React.ReactNode {
+  if (value === undefined) {
+    return <span className="text-muted-foreground" title="Did no work in this window — a realm the fence did not touch sends no record at all.">—</span>;
+  }
+  return value.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
 /** Cells per axis, the way the engine's own grid constructor computes them: ceil(extent / cellSize) per axis. */

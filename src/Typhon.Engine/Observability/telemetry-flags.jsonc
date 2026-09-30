@@ -661,6 +661,12 @@
                   "kind": "subtreeResolved",
                   "field": "SpatialRealmTelemetryActive",
                   "desc": "Combined gate for the Spatial:ClusterMigration:RealmTelemetry instant (kind 67: one row per RUNNABLE realm per spatial archetype, carrying that realm's partition shape). Separate from ArchetypeTelemetry because its volume scales with the realm count, not the archetype count: a galaxy of thousands of interiors can afford the one archetype record and not the thousands of realm rows."
+                },
+                {
+                  "name": "RealmRates",
+                  "kind": "subtreeResolved",
+                  "field": "SpatialRealmRatesActive",
+                  "desc": "Combined gate for the Spatial:ClusterMigration:RealmRates instant (kind 70: one row per realm the fence TOUCHED per spatial archetype, carrying that realm's per-tick maintenance rates). Separate from RealmTelemetry because the row sets differ — 67 is emitted for runnable realms whether or not they worked, 70 for realms that worked whether or not they are runnable — and because this row is three times the size, so a galaxy that can afford the shape rows may not want the rate rows."
                 }
               ]
             },

@@ -1887,13 +1887,26 @@ public partial class DatabaseEngine
         // does" and therefore free — it is not: kind 66 carries no reach field and that method is not called on this path, so the walk is additive. With the
         // profiler attached and both spatial kinds off, every archetype was paying O(present realms) plus a RealmTable.IsRunnable per realm every tick for
         // records nobody asked for — on the galaxy of a few thousand sleeping interiors this file's own docs invoke, that is the wrong order of magnitude.
-        if (!TelemetryConfig.SpatialArchetypeTelemetryActive && !TelemetryConfig.SpatialRealmTelemetryActive)
+        if (!TelemetryConfig.SpatialArchetypeTelemetryActive && !TelemetryConfig.SpatialRealmTelemetryActive && !TelemetryConfig.SpatialRealmRatesActive)
         {
             return;
         }
 
         var present = clusterState.PresentRealmSpatial;
-        var runnable = CountRunnableRealms(present, clusterState.RealmTableOrNull);
+
+        // Only the two records that CONSUME it pay for it. `runnable` costs O(present) plus a RealmTable.IsRunnable per realm, and with only the rates leaf
+        // on nothing reads it — which is the regression the comment above was written about, one leaf later.
+        var runnable = TelemetryConfig.SpatialArchetypeTelemetryActive || TelemetryConfig.SpatialRealmTelemetryActive
+            ? CountRunnableRealms(present, clusterState.RealmTableOrNull) : 0;
+
+        // The RATE rows go out BEFORE kind 66, so the counts it carries are MEASURED by the walk that emitted them rather than predicted from the cap.
+        // Predicting made the two agree by construction, which is the one thing a self-check must not do: a row lost between the count and the emit would
+        // have been unreportable, and the field would have measured nothing. Ordering on the wire does not matter — a consumer keys both by tick.
+        //
+        // BOTH read zero when the leaf is off, rather than a true `touched` against an emitted of zero: a consumer reads a shortfall as "the cap truncated
+        // working realms", and saying that about a subtree nobody switched on would be a false alarm. "The feature is off" is already carried by the
+        // absence of the kind itself.
+        EmitSpatialRealmRates(archetypeId, present, out var ratesTouched, out var ratesEmitted);
 
         // Gate kind 66's own emission too, not only the pair above. The generator puts `if (!TelemetryConfig.<Gate>) return;` INSIDE the emit body and C#
         // evaluates a call's arguments first, so with ONLY the realm gate on this call still computed ~35 arguments — four divisions and several `?.Count`
@@ -1936,7 +1949,9 @@ public partial class DatabaseEngine
                 measuredNsPerEntity: (float)clusterState.LastTickMeasuredNsPerEntity,
                 driftTargetBoost: clusterState.DriftTargetBoost,
                 presentRealms: present.Length,
-                runnableRealms: runnable);
+                runnableRealms: runnable,
+                ratesRealmsTouched: ratesTouched,
+                ratesRealmsEmitted: ratesEmitted);
         }
 
         EmitSpatialRealmRows(clusterState, archetypeId, present);
@@ -2026,6 +2041,103 @@ public partial class DatabaseEngine
                 blockedCells: rs.TightnessBlockedCells?.Count ?? 0,
                 budgetConfiguredMs: config.ReclusterBudgetMs,
                 efficiencyTolerance: config.QueryEfficiencyTolerance);
+        }
+    }
+
+    /// <summary>
+    /// The cap on kind-70 rows per archetype per tick. Volume scales with the realm count, so an engine hosting thousands of interiors would otherwise
+    /// spend its trace on rows nobody reads; 64 is chosen against what a panel can show, matching the operator-row cap the frame assembler uses.
+    /// </summary>
+    private const int RealmRatesRowCap = 64;
+
+    /// <summary>
+    /// Whether <paramref name="rs"/> gets a per-realm RATES row: one the fence touched this tick.
+    /// </summary>
+    /// <remarks>
+    /// The single definition, as <see cref="RealmGetsATelemetryRow"/> is for kind 67, so the census on kind 66 and the rows themselves can never disagree.
+    /// <b>Deliberately NOT the same predicate.</b> Kind 67 asks "is this realm runnable", which is a policy question and true of realms that did nothing;
+    /// this asks "did the fence do work here", which is true of realms policy is not running — and that case is the anomaly worth seeing, not a row to drop.
+    /// </remarks>
+    internal static bool RealmGetsARatesRow(RealmArchetypeSpatial rs) => rs != null && rs.Counters.F.Touched != 0;
+
+    /// <summary>
+    /// One row per realm the fence touched this tick, carrying that realm's per-tick maintenance rates (kind 70).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Called from Finalize, and that is the only correct place.</b> <c>ResetRealmTickCounters</c> runs in the NEXT tick's Prep, so these counters hold
+    /// this tick's work from the moment the fence's producers finish until then. Emitting anywhere in Prep would publish either the previous tick's numbers
+    /// (before the reset) or zeros (after it) — and both would look like a working feature reporting believable figures.
+    /// </para>
+    /// <para>
+    /// <b>The cap truncates a prefix of present order</b>, and the bias is real: with more touched realms than the cap, the same realms are dropped every
+    /// tick rather than a rotating sample. That is deliberate — rotating would put holes in every realm's series, spreading the ambiguity across all of
+    /// them instead of confining it to a tail a consumer can name from the two counts on kind 66. Sorting by busiest would be honest selection but puts a
+    /// sort on the fence path to serve a diagnostic.
+    /// </para>
+    /// </remarks>
+    private static void EmitSpatialRealmRates(ushort archetypeId, ReadOnlySpan<RealmArchetypeSpatial> present, out int touched, out int emitted)
+    {
+        touched = 0;
+        emitted = 0;
+        if (!TelemetryConfig.SpatialRealmRatesActive)
+        {
+            return;
+        }
+
+        foreach (var rs in present)
+        {
+            if (!RealmGetsARatesRow(rs))
+            {
+                continue;
+            }
+
+            // Counted for EVERY touched realm, including the ones past the cap — that is the whole point of reporting it beside `emitted`, and counting it
+            // after the `break` below would make the two equal by construction and the pair would measure nothing.
+            touched++;
+            if (emitted >= RealmRatesRowCap)
+            {
+                continue;
+            }
+
+            emitted++;
+            ref readonly var c = ref rs.Counters.F;
+            TyphonEvent.EmitSpatialRealmRates(
+                realmId: rs.Realm.Value,
+                archetypeId: archetypeId,
+                tightnessExtentSum: c.TightnessExtentSum,
+                tightnessBoundSum: c.TightnessBoundSum,
+                relocationSpendNs: c.RelocationSpendNs,
+                clustersScanned: c.ClustersScanned,
+                slotsScanned: c.SlotsScanned,
+                driftersDetected: c.DriftersDetected,
+                driftAbsorbed: c.DriftAbsorbed,
+                driftersUnplaced: c.DriftersUnplaced,
+                driftGatedClusters: c.DriftGatedClusters,
+                driftSuppressedByDensity: c.DriftSuppressedByDensity,
+                driftersUnplacedNoCandidate: c.DriftersUnplacedNoCandidate,
+                driftersSpilled: c.DriftersSpilled,
+                tightnessSamples: c.TightnessSamples,
+                migrationCount: c.MigrationCount,
+                crossingsExecuted: c.CrossingsExecuted,
+                relocationsExecuted: c.RelocationsExecuted,
+                repairsExecuted: c.RepairsExecuted,
+                jumpCrossings: c.JumpCrossings,
+                clampedDestinations: c.ClampedDestinations,
+                staleFlagsDropped: c.StaleFlagsDropped,
+                relocationsThrottled: c.RelocationsThrottled,
+                relocationsSuperseded: c.RelocationsSuperseded,
+                relocationsAdmitted: c.RelocationsAdmitted,
+                crossingsQueued: c.CrossingsQueued,
+                pinsRejected: c.PinsRejected,
+                repairedEntityCount: c.RepairedEntityCount,
+                repairUnitCount: c.RepairUnitCount,
+                repairUnitsRefused: c.RepairUnitsRefused,
+                repairValveFires: c.RepairValveFires,
+                arrivalCellsTouched: c.ArrivalCellsTouched,
+                largestArrivalRun: c.LargestArrivalRun,
+                cellTreePromotions: c.CellTreePromotions,
+                cellTreeDemotions: c.CellTreeDemotions);
         }
     }
 
