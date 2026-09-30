@@ -49,9 +49,60 @@ public sealed partial class SimBridge
 
     private bool IsDungeonRealm(ushort realm) => _config.Dungeons > 0 && realm >= FirstDungeonRealm && realm < FirstDungeonRealm + _config.Dungeons;
 
+    /// <summary>Whether the slots a previous run left behind have been accounted for. See <see cref="SkipSlotsHeldFromAPreviousRun"/>.</summary>
+    private bool _staleSlotsResolved;
+
+    /// <summary>
+    /// Step the slot counter past every dungeon id a previous run left registered, once, before the first open.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A dungeon realm is registered at run time and persisted like any other, so a run that ends with one open leaves its catalog row Live.</b> The next
+    /// open restores it registered — RLM-06: a Closing realm is resolved at open, a Live one is simply live again — and the slot counter, which is process
+    /// state, restarts at zero and walks straight into it. <c>Register</c> then throws <i>"Realm N is already registered"</i> from inside the Dungeon system,
+    /// which aborts the tick. It aborts every following tick too, so the world never advances: with <c>--serve</c> the process stays up, answers HTTP and
+    /// accepts profiler attachments while sitting at tick 0 forever, which reads as a hang rather than as a crash. Reproduced in two runs of
+    /// <c>--persist --planets 1 --dungeons 1</c>, and it does not need a kill — a measured run that simply ends with a dungeon open is enough.
+    /// </para>
+    /// <para>
+    /// <b>The slots are skipped, not reclaimed, and that is deliberate.</b> Reclaiming means unregistering them, which under RLM-06 needs their contents gone
+    /// before the realm can leave — and their contents include the previous party's <i>players</i>, real persisted entities that must be sent home rather than
+    /// destroyed. That is a recovery path with its own design (find the stranded players, teleport them to realm 0, destroy the mobs, let the fence retire the
+    /// realm), not a line in an opener. Skipping is the part that is unambiguously right: it costs this run the slots a previous run used, which the class
+    /// already documents as the rule within a session, and it leaves nothing in a worse state than it found.
+    /// </para>
+    /// </remarks>
+    private void SkipSlotsHeldFromAPreviousRun()
+    {
+        _staleSlotsResolved = true;
+        if (_config.Dungeons <= 0 || Dbe == null)
+        {
+            return;
+        }
+
+        // Only a prefix can be skipped: the counter is a cursor, not a set, and a hole would be re-entered by the next open anyway.
+        while (_nextDungeonSlot < _config.Dungeons
+            && Dbe.Realms.IsRegistered(new RealmId((ushort)(FirstDungeonRealm + _nextDungeonSlot))))
+        {
+            _nextDungeonSlot++;
+            _staleDungeonSlots++;
+        }
+    }
+
+    /// <summary>Dungeon slots this run inherited already registered, and therefore never used. Reported so a short run does not read as "dungeons are broken".</summary>
+    public int StaleDungeonSlots => _staleDungeonSlots;
+
+    private int _staleDungeonSlots;
+
     /// <summary>Close the dungeons whose stay is over, then open the next one when it is due. Serial.</summary>
     public void DungeonTick(TickContext ctx)
     {
+        // Before anything else, and once: the first open must not collide with a slot a previous run left registered.
+        if (!_staleSlotsResolved)
+        {
+            SkipSlotsHeldFromAPreviousRun();
+        }
+
         // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
         // the session system and the engine's own stages keep running, or no client could ever ask to resume.
         if (TatooineReplication.SimulationPaused)
