@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
-import { useSessionStore } from '@/stores/useSessionStore';
 import { useLiveGaugeData } from '@/hooks/profiler/useLiveGaugeData';
+import { useTelemetrySession } from '@/hooks/profiler/useTelemetrySession';
 import {
   differentiate,
   latestServerSample,
@@ -28,9 +28,9 @@ import {
  * states the difference rather than letting a reader assume they are looking at every session.
  */
 export default function SubscriptionsPanel(_props: IDockviewPanelProps) {
-  const sessionKind = useSessionStore((s) => s.kind);
-  const sessionId = useSessionStore((s) => s.sessionId);
-  const { windowedTicks } = useLiveGaugeData(sessionKind === 'attach' ? sessionId : null);
+  // Same correction as the Spatial panel: telemetry is a property of having profiler data, not of how you connected.
+  const { sessionId, hasTelemetry } = useTelemetrySession();
+  const { windowedTicks } = useLiveGaugeData(sessionId);
 
   const sample = useMemo(() => latestServerSample(windowedTicks), [windowedTicks]);
   const rows = useMemo(() => latestSessionRows(windowedTicks), [windowedTicks]);
@@ -52,11 +52,12 @@ export default function SubscriptionsPanel(_props: IDockviewPanelProps) {
     [windowedTicks, tickSeconds],
   );
 
-  if (sessionKind !== 'attach') {
+  if (!hasTelemetry) {
     return (
       <ColdState>
-        Subscriptions is available in <b>Attach</b> sessions only. Its figures are emitted by the replication track about once a second
-        while an engine runs, so they exist only against a live engine. Open <i>Connect → Attach</i> and point it at one.
+        Subscriptions reads figures the replication track emits about once a second, so it needs a session that carries them: a live
+        engine, or a database with a capture attached. Open <i>Connect → Attach</i> to watch one, or attach a profile to this database
+        to read a recorded run.
       </ColdState>
     );
   }

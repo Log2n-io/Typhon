@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
 import type { IDockviewPanelProps } from 'dockview-react';
-import { useSessionStore } from '@/stores/useSessionStore';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useLiveGaugeData } from '@/hooks/profiler/useLiveGaugeData';
+import { useTelemetrySession } from '@/hooks/profiler/useTelemetrySession';
 import { GaugeId } from '@/libs/profiler/model/types';
 import type { GaugeSeries, SpatialTickTelemetry } from '@/libs/profiler/model/traceModel';
 import {
@@ -36,9 +36,10 @@ import {
  * tick and not a missing measurement.
  */
 export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
-  const sessionKind = useSessionStore((s) => s.kind);
-  const sessionId = useSessionStore((s) => s.sessionId);
-  const { windowedTicks, gaugeData, hasData } = useLiveGaugeData(sessionKind === 'attach' ? sessionId : null);
+  // Not `kind === 'attach'`: a captured profile and a watching database session both carry these records and are both
+  // `kind === 'open'`, so a kind test showed this panel empty over every capture ever taken. See `useTelemetrySession`.
+  const { sessionId, hasTelemetry } = useTelemetrySession();
+  const { windowedTicks, gaugeData, hasData } = useLiveGaugeData(sessionId);
 
   const archetypeIds = useMemo(() => archetypeIdsIn(windowedTicks), [windowedTicks]);
   // Read the archetype table out of the store rather than through `useProfilerNameMaps`, which issues its own
@@ -86,11 +87,12 @@ export default function SpatialMaintenancePanel(_props: IDockviewPanelProps) {
     };
   }, [windowedTicks, archetypeId]);
 
-  if (sessionKind !== 'attach') {
+  if (!hasTelemetry) {
     return (
       <ColdState>
-        Spatial Maintenance is available in <b>Attach</b> sessions only. Its counters are produced by the tick fence and reset every
-        tick, so they exist only while an engine is running. Open <i>Connect → Attach</i> and point it at a live engine.
+        Spatial Maintenance reads counters the tick fence produces, so it needs a session that carries them: a live engine, or a
+        database with a capture attached. Open <i>Connect → Attach</i> to watch one, or attach a profile to this database to read a
+        recorded run.
       </ColdState>
     );
   }

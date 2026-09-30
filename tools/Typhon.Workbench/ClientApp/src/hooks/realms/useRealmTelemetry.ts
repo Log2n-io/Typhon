@@ -1,11 +1,15 @@
 import { useMemo } from 'react';
 import { useProfilerCache } from '@/hooks/profiler/useProfilerCache';
 import { selectEffectiveScope, useProfilerViewStore } from '@/stores/useProfilerViewStore';
-import { useLiveStreamSession, useSessionStore, useTraceBackedSession } from '@/stores/useSessionStore';
+import { useTelemetrySession } from '@/hooks/profiler/useTelemetrySession';
 import type { TickData } from '@/libs/profiler/model/traceModel';
 
 /**
  * The ticks the Realms panel should read per-realm records from, and whether this session has any at all.
+ *
+ * The "which sessions have telemetry" question is answered once, in {@link useTelemetrySession}; this hook adds only
+ * the windowing, because the Realms panel wants every tick in scope rather than the bounded rate window the gauge
+ * panels compute over.
  *
  * **Not `kind === 'attach'`, and that distinction is the whole point of this hook.** Per-realm telemetry is a property
  * of having profiler data, which is orthogonal to how the session was opened:
@@ -41,13 +45,10 @@ export interface RealmTelemetry {
 }
 
 export function useRealmTelemetry(): RealmTelemetry {
-  const sessionId = useSessionStore((s) => s.sessionId);
-  const isLive = useLiveStreamSession();
-  const traceBacked = useTraceBackedSession();
-  const hasTelemetry = isLive || traceBacked;
+  const { sessionId, hasTelemetry, isLive } = useTelemetrySession();
 
   // `isLive` drives the registry's live-tail prefetch; a replayed capture must not claim it (#289).
-  const { ticks } = useProfilerCache(hasTelemetry ? sessionId : null, isLive);
+  const { ticks } = useProfilerCache(sessionId, isLive);
   const scope = useProfilerViewStore(selectEffectiveScope);
   const scopeLinked = useProfilerViewStore((s) => s.scopeLinked);
 
