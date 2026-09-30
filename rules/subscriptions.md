@@ -662,8 +662,15 @@
 
 ### SUB-29: A session is in one realm at a time, and a realm switch is one published RESET|REALM frame `[fatal][silent]`
   invariant realm(s) ∈ {None} ∪ RealmId is one value per tick: the application's (Place(realm, pos) / Enter / Leave), the followed entity's after this
-    tick's fence (Bind, AroundControlled — a teleport switches its sessions in the same tick), or realm 0 (At); a session nobody placed is in realm 0
-    on an engine with one realm and in none on an engine with several, where it holds nothing positioned
+    tick's fence (Bind, AroundControlled, Follow(e) — a teleport switches its sessions in the same tick), or realm 0 (At); a session nobody placed is in
+    realm 0 on an engine with one realm and in none on an engine with several, where it holds nothing positioned
+  invariant Session(s).Follow(e) outranks the profile's own anchor while it is set and gives the session e's realm and centre — on a shape with no centre
+    (World, ClientRegion) the realm alone — and Follow(EntityId.Null) returns the session to the profile's anchor; following is NOT controlling, so no
+    SELF block and no owner field of e ever reaches a session that merely follows it (SUB-11), and e is absent from the owner-routing map that would
+    carry them; a followed entity that cannot be read leaves the session at its last position and realm, counting BoundLost (09 § 6)
+  invariant a realm removed while s is in it (unregistered, then emptied and dropped by a fence) puts s in None in the tick that sees it, publishes that
+    as a RESET whose REALM is NONE, and queues exactly ONE SessionEvent.RealmClosed{s, realm} naming the realm that went — not one per tick after it:
+    both the session's stored realm and its anchor cache are cleared, because either one left pointing at the dead id re-notices it for ever
   invariant s's committed realm changes only when a frame with RESET whose FIRST block is REALM(realm(s)) is published; a switch not published is
     retried as a RESET until one is (SUB-03); a switch of a session that has been sent any frame is a forced RESET, sent at once; only a session never
     framed has its first realm ride the first frame that has something to say
@@ -675,14 +682,22 @@
     with several realms throws; a session observes its realm for the realm policy (RLM-03) while it is in it
   scope: FrameAssembler.NoteRealm, FrameAssembler.CommitRealm, FrameAssembler.AnchorRealm, FrameAssembler.NoteRealmMoves, SessionFrameState.CommittedRealm,
     PushHub.Place, SessionTable.SetRealm, SubscriptionsCommands.Enter, SubscriptionsCommands.Leave, SubscriptionsCommands.TryEnter,
-    SubscriptionsCommands.TryPlace, SubscriptionsCommands.IsAnchored, SubscriptionsCommands.TryRealmTarget
+    SubscriptionsCommands.TryPlace, SubscriptionsCommands.IsAnchored, SubscriptionsCommands.TryRealmTarget, SessionRequest.Follow,
+    SessionTable.SetFollowed, SessionTable.FollowedOf, SessionTable.NoteRealmClosed, FrameAssembler.RealmClosed, SessionEventKind.RealmClosed,
+    SessionEvent.Realm
   on_violation: silent. A client applies records of one realm over another's store — entities of a world it is not in, at coordinates that mean
     another place — or keeps a store the server believes cleared.
   verified: RealmSessionTests.PlacingIntoAnotherRealmIsOneResetRealmFrame, RealmSessionTests.ASwitchAndBackRefillsFromAResetAndLeavingIsAResetRealmNone,
     RealmSessionTests.ASkippedRealmSwitchIsRetriedAsAReset, RealmSessionTests.AControlledSessionFollowsItsEntityIntoAnotherRealmInTheSameTick,
     RealmSessionTests.AnAnchoredSessionAnswersTheTryOverloadsRatherThanRaising, RealmSessionTests.AnUnanchoredSessionIsMovedByTheTryOverloads,
-    RealmSessionTests.TryEnterAnswersForARealmThatIsGoneAndRaisesForAMisuse
-    (unplaced sessions, the link state kept and realm observation: the fixture's other tests)
+    RealmSessionTests.TryEnterAnswersForARealmThatIsGoneAndRaisesForAMisuse,
+    RealmSessionTests.ARealmRemovedUnderASessionMovesItToNoneAndTellsTheApplicationOnce,
+    RealmSessionTests.AnAnchoredSessionWhoseRealmIsRemovedIsAlsoMovedToNoneOnce,
+    RealmSessionTests.AFollowedEntityCrossingRealmsTakesItsSessionInTheSameTick,
+    RealmSessionTests.AFollowedSessionGetsThePositionButNotTheOwnerFieldsOfItsSubject
+    (unplaced sessions, the link state kept and realm observation: the fixture's other tests; Follow's own centre and release:
+    AFollowedSessionIsCentredAndRealmedOnItsEntityWithoutControllingIt, FollowOverridesTheProfilesOwnAnchorAndReleasingReturnsToIt,
+    ASessionWhoseFollowedEntityDiesKeepsItsLastViewpoint)
 
 ### SUB-30: A realm-framed value is encoded and decoded with exactly one realm's frame `[fatal][silent]`
   invariant a position (pos2/pos3: ENTITIES records, event and command fields, a region's vertices) and an AGG cell index are quantized over the

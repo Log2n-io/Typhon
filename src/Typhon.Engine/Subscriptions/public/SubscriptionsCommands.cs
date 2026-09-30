@@ -483,14 +483,30 @@ public sealed class SubscriptionsCommands
     /// <see cref="Place(SessionId, RealmId, Vector3D)"/> and <see cref="Leave"/> raise on.
     /// </summary>
     /// <param name="session">The session.</param>
-    /// <returns><see langword="true"/> when the session's applied profile is <c>AroundControlled</c> or bound to an entity.</returns>
+    /// <returns>
+    /// <see langword="true"/> when the session follows an entity at run time (<c>Session(s).Follow</c>), or when its applied profile is
+    /// <c>AroundControlled</c> or bound to an entity.
+    /// </returns>
     /// <remarks>
+    /// <para>
     /// <b>A query, not a guard.</b> It reports the profile the engine has APPLIED, and a profile requested through <c>Session(s).Profile(name)</c> is applied
     /// by the next tick's prologue — so between asking and acting the answer can change, and the failure is a throw on the tick thread. Use it to decide what
     /// to draw, offer or log; use <see cref="TryEnter"/> and <see cref="TryPlace"/> to act.
+    /// </para>
+    /// <para>
+    /// <b>A run-time <c>Follow</c> counts, whatever the profile declared.</b> It is the same condition for the same reason: the engine is moving the session's
+    /// realm every tick from the followed entity, so an application moving it too would be the second writer of one field that 12-realms § 1.3 forbids. A
+    /// <c>Follow</c> on an otherwise unanchored profile — a god camera tracking a player's realm while keeping its own hull — anchors it exactly as
+    /// <c>AroundControlled</c> does, and releasing it with <see cref="EntityId.Null"/> gives it back.
+    /// </para>
     /// </remarks>
     public bool IsAnchored(SessionId session)
     {
+        if (!_ingress.Sessions.FollowedOf(session).IsNull)
+        {
+            return true;
+        }
+
         var profiles = _ingress.Profiles;
         var profile = _ingress.Sessions.ProfileIndex(session);
         return profiles != null && profile >= 0 && profiles.SourceOf(profile) is ViewpointSource.Bound or ViewpointSource.Controlled;
@@ -505,6 +521,18 @@ public sealed class SubscriptionsCommands
     /// Tick-thread only, as the rest of this type is: it reads the session row without the gate, because the controlled entity is written only on the tick.
     /// </remarks>
     public EntityId ControlledOf(SessionId session) => _ingress.Sessions.ControlledOf(session);
+
+    /// <summary>
+    /// The entity a session's viewpoint follows, or <see cref="EntityId.Null"/> — <c>Session(s).Follow(entity)</c>, 12-realms § 2.2 Q5.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The followed entity.</returns>
+    /// <remarks>
+    /// <b>Not the same question as <see cref="ControlledOf"/>, which is why both exist.</b> A session that follows an entity is centred on it and is in its
+    /// realm; a session that controls one is also served its <c>SELF</c> block and its owner fields. An application with a spectator mode wants the first and
+    /// must not have the second, so it asks this one. Tick-thread only, as the rest of this type is.
+    /// </remarks>
+    public EntityId FollowedOf(SessionId session) => _ingress.Sessions.FollowedOf(session);
 
     /// <summary>
     /// Takes a session out of every realm (12-realms § 1.6): its client is told with a <c>RESET</c> carrying <c>REALM(NONE)</c>, and it hears only the events

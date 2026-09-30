@@ -1038,6 +1038,20 @@ public static class TatooineReplication
                 Spectators.Remove(e.Session);
                 Releasing.Remove(e.Session);
             }
+            else if (e.Kind == SessionEventKind.RealmClosed)
+            {
+                // A dungeon was torn down with this session still in it, so the engine has put it in no realm and its client's store is empty. The demo used
+                // to announce a dungeon's closing on planet 0's subtree and hope the client acted on it — which a session inside the dungeon does not even
+                // hear, because the announcement goes to the planet it has left. This is the engine telling the application directly (12-realms § 1.6 Q7).
+                //
+                // Sent home rather than closed: a viewer whose instance ended has done nothing wrong, and planet 0 is somewhere it can certainly be. The god
+                // profile and the release of the follow go with it, because the subject it was riding went down with the realm — and the Enter itself waits a
+                // tick for the same reason every other release does (see Releasing).
+                Console.WriteLine($"  !! session {e.Session.Value} was in realm {e.Realm.Value}, which closed under it — sending it home to planet 0");
+                Spectators.Remove(e.Session);
+                subs.Session(e.Session).Profile(GodProfileName).Control(EntityId.Null).Follow(EntityId.Null);
+                Releasing[e.Session] = RealmId.Default;
+            }
         }
 
         // The second half of a release, one tick after the god profile was asked for; see Releasing. Drained before the commands below so that a viewer who
@@ -1073,6 +1087,13 @@ public static class TatooineReplication
             // The profile carries the anchor and Control names the entity; together they make the session's realm and centre the subject's, which is what
             // takes the viewer through a door without a command (12-realms § 1.3). Control is set even when the session is already spectating something
             // else, so switching subjects is one ask rather than a release and a re-ask.
+            //
+            // <b>Control rather than the newer Follow, and that is a decision rather than an oversight.</b> Follow (12-realms § 2.2 Q5) gives a session an
+            // entity's realm and centre WITHOUT its owner data, which is the right verb for a watcher — but "without its owner data" also means without the
+            // SELF block, and SELF is the only thing that tells this client WHICH netId it ended up riding. Anchoring re-sends the whole view and netIds are
+            // dense per view, so the id the viewer clicked is not the id it is now looking at; SpectateChecks says so at length. This demo declares no owner
+            // fields at all, so the SELF it gets is identity and nothing else and Control leaks nothing here — the day a Player declares one, this needs
+            // Follow plus a way to name the subject, and that is a wire question rather than a substitution.
             subs.Session(command.Session).Profile(SpectateProfile).Control(subject);
             Spectators[command.Session] = subject;
             Releasing.Remove(command.Session);
@@ -1256,16 +1277,20 @@ public static class TatooineReplication
     /// between then and now applied it — and a session that closed in the meantime is answered with <see langword="false"/> rather than a throw.
     /// </para>
     /// <para>
-    /// <b>The realm is clamped to the permanent ones, because <c>Enter</c>'s other two refusals ARE throws.</b> It raises for a realm that is unregistered
-    /// and for one that is closing, and the realm here was read a tick ago: a dungeon unregistered in between would take the tick down. Realms below
-    /// <see cref="ViewableRealms"/> are registered at start-up and never unregistered, which is the same reason the realm command accepts only those.
+    /// <b>The realm is asked for rather than clamped to the permanent ones.</b> It used to be: the realm here was read a tick ago, <c>Enter</c> raises for a
+    /// realm that is unregistered or closing, and a dungeon unregistered in between would have taken the tick down — so anything at or above
+    /// <see cref="ViewableRealms"/> was replaced by planet 0 whether or not it was still there. <c>TryEnter</c> answers that race instead of raising on it, so
+    /// a viewer released inside a dungeon that is still open stays in it, and one whose dungeon has gone falls back to the planet because it really has to.
     /// </para>
     /// </remarks>
     private static void ReleaseSpectators(SubscriptionsCommands subs)
     {
         foreach (var (session, realm) in Releasing)
         {
-            subs.Enter(session, realm.Value < ViewableRealms ? realm : RealmId.Default);
+            if (!subs.TryEnter(session, realm) && realm != RealmId.Default)
+            {
+                subs.TryEnter(session, RealmId.Default);
+            }
         }
 
         Releasing.Clear();
