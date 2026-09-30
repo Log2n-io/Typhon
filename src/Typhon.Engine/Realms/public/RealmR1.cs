@@ -26,7 +26,16 @@ public struct RealmR1
     /// <summary>The realm id.</summary>
     public int Id;
 
-    /// <summary>Incarnation of the id: bumped when a retired id is reused (realm lifecycle). Zero today.</summary>
+    /// <summary>
+    /// Incarnation of the id: 0 the first time an id is registered, and one more than the retired row's each time it is registered again.
+    /// </summary>
+    /// <remarks>
+    /// <b>It can only advance across an OPEN, and that is RLM-06 rather than an omission.</b> An id unregistered during a session is not registrable again in
+    /// that session at all: it is reusable only after an open has proved the realm empty and retired its row, because a crash before the destroys are
+    /// checkpointed would otherwise replay the old realm's entities into the new one. So within one run every registered realm reads the generation it opened
+    /// with, and a consumer that keys on <c>(id, generation)</c> — the identity 12-realms § 1.1 defines — sees it change only across a restart.
+    /// <para>Read it with <c>Realms.GenerationOf(id)</c>; it is what the <c>REALM</c> block puts on the wire.</para>
+    /// </remarks>
     public int Generation;
 
     /// <summary>World bounds, minimum corner.</summary>

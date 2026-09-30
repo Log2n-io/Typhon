@@ -669,14 +669,19 @@
     framed has its first realm ride the first frame that has something to say
   invariant across a switch the link state (budget level, radius shrink, rate), the events cursor, SELF's pending owner mask, the ack cursor and netIds
     are preserved; the realm-local geometry is given back and taken anew, and a new realm-local slot under a client that holds frames is a RESET
-  invariant an entity-anchored session is never moved explicitly (Place(realm) / Enter / Leave throw); a realm-less Place on an engine with several
-    realms throws; a session observes its realm for the realm policy (RLM-03) while it is in it
+  invariant an entity-anchored session is never moved explicitly: Place(realm) / Enter / Leave throw, and TryEnter / TryPlace answer false and move
+    nothing — the test and the act are one call because ViewpointSource is internal and a requested profile is applied by the NEXT tick's prologue, so
+    an application that asks with IsAnchored and acts afterwards is asking about a state that changes between the two; a realm-less Place on an engine
+    with several realms throws; a session observes its realm for the realm policy (RLM-03) while it is in it
   scope: FrameAssembler.NoteRealm, FrameAssembler.CommitRealm, FrameAssembler.AnchorRealm, FrameAssembler.NoteRealmMoves, SessionFrameState.CommittedRealm,
-    PushHub.Place, SessionTable.SetRealm, SubscriptionsCommands.Enter, SubscriptionsCommands.Leave
+    PushHub.Place, SessionTable.SetRealm, SubscriptionsCommands.Enter, SubscriptionsCommands.Leave, SubscriptionsCommands.TryEnter,
+    SubscriptionsCommands.TryPlace, SubscriptionsCommands.IsAnchored, SubscriptionsCommands.TryRealmTarget
   on_violation: silent. A client applies records of one realm over another's store — entities of a world it is not in, at coordinates that mean
     another place — or keeps a store the server believes cleared.
   verified: RealmSessionTests.PlacingIntoAnotherRealmIsOneResetRealmFrame, RealmSessionTests.ASwitchAndBackRefillsFromAResetAndLeavingIsAResetRealmNone,
-    RealmSessionTests.ASkippedRealmSwitchIsRetriedAsAReset, RealmSessionTests.AControlledSessionFollowsItsEntityIntoAnotherRealmInTheSameTick
+    RealmSessionTests.ASkippedRealmSwitchIsRetriedAsAReset, RealmSessionTests.AControlledSessionFollowsItsEntityIntoAnotherRealmInTheSameTick,
+    RealmSessionTests.AnAnchoredSessionAnswersTheTryOverloadsRatherThanRaising, RealmSessionTests.AnUnanchoredSessionIsMovedByTheTryOverloads,
+    RealmSessionTests.TryEnterAnswersForARealmThatIsGoneAndRaisesForAMisuse
     (unplaced sessions, the link state kept and realm observation: the fixture's other tests)
 
 ### SUB-30: A realm-framed value is encoded and decoded with exactly one realm's frame `[fatal][silent]`

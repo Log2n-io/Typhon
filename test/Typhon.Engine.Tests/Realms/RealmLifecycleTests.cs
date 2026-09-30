@@ -153,6 +153,14 @@ class RealmLifecycleTests : TestBase<RealmLifecycleTests>
         engine.Realms.Register(new RealmId(4), RealmConfig.SimulatedAlways(SpatialGridConfig.Flat(new Vector2(0, 0), new Vector2(100, 100), 25)));
         Assert.That(engine.PersistedRealmCatalog[4].Row.Generation, Is.EqualTo(1), "the retired row is reused, next incarnation");
         Assert.That(engine.RealmTable.Get(4).GridConfig.CellSize, Is.EqualTo(25d), "a new identity: the id is free");
+
+        // The same fact through the public accessor, because an application comparing realms by (id, generation) — the
+        // identity 12-realms § 1.1 defines — has no other way to read the second half, and a test hook is not an API.
+        Assert.Multiple(() =>
+        {
+            Assert.That(engine.Realms.GenerationOf(new RealmId(4)), Is.EqualTo(1), "GenerationOf does not see the incarnation the catalog holds");
+            Assert.That(engine.Realms.GenerationOf(RealmId.Default), Is.Zero, "a realm registered once is its first incarnation");
+        });
     }
 
     [Test]

@@ -277,6 +277,91 @@ class RealmSessionTests : TestBase<RealmSessionTests>
         });
     }
 
+    /// <summary>
+    /// The Try overloads answer an anchored session instead of raising at it, and still do not move it.
+    /// </summary>
+    /// <remarks>
+    /// <b>SUB-29 is satisfied either way — what changes is whether an application can obey it.</b> Whether a session is anchored is decided by
+    /// <c>ViewpointSource</c>, which is internal, and a profile requested on one tick is applied by the next tick's prologue: so an application that asks
+    /// first and acts second is asking about a state that changes between the two, and the wrong answer is an exception on the tick thread. The test and the
+    /// act have to be one call, which is what these are.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void AnAnchoredSessionAnswersTheTryOverloadsRatherThanRaising()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, Follow)[0];
+        var ids = Spawn(dbe, 0, 3);
+        Assert.That(harness.Sessions.SetControlled(session, ids[0]), Is.True);
+        Run(harness, session, 3);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.IsAnchored(session), Is.True, "a profile declaring AroundControlled is what anchored means");
+            Assert.That(commands.ControlledOf(session), Is.EqualTo(ids[0]), "the anchor is readable, so an application need not mirror it");
+
+            // The whole point: the same condition, answered rather than thrown.
+            Assert.Throws<InvalidOperationException>(() => commands.Enter(session, new RealmId(1)));
+            Assert.That(commands.TryEnter(session, new RealmId(1)), Is.False, "TryEnter raised or moved an anchored session");
+            Assert.That(commands.TryPlace(session, new RealmId(1), new Vector3D(1, 1, 0)), Is.False, "TryPlace raised or moved an anchored session");
+
+            // SUB-29 itself: answering false is not a quiet move.
+            Assert.That(commands.RealmOf(session), Is.EqualTo(RealmId.Default), "a refused Try moved the session anyway");
+        });
+    }
+
+    /// <summary>
+    /// A session nothing anchors takes the Try overloads exactly as it takes the raising ones.
+    /// </summary>
+    /// <remarks>
+    /// The half that stops <c>TryEnter</c> being a no-op that always answers <see langword="false"/> — which would pass every assertion of the case above.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void AnUnanchoredSessionIsMovedByTheTryOverloads()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, World)[0];
+        Spawn(dbe, 1, 2);
+
+        Assert.That(commands.IsAnchored(session), Is.False);
+        Assert.That(commands.ControlledOf(session), Is.EqualTo(EntityId.Null), "nothing controls it");
+        Assert.That(commands.TryEnter(session, new RealmId(1)), Is.True, "an ordinary session was refused");
+        Run(harness, session, 3);
+        Assert.That(commands.RealmOf(session), Is.EqualTo(new RealmId(1)), "TryEnter answered true and did not move it");
+    }
+
+    /// <summary>
+    /// <c>TryEnter</c> answers <see langword="false"/> for a realm that is gone, and still raises for a caller's own mistake.
+    /// </summary>
+    /// <remarks>
+    /// <b>The line is what can change under the caller.</b> A realm being unregistered is a race — a dungeon closes at the first fence that finds it empty —
+    /// so it is an answer. <see cref="RealmId.None"/> is not: it cannot become a realm, and answering false for it would turn a misuse of the API into a
+    /// session that quietly never arrives.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void TryEnterAnswersForARealmThatIsGoneAndRaisesForAMisuse()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, World)[0];
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.TryEnter(session, new RealmId(9)), Is.False, "a realm this engine never registered is an answer, not an exception");
+            Assert.Throws<ArgumentException>(() => commands.TryEnter(session, RealmId.None), "RealmId.None is Leave(), and saying so is the point");
+            Assert.Throws<InvalidOperationException>(() => commands.TryEnter(session, new RealmId(2)),
+                "a realm declaring no replication is fixed when it is registered, so it is the application's bug and not a race");
+        });
+    }
+
     [Test]
     [VerifiesRule("SUB-30")]
     public void ACommandIsFramedByTheRealmItWasBuiltIn_AndAPositionFromALeftRealmIsRefused()

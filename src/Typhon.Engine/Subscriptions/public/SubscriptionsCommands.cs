@@ -434,6 +434,79 @@ public sealed class SubscriptionsCommands
     }
 
     /// <summary>
+    /// <see cref="Enter(SessionId, RealmId)"/>, answering <see langword="false"/> where it would raise for something that can change under the caller.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="realm">A realm. Need not still be registered, or open.</param>
+    /// <returns>
+    /// <see langword="false"/> when the session is closing or gone, when it follows an entity, or when the realm is gone or closing; otherwise
+    /// <see langword="true"/> and the session is in it from this tick.
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// <b>It exists because the alternative cannot be written correctly by an application.</b> A session whose profile follows an entity may not be moved
+    /// explicitly — the entity decides its realm — and <see cref="Enter(SessionId, RealmId)"/> raises on one. But whether a session is anchored is decided by
+    /// <see cref="ViewpointSource"/>, which is internal, and a profile requested on one tick is applied by the NEXT tick's prologue: so an application that
+    /// asks first and acts second is asking about a state that changes between the two, and the wrong answer is an exception on the tick thread. That is not
+    /// hypothetical — it is the defect the SWG demo's spectator control shipped with, reachable by pressing Stop and picking a realm inside one tick.
+    /// </para>
+    /// <para>
+    /// <b>So the test and the act are one call.</b> <see cref="IsAnchored"/> answers the same question and cannot promise this, which is why it is documented
+    /// as a query rather than as a guard.
+    /// </para>
+    /// <para>
+    /// <b>What it does NOT swallow.</b> <see cref="RealmId.None"/> and a realm declaring no <see cref="RealmConfig.Replication"/> still raise: neither can
+    /// change under a caller — one is a misuse of the API and the other is fixed when the realm is registered — and answering <see langword="false"/> for them
+    /// would turn a bug in the application into a session that quietly never arrives.
+    /// </para>
+    /// </remarks>
+    public bool TryEnter(SessionId session, RealmId realm)
+    {
+        return TryRealmTarget(session, realm) && _ingress.Sessions.SetRealm(session, realm.Value, placed: false, default);
+    }
+
+    /// <summary>
+    /// <see cref="Place(SessionId, RealmId, Vector3D)"/>, answering <see langword="false"/> where it would raise for something that can change under the
+    /// caller. See <see cref="TryEnter"/> for why.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="realm">A realm. Need not still be registered, or open.</param>
+    /// <param name="position">Where it is looking from, in the realm's space.</param>
+    /// <returns><see langword="false"/> when the session is closing, gone or anchored, or the realm is gone or closing.</returns>
+    public bool TryPlace(SessionId session, RealmId realm, Vector3D position)
+    {
+        return TryRealmTarget(session, realm) && _ingress.Sessions.SetRealm(session, realm.Value, placed: true, position);
+    }
+
+    /// <summary>
+    /// Whether a session's realm is an entity's rather than the application's — the condition <see cref="Enter(SessionId, RealmId)"/>,
+    /// <see cref="Place(SessionId, RealmId, Vector3D)"/> and <see cref="Leave"/> raise on.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <returns><see langword="true"/> when the session's applied profile is <c>AroundControlled</c> or bound to an entity.</returns>
+    /// <remarks>
+    /// <b>A query, not a guard.</b> It reports the profile the engine has APPLIED, and a profile requested through <c>Session(s).Profile(name)</c> is applied
+    /// by the next tick's prologue — so between asking and acting the answer can change, and the failure is a throw on the tick thread. Use it to decide what
+    /// to draw, offer or log; use <see cref="TryEnter"/> and <see cref="TryPlace"/> to act.
+    /// </remarks>
+    public bool IsAnchored(SessionId session)
+    {
+        var profiles = _ingress.Profiles;
+        var profile = _ingress.Sessions.ProfileIndex(session);
+        return profiles != null && profile >= 0 && profiles.SourceOf(profile) is ViewpointSource.Bound or ViewpointSource.Controlled;
+    }
+
+    /// <summary>
+    /// The entity a session is anchored to, or <see cref="EntityId.Null"/> when its realm and viewpoint are the application's to set.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The controlled entity, as <c>Session(s).Control(entity)</c> last set it.</returns>
+    /// <remarks>
+    /// Tick-thread only, as the rest of this type is: it reads the session row without the gate, because the controlled entity is written only on the tick.
+    /// </remarks>
+    public EntityId ControlledOf(SessionId session) => _ingress.Sessions.ControlledOf(session);
+
+    /// <summary>
     /// Takes a session out of every realm (12-realms § 1.6): its client is told with a <c>RESET</c> carrying <c>REALM(NONE)</c>, and it hears only the events
     /// addressed to it. Applied this tick.
     /// </summary>
@@ -486,11 +559,41 @@ public sealed class SubscriptionsCommands
         CheckNotAnchored(session);
     }
 
+    /// <summary>
+    /// <see cref="CheckRealmTarget"/>'s answer as a bool for what can race, still raising for what cannot. See <see cref="TryEnter"/>.
+    /// </summary>
+    private bool TryRealmTarget(SessionId session, RealmId realm)
+    {
+        if (realm.IsNone)
+        {
+            throw new ArgumentException("RealmId.None is no realm to be in: take the session out of every realm with Leave(session).", nameof(realm));
+        }
+
+        var table = _ingress.Realms;
+        if (table != null || realm.Value != RealmId.Default.Value)
+        {
+            var target = table?.TryGet(realm.Value);
+
+            // Gone or closing: both are a realm being torn down while the caller was deciding to go there, which is the
+            // case this overload exists for. A dungeon unregisters at the first fence that finds it empty.
+            if (target == null || target.Closing)
+            {
+                return false;
+            }
+
+            if (realm.Value != RealmId.Default.Value && target.Config?.Replication == null)
+            {
+                throw new InvalidOperationException(
+                    $"{realm} declares no replication (RealmConfig.Replication): no session may be in it (12-realms § 2.1).");
+            }
+        }
+
+        return !IsAnchored(session);
+    }
+
     private void CheckNotAnchored(SessionId session)
     {
-        var profiles = _ingress.Profiles;
-        var profile = _ingress.Sessions.ProfileIndex(session);
-        if (profiles != null && profile >= 0 && profiles.SourceOf(profile) is ViewpointSource.Bound or ViewpointSource.Controlled)
+        if (IsAnchored(session))
         {
             throw new InvalidOperationException(
                 $"{session} follows an entity (profile '{_ingress.Sessions.ProfileName(session)}'): its realm is that entity's, and moves with it (12-realms § 1.3).");
