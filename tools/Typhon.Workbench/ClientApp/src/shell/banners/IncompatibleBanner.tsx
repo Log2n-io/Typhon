@@ -3,6 +3,8 @@ import { Button } from '@/components/ui/button';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { openConnect } from '@/shell/commands/baseCommands';
 import { openOptionsToSchema } from '@/shell/commands/openSchemaBrowser';
+import { useCanRetryDatabaseOpen } from '@/hooks/useRetryDatabaseOpen';
+import RetryOpenButton from '@/shell/components/RetryOpenButton';
 
 /**
  * The blocked-open banner. Two very different failures reach it and they must not read the same:
@@ -17,6 +19,7 @@ import { openOptionsToSchema } from '@/shell/commands/openSchemaBrowser';
  */
 export default function IncompatibleBanner() {
   const diagnostics = useSessionStore((s) => s.schemaDiagnostics);
+  const canRetry = useCanRetryDatabaseOpen();
 
   // Only-missing is the recoverable case. A mixed set (something missing AND something genuinely incompatible) is
   // reported as incompatible: the stronger, less hopeful message is the honest one when both are true.
@@ -68,6 +71,10 @@ export default function IncompatibleBanner() {
         >
           {onlyMissing ? 'Locate schema assembly…' : 'Manage schema directories…'}
         </Button>
+        {/* Registering a directory changes a setting and nothing else — the schema is resolved at OPEN, so a fix made
+            after the open is never tried and this banner stays up looking identical. Reopening is what applies it, and
+            it is the user's own gesture rather than something that happens to their session behind their back. */}
+        {canRetry && <RetryOpenButton />}
         <Button
           variant="outline"
           size="sm"

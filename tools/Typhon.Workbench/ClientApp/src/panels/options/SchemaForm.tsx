@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import FileBrowser from '@/shell/components/FileBrowser';
 import { useOptionsStore } from '@/stores/useOptionsStore';
+import SchemaReopenPrompt from './SchemaReopenPrompt';
 
 /**
  * Schema-directory options (ADR-055 Phase 2). Lists the directories the Workbench searches — at priority
@@ -27,6 +28,8 @@ export function SchemaForm(): React.JSX.Element {
 
   const [pendingPath, setPendingPath] = useState('');
   const [error, setError] = useState<string | null>(null);
+  // The directory registered since this form was opened, if any — the trigger for the reopen prompt below.
+  const [registered, setRegistered] = useState<string | null>(null);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [browseDir, setBrowseDir] = useState<string | null>(null);
 
@@ -48,6 +51,7 @@ export function SchemaForm(): React.JSX.Element {
       await setSchema({ directories: [...directories, trimmed] });
       setPendingPath('');
       setBrowseOpen(false);
+      setRegistered(trimmed);
     } catch (err) {
       setError((err as Error).message);
     }
@@ -163,6 +167,9 @@ export function SchemaForm(): React.JSX.Element {
       </div>
 
       {error && <p className="text-fs-base text-destructive">{error}</p>}
+
+      {/* Mounted only once something has been registered — see SchemaReopenPrompt for why that is load-bearing. */}
+      {registered && <SchemaReopenPrompt directory={registered} />}
     </section>
   );
 }
