@@ -1909,7 +1909,7 @@
     trusted: ZoneMapBatchOpens == MigrationSliceCount x indexed fields, an identity that does not mention the
     migration count. A number that starts tracking the migration count is the per-element acquire having come back,
     and no timing is needed to see it
-  scope: SpatialGrid.GetCell, ArchetypeClusterState._finalizeLock, any new per-element
+  scope: SpatialGrid.GetCell, ArchetypeClusterState._finalizeLock, RealmTickCounters, any new per-element
     Interlocked-mutated array, ZoneMapArray.Widen, ZoneMapArray.WidenInto, ZoneMapArray.BeginBatchAtCapacity,
     ZoneMapArray.Grow, ZoneMapArray.ThreadBatchDepth, SpatialMigrationTelemetry.ZoneMapBatchOpens,
     ArchetypeClusterState.LastTickZoneMapBatchOpens
@@ -2255,6 +2255,75 @@
 ---
 
 ## Module: Realms — catalog and open (Realms C2, decision D-1)
+
+### SO-03: A realm's rates are attributed to the realm that produced them, and silence is not zero `[silent]`
+  invariant the per-tick maintenance rates are partitioned by REALM as well as by archetype. The `LastTick*` block on
+    ArchetypeClusterState is summed across every realm an archetype lives in, so on a multi-realm engine it names no
+    realm; the per-realm copy lives in RealmTickCounters, one block per (realm, archetype), on RealmArchetypeSpatial
+  invariant where a counter is partitioned at all, its realms' shares sum to the archetype-wide counter they
+    partition. The per-realm fold ADDS an attribution and never moves one, so a consumer reading the archetype total
+    sees exactly what it saw before realms existed. The agreement is PER COUNTER, not per block: counters excluded
+    below have no per-realm twin at all, which is a different statement from having one that reads zero
+  note two paths leave the archetype-wide counter ahead of the sum of its realms, both by design and both stated here
+    rather than left to be rediscovered: (a) a realm lookup that answers null — an archetype with no realm table, or an
+    id past its length — is counted archetype-wide and attributed to nobody; (b) PinsRejected increments archetype-wide
+    unconditionally while its realm bump is skipped when the grid resolves to no realm state. Neither can strand a
+    count in the fold (SO-03's clearing clause), and neither may be "fixed" by dropping the archetype-wide increment
+  invariant the fold is per realm RUN, not per cluster. Every producer already branches when the realm changes from one
+    item to the next — the AABB refresh reloads its whole AabbRealmFrame, the migration loop and both detection scans
+    reload their grid — so the counters ride that branch and the per-item cost is a register increment, as it was. The
+    migration and repair queues are sorted with the realm in the key's high half, so a realm's requests are one run
+    there too (RP-08)
+  note the THROTTLE is the one producer whose runs are not guaranteed: it cuts the prefix BEFORE the radix sort puts it
+    in (realm, cell) order. Its producers still walk clusters in chunk-id order so runs exist in practice, and if the
+    fold ever shows up in a profile there the remedy is a per-realm scratch indexed by realm id — legitimate at that
+    site precisely because the throttle is SERIAL per archetype, and NOT the keyed map that would be wrong at the
+    parallel sites
+  invariant a producer with no run behind it — a cell-tree promotion, a demotion, a rejected pin, a repair unit — bumps
+    the realm directly rather than opening a fold. There is no sequence of same-realm items to amortise one over, and a
+    fold there would publish once per item anyway while costing a reset
+  forbid attributing a counter whose producers do not ALL carry a realm. Two are excluded for that reason and the
+    exclusion is the rule, not an omission: RealmKeyReverts (its second producer is on the COMMIT path, where the
+    realm's spatial state need not exist and creating it would be a behaviour change) and HysteresisAbsorbed (its
+    second producer is a live write-time accumulator drained at the fence AFTER the per-tick reset, so a per-realm copy
+    needs its own live accumulator and its own drain). A counter attributed for one producer of two reports a realm
+    total that is silently short — which is the failure kind 67's own documentation names
+  note the exclusion must name the REAL obstruction. StaleFlagsDropped was excluded on the claim that its producer had
+    no realm in hand; it does — the drain's realm-change branch loads the grid two lines above the increment — so it
+    is attributed. A wrong justification is worse than none here, because the forbid clause above makes it load-bearing
+  invariant a counter fold must never be the reason a lookup throws. RealmSpatialForFold answers null for an archetype
+    with no realm table, because an archetype with no realm state has nothing to attribute and that is an answer, not
+    an error; every other caller keeps the throwing GetOrCreateRealmSpatial, where a missing table means the fence is
+    running against state that was supposed to exist
+  invariant a realm the fence did NOT touch is not marked. The flag is set by the fold, with the counters it vouches
+    for and only when at least one of them moved, so a marked realm is one that was measured
+  contract THE EMITTER DOES NOT EXIST YET, and these two clauses bind it when it does rather than describing today's
+    code: a per-(realm, archetype) rates record is emitted only for realms whose flag is set, and its ABSENCE means
+    "not measured" — never "measured as zero". A realm that did work and counted zero is a different reading from a
+    realm that ran no work at all, and SO-01's "zero means zero, never unknown" is what forces the distinction to be
+    carried by presence rather than by a zero. Nothing outside the per-tick reset reads the block today, so a verifier
+    for these two lands with the emitter
+  invariant the Touched flag is what the per-tick reset reads, and is the same flag the emitter above must gate on, so
+    the two cannot disagree: a block that is emitted is a block that is cleared
+  invariant the reset is O(present realms), not O(registered realms). Present realms are the ones an archetype has
+    state in, created lazily; an engine with a thousand registered realms and one populated one clears one block
+  forbid a shared list of touched realms in place of the per-realm flag — the counters are flushed from parallel
+    workers, so a list needs a lock, which is new synchronisation on the fence's hot path for bookkeeping
+  forbid a generation stamp in place of clearing ("these counters are zero unless their tick matches") — it moves a
+    comparison onto every read in the fold, which is the hot path, to save stores on the cold one
+  invariant the counters are plain stores at reset and Interlocked at flush, the same discipline as the archetype-wide
+    block: what orders the reset against the worker publications that follow is the fence phase barrier, not a release
+    on the store, and giving the per-realm copies a different one would imply a distinction that does not exist
+  invariant the block is a padded struct, not fields on the class and not parallel per-counter arrays (MD-03).
+    RealmArchetypeSpatial is read by every spatial query on its Grid, PerCellIndex, CellClusterPool and ClusterReach
+    while the fence mutates these, so the counters carry their own leading and trailing reserve; the class is laid out
+    LayoutKind.Auto, so declaration ORDER buys nothing and only the padding inside the struct isolates them
+  scope: RealmTickCounters, RealmFold, RealmFold.Switch, RealmFold.Flush, RealmFold.Bump,
+    RealmArchetypeSpatial.Counters, ArchetypeClusterState.ResetRealmTickCounters, ArchetypeClusterState.RealmSpatialForFold,
+    ArchetypeClusterState.AabbRealmFrame, ArchetypeClusterState.RecomputeDirtyClusterAabbsSlice,
+    ArchetypeClusterState.OrderDrainAndMeasureArrivals, ArchetypeClusterState.RepairOneCell,
+    ArchetypeClusterState.ApplyMigrationThrottle, DatabaseEngine.ExecuteMigrations, DatabaseEngine.DetectClusterMigrations,
+    DatabaseEngine.ResetArchetypeFenceTickState
 
 ### RLM-01: Every realm the data names is known at open, from the catalog if not from the application `[fatal][silent]`
   invariant every named realm's identity (bounds, cell size, hysteresis) is persisted in the realm catalog (RealmR1) at its first registration,

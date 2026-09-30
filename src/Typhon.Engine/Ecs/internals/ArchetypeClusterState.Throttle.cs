@@ -649,6 +649,29 @@ internal sealed partial class ArchetypeClusterState
         var admittedRelocations = 0;
         MigrationRequest[] survivors;
 
+        // **The one producer whose realm runs are NOT guaranteed by a sort.** The throttle cuts the prefix BEFORE OrderDrainAndMeasureArrivals sorts it, so
+        // `(realm << 32) | cell` ordering is not yet in force and a realm change can in principle occur on any request. In practice the two producers that
+        // built this queue — the AABB refresh and the crossing detector — both walk clusters in chunk-id order, so realms still arrive in runs; the fold
+        // simply cannot PROVE it here as it can everywhere else. If this ever shows up in a profile, the remedy is a per-realm scratch indexed by realm id,
+        // which is legitimate at this site precisely because the throttle is SERIAL per archetype — not the keyed map that would be wrong at the parallel
+        // sites. Creating a destination realm's state is legitimate here for the same reason it is in the arrivals pass: this is the Prep tail, and the
+        // pre-size creates exactly the same set moments later.
+        var fold = default(RealmFold);
+        // Per RUN, not per item: RealmSpatialForFold is a bounds check plus a volatile load, and a queue of one realm would otherwise pay it once per
+        // request for an answer that cannot have changed. Every other producer gets this for free from a realm-change branch it already had.
+        var foldRealm = -1;
+
+        void SwitchFold(int realm)
+        {
+            if (realm == foldRealm)
+            {
+                return;
+            }
+
+            foldRealm = realm;
+            fold.Switch(RealmSpatialForFold(realm));
+        }
+
         {
             // -- 1. Classify in ONE pass. Mandatory requests are counted and charged; relocations are remembered by index --
             //
@@ -675,6 +698,8 @@ internal sealed partial class ArchetypeClusterState
                     // A repair request was charged by the planner that filed it (preChargedNs); charging it again here would bill the same move twice.
                     remainingNs -= estimateNs;
                     crossings++;
+                    SwitchFold(request.DestRealm);
+                    fold.T.CrossingsQueued++;
                 }
             }
 
@@ -709,6 +734,8 @@ internal sealed partial class ArchetypeClusterState
                     if ((claimed & (1UL << request.SourceSlotIndex)) != 0UL)
                     {
                         superseded++;
+                        SwitchFold(request.DestRealm);
+                        fold.T.RelocationsSuperseded++;
                         continue;
                     }
 
@@ -724,9 +751,22 @@ internal sealed partial class ArchetypeClusterState
                 if (remainingNs < estimateNs)
                 {
                     throttled = relocationCount - r;
+                    // The archetype-wide counter takes the remainder in bulk; the per-realm one cannot, because "how many were refused" is a different
+                    // question per realm. One pass over the tail that step 3 did not reach, which is work proportional to what was refused.
+                    for (var t = r; t < relocationCount; t++)
+                    {
+                        ref readonly var refused = ref queue[relocIndices[t]];
+                        SwitchFold(refused.DestRealm);
+                        fold.T.RelocationsThrottled++;
+                    }
+
                     break;
                 }
 
+                ref readonly var admittedRequest = ref queue[relocIndices[r]];
+                SwitchFold(admittedRequest.DestRealm);
+                fold.T.RelocationsAdmitted++;
+                fold.T.RelocationSpendNs += estimateNs;
                 admittedRelocations++;
                 remainingNs -= estimateNs;
             }
@@ -768,6 +808,7 @@ internal sealed partial class ArchetypeClusterState
             queue[admitted++] = survivors[r];
         }
 
+        fold.Flush();
         PendingMigrationCount = admitted;
         LastTickRelocationsThrottled = throttled;
         LastTickRelocationsSuperseded = superseded;

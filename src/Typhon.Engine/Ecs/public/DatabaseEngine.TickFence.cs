@@ -914,6 +914,9 @@ public partial class DatabaseEngine
         clusterState.LastTickTightnessSamples = 0;
         clusterState.LastTickTightnessExtentSum = 0d;
         clusterState.LastTickTightnessBoundSum = 0d;
+        // The per-realm half of the block above (#1083). Same producers, same phase barrier, same plain stores — partitioned by the realm that produced them
+        // so a realm's rates can be read on their own instead of only as one archetype-wide sum that names no realm.
+        clusterState.ResetRealmTickCounters();
 
         // LastTickHysteresisAbsorbedCount was NOT reset here until #872, and DetectClusterMigrations only ever ASSIGNED it (=, not +=). A tick in which
         // detection did not run therefore reported the PREVIOUS tick's absorbed count as if it were this tick's — a stale reading indistinguishable from a live
