@@ -200,6 +200,30 @@ public static class TyphonSubscriptionsEndpoints
 
             writer.WriteEndArray();
 
+            // One row per REGISTERED realm, not per served one: at scale most realms are empty, and "served": false is how a reader tells a realm that cost
+            // nothing from a realm that is simply not in the list. The work figures are cumulative for the same reason the bytes above are.
+            writer.WriteStartArray("realms"u8);
+            foreach (var realm in stats.Realms)
+            {
+                writer.WriteStartObject();
+                writer.WriteNumber("id"u8, realm.Realm);
+                writer.WriteNumber("generation"u8, realm.Generation);
+                writer.WriteString("kind"u8, realm.Kind);
+                writer.WriteString("state"u8, realm.State.ToString());
+                writer.WriteBoolean("served"u8, realm.Served);
+                writer.WriteNumber("divisor"u8, realm.Divisor);
+                writer.WriteNumber("sessions"u8, realm.Sessions);
+                writer.WriteNumber("enters"u8, realm.Enters);
+                writer.WriteNumber("updates"u8, realm.Updates);
+                writer.WriteNumber("leaves"u8, realm.Leaves);
+                writer.WriteNumber("cellsDelivered"u8, realm.CellsDelivered);
+                writer.WriteNumber("resets"u8, realm.Resets);
+                writer.WriteNumber("events"u8, realm.Events);
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+
             writer.WriteEndObject();
             await writer.FlushAsync(http.RequestAborted).ConfigureAwait(false);
         }).WithDisplayName("Typhon stats");

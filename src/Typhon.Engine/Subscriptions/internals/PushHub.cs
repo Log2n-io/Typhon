@@ -139,9 +139,27 @@ internal sealed unsafe class PushHub
     /// <summary>The replications of the realms served now.</summary>
     public ReadOnlySpan<PushReplication> Active => _active.AsSpan(0, _activeCount);
 
-    /// <summary>The replication of <paramref name="realm"/>, or <see langword="null"/> when it is not served.</summary>
+    /// <summary>The replication of <paramref name="realm"/>, or <see langword="null"/> when it is not served. <b>Tick side only</b>; see
+    /// <see cref="SnapshotFor"/> for anything else.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public PushReplication For(ushort realm) => realm < _byRealm.Length ? _byRealm[realm] : null;
+
+    /// <summary>
+    /// The same, safe to call from a thread that is not the tick: for diagnostics that report per-realm state.
+    /// </summary>
+    /// <remarks>
+    /// <b><see cref="For"/> cannot be used off the tick, and it is not a matter of staleness.</b> It reads the <c>_byRealm</c> field twice — once for the
+    /// length, once for the element — and <see cref="Serve"/> REPLACES that reference with <c>Array.Resize</c>. A reload between the two reads can take the
+    /// length from the grown array and index the old one, which is an <see cref="IndexOutOfRangeException"/> in whatever was asking. On arm64 a reader can also
+    /// see the new reference before the element written into it. One acquire load into a local, then an acquire load of the element, fixes both — and is kept
+    /// out of <see cref="For"/> because that one runs per cluster in the projection pass and per event in the drain, where the tick's single-threaded
+    /// discipline already makes the plain reads correct.
+    /// </remarks>
+    internal PushReplication SnapshotFor(ushort realm)
+    {
+        var byRealm = Volatile.Read(ref _byRealm);
+        return byRealm != null && realm < byRealm.Length ? Volatile.Read(ref byRealm[realm]) : null;
+    }
 
     /// <summary>Starts serving <paramref name="realm"/> with <paramref name="replication"/>. Serial, between ticks.</summary>
     internal void Serve(ushort realm, PushReplication replication)

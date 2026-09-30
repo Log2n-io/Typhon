@@ -160,8 +160,13 @@ public sealed class RealmRegistry
     /// does not is correct today and wrong after the first restart.
     /// </para>
     /// </remarks>
-    public int GenerationOf(RealmId id) =>
-        _engine.PersistedRealmCatalog != null && _engine.PersistedRealmCatalog.TryGetValue(id.Value, out var row) ? row.Row.Generation : 0;
+    /// <remarks>
+    /// <b>Read from a published array, not from the catalog dictionary.</b> The catalog is mutated at run time — a registration inserts, a retirement removes —
+    /// and this is called from wherever an application wants a realm's identity, including a web request thread serving a realm directory. A
+    /// <c>Dictionary.TryGetValue</c> racing an insert that resizes is undefined behaviour, and taking the realm lifecycle lock here would let a stats call stall
+    /// a fence. Two acquire loads instead.
+    /// </remarks>
+    public int GenerationOf(RealmId id) => _engine.RealmGenerationOf(id.Value);
 
     /// <summary>What realm <paramref name="id"/> is doing this tick, as its policy decided at tick start.</summary>
     /// <remarks>A realm Unregister has closed reads <see cref="RealmRunState.Closing"/> at once: entries are refused from the call on. Its policy state

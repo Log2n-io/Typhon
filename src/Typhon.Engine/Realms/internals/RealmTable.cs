@@ -219,6 +219,16 @@ internal sealed class RealmTable
         return _state[id];
     }
 
+    /// <summary>
+    /// The state of a realm the caller already holds a <see cref="Realm"/> for: one byte load, no registration check.
+    /// </summary>
+    /// <remarks>
+    /// <b>For a reader that walked <see cref="Registered"/> and may have been overtaken.</b> <see cref="StateOf"/> refuses an unregistered id, which is right
+    /// for a caller naming one out of the blue and wrong for one holding a row from a snapshot: a realm removed between the walk and the read would turn a
+    /// stats call into an exception. The id is in range by construction here, and the slot keeps the last state the policy wrote for it.
+    /// </remarks>
+    internal RealmRunState StateOfRow(ushort id) => _state[id];
+
     /// <summary>True when <paramref name="id"/>'s clusters are dispatched this tick. Hot path: one byte load, no registration check.</summary>
     internal bool IsRunnable(ushort id) => _state[id] != RealmRunState.Dormant;
 

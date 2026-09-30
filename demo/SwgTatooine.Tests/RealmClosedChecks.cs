@@ -42,6 +42,11 @@ public sealed class RealmClosedChecks
     {
         _harness?.Release();
         _harness = null;
+
+        // Restored, because this case WIDENS it and neither Reset method covers it. It happens to be re-set by the next TatooineSim's constructor, so
+        // leaving it would be invisible until some later fixture read it without building a sim — which is exactly the kind of cross-fixture leak that costs
+        // an afternoon to find, from a symptom in code that did not change.
+        TatooineReplication.ViewableRealms = 1;
         TatooineReplication.ResetSessionAccounting();
         TatooineReplication.ResetIntentAccounting();
         Worlds.Delete(_dir);

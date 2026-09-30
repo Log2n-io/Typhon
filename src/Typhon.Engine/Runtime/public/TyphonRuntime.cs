@@ -505,6 +505,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 // 1 rather than the default 0: a runtime that has not ticked is not modulating, and 0 is not a multiplier any tick ever runs under.
                 TickMultiplier = 1,
                 Archetypes = ReadArchetypeStats(),
+                Realms = ReadRealmStats(),
                 ReplicatedArchetypes = _subscriptionsRuntime?.Registry?.Archetypes?.Count ?? 0,
             };
         }
@@ -574,11 +575,76 @@ public sealed partial class TyphonRuntime : IDisposable
             DurabilityWaitP99Ms = TelemetryPercentile.NearestRank(waits, ticks, 0.99),
             Systems = systemStats,
             Archetypes = ReadArchetypeStats(),
+            Realms = ReadRealmStats(),
             ReplicatedArchetypes = subscriptions?.Registry?.Archetypes?.Count ?? 0,
             Sessions = subscriptions?.Sessions?.OpenCount ?? 0,
             NetOutBytesTotal = subscriptions?.SendPump?.BytesSent ?? 0L,
             ReplicationTrackP99Ms = (_subscriptionsContext.Telemetry?.Percentile(newest, window, 0.99, new double[ticks]) ?? 0.0) / 1000.0,
         };
+    }
+
+    /// <summary>
+    /// One row per registered realm: what it is, what it is doing, and the replication work its sessions have been served.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The realm table is walked, not the hub's served list</b>, because the absence of a served realm is the fact worth reporting (see
+    /// <see cref="RuntimeStatsSnapshot.Realms"/>). The table hands back one consistent snapshot — count and array in one reference — so a realm registered or
+    /// removed while this runs makes the row list one longer or shorter, never torn.
+    /// </para>
+    /// <para>
+    /// <b>Empty for a single-realm engine.</b> Every figure on the snapshot already describes that realm, and a one-row array saying the same thing again would
+    /// invite a reader to add the two together. At scale this is O(registered realms) with a handful of loads each, off the tick, at human rate.
+    /// </para>
+    /// <para>
+    /// <b>Read off the tick thread, and the staleness is accepted</b> — the same trade the rest of this snapshot makes and for the same reason (see
+    /// <see cref="RuntimeStatsSnapshot"/>'s remarks on the telemetry ring). <b>Staleness is all that is accepted, though:</b> the hub's per-realm table is
+    /// reached through <c>SnapshotFor</c> rather than <c>For</c>, because the latter reads its array field twice and the tick can replace that array between
+    /// the two — a race that throws rather than returning an old number. A realm can appear or disappear between rows; no row can be torn. A figure one tick
+    /// old is the right answer for a stats endpoint and the wrong price to pay a publication protocol on the tick path for.
+    /// </para>
+    /// <para>
+    /// <b>The state read cannot throw.</b> <c>Realms.StateOf</c> raises for a realm that is not registered, and a realm removed between the snapshot and the
+    /// read is exactly that — which would turn an operator's stats call into a 500 once a dungeon closed under it. The realm's own <c>Closing</c> flag is the
+    /// answer in that case, and it is the last thing that was true of it.
+    /// </para>
+    /// </remarks>
+    private RealmStat[] ReadRealmStats()
+    {
+        var table = Engine?.RealmTable;
+        if (table == null || table.MaxRealms <= 1)
+        {
+            return [];
+        }
+
+        var hub = _subscriptionsRuntime?.Hub;
+        var registered = table.Registered;
+        var stats = new RealmStat[registered.Length];
+        for (var i = 0; i < registered.Length; i++)
+        {
+            var realm = registered[i];
+            var id = realm.Id.Value;
+            var replication = hub?.SnapshotFor(id);
+            stats[i] = new RealmStat(
+                id,
+                Engine.Realms.GenerationOf(realm.Id),
+                realm.Config?.Replication?.Kind ?? string.Empty,
+                realm.Closing ? RealmRunState.Closing : table.StateOfRow(id),
+                replication != null,
+                table.DivisorOf(id),
+
+                // Clamped: SessionsHere is a subtraction of two counters the tick moves independently, so an off-tick read can land between them and see a
+                // negative. A session count below zero is not a fact about any realm and would only ever be read as one.
+                Math.Max(0, replication?.SessionsHere ?? 0),
+                replication?.Enters ?? 0,
+                replication?.Updates ?? 0,
+                replication?.Leaves ?? 0,
+                replication?.CellsDelivered ?? 0,
+                replication?.Resets ?? 0,
+                replication?.Events ?? 0);
+        }
+
+        return stats;
     }
 
     /// <summary>Live entity count per registered archetype, named. Read from the engine, so it is meaningful before the first tick.</summary>

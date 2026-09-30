@@ -1237,6 +1237,43 @@ class RealmSessionTests : TestBase<RealmSessionTests>
         });
     }
 
+    /// <summary>
+    /// The immediate <c>Follow</c> releases in the same tick, so stopping a follow and placing the session yourself is one tick's work.
+    /// </summary>
+    /// <remarks>
+    /// <b>The staged form cannot express the release, and that is the whole reason the immediate one exists.</b> <c>Session(s).Follow(null)</c> applies at the
+    /// next prologue, while <c>Leave</c>/<c>Enter</c>/<c>Place</c> apply now — so an application that asked to stop following and then placed the session in
+    /// the same tick met its own follow, still in force, and took a throw on the tick thread. It is the two-phase trap <c>TryEnter</c> was added to close,
+    /// met from the other side.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void TheImmediateFollowReleasesInTheSameTickTheApplicationPlacesTheSession()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, World)[0];
+        var ids = Spawn(dbe, 0, 2);
+
+        Assert.That(commands.Follow(session, ids[0]), Is.True, "the immediate Follow is refused");
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.FollowedOf(session), Is.EqualTo(ids[0]), "it took effect at once, not at the next prologue");
+            Assert.That(commands.IsAnchored(session), Is.True);
+
+            // The message must send the reader to the lever that works: this session's profile declares no anchor, so blaming the profile would be a dead end.
+            var raised = Assert.Throws<InvalidOperationException>(() => commands.Enter(session, new RealmId(1)));
+            Assert.That(raised.Message, Does.Contain("Follow(EntityId.Null)"), "the refusal does not name the way out");
+        });
+
+        // Released and placed in one tick, which the staged form cannot do.
+        Assert.That(commands.Follow(session, EntityId.Null), Is.True);
+        Assert.That(commands.TryEnter(session, new RealmId(1)), Is.True, "released, so the application may move it — in this same tick");
+        Run(harness, session, 3);
+        Assert.That(commands.RealmOf(session), Is.EqualTo(new RealmId(1)));
+    }
+
     // ── helpers for the two above ───────────────────────────────────────────────────────────────────────────────
 
     /// <summary>Stages one session request and lets the next prologue apply it, as a system would.</summary>

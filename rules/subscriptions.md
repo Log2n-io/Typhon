@@ -659,6 +659,13 @@
     RealmSessionTests.ATeleportBetweenServedRealmsLeavesOneAndEntersTheOtherInItsFrame,
     RealmEventTests.ANearEventIsHeardInItsRealmOnly_AtIdenticalLocalCoordinates, RealmEventTests.AToKnownEventIsFiledInItsEntitysRealm,
     RealmSessionTests.ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns, RealmReplicationTests.AnEntityOfARealmNotServedIsNeverKnownToASession
+  note the "stops being served" half is OBSERVABLE from outside since SWG-08: RuntimeStatsSnapshot.Realms carries a row per REGISTERED realm with
+    Served plus its cumulative enters/updates/leaves/cells/resets/events, so "this realm cost nothing" and "this realm has no replication state at all"
+    are distinguishable without reaching into the hub — which is what lets the claim be checked at workload scale rather than on three realms.
+  note verified at workload scale by demo/SwgTatooine.Tests RealmCostChecks (a two-planet galaxy, ~1 200 interiors), which is NOT cited in verified:
+    above because the coverage audit scans test/ only. Its load-bearing case is AnInteriorTheLastSessionLeavesStopsBeingServedAndStopsCosting: a realm
+    is given replication state only when a session ENTERS it, so every assertion over realms no session was ever in passes whether or not
+    PushHub.SweepUnplaced releases a realm it is finished with — proved by mutant, which left the other four cases green.
 
 ### SUB-29: A session is in one realm at a time, and a realm switch is one published RESET|REALM frame `[fatal][silent]`
   invariant realm(s) ∈ {None} ∪ RealmId is one value per tick: the application's (Place(realm, pos) / Enter / Leave), the followed entity's after this
@@ -683,8 +690,8 @@
   scope: FrameAssembler.NoteRealm, FrameAssembler.CommitRealm, FrameAssembler.AnchorRealm, FrameAssembler.NoteRealmMoves, SessionFrameState.CommittedRealm,
     PushHub.Place, SessionTable.SetRealm, SubscriptionsCommands.Enter, SubscriptionsCommands.Leave, SubscriptionsCommands.TryEnter,
     SubscriptionsCommands.TryPlace, SubscriptionsCommands.IsAnchored, SubscriptionsCommands.TryRealmTarget, SessionRequest.Follow,
-    SessionTable.SetFollowed, SessionTable.FollowedOf, SessionTable.NoteRealmClosed, FrameAssembler.RealmClosed, SessionEventKind.RealmClosed,
-    SessionEvent.Realm
+    SubscriptionsCommands.Follow, SubscriptionsCommands.FollowedOf, SessionTable.SetFollowed, SessionTable.FollowedOf, SessionTable.AnchorsOf,
+    SessionTable.NoteRealmClosed, FrameAssembler.RealmClosed, SessionEventKind.RealmClosed, SessionEvent.Realm
   on_violation: silent. A client applies records of one realm over another's store — entities of a world it is not in, at coordinates that mean
     another place — or keeps a store the server believes cleared.
   verified: RealmSessionTests.PlacingIntoAnotherRealmIsOneResetRealmFrame, RealmSessionTests.ASwitchAndBackRefillsFromAResetAndLeavingIsAResetRealmNone,
@@ -694,7 +701,9 @@
     RealmSessionTests.ARealmRemovedUnderASessionMovesItToNoneAndTellsTheApplicationOnce,
     RealmSessionTests.AnAnchoredSessionWhoseRealmIsRemovedIsAlsoMovedToNoneOnce,
     RealmSessionTests.AFollowedEntityCrossingRealmsTakesItsSessionInTheSameTick,
-    RealmSessionTests.AFollowedSessionGetsThePositionButNotTheOwnerFieldsOfItsSubject
+    RealmSessionTests.AFollowedSessionGetsThePositionButNotTheOwnerFieldsOfItsSubject,
+    RealmSessionTests.AFollowAnchorsASessionWhoseProfileDeclaredNoAnchor,
+    RealmSessionTests.TheImmediateFollowReleasesInTheSameTickTheApplicationPlacesTheSession
     (unplaced sessions, the link state kept and realm observation: the fixture's other tests; Follow's own centre and release:
     AFollowedSessionIsCentredAndRealmedOnItsEntityWithoutControllingIt, FollowOverridesTheProfilesOwnAnchorAndReleasingReturnsToIt,
     ASessionWhoseFollowedEntityDiesKeepsItsLastViewpoint)

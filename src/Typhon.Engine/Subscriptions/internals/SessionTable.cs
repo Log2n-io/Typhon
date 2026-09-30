@@ -1231,6 +1231,30 @@ internal sealed unsafe class SessionTable : IDisposable
     public EntityId FollowedOf(SessionId session) => TryGetRow(session, out var row) ? row->Followed : EntityId.Null;
 
     /// <summary>
+    /// Both of a session's anchor entities in one row read: what it controls, and what its viewpoint follows.
+    /// </summary>
+    /// <param name="session">The identity.</param>
+    /// <param name="controlled">What it controls, or <see cref="EntityId.Null"/>.</param>
+    /// <param name="followed">What it follows, or <see cref="EntityId.Null"/>.</param>
+    /// <remarks>
+    /// <b>One <see cref="TryGetRow"/> rather than two, because the frame prologue wants both for every session on every tick.</b> Each of the single-field
+    /// readers is a bounds check, an identity check and an acquire load of the gate, and the prologue asks for the follow unconditionally — a session anchored
+    /// to nothing at all still has to be asked, because that is how the engine learns it is not. The two fields are adjacent in the same cache line, so reading
+    /// them together costs one row read instead of two.
+    /// </remarks>
+    public void AnchorsOf(SessionId session, out EntityId controlled, out EntityId followed)
+    {
+        if (TryGetRow(session, out var row))
+        {
+            controlled = row->Controlled;
+            followed = row->Followed;
+            return;
+        }
+
+        controlled = followed = EntityId.Null;
+    }
+
+    /// <summary>
     /// Moves a session out of a realm that has gone and queues the <see cref="SessionEventKind.RealmClosed"/> that says so.
     /// </summary>
     /// <param name="session">The identity.</param>
@@ -1241,8 +1265,10 @@ internal sealed unsafe class SessionTable : IDisposable
     /// registered; if the session kept pointing at the dead id it would notice again on every tick for the rest of the session's life, and the application
     /// would be told the same thing a hundred times a second. Writing <see cref="RealmId.NoneValue"/> here is therefore part of the contract, not tidying.
     /// <para>
-    /// Tick side, from the frame prologue. <see cref="SetRealm"/>'s affinity check is not taken: the prologue is the tick thread and already holds the
-    /// position <see cref="SetRealm"/>'s callers take it to prove.
+    /// Tick side, from the frame prologue, and it takes <see cref="SetRealm"/>'s affinity guard because it writes the same two fields. An earlier version
+    /// skipped it on the grounds that "the prologue is the tick thread", which misreads what the guard is for: <see cref="ReplicationThreadAffinity"/> detects
+    /// two callers inside at once, not a change of thread, so being on the right thread is not the property it checks. It is
+    /// <c>[Conditional("DEBUG")]</c> and therefore free in Release.
     /// </para>
     /// </remarks>
     public bool NoteRealmClosed(SessionId session, ushort realm)
@@ -1252,9 +1278,12 @@ internal sealed unsafe class SessionTable : IDisposable
             return false;
         }
 
+        _affinity.Enter(nameof(SessionTable), nameof(NoteRealmClosed));
         try
         {
-            if (!TryGetRow(session, out var row))
+            // Open, not merely present: a session already Closing stays in the open list until its Closed event is delivered, so TryGetRow would hand a
+            // RealmClosed to an application that has already released everything it held for that session on Closed.
+            if (!TryGetOpenRow(session, out var row))
             {
                 return false;
             }
@@ -1267,6 +1296,7 @@ internal sealed unsafe class SessionTable : IDisposable
         }
         finally
         {
+            _affinity.Exit();
             Exit();
         }
     }

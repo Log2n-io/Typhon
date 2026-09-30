@@ -517,6 +517,48 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     // The persisted realm catalog (Realms D-1): every NAMED realm's identity. Null until a realm other than 0 is first registered on this database.
     private ComponentTable _realmsTable;
     private Dictionary<ushort, (int ChunkId, RealmR1 Row)> _persistedRealms;
+
+    // Realm generations, by id, published for readers that are not the tick.
+    //
+    // <b>A second copy of one number, and it exists because the first copy is a Dictionary.</b> _persistedRealms is written at run time — a registration
+    // inserts, a retirement removes — under _realmLifecycleLock, and Dictionary.TryGetValue concurrent with an insert that resizes is undefined: a wrong
+    // value, an IndexOutOfRangeException, or a spin. The generation is read from OUTSIDE the tick (an operator's stats call, an application's realm
+    // directory: RealmRegistry.GenerationOf), which cannot take that lock without letting a stats read stall a fence. So the one field those readers want is
+    // published on its own, in an array, with the ordering that makes a lock-free read correct.
+    //
+    // It is written only where a generation can change, which is a registration — every other catalog write preserves it — and cleared at retirement, which
+    // happens at open before any concurrent reader exists.
+    private int[] _realmGenerations;
+
+    /// <summary>
+    /// Realm <paramref name="id"/>'s generation, or 0 when it names no catalogued realm. Any thread.
+    /// </summary>
+    /// <remarks>
+    /// Two acquire loads and a bounds check: the array reference, then the slot. Growing the array replaces the reference rather than mutating it, so a reader
+    /// either sees the old array — which is complete for every id it covers — or the new one, never a half-copied one.
+    /// </remarks>
+    internal int RealmGenerationOf(ushort id)
+    {
+        var generations = Volatile.Read(ref _realmGenerations);
+        return generations != null && id < generations.Length ? Volatile.Read(ref generations[id]) : 0;
+    }
+
+    /// <summary>Publishes realm <paramref name="id"/>'s generation for <see cref="RealmGenerationOf"/>. Callers hold the realm lifecycle lock.</summary>
+    private void PublishRealmGeneration(ushort id, int generation)
+    {
+        var generations = _realmGenerations;
+        if (generations == null || id >= generations.Length)
+        {
+            var grown = new int[Math.Max(id + 1, Math.Max(8, (generations?.Length ?? 0) * 2))];
+            generations?.CopyTo(grown, 0);
+
+            // The copy is filled before the reference is published, so a reader never sees a grown array missing the entries the old one had.
+            Volatile.Write(ref _realmGenerations, grown);
+            generations = grown;
+        }
+
+        Volatile.Write(ref generations[id], generation);
+    }
     private ConcurrentDictionary<Type, ComponentTable> _componentTableByType;
 
     // ─── ArchetypeRegistry lifecycle tracking ───────────────────────────────────────────────────────────
@@ -1036,6 +1078,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             _persistedRealms[id] = (chunkId, row);
+            PublishRealmGeneration(id, row.Generation);
         }
 
         // The pages first, the bootstrap key last: SaveBootstrap fsyncs the meta slot at once, so saving it first would leave, across a crash, a key that
@@ -2721,6 +2764,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         throw new InvalidOperationException(
                             $"The realm catalog is corrupt: row {chunkId} names realm {realm.Id}, which is out of range or already catalogued.");
                     }
+
+                    PublishRealmGeneration((ushort)realm.Id, realm.Generation);
 
                     if (realm.State == RealmR1.StateClosing)
                     {

@@ -223,6 +223,21 @@ public struct Attack
 }
 
 /// <summary>
+/// A GM tells a realm and everything under it that something happened: the human half of <see cref="RealmNews"/>.
+/// </summary>
+/// <remarks>
+/// <b>The announcement half of realm routing had no producer a person could reach.</b> Dungeons emit <see cref="RealmNews"/> when they open and close, and
+/// nothing else ever did — so "a planet's news reaches the players in its buildings and not another planet's" was a claim the demo could make only as a
+/// side effect of its own timing. This is a GM control: it names a realm, and every session in that realm or in a realm under it hears it (Realms G3,
+/// <c>RouteToRealm(subtree: true)</c>).
+/// </remarks>
+public struct GmAnnounce
+{
+    /// <summary>The realm to tell, and whose subtree hears it.</summary>
+    public uint Realm;
+}
+
+/// <summary>
 /// News of a realm, heard by every session in it and in the realms under it (Realms G3: <c>RouteToRealm</c> over the parent tree) — a planet's news
 /// reaches the players in its buildings and dungeons.
 /// </summary>
@@ -233,6 +248,9 @@ public struct RealmNews
 
     /// <summary>A dungeon closed: its party is sent home.</summary>
     public const ushort DungeonClosed = 2;
+
+    /// <summary>A GM said something to a realm and everything under it (<see cref="GmAnnounce"/>).</summary>
+    public const ushort GmNotice = 3;
 
     /// <summary>The realm the news is about, and whose subtree hears it.</summary>
     public ushort Realm;
@@ -306,7 +324,16 @@ public static class TatooineReplication
     public const byte ViewRealmRefusedPlayer = AckReasons.FirstApplicationReason;
 
     /// <summary><c>ACKS</c> reason: the realm asked for is not registered — never was, or is a dungeon nobody is inside.</summary>
-    public const byte ViewRealmNoSuchRealm = AckReasons.FirstApplicationReason + 1;
+    public const byte NoSuchRealm = AckReasons.FirstApplicationReason + 1;
+
+    /// <summary>
+    /// The reason a <see cref="ViewRealm"/> naming an unviewable realm is refused: <see cref="NoSuchRealm"/>, under the name its own callers read.
+    /// </summary>
+    /// <remarks>
+    /// One code for both commands, because the code's meaning is the REALM and not the verb. A client's reason table rendering "cannot view that realm" for a
+    /// refused announcement would be describing a command nobody sent.
+    /// </remarks>
+    public const byte ViewRealmNoSuchRealm = NoSuchRealm;
 
     /// <summary>
     /// <c>ACKS</c> reason: the netId names nothing this session was shown — it left the view between the click and the tick.
@@ -867,6 +894,11 @@ public static class TatooineReplication
         // at the point of sending. Named here rather than worked around in the client, because the client was right.
         subs.Command<ViewRealm>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(v => v.Realm, Codec.VarUInt, "realm"));
 
+        // A GM announcement: one realm's subtree, told once. Spectators only, and at the SAME rate as the other god controls rather than twice it — an
+        // announcement is one event fanned out to every session in a planet and in all of its buildings, which is the widest thing one message can ask for in
+        // this demo, so it has no business being the most permissive of them.
+        subs.Command<GmAnnounce>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(a => a.Realm, Codec.VarUInt, "realm"));
+
         // Spectators only, and at ViewRealm's rate for ViewRealm's reason: an accepted ask changes the session's profile, and a profile change is a whole
         // RESET. It is a camera's control, not a player's — a possessed player already follows itself.
         subs.Command<Spectate>(c => c.Rate(1, 2).Roles(SessionRole.Spectator).Field(s => s.NetId, Codec.VarUInt, "netId"));
@@ -1097,6 +1129,27 @@ public static class TatooineReplication
             subs.Session(command.Session).Profile(SpectateProfile).Control(subject);
             Spectators[command.Session] = subject;
             Releasing.Remove(command.Session);
+        }
+
+        // A GM announcement. The realm is validated the same way ViewRealm's is and for the same reason: anything at or above ViewableRealms is a realm that
+        // may have gone between the client reading a directory and the click arriving, and RouteToRealm over an unregistered realm reaches nobody anyway.
+        foreach (var command in subs.Commands<GmAnnounce>())
+        {
+            if (command.Value.Realm >= (uint)ViewableRealms)
+            {
+                subs.Reject(command, NoSuchRealm);
+                continue;
+            }
+
+            // Subject stays 0: for the dungeon kinds it names a realm OTHER than the one hearing the news, so repeating the announced realm here would make the
+            // two indistinguishable — a client could not tell "about realm 7" from "about the realm you are in".
+            Announce(tick, new RealmNews
+            {
+                Realm = (ushort)command.Value.Realm,
+                What = RealmNews.GmNotice,
+                Subject = 0,
+                Count = 0,
+            });
         }
 
         // Stop or start the world. Logged on every change and never folded into a counter: a server that stopped

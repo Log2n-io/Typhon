@@ -16,9 +16,14 @@ namespace Typhon.Engine;
 /// and therefore answers on any running engine.
 /// </para>
 /// <para>
-/// <b>Read at human rate, not on the tick path.</b> It allocates (one snapshot, two arrays) and walks the telemetry window, so it belongs behind an HTTP
-/// endpoint, a CLI verb or a log timer — not in a system. Nothing here is a counter the caller must difference: every figure is either an instantaneous
-/// level or a percentile over the window the caller asked for.
+/// <b>Read at human rate, not on the tick path.</b> It allocates (one snapshot, a few arrays) and walks the telemetry window, so it belongs behind an HTTP
+/// endpoint, a CLI verb or a log timer — not in a system. Every figure outside <see cref="RuntimeStatsSnapshot.Realms"/> is either an instantaneous level or
+/// a percentile over the window the caller asked for, so it needs no differencing.
+/// </para>
+/// <para>
+/// <b><see cref="RuntimeStatsSnapshot.Realms"/> is the exception, and deliberately.</b> Its work figures are cumulative since the process started, because the
+/// question they exist to answer is "has this realm EVER cost anything" — a realm nobody is in is supposed to contribute exactly zero, and a per-tick level
+/// cannot tell "zero this tick" from "zero always". Difference two reads for a rate.
 /// </para>
 /// <para>
 /// <b>The telemetry ring is a single-writer diagnostic structure with no publication protocol</b>, so a sample read while the tick driver is writing it may
@@ -106,6 +111,71 @@ public sealed class RuntimeStatsSnapshot
 
     /// <summary>99th-percentile cost of the replication track itself over the window, in milliseconds.</summary>
     public double ReplicationTrackP99Ms { get; init; }
+
+    /// <summary>
+    /// One row per <b>registered</b> realm, in registration order: what it is, what it is doing, and what its sessions have cost.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Per registered realm, not per served one, and that distinction is the point.</b> A realm nobody is in has no replication state at all — the hub
+    /// drops it — so its counters do not read zero, they do not exist. Reporting only the served realms would make "this realm cost nothing" indistinguishable
+    /// from "this realm is not in the list", which is exactly the claim a realm world lives or dies on: an SWG galaxy registers a realm per enterable building
+    /// and a thousand of them are empty at any moment. <see cref="RealmStat.Served"/> says which case a zero row is.
+    /// </para>
+    /// <para>Empty when the engine has one realm, where every figure above already describes it.</para>
+    /// </remarks>
+    public RealmStat[] Realms { get; init; } = [];
+}
+
+/// <summary>
+/// One realm: what it is, what it is doing, and the replication work its sessions have been served.
+/// </summary>
+/// <param name="Realm">The realm's id.</param>
+/// <param name="Generation">
+/// Which incarnation of that id this is. A realm's identity is the PAIR (12-realms § 1.1): ids are reused across an open, so a reader comparing by id alone
+/// can take a reused id for the realm it replaced.
+/// </param>
+/// <param name="Kind">The realm kind its replication declared, which picks its sessions' profile variants; <c>""</c> for the default kind.</param>
+/// <param name="State">Active, Simulated, Dormant or Closing, as the realm policy last evaluated it.</param>
+/// <param name="Served">
+/// Whether the realm has replication state at all. <b>False is not an error and is the usual case at scale</b>: a realm no session is in is dropped by the
+/// hub, so every work figure below is structurally zero rather than measured zero.
+/// </param>
+/// <param name="Divisor">
+/// Its simulation rate divisor this tick: 1 while it is observed, its <c>RealmConfig.UnobservedTickDivisor</c> otherwise. A realm at 4 has its clusters
+/// dispatched once every fourth tick.
+/// </param>
+/// <param name="Sessions">Sessions in the realm at the moment of the read — a level, not a total.</param>
+/// <param name="Enters">Entities delivered into its sessions' views, cumulative.</param>
+/// <param name="Updates">Updates delivered to its sessions, cumulative.</param>
+/// <param name="Leaves">Entities dropped from its sessions' views, cumulative.</param>
+/// <param name="CellsDelivered">Replication cells its sessions were filled from, cumulative.</param>
+/// <param name="Resets">Views re-sent whole to its sessions — a realm switch, a slot reuse, a gap, cumulative.</param>
+/// <param name="Events">Events routed to its sessions, cumulative.</param>
+[PublicAPI]
+public readonly record struct RealmStat(
+    ushort Realm,
+    int Generation,
+    string Kind,
+    RealmRunState State,
+    bool Served,
+    int Divisor,
+    int Sessions,
+    long Enters,
+    long Updates,
+    long Leaves,
+    long CellsDelivered,
+    long Resets,
+    long Events)
+{
+    /// <summary>
+    /// Every work figure summed: zero means this realm has cost its sessions nothing at all since the process started.
+    /// </summary>
+    /// <remarks>
+    /// One number to assert against, because the claim "an unobserved realm is free" is about all of them at once and a check that named five of six would be
+    /// a check that passed when the sixth moved.
+    /// </remarks>
+    public long Work => Enters + Updates + Leaves + CellsDelivered + Resets + Events;
 }
 
 /// <summary>One system's mean cost over the window.</summary>

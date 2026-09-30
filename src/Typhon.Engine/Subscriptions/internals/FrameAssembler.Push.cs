@@ -120,9 +120,10 @@ internal sealed unsafe partial class FrameAssembler
             int realm;
 
             // Session(s).Follow(e) (12-realms § 2.2 Q5) outranks whatever the profile declared, and is legal on every shape: on a Sphere it is the centre and
-            // the realm, on a World or a ClientRegion the realm alone (§ 1.5), because those shapes have no centre to move. It is read from the row the
-            // Controlled case reads anyway, so a session that follows nothing costs one comparison against a value already in the line.
-            var followed = _sessions.FollowedOf(session);
+            // the realm, on a World or a ClientRegion the realm alone (§ 1.5), because those shapes have no centre to move. Both anchors come out of ONE row
+            // read: the follow has to be asked for unconditionally — that is how the engine learns a session follows nothing — and asking separately would be
+            // a second identity check and gate load per session per tick for a field adjacent to the one the Controlled case wants anyway.
+            _sessions.AnchorsOf(session, out var controlledEntity, out var followed);
             if (!followed.IsNull)
             {
                 follow = followed;
@@ -144,7 +145,7 @@ internal sealed unsafe partial class FrameAssembler
                         realm = AnchorRealm(session, follow, _anyRealmMoves && _movedEntities.Contains(follow.RawValue));
                         break;
                     case ViewpointSource.Controlled:
-                        follow = _sessions.ControlledOf(session);
+                        follow = controlledEntity;
                         realm = AnchorRealm(session, follow, _anyRealmMoves && Self == null && _movedEntities.Contains(follow.RawValue));
                         break;
                     default:
@@ -502,7 +503,9 @@ internal sealed unsafe partial class FrameAssembler
     /// <summary>What <see cref="RealmKindOf"/> answers for a registered realm no session may be in: no replication declared (12-realms § 2.1).</summary>
     private const int UnreplicatedRealm = -2;
 
-    /// <summary>What <see cref="RealmKindOf"/> answers for no realm at all, and for one that is not registered — which for a session IN one means removed.</summary>
+    /// <summary>
+    /// What <see cref="RealmKindOf"/> answers for no realm at all, and for one that is not registered — which, for a session that is IN one, means removed.
+    /// </summary>
     private const int RealmGone = -1;
 
     /// <summary>

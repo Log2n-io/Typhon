@@ -535,6 +535,29 @@ public sealed class SubscriptionsCommands
     public EntityId FollowedOf(SessionId session) => _ingress.Sessions.FollowedOf(session);
 
     /// <summary>
+    /// Points a session's viewpoint at an entity it does not control, or releases it — <b>this tick</b>, as <see cref="Place(SessionId, RealmId, Vector3D)"/>
+    /// and <see cref="Enter(SessionId, RealmId)"/> apply this tick.
+    /// </summary>
+    /// <param name="session">The session.</param>
+    /// <param name="entity">The entity to follow, or <see cref="EntityId.Null"/> to release and give the profile's own anchor back.</param>
+    /// <returns><see langword="false"/> when the session is no longer open.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this exists beside <c>Session(s).Follow(entity)</c>, which does the same thing a tick later.</b> The staged form is right for a system deciding
+    /// something about a session it is looking at, and it is the only form available from a parallel system. But a follow is also the thing an application has
+    /// to UNDO before it may move a session itself, and a release that lands next tick makes "stop following this player and put the camera on planet 0"
+    /// impossible to express in one tick: the <see cref="Leave"/> in the same tick still sees the follow and throws. That is the same two-phase trap
+    /// <see cref="TryEnter"/> was added to close, met from the other side — so the release is available immediately, from the tick, like every other verb on
+    /// this type.
+    /// </para>
+    /// <para>
+    /// Following is not controlling: the session is given the entity's position and realm and none of its owner data. See
+    /// <c>SessionRequest.Follow</c> for the whole argument.
+    /// </para>
+    /// </remarks>
+    public bool Follow(SessionId session, EntityId entity) => _ingress.Sessions.SetFollowed(session, entity);
+
+    /// <summary>
     /// Takes a session out of every realm (12-realms § 1.6): its client is told with a <c>RESET</c> carrying <c>REALM(NONE)</c>, and it hears only the events
     /// addressed to it. Applied this tick.
     /// </summary>
@@ -619,8 +642,25 @@ public sealed class SubscriptionsCommands
         return !IsAnchored(session);
     }
 
+    /// <summary>
+    /// Refuses to move a session whose realm is an entity's, naming which of the two ways it got that way.
+    /// </summary>
+    /// <remarks>
+    /// <b>The distinction is in the message because it decides what the caller does next.</b> A session anchored by its PROFILE is released by changing the
+    /// profile; one anchored by <see cref="Follow"/> is released by <c>Follow(EntityId.Null)</c>, and nothing about the profile is wrong. A message that blamed
+    /// the profile for a run-time follow sent the reader to the wrong lever — and would do it on a profile that declares no anchor at all, which reads as an
+    /// engine bug rather than as the caller's own follow still being in force.
+    /// </remarks>
     private void CheckNotAnchored(SessionId session)
     {
+        var followed = _ingress.Sessions.FollowedOf(session);
+        if (!followed.IsNull)
+        {
+            throw new InvalidOperationException(
+                $"{session} follows {followed} (Session(s).Follow): its realm is that entity's and moves with it. Release it with Follow(EntityId.Null) — "
+                + "changing the profile will not (12-realms § 1.3).");
+        }
+
         if (IsAnchored(session))
         {
             throw new InvalidOperationException(
