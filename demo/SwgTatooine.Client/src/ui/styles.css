@@ -189,6 +189,130 @@ button.active {
   margin-top: 0;
 }
 
+/* The realm inventory (CLI3D-11). Collapsed by default and scrolled rather than allowed to grow: it is the only
+   control on this panel whose height depends on the world, and a busy server can fill it to the row cap. */
+.realm-panel {
+  margin-top: 6px;
+}
+
+.realm-panel > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11px;
+  list-style: none;
+}
+
+/* Safari does not honour `list-style: none` on a summary, so without this it draws its own triangle beside ours. */
+.realm-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.realm-panel > summary .accent {
+  color: var(--accent);
+}
+
+.realm-panel > summary::before {
+  content: '▸ ';
+}
+
+.realm-panel[open] > summary::before {
+  content: '▾ ';
+}
+
+.realm-panel .hint {
+  margin-top: 2px;
+}
+
+ /* The scrolling belongs to the wrapper, not to the table: `display: block` on a `table` wraps its row groups in an
+   anonymous table box that shrink-wraps, so `width: 100%` would stop reaching the columns. The default bar is also a
+   white slab against a dark panel, and this is the only scrolling region on it. */
+.realm-scroll {
+  margin-top: 4px;
+  max-height: 190px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.realm-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  table-layout: fixed;
+}
+
+ /* Sticky because the headings are single letters, which is exactly when a scrolled-away header hurts. */
+.realm-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-bg);
+  color: var(--muted);
+  font-weight: 400;
+  text-align: left;
+  padding: 1px 3px;
+}
+
+.realm-table td {
+  padding: 1px 3px;
+  white-space: nowrap;
+}
+
+/* The heading abbreviations carry their own tooltip; the browser's dotted underline on top of a one-letter
+   heading is noise in a 300 px panel. */
+.realm-table abbr {
+  text-decoration: none;
+  cursor: help;
+}
+
+/* The name is the one column whose width the world decides, so it is the one that gives: ellipsised rather than
+   pushing the counts off the edge and adding a second, horizontal scrollbar to a 300 px panel. */
+.realm-table td:first-child,
+.realm-table button.link {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.realm-table th:nth-child(n + 3),
+.realm-table td:nth-child(n + 3) {
+  width: 30px;
+}
+
+.realm-table th:nth-child(2),
+.realm-table td:nth-child(2) {
+  width: 62px;
+}
+
+.realm-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The realm the session is actually in, so the row and the world agree at a glance. */
+.realm-table tr.here {
+  background: rgba(240, 180, 60, 0.14);
+}
+
+.realm-table .realm-state {
+  color: var(--muted);
+}
+
+
+.realm-table button.link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--panel-fg);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.realm-table button.link:hover {
+  color: var(--accent);
+}
+
 .slider {
   display: flex;
   flex-direction: column;

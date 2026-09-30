@@ -1,4 +1,6 @@
-﻿namespace SwgTatooine;
+﻿using System;
+
+namespace SwgTatooine;
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // Systems
@@ -645,4 +647,60 @@ internal sealed class ReplicationReportSystem : CallbackSystem
         .Reads<PlayerState>();
 
     protected override void Execute(TickContext ctx) => TatooineReplication.ReportTick(ctx);
+}
+
+/// <summary>
+/// Counts what is standing in each realm, once every <see cref="SimConfig.RealmCensusHz"/> of a second, for the realm inventory the client polls.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>In the DAG only when this process is serving</b> — added beside <see cref="PlayerSessionSystem"/>, under the same condition. A measurement run must
+/// execute the same code it always did, and a serial walk of every cluster of five archetypes once a second is small enough to disappear into the noise of
+/// one arm and not the other.
+/// </para>
+/// <para>
+/// <b>It reads placements, and says so.</b> It opens no component and touches no field — the count is <c>PopCount</c> of a cluster's occupancy — but it walks
+/// the same clusters the movers write, and a system that declares no access at all is a DAG root free to run at the head of the tick (see
+/// <see cref="ReplicationReportSystem"/>, which learned that the hard way). Declaring the placements it walks is what puts it after them.
+/// </para>
+/// </remarks>
+internal sealed class RealmCensusSystem : CallbackSystem
+{
+    private readonly RealmCensus _census;
+    private readonly int _everyTicks;
+
+    /// <summary>The census to fill, walked once every <paramref name="everyTicks"/> ticks.</summary>
+    internal RealmCensusSystem(RealmCensus census, int everyTicks)
+    {
+        _census = census;
+        _everyTicks = Math.Max(1, everyTicks);
+    }
+
+    protected override void Configure(SystemBuilder b) => b
+        .Name("RealmCensus")
+        .Phase(SimPhases.Report)
+        .Reads<PlayerPlacement>()
+        .Reads<NpcPlacement>()
+        .Reads<CreaturePlacement>()
+
+        // The scenery is walked too, so it is declared too. It never moves in this world — SetSpatialBarrierOnly says
+        // so — which makes the omission latent rather than live, and latent by luck is exactly what rule ED-05 and the
+        // note on ReplicationReportSystem above are about.
+        .Reads<StructurePlacement>()
+        .Reads<LairPlacement>();
+
+    protected override void Execute(TickContext ctx)
+    {
+        // The cadence, and the only thing this system does on the other ticks. A viewer polls at 1 Hz; walking every
+        // cluster at 50 Hz to answer it would be fifty times the work for the same document.
+        //
+        // The null check is not defensive noise: this runs unconditionally on the tick path, where a throw takes the
+        // tick thread down, so the one argument it passes on is tested rather than asserted.
+        if (ctx.TickNumber % _everyTicks != 0 || ctx.Transaction == null)
+        {
+            return;
+        }
+
+        _census.Take(ctx.Transaction, ctx.TickNumber);
+    }
 }

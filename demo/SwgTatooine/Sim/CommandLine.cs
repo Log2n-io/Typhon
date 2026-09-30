@@ -52,6 +52,7 @@ public static class CommandLine
         c.InterPlanetShare = r.Float("--interplanet-share", c.InterPlanetShare, "share of shuttle trips that cross planets", min: 0f, max: 1f);
         c.Space = r.Switch("--space", "build the space realm");
         c.Starships = r.Int("--starships", c.Starships, "starships in space", min: 0);
+        c.RealmCensusHz = r.Float("--realm-census-hz", c.RealmCensusHz, "times a second a serving run counts each realm's population; 0 = never", min: 0f);
         c.PlanetDivisor = r.Int("--planet-divisor", c.PlanetDivisor, "divide each planet's population by this", min: 1);
         c.SpaceDivisor = r.Int("--space-divisor", c.SpaceDivisor, "divide space's population by this", min: 1);
         c.Dungeons = r.Int("--dungeons", c.Dungeons, "dungeon realms per planet", min: 0);

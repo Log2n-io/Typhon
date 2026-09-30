@@ -189,19 +189,27 @@ export function crossingKindOf(previous: RealmView | null, next: RealmView | nul
  * always says something true, and a fetched name replaces it when there is one.
  */
 export function realmLabel(view: RealmView | null): string {
-  if (view === null) {
-    return 'No realm';
-  }
+  return view === null ? 'No realm' : labelForAppTag(view.appTag);
+}
 
-  switch (view.scene) {
+/**
+ * The same name, for a realm known only by its `AppTag` — the realm inventory's rows, which arrive over HTTP and never
+ * as a `REALM` frame.
+ *
+ * Shared with {@link realmLabel} rather than repeated, so a room cannot be called one thing in the HUD and another in
+ * the realm panel two centimetres away.
+ */
+export function labelForAppTag(tag: number): string {
+  const { scene, slot } = decodeAppTag(tag);
+  switch (scene) {
     case 'space':
       return 'Space';
     case 'interior':
-      return `Interior ${view.slot}`;
+      return `Interior ${slot}`;
     case 'dungeon':
-      return `Dungeon ${view.slot}`;
+      return `Dungeon ${slot}`;
     default:
-      return `Planet ${view.slot}`;
+      return `Planet ${slot}`;
   }
 }
 

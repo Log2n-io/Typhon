@@ -1,4 +1,5 @@
 import { DEFAULT_ARCHETYPE_INFOS } from '../data/archetypes';
+import { RealmPanel } from './RealmPanel';
 import { CITIES, POIS } from '../data/world-data';
 import { useStats } from '../state/stats-store';
 import { useUi, type Population } from '../state/ui-store';
@@ -109,6 +110,9 @@ export function Toolbar() {
             )}
           </>
         )}
+        {/* Under the two controls that CHANGE the realm, because it is what those controls are acting on. Renders
+            nothing at all against a source that reports no inventory. */}
+        <RealmPanel />
         <div className="row">
           {!LIVE &&
             POPULATIONS.map((p) => (

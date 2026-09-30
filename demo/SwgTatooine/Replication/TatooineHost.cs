@@ -37,8 +37,12 @@ public static class TatooineHost
     /// <param name="clientRoot">A directory of built client files to serve at the root, or <see langword="null"/> for none.</param>
     /// <param name="origins">Origins a browser may connect from; empty allows any, which is the right default for a demo on a developer's machine.</param>
     /// <param name="realmsJson">The realm directory to publish at <c>/typhon/demo.json</c>, or <see langword="null"/> to publish none.</param>
+    /// <param name="realmInventory">
+    /// Builds the live realm inventory served at <c>/typhon/realms.json</c>, or <see langword="null"/> to serve none.
+    /// </param>
     /// <returns>A task that completes when the host has stopped.</returns>
-    public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null, string realmsJson = null)
+    public static async Task ServeAsync(TyphonRuntime runtime, int port, string clientRoot = null, string[] origins = null, string realmsJson = null,
+        Func<string> realmInventory = null)
     {
         ArgumentNullException.ThrowIfNull(runtime);
 
@@ -114,6 +118,19 @@ public static class TatooineHost
                 FormattableString.Invariant($"{{\"godRegionMaxEdgeM\":{Json(edge)},\"maxViewRadiusM\":{Json(radius)}{realms}}}"),
                 "application/json");
         });
+
+        // What every realm is DOING, against demo.json's what this process was STARTED with (CLI3D-11).
+        //
+        // <b>Its own document rather than more of demo.json, and the difference is lifetime.</b> demo.json is immutable
+        // for the run and is fetched once; this one is polled about once a second. Merging them would make a page
+        // re-parse the static realm directory every second and would make an immutable document look volatile.
+        //
+        // The delegate keeps this file ignorant of the simulation, as everything else here is: the host maps an endpoint
+        // and serves what it is handed.
+        if (realmInventory != null)
+        {
+            app.MapGet("/typhon/realms.json", () => Results.Text(realmInventory(), "application/json"));
+        }
 
         // A double as JSON, or 0 for one JSON cannot express. See the note at its call site.
         static string Json(double value) =>

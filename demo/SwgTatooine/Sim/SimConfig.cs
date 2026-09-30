@@ -141,6 +141,20 @@ public sealed class SimConfig
     /// </summary>
     public float InteriorSleepS = 10f;
 
+    /// <summary>
+    /// How often a serving process counts what is standing in each realm, for the client's realm inventory. 0 = never.
+    /// </summary>
+    /// <remarks>
+    /// <b>It applies only to a serving run, whatever this says.</b> The census system is added to the DAG beside the session system, under the same
+    /// condition, because the measured runs are where this demo's CPU numbers come from and a once-a-second serial walk of every cluster is exactly the kind
+    /// of term that makes two A/B arms incomparable while looking like nothing. A viewer pays it; a measurement does not.
+    /// <para>
+    /// The cadence is <c>TickRateHz / RealmCensusHz</c> ticks, truncated: 3 at 40 Hz is 13 ticks, which is 3.08 Hz. Near
+    /// enough for a panel, and stated rather than left as a surprise.
+    /// </para>
+    /// </remarks>
+    public float RealmCensusHz = 1f;
+
     /// <summary>Planets after the first are simulated at this divisor: each of their clusters once every N ticks, over N ticks' delta time. 1 = full rate.</summary>
     public int PlanetDivisor = 1;
 

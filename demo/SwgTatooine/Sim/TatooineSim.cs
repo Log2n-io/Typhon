@@ -41,6 +41,31 @@ public sealed partial class TatooineSim : IDisposable
     public WorldCensus Census { get; private set; }
 
     /// <summary>
+    /// What is standing in each realm right now, recounted once a second while this process is serving.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="Census"/>, which is what the world was BUILT with and never changes: this one is walked
+    /// off the clusters as they are, so it follows every crossing, spawn and dungeon. Empty in a run that is not serving
+    /// — see <see cref="SimConfig.RealmCensusHz"/> for why the measured path does not pay for it.
+    /// <para>
+    /// <b>Allocated only by a serving run</b>, through <see cref="SizeRealmCensus"/>, which is the same rule the census system's own gating follows and is
+    /// there for the same reason: a measured run must execute the code it always did. Sized in <c>Initialize</c> it allocated four arrays over every realm
+    /// slot in EVERY run — about 19 KB on a two-planet world, nothing on a one-planet one — for a panel a measured run never serves. Small, and still the
+    /// wrong side of the line this demo's CPU numbers are taken on.
+    /// </para>
+    /// </remarks>
+    public RealmCensus RealmPopulation { get; private set; } = new(1);
+
+    /// <summary>How many realm slots this run configured, for <see cref="SizeRealmCensus"/>.</summary>
+    private int _realmSlots = 1;
+
+    /// <summary>
+    /// Sizes <see cref="RealmPopulation"/> for this run's realms — including the dungeon slots, since a dungeon is registered while a party is inside one,
+    /// which is exactly when a viewer wants to see it. Called by the serving path only.
+    /// </summary>
+    private void SizeRealmCensus() => RealmPopulation = new RealmCensus(_realmSlots);
+
+    /// <summary>
     /// How many ticks the runtime actually executed, read after the shutdown rather than at the poll that requested it.
     /// </summary>
     /// <remarks>
@@ -297,6 +322,9 @@ public sealed partial class TatooineSim : IDisposable
         // Dungeon slots (G2): ids after space, each used by one instance — an id unregistered this session is not registrable again (RLM-06).
         FirstDungeonRealm = realms;
         realms += _config.Dungeons;
+
+        // The census is NOT sized here, deliberately: see SizeRealmCensus, which the serving path calls and a measured run does not.
+        _realmSlots = realms;
         if (realms > 1)
         {
             Dbe.ConfigureRealms(realms);

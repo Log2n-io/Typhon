@@ -30,7 +30,9 @@ public sealed partial class TatooineSim
         StartReplication();
         try
         {
-            await TatooineHost.ServeAsync(_runtime, port, clientRoot, realmsJson: RealmDirectoryJson()).ConfigureAwait(false);
+            await TatooineHost
+                .ServeAsync(_runtime, port, clientRoot, realmsJson: RealmDirectoryJson(), realmInventory: RealmInventoryJson)
+                .ConfigureAwait(false);
         }
         finally
         {

@@ -596,6 +596,16 @@ public sealed partial class TatooineSim
         {
             dag.Add(new PlayerSessionSystem());
             dag.Add(new ReplicationReportSystem());
+
+            // The realm inventory's population (CLI3D-11). Here rather than beside SpatialTelemetry so a measured run
+            // executes the code it always did: this is a serial walk of every cluster, and one that runs in one A/B arm
+            // and not the other is how a measurement stops meaning anything.
+            if (_config.RealmCensusHz > 0f)
+            {
+                // Sized here rather than in Initialize, so a measured run allocates nothing for a panel it never serves. See SizeRealmCensus.
+                SizeRealmCensus();
+                dag.Add(new RealmCensusSystem(RealmPopulation, (int)Math.Max(1f, _config.TickRateHz / _config.RealmCensusHz)));
+            }
         }
     }
 }

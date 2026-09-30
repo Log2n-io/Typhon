@@ -443,13 +443,15 @@ public static class TatooineReplication
     private static readonly HashSet<SessionId> Kicked = [];
 
     /// <summary>
-    /// The sessions riding an entity, and which one — the ANCHOR, which is what the realm command consults to decide whether to place the session or to
-    /// end its ride and defer the placement by a tick.
+    /// The sessions riding an entity: this application's INDEX of them, not its copy of the anchor.
     /// </summary>
     /// <remarks>
-    /// Tick-thread only, entered when a <see cref="Spectate"/> is accepted and removed when it is released or its session closes. It is not a cache of
-    /// something the engine knows: the engine has the anchor, but nothing public reads it back, and asking <c>Enter</c> and catching the throw would be
-    /// finding out by crashing.
+    /// <b>It answers "which sessions are riding", which the engine has no API for; it no longer answers "is this session anchored", which the engine
+    /// does.</b> That second question used to be asked of this map, and getting it wrong cost a throw on the tick thread — the engine applies a requested
+    /// profile at the NEXT tick's prologue, so between asking for the god profile and it landing, this map said one thing and the engine said another. The
+    /// realm command now asks <c>TryEnter</c>, which tests and acts in one call; what is left here is a set to sweep in
+    /// <see cref="DropDeadSubjects"/>, where a stale entry costs one wasted liveness check and nothing else.
+    /// <para>Tick-thread only, entered when a <see cref="Spectate"/> is accepted and removed when it is released or its session closes.</para>
     /// </remarks>
     private static readonly Dictionary<SessionId, EntityId> Spectators = [];
 
@@ -470,8 +472,13 @@ public static class TatooineReplication
     /// <param name="session">The session.</param>
     /// <returns>The subject.</returns>
     /// <remarks>
-    /// <b>Tick thread only</b>, like the map it reads: it is a plain <see cref="Dictionary{TKey,TValue}"/> written by the replication system. A test may
-    /// call it between ticks to stage something; nothing may call it from another thread while the world is running.
+    /// <b>The engine's answer, not this application's.</b> It forwards to <c>Commands.ControlledOf</c>, which reads the session row the engine itself
+    /// writes — so it cannot drift from the anchor the way reading the local index did, and it is right during the tick between a release being asked for
+    /// and the prologue applying it, which the index is not.
+    /// <para>
+    /// <b>Tick thread only</b>, as everything on <c>SubscriptionsCommands</c> is. A test may call it between ticks to stage something. It goes through
+    /// <c>_pushCommands</c> — the live runtime's, as <see cref="Replicate{T}(in ClusterRef{T}, int)"/> does — and answers null before one is running.
+    /// </para>
     /// <para>
     /// <b>Not the same question as <see cref="ControlledBy"/>, which is why both exist.</b> That one reads
     /// <c>Player.Session.Controller</c> — the demo's own possession record, written when a client is given a player to play. This is the ENGINE's control,
@@ -479,7 +486,7 @@ public static class TatooineReplication
     /// whole difference between spectating and playing.
     /// </para>
     /// </remarks>
-    public static EntityId SubjectOf(SessionId session) => Spectators.TryGetValue(session, out var subject) ? subject : EntityId.Null;
+    public static EntityId SubjectOf(SessionId session) => _pushCommands?.ControlledOf(session) ?? EntityId.Null;
 
     /// <summary>The sessions whose subject died this tick, collected before any is released because releasing writes to <see cref="Spectators"/>.</summary>
     private static readonly List<SessionId> Dead = [];
@@ -1109,18 +1116,21 @@ public static class TatooineReplication
 
             var wanted = new RealmId((ushort)command.Value.Realm);
 
-            // <b>A rider asking for a realm stops riding and goes there, and this branch is why Enter is unreachable from an anchored session.</b> Enter
-            // THROWS on one (12-realms § 1.3, CheckNotAnchored), and the dropdown is on screen throughout a ride — so rather than guard the call, the call
-            // is not made: the ask joins the release that is already deferred by a tick, and lands from the drain once the god profile has been applied.
-            // Refusing instead was the first design; it needed the application to predict the engine's two-phase apply, and the tick between asking for the
-            // god profile and the prologue applying it was a window in which the guard said "not anchored" and the engine still said it was.
-            if (Spectators.ContainsKey(command.Session) || Releasing.ContainsKey(command.Session))
+            // <b>A rider asking for a realm stops riding and goes there, and the engine is what says which case this is.</b> Enter THROWS on an
+            // entity-anchored session (12-realms § 1.3) and the dropdown is on screen throughout a ride, so the ask and the anchor test have to be one
+            // call: TryEnter answers instead of raising, and the answer cannot go stale between asking and acting.
+            //
+            // Two earlier designs got this wrong in the same place. The first REFUSED the ask while a mirror said the session was riding; the second kept
+            // the mirror and deferred instead of refusing. Both needed the application to predict the engine's two-phase profile apply — a profile asked
+            // for on one tick is applied by the next tick's prologue — and the tick in between was a window where the mirror said "not anchored" and the
+            // engine still said it was. The wrong answer there was a throw on the tick thread.
+            //
+            // A release that has been asked for but not yet applied is still anchored as far as the engine is concerned, so it lands here too and simply
+            // updates where the drain will put the session.
+            if (!subs.TryEnter(command.Session, wanted))
             {
                 StopSpectating(subs, command.Session, wanted);
-                continue;
             }
-
-            subs.Enter(command.Session, wanted);
         }
 
         // Reclaim reservations nobody ever claimed. A reservation is released where its session's `Opened` event is seen, and a session that was accepted but
@@ -1214,7 +1224,11 @@ public static class TatooineReplication
     {
         // RealmId.None is the "no opinion" sentinel and default(RealmId) cannot be: it is realm 0, which is planet 0 and a place a viewer may really want.
         var wanted = target;
-        if (!Spectators.Remove(session))
+
+        // Removing from the index is bookkeeping; whether there is a ride to END is the engine's answer, because a release already asked for and not yet
+        // applied leaves the session anchored and out of the index at the same time.
+        Spectators.Remove(session);
+        if (!subs.IsAnchored(session) || Releasing.ContainsKey(session))
         {
             // Not riding. A release is accepted rather than refused — a client asking for a state it is already in is not an error — but a realm asked for
             // while a release is already pending must still land, so the pending target is updated rather than dropped.
