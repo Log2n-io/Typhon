@@ -359,7 +359,10 @@ export class Connection {
   private onWelcome(message: Uint8Array): void {
     const welcome = parseWelcome(message);
     if (welcome.major !== ProtocolConstants.major) {
-      this.fail(CloseCode.ProtocolError, `the server speaks major ${welcome.major}, this client major ${ProtocolConstants.major}`);
+      this.fail(
+        CloseCode.ProtocolError,
+        `the server speaks major ${welcome.major}, this client major ${ProtocolConstants.major}`,
+      );
       return;
     }
 
