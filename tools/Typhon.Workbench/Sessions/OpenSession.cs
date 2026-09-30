@@ -119,15 +119,51 @@ public sealed class OpenSession : ISession, ILiveProfilerHost, IDisposable
     /// <summary>Detaches and disposes one profile, falling focus back to any remaining one.</summary>
     public bool DetachProfile(Guid profileId) => _profileHost.Detach(profileId);
 
-    /// <summary>The capability sets an Open session can have. Cached because <see cref="Capabilities"/> is read on every session projection.</summary>
-    // Schema rides with the database: an Open session's schema comes from the live engine (LiveSchemaProvider), so it is available exactly when the
-    // engine is held and released when the session is paused. #WB-01 split the capability out because an ATTACH session now has schema without a
-    // browsable database; for an Open session the two still travel together.
-    private static readonly ImmutableHashSet<string> DatabaseOnly = [SessionCapability.Database, SessionCapability.Schema];
-    private static readonly ImmutableHashSet<string> DatabaseAndProfiler =
-        [SessionCapability.Database, SessionCapability.Schema, SessionCapability.Profiler];
-    private static readonly ImmutableHashSet<string> ProfilerOnly = [SessionCapability.Profiler];
-    private static readonly ImmutableHashSet<string> Nothing = [];
+    /// <summary>
+    /// The capability sets an Open session can have, indexed by the bit pattern <c>database | profiler&lt;&lt;1 | realms&lt;&lt;2</c>. Cached because
+    /// <see cref="Capabilities"/> is read on every session projection.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Schema rides with the database: an Open session's schema comes from the live engine (<c>LiveSchemaProvider</c>), so it is available exactly when the
+    /// engine is held and released when the session is paused. #WB-01 split the capability out because an ATTACH session now has schema without a browsable
+    /// database; for an Open session the two still travel together.
+    /// </para>
+    /// <para>
+    /// <b>A table rather than named fields, because the third capability made the combinations outgrow naming them.</b> Two booleans gave four sets, of which
+    /// three were reachable and had readable names; three give eight, and <c>ProfilerAndRealmsButNoDatabase</c> is not a name, it is a description of a bug
+    /// waiting to be argued about. The index is the truth and the table is exhaustive by construction.
+    /// </para>
+    /// </remarks>
+    private static readonly ImmutableHashSet<string>[] CapabilitySets = BuildCapabilitySets();
+
+    private static ImmutableHashSet<string>[] BuildCapabilitySets()
+    {
+        var sets = new ImmutableHashSet<string>[8];
+        for (var bits = 0; bits < sets.Length; bits++)
+        {
+            var builder = ImmutableHashSet.CreateBuilder<string>();
+            if ((bits & 1) != 0)
+            {
+                builder.Add(SessionCapability.Database);
+                builder.Add(SessionCapability.Schema);
+            }
+
+            if ((bits & 2) != 0)
+            {
+                builder.Add(SessionCapability.Profiler);
+            }
+
+            if ((bits & 4) != 0)
+            {
+                builder.Add(SessionCapability.Realms);
+            }
+
+            sets[bits] = builder.ToImmutable();
+        }
+
+        return sets;
+    }
 
     /// <inheritdoc />
     /// <remarks>
@@ -146,10 +182,28 @@ public sealed class OpenSession : ISession, ILiveProfilerHost, IDisposable
             // /profiler/*. Panels ask for the capability, never the kind, which is what lets a paused Open session
             // light up the profiler UI without pretending to be an Attach session.
             var hasProfiler = !_profileHost.IsEmpty || Volatile.Read(ref _liveRuntime) != null;
-            return hasDatabase
-                ? (hasProfiler ? DatabaseAndProfiler : DatabaseOnly)
-                : (hasProfiler ? ProfilerOnly : Nothing);
+
+            // Realms ride with the database here, and on CAPACITY rather than on the live count — see SessionCapability.Realms. A paused session has released
+            // the engine, so it cannot answer what the database's realm capacity is and loses the capability with the rest of the database half.
+            var hasRealms = hasDatabase && HasRealms(Volatile.Read(ref _engine));
+            return CapabilitySets[(hasDatabase ? 1 : 0) | (hasProfiler ? 2 : 0) | (hasRealms ? 4 : 0)];
         }
+    }
+
+    /// <summary>
+    /// Whether this database holds realms. Null-tolerant: a session mid-pause answers false rather than throwing.
+    /// </summary>
+    /// <remarks>
+    /// <b>The persisted catalog, not <c>Realms.MaxRealms</c>, and the difference is not academic.</b> The realm capacity is not a persisted field: the engine
+    /// raises it from the catalog during <c>InitializeArchetypes</c>, and a Workbench open of a database whose schema assemblies are absent never reaches that —
+    /// measured, on a database whose catalog held a realm: <c>MaxRealms = 1</c>, <c>RealmTable = null</c>, <c>PersistedRealmCatalog.Count = 1</c>. Gating on the
+    /// capacity would therefore have hidden realms on exactly the databases that have them. The catalog is the durable fact and it is loaded eagerly at open.
+    /// <para>The capacity is still consulted, for the engine that was configured for realms and has not written one yet.</para>
+    /// </remarks>
+    private static bool HasRealms(EngineLifecycle lifecycle)
+    {
+        var engine = lifecycle?.Engine;
+        return engine != null && (engine.PersistedRealmCatalog is { Count: > 0 } || engine.Realms.MaxRealms > 1);
     }
 
     /// <inheritdoc />

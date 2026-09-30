@@ -45,6 +45,7 @@ import {
 } from './commands/openSchemaBrowser';
 import { toggleViewCallTree, toggleViewCriticalPath, toggleViewProfiler, toggleViewTopSpans, toggleViewQueryAnalyzer, toggleViewEngineLiveHealth, toggleViewSpatialMaintenance, toggleViewSubscriptions, registerOpenSaveReplay } from './commands/profilerCommands';
 import { toggleViewQueryConsole } from './commands/openQueryConsole';
+import { toggleViewRealms } from './commands/openRealms';
 import { openIntegrity } from './commands/openIntegrity';
 import { registerOpenConnect } from './commands/baseCommands';
 import { ANY_ZONE_D_VIEW_ACTIVE, isViewVisible } from './viewRegistry';
@@ -140,6 +141,9 @@ export default function MenuBar() {
      in open mode. Shell-structural at the registry level (viewRegistry.ts), session-kind gated for usefulness. */}
  {isViewVisible('SchemaExplorer', sessionScope) && (
  <MenubarItem onClick={toggleViewSchemaExplorer}>Schema</MenubarItem>
+ )}
+ {isViewVisible('Realms', sessionScope) && (
+ <MenubarItem onClick={toggleViewRealms}>Realms</MenubarItem>
  )}
  {isViewVisible('DataBrowserEntities', sessionScope) && (
  <MenubarItem onClick={() => toggleViewDataBrowser()}>Data Browser</MenubarItem>

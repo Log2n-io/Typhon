@@ -39,7 +39,7 @@ const STABLE_PARAMS = [
  * primitive-ref navigator objects qualify; rich-ref leaves (resource/field/entity/profiler/file-map)
  * are reconstructed from their panels, not the URL.
  */
-const URL_LEAF_TYPES = new Set<SelectionObjectType>(['system', 'component', 'archetype']);
+const URL_LEAF_TYPES = new Set<SelectionObjectType>(['system', 'component', 'archetype', 'realm']);
 
 export interface ParsedLeaf {
   readonly type: SelectionObjectType;

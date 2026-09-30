@@ -105,7 +105,7 @@ public static class DslParser
             "ENABLED", "DISABLED",
             "WHERE", "AND", "OR",
             "SELECT",
-            "SPATIAL", "NEARBY", "AABB", "RAY", "RADIUS",
+            "SPATIAL", "NEARBY", "AABB", "RAY", "RADIUS", "IN", "REALM",
             "NAVIGATE",
             "ORDER", "BY", "ASC", "DESC",
             "SKIP", "TAKE",
@@ -820,7 +820,7 @@ public static class DslParser
                     return null;
                 }
                 var r = ParseNumber();
-                return new SpatialClauseDto(component, "nearby", [p[0], p[1], p[2], r]);
+                return new SpatialClauseDto(component, "nearby", [p[0], p[1], p[2], r], ParseOptionalRealm());
             }
             if (TryConsumeKeyword("AABB"))
             {
@@ -834,7 +834,7 @@ public static class DslParser
                 Consume();
                 var p2 = ParsePoint();
                 if (p2 == null) return null;
-                return new SpatialClauseDto(component, "aabb", [p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]]);
+                return new SpatialClauseDto(component, "aabb", [p1[0], p1[1], p1[2], p2[0], p2[1], p2[2]], ParseOptionalRealm());
             }
             if (TryConsumeKeyword("RAY"))
             {
@@ -855,11 +855,46 @@ public static class DslParser
                 }
                 Consume();
                 var maxDist = ParseNumber();
-                return new SpatialClauseDto(component, "ray", [origin[0], origin[1], origin[2], dir[0], dir[1], dir[2], maxDist]);
+                return new SpatialClauseDto(
+                    component,
+                    "ray",
+                    [origin[0], origin[1], origin[2], dir[0], dir[1], dir[2], maxDist],
+                    ParseOptionalRealm());
             }
 
             Error(Peek(), "Expected NEARBY, AABB, or RAY after SPATIAL <component>.");
             return null;
+        }
+
+        /// <summary>
+        /// The optional <c>IN REALM &lt;n&gt;</c> suffix of a spatial stage, or <see langword="null"/> when absent.
+        /// </summary>
+        /// <remarks>
+        /// <b>A suffix of the shape rather than its own stage</b>, because a realm scopes one spatial predicate and the
+        /// engine allows exactly one of those per query. Making it a stage would have let a query name two realms with
+        /// one predicate and needed its own refusal for the case; as a suffix the grammar cannot express it.
+        /// </remarks>
+        private int? ParseOptionalRealm()
+        {
+            if (!TryConsumeKeyword("IN"))
+            {
+                return null;
+            }
+
+            if (!TryConsumeKeyword("REALM"))
+            {
+                Error(Peek(), "Expected REALM after IN. A spatial stage is scoped with 'IN REALM <n>'.");
+                return null;
+            }
+
+            var realm = ParseNumber();
+            if (realm < 0 || realm != Math.Floor(realm) || realm > ushort.MaxValue)
+            {
+                Error(Peek(), $"'IN REALM {realm}' is not a realm id. A realm id is a whole number in [0, {ushort.MaxValue}].");
+                return null;
+            }
+
+            return (int)realm;
         }
 
         private double[] ParsePoint()

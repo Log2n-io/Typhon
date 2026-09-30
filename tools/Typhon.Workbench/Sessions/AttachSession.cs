@@ -31,9 +31,21 @@ public sealed class AttachSession : ISession, ILiveProfilerHost, IDisposable
     /// </remarks>
     public IStaticSchemaProvider StaticSchemaProvider => Runtime.StaticSchema;
 
-    /// <summary>The two capability sets an attach session can have. Cached because <see cref="Capabilities"/> is read on every session projection.</summary>
-    private static readonly System.Collections.Immutable.ImmutableHashSet<string> ProfilerOnly = [SessionCapability.Profiler];
-    private static readonly System.Collections.Immutable.ImmutableHashSet<string> ProfilerAndSchema = [SessionCapability.Profiler, SessionCapability.Schema];
+    /// <summary>
+    /// The four capability sets an attach session can have, indexed by <c>schema | realms&lt;&lt;1</c>. Cached because <see cref="Capabilities"/> is read on
+    /// every session projection.
+    /// </summary>
+    /// <remarks>
+    /// A table rather than a builder, for the same reason <c>OpenSession</c> uses one: the sets are few, fixed and named, and rebuilding one of four constants
+    /// per projection is an allocation on a path that runs per session per poll.
+    /// </remarks>
+    private static readonly System.Collections.Immutable.ImmutableHashSet<string>[] CapabilitySets =
+    [
+        [SessionCapability.Profiler],
+        [SessionCapability.Profiler, SessionCapability.Schema],
+        [SessionCapability.Profiler, SessionCapability.Realms],
+        [SessionCapability.Profiler, SessionCapability.Schema, SessionCapability.Realms],
+    ];
 
     /// <inheritdoc />
     /// <remarks>
@@ -45,8 +57,14 @@ public sealed class AttachSession : ISession, ILiveProfilerHost, IDisposable
     /// The schema capability is acquired when the first Init frame arrives carrying static-structure tables (#WB-01), which is why this cannot be a
     /// fixed set: a session is projected to the client before its first frame, and an engine that sends the tables empty never acquires it at all.
     /// </para>
+    /// <para>
+    /// The realms capability is acquired the same way, from the stream rather than from a handshake (#1083): the engine declares no realm count anywhere, so
+    /// the arrival of per-realm spatial telemetry is its statement that it has realms and is reporting them. It is <b>not</b> derived from
+    /// <c>database</c> — there is none here — nor from <c>profiler</c>, which every attach session has whether or not it runs more than one world.
+    /// </para>
     /// </remarks>
-    public IReadOnlySet<string> Capabilities => Runtime.StaticSchema != null ? ProfilerAndSchema : ProfilerOnly;
+    public IReadOnlySet<string> Capabilities =>
+        CapabilitySets[(Runtime.StaticSchema != null ? 1 : 0) | (Runtime.HasRealmTelemetry ? 2 : 0)];
 
     // ── Profiles (#621) ──────────────────────────────────────────────────────────────────────────────────────────
     //

@@ -3,6 +3,7 @@ import { ChevronRight, Link2, Unlink2 } from 'lucide-react';
 import { useSessionStore, useSessionCapability } from '@/stores/useSessionStore';
 import { useHeartbeat } from '@/hooks/streams/useHeartbeat';
 import { useProfilerViewStore } from '@/stores/useProfilerViewStore';
+import RealmScopeChip from './components/RealmScopeChip';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { resolveChain, selectionRefLabel, type SelectionRef } from '@/stores/selectionChain';
 import { useEnvTagStore, ENV_TAG_STYLE, type EnvTag } from '@/stores/useEnvTagStore';
@@ -59,6 +60,7 @@ export default function ContextBar() {
   const fileLabel = filePath ? (filePath.split(/[\\/]/).pop() ?? filePath) : kind;
   const isProfiler = useSessionCapability('profiler');
   const hasDatabase = useSessionCapability('database');
+  const hasRealms = useSessionCapability('realms');
 
   // The drift readout. Only an open database with a capture attached has both coordinates to compare — a standalone
   // trace has no database to be behind, and a bare database has no capture. The hook no-ops without a database.
@@ -105,6 +107,22 @@ export default function ContextBar() {
         <>
           <span aria-hidden="true">·</span>
           <span title="Database read revision (HEAD until a revision counter exists)">@HEAD</span>
+        </>
+      )}
+
+      {/* Scope — which world. The third global scope (IA §3.4), beside the revision because both answer "where in this
+          database am I": the revision is when, the realm is where. Shown only when the session HAS realms, so a
+          single-world database's bar is byte-for-byte what it was.
+
+          Also only with a database, and that is not a hedge: the chip narrows the Data Browser, the Query Console and
+          the storage map, every one of them an Open-session view, and it is populated from the realm catalog, which is
+          read out of the file. On a live attach session it would be an empty picker narrowing nothing — the dead
+          affordance IA §7 rules out. What attach gets instead is the live realm board, which needs no scope to say
+          which realms are awake. */}
+      {hasRealms && hasDatabase && (
+        <>
+          <span aria-hidden="true">·</span>
+          <RealmScopeChip />
         </>
       )}
 

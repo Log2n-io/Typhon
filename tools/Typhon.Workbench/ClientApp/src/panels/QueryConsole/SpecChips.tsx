@@ -13,6 +13,8 @@ import { ComponentChip } from './chips/ComponentChip';
 import { OrderByChip } from './chips/OrderByChip';
 import { PredicateChip } from './chips/PredicateChip';
 import { SpatialChip } from './chips/SpatialChip';
+import { useRealmList } from '@/hooks/realms/useRealmList';
+import { activeRealmScope, useRealmScopeStore } from '@/stores/useRealmScopeStore';
 
 /**
  * Chip-mode editor (#386 Phase 1 + Phase 1.5 polish). Composes the schema-aware chip primitives so the user
@@ -51,6 +53,10 @@ export function SpecChips() {
   const hasEnabled = (spec.enabled ?? []).length > 0 || extraStages.has('ENABLED');
   const hasDisabled = (spec.disabled ?? []).length > 0 || extraStages.has('DISABLED');
   const hasWhere = spec.where != null || extraStages.has('WHERE');
+  const { list: realms } = useRealmList();
+  // Already through the link toggle, so an unlinked scope stops seeding new clauses too — not just the panels that read it.
+  const scopedRealm = useRealmScopeStore((s) => activeRealmScope(s));
+
   const hasSpatial = (spec.spatial ?? []).length > 0 || extraStages.has('SPATIAL');
   const hasSelect = (spec.select ?? []).length > 0 || extraStages.has('SELECT');
   const hasOrderBy = spec.orderBy != null || extraStages.has('ORDER BY');
@@ -187,6 +193,8 @@ export function SpecChips() {
           <SpatialChip
             value={(spec.spatial ?? [])[0] ?? null}
             archetype={spec.archetype}
+            realms={realms}
+            scopedRealm={scopedRealm}
             onChange={(next) => {
               mutate((s) => ({ ...s, spatial: next ? [next] : [] }));
               if (!next) setExtraStages(removeFrom(extraStages, 'SPATIAL'));

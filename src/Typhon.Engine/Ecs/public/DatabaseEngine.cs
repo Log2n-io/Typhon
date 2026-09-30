@@ -2041,6 +2041,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         MMF.SaveBootstrap();
     }
 
+    /// <summary>
+    /// Realm 0's persisted grid, for a reader that has no realm table to ask.
+    /// </summary>
+    /// <remarks>
+    /// <b>The realm table is built during <c>InitializeArchetypes</c>, and a generic opener does not always get there</b> — the Workbench opening a database
+    /// whose schema assemblies are absent has the bootstrap records and no <c>_realms</c>. Realm 0's grid is in the bootstrap either way, because realm 0 keeps
+    /// the single-world record rather than a catalog row, so this is the only route to it for such a reader.
+    /// </remarks>
+    internal bool TryReadPersistedRealm0Grid(out SpatialGridConfig config) => TryLoadSpatialGridConfig(out config);
+
     /// <summary>Reads the persisted <see cref="SpatialGridConfig"/> written by <see cref="SaveSpatialGridConfig"/>; <see langword="false"/> when none was persisted.</summary>
     private bool TryLoadSpatialGridConfig(out SpatialGridConfig config)
     {

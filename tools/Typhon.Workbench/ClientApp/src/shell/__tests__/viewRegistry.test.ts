@@ -38,6 +38,8 @@ const ZONE_D_ACTIVE = [
   // (the panel renders its own cold state in a trace session).
   'SpatialMaintenance',
   'Subscriptions',
+  // #1083 — the Realms navigator. Capability-scoped rather than kind-scoped, like the Schema Explorer.
+  'Realms',
 ] as const;
 
 // The full registry key set = gated-off ∪ active. Used to assert the registry covers exactly the documented set.
@@ -92,6 +94,9 @@ describe('viewRegistry — session-kind scope (IA §5.1)', () => {
     // deliberately NOT 'open' — that would hide the Schema Explorer in remote-attach mode, the mode the engine change
     // exists to serve.
     expect(viewSessionScope('SchemaExplorer')).toBe('schema');
+    // #1083: realms, one turn further out again — an Open session has the catalog, an Attach session has the live run
+    // state, and neither `open` nor `profiler` covers both.
+    expect(viewSessionScope('Realms')).toBe('realms');
     expect(viewSessionScope('ResourceTree')).toBe('open');
     expect(viewSessionScope('Profiler')).toBe('profiler');
     expect(viewSessionScope('SystemsQueriesNav')).toBe('profiler');
@@ -120,6 +125,22 @@ describe('viewRegistry — session-kind scope (IA §5.1)', () => {
   // attached to it, and its profiler views must nonetheless be available.
   it('isViewAvailableInKind — an open database with a profile attached can run profiler views', () => {
     expect(isViewAvailableInKind('Profiler', scope('open', 'database', 'profiler'))).toBe(true);
+  });
+
+  /**
+   * #1083 — the Realms view in BOTH kinds, and this pair is not decoration.
+   *
+   * The live realm board shipped unreachable: an attach session advertised only `profiler` (+`schema`), so the view's
+   * `realms` scope excluded it, the View menu and the palette both dropped the entry, and no gesture could open the
+   * panel. The server now earns the capability from the stream (`AttachSessionRealmCapabilityTests`); this is the
+   * client half of the same claim, asserted per kind because each one failed for its own reason.
+   */
+  it('isViewAvailableInKind — Realms runs in an open database AND in a live attach, on the capability alone', () => {
+    expect(isViewAvailableInKind('Realms', scope('open', 'database', 'realms'))).toBe(true);
+    expect(isViewAvailableInKind('Realms', scope('attach', 'profiler', 'realms'))).toBe(true);
+    // And absent without it: a single-world database must not grow a realm view it has no use for.
+    expect(isViewAvailableInKind('Realms', scope('open', 'database'))).toBe(false);
+    expect(isViewAvailableInKind('Realms', scope('attach', 'profiler'))).toBe(false);
   });
 
   it('isViewAvailableInKind — `any` views (and non-view commands) run in every kind', () => {

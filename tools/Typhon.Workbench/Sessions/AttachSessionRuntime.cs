@@ -124,6 +124,18 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// </remarks>
     private volatile IStaticSchemaProvider _staticSchema;
 
+    /// <summary>
+    /// Set once a <see cref="TraceEventKind.SpatialRealmTelemetry"/> record has been seen on this stream (#1083).
+    /// </summary>
+    /// <remarks>
+    /// <b>Observed, not declared — because the engine declares nothing about realms in its Init frame.</b> The attached engine's realm count is not a
+    /// static-structure table and there is no handshake field for it, so the only honest source is the telemetry itself: kind 67 is emitted once per
+    /// <i>runnable</i> realm per archetype, so seeing one is proof both that this engine has realms and that its spatial trace subtree is on. Both are
+    /// preconditions for the realm board showing anything, which makes a capability derived from the record exactly a capability derived from "there is
+    /// something to show". It latches: a realm going dormant stops the records, and must not retract a panel the user has open.
+    /// </remarks>
+    private volatile bool _sawRealmTelemetry;
+
     private LiveCacheTempFile _tempFile;
     private IncrementalCacheBuilder _builder;
     private long _timestampFrequency;
@@ -135,7 +147,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// <remarks>
     /// Compacting in place inside <see cref="_rawBlockBuffer"/> would in fact be safe — the write cursor never overtakes
     /// the read cursor, since a record is only copied after it has been walked. A separate buffer is used anyway so that
-    /// the raw block stays intact for the whole of <c>HandleBlock</c>: <see cref="ExtractThreadInfos"/> and any future
+    /// the raw block stays intact for the whole of <c>HandleBlock</c>: <see cref="ExtractBlockMetadata"/> and any future
     /// unfiltered inspection then read the engine's bytes, not a half-compacted version of them, with no ordering rule
     /// to remember.
     /// </remarks>
@@ -262,6 +274,15 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// <see cref="SessionCapability.Schema"/> only while it is non-null.
     /// </summary>
     public IStaticSchemaProvider StaticSchema => _staticSchema;
+
+    /// <summary>
+    /// Whether this stream has carried per-realm spatial telemetry, which is what <see cref="AttachSession"/> turns into
+    /// <see cref="SessionCapability.Realms"/>.
+    /// </summary>
+    /// <remarks>
+    /// False on an engine with one realm, and on a realm engine whose spatial trace subtree is off — in both cases there are no rows to draw.
+    /// </remarks>
+    public bool HasRealmTelemetry => _sawRealmTelemetry;
 
     /// <summary>Set when an Init mismatch on reconnect made the session unrecoverable.</summary>
     public bool IsUnrecoverable => _unrecoverable;
@@ -1083,7 +1104,24 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         // chunk a record happens to land in (otherwise late-arriving worker ThreadInfo records get buried in
         // unloaded chunks). Runs on the UNFILTERED buffer — ThreadInfo is exempt anyway, but reading it here keeps
         // slot naming independent of capture state by construction rather than by coincidence.
-        ExtractThreadInfos(_rawBlockBuffer.AsSpan(0, uncompressedBytes));
+        //
+        // The same walk notes per-realm telemetry (#1083). It has to be the unfiltered one: kind 67 is NOT exempt, so in
+        // cherry-pick mode it is dropped before the builder for every tick outside an armed window - deriving the realm
+        // capability from the retained stream would make the Realms view appear and vanish with the capture arm.
+        //
+        // The capability is ANNOUNCED, not merely acquired, and that is the half that makes it reachable. A session is
+        // projected to the client once, at attach, and the client caches what that projection said. `schema` survives
+        // that because the Init frame has already arrived by the time the attach call returns; a realm record cannot,
+        // since it rides a later tick. Without this delta the server would grant `realms` to a client that never asks
+        // again, and the Realms view would stay absent from the View menu and the palette over a session that has it.
+        var hadRealms = _sawRealmTelemetry;
+        ExtractBlockMetadata(_rawBlockBuffer.AsSpan(0, uncompressedBytes));
+        if (!hadRealms && _sawRealmTelemetry)
+        {
+            // Carries no payload on purpose: `AttachSession.Capabilities` stays the single source of truth, and the
+            // client re-reads the session rather than merging a second, independently-computed list.
+            BroadcastDelta(new LiveStreamEventDto(Kind: "capabilitiesChanged"));
+        }
 
         // #805 on-demand tick capture: drop detail records for ticks outside an armed window. Filtering is per record,
         // never per block — a Block frame is a timestamp-ordered merge across all thread slots drained on a 1 ms
@@ -1110,12 +1148,17 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     }
 
     /// <summary>
-    /// Walk a raw record buffer for <see cref="TraceEventKind.ThreadInfo"/> records and populate
-    /// <see cref="_threadInfos"/>. Self-contained ThreadInfo wire walker.
-    /// Wire format: u16 size, u8 kind (=ThreadInfo), u8 threadSlot, i64 timestamp, then payload —
+    /// One walk of a raw record buffer for the two facts the session advertises about itself: <see cref="TraceEventKind.ThreadInfo"/> records populate
+    /// <see cref="_threadInfos"/>, and a <see cref="TraceEventKind.SpatialRealmTelemetry"/> record latches <see cref="_sawRealmTelemetry"/>.
+    /// Self-contained wire walker; only the common header is read for kinds it does not decode.
+    /// ThreadInfo wire format: u16 size, u8 kind (=ThreadInfo), u8 threadSlot, i64 timestamp, then payload —
     /// i32 managedThreadId, u16 nameByteCount, UTF-8 name bytes, u8 ThreadKind (Main=0/Worker=1/Pool=2/Other=3).
     /// </summary>
-    private void ExtractThreadInfos(ReadOnlySpan<byte> records)
+    /// <remarks>
+    /// <b>Two facts, one walk, because the walk is the cost.</b> Every record header is read here already; a second pass for realms would double a per-block
+    /// O(records) traversal to answer a question whose answer never changes after the first yes. The realm test is skipped entirely once latched.
+    /// </remarks>
+    private void ExtractBlockMetadata(ReadOnlySpan<byte> records)
     {
         const int CommonHeaderSize = 12;
         var pos = 0;
@@ -1127,6 +1170,10 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                 break;
             }
             var kind = (TraceEventKind)records[pos + 2];
+            if (!_sawRealmTelemetry && kind == TraceEventKind.SpatialRealmTelemetry)
+            {
+                _sawRealmTelemetry = true;
+            }
             if (kind != TraceEventKind.ThreadInfo)
             {
                 pos += size;
