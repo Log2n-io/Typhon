@@ -209,8 +209,22 @@ internal sealed class RealmTable
     /// </summary>
     internal static int PhaseOf(ushort id) => (int)((id * 0x9E3779B1u) >> 16);
 
-    /// <summary>Evaluations run — tests read it to prove the policy runs once per tick.</summary>
-    internal long EvaluationCount { get; private set; }
+    private long _evaluationCount;
+
+    /// <summary>
+    /// Evaluations run — tests read it to prove the policy runs once per tick. Tick thread; see <see cref="EvaluationCountVolatile"/> for any other.
+    /// </summary>
+    internal long EvaluationCount => _evaluationCount;
+
+    /// <summary>
+    /// <see cref="EvaluationCount"/> for a reader on another thread: the same value through an acquire load.
+    /// </summary>
+    /// <remarks>
+    /// The counter is written by the tick thread alone and read by the stats snapshot off it. Nothing is published alongside it, so the only thing at stake is
+    /// the project's own ordering discipline — an acquire load costs a plain <c>mov</c> on x64 and one <c>ldar</c> on arm64, and it stops the next reader
+    /// having to re-derive why a plain read was safe.
+    /// </remarks>
+    internal long EvaluationCountVolatile => Volatile.Read(ref _evaluationCount);
 
     /// <summary>The realm's state this tick. Refuses an id that is not registered.</summary>
     internal RealmRunState StateOf(ushort id)
@@ -271,7 +285,7 @@ internal sealed class RealmTable
     /// </remarks>
     internal void EvaluatePolicy()
     {
-        EvaluationCount++;
+        _evaluationCount++;
         var changed = false;
         var nonRunnable = 0;
         var divided = 0;

@@ -110,6 +110,14 @@ public class StatsEndpointTests
                 Assert.That(replication.GetProperty("outBytesTotal").GetInt64(), Is.EqualTo(expected.NetOutBytesTotal));
                 Assert.That(replication.GetProperty("trackP99Ms").GetDouble(), Is.EqualTo(expected.ReplicationTrackP99Ms));
 
+                // The four realm-scaling numbers (PRV-04 / Realms D-7). Asserted by NAME and not by value: three of them are zero unless the engine was
+                // started with phase timing, so a value assertion would pass against a field that had been dropped. What this pins is that they are emitted
+                // at all, and where — a later refactor that moves realmPolicyEvaluations back to the root would break the ratio it exists to be read as.
+                Assert.That(replication.GetProperty("prologueMsTotal").GetDouble(), Is.EqualTo(expected.ReplicationPrologueMsTotal));
+                Assert.That(replication.GetProperty("prologueTicks").GetInt64(), Is.EqualTo(expected.ReplicationPrologueTicks));
+                Assert.That(replication.GetProperty("realmPassSteps").GetInt64(), Is.EqualTo(expected.RealmPassSteps));
+                Assert.That(replication.GetProperty("realmPolicyEvaluations").GetInt64(), Is.EqualTo(expected.RealmPolicyEvaluations));
+
                 Assert.That(replication.TryGetProperty("running", out _), Is.False,
                     "a `running` flag would be true on every started engine, replicating or not — the count replaced it deliberately");
             });

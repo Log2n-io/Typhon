@@ -506,6 +506,10 @@ public sealed partial class TyphonRuntime : IDisposable
                 TickMultiplier = 1,
                 Archetypes = ReadArchetypeStats(),
                 Realms = ReadRealmStats(),
+                RealmPassSteps = ReadRealmPassSteps(_subscriptionsRuntime),
+                RealmPolicyEvaluations = ReadPolicyEvaluations(),
+                ReplicationPrologueMsTotal = _subscriptionsRuntime?.Frames?.PrologueTotal.Ms ?? 0.0,
+                ReplicationPrologueTicks = _subscriptionsRuntime?.Frames?.PrologueTotal.Ticks ?? 0L,
                 ReplicatedArchetypes = _subscriptionsRuntime?.Registry?.Archetypes?.Count ?? 0,
             };
         }
@@ -576,11 +580,37 @@ public sealed partial class TyphonRuntime : IDisposable
             Systems = systemStats,
             Archetypes = ReadArchetypeStats(),
             Realms = ReadRealmStats(),
+            RealmPassSteps = ReadRealmPassSteps(subscriptions),
+            RealmPolicyEvaluations = ReadPolicyEvaluations(),
+            ReplicationPrologueMsTotal = subscriptions?.Frames?.PrologueTotal.Ms ?? 0.0,
+            ReplicationPrologueTicks = subscriptions?.Frames?.PrologueTotal.Ticks ?? 0L,
             ReplicatedArchetypes = subscriptions?.Registry?.Archetypes?.Count ?? 0,
             Sessions = subscriptions?.Sessions?.OpenCount ?? 0,
             NetOutBytesTotal = subscriptions?.SendPump?.BytesSent ?? 0L,
             ReplicationTrackP99Ms = (_subscriptionsContext.Telemetry?.Percentile(newest, window, 0.99, new double[ticks]) ?? 0.0) / 1000.0,
         };
+    }
+
+    /// <summary>
+    /// The hub's cumulative serial per-realm pass count, read with an acquire load.
+    /// </summary>
+    /// <remarks>
+    /// <b>Volatile, although nothing is published alongside it.</b> This is the first counter of the hub's read from off the tick thread — its neighbours
+    /// (<c>PrepareTicks</c>, <c>SlotsPushed</c>) are only ever read on the tick thread — so there is no established local convention to lean on, and the
+    /// project's ordering rule asks for the acquire whenever a load crosses threads. It is a plain <c>mov</c> on x64 and one <c>ldar</c> on arm64, read at
+    /// human rate.
+    /// </remarks>
+    private static long ReadRealmPassSteps(SubscriptionsRuntime subscriptions)
+    {
+        var hub = subscriptions?.Hub;
+        return hub == null ? 0L : System.Threading.Volatile.Read(ref hub.RealmPassSteps);
+    }
+
+    /// <summary>The realm table's cumulative policy-evaluation count, read with an acquire load for the reason above.</summary>
+    private long ReadPolicyEvaluations()
+    {
+        var table = Engine?.RealmTable;
+        return table?.EvaluationCountVolatile ?? 0L;
     }
 
     /// <summary>

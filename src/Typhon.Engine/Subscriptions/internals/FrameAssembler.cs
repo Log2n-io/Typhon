@@ -591,6 +591,11 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
     /// <summary>Timestamp ticks the single-threaded prologue spent, and the sweep half of it.</summary>
     private long _prologueTicks;
+
+    // Ticks _prologueTicks accrued on. NOT _busyTicks: that one counts ticks whose CHUNKS reported busy time, folded a tick late, so a tick with sessions whose
+    // chunks measured nothing adds to the numerator and not to the denominator — and the ratio then overstates the prologue, the wrong direction for a figure
+    // meant to bound a per-realm cost (Realms D-7).
+    private long _prologueTickCount;
     private long _sweepTicks2;
     private long _prepareTicks;
 
@@ -869,6 +874,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         if (prologueFrom != 0L)
         {
             _prologueTicks += Stopwatch.GetTimestamp() - prologueFrom;
+            _prologueTickCount++;
         }
 
         var chunks = Math.Min(workers, _pushSessionCount + _eventSessionCount);
@@ -882,6 +888,23 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
         return chunks;
     }
+
+    /// <summary>
+    /// The prologue's total single-threaded time in milliseconds, and the ticks it was measured over: <b>cumulative</b>, so two readings difference into the
+    /// prologue cost of the ticks between them.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="PrologueMs"/> divides by its own tick count, which makes it a mean over the whole run and useless to a measurement that needs one figure per
+    /// configuration. This is the same two numbers before the division. Both are zero unless phase timing is on.
+    /// </para>
+    /// <para>
+    /// <b>The tick count is the prologue's own, not <c>_busyTicks</c>.</b> The two accrue over different populations: <c>_busyTicks</c> advances only for a
+    /// tick whose chunks reported busy time, and it is folded a tick late, while the prologue time accrues for every tick that got past the no-session return.
+    /// Dividing one by the other overstates the prologue — the wrong direction for a figure meant to bound a per-realm cost.
+    /// </para>
+    /// </remarks>
+    public (double Ms, long Ticks) PrologueTotal => (Volatile.Read(ref _prologueTicks) * 1000d / Stopwatch.Frequency, Volatile.Read(ref _prologueTickCount));
 
     /// <summary>The single-threaded prologue's cost per tick, and the two halves of it, in ms.</summary>
     public (double Prologue, double Sweep, double Prepare) PrologueMs

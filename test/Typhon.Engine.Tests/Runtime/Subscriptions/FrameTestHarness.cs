@@ -63,9 +63,9 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="replicationCellM">The cell side the defaults declare, as <see cref="ReplicationHarness.Create"/>.</param>
     /// <returns>The harness.</returns>
     public static FrameHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null,
-        double replicationCellM = 0)
+        double replicationCellM = 0, int maxSessions = 256)
     {
-        var replication = ReplicationHarness.Create(engine, declare, name, options, replicationCellM);
+        var replication = ReplicationHarness.Create(engine, declare, name, options, replicationCellM, maxSessions);
         try
         {
             return new FrameHarness(replication);

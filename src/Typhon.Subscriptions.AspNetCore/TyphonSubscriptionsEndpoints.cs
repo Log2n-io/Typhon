@@ -176,6 +176,17 @@ public static class TyphonSubscriptionsEndpoints
             // Cumulative on purpose: a rate computed server-side would be a rate over a window the caller did not choose. Two reads give the caller theirs.
             writer.WriteNumber("outBytesTotal"u8, stats.NetOutBytesTotal);
             writer.WriteNumber("trackP99Ms"u8, stats.ReplicationTrackP99Ms);
+            // Beside trackP99Ms and a different quantity: that percentile covers the whole stage, most of which is chunks on worker threads, while this is the
+            // part no second core can help with. Cumulative with its own denominator, because the ticks the stage was BUSY are not the ticks the engine ran.
+            // Both zero unless the engine was started with phase timing on.
+            writer.WriteNumber("prologueMsTotal"u8, stats.ReplicationPrologueMsTotal);
+            writer.WriteNumber("prologueTicks"u8, stats.ReplicationPrologueTicks);
+            // Realms visited by a serial per-realm stage, cumulative: eight per tick, each adding the realms SERVED. Held against the realms[] rows below, this
+            // is what says whether the tick's realm cost follows what is served or what is merely registered (Realms D-7).
+            writer.WriteNumber("realmPassSteps"u8, stats.RealmPassSteps);
+            // Beside realmPassSteps although it is the realm table's and not replication's: the two are read as a ratio — serial passes against registry
+            // walks — and a client computing it should not have to reach into two objects for the pair.
+            writer.WriteNumber("realmPolicyEvaluations"u8, stats.RealmPolicyEvaluations);
             writer.WriteEndObject();
 
             writer.WriteStartArray("systems"u8);
@@ -223,7 +234,6 @@ public static class TyphonSubscriptionsEndpoints
             }
 
             writer.WriteEndArray();
-
             writer.WriteEndObject();
             await writer.FlushAsync(http.RequestAborted).ConfigureAwait(false);
         }).WithDisplayName("Typhon stats");

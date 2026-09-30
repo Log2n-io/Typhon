@@ -55,13 +55,24 @@ sealed unsafe class ReplicationHarness : IDisposable
     /// The cell side the defaults declare; zero for <c>ProjectionTestSchema.ReplicationCellFor(0)</c>, the World fixtures' grid. Ignored when
     /// <paramref name="options"/> is given, which declares its own.
     /// </param>
+    /// <param name="maxSessions">
+    /// The session table's width; 256 unless a fixture needs more. Ignored when <paramref name="options"/> is given, which declares its own. Raised only by the
+    /// D-7 bench, which opens one session per realm and so is the one fixture whose session count is its subject rather than a detail.
+    /// </param>
     /// <returns>The harness.</returns>
     public static ReplicationHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null,
-        double replicationCellM = 0)
+        double replicationCellM = 0, int maxSessions = 256)
     {
         if (options != null && replicationCellM > 0)
         {
             throw new ArgumentException("options declares its own ReplicationCellM; passing replicationCellM too would be ignored", nameof(replicationCellM));
+        }
+
+        // The same guard for the same reason: options carries its own MaxSessions, so a caller passing both would get the table width it did not ask for and
+        // would debug the session table rather than its own call.
+        if (options != null && maxSessions != 256)
+        {
+            throw new ArgumentException("options declares its own MaxSessions; passing maxSessions too would be ignored", nameof(maxSessions));
         }
 
         var resources = new ResourceRegistry(new ResourceRegistryOptions { Name = name });
@@ -71,7 +82,7 @@ sealed unsafe class ReplicationHarness : IDisposable
             var declarations = new SubscriptionsRegistry(options ?? new SubscriptionsOptions
             {
                 IngressBytesPerSecond = TestIngress.Budget,
-                MaxSessions = 256,
+                MaxSessions = maxSessions,
                 StatePoolBudgetBytes = PoolBudgetBytes,
                 ReplicationCellM = replicationCellM > 0 ? replicationCellM : ProjectionTestSchema.ReplicationCellFor(0),
             });

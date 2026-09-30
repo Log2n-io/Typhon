@@ -647,13 +647,20 @@
     only, in a realm-local slot, so a lookup in another realm's reads the unbound sentinel
   invariant a realm with no session stops being served (no mark, projection, index or frame work) until a session is placed in it again, when it is
     re-pushed whole and recounted as after a gap
+  invariant every SERIAL per-realm stage of a tick walks the SERVED set, never the realm registry — the overload step, the index build and world order,
+    the index finish, the far flushes, the LOD census, the queued shadow checks, the two chunk plans and the unplaced sweep each visit exactly the realms
+    served when they run; so the serial cost of a tick is O(served realms) and registering more realms adds nothing to it. The one per-tick term that is
+    O(registered) is the realm policy (RLM-03), and it is one walk per tick
   invariant an entity that moves to another realm is never carried in its old realm's frame: it leaves the source realm (a leave there, decoded
     with that realm's frame, its identity released) and enters the destination as a fresh entry projected in the destination's frame
   invariant a Near point and a ToKnown entity are filed in their realm, by that realm's cells, and match only that realm's sessions; ToRealm reaches
     the sessions of one realm or, with its subtree, of the realms below it in the parent tree — which routes and grants no visibility
   never decide isolation by geometry: identical local coordinates in two realms are the expected case
   scope: PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
-    ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches
+    ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches,
+    PushHub.SetOverloadStep, PushHub.BuildIndexes, PushHub.PrepareFar, PushHub.EndFarFolds, PushHub.RecountLevels, PushHub.RunQueuedShadowChecks,
+    PushHub.BeginParallelIndex, PushHub.PrepareBlocks, PushHub.MarkPushed, PushHub.RealmPassSteps, RuntimeStatsSnapshot.RealmPassSteps,
+    RuntimeStatsSnapshot.RealmPolicyEvaluations, RuntimeStatsSnapshot.ReplicationPrologueMsTotal, RuntimeStatsSnapshot.ReplicationPrologueTicks
   on_violation: silent. A client sees or targets an entity of a world it is not in — a cheat, and a store holding two worlds' netIds.
   verified: RealmSessionTests.EachRealmsSessionsHoldThatRealmsEntitiesOnly_AtIdenticalLocalCoordinates,
     RealmSessionTests.ATeleportBetweenServedRealmsLeavesOneAndEntersTheOtherInItsFrame,
@@ -666,6 +673,16 @@
     above because the coverage audit scans test/ only. Its load-bearing case is AnInteriorTheLastSessionLeavesStopsBeingServedAndStopsCosting: a realm
     is given replication state only when a session ENTERS it, so every assertion over realms no session was ever in passes whether or not
     PushHub.SweepUnplaced releases a realm it is finished with — proved by mutant, which left the other four cases green.
+  note the O(served) half is COUNTED since PRV-04: RuntimeStatsSnapshot.RealmPassSteps adds the number of realms served to itself at each serial per-realm
+    stage of the blocks, mark, index and frame paths, so holding the served set fixed and doubling the registration must leave it unmoved — which no
+    assertion over Served itself could check, a stage walking the registry serving exactly the same set while doing hundreds of times the work.
+    RealmPolicyEvaluations is its companion and the honest half: policy is allowed to be O(registered), and what must hold of it is that it runs once per
+    tick. The counter is NOT exhaustive and its own remarks enumerate what it leaves out — PrepareBlocks's two bootstrap-guarded walks, and the per-chunk
+    stages (CountWorkers, PlaceWorker, FoldFarChunk) which run on worker threads where a shared add would measure itself.
+    Measured at workload scale by demo/SwgTatooine.Tests RealmScaleChecks (again not citable above — the audit scans test/ only): 15.016 serial passes per
+    served realm per tick, flat from 2 to 17 served realms, and 75.04 against 75.33 per tick at 1 236 and at 2 472 registered realms. Falsified by mutant —
+    one per-tick loop over RealmTable.Registered in the push prologue takes the per-served figure to 633 and the two registered figures to 1 311 against
+    2 547, reddening both cases while leaving the policy case correctly green.
 
 ### SUB-29: A session is in one realm at a time, and a realm switch is one published RESET|REALM frame `[fatal][silent]`
   invariant realm(s) ∈ {None} ∪ RealmId is one value per tick: the application's (Place(realm, pos) / Enter / Leave), the followed entity's after this

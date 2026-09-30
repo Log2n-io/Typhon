@@ -1,4 +1,3 @@
-using System;
 using JetBrains.Annotations;
 
 namespace Typhon.Engine;
@@ -125,6 +124,71 @@ public sealed class RuntimeStatsSnapshot
     /// <para>Empty when the engine has one realm, where every figure above already describes it.</para>
     /// </remarks>
     public RealmStat[] Realms { get; init; } = [];
+
+    /// <summary>
+    /// Realms visited by a <b>serial</b> per-realm replication stage since the engine opened: each stage adds the number of realms
+    /// <see cref="RealmStat.Served">served</see> when it ran. <b>Cumulative — difference two reads.</b>
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Realms D-7 asks whether the serial share of a tick grows with the realms being SERVED or with the realms merely registered. This counts the answer
+    /// instead of inferring it: hold the served set at one realm, register two thousand more, and this number must not move. Nothing derivable from
+    /// <see cref="Realms"/> can make that check — a stage that walked the registry would serve the same set while doing two thousand times the work.
+    /// </para>
+    /// <para>
+    /// <b>The parallel per-chunk stages are not in it</b> (the index merge's and far fold's chunk dispatch, and the projection's per-chunk sort), because a
+    /// counter on a path several workers run at once measures the counter. Their cost is read from the clock, in the D-7 bench.
+    /// </para>
+    /// <para>
+    /// Divided by the ticks in the same interval, a steady state reads <c>(stages + 1/SweepEvery) × served</c> — the unplaced sweep is the one stage that
+    /// runs one tick in <c>SweepEvery</c> rather than every tick. <b>How many stages is deliberately not promised here</b>: two of them are skipped on a tick
+    /// with no bound push session, and one runs once per pushed archetype, so a caller that needs the constant measures it at one served count and holds later
+    /// counts to it rather than writing a number down.
+    /// </para>
+    /// <para>
+    /// <b>Zero means replication is off, not that the engine has one realm.</b> The hub serves realm 0 from construction, so a single-realm engine that
+    /// replicates anything still counts it. That is the opposite of <see cref="Realms"/>, which IS empty for a single-realm engine.
+    /// </para>
+    /// </remarks>
+    public long RealmPassSteps { get; init; }
+
+    /// <summary>
+    /// Realm-policy evaluations since the engine opened — one per tick that ran, each deciding every <b>registered</b> realm's run state and divisor.
+    /// <b>Cumulative — difference two reads.</b>
+    /// </summary>
+    /// <remarks>
+    /// The companion to <see cref="RealmPassSteps"/> and the honest half of it: policy is <c>O(registered realms)</c> by design, not by accident, because a
+    /// dormant realm is precisely one whose state has to be re-decided in case a session arrived. What must hold is that it runs <b>once per tick</b>: a
+    /// second evaluation per dispatch, or per realm, would multiply the one term here that is allowed to scale with registration.
+    /// </remarks>
+    public long RealmPolicyEvaluations { get; init; }
+
+    /// <summary>
+    /// Milliseconds spent in the frame stage's <b>single-threaded</b> prologue since the engine opened, and the ticks it was measured over.
+    /// <b>Cumulative — difference two readings.</b> Both zero unless phase timing is enabled, which it is not by default.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The companion to <see cref="ReplicationTrackP99Ms"/> and a different quantity: the track's percentile covers the whole stage, most of which is chunks on
+    /// worker threads, while this is the part no second core can help with. The difference between N sessions in one realm and the same N sessions in N realms,
+    /// divided by N, is the per-realm fixed cost of everything inside this window — which is what Realms D-7 was measured with.
+    /// </para>
+    /// <para>
+    /// <b>It does not contain every serial per-realm step, and a D-7-style reading has to say so.</b> The frame prologue holds the overload step, the index
+    /// build and world order, the far flushes, the LOD census and the unplaced sweep. Three more serial per-realm stages sit outside it, in other tracks'
+    /// prepare phases: the index merge's plan, the index finish and far plan, and the queued shadow checks. So this is a lower bound on the serial per-realm
+    /// cost, not the whole of it; the upper bound is the whole tick.
+    /// </para>
+    /// <para>
+    /// <b>Cumulative on purpose, and the tick count comes with it.</b> The engine also keeps this as a mean over the whole run, which is the wrong shape for a
+    /// measurement: a run whose configuration changed half way through reports one number for both halves. The ticks here are the ticks the frame stage was
+    /// <i>busy</i>, not every tick the engine ran, so they are the right denominator and they are not derivable from <see cref="Tick"/>.
+    /// </para>
+    /// </remarks>
+    public double ReplicationPrologueMsTotal { get; init; }
+
+    /// <summary>Ticks the frame stage was busy, the denominator for <see cref="ReplicationPrologueMsTotal"/>. Zero unless phase timing is enabled.</summary>
+    public long ReplicationPrologueTicks { get; init; }
 }
 
 /// <summary>
