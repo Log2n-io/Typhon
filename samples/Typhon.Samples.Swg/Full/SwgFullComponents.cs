@@ -83,9 +83,24 @@ public struct Membership
 }
 
 /// <summary>Core player identity. Unique by AccountId; queryable by Level / ProfessionId. Name is an unindexed
-/// String64 — PlayerArch is cluster-eligible (SV Position + Transient Session), and cluster archetypes route all
-/// indexes through one fixed-stride segment that can't hold a 64-byte String64 index. AccountId (a long) is the
-/// unique-index demonstration here; the String64 unique index is exercised by Guild/ResourceType/Recipe.</summary>
+/// String64 — a choice, not a limitation.</summary>
+/// <remarks>
+/// <para>
+/// <b>A cluster archetype can index a String64.</b> Since #658 such a field gets its OWN index segment with a wider
+/// node stride, because a 64-byte key's B-tree nodes do not fit the default segment's 256-byte node stride; the
+/// segment is allocated only when a String64 field is actually indexed, and
+/// <c>ArchetypeClusterState.BuildIndexSlot</c> picks between the two per field type.
+/// <c>ClusterString64IndexTests</c> covers the index and <c>ClusterIndexSpiPersistenceTests</c> covers an archetype
+/// carrying both strides across a reopen. An earlier version of this comment claimed the opposite; it predated #658.
+/// </para>
+/// <para>
+/// <b>Why AccountId is still the unique-index demonstration.</b> The one asymmetry that remains is the zone map — the
+/// per-cluster min/max summary that lets a scan skip clusters that cannot match. A numeric key gets one; a 64-byte
+/// String64 key has no such summary and gets <c>null</c>, so a B-tree lookup on a name is as fast as any other while
+/// a SCAN filtered on the name cannot prune. A long key therefore shows the complete picture, and the String64 unique
+/// index is exercised where scan pruning does not matter, on Guild / ResourceType / Recipe.
+/// </para>
+/// </remarks>
 [Component("Swg.Player", 1)]
 [ComponentFamily("Social")]
 [StructLayout(LayoutKind.Sequential)]
