@@ -250,12 +250,25 @@ public partial class Outer
         });
     }
 
+    /// <summary>A 64-bit integer, a double and a fixed shape have an exact wire form (13 § 2.1, W32, W33), so a bare <c>[Replicate]</c> means exact.</summary>
     [Test]
-    public void AWideTypeWithNoCodecIsRefused()
+    public void AWideTypeOrAShapeWithNoCodecTravelsExact()
         => Assert.That(Ids(@"
-[Component(""C"", 1)] public struct C { [Field, Replicate] public long Big; [Field, Replicate] public double Real; }
+[Component(""C"", 1)] public struct C
+{
+    [Field, Replicate] public long Big; [Field, Replicate] public ulong Bigger; [Field, Replicate] public double Real;
+    [Field, Replicate] public Typhon.Schema.Definition.Point3F Spot;
+}
 [Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"),
-    Is.EqualTo(new[] { "TPH1104", "TPH1104" }));
+    Is.Empty);
+
+    [Test]
+    public void AStructThatIsNoShapeWithNoCodecIsRefused()
+        => Assert.That(Ids(@"
+public struct Pair { public float A; public float B; }
+[Component(""C"", 1)] public struct C { [Field, Replicate] public Pair P; }
+[Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"),
+    Is.EqualTo(new[] { "TPH1104" }));
 
     [TestCase("[Field, Fraction(\"Nope\", Name = \"hp\")] public int Value; [Field] public int Max;", TestName = "AFractionOfAMissingFieldIsRefused")]
     [TestCase("[Field, Fraction(nameof(Max), Name = \"hp\")] public float Value; [Field] public int Max;", TestName = "AFractionOfAnotherTypeIsRefused")]

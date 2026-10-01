@@ -39,9 +39,15 @@ enum class CodecKind : std::uint8_t
     Blob = 27,
     TickLo = 28,
     List = 29,
+    // W32: decoded as 64-bit integers or binary64, never through a narrower number.
+    U64 = 30,
+    I64 = 31,
+    F64 = 32,
+    Varu64 = 33,
+    Vari64 = 34,
 };
 
-inline constexpr int CodecKindCount = 30;
+inline constexpr int CodecKindCount = 35;
 
 // The kind a wire token names; Unknown for an empty or unrecognised token.
 CodecKind CodecKindOf(std::string_view token);
@@ -54,5 +60,17 @@ constexpr bool IsPacked(CodecKind kind) { return kind == CodecKind::Bits || kind
 
 // Whether a codec may be a list element: numeric, byte-aligned, and independent of the frame (W28).
 bool IsListElement(CodecKind kind);
+
+// Whether a codec may carry a count (W33): the byte-aligned scalar codecs.
+bool TakesCount(CodecKind kind);
+
+// Whether a codec decodes to 64-bit integers (W32).
+constexpr bool IsInteger64(CodecKind kind)
+{
+    return kind == CodecKind::U64 || kind == CodecKind::I64 || kind == CodecKind::Varu64 || kind == CodecKind::Vari64;
+}
+
+// Whether a 64-bit integer codec is signed: its bit patterns are two's complement.
+constexpr bool IsSigned64(CodecKind kind) { return kind == CodecKind::I64 || kind == CodecKind::Vari64; }
 
 }  // namespace typhon::client

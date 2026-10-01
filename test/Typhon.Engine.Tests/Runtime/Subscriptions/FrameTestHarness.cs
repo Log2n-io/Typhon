@@ -490,6 +490,8 @@ sealed unsafe class FrameHarness : IDisposable
 
         public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => Mix(components);
 
+        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components) => Mix(System.Runtime.InteropServices.MemoryMarshal.AsBytes(components));
+
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) => Mix(utf8);
 
         public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes) => Mix(bytes);
@@ -769,6 +771,37 @@ sealed class SessionReplica
 
         return null;
     }
+
+    /// <summary>Every component of a numeric field (a count's included, W33) for an entity the replica holds.</summary>
+    /// <param name="archetype">The archetype's wire index.</param>
+    /// <param name="netId">The entity.</param>
+    /// <param name="field">The field's wire name.</param>
+    /// <returns>The components.</returns>
+    public double[] Numbers(int archetype, uint netId, string field)
+    {
+        var (store, plan, slot) = Locate(archetype, netId, field);
+        return store.Numbers[plan.Ordinal].AsSpan(slot * plan.Components, plan.Components).ToArray();
+    }
+
+    /// <summary>Every component of a 64-bit integer field (W32) for an entity the replica holds, as bit patterns — never through a double.</summary>
+    /// <param name="archetype">The archetype's wire index.</param>
+    /// <param name="netId">The entity.</param>
+    /// <param name="field">The field's wire name.</param>
+    /// <returns>The components.</returns>
+    public ulong[] Integers(int archetype, uint netId, string field)
+    {
+        var (store, plan, slot) = Locate(archetype, netId, field);
+        return store.Integers[plan.Ordinal].AsSpan(slot * plan.Components, plan.Components).ToArray();
+    }
+
+    private (ArchetypeStore Store, FieldPlan Plan, int Slot) Locate(int archetype, uint netId, string field)
+    {
+        Assert.That(Store.TryLocate(netId, out var located, out var slot) && located == archetype, Is.True, $"the replica does not hold netId {netId}");
+        var store = Store.Archetypes[archetype];
+        var plan = Array.Find(store.Plan.Fields, f => f.Name == field);
+        Assert.That(plan, Is.Not.Null, $"no field '{field}'");
+        return (store, plan, slot);
+    }
 }
 
 /// <summary>Records every call one decoded frame makes into its sink, so a test can assert the ORDER a decoder sees and not only the state it ends in.</summary>
@@ -800,6 +833,9 @@ sealed class FrameLog : ITickSink
 
     /// <summary>The owner field values the <c>SELF</c> blocks carried, by field name (the last one wins).</summary>
     public Dictionary<string, double> SelfNumbers { get; } = [];
+
+    /// <summary>The 64-bit owner field values (W32) the <c>SELF</c> blocks carried, as bit patterns, by field name (the last one wins).</summary>
+    public Dictionary<string, ulong> SelfIntegers { get; } = [];
 
     /// <summary>The <c>ACKS</c> records, in stream order.</summary>
     public List<(ushort Seq, byte Reason)> Acks { get; } = [];
@@ -930,6 +966,15 @@ sealed class FrameLog : ITickSink
     }
 
     /// <inheritdoc />
+    public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+    {
+        if (_inSelf)
+        {
+            SelfIntegers[field.Name] = components[0];
+        }
+    }
+
+    /// <inheritdoc />
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) { }
 
     /// <inheritdoc />
@@ -985,6 +1030,8 @@ sealed class FrameLog : ITickSink
 
         public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => _log.Number(field, components);
 
+        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components) => _log.Integer64(field, components);
+
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) { }
 
         public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes) { }
@@ -1010,6 +1057,12 @@ sealed class EventRecorder : IEventHandler
     /// the ones that were sent — a string comparison would pass on a value that had been through a lossy decode.
     /// </remarks>
     public List<Dictionary<string, byte[]>> Texts { get; } = [];
+
+    /// <summary>
+    /// The 64-bit integer fields (W32) of the received events, exactly — a double in <see cref="Received"/> would round them: the event's index into
+    /// <see cref="Received"/>, the field and its first component's bit pattern.
+    /// </summary>
+    public List<(int Event, string Field, ulong Bits)> Integers { get; } = [];
 
     /// <summary>The sum of every <c>EventsLost</c> count received.</summary>
     public long Lost { get; private set; }
@@ -1048,6 +1101,15 @@ sealed class EventRecorder : IEventHandler
         }
 
         _current[field.Name] = components[0];
+    }
+
+    /// <inheritdoc />
+    public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+    {
+        if (!_lost)
+        {
+            Integers.Add((Received.Count - 1, field.Name, components[0]));
+        }
     }
 
     /// <inheritdoc />

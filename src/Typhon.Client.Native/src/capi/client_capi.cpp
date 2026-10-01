@@ -720,6 +720,11 @@ typhon_status typhon_command_enqueue(typhon_client* client, uint32_t command, co
                              value.kind = FieldValue::Kind::Bytes;
                              value.bytes = {v.bytes, v.bytes_len};
                          }
+                         else if (v.integers != nullptr)
+                         {
+                             value.kind = FieldValue::Kind::Integers;
+                             value.integers = {v.integers, v.integer_count};
+                         }
                          else
                          {
                              value.kind = FieldValue::Kind::Numbers;
@@ -792,6 +797,23 @@ typhon_status typhon_event_numbers(const typhon_event* event, uint32_t field, co
                      const auto numbers = record.Numbers(static_cast<int>(field));
                      *values = numbers.data();
                      *count = numbers.size();
+                     return TYPHON_OK;
+                 });
+}
+
+typhon_status typhon_event_integers(const typhon_event* event, uint32_t field, const uint64_t** values, size_t* count)
+{
+    return Guard(nullptr,
+                 [&]
+                 {
+                     capi::RequireOut(event);
+                     capi::RequireOut(values);
+                     capi::RequireOut(count);
+                     const EventRecord& record = capi::EventOf(event);
+                     capi::RequireEventField(record, field);
+                     const auto integers = record.Integers(static_cast<int>(field));
+                     *values = integers.data();
+                     *count = integers.size();
                      return TYPHON_OK;
                  });
 }

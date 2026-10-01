@@ -6,8 +6,16 @@ namespace Typhon.Protocol;
 /// <summary>What a decoded field value is made of.</summary>
 public enum FieldValueKind
 {
-    /// <summary>One to four numbers (<see cref="FieldPlan.Components"/>): integers, quantized scalars, vectors, a quaternion.</summary>
+    /// <summary>
+    /// One to sixteen numbers (<see cref="FieldPlan.Components"/>): integers up to 32 bits, floats, quantized scalars, vectors, a quaternion — every value
+    /// a binary64 holds exactly.
+    /// </summary>
     Number,
+
+    /// <summary>
+    /// One to sixteen 64-bit integers (<c>u64 i64 varu64 vari64</c>, W32), as their bit patterns: decoded without a double, which cannot hold them.
+    /// </summary>
+    Integer64,
 
     /// <summary>UTF-8 text.</summary>
     Text,
@@ -36,16 +44,29 @@ public sealed class FieldPlan
         Packed = CatalogSerializer.IsPacked(Kind);
         BitCount = Kind == CodecKind.Bool ? 1 : Kind == CodecKind.Bits ? codec.N : 0;
         VelocityUnitExp = codec.UnitExp ?? 0;
+
+        // Compilation is the decoder's trust boundary, as for a list: a count sizes stack buffers, so it is bounded here whether or not the catalog went
+        // through the validator. A codec newer than this library is skipped by its fixedBytes, whatever count it carries. A value no field holds — a list
+        // element, a metric, a position — is one value: its decode buffers are sized for that, so a count there is refused too.
+        var count = codec.Count == 0 || Kind == CodecKind.Unknown ? 1 : codec.Count;
+        if (Kind != CodecKind.Unknown && codec.Count != 0
+            && (field == null || !CatalogValidator.TakesCount(Kind) || count is < 2 or > ProtocolConstants.MaxCount))
+        {
+            throw new CatalogException([$"field '{name}' carries count {codec.Count} on '{codec.Type}'"]);
+        }
+
+        Count = count;
         (ValueKind, Components) = Kind switch
         {
             CodecKind.Pos2 or CodecKind.Vec2 or CodecKind.Vel2 => (FieldValueKind.Number, 2),
             CodecKind.Pos3 or CodecKind.Vec3 or CodecKind.Vel3 => (FieldValueKind.Number, 3),
             CodecKind.Quat3 => (FieldValueKind.Number, 4),
+            CodecKind.U64 or CodecKind.I64 or CodecKind.Varu64 or CodecKind.Vari64 => (FieldValueKind.Integer64, count),
             CodecKind.Str => (FieldValueKind.Text, 0),
             CodecKind.Bytes or CodecKind.Blob => (FieldValueKind.Bytes, 0),
             CodecKind.List => (FieldValueKind.List, 0),
             CodecKind.Unknown => (FieldValueKind.Skipped, 0),
-            _ => (FieldValueKind.Number, 1),
+            _ => (FieldValueKind.Number, count),
         };
 
         if (Kind == CodecKind.List)
@@ -61,14 +82,11 @@ public sealed class FieldPlan
             Components = Element.Components;
         }
 
-        // A position's quantum is the realm frame's (typhon.3), per frame: RealmFrame.Step.
+        // A position's quantum is the realm frame's (typhon.3), per frame: RealmFrame.Step. A quant has one range whatever its count: every component
+        // quantizes over min[0]..max[0].
         if (Kind is CodecKind.Quant)
         {
-            QuantStep = new double[Components];
-            for (var i = 0; i < Components; i++)
-            {
-                QuantStep[i] = WireMath.QuantStep(codec.Min[i], codec.Max[i], codec.Bits);
-            }
+            QuantStep = [WireMath.QuantStep(codec.Min[0], codec.Max[0], codec.Bits)];
         }
 
         EnumCount = field?.Enum != null && enums != null && enums.TryGetValue(field.Enum, out var names) ? names.Length : 0;
@@ -112,13 +130,19 @@ public sealed class FieldPlan
     /// <summary>Numbers per value (per element, for a list); 0 for text and bytes.</summary>
     public int Components { get; }
 
+    /// <summary>The codec's <c>count</c> (W33): how many values of it the field carries, 1 when the catalog declares none.</summary>
+    public int Count { get; }
+
     /// <summary>For a list, the element's plan.</summary>
     public FieldPlan Element { get; }
 
     /// <summary>For a velocity: the unit's binary exponent — one code is <c>2^VelocityUnitExp</c> metres per tick (W5).</summary>
     public int VelocityUnitExp { get; }
 
-    /// <summary>For a <c>quant</c> codec, its step, computed once exactly as <see cref="WireMath.QuantStep"/> does; <see langword="null"/> otherwise.</summary>
+    /// <summary>
+    /// For a <c>quant</c> codec, its step — one, shared by every component of a <c>count</c> — computed once exactly as <see cref="WireMath.QuantStep"/>
+    /// does; <see langword="null"/> otherwise.
+    /// </summary>
     public double[] QuantStep { get; }
 
     /// <summary>The number of names of the field's enum, or 0 when it has none; a server refuses a command value at or above it (W13).</summary>

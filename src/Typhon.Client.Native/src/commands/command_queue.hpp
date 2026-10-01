@@ -65,6 +65,8 @@ private:
         std::uint32_t seq = 0;
         std::uint32_t bytes = 0;
         Vec<double> numbers;
+        // 64-bit integer components (W32), as bit patterns.
+        Vec<std::uint64_t> integers;
         Vec<char> text;
         Vec<NamedValue> values;
 
@@ -76,6 +78,7 @@ private:
             std::swap(seq, other.seq);
             std::swap(bytes, other.bytes);
             numbers.swap(other.numbers);
+            integers.swap(other.integers);
             text.swap(other.text);
             values.swap(other.values);
         }

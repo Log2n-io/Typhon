@@ -51,6 +51,16 @@ public:
     // Zigzag-mapped varu, in [-2^31, 2^31).
     std::int32_t Vari();
 
+    // A little-endian u64 (W32); an i64 is the same bits.
+    std::uint64_t U64();
+
+    // A varu64 (W32): unsigned LEB128, at most ten bytes, fitting 64 bits. An over-long form is accepted while it fits; a tenth byte
+    // above 0x01 is malformed (1007).
+    std::uint64_t Varu64();
+
+    // A vari64 (W32): a zigzag-mapped varu64, returned as its two's-complement bit pattern.
+    std::uint64_t Vari64();
+
     // A varu that must not exceed `max`: a count, a length or an index.
     std::uint32_t VaruAtMost(std::uint64_t max, const char* what);
 

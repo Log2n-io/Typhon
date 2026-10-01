@@ -75,6 +75,12 @@ public static class ProtocolConstants
 
     /// <summary>The largest element count a <c>list</c> codec may declare.</summary>
     public const int MaxListCount = 255;
+
+    /// <summary>The most values one <c>count</c> field carries (W33): a 4 × 4 matrix, the widest fixed shape worth one field.</summary>
+    public const int MaxCount = 16;
+
+    /// <summary>The longest <c>shape</c> hint, in UTF-8 bytes (W33): every defined one is under ten.</summary>
+    public const int ShapeMaxBytes = 32;
 }
 
 /// <summary>

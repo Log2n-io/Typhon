@@ -1,0 +1,5 @@
+{
+  "description": "The exact wire (W32, W33): u64, i64, f64, varu64 and vari64 on onEnter, group and owner fields, count shapes with their hints, and the same codecs on an event and a command.",
+  "hash": "8a665525d928a08a",
+  "byteCount": 1718
+}

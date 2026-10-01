@@ -283,6 +283,12 @@ public sealed class SelfState
     /// <summary>Owner field numbers by <see cref="FieldPlan.Ordinal"/>; <see langword="null"/> until received or when not numeric.</summary>
     public double[][] Numbers { get; private set; } = [];
 
+    /// <summary>
+    /// Owner 64-bit integer fields (W32) by ordinal, as bit patterns — a signed value's two's complement; <see langword="null"/> until received or when the
+    /// field is not a 64-bit integer.
+    /// </summary>
+    public ulong[][] Integers { get; private set; } = [];
+
     /// <summary>Owner field texts by ordinal.</summary>
     public string[] Texts { get; private set; } = [];
 
@@ -297,6 +303,7 @@ public sealed class SelfState
         {
             Archetype = null;
             Numbers = [];
+            Integers = [];
             Texts = [];
             Bytes = [];
         }
@@ -304,6 +311,7 @@ public sealed class SelfState
         {
             Archetype = archetype;
             Numbers = new double[archetype.OwnerFields.Length][];
+            Integers = new ulong[archetype.OwnerFields.Length][];
             Texts = new string[archetype.OwnerFields.Length];
             Bytes = new byte[archetype.OwnerFields.Length][];
         }
@@ -326,6 +334,7 @@ public sealed class SelfState
         NetId = 0;
         LastSeq = 0;
         Numbers = [];
+        Integers = [];
         Texts = [];
         Bytes = [];
         Received = false;

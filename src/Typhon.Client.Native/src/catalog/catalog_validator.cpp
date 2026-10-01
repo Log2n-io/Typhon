@@ -255,9 +255,14 @@ enum Parameter : int
     PMaxBytes = 32,
     PList = 64,
     PFixedBytes = 128,
+    PCount = 256,
 };
 
-int ReadParameters(CodecKind kind)
+int ReadKindParameters(CodecKind kind);
+
+int ReadParameters(CodecKind kind) { return ReadKindParameters(kind) | (TakesCount(kind) ? PCount : 0); }
+
+int ReadKindParameters(CodecKind kind)
 {
     switch (kind)
     {
@@ -347,10 +352,16 @@ void CheckCodec(const std::string& at, const CatalogCodec& codec, long long maxB
                             | (codec.scale.has_value() && *codec.scale != 0 ? PScale : 0) | (codec.unitExp.has_value() ? PUnitExp : 0)
                             | (NonZero(codec.n) ? PN : 0) | (NonZero(codec.maxBytes) ? PMaxBytes : 0)
                             | (codec.of != nullptr || NonZero(codec.minCount) || NonZero(codec.maxCount) ? PList : 0)
-                            | (NonZero(codec.fixedBytes) ? PFixedBytes : 0);
+                            | (NonZero(codec.fixedBytes) ? PFixedBytes : 0) | (NonZero(codec.count) ? PCount : 0);
         if ((present & ~ReadParameters(kind)) != 0)
         {
             p.push_back(at + ": codec '" + codec.t + "' carries a parameter its kind does not read");
+        }
+
+        // Absent is one value, so a count of 1 has no spelling: it would hash differently from the same field without one.
+        if (NonZero(codec.count) && TakesCount(kind) && !(*codec.count >= 2 && *codec.count <= protocol::MaxCount))
+        {
+            p.push_back(at + ": count must be 2.." + std::to_string(protocol::MaxCount) + "; leave it out for one value");
         }
     }
 
@@ -431,6 +442,10 @@ void CheckCodec(const std::string& at, const CatalogCodec& codec, long long maxB
             {
                 p.push_back(at + ": a list element must be a numeric byte-aligned codec, not '" + codec.of->t + "'");
             }
+            else if (NonZero(codec.of->count))
+            {
+                p.push_back(at + ": a list element is one value; a count belongs on a field");
+            }
             else
             {
                 CheckCodec(at + " element", *codec.of, maxBytes, p);
@@ -469,6 +484,12 @@ void CheckField(const std::string& at, const CatalogField& f, const Catalog& c, 
     }
 
     CheckCodec(at, f.codec, maxBytes, p);
+    if (f.shape.has_value() && (f.shape->empty() || f.shape->size() > static_cast<std::size_t>(protocol::ShapeMaxBytes)))
+    {
+        // Any other value is accepted: a shape is a hint, and one this library does not know is ignored (W33).
+        p.push_back(at + ": shape must be 1.." + std::to_string(protocol::ShapeMaxBytes) + " UTF-8 bytes");
+    }
+
     if (!f.enumName.has_value() || f.enumName->empty())
     {
         return;
@@ -479,6 +500,10 @@ void CheckField(const std::string& at, const CatalogField& f, const Catalog& c, 
     if (t != "bits" && t != "u8" && t != "u16" && t != "varu")
     {
         p.push_back(at + ": an enum is allowed only on bits, u8, u16 and varu, not '" + t + "'");
+    }
+    else if (NonZero(f.codec.count))
+    {
+        p.push_back(at + ": an enum names one value; it cannot carry a count");
     }
     else if (names == nullptr)
     {
@@ -752,6 +777,11 @@ void CheckMetric(const CatalogMetric& m, Problems& p)
         default:
             p.push_back(where + ": codec '" + m.codec.t + "' is not a metric codec");
             break;
+    }
+
+    if (NonZero(m.codec.count))
+    {
+        p.push_back(where + ": a metric is one value per label; it cannot carry a count");
     }
 
     CheckCodec(where, m.codec, MaxSafeInteger, p);

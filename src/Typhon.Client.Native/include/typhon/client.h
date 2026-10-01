@@ -176,14 +176,15 @@ typedef struct typhon_column
 {
     /* A typhon_field_kind, as a fixed-width integer: an enum's size is the compiler's choice, a bad thing to share across an FFI. */
     uint32_t kind;
-    /* Values per slot: 1 to 4. */
+    /* Values per slot: 1 to 16 (a count, W33). A U64 / I64 column holds 64-bit integers exactly (W32). */
     int32_t components;
     /* capacity x components values of `kind`; NULL for text and bytes. */
     const void* data;
 } typhon_column;
 
-/* A command field's value: text when `text` is set, else bytes when `bytes` is set, else numbers (a scalar, a vector's components, a
- * list's flattened elements). An empty text or bytes value still passes a non-NULL pointer, with a length of 0. */
+/* A command field's value: text when `text` is set, else bytes when `bytes` is set, else 64-bit integers when `integers` is set (W32:
+ * a u64/varu64 field's values, an i64/vari64 field's as two's-complement bit patterns), else numbers (a scalar, the components of a
+ * vector or a count, a list's flattened elements). An empty text or bytes value still passes a non-NULL pointer, with a length of 0. */
 typedef struct typhon_value
 {
     const char* name;
@@ -193,6 +194,8 @@ typedef struct typhon_value
     size_t text_len;
     const uint8_t* bytes;
     size_t bytes_len;
+    const uint64_t* integers;
+    size_t integer_count;
 } typhon_value;
 
 TYPHON_API typhon_status typhon_set_allocator(const typhon_allocator* allocator);
@@ -254,6 +257,8 @@ TYPHON_API const char* typhon_event_type_name(const typhon_event* event);
 TYPHON_API uint32_t typhon_event_tick(const typhon_event* event);
 TYPHON_API typhon_status typhon_event_field_index(const typhon_event* event, const char* name, uint32_t* out);
 TYPHON_API typhon_status typhon_event_numbers(const typhon_event* event, uint32_t field, const double** values, size_t* count);
+/* A 64-bit integer field's components (W32), as bit patterns: cast to int64_t for an i64 or vari64 field. */
+TYPHON_API typhon_status typhon_event_integers(const typhon_event* event, uint32_t field, const uint64_t** values, size_t* count);
 TYPHON_API typhon_status typhon_event_text(const typhon_event* event, uint32_t field, const char** data, size_t* length);
 TYPHON_API typhon_status typhon_event_bytes(const typhon_event* event, uint32_t field, const uint8_t** data, size_t* length);
 

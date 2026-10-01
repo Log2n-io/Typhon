@@ -133,7 +133,8 @@ void WriteList(WireWriter& w, const FieldPlan& f, std::span<const double> flatte
 
 void ReadSection(WireReader& r, const SectionPlan& section, std::uint32_t frameTick, FieldSink& sink, bool strictEnums, const RealmFrame* frame)
 {
-    double scalar[4];
+    double scalar[protocol::MaxCount];
+    std::uint64_t wide[protocol::MaxCount];
     const auto& fields = section.fields;
     const int packedCount = section.packedCount;
     if (section.packBytes > 0)
@@ -168,6 +169,10 @@ void ReadSection(WireReader& r, const SectionPlan& section, std::uint32_t frameT
 
                 sink.Number(f, scalar);
                 break;
+            case ValueKind::Integer64:
+                ReadInteger64(r, f, wide);
+                sink.Integer64(f, wide);
+                break;
             case ValueKind::Text:
                 sink.Text(f, r.Str(static_cast<std::size_t>(f.maxBytes)));
                 break;
@@ -188,44 +193,59 @@ void ReadSection(WireReader& r, const SectionPlan& section, std::uint32_t frameT
     }
 }
 
-void ReadNumber(WireReader& r, const FieldPlan& f, std::uint32_t frameTick, double* out, const RealmFrame* frame)
+namespace {
+
+// One value of a scalar codec, the unit a count repeats (W33).
+double ReadScalar(WireReader& r, const FieldPlan& f, std::uint32_t frameTick)
 {
     switch (f.kind)
     {
         case CodecKind::U8:
-            out[0] = r.U8();
-            break;
+            return r.U8();
         case CodecKind::I8:
-            out[0] = r.I8();
-            break;
+            return r.I8();
         case CodecKind::U16:
-            out[0] = r.U16();
-            break;
+            return r.U16();
         case CodecKind::I16:
-            out[0] = r.I16();
-            break;
+            return r.I16();
         case CodecKind::U32:
-            out[0] = r.U32();
-            break;
+            return r.U32();
         case CodecKind::I32:
-            out[0] = r.I32();
-            break;
+            return r.I32();
         case CodecKind::Varu:
         case CodecKind::EntityRef:
-            out[0] = r.Varu();
-            break;
+            return r.Varu();
         case CodecKind::Vari:
-            out[0] = r.Vari();
-            break;
+            return r.Vari();
         case CodecKind::F32:
-            out[0] = r.F32();
-            break;
+            return r.F32();
         case CodecKind::F16:
-            out[0] = r.F16();
-            break;
+            return r.F16();
+        case CodecKind::F64:
+            return r.F64();
         case CodecKind::Quant:
-            out[0] = math::DecodeQuant(r.Unsigned(f.bits), f.min[0], f.step[0]);
-            break;
+            // One range whatever the count: every component over min[0] and step[0].
+            return math::DecodeQuant(r.Unsigned(f.bits), f.min[0], f.step[0]);
+        case CodecKind::Unorm:
+            return math::DecodeUnorm(r.Unsigned(f.bits), f.top);
+        case CodecKind::Snorm:
+            return math::DecodeSnorm(r.Signed(f.bits), f.limit);
+        case CodecKind::Angle:
+            // q * tau / 2^bits, where 2^bits = top + 1 exactly.
+            return (r.Signed(f.bits) * math::Tau) / (f.top + 1);
+        case CodecKind::TickLo:
+            return math::DecodeTickLo(r.U16(), frameTick);
+        default:
+            throw std::logic_error("'" + f.codec.t + "' is not a byte-aligned numeric codec");
+    }
+}
+
+}  // namespace
+
+void ReadNumber(WireReader& r, const FieldPlan& f, std::uint32_t frameTick, double* out, const RealmFrame* frame)
+{
+    switch (f.kind)
+    {
         case CodecKind::Pos2:
         case CodecKind::Pos3:
         {
@@ -259,24 +279,39 @@ void ReadNumber(WireReader& r, const FieldPlan& f, std::uint32_t frameTick, doub
             }
 
             break;
-        case CodecKind::Unorm:
-            out[0] = math::DecodeUnorm(r.Unsigned(f.bits), f.top);
-            break;
-        case CodecKind::Snorm:
-            out[0] = math::DecodeSnorm(r.Signed(f.bits), f.limit);
-            break;
-        case CodecKind::Angle:
-            // q * tau / 2^bits, where 2^bits = top + 1 exactly.
-            out[0] = (r.Signed(f.bits) * math::Tau) / (f.top + 1);
-            break;
         case CodecKind::Quat3:
             math::DecodeQuat3(r.U32(), out);
             break;
-        case CodecKind::TickLo:
-            out[0] = math::DecodeTickLo(r.U16(), frameTick);
-            break;
         default:
-            throw std::logic_error("'" + f.codec.t + "' is not a byte-aligned numeric codec");
+            // A scalar codec: components is its count (W33), each value read in turn.
+            for (int i = 0; i < f.components; i++)
+            {
+                out[i] = ReadScalar(r, f, frameTick);
+            }
+
+            break;
+    }
+}
+
+void ReadInteger64(WireReader& r, const FieldPlan& f, std::uint64_t* out)
+{
+    for (int i = 0; i < f.components; i++)
+    {
+        switch (f.kind)
+        {
+            case CodecKind::U64:
+            case CodecKind::I64:
+                out[i] = r.U64();
+                break;
+            case CodecKind::Varu64:
+                out[i] = r.Varu64();
+                break;
+            case CodecKind::Vari64:
+                out[i] = r.Vari64();
+                break;
+            default:
+                throw std::logic_error("'" + f.codec.t + "' is not a 64-bit integer codec");
+        }
     }
 }
 
@@ -349,6 +384,14 @@ void WriteSection(WireWriter& w, const SectionPlan& section, std::span<const Nam
                 WriteNumber(w, f, numbers, frame);
                 break;
             }
+            case ValueKind::Integer64:
+                if (value == nullptr || value->kind != FieldValue::Kind::Integers || value->integers.empty())
+                {
+                    throw std::out_of_range("no 64-bit integer value supplied for field '" + f.name + "'");
+                }
+
+                WriteInteger64(w, f, value->integers);
+                break;
             case ValueKind::Text:
                 if (value == nullptr || value->kind != FieldValue::Kind::Text)
                 {
@@ -395,15 +438,11 @@ void WriteSection(WireWriter& w, const SectionPlan& section, std::span<const Nam
     }
 }
 
-void WriteNumber(WireWriter& w, const FieldPlan& f, std::span<const double> c, const RealmFrame* frame)
-{
-    if (c.size() < static_cast<std::size_t>(f.components))
-    {
-        throw std::out_of_range("field '" + f.name + "' needs " + std::to_string(f.components) + " component(s), got "
-                                + std::to_string(c.size()));
-    }
+namespace {
 
-    const double v = c[0];
+// One value of a scalar codec, encoded: the unit a count repeats (W33).
+void WriteScalar(WireWriter& w, const FieldPlan& f, double v)
+{
     switch (f.kind)
     {
         case CodecKind::U8:
@@ -437,9 +476,41 @@ void WriteNumber(WireWriter& w, const FieldPlan& f, std::span<const double> c, c
         case CodecKind::F16:
             w.F16(v);
             break;
+        case CodecKind::F64:
+            w.F64(v);
+            break;
         case CodecKind::Quant:
             w.Bits(static_cast<std::uint32_t>(math::EncodeQuant(v, f.min[0], f.step[0], f.top)), f.bits);
             break;
+        case CodecKind::Unorm:
+            w.Bits(static_cast<std::uint32_t>(math::EncodeUnorm(v, f.top)), f.bits);
+            break;
+        case CodecKind::Snorm:
+            w.Bits(static_cast<std::uint32_t>(static_cast<std::int32_t>(math::EncodeSnorm(v, f.limit))), f.bits);
+            break;
+        case CodecKind::Angle:
+            w.Bits(static_cast<std::uint32_t>(static_cast<std::int64_t>(math::EncodeAngle(v, f.bits))), f.bits);
+            break;
+        case CodecKind::TickLo:
+            w.U16(ToUnsigned(v, 4294967295.0, f) & 0xFFFFu);
+            break;
+        default:
+            throw std::logic_error("'" + f.codec.t + "' is not a byte-aligned numeric codec");
+    }
+}
+
+}  // namespace
+
+void WriteNumber(WireWriter& w, const FieldPlan& f, std::span<const double> c, const RealmFrame* frame)
+{
+    if (c.size() < static_cast<std::size_t>(f.components))
+    {
+        throw std::out_of_range("field '" + f.name + "' needs " + std::to_string(f.components) + " component(s), got "
+                                + std::to_string(c.size()));
+    }
+
+    switch (f.kind)
+    {
         case CodecKind::Pos2:
         case CodecKind::Pos3:
             if (frame == nullptr)
@@ -473,23 +544,46 @@ void WriteNumber(WireWriter& w, const FieldPlan& f, std::span<const double> c, c
             }
 
             break;
-        case CodecKind::Unorm:
-            w.Bits(static_cast<std::uint32_t>(math::EncodeUnorm(v, f.top)), f.bits);
-            break;
-        case CodecKind::Snorm:
-            w.Bits(static_cast<std::uint32_t>(static_cast<std::int32_t>(math::EncodeSnorm(v, f.limit))), f.bits);
-            break;
-        case CodecKind::Angle:
-            w.Bits(static_cast<std::uint32_t>(static_cast<std::int64_t>(math::EncodeAngle(v, f.bits))), f.bits);
-            break;
         case CodecKind::Quat3:
-            w.U32(math::EncodeQuat3(v, c[1], c[2], c[3]));
-            break;
-        case CodecKind::TickLo:
-            w.U16(ToUnsigned(v, 4294967295.0, f) & 0xFFFFu);
+            w.U32(math::EncodeQuat3(c[0], c[1], c[2], c[3]));
             break;
         default:
-            throw std::logic_error("'" + f.codec.t + "' is not a byte-aligned numeric codec");
+            // A scalar codec: components is its count (W33), each value written in turn.
+            for (int i = 0; i < f.components; i++)
+            {
+                WriteScalar(w, f, c[static_cast<std::size_t>(i)]);
+            }
+
+            break;
+    }
+}
+
+void WriteInteger64(WireWriter& w, const FieldPlan& f, std::span<const std::uint64_t> c)
+{
+    if (c.size() < static_cast<std::size_t>(f.components))
+    {
+        throw std::out_of_range("field '" + f.name + "' needs " + std::to_string(f.components) + " 64-bit integer(s), got "
+                                + std::to_string(c.size()));
+    }
+
+    for (int i = 0; i < f.components; i++)
+    {
+        const std::uint64_t v = c[static_cast<std::size_t>(i)];
+        switch (f.kind)
+        {
+            case CodecKind::U64:
+            case CodecKind::I64:
+                w.U64(v);
+                break;
+            case CodecKind::Varu64:
+                w.Varu64(v);
+                break;
+            case CodecKind::Vari64:
+                w.Vari64(v);
+                break;
+            default:
+                throw std::logic_error("'" + f.codec.t + "' is not a 64-bit integer codec");
+        }
     }
 }
 

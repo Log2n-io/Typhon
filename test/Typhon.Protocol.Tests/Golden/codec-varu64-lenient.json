@@ -1,0 +1,30 @@
+{
+  "description": "Decode-only varu64: over-long forms are accepted while they fit 64 bits in ten bytes \u2014 0 in two bytes, 0 in ten, and 2\u2076\u00B3 from a tenth byte of 0x01.",
+  "codec": {
+    "t": "varu64"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "offset": 0,
+      "length": 2,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "offset": 2,
+      "length": 10,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "offset": 12,
+      "length": 10,
+      "decoded": [
+        "8000000000000000"
+      ]
+    }
+  ]
+}

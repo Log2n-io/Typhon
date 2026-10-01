@@ -35,7 +35,7 @@ constexpr bool IsNumericKind(FieldKind kind) { return kind != FieldKind::Text &&
 struct FieldSchema {
     std::string name;
     FieldKind kind = FieldKind::F64;
-    // Numbers per value of a numeric field, 1 to 4; ignored for text and bytes.
+    // Numbers per value of a numeric field, 1 to 16 (a count, W33); ignored for text and bytes.
     int components = 1;
     // Index into ArchetypeSchema::groups; -1 for an onEnter field (W15): enter records carry it, state records never do.
     int group = -1;
@@ -76,7 +76,7 @@ inline constexpr std::uint32_t MotionChangeBit = 1u << MaxGroups;
 void ValidateSchema(const WorldSchema& schema);
 
 // The storage a decoded field needs, or nullopt for a codec newer than this library (skipped by its width, nothing to store).
-// Integers keep their own width; varu, entityRef and tickLo a u32, vari an i32; f32 and f16 a f32 (every half and single is exact in
+// Integers keep their own width (the 64-bit ones, W32, a u64 or i64 column); varu, entityRef and tickLo a u32, vari an i32; f32 and f16 a f32 (every half and single is exact in
 // one); every dequantized value a f64 — decoded values are bit-exact binary64 (W1), and narrowing them is a renderer's choice.
 std::optional<FieldKind> FieldKindOf(const FieldPlan& field);
 

@@ -25,6 +25,18 @@ Value BitsOf(std::span<const double> values)
     return Value::MakeArray(std::move(items));
 }
 
+// 64-bit integers (W32) as their bit patterns: the same 16 hex digits a double's bits take — the codec says which one a value is.
+Value Bits64Of(std::span<const std::uint64_t> values)
+{
+    std::vector<Value> items;
+    for (const std::uint64_t v : values)
+    {
+        items.push_back(Str(Bits64(v)));
+    }
+
+    return Value::MakeArray(std::move(items));
+}
+
 Value HexOf(std::string_view text) { return Str(Hex({reinterpret_cast<const std::uint8_t*>(text.data()), text.size()})); }
 
 // A TCP stream's messages: `u32 len` little-endian, excluding itself (03 § 10, W31).
@@ -64,6 +76,9 @@ Value RenderEvent(const EventRecord& event, const FrameApplier& applier)
                     known.Set(f->name, Value::MakeBool(applier.World().Locate(netId) != NotFound));
                 }
 
+                break;
+            case ValueKind::Integer64:
+                fields.Set(f->name, Bits64Of(event.Integers(f->index)));
                 break;
             case ValueKind::List:
                 fields.Set(f->name, Value::MakeObject({{"count", Num(event.Count(f->index))}, {"values", BitsOf(event.Numbers(f->index))}}));
@@ -128,6 +143,16 @@ Value Render(const FrameApplier& applier, std::vector<Value> events)
                     }
 
                     fields.Set(f->name, BitsOf(values));
+                }
+                else if (f->valueKind == ValueKind::Integer64)
+                {
+                    std::vector<std::uint64_t> values;
+                    for (int c = 0; c < f->components; c++)
+                    {
+                        values.push_back(store.IntegerAt(index, slot, c));
+                    }
+
+                    fields.Set(f->name, Bits64Of(values));
                 }
                 else if (f->valueKind == ValueKind::Text)
                 {
@@ -213,6 +238,10 @@ Value Render(const FrameApplier& applier, std::vector<Value> events)
             if (f->valueKind == ValueKind::Number)
             {
                 fields.Set(f->name, BitsOf(self.Numbers(f->index)));
+            }
+            else if (f->valueKind == ValueKind::Integer64)
+            {
+                fields.Set(f->name, Bits64Of(self.Integers(f->index)));
             }
             else if (f->valueKind == ValueKind::Text)
             {

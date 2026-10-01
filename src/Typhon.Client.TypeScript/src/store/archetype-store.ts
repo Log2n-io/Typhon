@@ -1,4 +1,13 @@
-import { allocateField, isNumericKind, MOTION_CHANGE_BIT, type ArchetypeSchema, type FieldArray } from './schema.js';
+import {
+  allocateField,
+  allocateInteger64Field,
+  isInteger64Kind,
+  isNumericKind,
+  MOTION_CHANGE_BIT,
+  type ArchetypeSchema,
+  type FieldArray,
+  type Integer64FieldArray,
+} from './schema.js';
 
 /**
  * The largest render delay the store's motion ring is sized for, by default: the `Clock`'s own default `maxDelayMs`
@@ -123,6 +132,9 @@ export class ArchetypeStore {
   leftCount = 0;
 
   private numeric: (FieldArray | null)[] = [];
+  private integers: (Integer64FieldArray | null)[] = [];
+  /** Per 64-bit field, a `Uint32Array` over its column's buffer: the decoder's word path, which allocates no bigint. */
+  private integerWords: (Uint32Array | null)[] = [];
   private texts: (string[] | null)[] = [];
   private bytes: (Uint8Array[] | null)[] = [];
   private readonly fieldIndexByName: Map<string, number>;
@@ -152,7 +164,9 @@ export class ArchetypeStore {
     this.motionSegmentsOffset = motionSegmentsOffset(segmentHistory);
     this.motionRecordBytes = this.hasPosition ? motionRecordBytes(this.dims, segmentHistory) : 0;
     this.motionStride = 2 * this.dims;
-    this.fieldComponents = schema.fields.map((f) => (isNumericKind(f.kind) ? (f.components ?? 1) : 0));
+    this.fieldComponents = schema.fields.map((f) =>
+      isNumericKind(f.kind) || isInteger64Kind(f.kind) ? (f.components ?? 1) : 0,
+    );
     this.fieldIndexByName = new Map(schema.fields.map((f, i) => [f.name, i]));
     this.grow(Math.max(1, initialCapacity));
   }
@@ -175,6 +189,34 @@ export class ArchetypeStore {
     const array = this.numeric[index];
     if (array === undefined || array === null) {
       throw new Error(`Archetype '${this.schema.name}' has no numeric field #${index}`);
+    }
+
+    return array;
+  }
+
+  /**
+   * The column holding a 64-bit integer field (W32), by name: `capacity × components` values, a `BigUint64Array` for
+   * `u64`/`varu64` and a `BigInt64Array` for `i64`/`vari64`. Reading an element makes a bigint; re-read the column after
+   * {@link version} changes.
+   */
+  field64(name: string): Integer64FieldArray {
+    const index = this.fieldIndexByName.get(name);
+    const array = index === undefined ? undefined : this.integers[index];
+    if (array === undefined || array === null) {
+      throw new Error(`Archetype '${this.schema.name}' has no 64-bit field '${name}'`);
+    }
+
+    return array;
+  }
+
+  /**
+   * A 64-bit field's column as 32-bit words over the same buffer — element `i`'s low word at `2i + LOW_WORD`, its high
+   * word at `2i + HIGH_WORD` (see `int64.ts`): the allocation-free write path a decoder uses.
+   */
+  wordsAt(index: number): Uint32Array {
+    const array = this.integerWords[index];
+    if (array === undefined || array === null) {
+      throw new Error(`Archetype '${this.schema.name}' has no 64-bit field #${index}`);
     }
 
     return array;
@@ -245,6 +287,9 @@ export class ArchetypeStore {
         } else {
           array.fill(0, slot * components, (slot + 1) * components);
         }
+      } else if (this.integerWords[f] != null) {
+        const components = this.fieldComponents[f]!;
+        this.integerWords[f]!.fill(0, 2 * slot * components, 2 * (slot + 1) * components);
       } else {
         const text = this.texts[f];
         if (text !== null && text !== undefined) {
@@ -455,6 +500,22 @@ export class ArchetypeStore {
 
       return next;
     });
+    this.integers = this.schema.fields.map((field, i) => {
+      const kind = field.kind;
+      if (!isInteger64Kind(kind)) {
+        return null;
+      }
+
+      const next = allocateInteger64Field(kind, newCapacity * this.fieldComponents[i]!);
+      const previous = this.integers[i];
+      if (previous !== undefined && previous !== null) {
+        // Bits, not values: a BigUint64Array and a BigInt64Array of one kind each, so a word copy is exact either way.
+        new Uint32Array(next.buffer).set(new Uint32Array(previous.buffer));
+      }
+
+      return next;
+    });
+    this.integerWords = this.integers.map((column) => (column === null ? null : new Uint32Array(column.buffer)));
     this.texts = this.schema.fields.map((field, i) =>
       field.kind === 'text' ? grownList(this.texts[i] ?? [], newCapacity, '') : null,
     );

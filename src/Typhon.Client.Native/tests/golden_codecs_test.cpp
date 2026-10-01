@@ -75,7 +75,7 @@ void RunCodecVector(const std::string& name)
                 CheckLog(sink.log, expected, at);
                 const auto utf8 = FromHex(c.Find("text")->AsString());
                 const std::string text(utf8.begin(), utf8.end());
-                const NamedValue value{"v", {FieldValue::Kind::Text, {}, text, {}}};
+                const NamedValue value{"v", FieldValue::OfText(text)};
                 WriteSection(writer, section, {&value, 1});
                 break;
             }
@@ -88,7 +88,7 @@ void RunCodecVector(const std::string& name)
                                                                      {"bytes", Value::MakeString(c.Find("bytes")->AsString())}})});
                 CheckLog(sink.log, expected, at);
                 const auto bytes = FromHex(c.Find("bytes")->AsString());
-                const NamedValue value{"v", {FieldValue::Kind::Bytes, {}, {}, bytes}};
+                const NamedValue value{"v", FieldValue::OfBytes(bytes)};
                 WriteSection(writer, section, {&value, 1});
                 break;
             }
@@ -107,15 +107,49 @@ void RunCodecVector(const std::string& name)
                 else
                 {
                     const auto numbers = NumbersOf(*c.Find("input"));
-                    const NamedValue value{"v", {FieldValue::Kind::Numbers, numbers, {}, {}}};
+                    const NamedValue value{"v", FieldValue::OfNumbers(numbers)};
                     WriteSection(writer, section, {&value, 1}, false, frame.get());
+                }
+
+                break;
+            }
+            case CodecKind::U64:
+            case CodecKind::I64:
+            case CodecKind::Varu64:
+            case CodecKind::Vari64:
+            {
+                // W32: bit patterns, never a double.
+                std::uint64_t out[protocol::MaxCount] = {};
+                ReadInteger64(reader, plan, out);
+                std::vector<Value> items;
+                for (int i = 0; i < plan.components; i++)
+                {
+                    items.push_back(Value::MakeString(Bits64(out[i])));
+                }
+
+                const Value decoded = Value::MakeArray(std::move(items));
+                CHECK_MSG(decoded.Equals(*c.Find("decoded")), at << ": decoded bits " << decoded.Dump() << ", expected " << c.Find("decoded")->Dump());
+                if (c.Find("input") == nullptr)
+                {
+                    encoded = false;
+                }
+                else
+                {
+                    std::vector<std::uint64_t> input;
+                    for (const Value& v : c.Find("input")->Items())
+                    {
+                        input.push_back(FromBits64(v.AsString()));
+                    }
+
+                    WriteInteger64(writer, plan, input);
                 }
 
                 break;
             }
             default:
             {
-                double out[4] = {0, 0, 0, 0};
+                // Sized for the widest count (W33): ReadNumber writes plan.components values.
+                double out[protocol::MaxCount] = {};
                 ReadNumber(reader, plan, frameTick, out, frame.get());
                 const Value decoded = BitsOf(out, plan.components);
                 CHECK_MSG(decoded.Equals(*c.Find("decoded")), at << ": decoded bits " << decoded.Dump() << ", expected " << c.Find("decoded")->Dump());
@@ -246,7 +280,7 @@ TEST(GoldenSectionPacks_DecodeEncodeAndIgnorePadding)
         std::size_t k = 0;
         for (const auto& [fieldName, bits] : c.Find("values")->Members())
         {
-            values.push_back({fieldName, {FieldValue::Kind::Numbers, storage[k++], {}, {}}});
+            values.push_back({fieldName, FieldValue::OfNumbers(storage[k++])});
         }
 
         WireWriter writer;

@@ -98,6 +98,7 @@ public:
     void UnknownBlock(std::uint8_t blockType) override;
     void EndTick() override;
     void Number(const FieldPlan& field, const double* values) override;
+    void Integer64(const FieldPlan& field, const std::uint64_t* values) override;
     void Text(const FieldPlan& field, std::string_view utf8) override;
     void Bytes(const FieldPlan& field, std::span<const std::uint8_t> data) override;
     void List(const FieldPlan& field, int count, const double* values) override;

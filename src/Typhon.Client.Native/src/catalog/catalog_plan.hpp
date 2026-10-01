@@ -17,7 +17,8 @@ namespace typhon::client {
 // What a decoded field value is made of.
 enum class ValueKind : std::uint8_t
 {
-    // One to four numbers (FieldPlan::components): integers, quantized scalars, vectors, a quaternion.
+    // One to sixteen numbers (FieldPlan::components): integers up to 32 bits, floats, quantized scalars, vectors, a quaternion —
+    // everything a binary64 holds exactly.
     Number = 0,
     Text = 1,
     Bytes = 2,
@@ -25,6 +26,8 @@ enum class ValueKind : std::uint8_t
     List = 3,
     // A codec this library does not know, skipped by its declared width.
     Skipped = 4,
+    // W32: one to sixteen 64-bit integers, as their bit patterns — a signed codec's as two's complement.
+    Integer64 = 5,
 };
 
 // One field compiled: its codec's parameters resolved into the numbers the arithmetic needs, and its place in its section.
@@ -42,8 +45,10 @@ struct FieldPlan {
     int bitOffset = 0;
     int bitCount = 0;
     ValueKind valueKind = ValueKind::Number;
-    // Numbers per value (per element, for a list); 0 for text and bytes.
+    // Numbers per value (per element, for a list); 0 for text and bytes. A count field's count (W33).
     int components = 1;
+    // W33: the codec's count, 1 when the catalog declares none.
+    int count = 1;
     std::unique_ptr<FieldPlan> element;
     int bits = 0;
     double min[1] = {0};

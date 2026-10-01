@@ -265,6 +265,84 @@ export class WireReader {
     return value;
   }
 
+  /**
+   * A little-endian `u64` or `i64` (W32) into `out[at]` (low word) and `out[at + 1]` (high word): the same bits either
+   * way, so one read serves both.
+   */
+  u64Into(out: Uint32Array, at: number): void {
+    const p = this.take(8);
+    const b = this.message;
+    out[at] = (b[p]! | (b[p + 1]! << 8) | (b[p + 2]! << 16) | (b[p + 3]! << 24)) >>> 0;
+    out[at + 1] = (b[p + 4]! | (b[p + 5]! << 8) | (b[p + 6]! << 16) | (b[p + 7]! << 24)) >>> 0;
+  }
+
+  /**
+   * A `varu64` (W32) into words: unsigned LEB128, at most ten bytes, fitting 64 bits. An over-long form is accepted while
+   * it fits; a tenth byte above 0x01 carries bits past the 64th and is malformed (1007).
+   */
+  varu64Into(out: Uint32Array, at: number): void {
+    let lo = 0;
+    let hi = 0;
+    for (let i = 0; i < 10; i++) {
+      const b = this.u8();
+      const v = b & 0x7f;
+      const shift = 7 * i;
+      if (i === 9 && b > 0x01) {
+        throw malformed('varu64 does not fit 64 bits');
+      }
+
+      if (shift < 32) {
+        lo |= v << shift;
+        if (shift > 25) {
+          // Byte 4 straddles the words: its low four bits close lo, its top three open hi.
+          hi |= v >>> (32 - shift);
+        }
+      } else {
+        hi |= v << (shift - 32);
+      }
+
+      if ((b & 0x80) === 0) {
+        break;
+      }
+    }
+
+    out[at] = lo >>> 0;
+    out[at + 1] = hi >>> 0;
+  }
+
+  /** A `vari64` (W32) into words: a zigzag-mapped `varu64`, as its two's complement. */
+  vari64Into(out: Uint32Array, at: number): void {
+    this.varu64Into(out, at);
+    const lo = out[at]!;
+    const hi = out[at + 1]!;
+    // (u >>> 1) ^ −(u & 1), across the two words.
+    let rlo = (lo >>> 1) | ((hi & 1) << 31);
+    let rhi = hi >>> 1;
+    if ((lo & 1) !== 0) {
+      rlo = ~rlo;
+      rhi = ~rhi;
+    }
+
+    out[at] = rlo >>> 0;
+    out[at + 1] = rhi >>> 0;
+  }
+
+  /** {@link f64} into `out[offset]`, for a record's `f64` field (W32); any NaN pattern decodes as NaN. */
+  f64Into(out: Float64Array, offset: number): void {
+    const at = this.take(8);
+    const b = this.message;
+    for (let i = 0; i < 8; i++) {
+      doubleBytes[LITTLE_ENDIAN ? i : 7 - i] = b[at + i]!;
+    }
+
+    const value = double[0]!;
+    if (value === value) {
+      out[offset] = value;
+    } else {
+      out[offset] = NaN;
+    }
+  }
+
   /** A little-endian IEEE double; any NaN pattern decodes as NaN. Used by the `REALM` block, not per record. */
   f64(): number {
     const at = this.take(8);

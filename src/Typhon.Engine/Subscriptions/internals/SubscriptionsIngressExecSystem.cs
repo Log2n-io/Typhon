@@ -466,6 +466,10 @@ internal sealed class SubscriptionsIngress : IDisposable
         {
         }
 
+        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+        {
+        }
+
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
         {
         }
@@ -1061,6 +1065,21 @@ internal ref struct IngressCommandSink : ICommandSink
         if ((uint)field.Ordinal < (uint)bindings.Length)
         {
             bindings[field.Ordinal].Store(_payload, components);
+        }
+    }
+
+    /// <inheritdoc />
+    public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+    {
+        if (!_open || _current.IsClientRegion)
+        {
+            return;
+        }
+
+        var bindings = _current.Bindings;
+        if ((uint)field.Ordinal < (uint)bindings.Length)
+        {
+            bindings[field.Ordinal].StoreInteger64(_payload, components, signedWire: field.Kind is CodecKind.I64 or CodecKind.Vari64);
         }
     }
 

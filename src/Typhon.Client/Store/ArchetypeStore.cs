@@ -13,8 +13,9 @@ namespace Typhon.Client;
 /// </para>
 /// <para>
 /// <b>Columns.</b> A numeric field is one <see cref="double"/> array of <c>capacity × components</c> values: integers up to 2³² and every quantized decode are
-/// exact in a double, and a decoded value is stored exactly as decoded. Text and bytes fields are arrays of references, replaced on change — the one place a
-/// decode allocates, and only when such a field changes.
+/// exact in a double, and a decoded value is stored exactly as decoded. A 64-bit integer field (W32) is a <see cref="ulong"/> array of the same shape, holding
+/// bit patterns — a double would round it. Text and bytes fields are arrays of references, replaced on change — the one place a decode allocates, and only
+/// when such a field changes.
 /// </para>
 /// <para>
 /// <b>Motion</b> is a ring of the last <see cref="SegmentHistory"/> segments per slot — position, velocity per tick, start tick, epoch — in one contiguous
@@ -40,6 +41,7 @@ public sealed class ArchetypeStore
         Linear = plan.Position?.Linear ?? false;
         Segments = new SegmentRing(Dims, segmentHistory);
         Numbers = new double[plan.Fields.Length][];
+        Integers = new ulong[plan.Fields.Length][];
         Texts = new string[plan.Fields.Length][];
         BytesColumns = new byte[plan.Fields.Length][][];
         Grow(InitialCapacity);
@@ -80,6 +82,12 @@ public sealed class ArchetypeStore
 
     /// <summary>Per field ordinal: <c>capacity × components</c> numbers, or <see langword="null"/> for a non-numeric field.</summary>
     public double[][] Numbers { get; }
+
+    /// <summary>
+    /// Per field ordinal: <c>capacity × components</c> 64-bit integers as bit patterns (a signed value's two's complement), or <see langword="null"/> for a
+    /// field that is not a 64-bit integer.
+    /// </summary>
+    public ulong[][] Integers { get; }
 
     /// <summary>Per field ordinal: the text per slot, or <see langword="null"/> for a non-text field.</summary>
     public string[][] Texts { get; }
@@ -178,6 +186,11 @@ public sealed class ArchetypeStore
                 Array.Clear(Numbers[f], slot * Plan.Fields[f].Components, Plan.Fields[f].Components);
             }
 
+            if (Integers[f] != null)
+            {
+                Array.Clear(Integers[f], slot * Plan.Fields[f].Components, Plan.Fields[f].Components);
+            }
+
             if (Texts[f] != null)
             {
                 Texts[f][slot] = null;
@@ -272,6 +285,9 @@ public sealed class ArchetypeStore
             {
                 case FieldValueKind.Number:
                     Numbers[f] = Resize(Numbers[f] ?? [], capacity * field.Components);
+                    break;
+                case FieldValueKind.Integer64:
+                    Integers[f] = Resize(Integers[f] ?? [], capacity * field.Components);
                     break;
                 case FieldValueKind.Text:
                     Texts[f] = Resize(Texts[f] ?? [], capacity);

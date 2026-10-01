@@ -217,8 +217,14 @@ public sealed class ProjectedField
     /// <summary>A heading's send threshold in degrees; 0 for every other transform.</summary>
     public double HeadingToleranceDeg { get; internal set; }
 
-    /// <summary>How the value travels.</summary>
+    /// <summary>How the value travels — resolved: <see cref="Codec.Exact"/> is the stored type's exact codec here, and a shape carries its count.</summary>
     public Codec Codec { get; internal set; }
+
+    /// <summary>
+    /// What the values mean (W33) — <c>point3</c>, <c>aabb2</c>, <c>quat</c>, <c>char</c>… — from the stored type, or <see langword="null"/>. A hint the
+    /// catalog carries; it changes no byte.
+    /// </summary>
+    public string Shape { get; internal set; }
 
     /// <summary>The source component's type id, for the projection compiler's slot lookup.</summary>
     internal int ComponentTypeId { get; set; }

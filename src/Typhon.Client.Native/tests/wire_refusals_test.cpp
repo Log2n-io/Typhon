@@ -135,14 +135,14 @@ TEST(WireRefusals_ARefusedCommandsMessageDeliversNothing)
     const double one = 1;
     const double half = 0.5;
     const NamedValue first[] = {
-        {"heading", {FieldValue::Kind::Numbers, {&zero, 1}, {}, {}}}, {"boost", {FieldValue::Kind::Numbers, {&one, 1}, {}, {}}},
-        {"speed", {FieldValue::Kind::Numbers, {&half, 1}, {}, {}}},   {"stance", {FieldValue::Kind::Numbers, {&one, 1}, {}, {}}},
-        {"note", {FieldValue::Kind::Text, {}, "ok", {}}},
+        {"heading", FieldValue::OfNumbers({&zero, 1})}, {"boost", FieldValue::OfNumbers({&one, 1})},
+        {"speed", FieldValue::OfNumbers({&half, 1})},   {"stance", FieldValue::OfNumbers({&one, 1})},
+        {"note", FieldValue::OfText("ok")},
     };
     const NamedValue second[] = {
-        {"heading", {FieldValue::Kind::Numbers, {&zero, 1}, {}, {}}}, {"boost", {FieldValue::Kind::Numbers, {&zero, 1}, {}, {}}},
-        {"speed", {FieldValue::Kind::Numbers, {&zero, 1}, {}, {}}},   {"stance", {FieldValue::Kind::Numbers, {&zero, 1}, {}, {}}},
-        {"note", {FieldValue::Kind::Text, {}, "", {}}},
+        {"heading", FieldValue::OfNumbers({&zero, 1})}, {"boost", FieldValue::OfNumbers({&zero, 1})},
+        {"speed", FieldValue::OfNumbers({&zero, 1})},   {"stance", FieldValue::OfNumbers({&zero, 1})},
+        {"note", FieldValue::OfText("")},
     };
     const CommandInput commands[] = {{&steer, 1, first}, {&steer, 2, second}};
     WireWriter w;
@@ -156,12 +156,12 @@ TEST(WireRefusals_ARefusedCommandsMessageDeliversNothing)
 
     // A client refuses to encode an enum value outside its names, and an over-cap string.
     const double three = 3;
-    NamedValue bad[5] = {first[0], first[1], first[2], {"stance", {FieldValue::Kind::Numbers, {&three, 1}, {}, {}}}, first[4]};
+    NamedValue bad[5] = {first[0], first[1], first[2], {"stance", FieldValue::OfNumbers({&three, 1})}, first[4]};
     const CommandInput badEnum[] = {{&steer, 1, bad}};
     WireWriter refused;
     CHECK_THROWS(std::out_of_range, WriteCommands(refused, 0, badEnum));
     const std::string longNote(17, 'x');
-    NamedValue overCap[5] = {first[0], first[1], first[2], first[3], {"note", {FieldValue::Kind::Text, {}, longNote, {}}}};
+    NamedValue overCap[5] = {first[0], first[1], first[2], first[3], {"note", FieldValue::OfText(longNote)}};
     const CommandInput overCapCommand[] = {{&steer, 1, overCap}};
     CHECK_THROWS(std::out_of_range, WriteCommands(refused, 0, overCapCommand));
 }

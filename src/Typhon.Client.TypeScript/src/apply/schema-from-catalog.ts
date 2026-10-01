@@ -10,7 +10,9 @@ import type { ArchetypeSchema, FieldKind, FieldSchema, WorldSchema } from '../st
  *
  * - Integers keep their own typed array; a `bits` field the narrowest unsigned one that holds it; `varu`, `entityRef`
  *   and `tickLo` a `u32`, `vari` an `i32`.
- * - `f32` and `f16` a `f32`: every half and every single is exact in a float32.
+ * - The 64-bit integers (W32) a `u64` or `i64` column — a `BigUint64Array` / `BigInt64Array` — never a double.
+ * - `f32` and `f16` a `f32`: every half and every single is exact in a float32; `f64` a `f64`.
+ * - A `count` field (W33) its codec's storage, `count` values per slot.
  * - Every dequantized value (`quant`, `pos`, `vec`, `unorm`, `snorm`, `angle`, `quat3`) a `f64`: decoded values are
  *   bit-exact binary64 (W1), and narrowing them is a renderer's choice, not the store's.
  */
@@ -38,6 +40,12 @@ export function fieldKindOf(field: FieldPlan): FieldKind | null {
     case CodecKind.F32:
     case CodecKind.F16:
       return 'f32';
+    case CodecKind.U64:
+    case CodecKind.Varu64:
+      return 'u64';
+    case CodecKind.I64:
+    case CodecKind.Vari64:
+      return 'i64';
     case CodecKind.Str:
       return 'text';
     case CodecKind.Bytes:

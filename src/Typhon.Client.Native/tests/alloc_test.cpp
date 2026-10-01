@@ -98,11 +98,11 @@ TEST(Allocation_ASteadyStateCommandBatchAllocatesNothing)
     double heading = 0.25;
     const double one = 1;
     const double half = 0.5;
-    const NamedValue values[] = {{"heading", {FieldValue::Kind::Numbers, {&heading, 1}, {}, {}}},
-                                 {"boost", {FieldValue::Kind::Numbers, {&one, 1}, {}, {}}},
-                                 {"speed", {FieldValue::Kind::Numbers, {&half, 1}, {}, {}}},
-                                 {"stance", {FieldValue::Kind::Numbers, {&one, 1}, {}, {}}},
-                                 {"note", {FieldValue::Kind::Text, {}, "go", {}}}};
+    const NamedValue values[] = {{"heading", FieldValue::OfNumbers({&heading, 1})},
+                                 {"boost", FieldValue::OfNumbers({&one, 1})},
+                                 {"speed", FieldValue::OfNumbers({&half, 1})},
+                                 {"stance", FieldValue::OfNumbers({&one, 1})},
+                                 {"note", FieldValue::OfText("go")}};
     std::size_t bytes = 0;
     const std::function<void(std::span<const std::uint8_t>)> send = [&bytes](std::span<const std::uint8_t> m) { bytes += m.size(); };
     const auto batch = [&]

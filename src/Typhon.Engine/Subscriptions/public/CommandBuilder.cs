@@ -323,9 +323,9 @@ public sealed class CommandDeclaration
 /// "I meant to leave it out" into a line of code.
 /// </para>
 /// <para>
-/// <b>The table refuses more than it accepts, and that is deliberate.</b> A 64-bit integer has no place on the wire at all (01-model § 2), and a
-/// <see cref="double"/> has no default quantizer that is right for both a world coordinate and a ratio. Both are named at the declaration with the verb that
-/// fixes them, because a wrong default here is a value that is silently wrong on every client rather than a build that fails once.
+/// <b>The defaults are exact</b> (13 § 2.1, W32): a 64-bit integer travels as <c>i64</c> / <c>u64</c>, a <see cref="double"/> as <c>f64</c>, a fixed
+/// shape as a count of its element. A narrower or lossy codec is a declaration's choice — never a default, because a wrong default is a value that is silently
+/// wrong on every client rather than a build that fails once. What has no default (a struct that is no known shape) is named at the declaration.
 /// </para>
 /// <para>
 /// <b>It is reflection over a type, once, at <c>Start</c></b> — <see cref="Type.GetFields(BindingFlags)"/> and <see cref="Enum.GetNames(Type)"/>, which are
@@ -467,8 +467,9 @@ internal static class MessageContract
                 }
 
                 // The same pairing table a builder Field call runs (13 § 2.3): a narrowing needs Saturate = true, a loss for no gain is refused.
-                CodecPairing.Classify(member.FieldType, codec.Catalog, codec.Saturating, $"{what} '{name}' field '{messageType.Name}.{source}'",
-                    message: true);
+                var at = $"{what} '{name}' field '{messageType.Name}.{source}'";
+                codec = CodecPairing.Resolve(member.FieldType, codec, at, out _);
+                CodecPairing.Classify(member.FieldType, codec.Catalog, codec.Saturating, at, message: true);
 
                 wire = string.IsNullOrEmpty(declaration.Name) ? source : declaration.Name;
             }
@@ -500,6 +501,7 @@ internal static class MessageContract
                 ComponentName = messageType.Name,
                 SourceFieldName = source,
                 Codec = codec,
+                Shape = FieldShape.Of(member.FieldType)?.Name,
             });
         }
 
@@ -581,12 +583,35 @@ internal static class MessageContract
             return Codec.F32;
         }
 
+        // Exact by default (13 § 2.1, W32): a 64-bit integer and a double travel whole, as every narrower type already did.
+        if (fieldType == typeof(long))
+        {
+            return Codec.I64;
+        }
+
+        if (fieldType == typeof(ulong))
+        {
+            return Codec.U64;
+        }
+
+        if (fieldType == typeof(double))
+        {
+            return Codec.F64;
+        }
+
         if (fieldType == typeof(EntityId))
         {
             return Codec.EntityRef;
         }
 
-        // long, ulong, double and everything else: no default. The caller names the field and the verb that fixes it.
+        // A fixed shape is its components (W33): a Point3F is f32 × 3, an AABB3D f64 × 6.
+        var shape = FieldShape.Of(fieldType);
+        if (shape != null)
+        {
+            return (shape.Element == typeof(double) ? Codec.F64 : Codec.F32).Count(shape.Count);
+        }
+
+        // Everything else: no default. The caller names the field and the verb that fixes it.
         return default;
     }
 
@@ -609,22 +634,6 @@ internal static class MessageContract
     private static InvalidOperationException Undeclarable(string what, string name, Type messageType, FieldInfo member)
     {
         var where = $"{what} '{name}' field '{messageType.Name}.{member.Name}' is a {member.FieldType.Name}";
-        if (member.FieldType == typeof(long) || member.FieldType == typeof(ulong))
-        {
-            return new InvalidOperationException(
-                $"{where}, and no 64-bit integer reaches the wire (01-model § 2). Narrow it — " +
-                $".Field(x => x.{member.Name}, Codec.VarUInt.Saturate()) clamps to 32 bits and counts the clamps — or keep it off the wire with " +
-                $".Ignore(x => x.{member.Name}). It is not defaulted, because a silent truncation only shows up once the value is large.");
-        }
-
-        if (member.FieldType == typeof(double))
-        {
-            return new InvalidOperationException(
-                $"{where}, and no default quantizes one: the step that is right for a world coordinate is wrong for a ratio and wrong again for an angle. " +
-                $"Choose one — .Field(x => x.{member.Name}, Codec.Quant(min, max, bits)), Codec.Unorm(bits), Codec.Angle(bits), or Codec.F32 to send it at " +
-                $"single precision — or keep it off the wire with .Ignore(x => x.{member.Name}).");
-        }
-
         return new InvalidOperationException(
             $"{where}, which no codec travels by default. Declare how it travels with .Field(x => x.{member.Name}, <codec>) — a pair of coordinates is " +
             $"Codec.Pos2, a netId is Codec.EntityRef — or keep it off the wire with .Ignore(x => x.{member.Name}).");

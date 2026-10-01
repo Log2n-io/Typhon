@@ -179,6 +179,53 @@ double ArchetypeStore::NumberAt(int field, std::uint32_t slot, int component) co
     return std::visit([at](const auto& column) { return static_cast<double>(column[at]); }, numeric_[static_cast<std::size_t>(field)]);
 }
 
+std::uint64_t ArchetypeStore::IntegerAt(int field, std::uint32_t slot, int component) const
+{
+    RequireNumeric(field);
+    const int components = components_[static_cast<std::size_t>(field)];
+    if (slot >= capacity_ || component < 0 || component >= components)
+    {
+        throw std::out_of_range("slot " + std::to_string(slot) + ", component " + std::to_string(component) + " is beyond the column");
+    }
+
+    const std::size_t at = static_cast<std::size_t>(slot) * static_cast<std::size_t>(components) + static_cast<std::size_t>(component);
+    const NumericColumn& column = numeric_[static_cast<std::size_t>(field)];
+    if (const auto* u = std::get_if<Vec<std::uint64_t>>(&column))
+    {
+        return (*u)[at];
+    }
+
+    if (const auto* s = std::get_if<Vec<std::int64_t>>(&column))
+    {
+        return static_cast<std::uint64_t>((*s)[at]);
+    }
+
+    throw std::logic_error("field " + std::to_string(field) + " is not a 64-bit integer column");
+}
+
+void ArchetypeStore::SetIntegers(int field, std::uint32_t slot, const std::uint64_t* values)
+{
+    const int components = components_[static_cast<std::size_t>(field)];
+    const std::size_t base = static_cast<std::size_t>(slot) * static_cast<std::size_t>(components);
+    NumericColumn& column = numeric_[static_cast<std::size_t>(field)];
+    if (auto* u = std::get_if<Vec<std::uint64_t>>(&column))
+    {
+        for (int i = 0; i < components; i++)
+        {
+            (*u)[base + static_cast<std::size_t>(i)] = values[i];
+        }
+    }
+    else
+    {
+        // A two's-complement pattern into a signed column: the conversion is modular since C++20, so it is the value.
+        auto& s = std::get<Vec<std::int64_t>>(column);
+        for (int i = 0; i < components; i++)
+        {
+            s[base + static_cast<std::size_t>(i)] = static_cast<std::int64_t>(values[i]);
+        }
+    }
+}
+
 std::string_view ArchetypeStore::TextAt(int field, std::uint32_t slot) const
 {
     const auto bytes = arenas_[static_cast<std::size_t>(field)].At(slot);

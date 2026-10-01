@@ -27,6 +27,10 @@ std::vector<std::string> GoldenNames(std::string_view prefix);
 std::string Bits(double value);
 double FromBits(std::string_view hex);
 
+// A 64-bit integer's bit pattern (W32) as 16 lower-case hex digits: the format a double's bits take, the codec says which one it is.
+std::string Bits64(std::uint64_t value);
+std::uint64_t FromBits64(std::string_view hex);
+
 std::string Hex(std::span<const std::uint8_t> bytes);
 std::vector<std::uint8_t> FromHex(std::string_view hex);
 
@@ -67,6 +71,7 @@ public:
     void EndTick() override;
     void Command(const client::MessagePlan& type, std::uint32_t seq, std::uint32_t clientTick) override;
     void Number(const client::FieldPlan& field, const double* values) override;
+    void Integer64(const client::FieldPlan& field, const std::uint64_t* values) override;
     void Text(const client::FieldPlan& field, std::string_view utf8) override;
     void Bytes(const client::FieldPlan& field, std::span<const std::uint8_t> data) override;
     void List(const client::FieldPlan& field, int count, const double* values) override;

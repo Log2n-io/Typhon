@@ -60,6 +60,18 @@ internal readonly struct CommandFieldBinding
         Element = element;
         ElementSize = elementSize;
         TextCapacity = textCapacity;
+        ElementRange = element switch
+        {
+            CommandFieldElement.I8 => new IntegerRange(sbyte.MinValue, (ulong)sbyte.MaxValue),
+            CommandFieldElement.U8 => new IntegerRange(0, byte.MaxValue),
+            CommandFieldElement.I16 => new IntegerRange(short.MinValue, (ulong)short.MaxValue),
+            CommandFieldElement.U16 => new IntegerRange(0, ushort.MaxValue),
+            CommandFieldElement.I32 => new IntegerRange(int.MinValue, int.MaxValue),
+            CommandFieldElement.U32 => new IntegerRange(0, uint.MaxValue),
+            CommandFieldElement.I64 => new IntegerRange(long.MinValue, long.MaxValue),
+            CommandFieldElement.U64 => new IntegerRange(0, ulong.MaxValue),
+            _ => default,
+        };
     }
 
     /// <summary>The field's wire name.</summary>
@@ -77,11 +89,22 @@ internal readonly struct CommandFieldBinding
     /// <summary>Bytes each stored number occupies.</summary>
     public int ElementSize { get; }
 
+    /// <summary>The range an integer element holds, which a 64-bit wire value clamps to; 0..0 for a float element.</summary>
+    public IntegerRange ElementRange { get; }
+
     /// <summary>An inline <c>Utf8Text</c>'s capacity, or 0 when the field is not text.</summary>
     public int TextCapacity { get; }
 
     /// <summary>Whether this field carries text rather than numbers.</summary>
     public bool IsText => TextCapacity > 0;
+
+    /// <summary>
+    /// Each component's byte offset from <see cref="Offset"/>, for a fixed shape (W33) whose wire order is its members' names, not their places; null
+    /// for a field whose components are contiguous in order.
+    /// </summary>
+    public int[] ComponentOffsets { get; init; }
+
+    private int ComponentOffset(int i) => ComponentOffsets?[i] ?? i * ElementSize;
 
     /// <summary>
     /// Stores decoded UTF-8 into an inline text field: a <see cref="ushort"/> length, then the bytes.
@@ -105,11 +128,10 @@ internal readonly struct CommandFieldBinding
     /// <param name="components">The decoded numbers.</param>
     public void Store(Span<byte> payload, scoped ReadOnlySpan<double> components)
     {
-        var target = payload.Slice(Offset, Components * ElementSize);
         var integral = Element is not (CommandFieldElement.F32 or CommandFieldElement.F64);
         for (var i = 0; i < Components; i++)
         {
-            var slot = target.Slice(i * ElementSize, ElementSize);
+            var slot = payload.Slice(Offset + ComponentOffset(i), ElementSize);
             var value = components[i];
 
             // An integer field may travel as a quant (13 § 2.3), which decodes to a value between integers: rounded half away from zero (W1's rha), never
@@ -151,6 +173,58 @@ internal readonly struct CommandFieldBinding
                 default:
                     MemoryMarshal.Write(slot, value);
                     break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Writes 64-bit integer <paramref name="components"/> (W32) into <paramref name="payload"/> at this binding's offset, exactly — never through a double.
+    /// A struct field narrower than the wire value clamps to its own range, as <see cref="Store"/> does.
+    /// </summary>
+    /// <param name="payload">The command struct's bytes.</param>
+    /// <param name="components">The decoded bit patterns.</param>
+    /// <param name="signedWire">Whether the codec is signed (<c>i64</c>, <c>vari64</c>): the patterns are two's complement.</param>
+    public void StoreInteger64(Span<byte> payload, scoped ReadOnlySpan<ulong> components, bool signedWire)
+    {
+        for (var i = 0; i < Components; i++)
+        {
+            var slot = payload.Slice(Offset + ComponentOffset(i), ElementSize);
+            var bits = components[i];
+            var range = ElementRange;
+
+            // Clamped to the element's range as a two's-complement pattern: a signed wire value against both bounds, an unsigned one against the top
+            // alone (a range contains 0). The element then keeps the pattern's low bytes, which is the clamped value whatever its signedness.
+            if (signedWire)
+            {
+                var value = unchecked((long)bits);
+                bits = unchecked((ulong)(value < range.Min ? range.Min : value > range.SignedMax ? range.SignedMax : value));
+            }
+            else if (bits > range.Max)
+            {
+                bits = range.Max;
+            }
+
+            switch (Element)
+            {
+                case CommandFieldElement.I8:
+                case CommandFieldElement.U8:
+                    slot[0] = unchecked((byte)bits);
+                    break;
+                case CommandFieldElement.I16:
+                case CommandFieldElement.U16:
+                    MemoryMarshal.Write(slot, unchecked((ushort)bits));
+                    break;
+                case CommandFieldElement.I32:
+                case CommandFieldElement.U32:
+                    MemoryMarshal.Write(slot, unchecked((uint)bits));
+                    break;
+                case CommandFieldElement.I64:
+                case CommandFieldElement.U64:
+                    MemoryMarshal.Write(slot, bits);
+                    break;
+                default:
+                    // A float field never pairs with a 64-bit integer codec (13 § 2.3); the registry refused it at Start.
+                    throw new InvalidOperationException($"Command field '{WireName}' stores a 64-bit integer into a {Element} field.");
             }
         }
     }
@@ -417,7 +491,7 @@ internal sealed class CommandRegistry
 
     private static CommandFieldBinding BindField(CommandDeclaration declaration, Type structType, FieldPlan field, HashSet<string> bound)
     {
-        if (field.ValueKind is not (FieldValueKind.Number or FieldValueKind.Text))
+        if (field.ValueKind is not (FieldValueKind.Number or FieldValueKind.Integer64 or FieldValueKind.Text))
         {
             throw new InvalidOperationException(
                 $"Command '{declaration.Name}' field '{field.Name}' travels as {field.ValueKind}, and a command decodes " +
@@ -474,7 +548,13 @@ internal sealed class CommandRegistry
                 field.Name, (int)Marshal.OffsetOf(structType, sourceName), 1, CommandFieldElement.U8, sizeof(byte), capacity);
         }
 
-        var (element, elementSize) = ElementOf(member.FieldType, declaration.Name, field.Name);
+        var (element, elementSize) = ElementOf(member.FieldType, declaration.Name, field.Name, field.Components);
+        if (field.ValueKind == FieldValueKind.Integer64 && element is CommandFieldElement.F32 or CommandFieldElement.F64)
+        {
+            throw new InvalidOperationException(
+                $"Command '{declaration.Name}' field '{field.Name}' travels as {field.Codec.Type}, a 64-bit integer, and '{structType.Name}.{sourceName}' is " +
+                $"a '{member.FieldType.Name}'. A 64-bit integer lands in an integer field.");
+        }
 
         // Unwrapped exactly as ElementOf unwraps it, because Marshal.SizeOf refuses an enum TYPE outright — "no meaningful size or offset can be computed" —
         // even though the same enum marshals perfectly well as a member of the struct around it. Measuring the underlying type is the size the field occupies.
@@ -493,11 +573,18 @@ internal sealed class CommandRegistry
         }
 
         var offset = (int)Marshal.OffsetOf(structType, sourceName);
-        return new CommandFieldBinding(field.Name, offset, field.Components, element, elementSize);
+        return new CommandFieldBinding(field.Name, offset, field.Components, element, elementSize)
+        {
+            ComponentOffsets = FieldShape.Of(member.FieldType)?.Offsets,
+        };
     }
 
     /// <summary>The element kind of a struct field, unwrapping an enum and a single-component vector struct alike.</summary>
-    internal static (CommandFieldElement Element, int Size) ElementOf(Type fieldType, string command, string wireField)
+    /// <param name="fieldType">The struct field's type.</param>
+    /// <param name="command">The command, for a refusal.</param>
+    /// <param name="wireField">The wire field, for a refusal.</param>
+    /// <param name="components">The values the codec decodes to, which a multi-component struct's size is divided by.</param>
+    internal static (CommandFieldElement Element, int Size) ElementOf(Type fieldType, string command, string wireField, int components = 1)
     {
         var type = fieldType.IsEnum ? Enum.GetUnderlyingType(fieldType) : fieldType;
 
@@ -551,17 +638,18 @@ internal sealed class CommandRegistry
             return (CommandFieldElement.F64, 8);
         }
 
-        // A multi-component field is a struct of contiguous floats or doubles — Vec2d, Vec3d, or the application's own pair. Its element width comes from its
-        // size, which the caller checks against the codec's component count, so a mismatch is refused there with both numbers named.
+        // A multi-component field is a struct of contiguous floats or doubles — Vec2d, Vec3d, a Point4F, or the application's own pair. Its element width is
+        // its size over the codec's component count: 16 bytes are four floats under a count of 4 and two doubles under a vec2, which a width guessed from the
+        // size alone got wrong for every four-float shape. A size neither divides is refused by the caller, with both numbers named.
         if (type.IsValueType && !type.IsPrimitive)
         {
             var size = Marshal.SizeOf(type);
-            if (size % 8 == 0)
+            if (size == components * 8 || (components <= 1 && size % 8 == 0))
             {
                 return (CommandFieldElement.F64, 8);
             }
 
-            if (size % 4 == 0)
+            if (size == components * 4 || (components <= 1 && size % 4 == 0))
             {
                 return (CommandFieldElement.F32, 4);
             }

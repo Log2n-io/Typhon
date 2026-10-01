@@ -170,6 +170,45 @@ std::uint32_t WireReader::VaruAtMost(std::uint64_t max, const char* what)
     return value;
 }
 
+std::uint64_t WireReader::U64()
+{
+    const std::size_t at = Take(8);
+    std::uint64_t bits = 0;
+    for (int i = 7; i >= 0; i--)
+    {
+        bits = (bits << 8) | message_[at + static_cast<std::size_t>(i)];
+    }
+
+    return bits;
+}
+
+std::uint64_t WireReader::Varu64()
+{
+    std::uint64_t result = 0;
+    for (int shift = 0; shift < 70; shift += 7)
+    {
+        const std::uint8_t b = U8();
+        if (shift == 63 && b > 0x01)
+        {
+            throw Malformed("varu64 does not fit 64 bits");
+        }
+
+        result |= static_cast<std::uint64_t>(b & 0x7Fu) << shift;
+        if ((b & 0x80) == 0)
+        {
+            break;
+        }
+    }
+
+    return result;
+}
+
+std::uint64_t WireReader::Vari64()
+{
+    const std::uint64_t u = Varu64();
+    return (u >> 1) ^ (0 - (u & 1));
+}
+
 double WireReader::F64()
 {
     const std::size_t at = Take(8);

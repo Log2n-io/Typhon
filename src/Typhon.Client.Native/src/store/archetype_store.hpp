@@ -130,11 +130,16 @@ public:
     // for a slot or component beyond the column.
     double NumberAt(int field, std::uint32_t slot, int component = 0) const;
 
+    // One component of a 64-bit integer field (W32) at a slot, as its bit pattern (a signed column's two's complement): exact, where
+    // NumberAt would round. Throws std::logic_error for a field that is not a u64 or i64 column.
+    std::uint64_t IntegerAt(int field, std::uint32_t slot, int component = 0) const;
+
     std::string_view TextAt(int field, std::uint32_t slot) const;
     std::span<const std::uint8_t> BytesAt(int field, std::uint32_t slot) const;
 
     // The decoder's write paths.
     void SetNumbers(int field, std::uint32_t slot, const double* values);
+    void SetIntegers(int field, std::uint32_t slot, const std::uint64_t* values);
     void SetText(int field, std::uint32_t slot, std::string_view utf8);
     void SetBytes(int field, std::uint32_t slot, std::span<const std::uint8_t> data);
 

@@ -145,13 +145,18 @@ public static class Program
             .Field(E2eMover.State, x => x.Mode, Codec.Enum<E2eMode>(bits: 3), name: "mode")
             .Field(E2eMover.State, x => x.Alerted, Codec.Bool.Saturate(), name: "alerted")
             .Field(E2eMover.State, x => x.Level, Codec.U16, name: "level", group: "vitals")
-            .Fraction(E2eMover.State, x => x.Health, x => x.MaxHealth, bits: 8, name: "hp", group: "vitals"));
+            .Fraction(E2eMover.State, x => x.Health, x => x.MaxHealth, bits: 8, name: "hp", group: "vitals")
+            // The exact wire (W32, W33): 64-bit integers past 2⁵³, a double, a point — what a client decodes without a double in between.
+            .Field(E2eMover.State, x => x.Credits, Codec.Exact, name: "credits", group: "vitals")
+            .Field(E2eMover.State, x => x.Debt, Codec.VarInt64, name: "debt", group: "vitals")
+            .Field(E2eMover.State, x => x.Rate, Codec.Exact, name: "rate", group: "vitals")
+            .Field(E2eMover.State, x => x.Aim, Codec.Exact, name: "aim"));
         subs.Static<E2eRock>(a => a
             .Position(E2eRock.Bounds)
             .Field(E2eRock.State, x => x.Template, Codec.U8, name: "kind"));
-        subs.Event<E2ePulse>(e => e.Broadcast().Field(p => p.Seq, Codec.U32).Field(p => p.Kind, Codec.U16));
-        subs.Event<E2eEchoed>(e => e.Broadcast().Field(p => p.Value, Codec.U32).Field(p => p.Code, Codec.U16));
-        subs.Command<E2eEcho>(c => c.Field(p => p.Value, Codec.U32).Field(p => p.Code, Codec.U16));
+        subs.Event<E2ePulse>(e => e.Broadcast().Field(p => p.Seq, Codec.U32).Field(p => p.Kind, Codec.U16).Field(p => p.Stamp, Codec.VarUInt64));
+        subs.Event<E2eEchoed>(e => e.Broadcast().Field(p => p.Value, Codec.U32).Field(p => p.Code, Codec.U16).Field(p => p.Token, Codec.U64));
+        subs.Command<E2eEcho>(c => c.Field(p => p.Value, Codec.U32).Field(p => p.Code, Codec.U16).Field(p => p.Token, Codec.U64));
         subs.Profile(Profile, p => p.World().Of<E2eMover>().Of<E2eRock>());
     }
 
@@ -165,6 +170,8 @@ public static class Program
                 var state = new E2eState
                 {
                     Template = (byte)(i + 1), Mode = (E2eMode)(i % 4), Alerted = (byte)(i & 1), Level = (ushort)(10 + i), Health = 8, MaxHealth = 10,
+                    Credits = (1UL << 53) + 1 + (ulong)i, Debt = -(1L << 53) - i, Rate = 0.1 * (i + 1),
+                    Aim = new Point3F { X = i, Y = -i, Z = 0.5f },
                 };
                 tx.Spawn<E2eMover>(E2eMover.Bounds.Set(in bounds), E2eMover.State.Set(in state));
             }
@@ -240,12 +247,16 @@ public static class Program
                     {
                         s.Mode = (E2eMode)(((int)s.Mode + 1) & 3);
                         s.Alerted ^= 1;
+                        s.Aim = new Point3F { X = s.Aim.X + 0.25f, Y = s.Aim.Y, Z = -s.Aim.Z };
                     }
 
                     if (tick % 5 == 0)
                     {
                         s.Level = (ushort)(s.Level + 1);
                         s.Health = (int)((tick / 5 + slot) % (s.MaxHealth + 1));
+                        s.Credits += 1UL << 40;
+                        s.Debt -= 1;
+                        s.Rate *= 1.5;
                     }
 
                     if (tick % 7 == 0 || tick % 5 == 0)
@@ -267,12 +278,12 @@ public static class Program
 
         if (ctx.TickNumber % 5 == 0)
         {
-            subs.Emit(new E2ePulse { Seq = (uint)ctx.TickNumber, Kind = (ushort)(ctx.TickNumber % 7) });
+            subs.Emit(new E2ePulse { Seq = (uint)ctx.TickNumber, Kind = (ushort)(ctx.TickNumber % 7), Stamp = ulong.MaxValue - (ulong)ctx.TickNumber });
         }
 
         foreach (ref readonly var command in subs.Commands<E2eEcho>())
         {
-            subs.Emit(new E2eEchoed { Value = command.Value.Value, Code = command.Value.Code });
+            subs.Emit(new E2eEchoed { Value = command.Value.Value, Code = command.Value.Code, Token = command.Value.Token });
         }
     }
 }

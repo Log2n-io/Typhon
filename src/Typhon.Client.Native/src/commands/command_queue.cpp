@@ -206,17 +206,21 @@ void CommandQueue::Copy(Pending& entry, std::span<const NamedValue> values)
 {
     // Sized first, then filled: the NamedValue views point into these buffers, which must not move once a view is taken.
     std::size_t numbers = 0;
+    std::size_t integers = 0;
     std::size_t text = 0;
     for (const NamedValue& v : values)
     {
         numbers += v.value.numbers.size();
+        integers += v.value.integers.size();
         text += v.value.text.size() + v.value.bytes.size();
     }
 
     entry.numbers.resize(numbers);
+    entry.integers.resize(integers);
     entry.text.resize(text);
     entry.values.clear();
     std::size_t n = 0;
+    std::size_t k = 0;
     std::size_t t = 0;
     for (const NamedValue& v : values)
     {
@@ -241,6 +245,9 @@ void CommandQueue::Copy(Pending& entry, std::span<const NamedValue> values)
         std::copy(v.value.numbers.begin(), v.value.numbers.end(), entry.numbers.begin() + static_cast<std::ptrdiff_t>(n));
         copy.numbers = {entry.numbers.data() + n, v.value.numbers.size()};
         n += v.value.numbers.size();
+        std::copy(v.value.integers.begin(), v.value.integers.end(), entry.integers.begin() + static_cast<std::ptrdiff_t>(k));
+        copy.integers = {entry.integers.data() + k, v.value.integers.size()};
+        k += v.value.integers.size();
         std::copy(v.value.text.begin(), v.value.text.end(), entry.text.begin() + static_cast<std::ptrdiff_t>(t));
         copy.text = {entry.text.data() + t, v.value.text.size()};
         t += v.value.text.size();

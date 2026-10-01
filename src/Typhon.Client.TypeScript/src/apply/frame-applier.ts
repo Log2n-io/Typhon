@@ -10,6 +10,7 @@ import {
   type MetricPlan,
 } from '../protocol/catalog.js';
 import { TickFlags } from '../protocol/constants.js';
+import { HIGH_WORD, LOW_WORD } from '../protocol/int64.js';
 import type { RealmFrame } from '../protocol/realm-frame.js';
 import { catalogHashToHex } from '../protocol/messages.js';
 import {
@@ -172,7 +173,9 @@ export class FrameApplier implements TickSink, EntitiesTarget {
       const fields = this.world.archetypeStore(a.idx).schema.fields;
       return Int8Array.from(this.storeFieldOf[a.idx]!, (index) => {
         const kind = index < 0 ? undefined : fields[index]!.kind;
-        return kind === undefined || kind === 'text' || kind === 'bytes' ? -1 : COLUMN_KIND[kind];
+        return kind === undefined || kind === 'text' || kind === 'bytes' || kind === 'u64' || kind === 'i64'
+          ? -1
+          : COLUMN_KIND[kind];
       });
     });
     // Placeholders until the first REALM lays each grid over its realm (typhon.3): an AGG before one is refused.
@@ -448,6 +451,23 @@ export class FrameApplier implements TickSink, EntitiesTarget {
     }
   }
 
+  integer64(field: FieldPlan, words: Uint32Array): void {
+    if (this.target === Target.Entity) {
+      const index = this.storeFields[field.index]!;
+      if (index >= 0) {
+        // Word by word into the column's own buffer: a bigint never exists on this path (AC-6).
+        const column = this.store!.wordsAt(index);
+        const base = 2 * this.slot * field.components;
+        for (let i = 0; i < field.components; i++) {
+          column[base + 2 * i + LOW_WORD] = words[2 * i]!;
+          column[base + 2 * i + HIGH_WORD] = words[2 * i + 1]!;
+        }
+      }
+    } else if (this.target === Target.Owner) {
+      this.selfState.setInteger64(field, words);
+    }
+  }
+
   text(field: FieldPlan, value: string): void {
     if (this.target === Target.Entity) {
       const index = this.storeFields[field.index]!;
@@ -550,6 +570,10 @@ class EventPass implements TickSink {
 
   number(field: FieldPlan, values: Float64Array): void {
     this.pending?.setNumber(field, values);
+  }
+
+  integer64(field: FieldPlan, words: Uint32Array): void {
+    this.pending?.setInteger64(field, words);
   }
 
   text(field: FieldPlan, value: string): void {

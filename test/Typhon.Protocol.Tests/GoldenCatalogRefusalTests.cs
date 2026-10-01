@@ -35,6 +35,32 @@ public class GoldenCatalogRefusalTests
         Accept(cases, "unknown-codec-with-fixed-bytes",
             Canonical(Base(extra: new CatalogField { Name = "zz", Codec = new CatalogCodec { Type = "future", FixedBytes = 3 }, Group = "state" })));
 
+        // W32 / W33: the 64-bit codecs on an entity field, a count with its shape, and a shape no library defines — a hint, so it is accepted.
+        var exact = Canonical(Base(extras:
+        [
+            new CatalogField { Name = "flag", Codec = new CatalogCodec { Kind = CodecKind.Bool }, Group = "state" },
+            new CatalogField { Name = "balance", Codec = new CatalogCodec { Kind = CodecKind.U64 }, Group = "state" },
+            new CatalogField { Name = "delta", Codec = new CatalogCodec { Kind = CodecKind.Vari64 }, Group = "state" },
+            new CatalogField { Name = "mass", Codec = new CatalogCodec { Kind = CodecKind.F64 }, Group = "state" },
+            new CatalogField { Name = "id", Codec = new CatalogCodec { Kind = CodecKind.I64 }, Group = "state" },
+            new CatalogField { Name = "seen", Codec = new CatalogCodec { Kind = CodecKind.Varu64 }, Group = "state" },
+            new CatalogField { Name = "box", Codec = new CatalogCodec { Kind = CodecKind.F32, Count = 6 }, Group = "state", Shape = "aabb3" },
+            new CatalogField { Name = "zz", Codec = new CatalogCodec { Kind = CodecKind.U8, Count = 16 }, Group = "state", Shape = "hologram" },
+        ]));
+        Accept(cases, "exact-codecs-count-and-shape", exact);
+
+        Refuse(cases, "count-1", "count must be", Mutate(exact, c => CrateField(c, "box")["codec"]!["count"] = 1));
+        Refuse(cases, "count-17", "count must be", Mutate(exact, c => CrateField(c, "zz")["codec"]!["count"] = 17));
+        Refuse(cases, "count-on-bool", "does not read", Mutate(exact, c => CrateField(c, "flag")["codec"]!["count"] = 2));
+        Refuse(cases, "count-on-enum", "cannot carry a count", Mutate(exact, c => CrateField(c, "kind")["codec"]!["count"] = 2));
+        Refuse(cases, "count-on-metric", "one value per label", Mutate(exact, c => AppMetric(c)["codec"]!["count"] = 2));
+        Refuse(cases, "count-on-list-element", "a list element is one value", Mutate(exact, c => EventField(c)["codec"] = JsonNode.Parse(
+            """{"t":"list","of":{"t":"u8","count":2},"maxCount":4}""")));
+        Refuse(cases, "u64-list-element", "numeric byte-aligned", Mutate(exact, c => EventField(c)["codec"] = JsonNode.Parse(
+            """{"t":"list","of":{"t":"u64"},"maxCount":4}""")));
+        Refuse(cases, "u64-metric", "not a metric codec", Mutate(exact, c => AppMetric(c)["codec"] = JsonNode.Parse("""{"t":"u64"}""")));
+        Refuse(cases, "shape-empty", "shape must be", Mutate(exact, c => CrateField(c, "box")["shape"] = ""));
+
         const string parse = "does not parse";
         const string canonical = "not canonical";
         Refuse(cases, "not-an-object", parse, "[]");
@@ -83,7 +109,7 @@ public class GoldenCatalogRefusalTests
         });
     }
 
-    private static Catalog Base(Dictionary<string, string[]> enums = null, CatalogField extra = null) => new()
+    private static Catalog Base(Dictionary<string, string[]> enums = null, CatalogField extra = null, CatalogField[] extras = null) => new()
     {
         Protocol = new CatalogProtocolVersion { Major = 3 },
         App = new CatalogApp { Name = "Refusals", Revision = 1 },
@@ -99,6 +125,7 @@ public class GoldenCatalogRefusalTests
                 [
                     new CatalogField { Name = "kind", Codec = new CatalogCodec { Kind = CodecKind.U8 }, Group = "state", Enum = "Kind" },
                     .. extra == null ? Array.Empty<CatalogField>() : [extra],
+                    .. extras ?? [],
                 ],
             },
             new CatalogArchetype
@@ -136,6 +163,19 @@ public class GoldenCatalogRefusalTests
     private static string Canonical(Catalog catalog) => Encoding.UTF8.GetString(CatalogSerializer.ToCanonicalUtf8(catalog));
 
     private static JsonNode EventField(JsonNode catalog) => catalog["events"]![0]!["fields"]![0]!;
+
+    private static JsonNode CrateField(JsonNode catalog, string name)
+    {
+        foreach (var f in catalog["archetypes"]![0]!["fields"]!.AsArray())
+        {
+            if (f!["name"]!.GetValue<string>() == name)
+            {
+                return f;
+            }
+        }
+
+        throw new InvalidOperationException($"Crate has no field '{name}'");
+    }
 
     private static JsonNode AppMetric(JsonNode catalog)
     {

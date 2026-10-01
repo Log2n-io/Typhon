@@ -73,6 +73,10 @@ public sealed class ChatChecks
             }
         }
 
+        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+        {
+        }
+
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
         {
             if (_inChat && field.Name == "text")

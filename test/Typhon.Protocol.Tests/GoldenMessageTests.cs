@@ -25,6 +25,9 @@ public class GoldenMessageTests
                 "The worked example from 03-wire-protocol § 4 in its decided shape: moving positions, a packed enum, onEnter fields, ClientRegion."),
             ("catalog-kitchen-sink", CatalogSamples.KitchenSink(),
                 "Every construct the wire has: every codec, all position kinds, an owner section, an unknown codec, labelled and session metrics."),
+            ("catalog-exact", CatalogSamples.Exact(),
+                "The exact wire (W32, W33): u64, i64, f64, varu64 and vari64 on onEnter, group and owner fields, count shapes with their hints, and the "
+                + "same codecs on an event and a command."),
         })
         {
             var bytes = CatalogSerializer.ToCanonicalUtf8(catalog);
@@ -149,6 +152,54 @@ public class GoldenMessageTests
             ["log"] = sink.Log.DeepClone(),
         });
     }
+
+    /// <summary>
+    /// COMMANDS against catalog-exact (W32, W33): a Transfer carrying a u64 above 2⁵³, a varu64 × 2, an f64, a negative vari64 and an f32 × 2 point — the
+    /// 64-bit values as bit patterns a TypeScript client builds from bigints and a C client from int64_t.
+    /// </summary>
+    [Test]
+    public void CommandsExact()
+    {
+        var plan = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.Exact()));
+        var transfer = plan.CommandByName("Transfer");
+        var commands = new List<(MessagePlan, ushort, RecordValues)>
+        {
+            (transfer, 1, TransferValues((1UL << 53) + 1, [0, ulong.MaxValue], 0.1, long.MinValue, [1.5, -2.25])),
+            (transfer, 2, TransferValues(ulong.MaxValue, [127, 128], double.NegativeInfinity, -1, [0, -0.0])),
+        };
+
+        var buffer = new byte[1024];
+        var w = new WireWriter(buffer);
+        CommandsMessage.Write(ref w, 12_345, commands);
+        var bytes = w.Written.ToArray();
+
+        var sink = new RecordingSink();
+        CommandsMessage.Read(bytes, plan, ref sink);
+
+        Golden.Assert("message-commands-exact", bytes, new JsonObject
+        {
+            ["description"] = "COMMANDS against catalog-exact: two Transfers — a u64 at 2⁵³ + 1 and 2⁶⁴ − 1, a varu64 × 2 at its edges, an f64 (0.1, −∞), a "
+                + "vari64 at its minimum and −1, an f32 × 2 point with a negative zero.",
+            ["catalog"] = "catalog-exact",
+            ["inputs"] = new JsonArray(
+                CommandInput("Transfer", 1, TransferJson((1UL << 53) + 1, [0, ulong.MaxValue], 0.1, long.MinValue, [1.5, -2.25])),
+                CommandInput("Transfer", 2, TransferJson(ulong.MaxValue, [127, 128], double.NegativeInfinity, -1, [0, -0.0]))),
+            ["clientTick"] = 12_345,
+            ["log"] = sink.Log.DeepClone(),
+        });
+    }
+
+    private static RecordValues TransferValues(ulong amount, ulong[] memo, double ratio, long target, double[] where) => new()
+    {
+        ["amount"] = FieldValue.OfUInt64(amount), ["memo"] = FieldValue.OfUInt64(memo), ["ratio"] = FieldValue.Of(ratio),
+        ["target"] = FieldValue.OfInt64(target), ["where"] = FieldValue.Of(where),
+    };
+
+    private static JsonObject TransferJson(ulong amount, ulong[] memo, double ratio, long target, double[] where) => new()
+    {
+        ["amount"] = Golden.Bits64([amount]), ["memo"] = Golden.Bits64(memo), ["ratio"] = Golden.Bits([ratio]),
+        ["target"] = Golden.Bits64([unchecked((ulong)target)]), ["where"] = Golden.Bits(where),
+    };
 
     private static RecordValues SteerValues(double heading, bool boost, double speed, int stance, string note) => new()
     {

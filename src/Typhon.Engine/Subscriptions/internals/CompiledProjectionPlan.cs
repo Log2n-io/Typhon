@@ -37,10 +37,10 @@ internal enum ProjectionSourceType : byte
     /// <summary>An unsigned 32-bit integer.</summary>
     UInt32,
 
-    /// <summary>A signed 64-bit integer. Until the 64-bit codecs (13 § 3) it reaches the wire only through a declared narrowing.</summary>
+    /// <summary>A signed 64-bit integer: exact in <c>i64</c> / <c>vari64</c> (W32), or through a declared narrowing.</summary>
     Int64,
 
-    /// <summary>An unsigned 64-bit integer, narrowed the same way.</summary>
+    /// <summary>An unsigned 64-bit integer: exact in <c>u64</c> / <c>varu64</c>, or narrowed the same way.</summary>
     UInt64,
 
     /// <summary>An IEEE single.</summary>
@@ -159,6 +159,24 @@ internal readonly struct CompiledField
 
     /// <summary>Whether the field belongs to the archetype's owner section, which has its own bit space (W17).</summary>
     public bool Owner { get; init; }
+
+    /// <summary>A <c>vec2</c> / <c>vec3</c> codec's step, for a point field's per-axis code; 0 otherwise.</summary>
+    public double VectorScale { get; init; }
+
+    /// <summary>The catalog's <c>shape</c> hint (W33), or <see langword="null"/>.</summary>
+    public string Shape { get; init; }
+
+    /// <summary>
+    /// For a field of a fixed shape travelling as a count (W33): this sub-field's component, 0-based. A count field compiles to one sub-field per
+    /// component, consecutive, each its own code row (13 § 4); the catalog names the field once, at component 0.
+    /// </summary>
+    public int Component { get; init; }
+
+    /// <summary>How many sub-fields this field compiled to: its count, or 1.</summary>
+    public int ComponentCount { get; init; }
+
+    /// <summary>For a <c>quat3</c> field, its four components' byte offsets inside the component, in wire order; <see langword="null"/> otherwise.</summary>
+    public int[] ShapeOffsets { get; init; }
 
     /// <inheritdoc/>
     public override string ToString() => $"{Name} @ +{ComponentOffsetInCluster}/{ComponentSize}+{FieldOffsetInComponent} as {Codec?.Type}";

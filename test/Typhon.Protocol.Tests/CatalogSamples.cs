@@ -282,6 +282,84 @@ internal static class CatalogSamples
         ],
     };
 
+    /// <summary>
+    /// catalog-exact (W32, W33, 13 § 3): the exact codecs on every record kind — the 64-bit integers and <c>f64</c> on archetype fields (onEnter, two
+    /// groups, an owner group), <c>count</c> shapes with their hints, and the same on an event and a command. Nobody's application, like
+    /// <see cref="KitchenSink"/>; kept apart from it so the codecs it adds move no byte of that catalog's vectors.
+    /// </summary>
+    internal static Catalog Exact() => new()
+    {
+        Protocol = new CatalogProtocolVersion { Major = 3 },
+        App = new CatalogApp { Name = "Exact", Revision = 1 },
+        Tick = new CatalogTick { PeriodUs = 50_000, PingHz = 4 },
+        Limits = new CatalogLimits { FrameBytes = 65_536, ClientMessageBytes = 1024 },
+        Archetypes =
+        [
+            new CatalogArchetype
+            {
+                Name = "Vault",
+                Groups = ["money", "shape"],
+                Fields =
+                [
+                    new CatalogField { Name = "id", Codec = new CatalogCodec { Kind = CodecKind.I64 }, OnEnter = true },
+                    new CatalogField { Name = "balance", Codec = new CatalogCodec { Kind = CodecKind.U64 }, Group = "money" },
+                    new CatalogField { Name = "delta", Codec = new CatalogCodec { Kind = CodecKind.Vari64 }, Group = "money" },
+                    new CatalogField { Name = "rate", Codec = new CatalogCodec { Kind = CodecKind.F64 }, Group = "money" },
+                    new CatalogField { Name = "seen", Codec = new CatalogCodec { Kind = CodecKind.Varu64 }, Group = "money" },
+                    new CatalogField { Name = "open", Codec = new CatalogCodec { Kind = CodecKind.Bool }, Group = "money" },
+                    new CatalogField { Name = "box", Codec = new CatalogCodec { Kind = CodecKind.F32, Count = 6 }, Group = "shape", Shape = "aabb3" },
+                    new CatalogField { Name = "spot", Codec = new CatalogCodec { Kind = CodecKind.F64, Count = 3 }, Group = "shape", Shape = "point3" },
+                    new CatalogField
+                    {
+                        Name = "reach", Group = "shape", Shape = "bsphere3",
+                        Codec = new CatalogCodec { Kind = CodecKind.Quant, Min = [-1000], Max = [1000], Bits = 16, Count = 4 },
+                    },
+                    new CatalogField { Name = "spin", Codec = new CatalogCodec { Kind = CodecKind.F32, Count = 4 }, Group = "shape", Shape = "quat" },
+                ],
+                Owner = new CatalogOwner
+                {
+                    Groups = ["secret"],
+                    Fields =
+                    [
+                        new CatalogField { Name = "pin", Codec = new CatalogCodec { Kind = CodecKind.U64 }, Group = "secret" },
+                        new CatalogField { Name = "scale", Codec = new CatalogCodec { Kind = CodecKind.F64, Count = 2 }, Group = "secret", Shape = "point2" },
+                    ],
+                },
+            },
+        ],
+        Events =
+        [
+            new CatalogEvent
+            {
+                Name = "Audit",
+                Scope = "all",
+                Fields =
+                [
+                    new CatalogField { Name = "amount", Codec = new CatalogCodec { Kind = CodecKind.I64 } },
+                    new CatalogField { Name = "at", Codec = new CatalogCodec { Kind = CodecKind.F64 } },
+                    new CatalogField { Name = "corner", Codec = new CatalogCodec { Kind = CodecKind.F32, Count = 3 }, Shape = "point3" },
+                    new CatalogField { Name = "who", Codec = new CatalogCodec { Kind = CodecKind.EntityRef } },
+                ],
+            },
+        ],
+        Commands =
+        [
+            new CatalogCommand
+            {
+                Name = "Transfer",
+                Delivery = CatalogCommand.QueuedDelivery,
+                Fields =
+                [
+                    new CatalogField { Name = "amount", Codec = new CatalogCodec { Kind = CodecKind.U64 } },
+                    new CatalogField { Name = "memo", Codec = new CatalogCodec { Kind = CodecKind.Varu64, Count = 2 } },
+                    new CatalogField { Name = "ratio", Codec = new CatalogCodec { Kind = CodecKind.F64 } },
+                    new CatalogField { Name = "target", Codec = new CatalogCodec { Kind = CodecKind.Vari64 } },
+                    new CatalogField { Name = "where", Codec = new CatalogCodec { Kind = CodecKind.F32, Count = 2 }, Shape = "point2" },
+                ],
+            },
+        ],
+    };
+
     private static CatalogPosition MovingLinear() => new()
     {
         Kind = CatalogPosition.MotionKind,

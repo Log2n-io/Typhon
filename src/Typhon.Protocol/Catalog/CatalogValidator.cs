@@ -330,11 +330,21 @@ public static class CatalogValidator
 
         CheckCodec(at, f.Codec, maxBytes, problems);
 
+        if (f.Shape != null && (f.Shape.Length == 0 || Encoding.UTF8.GetByteCount(f.Shape) > ProtocolConstants.ShapeMaxBytes))
+        {
+            // Any other value is accepted: a shape is a hint, and one this library does not know is ignored, never refused (W33).
+            problems.Add($"{at}: shape must be 1..{ProtocolConstants.ShapeMaxBytes} UTF-8 bytes");
+        }
+
         if (!string.IsNullOrEmpty(f.Enum))
         {
             if (Array.IndexOf(EnumCodecs, f.Codec.Type) < 0)
             {
                 problems.Add($"{at}: an enum is allowed only on bits, u8, u16 and varu, not '{f.Codec.Type}'");
+            }
+            else if (f.Codec.Count != 0)
+            {
+                problems.Add($"{at}: an enum names one value; it cannot carry a count");
             }
             else if (!enums.TryGetValue(f.Enum, out var names) || names == null)
             {
@@ -475,6 +485,11 @@ public static class CatalogValidator
             problems.Add($"{where}: codec '{m.Codec.Type}' is not a metric codec");
         }
 
+        if (m.Codec.Count != 0)
+        {
+            problems.Add($"{where}: a metric is one value per label; it cannot carry a count");
+        }
+
         CheckCodec(where, m.Codec, int.MaxValue, problems);
     }
 
@@ -541,6 +556,12 @@ public static class CatalogValidator
     private static void CheckCodec(string at, CatalogCodec codec, int maxBytes, List<string> problems)
     {
         CheckUnreadParameters(at, codec, problems);
+        if (codec.Count != 0 && TakesCount(codec.Kind) && codec.Count is < 2 or > ProtocolConstants.MaxCount)
+        {
+            // Absent is one value, so 1 has a single spelling: a declared count of 1 would hash differently from the same field without one.
+            problems.Add($"{at}: count must be 2..{ProtocolConstants.MaxCount}; leave it out for one value");
+        }
+
         switch (codec.Kind)
         {
             case CodecKind.Unknown:
@@ -614,6 +635,10 @@ public static class CatalogValidator
                 {
                     problems.Add($"{at}: a list element must be a numeric byte-aligned codec, not '{codec.Of.Type}'");
                 }
+                else if (codec.Of.Count != 0)
+                {
+                    problems.Add($"{at}: a list element is one value; a count belongs on a field");
+                }
                 else
                 {
                     CheckCodec($"{at} element", codec.Of, maxBytes, problems);
@@ -634,6 +659,16 @@ public static class CatalogValidator
     public static bool IsListElement(CodecKind kind) => kind is CodecKind.U8 or CodecKind.I8 or CodecKind.U16 or CodecKind.I16 or CodecKind.U32
         or CodecKind.I32 or CodecKind.Varu or CodecKind.Vari or CodecKind.EntityRef or CodecKind.F32 or CodecKind.F16 or CodecKind.Quant or CodecKind.Pos2
         or CodecKind.Pos3 or CodecKind.Vec2 or CodecKind.Vec3 or CodecKind.Unorm or CodecKind.Snorm or CodecKind.Angle or CodecKind.Quat3;
+
+    /// <summary>
+    /// Whether a codec may carry a <c>count</c> (W33): the byte-aligned scalar codecs. Never <c>bool</c> or <c>bits</c> (packed), the length-prefixed and
+    /// raw codecs, <c>entityRef</c>, <c>tickLo</c>, a list, or a position, vector or quaternion codec — each of those is already a shape of its own.
+    /// </summary>
+    /// <param name="kind">The codec kind.</param>
+    /// <returns><see langword="true"/> when a count is allowed.</returns>
+    public static bool TakesCount(CodecKind kind) => kind is CodecKind.U8 or CodecKind.I8 or CodecKind.U16 or CodecKind.I16 or CodecKind.U32
+        or CodecKind.I32 or CodecKind.U64 or CodecKind.I64 or CodecKind.Varu or CodecKind.Vari or CodecKind.Varu64 or CodecKind.Vari64 or CodecKind.F16
+        or CodecKind.F32 or CodecKind.F64 or CodecKind.Quant or CodecKind.Unorm or CodecKind.Snorm or CodecKind.Angle;
 
     // A parameter a kind does not read would be ignored by this library and honoured by some other decoder: refuse it so every decoder reads the same width.
     private static void CheckUnreadParameters(string at, CatalogCodec codec, List<string> problems)
@@ -656,6 +691,11 @@ public static class CatalogValidator
             _ => Parameter.None,
         };
 
+        if (TakesCount(codec.Kind))
+        {
+            reads |= Parameter.Count;
+        }
+
         var present = Parameter.None;
         present |= codec.Bits != 0 ? Parameter.Bits : 0;
         present |= codec.Min != null || codec.Max != null ? Parameter.Bounds : 0;
@@ -665,6 +705,7 @@ public static class CatalogValidator
         present |= codec.MaxBytes != 0 ? Parameter.MaxBytes : 0;
         present |= codec.Of != null || codec.MinCount != 0 || codec.MaxCount != 0 ? Parameter.List : 0;
         present |= codec.FixedBytes != 0 ? Parameter.FixedBytes : 0;
+        present |= codec.Count != 0 ? Parameter.Count : 0;
 
         var unread = present & ~reads;
         if (unread != 0)
@@ -685,6 +726,7 @@ public static class CatalogValidator
         MaxBytes = 32,
         List = 64,
         FixedBytes = 128,
+        Count = 256,
     }
 
     private static void CheckBits(string at, int bits, List<string> problems)

@@ -608,11 +608,11 @@ struct SteerValues {
 
     explicit SteerValues(double h) : heading(h)
     {
-        values = {{"heading", {FieldValue::Kind::Numbers, {&heading, 1}, {}, {}}},
-                  {"boost", {FieldValue::Kind::Numbers, {&boost, 1}, {}, {}}},
-                  {"speed", {FieldValue::Kind::Numbers, {&speed, 1}, {}, {}}},
-                  {"stance", {FieldValue::Kind::Numbers, {&stance, 1}, {}, {}}},
-                  {"note", {FieldValue::Kind::Text, {}, "go", {}}}};
+        values = {{"heading", FieldValue::OfNumbers({&heading, 1})},
+                  {"boost", FieldValue::OfNumbers({&boost, 1})},
+                  {"speed", FieldValue::OfNumbers({&speed, 1})},
+                  {"stance", FieldValue::OfNumbers({&stance, 1})},
+                  {"note", FieldValue::OfText("go")}};
     }
 };
 
@@ -624,9 +624,9 @@ struct RegionValues {
 
     explicit RegionValues(double x) : vertices{x, 0, 0, x + 10, 0, 0, x + 10, 10, 0}
     {
-        values = {{"altitudeM", {FieldValue::Kind::Numbers, {&altitude, 1}, {}, {}}},
-                  {"budgetKiBps", {FieldValue::Kind::Numbers, {&budget, 1}, {}, {}}},
-                  {"vertices", {FieldValue::Kind::Numbers, vertices, {}, {}}}};
+        values = {{"altitudeM", FieldValue::OfNumbers({&altitude, 1})},
+                  {"budgetKiBps", FieldValue::OfNumbers({&budget, 1})},
+                  {"vertices", FieldValue::OfNumbers(vertices)}};
     }
 };
 
@@ -642,6 +642,7 @@ struct DecodedCommands final : CommandSink {
     }
 
     void Number(const FieldPlan&, const double*) override {}
+    void Integer64(const FieldPlan&, const std::uint64_t*) override {}
     void Text(const FieldPlan&, std::string_view) override {}
     void Bytes(const FieldPlan&, std::span<const std::uint8_t>) override {}
     void List(const FieldPlan&, int, const double*) override {}
@@ -798,6 +799,7 @@ TEST(CommandQueue_CopiesValuesAtEnqueue)
             }
         }
 
+        void Integer64(const FieldPlan&, const std::uint64_t*) override {}
         void Text(const FieldPlan&, std::string_view) override {}
         void Bytes(const FieldPlan&, std::span<const std::uint8_t>) override {}
         void List(const FieldPlan&, int, const double*) override {}

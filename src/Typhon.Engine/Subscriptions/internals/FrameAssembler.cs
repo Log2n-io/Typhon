@@ -1565,7 +1565,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         for (var i = 0; i < aligned; i++)
         {
             ref readonly var field = ref fields[section.FirstField + section.PackedCount + i];
-            var width = field.CodecKind is CodecKind.Varu or CodecKind.Vari or CodecKind.EntityRef ? 0 : field.MaxBodyBytes;
+            var width = field.CodecKind is CodecKind.Varu or CodecKind.Vari or CodecKind.EntityRef or CodecKind.Varu64 or CodecKind.Vari64 ? 0 : field.MaxBodyBytes;
             widths[i] = width;
             variable |= width == 0;
             fixedBytes += width;

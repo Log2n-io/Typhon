@@ -178,6 +178,7 @@ private:
 
         field.enumName = OptionalString(f, "enum", where);
         field.smoothing = OptionalString(f, "smoothing", where);
+        field.shape = OptionalString(f, "shape", where);
         return field;
     }
 
@@ -203,6 +204,7 @@ public:
         integer("minCount", codec.minCount);
         integer("maxCount", codec.maxCount);
         integer("fixedBytes", codec.fixedBytes);
+        integer("count", codec.count);
         if (c.Find("scale") != nullptr)
         {
             codec.scale = Num(c, "scale", where);

@@ -64,7 +64,7 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
 
     internal static readonly DiagnosticDescriptor NoDefaultCodec = new(
         "TPH1104", "No default codec",
-        "'{0}.{1}' is a {2}, which has no default codec (no implicit narrowing, 01 § 2): name one, e.g. [{3}(CodecKind.Quant, Min = …, Max = …, Bits = 24)].",
+        "'{0}.{1}' is a {2}, which has no default codec (13 § 2.1: only a type with an exact wire form has one): name one, e.g. [{3}(CodecKind.Quant, Min = …, Max = …, Bits = 24)].",
         Category, DiagnosticSeverity.Error, true);
 
     internal static readonly DiagnosticDescriptor BadFraction = new(
@@ -669,11 +669,23 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
             case SpecialType.System_Int32:
             case SpecialType.System_UInt32:
             case SpecialType.System_Single:
+            // Exact by default (13 § 2.1, W32): a 64-bit integer and a double travel whole.
+            case SpecialType.System_Int64:
+            case SpecialType.System_UInt64:
+            case SpecialType.System_Double:
                 return true;
         }
 
-        return type.Name == "EntityId" && type.ContainingNamespace?.ToDisplayString() == "Typhon.Engine";
+        var ns = type.ContainingNamespace?.ToDisplayString();
+        return (type.Name == "EntityId" && ns == "Typhon.Engine") || (ns == "Typhon.Schema.Definition" && ShapeTypes.Contains(type.Name));
     }
+
+    // The fixed shapes the engine's FieldShape knows (W33): each defaults to a count of its element.
+    private static readonly HashSet<string> ShapeTypes = new()
+    {
+        "Point2F", "Point3F", "Point4F", "Point2D", "Point3D", "Point4D", "QuaternionF", "QuaternionD", "AABB2F", "AABB3F", "AABB2D", "AABB3D",
+        "BSphere2F", "BSphere3F", "BSphere2D", "BSphere3D",
+    };
 
     private static bool IsNumeric(ITypeSymbol type) => type.SpecialType is SpecialType.System_Byte or SpecialType.System_SByte or SpecialType.System_Int16
         or SpecialType.System_UInt16 or SpecialType.System_Int32 or SpecialType.System_UInt32 or SpecialType.System_Int64 or SpecialType.System_UInt64

@@ -10,8 +10,11 @@
 /** Storage of one decoded numeric value: selects the typed array that holds it. */
 export type NumericFieldKind = 'u8' | 'i8' | 'u16' | 'i16' | 'u32' | 'i32' | 'f32' | 'f64';
 
-/** Storage of one decoded field: a numeric typed array, or one string or byte array per slot. */
-export type FieldKind = NumericFieldKind | 'text' | 'bytes';
+/** Storage of one decoded 64-bit integer (W32): a `BigUint64Array` or a `BigInt64Array` column. */
+export type Integer64FieldKind = 'u64' | 'i64';
+
+/** Storage of one decoded field: a numeric typed array, a 64-bit integer array, or one string or byte array per slot. */
+export type FieldKind = NumericFieldKind | Integer64FieldKind | 'text' | 'bytes';
 
 const FIELD_KINDS: ReadonlySet<string> = new Set<FieldKind>([
   'u8',
@@ -22,16 +25,21 @@ const FIELD_KINDS: ReadonlySet<string> = new Set<FieldKind>([
   'i32',
   'f32',
   'f64',
+  'u64',
+  'i64',
   'text',
   'bytes',
 ]);
+
+/** The most numbers one numeric field holds per slot: a `count` of 16 (W33). */
+export const MAX_COMPONENTS = 16;
 
 export interface FieldSchema {
   readonly name: string;
   readonly kind: FieldKind;
   /**
-   * Numbers per value of a numeric field: 1 for a scalar, up to 4 for a quaternion. Default 1; ignored for text and
-   * bytes.
+   * Numbers per value of a numeric or 64-bit field: 1 for a scalar, 4 for a quaternion, up to 16 for a `count` (W33).
+   * Default 1; ignored for text and bytes.
    */
   readonly components?: number;
   /**
@@ -104,7 +112,18 @@ export function allocateField(kind: NumericFieldKind, length: number): FieldArra
 }
 
 export function isNumericKind(kind: FieldKind): kind is NumericFieldKind {
-  return kind !== 'text' && kind !== 'bytes';
+  return kind !== 'text' && kind !== 'bytes' && kind !== 'u64' && kind !== 'i64';
+}
+
+export function isInteger64Kind(kind: FieldKind): kind is Integer64FieldKind {
+  return kind === 'u64' || kind === 'i64';
+}
+
+/** A 64-bit integer column (W32). */
+export type Integer64FieldArray = BigUint64Array | BigInt64Array;
+
+export function allocateInteger64Field(kind: Integer64FieldKind, length: number): Integer64FieldArray {
+  return kind === 'u64' ? new BigUint64Array(length) : new BigInt64Array(length);
 }
 
 /** Throws when a schema is internally inconsistent; a store built on it would silently misfile data otherwise. */
@@ -168,8 +187,13 @@ export function validateSchema(schema: WorldSchema): void {
       }
 
       const components = field.components ?? 1;
-      if (isNumericKind(field.kind) && !(Number.isInteger(components) && components >= 1 && components <= 4)) {
-        throw new Error(`Field '${archetype.name}.${field.name}' has ${components} components; 1 to 4 expected`);
+      if (
+        (isNumericKind(field.kind) || isInteger64Kind(field.kind)) &&
+        !(Number.isInteger(components) && components >= 1 && components <= MAX_COMPONENTS)
+      ) {
+        throw new Error(
+          `Field '${archetype.name}.${field.name}' has ${components} components; 1 to ${MAX_COMPONENTS} expected`,
+        );
       }
     }
   });

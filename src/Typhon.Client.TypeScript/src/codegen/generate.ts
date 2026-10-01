@@ -218,6 +218,8 @@ class Generator {
         if (f.valueKind === ValueKind.Number) {
           this.usesColumns = true;
           emit(depth, `${kw}c${f.index}${declare ? ': FieldArray' : ''} = st.columns[i${f.index}]!;`);
+        } else if (f.valueKind === ValueKind.Integer64) {
+          emit(depth, `${kw}c${f.index} = st.wordsAt(i${f.index});`);
         } else if (f.valueKind === ValueKind.Text) {
           emit(depth, `${kw}c${f.index} = st.textAt(i${f.index});`);
         } else if (f.valueKind === ValueKind.Bytes) {
@@ -350,6 +352,10 @@ class Generator {
       lines.push('const T = new Float64Array(4);');
     }
 
+    if (s.has('W')) {
+      lines.push('const W = new Uint32Array(2);');
+    }
+
     lines.push('const T0 = new Uint32Array(1);');
     if (s.has('NONE')) {
       lines.push('const NONE = new Float64Array(0);');
@@ -416,6 +422,24 @@ class Generator {
             emit(depth + 1, `c${f.index}[${index}] = ${v};`);
           });
           emit(depth, '}');
+          break;
+        }
+        case ValueKind.Integer64: {
+          // W32: lo/hi words through the scratch `W` into the column's word view — never a bigint, as the interpreter.
+          this.scratch.add('W');
+          this.values.add('LOW_WORD');
+          this.values.add('HIGH_WORD');
+          const method =
+            f.kind === CodecKind.Varu64 ? 'varu64Into' : f.kind === CodecKind.Vari64 ? 'vari64Into' : 'u64Into';
+          for (let c = 0; c < f.components; c++) {
+            emit(depth, `r.${method}(W, 0);`);
+            emit(depth, 'if (slot >= 0) {');
+            const base = `2 * (slot * ${f.components} + ${c})`;
+            emit(depth + 1, `c${f.index}[${base} + LOW_WORD] = W[0]!;`);
+            emit(depth + 1, `c${f.index}[${base} + HIGH_WORD] = W[1]!;`);
+            emit(depth, '}');
+          }
+
           break;
         }
         case ValueKind.Text: {
@@ -493,42 +517,52 @@ class Generator {
       return name;
     };
 
+    // A scalar codec repeats per component: a count (W33) is that many values back to back, each consumed before the next
+    // is read, so the scratch `T[0]` serves them all.
+    const scalar = (i: number, expr: () => string): void => {
+      emit(depth, store(i, expr()));
+    };
+
     switch (f.kind) {
       case CodecKind.U8:
-        emit(depth, store(0, 'r.u8()'));
+        for (let i = 0; i < f.components; i++) scalar(i, () => 'r.u8()');
         break;
       case CodecKind.I8:
-        emit(depth, store(0, 'r.i8()'));
+        for (let i = 0; i < f.components; i++) scalar(i, () => 'r.i8()');
         break;
       case CodecKind.U16:
-        emit(depth, store(0, 'r.u16()'));
+        for (let i = 0; i < f.components; i++) scalar(i, () => 'r.u16()');
         break;
       case CodecKind.I16:
-        emit(depth, store(0, 'r.i16()'));
+        for (let i = 0; i < f.components; i++) scalar(i, () => 'r.i16()');
         break;
       case CodecKind.U32:
-        emit(depth, store(0, into('u32Into')));
+        for (let i = 0; i < f.components; i++) scalar(i, () => into('u32Into'));
         break;
       case CodecKind.I32:
-        emit(depth, store(0, into('i32Into')));
+        for (let i = 0; i < f.components; i++) scalar(i, () => into('i32Into'));
         break;
       case CodecKind.Varu:
       case CodecKind.EntityRef:
-        emit(depth, store(0, into('varuInto')));
+        for (let i = 0; i < f.components; i++) scalar(i, () => into('varuInto'));
         break;
       case CodecKind.Vari:
-        emit(depth, store(0, into('variInto')));
+        for (let i = 0; i < f.components; i++) scalar(i, () => into('variInto'));
         break;
       case CodecKind.F32:
-        emit(depth, store(0, into('f32Into')));
+        for (let i = 0; i < f.components; i++) scalar(i, () => into('f32Into'));
         break;
       case CodecKind.F16:
-        emit(depth, store(0, into('f16Into')));
+        for (let i = 0; i < f.components; i++) scalar(i, () => into('f16Into'));
+        break;
+      case CodecKind.F64:
+        for (let i = 0; i < f.components; i++) scalar(i, () => into('f64Into'));
         break;
       case CodecKind.Quant:
+        // One range whatever the count: every component over min[0] and step[0].
         for (let i = 0; i < f.components; i++) {
           const code = q(unsigned(f.bits, 0));
-          emit(depth, store(i, `${lit(f.min[i]!)} + ${code} * ${lit(f.step[i]!)}`));
+          emit(depth, store(i, `${lit(f.min[0]!)} + ${code} * ${lit(f.step[0]!)}`));
         }
 
         break;
@@ -559,17 +593,25 @@ class Generator {
 
         break;
       case CodecKind.Unorm:
-        emit(depth, store(0, `${q(unsigned(f.bits, 0))} / ${lit(f.top)}`));
+        for (let i = 0; i < f.components; i++) {
+          emit(depth, store(i, `${q(unsigned(f.bits, 0))} / ${lit(f.top)}`));
+        }
+
         break;
-      case CodecKind.Snorm: {
-        const x = this.name('x');
-        emit(depth, `const ${x} = ${q(signed(f.bits, 0))} / ${lit(f.limit)};`);
-        emit(depth, store(0, `${x} < -1 ? -1 : ${x}`));
+      case CodecKind.Snorm:
+        for (let i = 0; i < f.components; i++) {
+          const x = this.name('x');
+          emit(depth, `const ${x} = ${q(signed(f.bits, 0))} / ${lit(f.limit)};`);
+          emit(depth, store(i, `${x} < -1 ? -1 : ${x}`));
+        }
+
         break;
-      }
       case CodecKind.Angle:
         this.values.add('TAU');
-        emit(depth, store(0, `(${q(signed(f.bits, 0))} * TAU) / ${lit(f.top + 1)}`));
+        for (let i = 0; i < f.components; i++) {
+          emit(depth, store(i, `(${q(signed(f.bits, 0))} * TAU) / ${lit(f.top + 1)}`));
+        }
+
         break;
       case CodecKind.Quat3: {
         this.values.add('decodeQuat3Halves');

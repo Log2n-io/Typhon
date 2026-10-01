@@ -22,6 +22,9 @@ public:
     // A numeric field: values[0 .. field.components).
     virtual void Number(const FieldPlan& field, const double* values) = 0;
 
+    // A 64-bit integer field (W32): values[0 .. field.components) as bit patterns, a signed codec's as two's complement.
+    virtual void Integer64(const FieldPlan& field, const std::uint64_t* values) = 0;
+
     // A text field, already validated as UTF-8.
     virtual void Text(const FieldPlan& field, std::string_view utf8) = 0;
 
@@ -35,8 +38,8 @@ public:
 // The largest number of components one decode yields, a list's included.
 inline constexpr int MaxListComponents = protocol::MaxListCount * 4;
 
-// A value to encode: numbers (one for a scalar or a boolean; the components of a vector or quaternion; a list's flattened elements),
-// UTF-8 text, or bytes (bytes, blob, or an unknown codec written verbatim).
+// A value to encode: numbers (one for a scalar or a boolean; the components of a vector, a quaternion or a count; a list's flattened
+// elements), 64-bit integers as bit patterns (W32), UTF-8 text, or bytes (bytes, blob, or an unknown codec written verbatim).
 struct FieldValue {
     enum class Kind : std::uint8_t
     {
@@ -44,12 +47,47 @@ struct FieldValue {
         Numbers,
         Text,
         Bytes,
+        Integers,
     };
 
     Kind kind = Kind::Absent;
     std::span<const double> numbers;
     std::string_view text;
     std::span<const std::uint8_t> bytes;
+    std::span<const std::uint64_t> integers;
+
+    // One factory per kind: a positional brace initializer silently changes meaning when a member is added.
+    static FieldValue OfNumbers(std::span<const double> values)
+    {
+        FieldValue v;
+        v.kind = Kind::Numbers;
+        v.numbers = values;
+        return v;
+    }
+
+    static FieldValue OfText(std::string_view utf8)
+    {
+        FieldValue v;
+        v.kind = Kind::Text;
+        v.text = utf8;
+        return v;
+    }
+
+    static FieldValue OfBytes(std::span<const std::uint8_t> data)
+    {
+        FieldValue v;
+        v.kind = Kind::Bytes;
+        v.bytes = data;
+        return v;
+    }
+
+    static FieldValue OfIntegers(std::span<const std::uint64_t> values)
+    {
+        FieldValue v;
+        v.kind = Kind::Integers;
+        v.integers = values;
+        return v;
+    }
 };
 
 // A field's value by wire name.
@@ -63,8 +101,14 @@ struct NamedValue {
 void ReadSection(WireReader& r, const SectionPlan& section, std::uint32_t frameTick, FieldSink& sink, bool strictEnums = false,
                  const RealmFrame* frame = nullptr);
 
-// Decodes one numeric value of a byte-aligned field (or list element, or position codec) into `out`.
+// Decodes one numeric value of a byte-aligned field (or list element, or position codec) into `out`: field.components values.
 void ReadNumber(WireReader& r, const FieldPlan& f, std::uint32_t frameTick, double* out, const RealmFrame* frame = nullptr);
+
+// Decodes a 64-bit integer field (W32) into `out`: field.components bit patterns.
+void ReadInteger64(WireReader& r, const FieldPlan& f, std::uint64_t* out);
+
+// Encodes a 64-bit integer field (W32) from its components' bit patterns.
+void WriteInteger64(WireWriter& w, const FieldPlan& f, std::span<const std::uint64_t> c);
 
 // Extracts `count` <= 24 bits at bit `offset` of a pack, least significant bit first.
 std::uint32_t ReadPackedBits(std::span<const std::uint8_t> pack, int offset, int count);

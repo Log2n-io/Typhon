@@ -95,6 +95,10 @@ public sealed class RealmClosedChecks
         {
         }
 
+        public void Integer64(FieldPlan field, scoped System.ReadOnlySpan<ulong> components)
+        {
+        }
+
         public void Text(FieldPlan field, scoped System.ReadOnlySpan<byte> utf8)
         {
         }

@@ -295,6 +295,73 @@ public class GoldenTickTests
         return record;
     }
 
+    /// <summary>
+    /// The exact wire end to end (W32, W33): a TICK against catalog-exact whose entity, owner and event fields carry the 64-bit integers past 2⁵³, f64 at
+    /// its edges, and count shapes — what no double-only decoder can render.
+    /// </summary>
+    [Test]
+    public void Exact()
+    {
+        var plan = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.Exact()));
+        var vault = plan.ArchetypeByName("Vault");
+        var buffer = new byte[4096];
+        var w = new WireWriter(buffer);
+        TickWriter.WriteHeader(ref w, Tick, TickFlags.ViewComplete | TickFlags.Reset);
+
+        var first = VaultValues(long.MinValue, (1UL << 53) + 1, long.MinValue, double.Epsilon, ulong.MaxValue, true);
+        var second = VaultValues(-1, ulong.MaxValue, -((1L << 53) + 1), double.NaN, 0, false);
+        TickWriter.WriteEntities(ref w, Tick, vault,
+            [new EnterRecord { NetId = 1, Values = first }, new EnterRecord { NetId = 2, Values = second }],
+            [],
+            [new StateRecord { NetId = 1, GroupMask = 0b11, Values = second }, new StateRecord { NetId = 2, GroupMask = 0b10, Values = first }],
+            []);
+        TickWriter.WriteEvents(ref w,
+        [
+            (plan.EventByName("Audit"), new RecordValues
+            {
+                ["amount"] = FieldValue.OfInt64(-(1L << 53) - 1), ["at"] = FieldValue.Of(-0.0), ["corner"] = FieldValue.Of(1, double.PositiveInfinity, -2.5),
+                ["who"] = FieldValue.Of(2),
+            }),
+        ]);
+        TickWriter.WriteSelf(ref w, vault, 1, 9, 0b1, new RecordValues
+        {
+            ["pin"] = FieldValue.OfUInt64(0x8000_0000_0000_0001UL), ["scale"] = FieldValue.Of(double.MaxValue, -double.Epsilon),
+        });
+
+        var sink = new RecordingSink();
+        RealmFrame frame = null;
+        TickReader.Read(w.Written, plan, ref frame, ref sink);
+        var log = sink.Log;
+
+        Assert.That(log.Where(e => e["call"]!.GetValue<string>() == "integer64" && e["field"]!.GetValue<string>() == "balance")
+                .Select(e => e["values"]![0]!.GetValue<string>()),
+            Is.EqualTo(new[] { "0020000000000001", "ffffffffffffffff", "ffffffffffffffff" }),
+            "2⁵³ + 1 and 2⁶⁴ − 1 survive, which a double would round; netId 2's state carries the shape group alone");
+
+        Golden.Assert("tick-exact", w.Written.ToArray(), new JsonObject
+        {
+            ["description"] = "RESET, then ENTITIES for catalog-exact's Vault — enters and states with u64/i64/varu64/vari64 past 2⁵³, f64 edges (the "
+                + "smallest subnormal, NaN) and count shapes (aabb3, point3, bsphere3, quat) — then an Audit event (i64, −0, f32 × 3 with ∞, an entityRef) "
+                + "and SELF with an owner u64 and an f64 × 2.",
+            ["catalog"] = "catalog-exact",
+            ["log"] = log.DeepClone(),
+        });
+    }
+
+    private static RecordValues VaultValues(long id, ulong balance, long delta, double rate, ulong seen, bool open) => new()
+    {
+        ["id"] = FieldValue.OfInt64(id),
+        ["balance"] = FieldValue.OfUInt64(balance),
+        ["delta"] = FieldValue.OfInt64(delta),
+        ["rate"] = FieldValue.Of(rate),
+        ["seen"] = FieldValue.OfUInt64(seen),
+        ["open"] = FieldValue.Of(open ? 1 : 0),
+        ["box"] = FieldValue.Of(-1, -2, -3, 1, 2, 3.5),
+        ["spot"] = FieldValue.Of(0.1, -1e300, 1e-300),
+        ["reach"] = FieldValue.Of(10, -20, 999.99, 1.5),
+        ["spin"] = FieldValue.Of(0, 0, 0.70710678118654757, 0.70710678118654757),
+    };
+
     private static JsonArray Record(ReadOnlySpan<byte> message)
     {
         var sink = new RecordingSink();

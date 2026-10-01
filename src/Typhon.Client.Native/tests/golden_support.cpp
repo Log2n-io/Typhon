@@ -91,6 +91,15 @@ std::string Bits(double value)
     return text;
 }
 
+std::string Bits64(std::uint64_t value)
+{
+    char text[17];
+    std::snprintf(text, sizeof text, "%016llx", static_cast<unsigned long long>(value));
+    return text;
+}
+
+std::uint64_t FromBits64(std::string_view hex) { return std::stoull(std::string(hex), nullptr, 16); }
+
 double FromBits(std::string_view hex)
 {
     if (hex == "nan")
@@ -289,6 +298,17 @@ void RecordingSink::Number(const client::FieldPlan& field, const double* values)
 {
     log.push_back(Entry("number", {{"field", Str(field.name)},
                                    {"values", BitsArray({values, static_cast<std::size_t>(field.components)})}}));
+}
+
+void RecordingSink::Integer64(const client::FieldPlan& field, const std::uint64_t* values)
+{
+    std::vector<Value> items;
+    for (int i = 0; i < field.components; i++)
+    {
+        items.push_back(Str(Bits64(values[i])));
+    }
+
+    log.push_back(Entry("integer64", {{"field", Str(field.name)}, {"values", Value::MakeArray(std::move(items))}}));
 }
 
 void RecordingSink::Text(const client::FieldPlan& field, std::string_view utf8)

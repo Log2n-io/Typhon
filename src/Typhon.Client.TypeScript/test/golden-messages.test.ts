@@ -13,6 +13,7 @@ import {
   readPong,
   readWelcome,
   ValueKind,
+  isSigned64,
   WireReader,
   WireWriter,
   writeBye,
@@ -162,37 +163,45 @@ describe('golden messages', () => {
     }).toThrow(RangeError);
   });
 
-  it('message-commands: encoded from its inputs, decoded to the server-side log', () => {
-    const vector = goldenJson('message-commands') as {
-      catalog: string;
-      clientTick: number;
-      inputs: { type: string; seq: number; values: Record<string, string[] | string> }[];
-      frame?: FrameJson;
-      log: LogEntry[];
-    };
-    const plan = CatalogPlan.compile(parseCatalog(goldenBin(vector.catalog)));
+  it.each(['message-commands', 'message-commands-exact'])(
+    '%s: encoded from its inputs, decoded to the server-side log',
+    (name) => {
+      const vector = goldenJson(name) as {
+        catalog: string;
+        clientTick: number;
+        inputs: { type: string; seq: number; values: Record<string, string[] | string> }[];
+        frame?: FrameJson;
+        log: LogEntry[];
+      };
+      const plan = CatalogPlan.compile(parseCatalog(goldenBin(vector.catalog)));
 
-    const commands: CommandInput[] = vector.inputs.map((input) => {
-      const type = plan.commandByName(input.type)!;
-      const values: Record<string, FieldValue> = {};
-      for (const field of type.body.fields) {
-        const raw = input.values[field.name]!;
-        values[field.name] =
-          field.valueKind === ValueKind.Text
-            ? text.decode(fromHex(raw as string))
-            : Float64Array.from(raw as string[], fromBits);
-      }
+      const commands: CommandInput[] = vector.inputs.map((input) => {
+        const type = plan.commandByName(input.type)!;
+        const values: Record<string, FieldValue> = {};
+        for (const field of type.body.fields) {
+          const raw = input.values[field.name]!;
+          values[field.name] =
+            field.valueKind === ValueKind.Text
+              ? text.decode(fromHex(raw as string))
+              : field.valueKind === ValueKind.Integer64
+                ? // W32: an application holds a 64-bit value as a bigint; the vector holds its bit pattern.
+                  (raw as string[]).map((h) =>
+                    isSigned64(field.kind) ? BigInt.asIntN(64, BigInt(`0x${h}`)) : BigInt(`0x${h}`),
+                  )
+                : Float64Array.from(raw as string[], fromBits);
+        }
 
-      return { type, seq: input.seq, values };
-    });
+        return { type, seq: input.seq, values };
+      });
 
-    const w = new WireWriter();
-    writeCommands(w, vector.clientTick, commands, frameFromJson(vector.frame));
-    const bin = goldenBin('message-commands');
-    expect(hex(w.written())).toBe(hex(bin));
+      const w = new WireWriter();
+      writeCommands(w, vector.clientTick, commands, frameFromJson(vector.frame));
+      const bin = goldenBin(name);
+      expect(hex(w.written())).toBe(hex(bin));
 
-    const sink = new RecordingSink();
-    readCommands(bin, plan, sink, frameFromJson(vector.frame));
-    expect(sink.log).toEqual(vector.log);
-  });
+      const sink = new RecordingSink();
+      readCommands(bin, plan, sink, frameFromJson(vector.frame));
+      expect(sink.log).toEqual(vector.log);
+    },
+  );
 });

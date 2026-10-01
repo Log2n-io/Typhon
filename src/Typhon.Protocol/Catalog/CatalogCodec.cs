@@ -112,6 +112,21 @@ public enum CodecKind
     /// <see cref="CatalogCodec.MinCount"/>..<see cref="CatalogCodec.MaxCount"/> elements of <see cref="CatalogCodec.Of"/>: <c>varu count | element*</c> (W28).
     /// </summary>
     List,
+
+    /// <summary>Unsigned 64-bit integer, little-endian (W32): decoded as a 64-bit integer, never through a double.</summary>
+    U64,
+
+    /// <summary>Signed 64-bit integer, little-endian two's complement (W32).</summary>
+    I64,
+
+    /// <summary>IEEE double, little-endian (W32): encoders write NaN as <c>0x7FF8000000000000</c>, decoders canonicalize every NaN.</summary>
+    F64,
+
+    /// <summary>Unsigned LEB128 varint of a 64-bit value, 1–10 bytes (W32).</summary>
+    Varu64,
+
+    /// <summary>Zigzag-encoded signed LEB128 varint of a 64-bit value, 1–10 bytes (W32).</summary>
+    Vari64,
 }
 
 /// <summary>
@@ -122,7 +137,7 @@ public static class CodecTokens
     private static readonly string[] Tokens =
     [
         "", "bool", "u8", "i8", "u16", "i16", "u32", "i32", "varu", "vari", "f32", "f16", "quant", "pos2", "pos3", "vec2", "vec3", "vel2", "vel3",
-        "unorm", "snorm", "angle", "quat3", "bits", "entityRef", "str", "bytes", "blob", "tickLo", "list",
+        "unorm", "snorm", "angle", "quat3", "bits", "entityRef", "str", "bytes", "blob", "tickLo", "list", "u64", "i64", "f64", "varu64", "vari64",
     ];
 
     /// <summary>The token of <paramref name="kind"/>.</summary>
@@ -220,4 +235,20 @@ public sealed class CatalogCodec
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public int FixedBytes { get; init; }
+
+    /// <summary>
+    /// How many values of this codec the field is, 2 to 16, in its shape's component order (W33); 0 — absent — is one value. Read only by the byte-aligned
+    /// scalar codecs (<see cref="CatalogValidator.TakesCount"/>).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public int Count { get; init; }
+
+    /// <summary>A copy of this codec carrying <paramref name="count"/> values (W33); 0 or 1 is one value, written as no count at all.</summary>
+    /// <param name="count">The count.</param>
+    /// <returns>The copy.</returns>
+    public CatalogCodec WithCount(int count) => new()
+    {
+        Type = Type, Bits = Bits, Min = Min, Max = Max, Scale = Scale, UnitExp = UnitExp, N = N, MaxBytes = MaxBytes, Of = Of, MinCount = MinCount,
+        MaxCount = MaxCount, FixedBytes = FixedBytes, Count = count <= 1 ? 0 : count,
+    };
 }

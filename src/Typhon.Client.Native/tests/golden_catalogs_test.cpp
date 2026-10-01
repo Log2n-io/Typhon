@@ -280,3 +280,56 @@ TEST(GoldenCatalogs_RefusesJsonThatIsNotACatalog)
     wrongMajor.FindMutable("protocol")->Set("major", Value::MakeNumber(4));
     CHECK_CONTAINS(ProblemsOf(wrongMajor), "protocol 4.0; this client speaks major 3");
 }
+
+// Compilation is the decoder's trust boundary (W33): a count sizes its buffers, so a catalog that skipped the validator is still refused
+// a count on a value no field holds, and a count of 0 is one value, as the validator reads it.
+TEST(GoldenCatalogs_PlanRefusesACountOnAMetricOrAListElement)
+{
+    const auto bin = GoldenBin("catalog-kitchen-sink");
+    const auto compile = [](Catalog c) { return CatalogPlan::Compile(std::make_shared<const Catalog>(std::move(c))); };
+    const auto pathOf = [](Catalog& c) -> CatalogField&
+    {
+        for (auto& e : c.events)
+        {
+            for (auto& f : e.fields)
+            {
+                if (e.name == "Ping" && f.name == "path")
+                {
+                    return f;
+                }
+            }
+        }
+
+        throw std::logic_error("Ping.path is gone from the kitchen sink");
+    };
+    const auto withElementCount = [&](int count)
+    {
+        Catalog c = ParseCatalog(std::span<const std::uint8_t>(bin));
+        CatalogCodec element;
+        element.t = "u8";
+        element.count = count;
+        pathOf(c).codec.of = std::make_shared<const CatalogCodec>(element);
+        return c;
+    };
+
+    Catalog metric = ParseCatalog(std::span<const std::uint8_t>(bin));
+    for (auto& m : metric.metrics)
+    {
+        if (m.name == "app.load")
+        {
+            m.codec.count = 5;
+        }
+    }
+
+    CHECK_THROWS(CatalogError, (void)compile(std::move(metric)));
+    CHECK_THROWS(CatalogError, (void)compile(withElementCount(16)));
+
+    const auto plan = compile(withElementCount(0));
+    const FieldPlan* path = nullptr;
+    for (const FieldPlan* f : plan->EventByName("Ping")->body->fields)
+    {
+        path = f->name == "path" ? f : path;
+    }
+
+    CHECK(path != nullptr && path->element->count == 1 && path->element->components == 1);
+}

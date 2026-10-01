@@ -167,6 +167,12 @@ internal static class ProjectionColumnWalk
             case ColumnPath.ExactSingle:
                 WalkSingleBits(column, slots, codes);
                 return 0;
+            case ColumnPath.ExactDouble:
+                WalkDoubleBits(column, slots, codes);
+                return 0;
+            case ColumnPath.Quaternion:
+                WalkQuaternion(field, column, slots, codes);
+                return 0;
             case ColumnPath.Quantizing:
                 break;
             default:
@@ -192,6 +198,11 @@ internal static class ProjectionColumnWalk
                 break;
             case CodecKind.F16:
                 WithReader(field, column, slots, new HalfColumnCodec(), codes);
+                break;
+            case CodecKind.Vec2:
+            case CodecKind.Vec3:
+                // One axis of a point (W4): each sub-field is one component's code.
+                WithReader(field, column, slots, new VectorColumnCodec(field.VectorScale, field.CodecBits), codes);
                 break;
             default:
                 // An integer codec never quantizes: the pairing table sends every integral source to an integer path and refuses a float in one.
@@ -287,6 +298,91 @@ internal static class ProjectionColumnWalk
             var bits = Unsafe.ReadUnaligned<uint>(ref At(bytes, (slot * stride) + offset));
             codes[slot] = (bits & 0x7FFFFFFFu) > 0x7F800000u ? 0x7FC00000u : bits;
         }
+    }
+
+    /// <summary>
+    /// The exact <c>f64</c> loop for a <see cref="double"/> source (W32): its bits are the code, with every NaN canonicalized to
+    /// <c>0x7FF8000000000000</c> — the bytes <see cref="WireWriter.WriteF64"/> produces for the same value.
+    /// </summary>
+    /// <param name="column">The field's column.</param>
+    /// <param name="slots">The slots to read; intersected with the column's own <see cref="ProjectionColumn.SlotMask"/> before anything is read.</param>
+    /// <param name="codes">Receives one code per set bit, indexed by slot.</param>
+    public static void WalkDoubleBits(in ProjectionColumn column, ulong slots, Span<ulong> codes)
+    {
+        var bytes = column.Bytes;
+        var stride = column.Stride;
+        var offset = column.ValueOffset;
+        slots &= column.SlotMask;
+        while (slots != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(slots);
+            slots &= slots - 1;
+            var bits = Unsafe.ReadUnaligned<ulong>(ref At(bytes, (slot * stride) + offset));
+            codes[slot] = (bits & 0x7FFFFFFFFFFFFFFFUL) > 0x7FF0000000000000UL ? 0x7FF8000000000000UL : bits;
+        }
+    }
+
+    /// <summary>
+    /// The <c>quat3</c> loop (W8): four components of one quaternion, each at its member's offset, into one 32-bit smallest-three code.
+    /// </summary>
+    private static void WalkQuaternion(in CompiledField field, in ProjectionColumn column, ulong slots, Span<ulong> codes)
+    {
+        var bytes = column.Bytes;
+        var stride = column.Stride;
+        var offsets = field.ShapeOffsets;
+        var isDouble = field.SourceType == ProjectionSourceType.Double;
+        slots &= column.SlotMask;
+        while (slots != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(slots);
+            slots &= slots - 1;
+            var at = slot * stride;
+            double x, y, z, w;
+            if (isDouble)
+            {
+                x = Unsafe.ReadUnaligned<double>(ref At(bytes, at + offsets[0]));
+                y = Unsafe.ReadUnaligned<double>(ref At(bytes, at + offsets[1]));
+                z = Unsafe.ReadUnaligned<double>(ref At(bytes, at + offsets[2]));
+                w = Unsafe.ReadUnaligned<double>(ref At(bytes, at + offsets[3]));
+            }
+            else
+            {
+                x = Unsafe.ReadUnaligned<float>(ref At(bytes, at + offsets[0]));
+                y = Unsafe.ReadUnaligned<float>(ref At(bytes, at + offsets[1]));
+                z = Unsafe.ReadUnaligned<float>(ref At(bytes, at + offsets[2]));
+                w = Unsafe.ReadUnaligned<float>(ref At(bytes, at + offsets[3]));
+            }
+
+            codes[slot] = WireMath.EncodeQuat3(x, y, z, w);
+        }
+    }
+
+    /// <summary>
+    /// A <see cref="ulong"/> narrowed into a signed 64-bit codec (<c>i64</c>, <c>vari64</c>): values above <see cref="long.MaxValue"/> clamp to it and
+    /// are counted — the saturating reader the narrower codecs use would hide those clamps, since its saturated value is the codec's own top.
+    /// </summary>
+    private static int WalkUInt64IntoSigned(in ProjectionColumn column, ulong slots, Span<ulong> codes)
+    {
+        var bytes = column.Bytes;
+        var stride = column.Stride;
+        var offset = column.ValueOffset;
+        var clamps = 0;
+        slots &= column.SlotMask;
+        while (slots != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(slots);
+            slots &= slots - 1;
+            var value = Unsafe.ReadUnaligned<ulong>(ref At(bytes, (slot * stride) + offset));
+            if (value > long.MaxValue)
+            {
+                value = long.MaxValue;
+                clamps++;
+            }
+
+            codes[slot] = value;
+        }
+
+        return clamps;
     }
 
     /// <summary>
@@ -428,6 +524,12 @@ internal static class ProjectionColumnWalk
                 return RunInteger(field, column, slots, new Int64IntegerReader(), codes, narrowing);
             case ProjectionSourceType.UInt64:
                 // A ulong above long.MaxValue clamps to any narrower codec's max, so saturating it there is exact; an exact path (a u64 codec) keeps its bits.
+                // Into a signed 64-bit codec the saturated value IS the codec's top, so the clamp is counted by a walk of its own.
+                if (narrowing && field.IntMax == long.MaxValue)
+                {
+                    return WalkUInt64IntoSigned(column, slots, codes);
+                }
+
                 return narrowing
                     ? RunInteger(field, column, slots, new UInt64SaturatingReader(), codes, true)
                     : RunInteger(field, column, slots, new UInt64IntegerReader(), codes, false);
@@ -647,6 +749,21 @@ internal static class ProjectionColumnWalk
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public uint Encode(double value) => WireMath.EncodeSingle(value);
+    }
+
+    private readonly struct VectorColumnCodec : IColumnCodec
+    {
+        private readonly double _scale;
+        private readonly int _bits;
+
+        public VectorColumnCodec(double scale, int bits)
+        {
+            _scale = scale;
+            _bits = bits;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public uint Encode(double value) => unchecked((uint)WireMath.EncodeVec(value, _scale, _bits));
     }
 
     private readonly struct HalfColumnCodec : IColumnCodec

@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include "catalog/catalog_plan.hpp"
+#include "wire/constants.hpp"
 
 namespace typhon::client {
 
@@ -54,10 +55,10 @@ void ValidateSchema(const WorldSchema& schema)
                                             ", which does not exist");
             }
 
-            if (IsNumericKind(field.kind) && (field.components < 1 || field.components > 4))
+            if (IsNumericKind(field.kind) && (field.components < 1 || field.components > protocol::MaxCount))
             {
                 throw std::invalid_argument("Field '" + archetype.name + "." + field.name + "' has " + std::to_string(field.components) +
-                                            " components; 1 to 4 expected");
+                                            " components; 1 to " + std::to_string(protocol::MaxCount) + " expected");
             }
         }
     }
@@ -86,6 +87,12 @@ std::optional<FieldKind> FieldKindOf(const FieldPlan& field)
         case CodecKind::I32:
         case CodecKind::Vari:
             return FieldKind::I32;
+        case CodecKind::U64:
+        case CodecKind::Varu64:
+            return FieldKind::U64;
+        case CodecKind::I64:
+        case CodecKind::Vari64:
+            return FieldKind::I64;
         case CodecKind::F32:
         case CodecKind::F16:
             return FieldKind::F32;

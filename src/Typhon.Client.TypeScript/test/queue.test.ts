@@ -51,6 +51,7 @@ function decode(messages: Uint8Array[]): Decoded {
           clientTicks.push(clientTick);
         },
         number: () => undefined,
+        integer64: () => undefined,
         text: () => undefined,
         bytes: () => undefined,
         list: () => undefined,

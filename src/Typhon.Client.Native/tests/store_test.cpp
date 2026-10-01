@@ -383,7 +383,7 @@ TEST(Store_ValidateSchemaRefusesInconsistentShapes)
     bad.archetypes[1].fields[1].group = 3;
     CHECK_THROWS(std::invalid_argument, ValidateSchema(bad));
     bad = Schema();
-    bad.archetypes[2].fields[0].components = 5;
+    bad.archetypes[2].fields[0].components = 17;
     CHECK_THROWS(std::invalid_argument, ValidateSchema(bad));
     bad = Schema();
     bad.archetypes[1].fields[1].name = "template";

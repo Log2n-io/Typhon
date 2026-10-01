@@ -240,8 +240,8 @@ public class ColumnPathEquivalenceTests
             Codec = codec.Catalog,
             CodecKind = codec.Catalog.Kind,
             Path = path,
-            IntMin = CodecPairing.CodeRange(codec.Catalog).Min,
-            IntMax = CodecPairing.CodeRange(codec.Catalog).Max,
+            IntMin = CodecPairing.ClampRange(codec.Catalog).Min,
+            IntMax = CodecPairing.ClampRange(codec.Catalog).Max,
         };
 
     [TestCase("SByte", 1, "i8")]
@@ -256,7 +256,7 @@ public class ColumnPathEquivalenceTests
     {
         var source = Enum.Parse<ProjectionSourceType>(sourceName);
         var codec = Token(token);
-        var (min, max) = CodecPairing.CodeRange(codec.Catalog);
+        var (min, max) = CodecPairing.ClampRange(codec.Catalog);
         var rng = new Random(0x1085 + stride);
         var column = new byte[Slots * stride];
         var values = new double[Slots];
@@ -298,7 +298,7 @@ public class ColumnPathEquivalenceTests
     {
         var source = Enum.Parse<ProjectionSourceType>(sourceName);
         var codec = Token(token);
-        var (min, max) = CodecPairing.CodeRange(codec.Catalog);
+        var (min, max) = CodecPairing.ClampRange(codec.Catalog);
         var rng = new Random(0x2085 + stride);
         var column = new byte[Slots * stride];
         var values = new double[Slots];

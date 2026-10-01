@@ -28,6 +28,14 @@ public class GoldenRefusalTests
         Codec(cases, "varu-over-32-bits", new CatalogCodec { Kind = CodecKind.Varu }, [0xFF, 0xFF, 0xFF, 0xFF, 0x10]);
         Codec(cases, "varu-six-bytes", new CatalogCodec { Kind = CodecKind.Varu }, [0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
         Codec(cases, "varu-truncated", new CatalogCodec { Kind = CodecKind.Varu }, [0x80]);
+        // W32: a tenth byte above 0x01 carries bits past the 64th; an eleventh byte is past any 64-bit value.
+        Codec(cases, "varu64-tenth-byte-0x02", new CatalogCodec { Kind = CodecKind.Varu64 }, [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02]);
+        Codec(cases, "varu64-eleven-bytes", new CatalogCodec { Kind = CodecKind.Varu64 },
+            [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
+        Codec(cases, "vari64-tenth-byte-0x7f", new CatalogCodec { Kind = CodecKind.Vari64 },
+            [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        Codec(cases, "u64-truncated", new CatalogCodec { Kind = CodecKind.U64 }, [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]);
+        Codec(cases, "f64-x3-truncated", new CatalogCodec { Kind = CodecKind.F64, Count = 3 }, new byte[20]);
         Codec(cases, "u32-truncated", new CatalogCodec { Kind = CodecKind.U32 }, [0x01, 0x02]);
         Codec(cases, "bytes-truncated", new CatalogCodec { Kind = CodecKind.Bytes, N = 4 }, [0x01, 0x02]);
         Codec(cases, "str-over-cap", new CatalogCodec { Kind = CodecKind.Str, MaxBytes = 4 }, [0x05, 0x31, 0x32, 0x33, 0x34, 0x35]);

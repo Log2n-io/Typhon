@@ -111,6 +111,10 @@ public static class CommandsMessage
             }
         }
 
+        public readonly void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+        {
+        }
+
         public readonly void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
         {
         }

@@ -8,7 +8,7 @@ import type {
   CatalogMetric,
   CatalogPosition,
 } from './catalog.js';
-import { codecKindOf, CodecKind, isListElement, isPacked } from './codec-kinds.js';
+import { codecKindOf, CodecKind, isListElement, isPacked, takesCount } from './codec-kinds.js';
 import { BuiltInCommand, BuiltInEvent, ProtocolConstants } from './constants.js';
 import { pow2, quantStep } from './math.js';
 import { encodeUtf8 } from './utf8.js';
@@ -421,6 +421,11 @@ function checkField(
   }
 
   checkCodec(at, f.codec, maxBytes, problems);
+  if (f.shape !== undefined && (f.shape === '' || encodeUtf8(f.shape).length > ProtocolConstants.shapeMaxBytes)) {
+    // Any other value is accepted: a shape is a hint, and one this library does not know is ignored (W33).
+    problems.push(`${at}: shape must be 1..${ProtocolConstants.shapeMaxBytes} UTF-8 bytes`);
+  }
+
   if (f.enum === undefined || f.enum === '') {
     return;
   }
@@ -428,6 +433,8 @@ function checkField(
   const names = Object.prototype.hasOwnProperty.call(enums, f.enum) ? enums[f.enum] : undefined;
   if (!ENUM_CODECS.includes(f.codec.t)) {
     problems.push(`${at}: an enum is allowed only on bits, u8, u16 and varu, not '${f.codec.t}'`);
+  } else if (f.codec.count !== undefined && f.codec.count !== 0) {
+    problems.push(`${at}: an enum names one value; it cannot carry a count`);
   } else if (names === undefined) {
     problems.push(`${at}: enum '${f.enum}' is not declared`);
   } else {
@@ -511,6 +518,10 @@ function checkMetric(m: CatalogMetric, problems: string[]): void {
     problems.push(`${where}: codec '${m.codec.t}' is not a metric codec`);
   }
 
+  if (nonZero(m.codec.count)) {
+    problems.push(`${where}: a metric is one value per label; it cannot carry a count`);
+  }
+
   checkCodec(where, m.codec, Number.MAX_SAFE_INTEGER, problems);
 }
 
@@ -575,9 +586,14 @@ const Parameter = {
   MaxBytes: 32,
   List: 64,
   FixedBytes: 128,
+  Count: 256,
 } as const;
 
 function readParameters(kind: CodecKind): number {
+  return readKindParameters(kind) | (takesCount(kind) ? Parameter.Count : 0);
+}
+
+function readKindParameters(kind: CodecKind): number {
   switch (kind) {
     case CodecKind.Quant:
       return Parameter.Bits | Parameter.Bounds;
@@ -621,9 +637,20 @@ function checkCodec(at: string, codec: CatalogCodec, maxBytes: number, problems:
       (nonZero(codec.n) ? Parameter.N : 0) |
       (nonZero(codec.maxBytes) ? Parameter.MaxBytes : 0) |
       (codec.of !== undefined || nonZero(codec.minCount) || nonZero(codec.maxCount) ? Parameter.List : 0) |
-      (nonZero(codec.fixedBytes) ? Parameter.FixedBytes : 0);
+      (nonZero(codec.fixedBytes) ? Parameter.FixedBytes : 0) |
+      (nonZero(codec.count) ? Parameter.Count : 0);
     if ((present & ~readParameters(kind)) !== 0) {
       problems.push(`${at}: codec '${codec.t}' carries a parameter its kind does not read`);
+    }
+
+    // Absent is one value, so a count of 1 has no spelling: it would hash differently from the same field without one.
+    const count = codec.count;
+    if (
+      nonZero(count) &&
+      takesCount(kind) &&
+      !(Number.isInteger(count) && count! >= 2 && count! <= ProtocolConstants.maxCount)
+    ) {
+      problems.push(`${at}: count must be 2..${ProtocolConstants.maxCount}; leave it out for one value`);
     }
   }
 
@@ -710,6 +737,8 @@ function checkCodec(at: string, codec: CatalogCodec, maxBytes: number, problems:
 
       if (!isListElement(codecKindOf(codec.of.t))) {
         problems.push(`${at}: a list element must be a numeric byte-aligned codec, not '${codec.of.t}'`);
+      } else if (nonZero(codec.of.count)) {
+        problems.push(`${at}: a list element is one value; a count belongs on a field`);
       } else {
         checkCodec(`${at} element`, codec.of, maxBytes, problems);
       }

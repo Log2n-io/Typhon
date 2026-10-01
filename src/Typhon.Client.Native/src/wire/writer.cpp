@@ -69,6 +69,31 @@ void WireWriter::Vari(std::int32_t value)
     Varu((u << 1) ^ (0u - (u >> 31)));
 }
 
+void WireWriter::U64(std::uint64_t value)
+{
+    for (int i = 0; i < 8; i++)
+    {
+        buffer_.push_back(static_cast<std::uint8_t>(value >> (8 * i)));
+    }
+}
+
+void WireWriter::Varu64(std::uint64_t value)
+{
+    while (value >= 0x80)
+    {
+        buffer_.push_back(static_cast<std::uint8_t>((value & 0x7F) | 0x80));
+        value >>= 7;
+    }
+
+    buffer_.push_back(static_cast<std::uint8_t>(value));
+}
+
+void WireWriter::Vari64(std::uint64_t bits)
+{
+    // zigzag64(v) = (v << 1) ^ (v >> 63), on the two's-complement pattern.
+    Varu64((bits << 1) ^ (0 - (bits >> 63)));
+}
+
 void WireWriter::F32(double value)
 {
     if (value != value)

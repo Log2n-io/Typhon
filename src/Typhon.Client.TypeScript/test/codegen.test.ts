@@ -16,6 +16,7 @@ import {
   MessageType,
   parseCodegenArgs,
   parseCatalog,
+  ValueKind,
   WireWriter,
   writeTickHeader,
   type Catalog,
@@ -76,6 +77,10 @@ function dump(applier: FrameApplier): unknown {
           const column = s.columns[index];
           if (column != null) {
             return bytesOf(column);
+          }
+
+          if (f.valueKind === ValueKind.Integer64) {
+            return bytesOf(s.wordsAt(index));
           }
 
           try {
@@ -194,7 +199,7 @@ describe('typhon-codegen', () => {
       add((goldenJson(name) as { catalog: string }).catalog, [goldenBin(name)]);
     }
 
-    expect([...byCatalog.keys()].sort()).toEqual(['catalog-kitchen-sink', 'catalog-wide']);
+    expect([...byCatalog.keys()].sort()).toEqual(['catalog-exact', 'catalog-kitchen-sink', 'catalog-wide']);
     for (const [catalog, messages] of byCatalog) {
       const { decoders } = await generated(catalog, goldenBin(catalog));
       const [interpreter, gen] = pair(goldenBin(catalog), decoders);

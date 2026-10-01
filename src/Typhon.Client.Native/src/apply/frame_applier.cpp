@@ -66,6 +66,14 @@ public:
         }
     }
 
+    void Integer64(const FieldPlan& field, const std::uint64_t* values) override
+    {
+        if (pending_ != nullptr)
+        {
+            pending_->SetInteger64(field, values);
+        }
+    }
+
     void Text(const FieldPlan& field, std::string_view utf8) override
     {
         if (pending_ != nullptr)
@@ -386,6 +394,22 @@ void FrameApplier::Number(const FieldPlan& field, const double* values)
     else if (target_ == Target::Owner)
     {
         self_.SetNumber(field, values);
+    }
+}
+
+void FrameApplier::Integer64(const FieldPlan& field, const std::uint64_t* values)
+{
+    if (target_ == Target::Entity)
+    {
+        const int index = StoreField(field);
+        if (index >= 0)
+        {
+            store_->SetIntegers(index, slot_, values);
+        }
+    }
+    else if (target_ == Target::Owner)
+    {
+        self_.SetInteger64(field, values);
     }
 }
 

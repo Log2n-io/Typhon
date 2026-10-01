@@ -2,6 +2,7 @@
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Text;
 
@@ -122,6 +123,27 @@ public ref struct WireWriter
     /// <param name="value">The value.</param>
     public void WriteU64(ulong value) => BinaryPrimitives.WriteUInt64LittleEndian(Take(8), value);
 
+    /// <summary>Writes a little-endian two's-complement <c>i64</c>.</summary>
+    /// <param name="value">The value.</param>
+    public void WriteI64(long value) => BinaryPrimitives.WriteInt64LittleEndian(Take(8), value);
+
+    /// <summary>Writes a <c>varu64</c> (W32): minimal unsigned LEB128 of a 64-bit value, 1–10 bytes.</summary>
+    /// <param name="value">The value.</param>
+    public void WriteVaru64(ulong value)
+    {
+        while (value >= 0x80)
+        {
+            WriteU8((byte)(value | 0x80));
+            value >>= 7;
+        }
+
+        WriteU8((byte)value);
+    }
+
+    /// <summary>Writes a <c>vari64</c> (W32): <c>zigzag64(v) = (v &lt;&lt; 1) ^ (v &gt;&gt; 63)</c>, then <c>varu64</c>.</summary>
+    /// <param name="value">The value.</param>
+    public void WriteVari64(long value) => WriteVaru64((ulong)((value << 1) ^ (value >> 63)));
+
     /// <summary>Writes a little-endian IEEE double; NaN as <c>0x7FF8000000000000</c>.</summary>
     /// <param name="value">The value.</param>
     public void WriteF64(double value) => BinaryPrimitives.WriteDoubleLittleEndian(Take(8), WireMath.CanonicalizeNaN(value));
@@ -238,6 +260,11 @@ public ref struct WireWriter
         < 1u << 28 => 4,
         _ => 5,
     };
+
+    /// <summary>The number of bytes <see cref="WriteVaru64"/> writes for <paramref name="value"/>.</summary>
+    /// <param name="value">The value.</param>
+    /// <returns>1 to 10.</returns>
+    public static int Varu64Size(ulong value) => value == 0 ? 1 : (70 - BitOperations.LeadingZeroCount(value)) / 7;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private Span<byte> Take(int count)

@@ -282,11 +282,11 @@ struct Steer {
     NamedValue values[5];
 
     Steer()
-        : values{{"heading", {FieldValue::Kind::Numbers, {&heading, 1}, {}, {}}},
-                 {"boost", {FieldValue::Kind::Numbers, {&one, 1}, {}, {}}},
-                 {"speed", {FieldValue::Kind::Numbers, {&half, 1}, {}, {}}},
-                 {"stance", {FieldValue::Kind::Numbers, {&one, 1}, {}, {}}},
-                 {"note", {FieldValue::Kind::Text, {}, "go", {}}}}
+        : values{{"heading", FieldValue::OfNumbers({&heading, 1})},
+                 {"boost", FieldValue::OfNumbers({&one, 1})},
+                 {"speed", FieldValue::OfNumbers({&half, 1})},
+                 {"stance", FieldValue::OfNumbers({&one, 1})},
+                 {"note", FieldValue::OfText("go")}}
     {
     }
 };
@@ -326,6 +326,7 @@ TEST(Batching_NeverExceedsTheCapWhereTheCountVarintWidens)
                 std::size_t n = 0;
                 void Command(const MessagePlan&, std::uint32_t, std::uint32_t) override { n++; }
                 void Number(const FieldPlan&, const double*) override {}
+                void Integer64(const FieldPlan&, const std::uint64_t*) override {}
                 void Text(const FieldPlan&, std::string_view) override {}
                 void Bytes(const FieldPlan&, std::span<const std::uint8_t>) override {}
                 void List(const FieldPlan&, int, const double*) override {}
@@ -373,7 +374,7 @@ TEST(Batching_AnUnknownFieldIsAnInvalidArgument)
     const auto plan = PlanOf("catalog-kitchen-sink");
     CommandQueue queue(plan, [] { return 0.0; });
     const double v = 1;
-    const NamedValue values[] = {{"nope", {FieldValue::Kind::Numbers, {&v, 1}, {}, {}}}};
+    const NamedValue values[] = {{"nope", FieldValue::OfNumbers({&v, 1})}};
     CHECK_THROWS(std::invalid_argument, queue.Enqueue(*plan->CommandByName("Steer"), values));
     CHECK_EQ(queue.PendingCount(), 0u);
 }

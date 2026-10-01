@@ -29,10 +29,12 @@ tick. A projection names only what travels, quantizes it to what the client can 
 - **`Owner(o => o.Field(…))`** fields go only to the controlling session ([Owner state](owner-state.md)).
 - **`Static<T>(…)`** declares an archetype whose state never changes: sent once on enter, no groups, no per-tick comparison.
 
-**Codecs** (`Codec.X`): `Bool`, `U8`/`I8`/`U16`/`I16`/`U32`/`I32`, `VarUInt`/`VarInt`, `F32`, `F16`, `Quant(min, max, bits)`,
-`Unorm(bits)`, `Snorm(bits)`, `Angle(bits)`, `Bits(n)`, `Enum<T>(bits)`, `Vec2/Vec3(scale, bits)`, `EntityRef`, `Str`/`Blob`/`Bytes`,
-`List(of, min, max)`, `TickLo`, `Quat3`. `.Saturate()` clamps out-of-range values instead of refusing them. Quantizers take 8, 16, 24 or
-32 bits. The same arithmetic runs bit-exactly in the engine and both SDKs.
+**Codecs** (`Codec.X`): `Bool`, `U8`/`I8`/`U16`/`I16`/`U32`/`I32`, `U64`/`I64`, `VarUInt`/`VarInt`, `VarUInt64`/`VarInt64`, `F32`,
+`F64`, `F16`, `Quant(min, max, bits)`, `Unorm(bits)`, `Snorm(bits)`, `Angle(bits)`, `Bits(n)`, `Enum<T>(bits)`, `Vec2/Vec3(scale, bits)`,
+`EntityRef`, `Str`/`Blob`/`Bytes`, `List(of, min, max)`, `TickLo`, `Quat3`. **`Codec.Exact`** is the stored type's exact codec — `u64` for a
+`ulong`, `f64` for a `double`, `f32 × 3` for a `Point3F`. `.Count(n)` repeats a scalar codec for a point, a quaternion, a box or a sphere,
+whose count the type also gives. `.Saturate()` clamps out-of-range values instead of refusing them. Quantizers take 8, 16, 24 or 32 bits. The
+same arithmetic runs bit-exactly in the engine and the .NET, TypeScript and C SDKs.
 
 ## 💻 Usage
 
@@ -53,8 +55,9 @@ The same declarations can be written as attributes on the data ([Replication by 
 
 ## ⚠️ Guarantees & limits
 
-- **No 64-bit integer reaches the wire implicitly**: a `long` needs an explicit codec, and a narrowing one must `.Saturate()` (clamps are
-  counted). Refused at declaration.
+- **Exact by default, lossy only when declared**: a 64-bit integer travels whole (`u64`, `i64`, their varints), a `double` as `f64`, a point or a
+  box as its components; a narrowing of any width must `.Saturate()` (clamps are counted), and a pairing that loses data for nothing — a `float`
+  in an integer codec, a `float` in `f64` — is refused at declaration.
 - **At most 8 change groups** per section — the public fields, and the owner fields — because the group mask is a byte; up to **255
   replicated archetypes**.
 - **Components are read through the cluster layout** (SUB-01); a projection never reads storage any other way.

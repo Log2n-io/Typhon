@@ -33,12 +33,15 @@ public:
     void Clear();
 
     void SetNumber(const FieldPlan& field, const double* values);
+    void SetInteger64(const FieldPlan& field, const std::uint64_t* values);
     void SetText(const FieldPlan& field, std::string_view utf8);
     void SetBytes(const FieldPlan& field, std::span<const std::uint8_t> data);
 
     // Whether an owner field (by FieldPlan::index) was received for the current controlled entity.
     bool Present(int field) const { return present_[static_cast<std::size_t>(field)] != 0; }
     std::span<const double> Numbers(int field) const;
+    // A 64-bit integer owner field's components (W32), as bit patterns; empty for another kind.
+    std::span<const std::uint64_t> Integers(int field) const;
     std::string_view Text(int field) const;
     std::span<const std::uint8_t> Bytes(int field) const;
 
@@ -49,6 +52,7 @@ private:
     void Shape(const ArchetypePlan* owner);
 
     Vec<Vec<double>> numbers_;
+    Vec<Vec<std::uint64_t>> integers_;
     Vec<Vec<std::uint8_t>> values_;
     Vec<std::uint8_t> present_;
 };
@@ -65,6 +69,8 @@ public:
 
     // A numeric field's components, or a list's flattened elements (Count(i) x components).
     std::span<const double> Numbers(int field) const;
+    // A 64-bit integer field's components (W32), as bit patterns; empty for another kind.
+    std::span<const std::uint64_t> Integers(int field) const;
     // A list's element count, or a bytes field's length.
     int Count(int field) const { return counts_[static_cast<std::size_t>(field)]; }
     std::string_view Text(int field) const;
@@ -75,6 +81,7 @@ public:
     double Number(std::string_view name, int component = 0) const;
 
     void SetNumber(const FieldPlan& field, const double* values);
+    void SetInteger64(const FieldPlan& field, const std::uint64_t* values);
     void SetList(const FieldPlan& field, int count, const double* values);
     void SetText(const FieldPlan& field, std::string_view utf8);
     void SetBytes(const FieldPlan& field, std::span<const std::uint8_t> data);
@@ -83,6 +90,8 @@ private:
     const MessagePlan* type_;
     Vec<int> offsets_;
     Vec<double> numbers_;
+    // 64-bit integer fields' components, at the same offsets as numbers_.
+    Vec<std::uint64_t> integers_;
     Vec<int> counts_;
     // Per field: text or bytes, grown to the largest value received.
     Vec<Vec<std::uint8_t>> values_;

@@ -30,6 +30,9 @@ using namespace typhon::test;
 
 namespace {
 
+// The echo's 64-bit token (W32): above 2⁵³ and with its top bit set, so a double or a signed misread would not bring it back intact.
+constexpr std::uint64_t EchoToken = 0xFEDCBA9876543211ull;
+
 int failures = 0;
 
 // Whether the steady-state allocation measurement is running: this driver's own callbacks (recording, rendering JSON) allocate, and are paused out of it.
@@ -132,7 +135,9 @@ int main(int argc, char** argv)
         events.push_back(RenderEvent(event, *client->Applier()));
         if (event.Type().name == "E2eEchoed")
         {
-            echoed = event.Number("Value") == 4242 && event.Number("Code") == 7;
+            const int token = event.FieldIndex("Token");
+            echoed = event.Number("Value") == 4242 && event.Number("Code") == 7 && token >= 0 && event.Integers(token).size() == 1
+                     && event.Integers(token)[0] == EchoToken;
         }
     };
     options.onFrame = [&]
@@ -195,8 +200,10 @@ int main(int argc, char** argv)
         {
             const double value = 4242;
             const double code = 7;
-            const NamedValue values[] = {{"Value", {FieldValue::Kind::Numbers, {&value, 1}, {}, {}}},
-                                         {"Code", {FieldValue::Kind::Numbers, {&code, 1}, {}, {}}}};
+            const std::uint64_t token = EchoToken;
+            const NamedValue values[] = {{"Value", FieldValue::OfNumbers({&value, 1})},
+                                         {"Code", FieldValue::OfNumbers({&code, 1})},
+                                         {"Token", FieldValue::OfIntegers({&token, 1})}};
             const MessagePlan* echo = client->Applier()->Plan().CommandByName("E2eEcho");
             Expect(echo != nullptr, "the catalog declares E2eEcho");
             if (echo != nullptr)
@@ -210,7 +217,7 @@ int main(int argc, char** argv)
     }
 
     Expect(snapshots.size() >= frames, "received " + std::to_string(snapshots.size()) + " of " + std::to_string(frames) + " frames");
-    Expect(echoed, "the E2eEchoed event carried the command's values back");
+    Expect(echoed, "the E2eEchoed event carried the command's values back, its u64 token exact");
     Expect(defaultGroupUpdates > 0 && vitalsGroupUpdates > 0, "state records of both groups arrived: " + std::to_string(defaultGroupUpdates) +
                                                                   " default, " + std::to_string(vitalsGroupUpdates) + " vitals");
     Expect(steady.news == 0 && steady.hookAllocs == 0, "no allocation over frames " + std::to_string(MeasureFrom) + "-" + std::to_string(MeasureTo) +
@@ -224,6 +231,27 @@ int main(int argc, char** argv)
         { return applier.World().Archetype(static_cast<std::size_t>(applier.Plan().ArchetypeByName(name)->idx)).LiveCount(); };
         Expect(live("E2eMover") == 12, "12 movers held, got " + std::to_string(live("E2eMover")));
         Expect(live("E2eRock") == 4, "4 rocks held, got " + std::to_string(live("E2eRock")));
+
+        // The exact wire live (W32, W33): every mover's credits sit above 2^53 in a u64 column, its debt below -2^53 in an i64 one, its aim is
+        // three floats — the store's own typed columns, not a double that would have rounded them.
+        const ArchetypePlan& moverPlan = *applier.Plan().ArchetypeByName("E2eMover");
+        const ArchetypeStore& movers = applier.World().Archetype(static_cast<std::size_t>(moverPlan.idx));
+        const int credits = movers.FieldIndex("credits");
+        const int debt = movers.FieldIndex("debt");
+        const int aim = movers.FieldIndex("aim");
+        Expect(credits >= 0 && movers.Schema().fields[static_cast<std::size_t>(credits)].kind == FieldKind::U64, "credits is a u64 column");
+        Expect(debt >= 0 && movers.Schema().fields[static_cast<std::size_t>(debt)].kind == FieldKind::I64, "debt is an i64 column");
+        Expect(aim >= 0 && movers.Schema().fields[static_cast<std::size_t>(aim)].components == 3, "aim is three components");
+        for (const std::uint32_t slot : movers.Live())
+        {
+            if (credits < 0 || debt < 0)
+            {
+                break;
+            }
+
+            Expect(movers.IntegerAt(credits, slot) > (std::uint64_t{1} << 53), "credits above 2^53");
+            Expect(static_cast<std::int64_t>(movers.IntegerAt(debt, slot)) < -(std::int64_t{1} << 53), "debt below -2^53");
+        }
     }
     else
     {

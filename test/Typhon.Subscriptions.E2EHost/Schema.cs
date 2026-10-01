@@ -50,6 +50,22 @@ public struct E2eState
 
     [Field]
     public int MaxHealth;
+
+    /// <summary>A balance above 2⁵³ (W32): exact on every client, which a double would round.</summary>
+    [Field]
+    public ulong Credits;
+
+    /// <summary>A signed 64-bit value, as a <c>vari64</c>.</summary>
+    [Field]
+    public long Debt;
+
+    /// <summary>A double sent whole (<c>f64</c>).</summary>
+    [Field]
+    public double Rate;
+
+    /// <summary>A point, sent as <c>f32 × 3</c> (W33).</summary>
+    [Field]
+    public Point3F Aim;
 }
 
 [Archetype]
@@ -72,6 +88,7 @@ public struct E2ePulse
 {
     public uint Seq;
     public ushort Kind;
+    public ulong Stamp;
 }
 
 /// <summary>The command a client sends; the host answers it with <see cref="E2eEchoed"/>, which proves the round trip.</summary>
@@ -80,6 +97,7 @@ public struct E2eEcho
 {
     public uint Value;
     public ushort Code;
+    public ulong Token;
 }
 
 [StructLayout(LayoutKind.Sequential)]
@@ -87,4 +105,5 @@ public struct E2eEchoed
 {
     public uint Value;
     public ushort Code;
+    public ulong Token;
 }

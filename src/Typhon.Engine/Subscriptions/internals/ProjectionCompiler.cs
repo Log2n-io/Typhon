@@ -313,7 +313,9 @@ internal static class ProjectionCompiler
             return byPacking != 0 ? byPacking : string.CompareOrdinal(a.Name, b.Name);
         });
 
-        var compiled = new CompiledField[ordered.Count];
+        // A count field (W33) compiles to one sub-field per component — its own code row, read at its member's offset — so the column walk stays one
+        // scalar per column (13 § 4). The sub-fields of a field are consecutive, so a section's encode writes them back to back as the wire wants.
+        var expanded = new List<CompiledField>(ordered.Count);
         var section = -1;
         var packBits = 0;
         for (var i = 0; i < ordered.Count; i++)
@@ -326,8 +328,10 @@ internal static class ProjectionCompiler
                 packBits = 0;
             }
 
-            compiled[i] = CompileField(projection, field, meta, layout, engine, fieldSection, i, ref packBits);
+            CompileField(projection, field, meta, layout, engine, fieldSection, expanded, ref packBits);
         }
+
+        var compiled = expanded.ToArray();
 
         // Each heading gets its index among the archetype's headings, in wire order: where its held code lives in the cold entry (09 § 15).
         var heading = 0;
@@ -342,27 +346,37 @@ internal static class ProjectionCompiler
         return compiled;
     }
 
-    private static CompiledField CompileField(ArchetypeProjection projection, ProjectedField field, ArchetypeMetadata meta, ArchetypeClusterInfo layout,
-        DatabaseEngine engine, int section, int ordinal, ref int packBits)
+    private static void CompileField(ArchetypeProjection projection, ProjectedField field, ArchetypeMetadata meta, ArchetypeClusterInfo layout,
+        DatabaseEngine engine, int section, List<CompiledField> into, ref int packBits)
     {
         var codec = field.Codec.Catalog;
-        RefuseUnsupportedFieldCodec(projection, field, codec);
-
         var slot = ResolveSlot(projection, meta, field.ComponentTypeId, field.ComponentName, field.Name);
         var definition = ResolveDefinition(meta, slot, engine);
         var source = ResolveField(projection, definition, field.SourceFieldName, field.Name);
+        var shape = FieldShape.Of(source.DotNetType);
+        RefuseUnsupportedFieldCodec(projection, field, codec, shape != null);
+
         var ratioOffset = -1;
         if (field.MaxSourceFieldName != null)
         {
             ratioOffset = ResolveField(projection, definition, field.MaxSourceFieldName, field.Name).OffsetInComponentStorage;
         }
 
+        // A shape compiles to one sub-field per component, which is only the wire's own layout when the codec carries that many values: a vector or
+        // quaternion codec, or a count equal to the shape's. Anything else would write N values where the catalog declares one — a desynced stream, not a
+        // refusal — so it is refused here, the last place both are known. A Fraction reads two scalars; a shape has no ratio.
+        if (shape != null
+            && (ratioOffset >= 0 || (codec.Kind is not (CodecKind.Vec2 or CodecKind.Vec3 or CodecKind.Quat3) && codec.Count != shape.Count)))
+        {
+            throw new InvalidOperationException(
+                $"Archetype '{projection.Name}' declares field '{field.Name}' over a {source.DotNetType.Name} ({shape.Count} components) with codec " +
+                $"'{codec.Type}'{(ratioOffset >= 0 ? " as a Fraction" : "")}. A shape travels as a vector codec or a count of {shape.Count} (W33).");
+        }
+
         var packed = IsPacked(field.Codec);
         var bitCount = !packed ? 0 : codec.Kind == CodecKind.Bool ? 1 : codec.N;
         var bitOffset = packBits;
         packBits += bitCount;
-
-        var sourceType = ResolveSourceType(projection, field, source);
 
         // The column path, from the same table the registry ran at declaration (13 § 2.3), against the stored field's own type. A Fraction encodes the
         // ratio of two fields as a double, never the field, so it is always the quantizing path.
@@ -375,7 +389,10 @@ internal static class ProjectionCompiler
                 $"Archetype '{projection.Name}' declares field '{field.Name}' with codec '{codec.Type}', which the column walk has no path for.");
         }
 
-        var (intMin, intMax) = CodecPairing.CodeRange(codec);
+        var sourceType = shape != null
+            ? (shape.Element == typeof(double) ? ProjectionSourceType.Double : ProjectionSourceType.Single)
+            : ResolveSourceType(projection, field, source);
+        var (intMin, intMax) = CodecPairing.ClampRange(codec);
         var headingTolerance = 0u;
         if (field.IsHeading)
         {
@@ -386,16 +403,16 @@ internal static class ProjectionCompiler
                     "turns past its tolerance, which must be above 0° and below 180°.");
             }
 
-            if (codec.Kind != CodecKind.Angle || field.Owner || field.OnEnter)
+            if (codec.Kind != CodecKind.Angle || codec.Count > 1 || field.Owner || field.OnEnter)
             {
-                throw new InvalidOperationException($"Heading '{field.Name}' of archetype '{projection.Name}' must be a public, grouped angle field.");
+                throw new InvalidOperationException($"Heading '{field.Name}' of archetype '{projection.Name}' must be a public, grouped, single angle field.");
             }
 
             // The deadband in code space: a turn of the tolerance is this many codes of the angle's 2^bits per full turn.
             headingTolerance = (uint)Math.Floor(field.HeadingToleranceDeg / 360d * Math.Pow(2, codec.Bits));
         }
 
-        return new CompiledField
+        var compiled = new CompiledField
         {
             HeadingPlusOne = field.IsHeading ? 1 : 0,
             HeadingToleranceCodes = headingTolerance,
@@ -409,6 +426,7 @@ internal static class ProjectionCompiler
             Codec = codec,
             CodecKind = codec.Kind,
             CodecBits = codec.Kind == CodecKind.Bits ? codec.N : codec.Bits,
+            VectorScale = codec.Kind is CodecKind.Vec2 or CodecKind.Vec3 ? codec.Scale : 0d,
             EnumType = field.Codec.EnumType,
             Saturating = field.Codec.Saturating,
             Path = path,
@@ -418,13 +436,45 @@ internal static class ProjectionCompiler
             QuantMax = codec.Kind == CodecKind.Quant ? codec.Max[0] : 0d,
             Section = section,
             GroupBit = section == 0 ? -1 : section - 1,
-            Ordinal = ordinal,
+            Ordinal = into.Count,
             Packed = packed,
             BitOffset = packed ? bitOffset : 0,
             BitCount = bitCount,
             MaxBodyBytes = packed ? 0 : MaxEncodedBytes(codec),
             Owner = field.Owner,
+            Shape = field.Shape,
+            ComponentCount = 1,
         };
+
+        if (shape == null || path == ColumnPath.Quaternion)
+        {
+            if (path == ColumnPath.Quaternion)
+            {
+                // quat3 is one 32-bit code of all four components (W8): one row, its reader taking each member at its own offset.
+                var offsets = new int[shape.Count];
+                for (var k = 0; k < offsets.Length; k++)
+                {
+                    offsets[k] = source.OffsetInComponentStorage + shape.Offsets[k];
+                }
+
+                compiled = compiled with { ShapeOffsets = offsets };
+            }
+
+            into.Add(compiled);
+            return;
+        }
+
+        // A shape: one sub-field per component, in the shape's wire order (13 § 2.1), each a scalar column of the element type.
+        for (var k = 0; k < shape.Count; k++)
+        {
+            into.Add(compiled with
+            {
+                FieldOffsetInComponent = source.OffsetInComponentStorage + shape.Offsets[k],
+                Ordinal = into.Count,
+                Component = k,
+                ComponentCount = shape.Count,
+            });
+        }
     }
 
     private static CompiledSection SectionOf(CompiledField[] fields, int section)
@@ -647,7 +697,7 @@ internal static class ProjectionCompiler
             TypeCode.SByte => ProjectionSourceType.SByte,
             TypeCode.Byte => ProjectionSourceType.Byte,
             TypeCode.Int16 => ProjectionSourceType.Int16,
-            TypeCode.UInt16 => ProjectionSourceType.UInt16,
+            TypeCode.UInt16 or TypeCode.Char => ProjectionSourceType.UInt16,
             TypeCode.Int32 => ProjectionSourceType.Int32,
             TypeCode.UInt32 => ProjectionSourceType.UInt32,
             TypeCode.Int64 => ProjectionSourceType.Int64,
@@ -668,8 +718,14 @@ internal static class ProjectionCompiler
         return resolved;
     }
 
-    private static void RefuseUnsupportedFieldCodec(ArchetypeProjection projection, ProjectedField field, CatalogCodec codec)
+    private static void RefuseUnsupportedFieldCodec(ArchetypeProjection projection, ProjectedField field, CatalogCodec codec, bool shape)
     {
+        // A vector or quaternion codec carries a shape (W33): legal on a point or a quaternion, which CodecPairing.Resolve checked.
+        if (shape && codec.Kind is CodecKind.Vec2 or CodecKind.Vec3 or CodecKind.Quat3)
+        {
+            return;
+        }
+
         switch (codec.Kind)
         {
             case CodecKind.Pos2:
@@ -744,8 +800,11 @@ internal static class ProjectionCompiler
         CodecKind.U8 or CodecKind.I8 => 1,
         CodecKind.U16 or CodecKind.I16 or CodecKind.F16 or CodecKind.TickLo => 2,
         CodecKind.U32 or CodecKind.I32 or CodecKind.F32 or CodecKind.Quat3 => 4,
+        CodecKind.U64 or CodecKind.I64 or CodecKind.F64 => 8,
         CodecKind.Varu or CodecKind.Vari or CodecKind.EntityRef => 5,
-        CodecKind.Quant or CodecKind.Unorm or CodecKind.Snorm or CodecKind.Angle => codec.Bits / 8,
+        CodecKind.Varu64 or CodecKind.Vari64 => 10,
+        // One component's: a count field compiles to one sub-field per component (13 § 4).
+        CodecKind.Quant or CodecKind.Unorm or CodecKind.Snorm or CodecKind.Angle or CodecKind.Vec2 or CodecKind.Vec3 => codec.Bits / 8,
         CodecKind.Bytes => codec.N,
         CodecKind.Str or CodecKind.Blob => 5 + codec.MaxBytes,
         _ => 0,

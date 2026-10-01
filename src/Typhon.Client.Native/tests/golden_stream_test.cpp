@@ -74,6 +74,7 @@ public:
     }
 
     void Number(const FieldPlan&, const double*) override {}
+    void Integer64(const FieldPlan&, const std::uint64_t*) override {}
     void Text(const FieldPlan&, std::string_view) override {}
     void Bytes(const FieldPlan&, std::span<const std::uint8_t>) override {}
     void List(const FieldPlan&, int, const double*) override {}

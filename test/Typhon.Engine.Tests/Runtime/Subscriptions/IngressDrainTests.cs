@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Linq;
 using System.Threading;
 using Typhon.Engine.Internals;
 using Typhon.Engine.Tests.Runtime;
@@ -34,6 +35,17 @@ struct SayText
 {
     public Utf8Text256 Text;
     public byte Channel;
+}
+
+/// <summary>
+/// A command of the exact wire's types (W32, W33), declared with no field at all: each defaults to its exact codec — u64, i64, f64, f32 × 3.
+/// </summary>
+struct Transfer64
+{
+    public ulong Amount;
+    public long Delta;
+    public double Ratio;
+    public Typhon.Schema.Definition.Point3F Where;
 }
 
 /// <summary>A command that declares a str on a field that cannot hold one. Only ever passed to a binder that must refuse it.</summary>
@@ -106,6 +118,7 @@ class IngressDrainTests : TestBase<IngressDrainTests>
                 .Rate(10_000, 20_000)
                 .Field(t => t.Text, Codec.Str(Utf8Text256.Capacity))
                 .Field(t => t.Channel, Codec.U8));
+            Subs.Command<Transfer64>(c => c.Rate(10_000, 20_000));
             Subs.Freeze();
 
             var export = CatalogBuilder.Build(Subs, [], CatalogBuilder.DefaultAppName, appRevision: 0, tickPeriodUs: 10_000, systemNames: []);
@@ -755,6 +768,50 @@ class IngressDrainTests : TestBase<IngressDrainTests>
         var request = new AdmissionRequest("player", null, 0, ReadOnlySpan<byte>.Empty, null, null, null, "harness");
         Assert.That(subscriptions.Sessions.TryAdmit(subscriptions.Registry.Sessions, request, out var session, out _, out _), Is.True);
         return session;
+    }
+
+    /// <summary>
+    /// E-11: a command's 64-bit integers, double and point reach the engine's struct exactly — 2⁶⁴ − 1, 2⁵³ + 1 and the extremes of a long, none of
+    /// which a double carries — through the exact codecs a field with no declaration defaults to.
+    /// </summary>
+    [Test]
+    public void ACommandCarries64BitValuesExactlyIntoItsStruct()
+    {
+        using var harness = new Harness();
+        var session = harness.Admit();
+        harness.Tick();
+
+        var transfer = harness.Plan.CommandByName(nameof(Transfer64));
+        Assert.That(transfer.Body.Fields.Select(f => (f.Name, f.Codec.Type, f.Codec.Count)),
+            Is.EquivalentTo(new[] { ("Amount", "u64", 0), ("Delta", "i64", 0), ("Ratio", "f64", 0), ("Where", "f32", 3) }));
+
+        static RecordValues Values(ulong amount, long delta, double ratio) => new()
+        {
+            ["Amount"] = FieldValue.OfUInt64(amount),
+            ["Delta"] = FieldValue.OfInt64(delta),
+            ["Ratio"] = FieldValue.Of(ratio),
+            ["Where"] = FieldValue.Of(1.5, -2.25, 0.1),
+        };
+
+        harness.Ingress.OnCommands(session, Encode(harness.Plan, 1u,
+            (nameof(Transfer64), 1, Values(ulong.MaxValue, long.MinValue, double.Epsilon)),
+            (nameof(Transfer64), 2, Values((1UL << 53) + 1, long.MaxValue, -0d))));
+        harness.Tick();
+
+        var seen = new List<Transfer64>();
+        foreach (ref readonly var c in harness.Api.Commands<Transfer64>())
+        {
+            seen.Add(c.Value);
+        }
+
+        Assert.That(seen, Has.Count.EqualTo(2));
+        Assert.Multiple(() =>
+        {
+            Assert.That((seen[0].Amount, seen[0].Delta, seen[0].Ratio), Is.EqualTo((ulong.MaxValue, long.MinValue, double.Epsilon)));
+            Assert.That((seen[1].Amount, seen[1].Delta), Is.EqualTo(((1UL << 53) + 1, long.MaxValue)), "2⁵³ + 1: a double would have rounded it");
+            Assert.That(BitConverter.DoubleToInt64Bits(seen[1].Ratio), Is.EqualTo(BitConverter.DoubleToInt64Bits(-0d)), "f64 keeps −0");
+            Assert.That((seen[0].Where.X, seen[0].Where.Y, seen[0].Where.Z), Is.EqualTo((1.5f, -2.25f, 0.1f)), "a point's components, in order");
+        });
     }
 
     /// <summary>

@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace Typhon.Protocol;
@@ -14,6 +15,14 @@ public interface IFieldSink
     /// <param name="field">The field.</param>
     /// <param name="components">The values; valid only for the duration of the call.</param>
     void Number(FieldPlan field, scoped ReadOnlySpan<double> components);
+
+    /// <summary>
+    /// A 64-bit integer field's decoded components (<see cref="FieldPlan.Components"/> of them, W32), as bit patterns: the value of a <c>u64</c> or
+    /// <c>varu64</c>, the two's complement of an <c>i64</c> or <c>vari64</c> — <c>(long)value</c> recovers it. Never a double, which cannot hold them.
+    /// </summary>
+    /// <param name="field">The field.</param>
+    /// <param name="components">The values; valid only for the duration of the call.</param>
+    void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components);
 
     /// <summary>A text field's validated UTF-8 bytes.</summary>
     /// <param name="field">The field.</param>
@@ -33,13 +42,19 @@ public interface IFieldSink
 }
 
 /// <summary>
-/// A value to encode. Numbers carry the components of a numeric field, or the flattened elements of a list; <see cref="Text"/> and <see cref="Bytes"/> carry
-/// the rest.
+/// A value to encode. Numbers carry the components of a numeric field, or the flattened elements of a list; <see cref="Integers"/> the components of a
+/// 64-bit integer field; <see cref="Text"/> and <see cref="Bytes"/> carry the rest.
 /// </summary>
 public sealed class FieldValue
 {
     /// <summary>Numeric components, or a list's flattened element components.</summary>
     public double[] Numbers { get; init; }
+
+    /// <summary>
+    /// A 64-bit integer field's components as bit patterns (W32): a signed value's two's complement. A 64-bit field given <see cref="Numbers"/> instead
+    /// encodes them when each is an integer in the codec's range — exactly representable, so nothing is rounded.
+    /// </summary>
+    public ulong[] Integers { get; init; }
 
     /// <summary>Text, for a <c>str</c> field.</summary>
     public string Text { get; init; }
@@ -66,6 +81,25 @@ public sealed class FieldValue
     /// <param name="bytes">The bytes.</param>
     /// <returns>The field value.</returns>
     public static FieldValue Of(byte[] bytes) => new() { Bytes = bytes };
+
+    /// <summary>Unsigned 64-bit components, for a <c>u64</c> or <c>varu64</c> field.</summary>
+    /// <param name="components">The components.</param>
+    /// <returns>The field value.</returns>
+    public static FieldValue OfUInt64(params ulong[] components) => new() { Integers = components };
+
+    /// <summary>Signed 64-bit components, for an <c>i64</c> or <c>vari64</c> field.</summary>
+    /// <param name="components">The components.</param>
+    /// <returns>The field value.</returns>
+    public static FieldValue OfInt64(params long[] components)
+    {
+        var bits = new ulong[components.Length];
+        for (var i = 0; i < bits.Length; i++)
+        {
+            bits[i] = unchecked((ulong)components[i]);
+        }
+
+        return new FieldValue { Integers = bits };
+    }
 }
 
 /// <summary>
@@ -87,7 +121,9 @@ public static class FieldCodec
     public static void ReadSection<TSink>(ref WireReader reader, SectionPlan section, uint frameTick, ref TSink sink, RealmFrame frame = null)
         where TSink : IFieldSink, allows ref struct
     {
-        Span<double> one = stackalloc double[4];
+        Span<double> one = stackalloc double[ProtocolConstants.MaxCount];
+        // A field is either numbers or 64-bit integers, and each sink call consumes its span before the next field: one buffer serves both, zeroed once.
+        var wide = MemoryMarshal.Cast<double, ulong>(one);
         if (section.PackBytes > 0)
         {
             var pack = reader.ReadBytes(section.PackBytes);
@@ -107,6 +143,10 @@ public static class FieldCodec
                 case FieldValueKind.Number:
                     ReadNumber(ref reader, f, frameTick, one, frame);
                     sink.Number(f, one[..f.Components]);
+                    break;
+                case FieldValueKind.Integer64:
+                    ReadInteger64(ref reader, f, wide);
+                    sink.Integer64(f, wide[..f.Components]);
                     break;
                 case FieldValueKind.Text:
                     sink.Text(f, reader.ReadStrUtf8(f.Codec.MaxBytes));
@@ -153,6 +193,17 @@ public static class FieldCodec
             {
                 case FieldValueKind.Number:
                     WriteNumber(ref writer, f, value.Numbers, frame);
+                    break;
+                case FieldValueKind.Integer64:
+                    if (value.Integers != null)
+                    {
+                        WriteInteger64(ref writer, f, value.Integers);
+                    }
+                    else
+                    {
+                        WriteInteger64FromNumbers(ref writer, f, value.Numbers);
+                    }
+
                     break;
                 case FieldValueKind.Text:
                     writer.WriteStr(value.Text, f.Codec.MaxBytes);
@@ -208,40 +259,6 @@ public static class FieldCodec
         var c = field.Codec;
         switch (field.Kind)
         {
-            case CodecKind.U8:
-                destination[0] = reader.ReadU8();
-                break;
-            case CodecKind.I8:
-                destination[0] = reader.ReadI8();
-                break;
-            case CodecKind.U16:
-                destination[0] = reader.ReadU16();
-                break;
-            case CodecKind.I16:
-                destination[0] = reader.ReadI16();
-                break;
-            case CodecKind.U32:
-                destination[0] = reader.ReadU32();
-                break;
-            case CodecKind.I32:
-                destination[0] = reader.ReadI32();
-                break;
-            case CodecKind.Varu:
-            case CodecKind.EntityRef:
-                destination[0] = reader.ReadVaru();
-                break;
-            case CodecKind.Vari:
-                destination[0] = reader.ReadVari();
-                break;
-            case CodecKind.F32:
-                destination[0] = reader.ReadF32();
-                break;
-            case CodecKind.F16:
-                destination[0] = reader.ReadF16();
-                break;
-            case CodecKind.Quant:
-                destination[0] = WireMath.DecodeQuantWithStep(reader.ReadUnsigned(c.Bits), c.Min[0], field.QuantStep[0]);
-                break;
             case CodecKind.Pos2:
             case CodecKind.Pos3:
             {
@@ -272,40 +289,122 @@ public static class FieldCodec
                 }
 
                 break;
-            case CodecKind.Unorm:
-                destination[0] = WireMath.DecodeUnorm(reader.ReadUnsigned(c.Bits), c.Bits);
-                break;
-            case CodecKind.Snorm:
-                destination[0] = WireMath.DecodeSnorm(reader.ReadSigned(c.Bits), c.Bits);
-                break;
-            case CodecKind.Angle:
-                destination[0] = WireMath.DecodeAngle(reader.ReadSigned(c.Bits), c.Bits);
-                break;
             case CodecKind.Quat3:
                 WireMath.DecodeQuat3(reader.ReadU32(), destination);
                 break;
-            case CodecKind.TickLo:
-                destination[0] = WireMath.DecodeTickLo(reader.ReadU16(), frameTick);
-                break;
             default:
-                throw new InvalidOperationException($"'{CodecTokens.ToToken(field.Kind)}' is not a byte-aligned numeric codec");
+                // A scalar codec: Components is its count (W33), each value written in turn.
+                for (var i = 0; i < field.Components; i++)
+                {
+                    destination[i] = ReadScalar(ref reader, field, frameTick);
+                }
+
+                break;
         }
     }
 
-    /// <summary>Encodes one numeric value of <paramref name="field"/>.</summary>
+    /// <summary>Decodes one 64-bit integer field (W32) into <paramref name="destination"/>, as bit patterns.</summary>
+    /// <param name="reader">The reader.</param>
+    /// <param name="field">A <c>u64</c>, <c>i64</c>, <c>varu64</c> or <c>vari64</c> field.</param>
+    /// <param name="destination">Receives <see cref="FieldPlan.Components"/> values.</param>
+    public static void ReadInteger64(ref WireReader reader, FieldPlan field, scoped Span<ulong> destination)
+    {
+        for (var i = 0; i < field.Components; i++)
+        {
+            destination[i] = field.Kind switch
+            {
+                CodecKind.U64 => reader.ReadU64(),
+                CodecKind.I64 => unchecked((ulong)reader.ReadI64()),
+                CodecKind.Varu64 => reader.ReadVaru64(),
+                CodecKind.Vari64 => unchecked((ulong)reader.ReadVari64()),
+                _ => throw new InvalidOperationException($"'{CodecTokens.ToToken(field.Kind)}' is not a 64-bit integer codec"),
+            };
+        }
+    }
+
+    /// <summary>Encodes one 64-bit integer field (W32) from bit patterns.</summary>
     /// <param name="writer">The writer.</param>
-    /// <param name="field">A byte-aligned numeric field (or list element, or position codec).</param>
-    /// <param name="components">At least <see cref="FieldPlan.Components"/> values.</param>
-    /// <param name="frame">The realm frame a position is quantized over; a position with none is refused.</param>
-    public static void WriteNumber(ref WireWriter writer, FieldPlan field, scoped ReadOnlySpan<double> components, RealmFrame frame = null)
+    /// <param name="field">A <c>u64</c>, <c>i64</c>, <c>varu64</c> or <c>vari64</c> field.</param>
+    /// <param name="components">At least <see cref="FieldPlan.Components"/> values; a signed value as its two's complement.</param>
+    public static void WriteInteger64(ref WireWriter writer, FieldPlan field, scoped ReadOnlySpan<ulong> components)
     {
         if (components.Length < field.Components)
         {
             throw new ArgumentException($"field '{field.Name}' needs {field.Components} component(s), got {components.Length}");
         }
 
+        for (var i = 0; i < field.Components; i++)
+        {
+            var v = components[i];
+            switch (field.Kind)
+            {
+                case CodecKind.U64:
+                case CodecKind.I64:
+                    writer.WriteU64(v);
+                    break;
+                case CodecKind.Varu64:
+                    writer.WriteVaru64(v);
+                    break;
+                case CodecKind.Vari64:
+                    writer.WriteVari64(unchecked((long)v));
+                    break;
+                default:
+                    throw new InvalidOperationException($"'{CodecTokens.ToToken(field.Kind)}' is not a 64-bit integer codec");
+            }
+        }
+    }
+
+    // A 64-bit field handed doubles: each must be an integer in the codec's range, which a double holds exactly only up to 2^53 — beyond that the caller
+    // has already lost the value, and refusing a non-integer is the most this can check.
+    private static void WriteInteger64FromNumbers(ref WireWriter writer, FieldPlan field, ReadOnlySpan<double> numbers)
+    {
+        Span<ulong> bits = stackalloc ulong[ProtocolConstants.MaxCount];
+        var signed = field.Kind is CodecKind.I64 or CodecKind.Vari64;
+        for (var i = 0; i < field.Components; i++)
+        {
+            var v = numbers[i];
+            var inRange = signed ? v >= -9223372036854775808d && v < 9223372036854775808d : v >= 0 && v < 18446744073709551616d;
+            if (!inRange || Math.Floor(v) != v)
+            {
+                throw new ArgumentException($"field '{field.Name}': {v.ToString(CultureInfo.InvariantCulture)} is not a 64-bit integer of its codec");
+            }
+
+            bits[i] = signed ? unchecked((ulong)(long)v) : (ulong)v;
+        }
+
+        WriteInteger64(ref writer, field, bits[..field.Components]);
+    }
+
+    // One value of a scalar codec, the unit a count repeats.
+    private static double ReadScalar(ref WireReader reader, FieldPlan field, uint frameTick)
+    {
         var c = field.Codec;
-        var v = components[0];
+        return field.Kind switch
+        {
+            CodecKind.U8 => reader.ReadU8(),
+            CodecKind.I8 => reader.ReadI8(),
+            CodecKind.U16 => reader.ReadU16(),
+            CodecKind.I16 => reader.ReadI16(),
+            CodecKind.U32 => reader.ReadU32(),
+            CodecKind.I32 => reader.ReadI32(),
+            CodecKind.Varu or CodecKind.EntityRef => reader.ReadVaru(),
+            CodecKind.Vari => reader.ReadVari(),
+            CodecKind.F32 => reader.ReadF32(),
+            CodecKind.F16 => reader.ReadF16(),
+            CodecKind.F64 => reader.ReadF64(),
+            CodecKind.Quant => WireMath.DecodeQuantWithStep(reader.ReadUnsigned(c.Bits), c.Min[0], field.QuantStep[0]),
+            CodecKind.Unorm => WireMath.DecodeUnorm(reader.ReadUnsigned(c.Bits), c.Bits),
+            CodecKind.Snorm => WireMath.DecodeSnorm(reader.ReadSigned(c.Bits), c.Bits),
+            CodecKind.Angle => WireMath.DecodeAngle(reader.ReadSigned(c.Bits), c.Bits),
+            CodecKind.TickLo => WireMath.DecodeTickLo(reader.ReadU16(), frameTick),
+            _ => throw new InvalidOperationException($"'{CodecTokens.ToToken(field.Kind)}' is not a byte-aligned numeric codec"),
+        };
+    }
+
+    // One value of a scalar codec, encoded.
+    private static void WriteScalar(ref WireWriter writer, FieldPlan field, double v)
+    {
+        var c = field.Codec;
         switch (field.Kind)
         {
             case CodecKind.U8:
@@ -339,9 +438,44 @@ public static class FieldCodec
             case CodecKind.F16:
                 writer.WriteF16(v);
                 break;
+            case CodecKind.F64:
+                writer.WriteF64(v);
+                break;
             case CodecKind.Quant:
                 writer.WriteBits(WireMath.EncodeQuant(v, c.Min[0], c.Max[0], c.Bits), c.Bits);
                 break;
+            case CodecKind.Unorm:
+                writer.WriteBits(WireMath.EncodeUnorm(v, c.Bits), c.Bits);
+                break;
+            case CodecKind.Snorm:
+                writer.WriteBits((uint)WireMath.EncodeSnorm(v, c.Bits), c.Bits);
+                break;
+            case CodecKind.Angle:
+                writer.WriteBits((uint)WireMath.EncodeAngle(v, c.Bits), c.Bits);
+                break;
+            case CodecKind.TickLo:
+                writer.WriteU16((ushort)(ToUnsignedInteger(v, uint.MaxValue, field) & 0xFFFF));
+                break;
+            default:
+                throw new InvalidOperationException($"'{CodecTokens.ToToken(field.Kind)}' is not a byte-aligned numeric codec");
+        }
+    }
+
+    /// <summary>Encodes one numeric value of <paramref name="field"/>.</summary>
+    /// <param name="writer">The writer.</param>
+    /// <param name="field">A byte-aligned numeric field (or list element, or position codec).</param>
+    /// <param name="components">At least <see cref="FieldPlan.Components"/> values.</param>
+    /// <param name="frame">The realm frame a position is quantized over; a position with none is refused.</param>
+    public static void WriteNumber(ref WireWriter writer, FieldPlan field, scoped ReadOnlySpan<double> components, RealmFrame frame = null)
+    {
+        if (components.Length < field.Components)
+        {
+            throw new ArgumentException($"field '{field.Name}' needs {field.Components} component(s), got {components.Length}");
+        }
+
+        var c = field.Codec;
+        switch (field.Kind)
+        {
             case CodecKind.Pos2:
             case CodecKind.Pos3:
             {
@@ -376,23 +510,17 @@ public static class FieldCodec
                 }
 
                 break;
-            case CodecKind.Unorm:
-                writer.WriteBits(WireMath.EncodeUnorm(v, c.Bits), c.Bits);
-                break;
-            case CodecKind.Snorm:
-                writer.WriteBits((uint)WireMath.EncodeSnorm(v, c.Bits), c.Bits);
-                break;
-            case CodecKind.Angle:
-                writer.WriteBits((uint)WireMath.EncodeAngle(v, c.Bits), c.Bits);
-                break;
             case CodecKind.Quat3:
                 writer.WriteU32(WireMath.EncodeQuat3(components[0], components[1], components[2], components[3]));
                 break;
-            case CodecKind.TickLo:
-                writer.WriteU16((ushort)(ToUnsignedInteger(v, uint.MaxValue, field) & 0xFFFF));
-                break;
             default:
-                throw new InvalidOperationException($"'{CodecTokens.ToToken(field.Kind)}' is not a byte-aligned numeric codec");
+                // A scalar codec: Components is its count (W33), each value written in turn.
+                for (var i = 0; i < field.Components; i++)
+                {
+                    WriteScalar(ref writer, field, components[i]);
+                }
+
+                break;
         }
     }
 
@@ -490,6 +618,11 @@ public static class FieldCodec
         if (field.ValueKind is FieldValueKind.Number && (value.Numbers == null || value.Numbers.Length < Math.Max(1, field.Components)))
         {
             throw new ArgumentException($"field '{field.Name}' needs {Math.Max(1, field.Components)} number(s)");
+        }
+
+        if (field.ValueKind is FieldValueKind.Integer64 && (value.Integers?.Length ?? value.Numbers?.Length ?? 0) < field.Components)
+        {
+            throw new ArgumentException($"field '{field.Name}' needs {field.Components} 64-bit integer(s)");
         }
 
         return value;

@@ -84,6 +84,21 @@ internal static class Golden
         return array;
     }
 
+    /// <summary>
+    /// 64-bit integers (W32) as their bit patterns, 16 lower-case hex digits each — the format a double's bits take, so a vector's numbers read one way
+    /// whatever their codec, and the codec says which of the two a value is. A signed value is its two's complement.
+    /// </summary>
+    internal static JsonArray Bits64(ReadOnlySpan<ulong> values)
+    {
+        var array = new JsonArray();
+        foreach (var v in values)
+        {
+            array.Add(v.ToString("x16", CultureInfo.InvariantCulture));
+        }
+
+        return array;
+    }
+
     internal static string Hex(ReadOnlySpan<byte> bytes) => Convert.ToHexString(bytes).ToLowerInvariant();
 
     internal static JsonNode CodecJson(CatalogCodec codec) => JsonSerializer.SerializeToNode(codec, CatalogJson);
@@ -178,6 +193,9 @@ internal sealed class RecordingSink : ITickSink, ICommandSink
 
     public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) =>
         Log.Add(new JsonObject { ["call"] = "number", ["field"] = field.Name, ["values"] = Golden.Bits(components) });
+
+    public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components) =>
+        Log.Add(new JsonObject { ["call"] = "integer64", ["field"] = field.Name, ["values"] = Golden.Bits64(components) });
 
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) =>
         Log.Add(new JsonObject { ["call"] = "text", ["field"] = field.Name, ["utf8"] = Golden.Hex(utf8) });

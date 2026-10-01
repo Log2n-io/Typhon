@@ -2,7 +2,9 @@
 // motion and the commands are read and written through the C surface only.
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <map>
 
 #include "capi/capi_internal.hpp"
 #include "fake_transport.hpp"
@@ -18,6 +20,8 @@ namespace {
 struct Observed {
     std::vector<std::string> events;
     std::vector<double> pingFrom;
+    std::vector<std::uint64_t> auditAmount;
+    std::size_t auditAtIntegers = SIZE_MAX;
     std::vector<std::uint32_t> frames;
     int welcomes = 0;
     int resets = 0;
@@ -58,6 +62,23 @@ struct CapiHarness {
                 if (typhon_event_numbers(event, field, &values, &count) == TYPHON_OK && count == 1)
                 {
                     o->pingFrom.push_back(values[0]);
+                }
+            }
+
+            // W32: an i64 field's components as bit patterns; a numeric field has none.
+            if (std::strcmp(typhon_event_type_name(event), "Audit") == 0 && typhon_event_field_index(event, "amount", &field) == TYPHON_OK)
+            {
+                const std::uint64_t* integers = nullptr;
+                std::size_t count = 0;
+                if (typhon_event_integers(event, field, &integers, &count) == TYPHON_OK)
+                {
+                    o->auditAmount.assign(integers, integers + count);
+                }
+
+                if (typhon_event_field_index(event, "at", &field) == TYPHON_OK
+                    && typhon_event_integers(event, field, &integers, &count) == TYPHON_OK)
+                {
+                    o->auditAtIntegers = count;
                 }
             }
         };
@@ -101,6 +122,29 @@ struct CapiHarness {
 
         Pump();
     }
+
+    // Opens a session on catalog-exact and applies tick-exact: 64-bit fields, f64 and count shapes (W32, W33).
+    void OpenExact()
+    {
+        CHECK_EQ(static_cast<int>(typhon_client_start(client)), static_cast<int>(TYPHON_OK));
+        links.back()->Open();
+        links.back()->Deliver(Welcome(WelcomeParts().CatalogJson(GoldenBin("catalog-exact"))));
+        links.back()->Deliver(GoldenBin("tick-exact"));
+        Pump();
+    }
+};
+
+// Records what a COMMANDS message decodes to, by field name.
+struct DecodedCommand final : typhon::client::CommandSink {
+    std::map<std::string, std::vector<std::uint64_t>> integers;
+    std::map<std::string, std::vector<double>> numbers;
+
+    void Command(const typhon::client::MessagePlan&, std::uint32_t, std::uint32_t) override {}
+    void Number(const typhon::client::FieldPlan& f, const double* v) override { numbers[f.name].assign(v, v + f.components); }
+    void Integer64(const typhon::client::FieldPlan& f, const std::uint64_t* v) override { integers[f.name].assign(v, v + f.components); }
+    void Text(const typhon::client::FieldPlan&, std::string_view) override {}
+    void Bytes(const typhon::client::FieldPlan&, std::span<const std::uint8_t>) override {}
+    void List(const typhon::client::FieldPlan&, int, const double*) override {}
 };
 
 }  // namespace
@@ -233,9 +277,9 @@ TEST(CApi_QueuesAndFlushesCommands)
     const double speed = 0.5;
     const double stance = 1;
     const typhon_value values[] = {
-        {"heading", &heading, 1, nullptr, 0, nullptr, 0}, {"boost", &boost, 1, nullptr, 0, nullptr, 0},
-        {"speed", &speed, 1, nullptr, 0, nullptr, 0},     {"stance", &stance, 1, nullptr, 0, nullptr, 0},
-        {"note", nullptr, 0, "go", 2, nullptr, 0},
+        {"heading", &heading, 1, nullptr, 0, nullptr, 0, nullptr, 0}, {"boost", &boost, 1, nullptr, 0, nullptr, 0, nullptr, 0},
+        {"speed", &speed, 1, nullptr, 0, nullptr, 0, nullptr, 0},     {"stance", &stance, 1, nullptr, 0, nullptr, 0, nullptr, 0},
+        {"note", nullptr, 0, "go", 2, nullptr, 0, nullptr, 0},
     };
     std::int32_t seq = -1;
     CHECK_EQ(static_cast<int>(typhon_command_enqueue(h.client, steer, values, 5, &seq)), static_cast<int>(TYPHON_OK));
@@ -257,4 +301,47 @@ TEST(CApi_QueuesAndFlushesCommands)
 
     CHECK_EQ(static_cast<int>(typhon_client_stop(h.client, 1000)), static_cast<int>(TYPHON_OK));
     CHECK_EQ(static_cast<int>(typhon_client_get_status(h.client)), static_cast<int>(TYPHON_CLIENT_STOPPED));
+}
+
+// W32 through the C surface: an event's i64 read as bit patterns, and a command's u64 / varu64 x 2 / vari64 written from uint64_t values
+// past 2^53 — the server decodes exactly what the application held.
+TEST(CApi_CarriesExact64BitValuesBothWays)
+{
+    CapiHarness h;
+    h.OpenExact();
+    CHECK(h.seen.auditAmount == (std::vector<std::uint64_t>{static_cast<std::uint64_t>(-(std::int64_t{1} << 53) - 1)}));
+    CHECK_EQ(h.seen.auditAtIntegers, 0u);
+
+    std::uint32_t transfer = 0;
+    CHECK_EQ(static_cast<int>(typhon_command_index(h.client, "Transfer", &transfer)), static_cast<int>(TYPHON_OK));
+    const std::uint64_t amount = UINT64_MAX;
+    const std::uint64_t memo[] = {std::uint64_t{1} << 63, (std::uint64_t{1} << 53) + 1};
+    const std::uint64_t target = static_cast<std::uint64_t>(INT64_MIN);
+    const double ratio = 0.1;
+    const double where[] = {1.5, -2};
+    const typhon_value values[] = {
+        {"amount", nullptr, 0, nullptr, 0, nullptr, 0, &amount, 1}, {"memo", nullptr, 0, nullptr, 0, nullptr, 0, memo, 2},
+        {"ratio", &ratio, 1, nullptr, 0, nullptr, 0, nullptr, 0},   {"target", nullptr, 0, nullptr, 0, nullptr, 0, &target, 1},
+        {"where", where, 2, nullptr, 0, nullptr, 0, nullptr, 0},
+    };
+    std::int32_t seq = -1;
+    CHECK_EQ(static_cast<int>(typhon_command_enqueue(h.client, transfer, values, 5, &seq)), static_cast<int>(TYPHON_OK));
+    std::int32_t messages = 0;
+    CHECK_EQ(static_cast<int>(typhon_commands_flush(h.client, &messages)), static_cast<int>(TYPHON_OK));
+    CHECK_EQ(messages, 1);
+
+    DecodedCommand decoded;
+    const auto plan = PlanOf("catalog-exact");
+    typhon::client::ReadCommands(h.links.back()->sent.back(), *plan, decoded);
+    CHECK(decoded.integers["amount"] == (std::vector<std::uint64_t>{UINT64_MAX}));
+    CHECK(decoded.integers["memo"] == (std::vector<std::uint64_t>{memo[0], memo[1]}));
+    CHECK(decoded.integers["target"] == (std::vector<std::uint64_t>{target}));
+    CHECK(decoded.numbers["ratio"] == (std::vector<double>{0.1}));
+    CHECK(decoded.numbers["where"] == (std::vector<double>{1.5, -2}));
+
+    // A count of integers that is not the field's is refused, and nothing is queued.
+    typhon_value wrong[5];
+    std::copy(std::begin(values), std::end(values), wrong);
+    wrong[1].integer_count = 1;
+    CHECK(typhon_command_enqueue(h.client, transfer, wrong, 5, &seq) != TYPHON_OK);
 }

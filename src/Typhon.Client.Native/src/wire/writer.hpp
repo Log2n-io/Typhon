@@ -36,6 +36,15 @@ public:
     // Zigzag, then varu.
     void Vari(std::int32_t value);
 
+    // A little-endian u64 / i64 (W32), from its bit pattern.
+    void U64(std::uint64_t value);
+
+    // A varu64 (W32): minimal unsigned LEB128, 1-10 bytes.
+    void Varu64(std::uint64_t value);
+
+    // A vari64 (W32) from the two's-complement bit pattern of a signed value: zigzag64, then varu64.
+    void Vari64(std::uint64_t bits);
+
     // An IEEE single, narrowed with ties to even; NaN as 0x7FC00000.
     void F32(double value);
 

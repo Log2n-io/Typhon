@@ -829,10 +829,18 @@ internal static class SubscriptionsNames
         }
 
         // A Fraction encodes the RATIO of two fields, a double, never the field itself: the table judges what is encoded, so it is not asked here.
+        string shape = null;
         if (!ratio)
         {
-            CodecPairing.Classify(StoredType(typeof(TComponent), sourceField, typeof(TField)), codec.Catalog, codec.Saturating,
-                $"Field '{wireName}' of '{typeof(TComponent).Name}'");
+            var stored = StoredType(typeof(TComponent), sourceField, typeof(TField));
+            var where = $"Field '{wireName}' of '{typeof(TComponent).Name}'";
+            codec = CodecPairing.Resolve(stored, codec, where, out shape);
+            CodecPairing.Classify(stored, codec.Catalog, codec.Saturating, where);
+        }
+        else if (FieldShape.Of(StoredType(typeof(TComponent), sourceField, typeof(TField))) is { } fractionShape)
+        {
+            throw new ArgumentException($"Field '{wireName}' is a Fraction over a {fractionShape.Type.Name}, a {fractionShape.Name}: a ratio divides two " +
+                                        "scalars, and a shape has no single value to divide.", nameof(selector));
         }
 
         return new ProjectedField
@@ -845,6 +853,7 @@ internal static class SubscriptionsNames
             OnEnter = onEnter,
             Owner = owner,
             Codec = codec,
+            Shape = shape,
         };
     }
 
@@ -868,8 +877,9 @@ internal static class SubscriptionsNames
             throw new ArgumentException($"Field '{wireName}' of '{owner}' needs a codec.", nameof(codec));
         }
 
-        CodecPairing.Classify(StoredType(typeof(TMessage), sourceField, typeof(TField)), codec.Catalog, codec.Saturating, $"Field '{wireName}' of '{owner}'",
-            message: true);
+        var stored = StoredType(typeof(TMessage), sourceField, typeof(TField));
+        codec = CodecPairing.Resolve(stored, codec, $"Field '{wireName}' of '{owner}'", out var shape);
+        CodecPairing.Classify(stored, codec.Catalog, codec.Saturating, $"Field '{wireName}' of '{owner}'", message: true);
 
         return new ProjectedField
         {
@@ -877,6 +887,7 @@ internal static class SubscriptionsNames
             ComponentName = typeof(TMessage).Name,
             SourceFieldName = sourceField,
             Codec = codec,
+            Shape = shape,
         };
     }
 

@@ -22,6 +22,10 @@ inline constexpr int MaxGroups = 8;
 inline constexpr int MaxArchetypes = 255;
 inline constexpr int MaxPackedBits = 24;
 inline constexpr int MaxListCount = 255;
+// The most values one count field carries (W33).
+inline constexpr int MaxCount = 16;
+// The longest shape hint, in UTF-8 bytes (W33).
+inline constexpr int ShapeMaxBytes = 32;
 inline constexpr int MaxGridCells = 1 << 24;
 inline constexpr int MaxMessageIndex = 0xFFFF;
 inline constexpr int MinVelocityUnitExp = -40;

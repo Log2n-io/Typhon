@@ -32,6 +32,8 @@ struct CatalogCodec {
     std::optional<int> minCount;
     std::optional<int> maxCount;
     std::optional<int> fixedBytes;
+    // W33: how many values of the codec the field carries, 2..16; absent is one.
+    std::optional<int> count;
 };
 
 struct CatalogField {
@@ -41,6 +43,8 @@ struct CatalogField {
     std::optional<bool> onEnter;
     std::optional<std::string> enumName;
     std::optional<std::string> smoothing;
+    // W33: what the values mean (point3, aabb2, quat...). A hint: no byte depends on it, and an unknown one is ignored.
+    std::optional<std::string> shape;
 
     bool IsOnEnter() const { return onEnter.value_or(false); }
 };

@@ -276,6 +276,22 @@ public sealed class FrameApplier
         }
     }
 
+    private void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+    {
+        switch (_target)
+        {
+            case Target.Entity:
+                components.CopyTo(_archetype.Integers[field.Ordinal].AsSpan(_slot * field.Components, field.Components));
+                break;
+            case Target.Self:
+                components.CopyTo(_store.Self.Integers[field.Ordinal] ??= new ulong[field.Components]);
+                break;
+            case Target.Event:
+                _events?.Integer64(field, components);
+                break;
+        }
+    }
+
     private void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
     {
         switch (_target)
@@ -404,6 +420,8 @@ public sealed class FrameApplier
         }
 
         public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => _applier.Number(field, components);
+
+        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components) => _applier.Integer64(field, components);
 
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) => _applier.Text(field, utf8);
 

@@ -54,7 +54,8 @@ TypeScript.
 ## ⚠️ Guarantees & limits
 
 - **Versioned**: `typhon.3` + a minor + capability bits; a client ignores unknown blocks and unknown fixed-size fields.
-- **No 64-bit integer on the wire** implicitly; strings and blobs are length-capped by the catalog.
+- **Exact by default**: 64-bit integers (`u64`, `i64`, their varints) and doubles (`f64`) travel whole, and a fixed shape as a `count` of its
+  element; a lossy codec is a declaration's choice. Strings and blobs are length-capped by the catalog.
 - **Records are absolute**: a frame never depends on a frame the client might have missed.
 - `resumeToken` is always 0 until resume is built.
 

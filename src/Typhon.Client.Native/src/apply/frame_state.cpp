@@ -41,12 +41,14 @@ void SelfState::Shape(const ArchetypePlan* owner)
 {
     const std::size_t count = owner == nullptr ? 0 : owner->ownerFields.size();
     numbers_.resize(count);
+    integers_.resize(count);
     values_.resize(count);
     present_.assign(count, 0);
     for (std::size_t i = 0; i < count; i++)
     {
         const FieldPlan& f = *owner->ownerFields[i];
         numbers_[i].assign(f.valueKind == ValueKind::Number ? static_cast<std::size_t>(f.components) : 0, 0.0);
+        integers_[i].assign(f.valueKind == ValueKind::Integer64 ? static_cast<std::size_t>(f.components) : 0, 0);
         values_[i].clear();
     }
 }
@@ -75,6 +77,13 @@ void SelfState::SetNumber(const FieldPlan& field, const double* values)
     present_[static_cast<std::size_t>(field.index)] = 1;
 }
 
+void SelfState::SetInteger64(const FieldPlan& field, const std::uint64_t* values)
+{
+    auto& target = integers_[static_cast<std::size_t>(field.index)];
+    std::copy_n(values, target.size(), target.begin());
+    present_[static_cast<std::size_t>(field.index)] = 1;
+}
+
 void SelfState::SetText(const FieldPlan& field, std::string_view utf8)
 {
     Assign(values_[static_cast<std::size_t>(field.index)], reinterpret_cast<const std::uint8_t*>(utf8.data()), utf8.size());
@@ -90,6 +99,12 @@ void SelfState::SetBytes(const FieldPlan& field, std::span<const std::uint8_t> d
 std::span<const double> SelfState::Numbers(int field) const
 {
     const auto& values = numbers_[static_cast<std::size_t>(field)];
+    return {values.data(), values.size()};
+}
+
+std::span<const std::uint64_t> SelfState::Integers(int field) const
+{
+    const auto& values = integers_[static_cast<std::size_t>(field)];
     return {values.data(), values.size()};
 }
 
@@ -135,10 +150,13 @@ EventRecord::EventRecord(const MessagePlan& type) : type_(&type)
     for (const FieldPlan* f : fields)
     {
         offsets_[static_cast<std::size_t>(f->index)] = size;
-        size += f->valueKind == ValueKind::List ? f->maxCount * f->components : f->valueKind == ValueKind::Number ? f->components : 0;
+        size += f->valueKind == ValueKind::List                                                   ? f->maxCount * f->components
+                : f->valueKind == ValueKind::Number || f->valueKind == ValueKind::Integer64 ? f->components
+                                                                                            : 0;
     }
 
     numbers_.assign(static_cast<std::size_t>(size), 0.0);
+    integers_.assign(static_cast<std::size_t>(size), 0);
 }
 
 std::span<const double> EventRecord::Numbers(int field) const
@@ -149,6 +167,13 @@ std::span<const double> EventRecord::Numbers(int field) const
                       : f.valueKind == ValueKind::Number ? f.components
                                                          : 0;
     return {numbers_.data() + at, static_cast<std::size_t>(count)};
+}
+
+std::span<const std::uint64_t> EventRecord::Integers(int field) const
+{
+    const FieldPlan& f = *type_->fields[static_cast<std::size_t>(field)];
+    const std::size_t at = static_cast<std::size_t>(offsets_[static_cast<std::size_t>(field)]);
+    return {integers_.data() + at, f.valueKind == ValueKind::Integer64 ? static_cast<std::size_t>(f.components) : 0};
 }
 
 std::string_view EventRecord::Text(int field) const
@@ -191,6 +216,11 @@ double EventRecord::Number(std::string_view name, int component) const
 void EventRecord::SetNumber(const FieldPlan& field, const double* values)
 {
     std::copy_n(values, field.components, numbers_.begin() + offsets_[static_cast<std::size_t>(field.index)]);
+}
+
+void EventRecord::SetInteger64(const FieldPlan& field, const std::uint64_t* values)
+{
+    std::copy_n(values, field.components, integers_.begin() + offsets_[static_cast<std::size_t>(field.index)]);
 }
 
 void EventRecord::SetList(const FieldPlan& field, int count, const double* values)

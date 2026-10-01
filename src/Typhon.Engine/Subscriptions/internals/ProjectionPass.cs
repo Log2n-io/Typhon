@@ -684,7 +684,24 @@ internal static unsafe class ProjectionPass
             case CodecKind.Unorm:
             case CodecKind.Snorm:
             case CodecKind.Angle:
+            case CodecKind.Vec2:
+            case CodecKind.Vec3:
                 writer.WriteBits(unchecked((uint)code), field.CodecBits);
+                break;
+            case CodecKind.Quat3:
+                writer.WriteU32(unchecked((uint)code));
+                break;
+            case CodecKind.U64:
+            case CodecKind.I64:
+            case CodecKind.F64:
+                // W32: the code is the bit pattern — the value's, the two's complement's, or the double's.
+                writer.WriteU64(code);
+                break;
+            case CodecKind.Varu64:
+                writer.WriteVaru64(code);
+                break;
+            case CodecKind.Vari64:
+                writer.WriteVari64(unchecked((long)code));
                 break;
             default:
                 throw new InvalidOperationException(

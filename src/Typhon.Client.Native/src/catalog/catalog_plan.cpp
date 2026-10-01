@@ -52,8 +52,25 @@ FieldPlan::FieldPlan(std::string fieldName, int fieldIndex, const CatalogField* 
         enumNames = catalog.Enum(*field->enumName);
     }
 
+    // A count sizes the decoder's buffers, so it is bounded here whether or not the catalog was validated (W33). A codec newer than
+    // this library is skipped by its fixedBytes, whatever count it carries. 0 is absent, as the validator reads it. A value no field
+    // holds (a list element, a metric, a position) is one value: its buffers are sized for that.
+    const bool declared = kind != CodecKind::Unknown && codec.count.has_value() && *codec.count != 0;
+    if (declared && !(field != nullptr && TakesCount(kind) && *codec.count >= 2 && *codec.count <= protocol::MaxCount))
+    {
+        throw Refuse("field '" + name + "' carries count " + std::to_string(*codec.count) + " on '" + codec.t + "'");
+    }
+
+    count = declared ? *codec.count : 1;
+    components = count;
     switch (kind)
     {
+        case CodecKind::U64:
+        case CodecKind::I64:
+        case CodecKind::Varu64:
+        case CodecKind::Vari64:
+            valueKind = ValueKind::Integer64;
+            break;
         case CodecKind::Pos2:
         case CodecKind::Vec2:
         case CodecKind::Vel2:

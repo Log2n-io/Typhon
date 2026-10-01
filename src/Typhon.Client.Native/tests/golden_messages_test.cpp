@@ -136,18 +136,22 @@ TEST(GoldenMessages_Bye)
     CHECK_THROWS(std::out_of_range, WriteBye(w, 1001));
 }
 
-TEST(GoldenMessages_CommandsEncodeFromInputsAndDecodeToTheServerLog)
+namespace {
+
+void RunCommandsVector(const std::string& name)
 {
-    const Value vector = GoldenJson("message-commands");
+    const Value vector = GoldenJson(name);
     const auto plan = PlanOf(vector.Find("catalog")->AsString());
     const auto frame = FrameFromJson(vector.Find("frame"));
 
     // Storage first, views second: every view must outlive the encode.
     std::vector<std::vector<double>> numbers;
+    std::vector<std::vector<std::uint64_t>> integers;
     std::vector<std::string> texts;
     std::vector<std::vector<NamedValue>> valueSets;
     const auto& inputs = vector.Find("inputs")->Items();
     numbers.reserve(64);
+    integers.reserve(64);
     texts.reserve(64);
     for (const Value& input : inputs)
     {
@@ -160,7 +164,19 @@ TEST(GoldenMessages_CommandsEncodeFromInputsAndDecodeToTheServerLog)
             {
                 const auto utf8 = FromHex(raw.AsString());
                 texts.emplace_back(utf8.begin(), utf8.end());
-                values.push_back({field->name, {FieldValue::Kind::Text, {}, texts.back(), {}}});
+                values.push_back({field->name, FieldValue::OfText(texts.back())});
+            }
+            else if (field->valueKind == ValueKind::Integer64)
+            {
+                // W32: bit patterns, as a C application holds them in uint64_t / int64_t.
+                std::vector<std::uint64_t> components;
+                for (const Value& bits : raw.Items())
+                {
+                    components.push_back(FromBits64(bits.AsString()));
+                }
+
+                integers.push_back(std::move(components));
+                values.push_back({field->name, FieldValue::OfIntegers(integers.back())});
             }
             else
             {
@@ -171,7 +187,7 @@ TEST(GoldenMessages_CommandsEncodeFromInputsAndDecodeToTheServerLog)
                 }
 
                 numbers.push_back(std::move(components));
-                values.push_back({field->name, {FieldValue::Kind::Numbers, numbers.back(), {}, {}}});
+                values.push_back({field->name, FieldValue::OfNumbers(numbers.back())});
             }
         }
 
@@ -187,10 +203,18 @@ TEST(GoldenMessages_CommandsEncodeFromInputsAndDecodeToTheServerLog)
 
     WireWriter w;
     WriteCommands(w, static_cast<std::uint32_t>(vector.Find("clientTick")->AsNumber()), commands, frame.get());
-    const auto bin = GoldenBin("message-commands");
-    CHECK_EQ(Hex(w.Written()), Hex(bin));
+    const auto bin = GoldenBin(name);
+    CHECK_MSG(Hex(w.Written()) == Hex(bin), name << ": encoded " << Hex(w.Written()));
 
     RecordingSink sink;
     ReadCommands(bin, *plan, sink, frame.get());
-    CheckLog(sink.log, *vector.Find("log"), "message-commands");
+    CheckLog(sink.log, *vector.Find("log"), name);
+}
+
+}  // namespace
+
+TEST(GoldenMessages_CommandsEncodeFromInputsAndDecodeToTheServerLog)
+{
+    RunCommandsVector("message-commands");
+    RunCommandsVector("message-commands-exact");
 }
