@@ -199,7 +199,7 @@ namespace Typhon.Engine.Tests.Runtime
             var ex = Assert.Throws<InvalidOperationException>(() => subs.Command<Attributed.Wide>(c => c.Rate(10, 20)));
             Assert.Multiple(() =>
             {
-                Assert.That(ex.Message, Does.Contain("64-bit"));
+                Assert.That(ex.Message, Does.Contain(".Saturate()"), "a 64-bit source in a 32-bit codec is a narrowing like any other (13 § 2.3)");
                 Assert.That(() => subs.Command<Attributed.WideClamped>(c => c.Rate(10, 20)), Throws.Nothing);
             });
         }

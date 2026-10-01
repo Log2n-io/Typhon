@@ -466,13 +466,9 @@ internal static class MessageContract
                     throw new InvalidOperationException($"{what} '{name}' field '{messageType.Name}.{source}': its attribute declares {e.Message}", e);
                 }
 
-                // The same narrowing rule a builder Field call enforces: no 64-bit integer reaches the wire unless the declaration clamps it.
-                if ((member.FieldType == typeof(long) || member.FieldType == typeof(ulong)) && !codec.Saturating)
-                {
-                    throw new InvalidOperationException(
-                        $"{what} '{name}' field '{messageType.Name}.{source}' reads a 64-bit integer, and no 64-bit integer reaches the wire: set " +
-                        "Saturate = true on its attribute, so the clamp is a decision rather than a truncation nobody sees.");
-                }
+                // The same pairing table a builder Field call runs (13 § 2.3): a narrowing needs Saturate = true, a loss for no gain is refused.
+                CodecPairing.Classify(member.FieldType, codec.Catalog, codec.Saturating, $"{what} '{name}' field '{messageType.Name}.{source}'",
+                    message: true);
 
                 wire = string.IsNullOrEmpty(declaration.Name) ? source : declaration.Name;
             }

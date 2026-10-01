@@ -144,6 +144,45 @@ class EntitiesEncodingTests : TestBase<EntitiesEncodingTests>
         });
     }
 
+    /// <summary>
+    /// A declared narrowing that bites is counted per field (13 § 2.3, E-3): two balances above <c>u32</c> clamp, the one below does not, and no other
+    /// field's counter moves.
+    /// </summary>
+    [Test]
+    public void ADeclaredNarrowingCountsEveryClampOnItsOwnField()
+    {
+        using var harness = Create();
+        using (var tx = harness.Engine.CreateQuickTransaction())
+        {
+            long[] balances = [5_000_000_000L, 12L, long.MaxValue];
+            for (var i = 0; i < balances.Length; i++)
+            {
+                var bounds = At(600f + (i * 4f), 600f);
+                var vitals = new ProjVitals { Health = 7, MaxHealth = 10 };
+                var wallet = new ProjWallet { Credits = balances[i], ItemCount = 3 };
+                tx.Spawn<ProjPlayer>(ProjPlayer.Bounds.Set(in bounds), ProjPlayer.Vitals.Set(in vitals), ProjPlayer.Wallet.Set(in wallet));
+            }
+
+            tx.Commit();
+        }
+
+        harness.OpenSessions(1, Profile);
+        harness.RunTick(1);
+
+        var index = harness.PlanIndex(nameof(ProjPlayer));
+        var plan = harness.Subscriptions.Plans[index];
+        var state = harness.Subscriptions.ReplicationStates[index];
+        var credits = plan.Fields.Length + Array.FindIndex(plan.OwnerFields, f => f.Name == "credits");
+        var items = plan.Fields.Length + Array.FindIndex(plan.OwnerFields, f => f.Name == "items");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(state.ClampsOf(credits), Is.EqualTo(2), "5e9 and long.MaxValue clamp into a varu; 12 does not");
+            Assert.That(state.ClampsOf(items), Is.Zero, "a saturating field whose values fit counts nothing");
+            Assert.That(state.ClampsOf(0), Is.Zero, "and a public field is untouched");
+        });
+    }
+
     // ── The vector ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
     /// <summary>

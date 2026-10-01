@@ -446,7 +446,7 @@ public struct CreatureVitals
 public struct PlayerVitals
 {
     // Everyone sees an 8-bit bar; the player alone sees the exact number, in SELF (design/Subscriptions/11 § 2).
-    [Field, Fraction(nameof(MaxHealth), Bits = 8, Name = "hp", Group = "vitals"), Owner(CodecKind.Varu, Name = "health")] public int Health;
+    [Field, Fraction(nameof(MaxHealth), Bits = 8, Name = "hp", Group = "vitals"), Owner(CodecKind.Varu, Name = "health", Saturate = true)] public int Health;
     [Field] public int MaxHealth;
     [Field] public int AttackCooldown;
     [Field] public int AttackDamage;
@@ -476,7 +476,7 @@ public struct LairVitals
 public struct CreatureBrain
 {
     /// <summary>See <see cref="AiMode"/>.</summary>
-    [Field, Replicate(CodecKind.U8, Name = "mode")] public int Mode;
+    [Field, Replicate(CodecKind.U8, Name = "mode", Saturate = true)] public int Mode;
 
     /// <summary>The lair this creature belongs to. Leashing is measured from here.</summary>
     [Field] public float HomeX;
@@ -591,7 +591,7 @@ public struct CreatureTimers
 [StructLayout(LayoutKind.Sequential)]
 public struct NpcBrain
 {
-    [Field, Replicate(CodecKind.U8, Name = "mode")] public int Mode;
+    [Field, Replicate(CodecKind.U8, Name = "mode", Saturate = true)] public int Mode;
     [Field] public float HomeX;
     [Field] public float HomeZ;
     [Field] public float LeashRadius;
@@ -640,7 +640,7 @@ public static class AiMode
 public struct PlayerState
 {
     /// <summary>See <see cref="PlayerActivity"/>.</summary>
-    [Field, Replicate(CodecKind.U8, Name = "activity")] public int Activity;
+    [Field, Replicate(CodecKind.U8, Name = "activity", Saturate = true)] public int Activity;
 
     /// <summary>Ticks until this player re-evaluates what it is doing.</summary>
     [Field] public int ActivityTicks;
@@ -799,7 +799,7 @@ public static class PlayerActivity
 public struct Lair
 {
     /// <summary>Which creature template this lair spawns; indexes <see cref="CreatureTemplates"/>.</summary>
-    [Field, OnEnter(CodecKind.U16, Name = "template")] public int CreatureTemplate;
+    [Field, OnEnter(CodecKind.U16, Name = "template", Saturate = true)] public int CreatureTemplate;
 
     /// <summary>How many creatures this lair keeps alive.</summary>
     [Field] public int SpawnLimit;
@@ -838,7 +838,7 @@ public struct Lair
 public struct Structure
 {
     /// <summary>See <see cref="StructureKind"/>.</summary>
-    [Field, OnEnter(CodecKind.U8, Name = "kind")] public int Kind;
+    [Field, OnEnter(CodecKind.U8, Name = "kind", Saturate = true)] public int Kind;
 
     /// <summary>
     /// Which region this belongs to: a city by its index, a point of interest as <c>Cities.Count + poiIndex</c>, and -1 for a structure standing alone in
@@ -849,7 +849,7 @@ public struct Structure
     /// thing that says which city a shuttleport serves, and a world reopened from disk has to answer that without the generator. Cities and points of interest
     /// share one index space because they are one question ("which region?"), and separating them would need a second field to say which kind of index this is.
     /// </remarks>
-    [Field, OnEnter(CodecKind.I16, Name = "region")] public int OwnerRegion;
+    [Field, OnEnter(CodecKind.I16, Name = "region", Saturate = true)] public int OwnerRegion;
 
     /// <summary>
     /// This building's slot in the planet's door list — the index that decides which interior realm it leads to — or -1 when the building is not enterable.
@@ -873,7 +873,7 @@ public struct Structure
     /// entity, like <c>kind</c> and <c>region</c>: a building's door never moves.
     /// </para>
     /// </remarks>
-    [Field, OnEnter(CodecKind.I16, Name = "portal")] public int PortalIndex;
+    [Field, OnEnter(CodecKind.I16, Name = "portal", Saturate = true)] public int PortalIndex;
 
     /// <summary>
     /// Ticks between updates. A building is 0 and never ticks. SWG's own arithmetic sets the others: manufacturing is

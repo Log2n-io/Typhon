@@ -18,7 +18,7 @@ namespace Typhon.Engine.Internals;
 /// </remarks>
 internal sealed unsafe class ProjectionScratch : IDisposable
 {
-    private uint* _codes;
+    private ulong* _codes;
     private int _codeCapacity;
 
     private byte* _scratch;
@@ -27,14 +27,14 @@ internal sealed unsafe class ProjectionScratch : IDisposable
     private bool _disposed;
 
     /// <summary>Native bytes this scratch holds, for the owner's resource accounting.</summary>
-    public long EstimatedBytes => ((long)_codeCapacity * sizeof(uint)) + _scratchCapacity;
+    public long EstimatedBytes => ((long)_codeCapacity * sizeof(ulong)) + _scratchCapacity;
 
     /// <summary>
-    /// The code scratch: one <c>uint</c> per (field ordinal, slot) pair, so a column walk writes a whole column and the per-slot encoders read down it.
+    /// The code scratch: one <c>ulong</c> per (field ordinal, slot) pair, so a column walk writes a whole column and the per-slot encoders read down it.
     /// </summary>
     /// <param name="count">How many codes are needed — <c>fieldCount × 64</c>.</param>
     /// <returns>The scratch, at least <paramref name="count"/> long.</returns>
-    public uint* Codes(int count)
+    public ulong* Codes(int count)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (count > _codeCapacity)
@@ -45,7 +45,7 @@ internal sealed unsafe class ProjectionScratch : IDisposable
                 capacity *= 2;
             }
             // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
-            _codes = (uint*)NativeMemory.Realloc(_codes, (nuint)capacity * sizeof(uint));
+            _codes = (ulong*)NativeMemory.Realloc(_codes, (nuint)capacity * sizeof(ulong));
             _codeCapacity = capacity;
         }
 

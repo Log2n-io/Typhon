@@ -37,7 +37,7 @@ internal enum ProjectionSourceType : byte
     /// <summary>An unsigned 32-bit integer.</summary>
     UInt32,
 
-    /// <summary>A signed 64-bit integer. It never reaches the wire as 64 bits; the codec narrows it and the registry made that narrowing explicit.</summary>
+    /// <summary>A signed 64-bit integer. Until the 64-bit codecs (13 § 3) it reaches the wire only through a declared narrowing.</summary>
     Int64,
 
     /// <summary>An unsigned 64-bit integer, narrowed the same way.</summary>
@@ -109,16 +109,20 @@ internal readonly struct CompiledField
     public Type EnumType { get; init; }
 
     /// <summary>
-    /// Whether the declaration marked this integer codec saturating — <c>Codec.Saturate()</c>, required of any 64-bit source, and exported as the codec's
-    /// <c>!</c> in the catalog. Dropping it here would build a catalog whose <c>varu</c> no longer says the narrowing was explicit.
+    /// Whether the declaration marked this integer codec saturating — <c>Codec.Saturate()</c>, required of any integer narrowing (13 § 2.3). It is
+    /// what made <see cref="Path"/> a <see cref="ColumnPath.NarrowingInteger"/> for a source the codec cannot hold; the codec's text shows it as
+    /// <c>!</c>.
     /// </summary>
     public bool Saturating { get; init; }
 
-    /// <summary>Lowest code an integer kind accepts; the clamp is the codec's range, not the source's.</summary>
-    public double CodeMin { get; init; }
+    /// <summary>How the column turns values into codes, decided by the pairing table (<see cref="CodecPairing"/>, 13 § 4).</summary>
+    public ColumnPath Path { get; init; }
 
-    /// <summary>Highest code an integer kind accepts.</summary>
-    public double CodeMax { get; init; }
+    /// <summary>Lowest code a <see cref="ColumnPath.NarrowingInteger"/> column clamps to: the codec's range, not the source's.</summary>
+    public long IntMin { get; init; }
+
+    /// <summary>Highest code a <see cref="ColumnPath.NarrowingInteger"/> column clamps to.</summary>
+    public long IntMax { get; init; }
 
     /// <summary>Lower bound of a <c>quant</c> codec, inclusive.</summary>
     public double QuantMin { get; init; }

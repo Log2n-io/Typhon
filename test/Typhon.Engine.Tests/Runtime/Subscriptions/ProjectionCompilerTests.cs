@@ -206,7 +206,7 @@ class ProjectionCompilerTests : TestBase<ProjectionCompilerTests>
         // and nothing about which archetype may use it — so this can only be caught where the id is resolved against the archetype.
         subs.Archetype<ProjCreature>(a => a
             .Motion(ProjCreature.Bounds, m => m.Teleport(ProjectionTestSchema.MaxSpeedMps))
-            .Field(ProjPlayer.Wallet, w => w.ItemCount, Codec.VarUInt, name: "items"));
+            .Field(ProjPlayer.Wallet, w => w.ItemCount, Codec.I32, name: "items"));
 
         var thrown = Assert.Throws<InvalidOperationException>(
             () => ProjectionCompiler.Compile(subs, dbe, ProjectionTestSchema.TickPeriodSeconds, 1));
@@ -347,8 +347,11 @@ class ProjectionCompilerTests : TestBase<ProjectionCompilerTests>
             Assert.That(mode.EnumType.Name, Is.EqualTo(nameof(ProjAiMode)), "which is also the catalog key");
             Assert.That(level.EnumType, Is.Null, "a plain integer field carries none");
             Assert.That(credits.Saturating, Is.True, "Codec.VarUInt.Saturate() is what let a long be projected at all");
-            Assert.That(items.Saturating, Is.False, "an int needs no narrowing, and must not claim one");
-            Assert.That(mode.Saturating, Is.False);
+            Assert.That(items.Saturating, Is.True, "an int in a varu loses its negatives: the narrowing is declared, as for any width (13 § 2.3)");
+            Assert.That(mode.Saturating, Is.False, "an enum whose names fit its codec needs no Saturate");
+            Assert.That(credits.Path, Is.EqualTo(ColumnPath.NarrowingInteger), "a declared narrowing clamps and counts");
+            Assert.That(mode.Path, Is.EqualTo(ColumnPath.NarrowingInteger), "an enum still clamps a value cast in from outside its names");
+            Assert.That(level.Path, Is.EqualTo(ColumnPath.ExactInteger), "a ushort in a u16 is its own code: no rounding, no clamp");
         });
     }
 }

@@ -362,7 +362,20 @@ internal static class ProjectionCompiler
         var bitOffset = packBits;
         packBits += bitCount;
 
-        var (codeMin, codeMax) = IntegerRange(codec);
+        var sourceType = ResolveSourceType(projection, field, source);
+
+        // The column path, from the same table the registry ran at declaration (13 § 2.3), against the stored field's own type. A Fraction encodes the
+        // ratio of two fields as a double, never the field, so it is always the quantizing path.
+        var path = ratioOffset >= 0
+            ? ColumnPath.Quantizing
+            : CodecPairing.Classify(source.DotNetType, codec, field.Codec.Saturating, $"Field '{field.Name}' of archetype '{projection.Name}'");
+        if (path == ColumnPath.None)
+        {
+            throw new InvalidOperationException(
+                $"Archetype '{projection.Name}' declares field '{field.Name}' with codec '{codec.Type}', which the column walk has no path for.");
+        }
+
+        var (intMin, intMax) = CodecPairing.CodeRange(codec);
         var headingTolerance = 0u;
         if (field.IsHeading)
         {
@@ -392,14 +405,15 @@ internal static class ProjectionCompiler
             ComponentSize = layout.ComponentSize(slot),
             FieldOffsetInComponent = source.OffsetInComponentStorage,
             RatioOffsetInComponent = ratioOffset,
-            SourceType = ResolveSourceType(projection, field, source),
+            SourceType = sourceType,
             Codec = codec,
             CodecKind = codec.Kind,
             CodecBits = codec.Kind == CodecKind.Bits ? codec.N : codec.Bits,
             EnumType = field.Codec.EnumType,
             Saturating = field.Codec.Saturating,
-            CodeMin = codeMin,
-            CodeMax = codeMax,
+            Path = path,
+            IntMin = intMin,
+            IntMax = intMax,
             QuantMin = codec.Kind == CodecKind.Quant ? codec.Min[0] : 0d,
             QuantMax = codec.Kind == CodecKind.Quant ? codec.Max[0] : 0d,
             Section = section,
@@ -724,19 +738,6 @@ internal static class ProjectionCompiler
     private static bool IsPacked(Codec codec) => codec.Catalog != null && CatalogSerializer.IsPacked(codec.Catalog.Kind);
 
     private static bool IsPacked(CatalogCodec codec) => codec != null && CatalogSerializer.IsPacked(codec.Kind);
-
-    private static (double Min, double Max) IntegerRange(CatalogCodec codec) => codec.Kind switch
-    {
-        CodecKind.U8 => (0d, byte.MaxValue),
-        CodecKind.I8 => (sbyte.MinValue, sbyte.MaxValue),
-        CodecKind.U16 => (0d, ushort.MaxValue),
-        CodecKind.I16 => (short.MinValue, short.MaxValue),
-        CodecKind.U32 or CodecKind.Varu or CodecKind.EntityRef or CodecKind.TickLo => (0d, uint.MaxValue),
-        CodecKind.I32 or CodecKind.Vari => (int.MinValue, int.MaxValue),
-        CodecKind.Bool => (0d, 1d),
-        CodecKind.Bits => (0d, WireMath.Pow2(codec.N) - 1),
-        _ => (0d, 0d),
-    };
 
     private static int MaxEncodedBytes(CatalogCodec codec) => codec.Kind switch
     {

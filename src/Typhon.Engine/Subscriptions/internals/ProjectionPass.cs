@@ -253,8 +253,8 @@ internal static unsafe class ProjectionPass
         var ownerFields = plan.OwnerFields;
         var codeRows = fields.Length + ownerFields.Length;
         var codes = arena.Codes(Math.Max(1, codeRows) * MaxSlots);
-        Quantize(fields, 0, clusterLayout, clusterBase, transientBase, slotCount, live, codes);
-        Quantize(ownerFields, fields.Length, clusterLayout, clusterBase, transientBase, slotCount, live, codes);
+        Quantize(state, fields, 0, clusterLayout, clusterBase, transientBase, slotCount, live, codes);
+        Quantize(state, ownerFields, fields.Length, clusterLayout, clusterBase, transientBase, slotCount, live, codes);
 
         // ── 4. Scratch, carved once per block ────────────────────────────────────────────────────────────────────────────────────────────────────────────
         var packBytes = MaxPackBytes(plan);
@@ -506,8 +506,8 @@ internal static unsafe class ProjectionPass
 
     // ── Column walk ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    private static void Quantize(CompiledField[] fields, int rowBase, ArchetypeClusterInfo clusterLayout, byte* clusterBase, byte* transientBase,
-        int slotCount, ulong slots, uint* codes)
+    private static void Quantize(ArchetypeReplicationState state, CompiledField[] fields, int rowBase, ArchetypeClusterInfo clusterLayout, byte* clusterBase,
+        byte* transientBase, int slotCount, ulong slots, ulong* codes)
     {
         for (var i = 0; i < fields.Length; i++)
         {
@@ -515,7 +515,13 @@ internal static unsafe class ProjectionPass
             ref readonly var field = ref fields[i];
             var storeBase = StoreFor(clusterLayout, transientBase, clusterBase, field.ComponentSlot);
             var column = new ReadOnlySpan<byte>(storeBase + field.ComponentOffsetInCluster, slotCount * field.ComponentSize);
-            ProjectionColumnWalk.Quantize(field, ProjectionColumn.Over(column, field), slots, new Span<uint>(codes + ((rowBase + i) * MaxSlots), MaxSlots));
+            var row = new Span<ulong>(codes + ((rowBase + i) * MaxSlots), MaxSlots);
+            var clamps = ProjectionColumnWalk.Quantize(field, ProjectionColumn.Over(column, field), slots, row);
+            if (clamps != 0)
+            {
+                // A declared narrowing that bit: counted per field, so "my balance shows 4 294 967 295" has a number behind it (13 § 2.3).
+                state.NoteClamps(rowBase + i, clamps);
+            }
         }
     }
 
@@ -532,7 +538,7 @@ internal static unsafe class ProjectionPass
     /// group body the comparison sees is unchanged and nothing is sent; past it, the new code becomes the held one. The distance is taken modulo the angle's
     /// full turn, so the wrap at ±π is no special case — and the compare is still the encode: what is compared is what would be sent.
     /// </summary>
-    private static void ApplyHeadingDeadband(CompiledField[] fields, uint* codes, int slot, byte* held, bool initialize)
+    private static void ApplyHeadingDeadband(CompiledField[] fields, ulong* codes, int slot, byte* held, bool initialize)
     {
         for (var i = 0; i < fields.Length; i++)
         {
@@ -542,12 +548,14 @@ internal static unsafe class ProjectionPass
                 continue;
             }
 
+            // An angle's code is at most 32 bits wide, so the held copy stays a uint and the arithmetic stays in 32 bits.
             var code = codes + (i * MaxSlots) + slot;
             var kept = (uint*)(held + (4 * (field.HeadingPlusOne - 1)));
+            var current = (uint)*code;
             if (!initialize)
             {
                 var mask = field.CodecBits >= 32 ? uint.MaxValue : (1u << field.CodecBits) - 1;
-                var diff = (*code - *kept) & mask;
+                var diff = (current - *kept) & mask;
                 var distance = Math.Min(diff, (mask - diff) + 1);
                 if (distance <= field.HeadingToleranceCodes)
                 {
@@ -556,7 +564,7 @@ internal static unsafe class ProjectionPass
                 }
             }
 
-            *kept = *code;
+            *kept = current;
         }
     }
 
@@ -566,7 +574,7 @@ internal static unsafe class ProjectionPass
     /// Encodes each group's body from the codes, compares it with the copy the entry holds and stamps the group's tick where they differ.
     /// </summary>
     /// <returns>The mask of groups whose body changed.</returns>
-    private static int EncodeAndCompare(CompiledGroup[] groups, CompiledField[] fields, int rowBase, uint* codes, int slot, Span<byte> pack, byte* scratch,
+    private static int EncodeAndCompare(CompiledGroup[] groups, CompiledField[] fields, int rowBase, ulong* codes, int slot, Span<byte> pack, byte* scratch,
         byte* stored, Span<int> lengths, Span<int> offsets, ReplicationHotEntry* hot, uint tick, bool initialize, bool stampTicks = true)
     {
         var changed = 0;
@@ -604,7 +612,7 @@ internal static unsafe class ProjectionPass
     /// Encodes one section's body for one slot: its leading bit pack, then each byte-aligned field's code in wire order (03 § 5, W11/W12).
     /// </summary>
     /// <returns>Bytes written.</returns>
-    private static int EncodeSection(CompiledField[] fields, in CompiledSection section, uint* codes, int rowBase, int slot, Span<byte> pack,
+    private static int EncodeSection(CompiledField[] fields, in CompiledSection section, ulong* codes, int rowBase, int slot, Span<byte> pack,
         Span<byte> destination)
     {
         if (section.FieldCount == 0)
@@ -621,7 +629,7 @@ internal static unsafe class ProjectionPass
             {
                 var index = section.FirstField + i;
                 ref readonly var field = ref fields[index];
-                var code = codes[((rowBase + index) * MaxSlots) + slot];
+                var code = (uint)codes[((rowBase + index) * MaxSlots) + slot];
                 var mask = field.BitCount >= 32 ? uint.MaxValue : (1u << field.BitCount) - 1;
                 FieldCodec.WritePackedBits(packed, field.BitOffset, field.BitCount, code & mask);
             }
@@ -646,7 +654,7 @@ internal static unsafe class ProjectionPass
     /// same number and the one place a rounding difference could put different bytes on the wire from the ones the comparison above accepted. The framing is
     /// still <see cref="WireWriter"/>'s — nothing here re-spells a varint or an endianness.
     /// </remarks>
-    private static void WriteCode(ref WireWriter writer, in CompiledField field, uint code)
+    internal static void WriteCode(ref WireWriter writer, in CompiledField field, ulong code)
     {
         switch (field.CodecKind)
         {
@@ -663,11 +671,11 @@ internal static unsafe class ProjectionPass
             case CodecKind.U32:
             case CodecKind.I32:
             case CodecKind.F32:
-                writer.WriteU32(code);
+                writer.WriteU32(unchecked((uint)code));
                 break;
             case CodecKind.Varu:
             case CodecKind.EntityRef:
-                writer.WriteVaru(code);
+                writer.WriteVaru(unchecked((uint)code));
                 break;
             case CodecKind.Vari:
                 writer.WriteVari(unchecked((int)code));
@@ -676,7 +684,7 @@ internal static unsafe class ProjectionPass
             case CodecKind.Unorm:
             case CodecKind.Snorm:
             case CodecKind.Angle:
-                writer.WriteBits(code, field.CodecBits);
+                writer.WriteBits(unchecked((uint)code), field.CodecBits);
                 break;
             default:
                 throw new InvalidOperationException(

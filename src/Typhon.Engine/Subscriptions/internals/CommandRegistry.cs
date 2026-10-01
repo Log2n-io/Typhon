@@ -106,10 +106,19 @@ internal readonly struct CommandFieldBinding
     public void Store(Span<byte> payload, scoped ReadOnlySpan<double> components)
     {
         var target = payload.Slice(Offset, Components * ElementSize);
+        var integral = Element is not (CommandFieldElement.F32 or CommandFieldElement.F64);
         for (var i = 0; i < Components; i++)
         {
             var slot = target.Slice(i * ElementSize, ElementSize);
             var value = components[i];
+
+            // An integer field may travel as a quant (13 § 2.3), which decodes to a value between integers: rounded half away from zero (W1's rha), never
+            // truncated. Every integer codec decodes to a whole number, which rounding leaves as it is.
+            if (integral)
+            {
+                value = WireMath.RoundHalfAwayFromZero(value);
+            }
+
             switch (Element)
             {
                 case CommandFieldElement.I8:

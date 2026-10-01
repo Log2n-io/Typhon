@@ -741,6 +741,41 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>Records that a worker's identity lease ran dry and one entity was deferred to the next tick.</summary>
     public void NoteNetIdStarvation() => Interlocked.Increment(ref _netIdStarvations);
 
+    // One counter per projected field row (public fields, then owner fields, as the code scratch lays them out). Sized once at Start, so counting allocates
+    // nothing on the tick path; a clamp is rare, so the Interlocked add is paid only when one happened.
+    private long[] _fieldClamps = [];
+
+    /// <summary>Sizes the per-field clamp counters to the archetype's projected rows. Called once, when the plan is attached.</summary>
+    /// <param name="rows">Public fields plus owner fields.</param>
+    public void SizeClampCounters(int rows) => _fieldClamps = new long[Math.Max(0, rows)];
+
+    /// <summary>
+    /// Records that a narrowing column (<c>Saturate()</c>, or an enum read from outside its names) clamped <paramref name="count"/> values this tick.
+    /// </summary>
+    /// <param name="row">The field's row: its index among the public fields, or the public count plus its index among the owner fields.</param>
+    /// <param name="count">Values clamped.</param>
+    /// <remarks>Never throws: a row outside the sized range is dropped, because a counter must not be the thing that fails a tick.</remarks>
+    public void NoteClamps(int row, int count)
+    {
+        var counters = _fieldClamps;
+        if ((uint)row < (uint)counters.Length)
+        {
+            Interlocked.Add(ref counters[row], count);
+        }
+    }
+
+    /// <summary>
+    /// Clamps a field's declared narrowing has performed since the runtime started (design/Subscriptions/13 § 2.3, E-3) — one per projection of an
+    /// out-of-range value, so a value that stays out of range counts again each time its entity is pushed. A rate, not a count of distinct values.
+    /// </summary>
+    /// <param name="row">The field's row, as <see cref="NoteClamps"/> numbers it.</param>
+    /// <returns>The count; 0 for a row that does not exist.</returns>
+    public long ClampsOf(int row)
+    {
+        var counters = _fieldClamps;
+        return (uint)row < (uint)counters.Length ? Volatile.Read(ref counters[row]) : 0;
+    }
+
     /// <summary>Accumulates one block's motion segments, and what the rejected trigger would have emitted over the same block.</summary>
     /// <param name="emitted">Segments this rule emitted.</param>
     /// <param name="shadow">Segments the rejected "the quantized velocity changed" trigger would have emitted.</param>

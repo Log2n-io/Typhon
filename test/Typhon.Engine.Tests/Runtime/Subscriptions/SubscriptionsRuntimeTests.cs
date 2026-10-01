@@ -253,7 +253,7 @@ unsafe class SubscriptionsRuntimeTests : TestBase<SubscriptionsRuntimeTests>
         // ProjRock has no Vitals component, so the field cannot resolve to a column in its cluster layout.
         runtime.Subscriptions.Archetype<ProjRock>(a => a
             .Position(ProjRock.Bounds)
-            .Field(ProjCreature.Vitals, v => v.Health, Codec.U16, name: "hp"));
+            .Field(ProjCreature.Vitals, v => v.Health, Codec.I32, name: "hp"));
 
         var ex = Assert.Throws<InvalidOperationException>(runtime.Start);
 

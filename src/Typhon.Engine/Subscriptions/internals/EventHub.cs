@@ -29,6 +29,33 @@ internal readonly struct EventFieldBinding
         TextWireCap = textWireCap;
     }
 
+    /// <summary>
+    /// Whether the declaration narrowed this integer field with <c>Codec.Saturate()</c> (13 § 2.3): the value is clamped to <see cref="ClampMin"/> ..
+    /// <see cref="ClampMax"/> before it is encoded, as an archetype field's is, rather than refused by the encoder and the whole event dropped.
+    /// </summary>
+    public bool Saturating { get; init; }
+
+    /// <summary>The codec's lowest code, for a saturating field.</summary>
+    public double ClampMin { get; init; }
+
+    /// <summary>The codec's highest code, for a saturating field.</summary>
+    public double ClampMax { get; init; }
+
+    /// <summary>Applies the declared narrowing to loaded values; a no-op unless <see cref="Saturating"/>.</summary>
+    /// <param name="values">The values <see cref="Load"/> produced.</param>
+    public void Narrow(Span<double> values)
+    {
+        if (!Saturating)
+        {
+            return;
+        }
+
+        for (var i = 0; i < values.Length; i++)
+        {
+            values[i] = Math.Clamp(values[i], ClampMin, ClampMax);
+        }
+    }
+
     /// <summary>The wire field, in the catalog's wire order.</summary>
     public FieldPlan Field { get; }
 
@@ -119,6 +146,10 @@ internal readonly struct EventFieldBinding
                 _ => MemoryMarshal.Read<double>(slot),
             };
         }
+
+        // Here rather than at each encode site, so the packed and the byte-aligned writers both see the clamped value: the encoder refuses an
+        // out-of-range integer, which would drop the whole event for a narrowing the declaration asked for.
+        Narrow(into[..Components]);
     }
 }
 
@@ -439,11 +470,13 @@ internal sealed class EventHub
         }
 
         var sourceName = field.Name;
+        var saturating = false;
         foreach (var declared in declaration.Fields)
         {
             if (string.Equals(declared.Name, field.Name, StringComparison.Ordinal))
             {
                 sourceName = declared.SourceFieldName;
+                saturating = declared.Codec.Saturating;
                 break;
             }
         }
@@ -496,7 +529,13 @@ internal sealed class EventHub
                 $"is {fieldSize} bytes.");
         }
 
-        return new EventFieldBinding(field, offset, field.Components, element, elementSize, entity: false);
+        var (clampMin, clampMax) = CodecPairing.CodeRange(field.Codec);
+        return new EventFieldBinding(field, offset, field.Components, element, elementSize, entity: false)
+        {
+            Saturating = saturating && CodecPairing.IsIntegerCodec(field.Codec.Kind),
+            ClampMin = clampMin,
+            ClampMax = clampMax,
+        };
     }
 
     // ══ Emission (any worker) ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════

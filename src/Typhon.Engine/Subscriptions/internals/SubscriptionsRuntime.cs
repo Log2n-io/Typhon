@@ -1018,6 +1018,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // The motion rule's teleport threshold and its heartbeat are both expressed in ticks, so the state carries the nominal period rather than
             // assuming one: a 10 Hz runtime left at the default would get a threshold six times too tight and a heartbeat six times too long.
             states[i].TickPeriodSeconds = NominalTickPeriodSeconds;
+            states[i].SizeClampCounters(plan.Fields.Length + plan.OwnerFields.Length);
             states[i].AttachTo(clusterState);
 
             // Narrowed HERE and nowhere else, because this is the only place a compiled plan and its cluster state are both in hand. Until this runs the

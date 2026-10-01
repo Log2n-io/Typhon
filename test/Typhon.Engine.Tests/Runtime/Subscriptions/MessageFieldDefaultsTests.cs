@@ -367,7 +367,7 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
     {
         using var harness = new Harness(static subs => subs.Command<AllDefaults>(c => c
             .Rate(10_000, 20_000)
-            .Field(m => m.Count, Codec.U8)));
+            .Field(m => m.Count, Codec.U8.Saturate())));
 
         var command = CommandNamed(harness.Export.Canonical, nameof(AllDefaults));
         Assert.Multiple(() =>
@@ -577,7 +577,7 @@ class MessageFieldDefaultsTests : TestBase<MessageFieldDefaultsTests>
 
         static void Declare(SubscriptionsRegistry subs)
         {
-            subs.Command<AllDefaults>(c => c.Rate(10, 20).Field(m => m.Count, Codec.U8));
+            subs.Command<AllDefaults>(c => c.Rate(10, 20).Field(m => m.Count, Codec.U8.Saturate()));
             subs.Command<HasScratch>(c => c.Ignore(s => s.Scratch));
             subs.Event<DefaultedHit>(e => e.RouteToOwner(h => h.Victim));
         }

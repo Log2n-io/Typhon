@@ -134,7 +134,8 @@ public sealed class ArchetypeProjectionBuilder
             throw new ArgumentException("Fraction needs a wire name: neither the numerator's nor the denominator's name describes the ratio.", nameof(name));
         }
 
-        var field = SubscriptionsNames.BuildField<TComponent, TValue>(component, value, Codec.Unorm(bits), name, group, onEnter: false, owner: false);
+        var field = SubscriptionsNames.BuildField<TComponent, TValue>(component, value, Codec.Unorm(bits), name, group, onEnter: false, owner: false,
+            ratio: true);
         field.MaxSourceFieldName = SubscriptionsNames.SelectorField(max, "Fraction");
         _projection.AddField(field);
         return this;

@@ -18,8 +18,20 @@ internal interface IColumnReader
     /// Byte offset of the value. A reader reads unchecked, so the offset must come from a slot the walk has already masked against the column's
     /// <see cref="ProjectionColumn.SlotCount"/> — never from an arbitrary index.
     /// </param>
-    /// <returns>The value, widened to <see cref="double"/> — the one type every codec's arithmetic is defined over (W1).</returns>
+    /// <returns>The value, widened to <see cref="double"/> — the one type every quantizing codec's arithmetic is defined over (W1).</returns>
     double Read(ReadOnlySpan<byte> column, int offset);
+}
+
+/// <summary>
+/// Reads one integral value out of a component column, exactly: the integer paths never see a <see cref="double"/> (13 § 4, W1 scoped by ADR-069).
+/// </summary>
+internal interface IIntegerColumnReader
+{
+    /// <summary>Reads the value at <paramref name="offset"/> bytes into <paramref name="column"/>, sign- or zero-extended to 64 bits.</summary>
+    /// <param name="column">The component column for one cluster.</param>
+    /// <param name="offset">Byte offset of the value; masked by the walk, as for <see cref="IColumnReader"/>.</param>
+    /// <returns>The value. A <see cref="ulong"/> reader either reinterprets its bits or saturates at <see cref="long.MaxValue"/>, by its kind.</returns>
+    long Read(ReadOnlySpan<byte> column, int offset);
 }
 
 /// <summary>
@@ -123,22 +135,44 @@ internal readonly ref struct ProjectionColumn
 /// run of cache lines instead of one line per entity per field ([02 § 4]).
 /// </para>
 /// <para>
-/// <b>Two struct type parameters, chosen once per column.</b> <see cref="Quantize(in CompiledField, in ProjectionColumn, ulong, Span{uint})"/> switches on the
-/// compiled field's source type and codec kind — two switches per column, never per entity — and hands the loop a <c>struct</c> for each. The JIT then
-/// specializes the loop over that pair: no delegate, no virtual call, no generated code, and nothing that runtime IL emission would be needed for (#409).
+/// <b>Two struct type parameters, chosen once per column.</b> <see cref="Quantize(in CompiledField, in ProjectionColumn, ulong, Span{ulong})"/> switches on
+/// the compiled field's path, source type and codec kind — a few switches per column, never per entity — and hands the loop a <c>struct</c> for each. The
+/// JIT then specializes the loop: no delegate, no virtual call, no generated code, and nothing that runtime IL emission would be needed for (#409).
+/// </para>
+/// <para>
+/// <b>Three scalar paths</b> (13 § 4). An integral source in an integer codec takes an exact path — its value is its code, with no rounding, no NaN test and,
+/// when the codec covers the source, no clamp; a narrower codec clamps and counts. A <see cref="float"/> in <c>f32</c> copies its bits. Everything that
+/// quantizes takes W1's binary64 path through <see cref="WireMath"/>. Codes are 64 bits wide so one row type serves every path.
 /// </para>
 /// </remarks>
 internal static class ProjectionColumnWalk
 {
     /// <summary>
-    /// Quantizes one field's column over the given slots.
+    /// Turns one field's column into codes over the given slots.
     /// </summary>
-    /// <param name="field">The compiled field; its codec kind and source type pick the specialization.</param>
+    /// <param name="field">The compiled field; its path, codec kind and source type pick the specialization.</param>
     /// <param name="column">The field's column for one cluster.</param>
     /// <param name="slots">The slots to read, one bit each — the watched mask intersected with the cluster's occupancy.</param>
     /// <param name="codes">Receives one code per set bit, indexed by slot.</param>
-    public static void Quantize(in CompiledField field, in ProjectionColumn column, ulong slots, Span<uint> codes)
+    /// <returns>How many values a narrowing column clamped; 0 for every other path.</returns>
+    public static int Quantize(in CompiledField field, in ProjectionColumn column, ulong slots, Span<ulong> codes)
     {
+        switch (field.Path)
+        {
+            case ColumnPath.ExactInteger:
+                WithIntegerReader(field, column, slots, codes, narrowing: false);
+                return 0;
+            case ColumnPath.NarrowingInteger:
+                return WithIntegerReader(field, column, slots, codes, narrowing: true);
+            case ColumnPath.ExactSingle:
+                WalkSingleBits(column, slots, codes);
+                return 0;
+            case ColumnPath.Quantizing:
+                break;
+            default:
+                throw new InvalidOperationException($"Field '{field.Name}' has no column path; the plan was not compiled.");
+        }
+
         switch (field.CodecKind)
         {
             case CodecKind.Unorm:
@@ -160,10 +194,98 @@ internal static class ProjectionColumnWalk
                 WithReader(field, column, slots, new HalfColumnCodec(), codes);
                 break;
             default:
-                // Every remaining kind a projected field may carry is an integer on the wire — u8…i32, varu, vari, bits, bool, entityRef, tickLo. They differ
-                // only in the range they clamp to, which the compiler already reduced to a pair of numbers, so one specialization serves them all.
-                WithReader(field, column, slots, new IntegerColumnCodec(field.CodeMin, field.CodeMax), codes);
-                break;
+                // An integer codec never quantizes: the pairing table sends every integral source to an integer path and refuses a float in one.
+                throw new InvalidOperationException(
+                    $"Field '{field.Name}' carries codec '{CodecTokens.ToToken(field.CodecKind)}' on the quantizing path, which only W1's codecs take.");
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// The exact integer loop: the value read is the code. No rounding, no NaN test, no clamp — the pairing table proved the codec covers the source.
+    /// </summary>
+    /// <typeparam name="TReader">How the value is read.</typeparam>
+    /// <param name="column">The field's column.</param>
+    /// <param name="slots">The slots to read; intersected with the column's own <see cref="ProjectionColumn.SlotMask"/> before anything is read.</param>
+    /// <param name="reader">The reader.</param>
+    /// <param name="codes">Receives one code per set bit, indexed by slot: the value's two's complement, which every writer truncates to its width.</param>
+    public static void WalkInteger<TReader>(in ProjectionColumn column, ulong slots, TReader reader, Span<ulong> codes)
+        where TReader : struct, IIntegerColumnReader
+    {
+        var bytes = column.Bytes;
+        var stride = column.Stride;
+        var offset = column.ValueOffset;
+        slots &= column.SlotMask;
+        while (slots != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(slots);
+            slots &= slots - 1;
+            codes[slot] = unchecked((ulong)reader.Read(bytes, (slot * stride) + offset));
+        }
+    }
+
+    /// <summary>
+    /// The narrowing integer loop: the value clamped to the codec's range, every clamp counted — the declaration said <c>Saturate()</c>, or the field is an
+    /// enum whose declared names fit and a clamp means a value from outside them.
+    /// </summary>
+    /// <typeparam name="TReader">How the value is read; a <see cref="ulong"/> source saturates at <see cref="long.MaxValue"/>, clamping the same.</typeparam>
+    /// <param name="column">The field's column.</param>
+    /// <param name="slots">The slots to read; intersected with the column's own <see cref="ProjectionColumn.SlotMask"/> before anything is read.</param>
+    /// <param name="reader">The reader.</param>
+    /// <param name="min">The codec's lowest code.</param>
+    /// <param name="max">The codec's highest code.</param>
+    /// <param name="codes">Receives one code per set bit, indexed by slot.</param>
+    /// <returns>How many values were clamped.</returns>
+    public static int WalkNarrowing<TReader>(in ProjectionColumn column, ulong slots, TReader reader, long min, long max, Span<ulong> codes)
+        where TReader : struct, IIntegerColumnReader
+    {
+        var bytes = column.Bytes;
+        var stride = column.Stride;
+        var offset = column.ValueOffset;
+        var clamps = 0;
+        slots &= column.SlotMask;
+        while (slots != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(slots);
+            slots &= slots - 1;
+            var value = reader.Read(bytes, (slot * stride) + offset);
+            if (value < min)
+            {
+                value = min;
+                clamps++;
+            }
+            else if (value > max)
+            {
+                value = max;
+                clamps++;
+            }
+
+            codes[slot] = unchecked((ulong)value);
+        }
+
+        return clamps;
+    }
+
+    /// <summary>
+    /// The exact <c>f32</c> loop for a <see cref="float"/> source: its bits are the code, with every NaN canonicalized to <c>0x7FC00000</c> — the bytes
+    /// <see cref="WireMath.EncodeSingle"/> produces for the same value, without the widen and the narrow.
+    /// </summary>
+    /// <param name="column">The field's column.</param>
+    /// <param name="slots">The slots to read; intersected with the column's own <see cref="ProjectionColumn.SlotMask"/> before anything is read.</param>
+    /// <param name="codes">Receives one code per set bit, indexed by slot.</param>
+    public static void WalkSingleBits(in ProjectionColumn column, ulong slots, Span<ulong> codes)
+    {
+        var bytes = column.Bytes;
+        var stride = column.Stride;
+        var offset = column.ValueOffset;
+        slots &= column.SlotMask;
+        while (slots != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(slots);
+            slots &= slots - 1;
+            var bits = Unsafe.ReadUnaligned<uint>(ref At(bytes, (slot * stride) + offset));
+            codes[slot] = (bits & 0x7FFFFFFFu) > 0x7F800000u ? 0x7FC00000u : bits;
         }
     }
 
@@ -177,7 +299,7 @@ internal static class ProjectionColumnWalk
     /// <param name="reader">The reader.</param>
     /// <param name="codec">The codec.</param>
     /// <param name="codes">Receives one code per set bit, indexed by slot.</param>
-    public static void Walk<TReader, TCodec>(in ProjectionColumn column, ulong slots, TReader reader, TCodec codec, Span<uint> codes)
+    public static void Walk<TReader, TCodec>(in ProjectionColumn column, ulong slots, TReader reader, TCodec codec, Span<ulong> codes)
         where TReader : struct, IColumnReader
         where TCodec : struct, IColumnCodec
     {
@@ -205,7 +327,7 @@ internal static class ProjectionColumnWalk
     /// <param name="codec">The codec.</param>
     /// <param name="codes">Receives one code per set bit, indexed by slot.</param>
     public static void WalkRatio<TReader, TCodec>(in ProjectionColumn column, int denominatorOffset, ulong slots, TReader reader, TCodec codec,
-        Span<uint> codes)
+        Span<ulong> codes)
         where TReader : struct, IColumnReader
         where TCodec : struct, IColumnCodec
     {
@@ -226,7 +348,7 @@ internal static class ProjectionColumnWalk
         }
     }
 
-    private static void WithReader<TCodec>(in CompiledField field, in ProjectionColumn column, ulong slots, TCodec codec, Span<uint> codes)
+    private static void WithReader<TCodec>(in CompiledField field, in ProjectionColumn column, ulong slots, TCodec codec, Span<ulong> codes)
         where TCodec : struct, IColumnCodec
     {
         switch (field.SourceType)
@@ -269,7 +391,7 @@ internal static class ProjectionColumnWalk
         }
     }
 
-    private static void Run<TReader, TCodec>(in CompiledField field, in ProjectionColumn column, ulong slots, TReader reader, TCodec codec, Span<uint> codes)
+    private static void Run<TReader, TCodec>(in CompiledField field, in ProjectionColumn column, ulong slots, TReader reader, TCodec codec, Span<ulong> codes)
         where TReader : struct, IColumnReader
         where TCodec : struct, IColumnCodec
     {
@@ -282,6 +404,48 @@ internal static class ProjectionColumnWalk
         {
             Walk(column, slots, reader, codec, codes);
         }
+    }
+
+    private static int WithIntegerReader(in CompiledField field, in ProjectionColumn column, ulong slots, Span<ulong> codes, bool narrowing)
+    {
+        switch (field.SourceType)
+        {
+            case ProjectionSourceType.Boolean:
+                return RunInteger(field, column, slots, new BooleanIntegerReader(), codes, narrowing);
+            case ProjectionSourceType.SByte:
+                return RunInteger(field, column, slots, new SByteIntegerReader(), codes, narrowing);
+            case ProjectionSourceType.Byte:
+                return RunInteger(field, column, slots, new ByteIntegerReader(), codes, narrowing);
+            case ProjectionSourceType.Int16:
+                return RunInteger(field, column, slots, new Int16IntegerReader(), codes, narrowing);
+            case ProjectionSourceType.UInt16:
+                return RunInteger(field, column, slots, new UInt16IntegerReader(), codes, narrowing);
+            case ProjectionSourceType.Int32:
+                return RunInteger(field, column, slots, new Int32IntegerReader(), codes, narrowing);
+            case ProjectionSourceType.UInt32:
+                return RunInteger(field, column, slots, new UInt32IntegerReader(), codes, narrowing);
+            case ProjectionSourceType.Int64:
+                return RunInteger(field, column, slots, new Int64IntegerReader(), codes, narrowing);
+            case ProjectionSourceType.UInt64:
+                // A ulong above long.MaxValue clamps to any narrower codec's max, so saturating it there is exact; an exact path (a u64 codec) keeps its bits.
+                return narrowing
+                    ? RunInteger(field, column, slots, new UInt64SaturatingReader(), codes, true)
+                    : RunInteger(field, column, slots, new UInt64IntegerReader(), codes, false);
+            default:
+                throw new InvalidOperationException($"Field '{field.Name}' is on an integer path with a non-integral source; the plan was not compiled.");
+        }
+    }
+
+    private static int RunInteger<TReader>(in CompiledField field, in ProjectionColumn column, ulong slots, TReader reader, Span<ulong> codes, bool narrowing)
+        where TReader : struct, IIntegerColumnReader
+    {
+        if (narrowing)
+        {
+            return WalkNarrowing(column, slots, reader, field.IntMin, field.IntMax, codes);
+        }
+
+        WalkInteger(column, slots, reader, codes);
+        return 0;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -358,35 +522,79 @@ internal static class ProjectionColumnWalk
         public double Read(ReadOnlySpan<byte> column, int offset) => Unsafe.ReadUnaligned<double>(ref At(column, offset));
     }
 
+    // ── Integer readers ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // The exact paths' readers: a load and a sign or zero extension, nothing else. The double readers above stay for the quantizing path and for a Fraction,
+    // whose ratio is a double whatever its two fields are.
+
+    private readonly struct BooleanIntegerReader : IIntegerColumnReader
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public long Read(ReadOnlySpan<byte> column, int offset) => At(column, offset) != 0 ? 1L : 0L;
+    }
+
+    private readonly struct SByteIntegerReader : IIntegerColumnReader
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public long Read(ReadOnlySpan<byte> column, int offset) => (sbyte)At(column, offset);
+    }
+
+    private readonly struct ByteIntegerReader : IIntegerColumnReader
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public long Read(ReadOnlySpan<byte> column, int offset) => At(column, offset);
+    }
+
+    private readonly struct Int16IntegerReader : IIntegerColumnReader
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public long Read(ReadOnlySpan<byte> column, int offset) => Unsafe.ReadUnaligned<short>(ref At(column, offset));
+    }
+
+    private readonly struct UInt16IntegerReader : IIntegerColumnReader
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public long Read(ReadOnlySpan<byte> column, int offset) => Unsafe.ReadUnaligned<ushort>(ref At(column, offset));
+    }
+
+    private readonly struct Int32IntegerReader : IIntegerColumnReader
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public long Read(ReadOnlySpan<byte> column, int offset) => Unsafe.ReadUnaligned<int>(ref At(column, offset));
+    }
+
+    private readonly struct UInt32IntegerReader : IIntegerColumnReader
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public long Read(ReadOnlySpan<byte> column, int offset) => Unsafe.ReadUnaligned<uint>(ref At(column, offset));
+    }
+
+    private readonly struct Int64IntegerReader : IIntegerColumnReader
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public long Read(ReadOnlySpan<byte> column, int offset) => Unsafe.ReadUnaligned<long>(ref At(column, offset));
+    }
+
+    private readonly struct UInt64IntegerReader : IIntegerColumnReader
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public long Read(ReadOnlySpan<byte> column, int offset) => unchecked((long)Unsafe.ReadUnaligned<ulong>(ref At(column, offset)));
+    }
+
+    private readonly struct UInt64SaturatingReader : IIntegerColumnReader
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public long Read(ReadOnlySpan<byte> column, int offset)
+        {
+            var value = Unsafe.ReadUnaligned<ulong>(ref At(column, offset));
+            return value > long.MaxValue ? long.MaxValue : (long)value;
+        }
+    }
+
     // ── Codecs ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
     //
     // Every one defers to WireMath, which is the single definition of the arithmetic both SDKs implement (W1). None of them re-derives a formula: a second
     // spelling of a rounding rule is how a client's world stops being the server's.
-
-    private readonly struct IntegerColumnCodec : IColumnCodec
-    {
-        private readonly double _min;
-        private readonly double _max;
-
-        public IntegerColumnCodec(double min, double max)
-        {
-            _min = min;
-            _max = max;
-        }
-
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public uint Encode(double value)
-        {
-            var rounded = WireMath.RoundHalfAwayFromZero(WireMath.CanonicalizeNaN(value));
-            if (double.IsNaN(rounded))
-            {
-                return 0;
-            }
-
-            var clamped = rounded < _min ? _min : rounded > _max ? _max : rounded;
-            return unchecked((uint)(long)clamped);
-        }
-    }
 
     private readonly struct UnormColumnCodec : IColumnCodec
     {

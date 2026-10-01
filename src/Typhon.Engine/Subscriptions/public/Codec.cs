@@ -64,8 +64,9 @@ public readonly struct Codec : IEquatable<Codec>
     public string EnumName => _enumType?.Name;
 
     /// <summary>
-    /// Whether a 64-bit source value may be narrowed into this codec by clamping. Set only by <see cref="Saturate"/>, and required of any projected field
-    /// whose source is a <see cref="long"/> or a <see cref="ulong"/> — no 64-bit integer reaches the wire, and the narrowing is never implicit.
+    /// Whether a source value may be narrowed into this integer codec by clamping. Set only by <see cref="Saturate"/>, and required of any field whose
+    /// integral source has a range the codec cannot hold — an <c>int</c> in a <c>u8</c> as much as a <c>long</c> in a <c>varu</c>: the narrowing is never
+    /// implicit (design/Subscriptions/13 § 2.3).
     /// </summary>
     public bool Saturating { get; }
 
@@ -384,9 +385,9 @@ public readonly struct Codec : IEquatable<Codec>
     }
 
     /// <summary>
-    /// Marks this integer codec as the explicit narrowing of a 64-bit source value: out-of-range values clamp and the clamp is counted. A projected field
-    /// whose source is a <see cref="long"/> or a <see cref="ulong"/> is refused without it, because a silent truncation of a credit balance is a bug that
-    /// only shows up once someone is rich.
+    /// Marks this integer codec as the explicit narrowing of a wider source: out-of-range values clamp to the codec's range, and a projected field counts
+    /// every clamp. A field whose integral source the codec cannot hold — an <c>int</c> in a <c>u8</c>, a <c>long</c> in a <c>varu</c> — is refused
+    /// without it, because a silent truncation is a bug that only shows up once a value is large.
     /// </summary>
     /// <returns>The same codec, marked saturating.</returns>
     public Codec Saturate()
@@ -528,6 +529,6 @@ public readonly struct Codec : IEquatable<Codec>
     }
 
     private static bool IsIntegerKind(CodecKind kind) => kind
-        is CodecKind.U8 or CodecKind.I8 or CodecKind.U16 or CodecKind.I16 or CodecKind.U32 or CodecKind.I32
+        is CodecKind.Bool or CodecKind.U8 or CodecKind.I8 or CodecKind.U16 or CodecKind.I16 or CodecKind.U32 or CodecKind.I32
         or CodecKind.Varu or CodecKind.Vari or CodecKind.Bits;
 }

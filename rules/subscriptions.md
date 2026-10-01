@@ -923,7 +923,7 @@
     how much it missed after.
   verified: EventDeliveryTests.EveryEventReachesExactlyItsSessionsAtEverySkipRate (random broadcast and owner events, skip 0–90 %: once each, in order,
     received + lost = routed; Near and ToKnown included), EventDeliveryTests.AnEventReachesItsSessionsWithItsValues,
-    EventDeliveryTests.EveryCodecShapeRoundTripsAndABadValueDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
+    EventDeliveryTests.EveryCodecShapeRoundTripsAndADeclaredNarrowingClamps, EventDeliveryTests.AnEnumValueOutsideItsNamesDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
     EventDeliveryTests.WorldSessionsLateSessionsAndWorkerOrder, EventDeliveryTests.AKnownEventReachesASessionTheEntityLeftThisTick,
     EventDeliveryTests.ASessionWithNoProfileHearsBroadcastsAndItsOwnEvents. Falsifiability: filing only the current v̂ turns the leaving-entity case red; a frame that carries only its own tick's events turns the
     30–90 % cases red; a loss count of 0 turns the 60 and 90 % cases red; dropping the dedupe turns the oracle and the dedupe case red.
