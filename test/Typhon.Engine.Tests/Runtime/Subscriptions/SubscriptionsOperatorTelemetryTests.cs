@@ -74,13 +74,20 @@ class SubscriptionsOperatorTelemetryTests : TestBase<SubscriptionsOperatorTeleme
             // the profiler is a process-global whose per-thread rings still hold records another fixture's runtime left queued — so a count of 3 was satisfied
             // the instant the session started, by records belonging to servers with 1, 40 and 110 sessions, and this world was disposed before it had ticked.
             // In isolation there is nothing stale, so the count waited for the right records and the case passed; the neighbours are what exposed it.
+            // Wait for THREE idle-server rows, which is what the assertion below claims — the two used to disagree. The wait was narrowed to the first
+            // matching row to stop a neighbour's record satisfying it, and the assertion kept asking for three of the KIND, so the case only passed when
+            // three records happened to have arrived by the time the first idle one was decoded. It is a race, and it was never run in CI: this fixture's
+            // category had no pass to run it in until one was added, and the gate has not been green since before both landed.
+            //
+            // Three, not one, because the claim is that an idle server reports EVERY window and not once at startup. Counting idle rows rather than the
+            // kind keeps the neighbour-immunity the narrowed wait was introduced for: a row from another fixture's runtime has sessions on it.
             var deadline = Environment.TickCount64 + 5000;
-            while (!Decoded(observer).Any(IsIdleServer) && Environment.TickCount64 < deadline)
+            while (Decoded(observer).Count(IsIdleServer) < 3 && Environment.TickCount64 < deadline)
             {
                 Thread.Sleep(5);
             }
 
-            seen = observer.CountOf(TraceEventKind.SubscriptionsServerTelemetry);
+            seen = Decoded(observer).Count(IsIdleServer);
             // The emission is wrapped in a catch at its call site, because a throw there escapes OnTickEndInternal and costs the tick. That catch must not be
             // able to hide a broken emission from this test — the whole point of the case is that records arrive — so the fault counter is asserted, not just
             // the records. Without this, a throw reads as "no records" and sends the reader looking at the profiler instead of at the emitter.
@@ -94,7 +101,7 @@ class SubscriptionsOperatorTelemetryTests : TestBase<SubscriptionsOperatorTeleme
         Assert.That(faults, Is.Zero, "the operator emission threw and was caught — see SubscriptionsContext.OperatorTelemetryFaults");
 
         Assert.That(seen, Is.GreaterThanOrEqualTo(3),
-            $"records seen: {observer.RecordsProcessed}, kinds: {KindsSeen(observer)}");
+            $"idle-server rows: {seen}; total records seen: {observer.RecordsProcessed}, kinds: {KindsSeen(observer)}");
 
         // Matched rather than asserted over every row: the profiler is a process-global singleton and the ring it drains is per THREAD, so a record another
         // fixture's runtime left queued is delivered to this exporter too. What this case claims is that a server with no session produces a record at all —
