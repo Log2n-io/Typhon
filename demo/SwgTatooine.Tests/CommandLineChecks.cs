@@ -63,10 +63,20 @@ public sealed class CommandLineChecks
 
     /// <summary><c>--db-name</c> is a name, not a path: <c>--db-dir</c> is the directory.</summary>
     /// <remarks>
+    /// <para>
     /// Without this a name containing a separator would be composed into a path the storage layer cannot open, and the failure would arrive as an I/O error
     /// from inside the engine rather than as a refusal naming the flag.
+    /// </para>
+    /// <para>
+    /// <b>The backslash case has to be written <c>@"a\b"</c>, and both halves of that matter.</b> It was <c>"a\b"</c>, which C# compiles to <c>'a'</c>
+    /// followed by U+0008 BACKSPACE rather than a separator — so the case that was supposed to cover the Windows separator covered a control character
+    /// instead. It still passed on Windows, where control characters are invalid in a file name, and failed on Linux, where they are not. Fixing the escape
+    /// then exposed the real defect behind it: <c>Path.GetInvalidFileNameChars()</c> omits <c>'\\'</c> on Unix, so the validator accepted a Windows-style
+    /// path on the platform the demo actually deploys to. Both are fixed; this case now fails if either regresses.
+    /// </para>
     /// </remarks>
     [TestCase("worlds/mine")]
+    [TestCase(@"a\b")]
     [TestCase("a\b")]
     [TestCase(" ")]
     public void ADatabaseNameThatIsAPathIsRefused(string name)

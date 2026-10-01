@@ -18,6 +18,30 @@ namespace SwgTatooine;
 /// </remarks>
 public static class CommandLine
 {
+    /// <summary>Whether <c>--db-name</c> is something other than a bare, portable file name.</summary>
+    /// <param name="name">The requested database name.</param>
+    /// <returns><see langword="true"/> when it must be refused.</returns>
+    /// <remarks>
+    /// <b><see cref="System.IO.Path.GetInvalidFileNameChars"/> alone is not enough, and the gap shows only on Linux.</b> On Windows it returns 41 characters —
+    /// both separators and every control character; on Unix it returns exactly two, <c>'\0'</c> and <c>'/'</c>. So <c>--db-name "worlds\mine"</c> was
+    /// refused on the dev box and accepted on the server, where it would have become one file literally named <c>worlds\mine</c> — the failure this check
+    /// exists to turn into a refusal naming the flag. A control character went the same way, and a name carrying one is unreadable in a log and unquotable
+    /// in a shell whatever the filesystem permits. So the rule is stated here rather than delegated: no separator of either kind, no control character, plus
+    /// whatever else this platform rejects.
+    /// </remarks>
+    private static bool IsNotABareFileName(string name)
+    {
+        foreach (var ch in name)
+        {
+            if (ch is '/' or '\\' || char.IsControl(ch))
+            {
+                return true;
+            }
+        }
+
+        return name.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0;
+    }
+
     /// <summary>Parses a command line.</summary>
     /// <param name="args">The process arguments.</param>
     /// <returns>The configuration. <see cref="SimConfig.HelpText"/> is set instead when the line asks for help.</returns>
@@ -182,7 +206,7 @@ public static class CommandLine
                 + "the point before it. Pick one.");
         }
 
-        if (string.IsNullOrWhiteSpace(c.DatabaseName) || c.DatabaseName.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0)
+        if (string.IsNullOrWhiteSpace(c.DatabaseName) || IsNotABareFileName(c.DatabaseName))
         {
             throw new ArgumentException($"--db-name must be a bare file name with no directory and no invalid characters; got '{c.DatabaseName}'. "
                 + "Use --db-dir for the directory.");
