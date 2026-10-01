@@ -49,6 +49,16 @@
       ],
       "runs_via": "merge-gate.yml (free runner)"
     },
+    "native-sdk": {
+      "filters": [
+        "native"
+      ],
+      "projects": [
+        "test/Typhon.Client.Tests/Typhon.Client.Tests.csproj",
+        "test/Typhon.Subscriptions.E2EHost/Typhon.Subscriptions.E2EHost.csproj"
+      ],
+      "runs_via": "merge-gate.yml (free runners) via scripts/native-live-test.py: the NativeSdk category only"
+    },
     "subscriptions-sdk": {
       "filters": [
         "sdk"

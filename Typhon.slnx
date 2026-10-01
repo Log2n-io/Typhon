@@ -30,6 +30,7 @@
         <Project Path="test/Typhon.MonitoringDemo/Typhon.MonitoringDemo.csproj" />
         <Project Path="test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj" />
         <Project Path="test/Typhon.Subscriptions.AspNetCore.Tests/Typhon.Subscriptions.AspNetCore.Tests.csproj" />
+        <Project Path="test/Typhon.Subscriptions.E2EHost/Typhon.Subscriptions.E2EHost.csproj" />
         <Project Path="test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj" />
         <Project Path="test/Typhon.Workbench.Tests/Typhon.Workbench.Tests.csproj" />
     </Folder>

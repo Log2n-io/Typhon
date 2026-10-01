@@ -142,6 +142,49 @@ describe('CommandQueue', () => {
     expect(new Set(decoded.clientTicks)).toEqual(new Set([9]));
   });
 
+  it('never exceeds the limit where the count varint widens, at 128 commands', () => {
+    // One command's size, from a one-command message: type, clientTick and a 1-byte count are 6 bytes.
+    const probe = new CommandQueue({ plan, now: () => 0 });
+    probe.enqueue(steer, steerValues(0));
+    let single = 0;
+    probe.flush(1, (m) => (single = m.length), SWG);
+    const perCommand = single - 6;
+
+    // A limit that fits exactly 128 commands under a 1-byte count, which 128 commands do not have: theirs takes 2 bytes.
+    const cap = 6 + 128 * perCommand;
+    const queue = new CommandQueue({ plan, now: () => 0, maxMessageBytes: cap });
+    for (let i = 0; i < 300; i++) {
+      queue.enqueue(steer, steerValues(0));
+    }
+
+    const messages: Uint8Array[] = [];
+    queue.flush(2, (m) => messages.push(m.slice()), SWG);
+    expect(Math.max(...messages.map((m) => m.length))).toBeLessThanOrEqual(cap);
+    expect(decode(messages).seqs).toHaveLength(300);
+  });
+
+  it('drops the batch when a send throws, instead of sending it again on the next flush', () => {
+    const queue = new CommandQueue({ plan, now: () => 0 });
+    for (let i = 0; i < 200; i++) {
+      queue.enqueue(steer, steerValues(0));
+    }
+
+    let sent = 0;
+    expect(() =>
+      queue.flush(
+        1,
+        () => {
+          if (++sent === 2) {
+            throw new RangeError('the connection refused the second message');
+          }
+        },
+        SWG,
+      ),
+    ).toThrow(RangeError);
+    expect(queue.pendingCount).toBe(0);
+    expect(queue.flush(2, () => undefined, SWG)).toBe(0);
+  });
+
   it('refuses a command that could not fit a message on its own, and a type from another catalog', () => {
     const queue = new CommandQueue({ plan, now: () => 0, maxMessageBytes: 12 });
     expect(() => queue.enqueue(steer, steerValues(0))).toThrow(/above the 12 B limit/);

@@ -211,6 +211,40 @@ else
   printf '\n\033[33m   SKIP\033[0m  TypeScript SDK check — Node is not installed; the gate runs it on subscriptions-sdk\n'
 fi
 
+# ── native C/C++ SDK (gate: native-sdk) ──────────────────────────────────────────────────────────────────────────────
+# The goldens, the C-compiled header test and the hostile-input sweep through ctest, then the live differential test against the E2E host.
+# The gate also builds it with GCC, Clang+ASan and MSVC; this runs whatever compiler CMake finds here. Built unless --no-build, like
+# everything else here: with --no-build the last build is tested, and a box that never built it is told so rather than failing.
+NATIVE_BUILD=src/Typhon.Client.Native/build/pre-push
+native_binary() {
+  # Single-config generators (Ninja, Makefiles) put it at the root; multi-config ones (Visual Studio) under the configuration. The .exe
+  # names come first: Git Bash's test -f also matches "x" when only "x.exe" exists, and the bare name is not one Python can run.
+  for candidate in "$NATIVE_BUILD/$1.exe" "$NATIVE_BUILD/Release/$1.exe" "$NATIVE_BUILD/$1" "$NATIVE_BUILD/Release/$1"; do
+    if [ -f "$candidate" ]; then echo "$candidate"; return 0; fi
+  done
+  return 1
+}
+if ! command -v cmake >/dev/null 2>&1; then
+  printf '\n\033[33m   SKIP\033[0m  native SDK — CMake is not installed; the gate runs it on native-sdk\n'
+else
+  if [ "$BUILD" -eq 1 ]; then
+    step "native SDK configure (gate: native-sdk)" cmake -S src/Typhon.Client.Native -B "$NATIVE_BUILD" -DCMAKE_BUILD_TYPE=Release
+    step "native SDK build (gate: native-sdk)" cmake --build "$NATIVE_BUILD" --config Release --parallel
+  fi
+  if NATIVE_LIVE="$(native_binary typhon_client_live)"; then
+    step "native SDK tests (gate: native-sdk)" ctest --test-dir "$NATIVE_BUILD" -C Release --output-on-failure
+    if [ "$BUILD" -eq 1 ]; then
+      step "native SDK live differential (gate: native-sdk)" python3 scripts/native-live-test.py --live "$NATIVE_LIVE" --config Release
+    elif [ -f test/Typhon.Subscriptions.E2EHost/bin/Release/net10.0/Typhon.Subscriptions.E2EHost.dll ]; then
+      step "native SDK live differential (gate: native-sdk)" python3 scripts/native-live-test.py --live "$NATIVE_LIVE" --config Release --no-build
+    else
+      printf '\n\033[33m   SKIP\033[0m  native SDK live differential — the E2E host was never built in Release; run without --no-build\n'
+    fi
+  else
+    printf '\n\033[33m   SKIP\033[0m  native SDK — never built here; run without --no-build (the gate runs it on native-sdk)\n'
+  fi
+fi
+
 echo ""
 if [ "$RC" -eq 0 ]; then
   printf '\033[32mAll gate-equivalent checks passed.\033[0m\n'

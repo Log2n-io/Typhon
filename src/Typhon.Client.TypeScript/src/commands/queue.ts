@@ -168,30 +168,39 @@ export class CommandQueue {
 
     let messages = 0;
     let from = 0;
-    while (from < pending.length) {
-      let bytes = this.headerBytes(1);
-      let to = from;
-      while (to < pending.length && bytes + pending[to]!.bytes <= this.maxMessageBytes) {
-        bytes += pending[to]!.bytes;
-        to++;
-        // One more command may widen the count's varint.
-        bytes += this.headerBytes(to - from) - this.headerBytes(to - from - 1);
-      }
+    // Emptied however the flush ends: a send that throws midway must not leave the batch to go out a second time, with seqs the server
+    // already executed.
+    try {
+      while (from < pending.length) {
+        let bytes = this.headerBytes(1);
+        let to = from;
+        // One more command may also widen the count's varint (1 B to 2 B at 128): the widening is part of what must fit.
+        while (to < pending.length) {
+          const next = pending[to]!.bytes + this.headerBytes(to - from + 1) - this.headerBytes(to - from);
+          if (bytes + next > this.maxMessageBytes) {
+            break;
+          }
 
-      const batch: CommandInput[] = [];
-      for (let i = from; i < to; i++) {
-        const entry = pending[i]!;
-        batch.push({ type: entry.type, seq: entry.seq, values: entry.values });
-      }
+          bytes += next;
+          to++;
+        }
 
-      this.writer.reset();
-      writeCommands(this.writer, clientTick, batch, frame);
-      send(this.writer.written());
-      messages++;
-      from = to;
+        const batch: CommandInput[] = [];
+        for (let i = from; i < to; i++) {
+          const entry = pending[i]!;
+          batch.push({ type: entry.type, seq: entry.seq, values: entry.values });
+        }
+
+        this.writer.reset();
+        writeCommands(this.writer, clientTick, batch, frame);
+        send(this.writer.written());
+        messages++;
+        from = to;
+      }
+    } finally {
+      pending.length = 0;
     }
 
-    pending.length = 0;
     return messages;
   }
 
