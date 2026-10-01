@@ -48,7 +48,7 @@ internal static class Worlds
     public static PlayerPlacement At(float x, float z)
     {
         var p = default(PlayerPlacement);
-        p.SetAt(x, z, 0.5f);
+        p.SetAt(x, z, 0f, 0.5f);
         return p;
     }
 

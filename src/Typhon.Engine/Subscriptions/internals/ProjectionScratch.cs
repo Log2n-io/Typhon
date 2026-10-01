@@ -44,7 +44,7 @@ internal sealed unsafe class ProjectionScratch : IDisposable
             {
                 capacity *= 2;
             }
-
+            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
             _codes = (uint*)NativeMemory.Realloc(_codes, (nuint)capacity * sizeof(uint));
             _codeCapacity = capacity;
         }
@@ -66,6 +66,7 @@ internal sealed unsafe class ProjectionScratch : IDisposable
                 capacity *= 2;
             }
 
+            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
             _scratch = (byte*)NativeMemory.Realloc(_scratch, (nuint)capacity);
             _scratchCapacity = capacity;
         }

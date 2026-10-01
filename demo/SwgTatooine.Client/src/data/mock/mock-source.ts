@@ -1,7 +1,26 @@
-import type { AggregateGrid, Clock, WorldStore } from '@typhondb/client';
+import { RealmFrame, type AggregateGrid, type Clock, type WorldStore } from '@typhondb/client';
 import type { DataSource, EventSink, LatencyControl, SourceStats } from '../source';
+import { realmViewOf, type RealmView } from '../realm-view';
+import { PLANET_HALF_EXTENT_M } from '../world-data';
 import { applyTick } from './apply';
 import { TickFlags, type MainToWorker, type TickMessage, type WorkerToMain } from './protocol';
+
+/**
+ * The one realm the mock has: planet 0, at the size the mock's own world is generated over.
+ *
+ * <b>The mock is one planet by construction</b> — its bins, its motion rule and its placement limits all read
+ * `PLANET_HALF_EXTENT_M` directly — so this is a fact about it rather than a simplification. It exists so the app
+ * can treat every source the same way: a scene is chosen from a realm, and a source that cannot switch realms
+ * still has one.
+ *
+ * `appTag` 0 is a planet in slot 0 with the default palette and place table, which is exactly Tatooine.
+ */
+const MOCK_PLANET: RealmView = realmViewOf(
+    // Axis 2 is the degenerate slab a flat `SpatialGridConfig` leaves behind, `[0, cellM]` — not a height. A
+  // `RealmFrame` requires a strict `min < max` on every axis, so it cannot be zero-width, and `realmViewOf`
+  // gives a flat realm no altitude whatever it holds.
+  new RealmFrame(0, 1, 0, 0, 24, 64, false, [-PLANET_HALF_EXTENT_M, -PLANET_HALF_EXTENT_M, 0], [PLANET_HALF_EXTENT_M, PLANET_HALF_EXTENT_M, 64]),
+)!;
 
 /** The part of a `Worker` the source uses: tests hand in a fake. */
 export interface WorkerLike {
@@ -52,6 +71,74 @@ export class MockSource implements DataSource, LatencyControl {
   private latencyMs: number;
   private jitterMs: number;
 
+  /** The world it was handed: the mock does not build its own, so the app is already drawing this one. */
+  get world(): WorldStore {
+    return this.options.world;
+  }
+
+  get grid(): AggregateGrid {
+    return this.options.grid;
+  }
+
+  /** What the mock server reports it is serving, the same figure its stats carry. */
+  get effectiveRadiusM(): number {
+    return this.current.server?.effectiveRadius ?? 0;
+  }
+
+  /** Planet 0, always: see {@link MOCK_PLANET}. */
+  get realm(): RealmView {
+    return MOCK_PLANET;
+  }
+
+  /** Never: the mock's world is one realm on one profile, and nothing in it can empty the store. */
+  get resetCount(): number {
+    return 0;
+  }
+
+  /** The mock has one profile and no sessions to move between them, so the control hides rather than pretending. */
+  get canSpectate(): boolean {
+    return false;
+  }
+
+  get spectatingNetId(): number {
+    return 0;
+  }
+
+  spectate(): void {}
+
+  /** The mock controls nothing: it has no sessions and no SELF block. */
+  get selfNetId(): number {
+    return 0;
+  }
+
+  /** The mock's own worker stops on demand, so pausing has always worked here. */
+  get canPause(): boolean {
+    return true;
+  }
+
+  /**
+   * The mock has one realm, so it cannot honour this — and says so rather than accepting and doing nothing.
+   *
+   * The selector hides itself against a source that answers false, which is the same way the Pause button behaves
+   * against a catalog that does not declare `SetPaused`: a control that cannot work is worse than no control.
+   */
+  get canViewRealm(): boolean {
+    return false;
+  }
+
+  viewRealm(): void {
+    // Nothing. `canViewRealm` is false, so no UI offers this, and a caller that asked anyway gets what it was told.
+  }
+
+  /**
+   * The mock has no `DEBUG` block, and inventing one would be worse than having none: the overlay exists to show what
+   * the ENGINE holds, so a mock that drew a plausible grid and window would be the one thing on screen that could not
+   * be believed.
+   */
+  get debug(): null {
+    return null;
+  }
+
   constructor(options: MockSourceOptions) {
     this.options = options;
     this.latencyMs = options.latencyMs;
@@ -65,6 +152,7 @@ export class MockSource implements DataSource, LatencyControl {
       wireBytesPerSec: 0,
       applyMs: 0,
       server: null,
+      session: null,
     };
   }
 
@@ -196,6 +284,10 @@ export class MockSource implements DataSource, LatencyControl {
         effectiveRadius: message.stats.effectiveRadius,
         worldEntities: message.stats.worldEntities,
       },
+
+      // The mock has no session: no PING loop, no session-scoped metrics, no RegionSender. Reporting zeros here would
+      // read as "this client costs the server nothing", which is a claim rather than an absence (CLI3D-06).
+      session: null,
     };
   }
 }

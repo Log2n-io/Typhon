@@ -73,7 +73,9 @@ export default function AttachTab({ onAttach, isAttaching }: Props) {
           <span className="flex flex-col">
             <span className="text-fs-base">Capture everything</span>
             <span className="text-fs-xs text-muted-foreground">
-              Records every tick for as long as the session is attached.
+              Records every tick for as long as the session is attached. A busy engine can outrun the browser: measured at 50 Hz
+              with ~7,600 events a tick, decoding the stream saturates the main thread and the window stops answering. Prefer
+              cherry-pick above a few thousand events per tick.
             </span>
           </span>
         </label>

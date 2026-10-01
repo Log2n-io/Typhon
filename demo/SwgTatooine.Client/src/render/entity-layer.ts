@@ -9,11 +9,19 @@ import { createShapeMesh } from './meshes';
 import { PrefixUploader } from './prefix-upload';
 import { SCENE_GROUP } from './render-groups';
 import { ENTITY_FRAGMENT, ENTITY_VERTEX, SPRITE_FRAGMENT, SPRITE_VERTEX } from './shaders';
-import type { LayerStyle } from './styles';
-import { pickInstances, type PickHit, type ScreenPoint } from './view-math';
+import { SELECTED_MESH_SCALE, SELECTED_SPRITE_SCALE, type LayerStyle } from './styles';
+import {
+  packedStyle,
+  pickInstances,
+  pickShapes,
+  projectToScreen,
+  type PickHit,
+  type PickRay,
+  type ScreenPoint,
+} from './view-math';
 
 export type { FrameView } from './layer-packer';
-export type { PickHit } from './view-math';
+export type { PickHit, PickRay } from './view-math';
 
 const SUN = new Vector3(-0.45, -0.8, -0.4).normalize();
 
@@ -36,6 +44,7 @@ export class EntityLayer {
   private readonly viewport = new Vector2(1, 1);
   private nearUploader: PrefixUploader | null = null;
   private farUploader: PrefixUploader | null = null;
+  private yawUploader: PrefixUploader | null = null;
   /** The packer's arrays the GPU buffers were created over. */
   private arraysVersion = -1;
   private readonly screen: ScreenPoint = { x: 0, y: 0, w: 0 };
@@ -54,7 +63,7 @@ export class EntityLayer {
       scene,
       { vertexSource: ENTITY_VERTEX, fragmentSource: ENTITY_FRAGMENT },
       {
-        attributes: ['position', 'normal', 'instData'],
+        attributes: ['position', 'normal', 'instData', 'instYaw'],
         uniforms: ['viewProjection', 'uColors', 'uSizes', 'uTints', 'uFlattenMode', 'uSunDirection'],
       },
     );
@@ -120,11 +129,80 @@ export class EntityLayer {
     this.farMaterial.setVector2('uViewport', this.viewport);
     this.nearUploader?.upload(this.nearMesh.getVertexBuffer('instData')?.getWrapperBuffer() ?? null, packer.nearCount);
     this.farUploader?.upload(this.farMesh.getVertexBuffer('instData')?.getWrapperBuffer() ?? null, packer.farCount);
+    this.yawUploader?.upload(this.nearMesh.getVertexBuffer('instYaw')?.getWrapperBuffer() ?? null, packer.nearCount);
     this.setCounts(packer.nearCount, packer.farCount);
   }
 
   /** Nearest drawn entity within `maxPixels` of a viewport point (CSS pixels); updates `best` when closer than it. */
-  pick(matrix: ArrayLike<number>, view: FrameView, px: number, py: number, maxPixels: number, best: PickHit): void {
+  /**
+   * Where one packed entity is on screen, by the same projection {@link pick} uses. For diagnosis: a click that misses is
+   * either the projection disagreeing with the eye or the pointer never reaching the pick, and these tell them apart.
+   */
+  screenOf(
+    matrix: ArrayLike<number>,
+    view: FrameView,
+    netId: number,
+  ): { x: number; y: number; depth: number; band: 'near' | 'far' } | null {
+    const p = this.packer;
+    const w = view.viewportWidth;
+    const h = view.viewportHeight;
+    for (let k = 0; k < this.nearCount; k++) {
+      if (p.nearNetIds[k] === netId) {
+        const b = k * 4;
+        // (x, y, z, packed): the label's height is measured from the entity's own altitude (CLI3D-04).
+        const s = projectToScreen(
+          matrix,
+          p.nearData[b],
+          p.nearData[b + 1] + this.style.bounds.pickY[packedStyle(p.nearData[b + 3])],
+          p.nearData[b + 2],
+          w,
+          h,
+          this.screen,
+        );
+        return { x: s.x, y: s.y, depth: s.w, band: 'near' };
+      }
+    }
+
+    for (let k = 0; k < this.farCount; k++) {
+      if (p.farNetIds[k] === netId) {
+        const b = k * 4;
+        const s = projectToScreen(
+          matrix,
+          p.farData[b],
+          p.farData[b + 1] + this.style.spriteLift,
+          p.farData[b + 2],
+          w,
+          h,
+          this.screen,
+        );
+        return { x: s.x, y: s.y, depth: s.w, band: 'far' };
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * Updates `best` with anything of this layer's under the cursor, or near it when nothing is under it.
+   *
+   * The near band is tested as the boxes it is DRAWN as, not as points. That is the fix for the defect this had: an
+   * 18 m building 60 m away covers about 320 screen pixels and only the 16 around its centre used to be clickable, so
+   * clicking its wall or its roof selected nothing. The far band is a fixed-size sprite, so its silhouette is a disc.
+   *
+   * @param maxT How far along the ray the ground is. Nothing beyond it is on screen, so nothing beyond it is pickable:
+   * the GPU gets this from depth testing and the pick has to be told. Without it, clicking a mesa's visible rock face
+   * selects whatever is standing behind the mesa.
+   */
+  pick(
+    ray: PickRay,
+    matrix: ArrayLike<number>,
+    view: FrameView,
+    px: number,
+    py: number,
+    maxPixels: number,
+    best: PickHit,
+    maxT: number,
+  ): void {
     if (!this.visible) {
       return;
     }
@@ -134,12 +212,30 @@ export class EntityLayer {
     const h = view.viewportHeight;
     const a = this.archetype;
     const s = this.screen;
+    pickShapes(
+      ray,
+      p.nearData,
+      p.nearYaw,
+      p.nearNetIds,
+      this.nearCount,
+      this.style.bounds.sizesFlat,
+      this.style.flattenMode,
+      SELECTED_MESH_SCALE,
+      a,
+      best,
+      maxT,
+    );
+    // The near band's silhouette is settled above; 0 leaves this as the near-miss fallback for a mesh only a few pixels
+    // across, which is a fiddly target to hit exactly at the band boundary.
     pickInstances(
+      ray,
       matrix,
       p.nearData,
       p.nearNetIds,
       this.nearCount,
       this.style.bounds.pickY,
+      0,
+      SELECTED_MESH_SCALE,
       w,
       h,
       px,
@@ -148,13 +244,17 @@ export class EntityLayer {
       a,
       best,
       s,
+      maxT,
     );
     pickInstances(
+      ray,
       matrix,
       p.farData,
       p.farNetIds,
       this.farCount,
       this.style.spriteLift,
+      this.style.spritePixels * 0.5,
+      SELECTED_SPRITE_SCALE,
       w,
       h,
       px,
@@ -163,6 +263,7 @@ export class EntityLayer {
       a,
       best,
       s,
+      maxT,
     );
   }
 
@@ -176,8 +277,12 @@ export class EntityLayer {
     this.arraysVersion = packer.arraysVersion;
     this.nearUploader = new PrefixUploader(packer.nearData, 4);
     this.farUploader = new PrefixUploader(packer.farData, 4);
+    this.yawUploader = new PrefixUploader(packer.nearYaw, 1);
     this.nearMesh.thinInstanceSetBuffer('instData', null);
     this.nearMesh.thinInstanceSetBuffer('instData', packer.nearData, 4, false);
+    // Only the mesh band turns, so only it carries a yaw (CLI3D-04): instData's four slots went to (x, y, z, packed).
+    this.nearMesh.thinInstanceSetBuffer('instYaw', null);
+    this.nearMesh.thinInstanceSetBuffer('instYaw', packer.nearYaw, 1, false);
     this.farMesh.thinInstanceSetBuffer('instData', null);
     this.farMesh.thinInstanceSetBuffer('instData', packer.farData, 4, false);
   }

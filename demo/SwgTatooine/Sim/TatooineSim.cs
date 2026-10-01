@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.IO;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -39,6 +40,89 @@ public sealed partial class TatooineSim : IDisposable
     /// <summary>Populations actually created, for the report.</summary>
     public WorldCensus Census { get; private set; }
 
+    /// <summary>
+    /// What is standing in each realm right now, recounted once a second while this process is serving.
+    /// </summary>
+    /// <remarks>
+    /// Distinct from <see cref="Census"/>, which is what the world was BUILT with and never changes: this one is walked
+    /// off the clusters as they are, so it follows every crossing, spawn and dungeon. Empty in a run that is not serving
+    /// — see <see cref="SimConfig.RealmCensusHz"/> for why the measured path does not pay for it.
+    /// <para>
+    /// <b>Allocated only by a serving run</b>, through <see cref="SizeRealmCensus"/>, which is the same rule the census system's own gating follows and is
+    /// there for the same reason: a measured run must execute the code it always did. Sized in <c>Initialize</c> it allocated four arrays over every realm
+    /// slot in EVERY run — about 19 KB on a two-planet world, nothing on a one-planet one — for a panel a measured run never serves. Small, and still the
+    /// wrong side of the line this demo's CPU numbers are taken on.
+    /// </para>
+    /// </remarks>
+    public RealmCensus RealmPopulation { get; private set; } = new(1);
+
+    /// <summary>How many realm slots this run configured, for <see cref="SizeRealmCensus"/>.</summary>
+    private int _realmSlots = 1;
+
+    /// <summary>
+    /// Sizes <see cref="RealmPopulation"/> for this run's realms — including the dungeon slots, since a dungeon is registered while a party is inside one,
+    /// which is exactly when a viewer wants to see it. Called by the serving path only.
+    /// </summary>
+    private void SizeRealmCensus() => RealmPopulation = new RealmCensus(_realmSlots);
+
+    /// <summary>
+    /// How many ticks the runtime actually executed, read after the shutdown rather than at the poll that requested it.
+    /// </summary>
+    /// <remarks>
+    /// Unpaced, this exceeds the requested count by however many ticks fit between the polling loop noticing the target and <c>Shutdown</c> landing — so a
+    /// run's length is not reproducible and neither is its end state. The measured window is clamped to the request; this is the number to quote when a claim
+    /// is per-tick.
+    /// </remarks>
+    public long Executed { get; private set; }
+
+    /// <summary>
+    /// True when this instance opened a database that already held a world, so the world was REOPENED rather than built (P-2).
+    /// </summary>
+    /// <remarks>
+    /// Decided before the engine opens the file, because opening it creates it — after that there is no way to tell a world that was already there from one
+    /// this process has just made.
+    /// </remarks>
+    public bool Reopened { get; private set; }
+
+    /// <summary>This planet's interior realm ids (Realms G1b), or empty without <c>--interiors</c>.</summary>
+    private ushort[] InteriorRealmsOf(int planet)
+    {
+        if (InteriorsPerPlanet == 0)
+        {
+            return [];
+        }
+
+        var first = _config.Planets + (planet * InteriorsPerPlanet);
+        var realms = new ushort[InteriorsPerPlanet];
+        for (var i = 0; i < InteriorsPerPlanet; i++)
+        {
+            realms[i] = (ushort)(first + i);
+        }
+
+        return realms;
+    }
+
+    /// <summary>Is there already a database where this configuration would open one?</summary>
+    /// <remarks>
+    /// <para>
+    /// <b><c>GetFileSystemEntries</c>, not <c>GetFiles</c>, and the difference is the whole method.</b> A Typhon database is a DIRECTORY — <c>&lt;name&gt;.typhon</c>
+    /// — so <c>GetFiles</c> answers "no database here" for every database that exists. Measured: with <c>GetFiles</c> the reopen path never fired once, and three
+    /// consecutive <c>--persist</c> runs each built a fresh world on top of the last while reporting a census that matched perfectly, because the census counts
+    /// what the generator made rather than what the database holds.
+    /// </para>
+    /// <para>Any entry matching the name counts. Treating a half-written database as absent would delete the rest of it by building on top.</para>
+    /// </remarks>
+    private bool DatabaseFileExists()
+    {
+        var dir = _config.DatabaseDirectory ?? AppContext.BaseDirectory;
+        if (!Directory.Exists(dir))
+        {
+            return false;
+        }
+
+        return Directory.GetFileSystemEntries(dir, _config.DatabaseName + ".*").Length > 0;
+    }
+
     /// <summary>Entity handles and place geometry the systems address after the build.</summary>
     /// <summary>Each planet's destinations and handles, indexed by its realm (Realms G1).</summary>
     public WorldIndex[] Indexes { get; private set; } = [new WorldIndex()];
@@ -61,9 +145,22 @@ public sealed partial class TatooineSim : IDisposable
 
     // How each kind of realm is served to sessions (Realms G3, 12-realms § 2.1): planets at the planet's replication cell, an interior as one cell,
     // space at its own 500 m cell. Planet 0 is ConfigureSpatialGrid's realm, served at SubscriptionsOptions.ReplicationCellM.
-    private static readonly RealmReplicationConfig PlanetReplication = new() { CellM = TatooineReplication.ReplicationCellM };
-    internal static readonly RealmReplicationConfig InteriorReplication = new() { Kind = TatooineReplication.InteriorKind, CellM = WorldBuilder.InteriorEdgeM };
-    private static readonly RealmReplicationConfig SpaceReplication = new() { Kind = TatooineReplication.SpaceKind, CellM = 500d };
+    //
+    // Each carries an AppTag (RealmTag): the one field a client reads to choose a scene, so a browser never has to
+    // reproduce "interior j of planet p is realm Planets + p*InteriorsPerPlanet + j" from flags it cannot see. They are
+    // built PER REALM rather than shared for that reason — the tag differs even where the rest of the config does not.
+    private static RealmReplicationConfig PlanetReplication(int planet) =>
+        new() { CellM = TatooineReplication.ReplicationCellM, AppTag = RealmTag.Planet(planet) };
+
+    internal static RealmReplicationConfig InteriorReplication(int portal) =>
+        new() { Kind = TatooineReplication.InteriorKind, CellM = WorldBuilder.InteriorEdgeM, AppTag = RealmTag.Interior(portal) };
+
+    /// <summary>A dungeon is served exactly like an interior and tagged as its own scene, so a client can tell them apart.</summary>
+    internal static RealmReplicationConfig DungeonReplication(int slot) =>
+        new() { Kind = TatooineReplication.InteriorKind, CellM = WorldBuilder.InteriorEdgeM, AppTag = RealmTag.Dungeon(slot) };
+
+    private static RealmReplicationConfig SpaceReplication() =>
+        new() { Kind = TatooineReplication.SpaceKind, CellM = 500d, AppTag = RealmTag.Space() };
 
     public TatooineSim(SimConfig config)
     {
@@ -104,7 +201,10 @@ public sealed partial class TatooineSim : IDisposable
             .AddDeadlineWatchdog()
             .AddScopedManagedPagedMemoryMappedFile(opt =>
             {
-                opt.DatabaseName = $"SwgTatooine_{Environment.ProcessId}";
+                // NO process id (P-1). It used to be `SwgTatooine_{Environment.ProcessId}`, so every run had a database of its own and every run KILLED before
+                // it could delete its own file left one behind — 154 GB of them, once, because the only process that knew the name was gone. One stable name
+                // makes "a killed run leaves ONE database" structural instead of a rule somebody has to remember.
+                opt.DatabaseName = _config.DatabaseName;
                 opt.DatabaseDirectory = _config.DatabaseDirectory ?? AppContext.BaseDirectory;
                 opt.DatabaseCacheSize = (ulong)_config.PageCacheMiB * 1024UL * 1024UL;
             })
@@ -123,7 +223,17 @@ public sealed partial class TatooineSim : IDisposable
             });
 
         _serviceProvider = services.BuildServiceProvider();
-        _serviceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+
+        // The one persistence decision in the program (P-1), taken here and nowhere else. Without --persist the file goes, which is the benchmark's default
+        // because a run that quietly measures a world some earlier run left behind is a corrupted A/B that says nothing about itself.
+        if (!_config.Persist)
+        {
+            _serviceProvider.EnsureFileDeleted<ManagedPagedMMFOptions>();
+        }
+
+        // Whether this open found a world already there is what decides between building one and rebuilding the index over one (P-2). Read BEFORE the engine
+        // opens the file, because opening it creates it.
+        Reopened = _config.Persist && DatabaseFileExists();
         _scope = _serviceProvider.CreateScope();
         Dbe = _scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
 
@@ -145,6 +255,10 @@ public sealed partial class TatooineSim : IDisposable
         Dbe.RegisterComponentFromAccessor<CreatureTimers>();
         Dbe.RegisterComponentFromAccessor<NpcTimers>();
         Dbe.RegisterComponentFromAccessor<PlayerState>();
+
+        // Possession and targeting, split out of PlayerState so a write to it reaches no subscriber (SWG-01). See PlayerControl.
+        Dbe.RegisterComponentFromAccessor<PlayerControl>();
+        Dbe.RegisterComponentFromAccessor<PlayerSession>();
         Dbe.RegisterComponentFromAccessor<Lair>();
         Dbe.RegisterComponentFromAccessor<Structure>();
         Dbe.RegisterComponentFromAccessor<Inventory>();
@@ -179,14 +293,38 @@ public sealed partial class TatooineSim : IDisposable
         // Realms (G1): planet 0 is realm 0, configured as the single world always was; every further planet is a realm of its own with the same grid,
         // simulated always (per-realm policy is G2's). With --interiors, every enterable city building of every planet is a one-cell realm after the
         // planets: portal j of planet p is realm Planets + p·N + j. The map is built first because it fixes N, and realms are registered at open.
+        // Reset BEFORE anything can be registered. It is process-static, so a run whose Initialize threw part-way — a
+        // test fixture, a bad flag — would otherwise leave the previous run's larger value standing, and this one's
+        // ViewRealm would admit realm ids its own engine never registered. Enter into an unregistered realm throws, on
+        // the tick path.
+        TatooineReplication.ViewableRealms = 1;
+
         Map = TatooineMap.Build(_config);
         InteriorsPerPlanet = _config.Interiors ? WorldBuilder.CountEnterable(Map) : 0;
         var realms = _config.Planets * (1 + InteriorsPerPlanet);
         SpaceRealm = _config.Space ? realms++ : -1;
 
+        // Realm ids are ushort on the wire, and every registration below casts to one. With 617 interiors per planet the
+        // count passes 65 535 at about 107 planets, and an unchecked cast would silently alias a later realm onto an
+        // earlier one — while ViewableRealms, an int, still advertised the un-truncated range. Refused at start-up, where
+        // a flag can be corrected, rather than mis-rendered at run time.
+        if (realms + _config.Dungeons > ushort.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(_config.Planets),
+                realms + _config.Dungeons,
+                $"{realms + _config.Dungeons} realms exceeds the {ushort.MaxValue} a RealmId can hold: reduce --planets, --interiors or --dungeons.");
+        }
+
+        // What a god camera may ask to look at: everything registered at start-up, which is everything below the dungeon slots.
+        TatooineReplication.ViewableRealms = realms;
+
         // Dungeon slots (G2): ids after space, each used by one instance — an id unregistered this session is not registrable again (RLM-06).
         FirstDungeonRealm = realms;
         realms += _config.Dungeons;
+
+        // The census is NOT sized here, deliberately: see SizeRealmCensus, which the serving path calls and a measured run does not.
+        _realmSlots = realms;
         if (realms > 1)
         {
             Dbe.ConfigureRealms(realms);
@@ -196,30 +334,31 @@ public sealed partial class TatooineSim : IDisposable
         // Planet 0 runs at full rate always — it is the measured workload. A further planet is simulated at --planet-divisor (G2).
         for (var planet = 1; planet < _config.Planets; planet++)
         {
-            Dbe.Realms.Register(new RealmId((ushort)planet), Divided(planetGrid, _config.PlanetDivisor, PlanetReplication));
+            Dbe.Realms.Register(new RealmId((ushort)planet), Divided(planetGrid, _config.PlanetDivisor, PlanetReplication(planet)));
         }
 
         // Interiors sleep once unobserved for --interior-sleep seconds (G2): a player walking in wakes one, and pins it while inside.
         var interiorGridConfig = SpatialGridConfig.Flat(Vector2.Zero, new Vector2(WorldBuilder.InteriorEdgeM, WorldBuilder.InteriorEdgeM),
             WorldBuilder.InteriorEdgeM);
         // Each interior's parent is its planet (Realms G3): a planet's news reaches the players in its buildings (RouteToRealm, subtree).
-        RealmConfig InteriorOf(int planet) => new()
+        RealmConfig InteriorOf(int planet, int portal) => new()
         {
             Grid = interiorGridConfig,
             WhenUnobserved = _config.InteriorSleepS > 0f ? RealmUnobserved.Sleep : RealmUnobserved.Simulate,
             UnobservedTickDivisor = 1,
             SleepAfterTicks = _config.InteriorSleepS > 0f ? Math.Max(1, (int)(_config.InteriorSleepS * _config.TickRateHz)) : 0,
             Parent = new RealmId((ushort)planet),
-            Replication = InteriorReplication,
+            Replication = InteriorReplication(portal),
         };
 
         for (var planet = 0; planet < _config.Planets && InteriorsPerPlanet > 0; planet++)
         {
-            var interior = InteriorOf(planet);
             var first = _config.Planets + (planet * InteriorsPerPlanet);
             for (var realm = first; realm < first + InteriorsPerPlanet; realm++)
             {
-                Dbe.Realms.Register(new RealmId((ushort)realm), interior);
+                // One config per interior now, where a single shared one used to serve them all: the tag names which
+                // portal this is, and that is exactly what a client needs to label the room it walked into.
+                Dbe.Realms.Register(new RealmId((ushort)realm), InteriorOf(planet, realm - first));
             }
         }
 
@@ -228,7 +367,7 @@ public sealed partial class TatooineSim : IDisposable
         {
             var edge = WorldBuilder.SpaceEdgeM * 0.5;
             Dbe.Realms.Register(new RealmId((ushort)SpaceRealm),
-                Divided(new SpatialGridConfig(new Vector3D(-edge, -edge, -edge), new Vector3D(edge, edge, edge), 500d), _config.SpaceDivisor, SpaceReplication));
+                Divided(new SpatialGridConfig(new Vector3D(-edge, -edge, -edge), new Vector3D(edge, edge, edge), 500d), _config.SpaceDivisor, SpaceReplication()));
         }
 
         Dbe.InitializeArchetypes();
@@ -274,7 +413,14 @@ public sealed partial class TatooineSim : IDisposable
         for (var planet = 0; planet < _config.Planets; planet++)
         {
             Indexes[planet] = new WorldIndex();
-            var census = WorldBuilder.Populate(Dbe, Map, _config, Indexes[planet], (ushort)planet);
+
+            // BUILD or REBUILD, and everything above this line runs either way (P-2). The realm registrations, the grid, SetSpatialBarrierOnly, the dormancy
+            // declarations and InitializeArchetypes are all statements about the database rather than about its contents, and a reopened database needs every
+            // one of them re-issued — none of them is persisted. Only the contents are, which is why this is the single branch.
+            var census = Reopened
+                ? WorldRebuild.Rebuild(Dbe, Map, Indexes[planet], (ushort)planet, InteriorRealmsOf(planet))
+                : WorldBuilder.Populate(Dbe, Map, _config, Indexes[planet], (ushort)planet);
+
             if (InteriorsPerPlanet > 0)
             {
                 // Portal j of planet p is realm Planets + p·N + j: every planet must have exactly N portals, or the decode reads another door.
@@ -284,7 +430,11 @@ public sealed partial class TatooineSim : IDisposable
                         $"Planet {planet} has {Indexes[planet].Portals.Count} portals where the realm layout reserved {InteriorsPerPlanet}.");
                 }
 
-                WorldBuilder.PopulateInteriors(Dbe, _config, Indexes[planet], _config.Planets + (planet * InteriorsPerPlanet), census);
+                // An interior's NPCs are already on disk when the world is reopened; re-populating would put a second set in every building.
+                if (!Reopened)
+                {
+                    WorldBuilder.PopulateInteriors(Dbe, _config, Indexes[planet], _config.Planets + (planet * InteriorsPerPlanet), census);
+                }
             }
 
             Census = planet == 0 ? census : Census.Plus(census);
@@ -292,12 +442,35 @@ public sealed partial class TatooineSim : IDisposable
 
         if (SpaceRealm >= 0)
         {
-            Census.Starships = WorldBuilder.PopulateSpace(Dbe, _config, (ushort)SpaceRealm);
+            Census.Starships = Reopened
+                ? WorldRebuild.CountStarships(Dbe, (ushort)SpaceRealm)
+                : WorldBuilder.PopulateSpace(Dbe, _config, (ushort)SpaceRealm);
         }
     }
 
     public void Dispose()
     {
+        // A CHECKPOINT before the engine closes, when the world is meant to survive (P-1).
+        //
+        // The engine writes the clean-shutdown watermark on its own Dispose, strictly after it has flushed dirty pages, so a clean close is already recorded
+        // without this. What this adds is that the checkpoint LSN is ADVANCED first: without it every page this run dirtied reaches disk through the close
+        // flush but the checkpoint watermark still names whatever LSN the last automatic cycle reached, so the next open replays the WAL from there. On a
+        // world of a million entities that is the difference between a reopen that reads pages and one that replays a run.
+        //
+        // Guarded, and it must be: ForceCheckpoint on a run that is about to have its file deleted is pure cost, and this is a Dispose — it runs on the
+        // failure path too, where the engine may be in no state to checkpoint and where throwing would mask the original fault.
+        if (_config.Persist && Dbe != null)
+        {
+            try
+            {
+                Dbe.ForceCheckpoint();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  !! final checkpoint failed, the next open will replay the WAL instead: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         _runtime?.Dispose();
         _playerView?.Dispose();
         _creatureView?.Dispose();
@@ -305,7 +478,6 @@ public sealed partial class TatooineSim : IDisposable
         _shipView?.Dispose();
         _lairView?.Dispose();
         _structureView?.Dispose();
-        _viewTx?.Dispose();
         _scope?.Dispose();
         _serviceProvider?.Dispose();
         Typhon.Engine.Internals.SpatialQueryTuning.SimdNarrowphase = _simdNarrowphaseBefore;

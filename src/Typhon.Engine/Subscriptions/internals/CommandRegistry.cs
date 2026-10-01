@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
@@ -52,13 +52,14 @@ internal enum CommandFieldElement
 /// </remarks>
 internal readonly struct CommandFieldBinding
 {
-    internal CommandFieldBinding(string wireName, int offset, int components, CommandFieldElement element, int elementSize)
+    internal CommandFieldBinding(string wireName, int offset, int components, CommandFieldElement element, int elementSize, int textCapacity = 0)
     {
         WireName = wireName;
         Offset = offset;
         Components = components;
         Element = element;
         ElementSize = elementSize;
+        TextCapacity = textCapacity;
     }
 
     /// <summary>The field's wire name.</summary>
@@ -75,6 +76,29 @@ internal readonly struct CommandFieldBinding
 
     /// <summary>Bytes each stored number occupies.</summary>
     public int ElementSize { get; }
+
+    /// <summary>An inline <c>Utf8Text</c>'s capacity, or 0 when the field is not text.</summary>
+    public int TextCapacity { get; }
+
+    /// <summary>Whether this field carries text rather than numbers.</summary>
+    public bool IsText => TextCapacity > 0;
+
+    /// <summary>
+    /// Stores decoded UTF-8 into an inline text field: a <see cref="ushort"/> length, then the bytes.
+    /// </summary>
+    /// <param name="payload">The command struct's bytes.</param>
+    /// <param name="utf8">The decoded bytes, already length-capped and UTF-8-validated by the wire reader.</param>
+    /// <remarks>
+    /// The reader caps the length at the field's declared <c>maxBytes</c> before this is reached, and the binder refused a
+    /// capacity that disagrees with it — so a longer value is a decode that should already have failed. It is truncated
+    /// here rather than trusted, because the alternative is writing past the field into its neighbour.
+    /// </remarks>
+    public void StoreText(Span<byte> payload, scoped ReadOnlySpan<byte> utf8)
+    {
+        var length = Math.Min(utf8.Length, TextCapacity);
+        MemoryMarshal.Write(payload[Offset..], (ushort)length);
+        utf8[..length].CopyTo(payload.Slice(Offset + sizeof(ushort), length));
+    }
 
     /// <summary>Writes <paramref name="components"/> into <paramref name="payload"/> at this binding's offset.</summary>
     /// <param name="payload">The command struct's bytes.</param>
@@ -384,11 +408,12 @@ internal sealed class CommandRegistry
 
     private static CommandFieldBinding BindField(CommandDeclaration declaration, Type structType, FieldPlan field, HashSet<string> bound)
     {
-        if (field.ValueKind != FieldValueKind.Number)
+        if (field.ValueKind is not (FieldValueKind.Number or FieldValueKind.Text))
         {
             throw new InvalidOperationException(
-                $"Command '{declaration.Name}' field '{field.Name}' travels as {field.ValueKind}, and a command decodes into an unmanaged struct, which holds " +
-                "no text, no blob and no list. Carry the value as a number, or send it as state rather than as a command.");
+                $"Command '{declaration.Name}' field '{field.Name}' travels as {field.ValueKind}, and a command decodes " +
+                "into an unmanaged struct: it carries " +
+                "numbers and an inline Utf8Text, but no blob and no list. Carry the value as a number, or send it as state rather than as a command.");
         }
 
         // The declaration is what names the struct member: the wire name may have been overridden, and it is the SOURCE name that has to resolve.
@@ -408,6 +433,36 @@ internal sealed class CommandRegistry
             throw new InvalidOperationException(
                 $"Command '{declaration.Name}' carries the wire field '{field.Name}', and '{structType.Name}' has no public instance field '{sourceName}' to " +
                 "put it in.");
+        }
+
+        if (field.ValueKind == FieldValueKind.Text)
+        {
+            var capacity = MessageText.CapacityOf(member.FieldType)
+                           ?? throw new InvalidOperationException(
+                               $"Command '{declaration.Name}' field '{field.Name}' travels as a str, and " +
+                               $"'{structType.Name}.{sourceName}' is a '{member.FieldType.Name}'. A str field is an inline " +
+                               $"text type — {MessageText.KnownTypes} — because a command struct owns its bytes.");
+            // Only a capacity SMALLER than the wire cap is unsafe — then the wire admits more bytes than the struct can
+            // hold and the surplus is truncated silently. A capacity LARGER is strictly safe: the wire cap is the tighter
+            // of the two and nothing is lost. Demanding equality made one storage size the engine's ingress policy, since
+            // a 24-byte name field then had to admit 256 bytes from every client on every message — and the wire design
+            // names per-field `maxBytes` as exactly that knob.
+            if (capacity < field.Codec.MaxBytes)
+            {
+                throw new InvalidOperationException(
+                    $"Command '{declaration.Name}' field '{field.Name}' declares Codec.Str({field.Codec.MaxBytes}) and " +
+                    $"'{structType.Name}.{sourceName}' holds only {capacity}. The struct must be able to carry the cap the " +
+                    "wire enforces, or the surplus is truncated without a word.");
+            }
+
+            if (!bound.Add(sourceName))
+            {
+                throw new InvalidOperationException(
+                    $"Command '{declaration.Name}' binds '{structType.Name}.{sourceName}' twice; two wire fields cannot share one struct field.");
+            }
+
+            return new CommandFieldBinding(
+                field.Name, (int)Marshal.OffsetOf(structType, sourceName), 1, CommandFieldElement.U8, sizeof(byte), capacity);
         }
 
         var (element, elementSize) = ElementOf(member.FieldType, declaration.Name, field.Name);

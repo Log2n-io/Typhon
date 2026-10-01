@@ -229,6 +229,29 @@ export function deriveActiveSystems(ticks: TickData[]): number[] {
  * Mutates `span.renderDepth` in place. Safe because `assembleTickViewAndNumbers` memoises on the
  * cache's `entriesVersion`, so span objects are stable references — the mutation persists until
  * the cache mutates again (at which point this function re-runs against the new ticks array).
+ *
+ * ## Why this is still a full re-walk (measured 2026-09-27, do not re-derive)
+ *
+ * The obvious optimisation is to memoise per tick and pack only new arrivals: during live capture the `ticks` identity
+ * flips ~4.9×/s and the array differs only in its newest entries, so the call re-sorts and re-packs ~253 ticks ×
+ * ~445 spans ≈ 112 000 spans to produce a result that differs in ~10 of them. Against the SWG demo at `--hz 50`,
+ * capture-everything, production SPA build, that is **7.3 s of a 166 s session — 4.4 % of wall clock**.
+ *
+ * It was implemented (per-tick `WeakMap` summaries plus a carried per-slot `rowEnds`) and **measured not to pay**:
+ *  - `assembleTickViewAndNumbers` re-runs `mergeTickData` on every assembly for every tick that splits across a chunk
+ *    boundary, so those ticks are **fresh objects each time** — no identity to memoise on. Instrumented on this
+ *    workload: **33 of 253 resident ticks were new on each call, and the first of them sat at index 11**, i.e. the
+ *    churn starts near the front of the window, not at the tail. 302 of 303 calls therefore had to re-pack the window.
+ *  - Result: `deriveSlotInfo` went from **8.91 ms/call to 10.08 ms/call (13 % slower** — per-tick array copies and
+ *    `WeakMap` probes replacing one big per-slot sort), while `deriveActiveSystems` sharing the summaries went from
+ *    0.648 to 0.057 ms/call. Net a small regression, so the machinery was removed.
+ *
+ * What would unblock it: make the merged `TickData` stable across assemblies — group the flattened ticks by
+ * `tickNumber` and merge each group once, memoised on the tuple of input `TickData` identities (LRU-stable while
+ * resident). The hazard to respect is `rawEvents`: `mergeTickData` concatenates its inputs' `rawEvents`, and
+ * `assembleTickViewAndNumbers` wipes them on the final merged result to avoid retaining ~1 GB on a dense tick, so a
+ * memo that serves a wiped object into a later chain fold would silently lose events. A group-at-once merge avoids
+ * intermediate objects and sidesteps that.
  */
 export function deriveSlotInfo(ticks: TickData[]): {
   activeSlots: number[];

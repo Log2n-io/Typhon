@@ -26,8 +26,11 @@ for one archetype or `GetSpatialTelemetryTotal()` for the engine. Each one is pa
 > `RepairQueueDepth` and `MeasuredNsPerEntity` — the four this page's worked readings are built on — are not among them.
 > **The Workbench** reads a wider subset every tick from the profiler trace, live or from a recording: two per-archetype
 > records, kinds 65 and 66, gated by `SpatialClusterRelocationActive` and `SpatialArchetypeTelemetryActive`. They carry
-> the throttle's outcome split, repair and queue state, tightness, the query tally and the budget controller's state. Its
-> Spatial Maintenance panel shows the older part of that record today. `GetSpatialGridOccupancy()` is API-only.
+> the throttle's outcome split, repair and queue state, tightness, the query tally and the budget controller's state, and
+> its Spatial Maintenance panel shows all of it (#944). A third record, kind 67, adds one row per RUNNABLE realm carrying
+> that realm's partition shape — its own cell size, cluster count, reach, outliers and budget — because after realms
+> "is spatial healthy" is a per-realm question and a thrashing 50 m dungeon is invisible behind a calm 16 km planet.
+> `GetSpatialGridOccupancy()` is API-only.
 
 ## ⚙️ How it works (in brief)
 
@@ -204,7 +207,9 @@ blameless.
 
 **Which knob.** Raise `MigrationHysteresisRatio` first, from its default of a twentieth of the cell towards a tenth. If
 absorption stays near zero after that, the margin was never the problem and the cell is too small for how far things
-move in a tick: raise `CellSize` instead, back towards 16 to 64 entities per cell.
+move in a tick: raise `CellSize` instead. On the workloads measured so far the cost curve is flat or still improving at
+the large end, so raising it is rarely what hurts — see [Spatial Tuning](./spatial-tuning.md) for the two measurements
+and why there is no portable target occupancy.
 
 **What you expect after.** The absorbed count rises and the migration count falls, with their sum roughly unchanged —
 that is the margin catching crossings it was previously paying for. If instead both fall together, you changed the cell
@@ -275,7 +280,21 @@ nothing is degraded enough to nominate, or that every cell that is was repaired 
   (`typhon.ecs.open.cellstate_rebuild_ms`, `typhon.ecs.open.cluster_aabb_rebuild_ms`).
 - **The Workbench reads the trace, not the accessors.** Its Spatial Maintenance panel is fed by two per-archetype trace
   records a tick (kinds 65 and 66), live or from a recording; neither accessor is called anywhere in `tools/`. Kind 66
-  also carries the query tally and the budget controller's state, which the panel does not show yet.
+  also carries the query tally and the budget controller's state, which the panel reads since #944 — as a Controller
+  block (configured vs granted budget, candidates/hit now vs best, ticks at the whole budget, measured ns/entity,
+  drift-target boost) and a Repair-health block (cells cooling, valve fires, entities repaired, queue evictions). The two
+  cumulative members are differentiated over the window rather than shown raw, and candidates/hit is a window SUM of
+  candidates over a window sum of hits, never a mean of per-tick ratios.
+- **The per-realm record carries SHAPE, not rates, and the panel says so.** Kind 67 (gate
+  `Spatial:ClusterMigration:RealmTelemetry`, one row per runnable realm per spatial archetype) carries that realm's grid,
+  cell size, cluster count, cluster reach, escaped clusters, promoted and blocked cells, and its own configured budget and
+  tolerance — all O(1) reads at fence end. The per-tick rate counters are deliberately absent: they are owned per
+  ARCHETYPE, one set for every realm the archetype lives in, so a realm-keyed copy would report the sum across realms
+  under one realm's name. Dormant realms send no row; kind 66's `presentRealms` / `runnableRealms` say how many rows are
+  missing, so a realm going to sleep reads as a row disappearing while the present count holds.
+  A row's `budgetConfiguredMs` and `efficiencyTolerance` are that realm's **declaration**, not what it gets: maintenance is
+  budgeted per archetype from realm 0's grid, so kind 66's `budgetConfiguredMs` is the ceiling a grant was actually measured
+  against. The Workbench labels the column `budget (decl)` and flags a realm whose declaration differs from what is enforced.
 - **Reads are lock-free and can tear across the fence.** A snapshot taken while the fence runs may mix values from
   either side of it. That is deliberate — serialising a diagnostic reader against the fence would cost more than the
   inconsistency is worth. Call it after the fence and before the next tick for a coherent view.

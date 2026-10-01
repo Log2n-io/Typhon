@@ -1,4 +1,5 @@
 import { DragKind, DragTracker } from './drag-tracker';
+import type { EyeCamera } from './eye-camera';
 import { MapCamera, type Ray } from './map-camera';
 
 export interface CameraInputHandlers {
@@ -39,9 +40,26 @@ export class CameraInput {
    */
   private swallowContextMenu = false;
 
-  constructor(canvas: HTMLCanvasElement, camera: MapCamera, size: ViewportSize, handlers: CameraInputHandlers) {
+  /**
+   * The eye camera and whether it is the active one (CLI3D-10). While it is, the pointer and the keyboard may **look**
+   * and pull back, and nothing else: panning, dragging and the ground ray are all map affordances, and a spectator has
+   * no authority to move. So those are not routed — they are dropped.
+   */
+  private readonly eye: EyeCamera;
+  private readonly isEye: () => boolean;
+
+  constructor(
+    canvas: HTMLCanvasElement,
+    camera: MapCamera,
+    size: ViewportSize,
+    handlers: CameraInputHandlers,
+    eye: EyeCamera,
+    isEye: () => boolean,
+  ) {
     this.canvas = canvas;
     this.camera = camera;
+    this.eye = eye;
+    this.isEye = isEye;
     this.size = size;
     this.handlers = handlers;
     const signal = this.abort.signal;
@@ -124,6 +142,20 @@ export class CameraInput {
       return;
     }
 
+    const turn = 1.6 * dt;
+    if (this.isEye()) {
+      // Look and pull back. WASD is deliberately dead: a spectator does not drive (CLI3D-10).
+      if (keys.has('KeyQ')) this.eye.rotateBy(-turn, 0);
+      if (keys.has('KeyE')) this.eye.rotateBy(turn, 0);
+      // Same sign as the map camera's R/F below, and as the pointer path for both. They disagreed: R tilted one way with
+      // the map camera and the other way in eye mode, which no test noticed because nothing covers this file's routing.
+      if (keys.has('KeyR')) this.eye.rotateBy(0, turn * 0.6);
+      if (keys.has('KeyF')) this.eye.rotateBy(0, -turn * 0.6);
+      if (keys.has('Equal') || keys.has('NumpadAdd')) this.eye.zoomBy(Math.exp(-2 * dt));
+      if (keys.has('Minus') || keys.has('NumpadSubtract')) this.eye.zoomBy(Math.exp(2 * dt));
+      return;
+    }
+
     const speed = this.camera.panSpeed * dt * (keys.has('ShiftLeft') || keys.has('ShiftRight') ? 3 : 1);
     let right = 0;
     let forward = 0;
@@ -136,7 +168,6 @@ export class CameraInput {
       this.handlers.onManualMove();
     }
 
-    const turn = 1.6 * dt;
     if (keys.has('KeyQ')) this.camera.rotateBy(-turn, 0);
     if (keys.has('KeyE')) this.camera.rotateBy(turn, 0);
     if (keys.has('KeyR')) this.camera.rotateBy(0, turn * 0.6);
@@ -176,27 +207,42 @@ export class CameraInput {
       return;
     }
 
-    if (this.drag.kind === DragKind.Pan) {
+    const dYaw = (x - this.drag.lastX) * 0.005;
+    const dPitch = (y - this.drag.lastY) * 0.004;
+    if (this.isEye()) {
+      // EITHER button looks around: there is no pan to distinguish it from, and a spectator dragging with the left
+      // button expects to turn their head rather than to be told the gesture is unavailable.
+      this.eye.rotateBy(dYaw, dPitch);
+    } else if (this.drag.kind === DragKind.Pan) {
       if (this.groundAt(this.drag.lastX, this.drag.lastY, this.before) && this.groundAt(x, y, this.after)) {
         this.camera.dragBy(this.before[0] - this.after[0], this.before[1] - this.after[1]);
         this.handlers.onManualMove();
       }
     } else {
-      this.camera.rotateBy((x - this.drag.lastX) * 0.005, (y - this.drag.lastY) * 0.004);
+      this.camera.rotateBy(dYaw, dPitch);
     }
 
     this.drag.moveTo(x, y);
   }
 
   private onPointerUp(e: PointerEvent): void {
+    // The PRESS position, not the release. A click may wander up to the slop and still count, and reporting where the
+    // finger ended would then aim the pick a few pixels off what the user pressed on — which is a miss at a small sprite.
+    const { startX, startY } = this.drag;
     if (this.drag.up(e.pointerId, e.buttons)) {
-      this.handlers.onClick(e.offsetX, e.offsetY);
+      this.handlers.onClick(startX, startY);
     }
   }
 
   private onWheel(e: WheelEvent): void {
     e.preventDefault();
     const factor = Math.exp(Math.sign(e.deltaY) * Math.min(Math.abs(e.deltaY), 300) * 0.0015);
+    if (this.isEye()) {
+      // No cursor anchor: the eye pulls back along its own view, not toward a ground point.
+      this.eye.zoomBy(factor);
+      return;
+    }
+
     if (this.groundAt(e.offsetX, e.offsetY, this.after)) {
       this.camera.zoomBy(factor, this.after[0], this.after[1]);
     } else {
@@ -207,7 +253,7 @@ export class CameraInput {
   private groundAt(x: number, y: number, out: Float64Array): boolean {
     const { width, height } = this.size;
     this.camera.rayThrough(x, y, width, height, this.ray);
-    return MapCamera.groundHit(this.ray, out, this.camera.maxGroundHitM(height));
+    return MapCamera.groundHit(this.ray, out, this.camera.maxGroundHitM(height), this.camera.groundY);
   }
 }
 

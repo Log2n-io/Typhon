@@ -247,13 +247,12 @@ internal unsafe struct SessionSendState
     public void NoteCapsGranted(Capabilities caps) => Volatile.Write(ref _caps, (int)(uint)caps);
 
     /// <summary>Clears a state to its initial values. Call once, before any thread can reach it.</summary>
-    /// <param name="state">The state to clear, in memory the caller owns.</param>
-    public static void Initialize(SessionSendState* state)
+    /// <param name="state">The state to clear.</param>
+    public static void Initialize(ref SessionSendState state)
     {
-        ArgumentNullException.ThrowIfNull(state);
         Debug.Assert(K == 2, "the slot index is computed as a parity; another K needs a modulo here and a wider slot array");
         Debug.Assert(sizeof(FrameSlot) == SlotBytes, "a frame slot must match the layout the offsets above assume");
-        NativeMemory.Clear(state, (nuint)sizeof(SessionSendState));
+        state = default;
     }
 
     /// <summary>

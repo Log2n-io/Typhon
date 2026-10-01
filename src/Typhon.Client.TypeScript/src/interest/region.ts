@@ -1,3 +1,4 @@
+import { monotonicNow } from '../clock/now.js';
 import type { CatalogCommand, CatalogPlan, MessagePlan } from '../protocol/catalog.js';
 import { AckReason, BuiltInCommand } from '../protocol/constants.js';
 import type { FieldValues } from '../protocol/field-codec.js';
@@ -111,7 +112,7 @@ export class RegionSender {
     this.options = options;
     this.command = command;
     this.realm = options.realm ?? (() => null);
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? monotonicNow;
     const rate = options.plan.catalog.commands.find((c) => c.idx === BuiltInCommand.ClientRegionIdx)?.rate;
     this.minIntervalMs = options.minIntervalMs ?? (rate === undefined ? 200 : 1000 / rate.perSec);
     this.moveThreshold = options.moveThreshold ?? 4;

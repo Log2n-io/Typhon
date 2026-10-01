@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 
 namespace SwgTatooine;
 
@@ -141,6 +141,20 @@ public sealed class SimConfig
     /// </summary>
     public float InteriorSleepS = 10f;
 
+    /// <summary>
+    /// How often a serving process counts what is standing in each realm, for the client's realm inventory. 0 = never.
+    /// </summary>
+    /// <remarks>
+    /// <b>It applies only to a serving run, whatever this says.</b> The census system is added to the DAG beside the session system, under the same
+    /// condition, because the measured runs are where this demo's CPU numbers come from and a once-a-second serial walk of every cluster is exactly the kind
+    /// of term that makes two A/B arms incomparable while looking like nothing. A viewer pays it; a measurement does not.
+    /// <para>
+    /// The cadence is <c>TickRateHz / RealmCensusHz</c> ticks, truncated: 3 at 40 Hz is 13 ticks, which is 3.08 Hz. Near
+    /// enough for a panel, and stated rather than left as a surprise.
+    /// </para>
+    /// </remarks>
+    public float RealmCensusHz = 1f;
+
     /// <summary>Planets after the first are simulated at this divisor: each of their clusters once every N ticks, over N ticks' delta time. 1 = full rate.</summary>
     public int PlanetDivisor = 1;
 
@@ -258,6 +272,44 @@ public sealed class SimConfig
     /// </summary>
     public string DatabaseDirectory;
 
+    /// <summary>
+    /// The database's file name, without a directory or an extension. <c>--db-name</c>; <see cref="DefaultDatabaseName"/> by default (P-1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The process id used to be in here, and that is the 154 GB incident.</b> The name was
+    /// <c>SwgTatooine_{Environment.ProcessId}</c>, so every run — and every run KILLED before it could delete its own file — left a database of its own. A
+    /// campaign of a few dozen interrupted runs accumulated 154 GB of multi-gigabyte files that nothing would ever clean up, because the only process that knew
+    /// the name was gone.
+    /// </para>
+    /// <para>
+    /// A single stable name makes that structural rather than a rule to remember: a killed run leaves ONE database, and the next run reuses or deletes it.
+    /// That is also the precondition for <see cref="Persist"/> meaning anything — a world you cannot name is a world you cannot reopen.
+    /// </para>
+    /// </remarks>
+    public string DatabaseName = DefaultDatabaseName;
+
+    /// <summary>The database name a run uses when <c>--db-name</c> is not given.</summary>
+    public const string DefaultDatabaseName = "SwgTatooine";
+
+    /// <summary>
+    /// <c>--persist</c>: keep the database across runs and REOPEN it instead of building a fresh world (P-1).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Delete-on-start stays the default, and the asymmetry of the two failure modes is the whole reason.</b> A run that wrongly persists measures a world
+    /// some earlier run left behind — a different population, a different cluster geometry, creatures that have already wandered — and says nothing about it,
+    /// so an A/B pair silently compares two different worlds. A run that wrongly starts fresh loses a demonstration world and is obvious the moment anybody
+    /// looks. The reproducibility of every number in this repository depends on the first of those not happening quietly, which is why the opt-in is the
+    /// persisting direction and not the other one.
+    /// </para>
+    /// <para>
+    /// There is deliberately no <c>--fresh</c>. Two flags with opposite senses is how the two source items (SWG-04 and CLI-05) came to propose opposite
+    /// defaults, and a surface with both would let a command line say the same thing twice or contradict itself.
+    /// </para>
+    /// </remarks>
+    public bool Persist;
+
     /// <summary>Run the tick fence on the worker pool rather than serially on the tick driver.</summary>
     public bool ParallelFence = true;
 
@@ -312,6 +364,19 @@ public sealed class SimConfig
     /// commands, with room to spare — the demo's own sizing of a rail the engine will not default.
     /// </summary>
     public int IngressBytesPerSecond = 16 * 1024;
+
+    /// <summary>
+    /// <c>--max-clients N</c>: how many player sessions are admitted at once; 0 (the default) is unlimited.
+    /// </summary>
+    /// <remarks>
+    /// <b>A cap is what makes the refusal path exist at all (SWG-07).</b> Without one the demo accepted every connection, so the one thing every real server
+    /// does under load — say no, with a reason a client can act on — was never exercised, and neither was the engine's admission hook. The cap counts
+    /// admitted sessions of each role separately because a full house of spectators must not lock players out of their own world.
+    /// </remarks>
+    public int MaxClients;
+
+    /// <summary><c>--max-spectators N</c>: how many god-camera sessions are admitted at once; 0 (the default) is unlimited.</summary>
+    public int MaxSpectators;
 
     /// <summary><c>--player-leave M</c>: the players' leave radius, metres; 0 (the default) for none. The Phase 2 criteria run at 192/208 m.</summary>
     public double PlayerLeaveM;
@@ -380,6 +445,32 @@ public sealed class SimConfig
     public bool SplitAwareness;
 
     /// <summary>
+    /// Keep the awareness system in the schedule even when replication is declared (<c>--awareness</c>).
+    /// </summary>
+    /// <remarks>
+    /// <b>Under <c>serve</c>, awareness is a phantom pass and is dropped by default (#950, S0-6).</b> Replication computes each session's interest for real;
+    /// <c>AwarenessSystem</c> then computed the same interest again and threw it away as a <c>Count()</c>. So the server's tick carried a whole second
+    /// interest pass that nothing read, and every per-hit figure the README quotes describes a caller that counts rather than one that produces lists.
+    /// <para>
+    /// The system is still worth having as a <i>labelled</i> spatial-query benchmark — it is the cleanest interest-query workload in the demo — which is what
+    /// this flag keeps. In <c>run</c> (no sessions) it is the interest system and is always scheduled.
+    /// </para>
+    /// </remarks>
+    public bool ForceAwareness;
+
+    /// <summary>Where <c>--sweep</c> writes its report (<c>--report-dir</c>). Empty picks the docs repo when present, else the binary's directory (#947).</summary>
+    public string ReportDirectory;
+
+    /// <summary>
+    /// [CORE3] Seconds before a wild lair revives a killed creature (<c>--respawn-s</c>). A uniform 120-240 s in <c>LairObserver.idl</c>; the midpoint.
+    /// </summary>
+    /// <remarks>
+    /// Configurable because at the shipped 180 s nothing revives inside a 200-tick measurement, so the revival path — the one teleport in the simulation, and
+    /// the largest position jump it makes — is never exercised by a short run or by a test. A destroy-mission lair never respawns at all.
+    /// </remarks>
+    public float RespawnSeconds = 180f;
+
+    /// <summary>
     /// Per-system <c>MinChunkSize</c> for the awareness system only. <c>0</c> leaves it on the global floor.
     /// </summary>
     /// <remarks>
@@ -397,10 +488,57 @@ public sealed class SimConfig
     /// <summary>
     /// How the creature-combat system asks which players are in range: one query per creature, or one batch per creature cluster.
     /// </summary>
-    public CombatApi CombatApi = CombatApi.MoveNext;
 
     /// <summary>Seed for every random decision, so a run is reproducible and two arms see the same world.</summary>
     public int Seed = 20260907;
+
+    /// <summary>
+    /// <c>--fault-at-tick N</c>: throw from a system on tick <c>N</c>, to exercise the crash artefact (P-3). Zero never faults.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A real fault through the real path, because the artefact cannot be tested any other way.</b> AC-3 asks for an artefact produced by an induced
+    /// <c>OnTickAborted</c>, and the only honest way to induce one is for a system body to throw the way a defect would: the runtime then decides the tick is
+    /// aborted, raises the event, and the handler writes the directory. Calling the writer directly from a test would assert that a file-writing method writes
+    /// files — which is not the claim.
+    /// </para>
+    /// <para>
+    /// A measurement flag, and refused with <c>--serve</c> alongside the probes: a server that deliberately kills itself on a tick is not a server. It is also
+    /// kept out of <see cref="Label"/>, because a run that faults produces no measurement to label.
+    /// </para>
+    /// </remarks>
+    public int FaultAtTick;
+
+    // ── Mode ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// <c>--serve P</c>: the port to serve the world on instead of measuring it; 0 (the default) measures.
+    /// </summary>
+    /// <remarks>
+    /// Parsed with every other flag rather than separately in <c>Program</c>, so that the strict parser can account for it. A mode flag the argument reader
+    /// does not know about is a token it would have to refuse — see <see cref="ArgReader"/>.
+    /// </remarks>
+    public int ServePort;
+
+    /// <summary><c>--sweep</c>: run the partitioning matrix instead of one configuration.</summary>
+    public bool RunSweep;
+
+    /// <summary><c>--sweep-worlds</c>: the sweep's world-edge axis, km.</summary>
+    /// <remarks>
+    /// <b>Defaulted here as well as in the parser, because a configuration is not always parsed.</b> A test, or any code that builds a
+    /// <see cref="SimConfig"/> directly and calls <c>Sweep.Run</c>, would otherwise hand it a null axis and get a <c>NullReferenceException</c> out of the
+    /// matrix loop. The same three defaults appear in <see cref="CommandLine"/> so that <c>--help</c> can print them.
+    /// </remarks>
+    public float[] SweepWorlds = [TatooineData.PlanetEdgeM / 1000f, 64f, 128f];
+
+    /// <summary><c>--sweep-pops</c>: the sweep's population-scale axis.</summary>
+    public float[] SweepPops = [1f, 4f, 16f];
+
+    /// <summary><c>--sweep-cells</c>: the sweep's cell-size axis, metres at the real planet's scale.</summary>
+    public float[] SweepCells = [64f, 128f, 256f, 512f, 1024f];
+
+    /// <summary>The flag list, set instead of a configuration when the command line asked for <c>--help</c>; null otherwise.</summary>
+    public string HelpText;
 
     // ── Derived ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -426,7 +564,7 @@ public sealed class SimConfig
     public int ResolveWorkerCount() => WorkerCount > 0 ? WorkerCount : Environment.ProcessorCount;
 
     /// <summary>A short label identifying this configuration in a results table.</summary>
-    /// <remarks>Deliberately omits <see cref="AwarenessApi"/>, <see cref="CombatApi"/> and <see cref="SimdNarrowphase"/>: none changes the workload, and
+    /// <remarks>Deliberately omits <see cref="AwarenessApi"/> and <see cref="SimdNarrowphase"/>: none changes the workload, and
     /// the label keys sweep results.</remarks>
     public string Label =>
         $"{WorldEdgeKm:N0}km x{PopulationScale:N1} cell={ResolveCellSize():N0}m floors={ClusterTargetExtentRatio:G}/{ClusterRepairExtentRatio:G} "
@@ -450,15 +588,5 @@ public enum AwarenessApi
     /// One <c>CountRadius</c> per source cluster and target archetype: the cluster's players share one cell walk. <c>--work-probe</c> still replays each
     /// player's single query, so it reports per-query work, not what the batch saved.
     /// </summary>
-    Batch,
-}
-
-/// <summary>How the creature-combat system asks which players are in range.</summary>
-public enum CombatApi
-{
-    /// <summary>One radius query per creature, drained with <c>MoveNext</c> up to four hits.</summary>
-    MoveNext,
-
-    /// <summary>One <c>ForEachInRadius</c> per creature cluster, each creature retiring at four hits.</summary>
     Batch,
 }

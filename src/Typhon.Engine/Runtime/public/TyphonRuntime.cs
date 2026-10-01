@@ -463,6 +463,237 @@ public sealed partial class TyphonRuntime : IDisposable
         Scheduler.Start();
     }
 
+    /// <summary>
+    /// Reads the numbers an operator watches: tick percentiles against the target, overruns, the durability wait, per-system cost, entities per archetype,
+    /// and the session figures when replication is running.
+    /// </summary>
+    /// <param name="windowTicks">
+    /// How many recorded ticks to compute the percentiles over. <c>0</c> (the default) means one second's worth at the configured tick rate, which is the
+    /// window the <c>STATS</c> wire block uses — so a caller comparing the two reads the same thing. Clamped to what the ring still holds.
+    /// </param>
+    /// <returns>A snapshot. Never null; every figure is zero on an engine that has not ticked.</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>This is the read the <c>STATS</c> block could not be.</b> Those values are computed once a second inside the subscriptions runtime, held in a
+    /// private array, and written into a game client's frame — so nothing else could see one of them, and an engine with replication off, or whose
+    /// application declared no metrics, computed none at all. This reads the ring and the engine directly: it answers on any running engine, with or without
+    /// replication, whatever the application declared.
+    /// </para>
+    /// <para>
+    /// <b>Not for the tick path.</b> It allocates a snapshot and two arrays and walks the window. Call it from an HTTP endpoint, a CLI verb or a log timer,
+    /// at human rate. It takes no lock and blocks no tick: the ring is a single-writer diagnostic structure, so a sample read while the driver is writing it
+    /// may be torn, perturbing one sample in a percentile — the same trade the encoder makes, for the same reason.
+    /// </para>
+    /// </remarks>
+    public RuntimeStatsSnapshot ReadStats(int windowTicks = 0)
+    {
+        var ring = Telemetry;
+        var targetMs = Options.BaseTickRate > 0 ? 1000.0 / Options.BaseTickRate : 0.0;
+        var window = windowTicks > 0
+            ? windowTicks
+            : Math.Max(1, (int)Math.Round((double)Options.BaseTickRate, MidpointRounding.AwayFromZero));
+
+        var newest = ring?.NewestTick ?? -1;
+        if (ring == null || newest < 0)
+        {
+            // An engine that has not ticked has no percentiles, and saying so with zeros beats inventing a window over no samples. The archetype counts are
+            // still real — they come from the engine, not the ring — so they are read anyway.
+            return new RuntimeStatsSnapshot
+            {
+                Tick = newest,
+                TargetTickMs = targetMs,
+                // 1 rather than the default 0: a runtime that has not ticked is not modulating, and 0 is not a multiplier any tick ever runs under.
+                TickMultiplier = 1,
+                Archetypes = ReadArchetypeStats(),
+                Realms = ReadRealmStats(),
+                RealmPassSteps = ReadRealmPassSteps(_subscriptionsRuntime),
+                RealmPolicyEvaluations = ReadPolicyEvaluations(),
+                ReplicationPrologueMsTotal = _subscriptionsRuntime?.Frames?.PrologueTotal.Ms ?? 0.0,
+                ReplicationPrologueTicks = _subscriptionsRuntime?.Frames?.PrologueTotal.Ticks ?? 0L,
+                ReplicatedArchetypes = _subscriptionsRuntime?.Registry?.Archetypes?.Count ?? 0,
+            };
+        }
+
+        // One spelling of the clamp, shared with the STATS path, rather than two that have to agree. Re-reading `newest` from it also makes the pair
+        // self-consistent: the tick driver can advance between the read above and this one, and a window whose ends came from different reads is not a window.
+        // A false return needs `window < 1`, which the old form turned into a zero-tick window; keep that rather than inventing a different answer.
+        var spanTicks = ring.TryGetRange(newest - window + 1, out var oldest, out newest) ? (int)(newest - oldest + 1) : 0;
+        var durations = new double[spanTicks];
+        var waits = new double[spanTicks];
+        var systemSums = new double[Scheduler.AllSystemCount];
+        var overruns = 0;
+        var multiplier = 1;
+
+        // How many ticks were actually READ, which is not the width of the range resolved above. The tick driver writes this ring concurrently, so a resolved
+        // range is not a promise that every tick in it still exists when the loop reaches it: with `windowTicks` as wide as the ring — it is caller-supplied
+        // and unbounded — `oldest` clamps exactly to OldestAvailableTick, and one tick recorded in between evicts it. GetTick would throw out of this public
+        // method, failing an operator's stats call rather than returning a window one sample short, so both reads go through the Try peers and a tick that has
+        // gone is skipped. That is the tearing this method's remarks already accept.
+        //
+        // Both reads are taken BEFORE anything is recorded, so a tick contributes to every figure or to none. Incrementing on the first and continuing on the
+        // second would leave the per-system means dividing by a count that includes ticks whose metrics were never summed.
+        var ticks = 0;
+        for (var t = oldest; t <= newest; t++)
+        {
+            if (!ring.TryGetTick(t, out var tick) || !ring.TryGetSystemMetrics(t, out var systems))
+            {
+                continue;
+            }
+
+            durations[ticks] = tick.ActualDurationMs;
+            waits[ticks] = tick.UowFlushMs;
+            // The newest tick's, so it ends up holding the last one the loop sees. Published beside Overruns because that count is measured against the 1×
+            // target and a modulated tick legitimately exceeds it — see RuntimeStatsSnapshot.Overruns.
+            multiplier = tick.TickMultiplier;
+            ticks++;
+            if (targetMs > 0 && tick.ActualDurationMs > targetMs)
+            {
+                overruns++;
+            }
+
+            var upTo = Math.Min(systems.Length, systemSums.Length);
+            for (var sys = 0; sys < upTo; sys++)
+            {
+                systemSums[sys] += systems[sys].DurationUs;
+            }
+        }
+
+        var systemStats = new SystemStat[systemSums.Length];
+        for (var sys = 0; sys < systemStats.Length; sys++)
+        {
+            systemStats[sys] = new SystemStat(Scheduler.Systems[sys]?.Name ?? string.Empty, ticks > 0 ? systemSums[sys] / ticks : 0.0);
+        }
+
+        var subscriptions = _subscriptionsRuntime;
+        return new RuntimeStatsSnapshot
+        {
+            Tick = newest,
+            TicksInWindow = ticks,
+            TargetTickMs = targetMs,
+            // The same nearest-rank definition the STATS block uses, from the same helper, so the HTTP figure and the wire figure cannot drift apart on the
+            // meaning of "p99" while both look plausible.
+            TickP50Ms = TelemetryPercentile.NearestRank(durations, ticks, 0.50),
+            TickP99Ms = TelemetryPercentile.NearestRank(durations, ticks, 0.99),
+            Overruns = overruns,
+            TickMultiplier = multiplier,
+            DurabilityWaitP99Ms = TelemetryPercentile.NearestRank(waits, ticks, 0.99),
+            Systems = systemStats,
+            Archetypes = ReadArchetypeStats(),
+            Realms = ReadRealmStats(),
+            RealmPassSteps = ReadRealmPassSteps(subscriptions),
+            RealmPolicyEvaluations = ReadPolicyEvaluations(),
+            ReplicationPrologueMsTotal = subscriptions?.Frames?.PrologueTotal.Ms ?? 0.0,
+            ReplicationPrologueTicks = subscriptions?.Frames?.PrologueTotal.Ticks ?? 0L,
+            ReplicatedArchetypes = subscriptions?.Registry?.Archetypes?.Count ?? 0,
+            Sessions = subscriptions?.Sessions?.OpenCount ?? 0,
+            NetOutBytesTotal = subscriptions?.SendPump?.BytesSent ?? 0L,
+            ReplicationTrackP99Ms = (_subscriptionsContext.Telemetry?.Percentile(newest, window, 0.99, new double[ticks]) ?? 0.0) / 1000.0,
+        };
+    }
+
+    /// <summary>
+    /// The hub's cumulative serial per-realm pass count, read with an acquire load.
+    /// </summary>
+    /// <remarks>
+    /// <b>Volatile, although nothing is published alongside it.</b> This is the first counter of the hub's read from off the tick thread — its neighbours
+    /// (<c>PrepareTicks</c>, <c>SlotsPushed</c>) are only ever read on the tick thread — so there is no established local convention to lean on, and the
+    /// project's ordering rule asks for the acquire whenever a load crosses threads. It is a plain <c>mov</c> on x64 and one <c>ldar</c> on arm64, read at
+    /// human rate.
+    /// </remarks>
+    private static long ReadRealmPassSteps(SubscriptionsRuntime subscriptions)
+    {
+        var hub = subscriptions?.Hub;
+        return hub == null ? 0L : System.Threading.Volatile.Read(ref hub.RealmPassSteps);
+    }
+
+    /// <summary>The realm table's cumulative policy-evaluation count, read with an acquire load for the reason above.</summary>
+    private long ReadPolicyEvaluations()
+    {
+        var table = Engine?.RealmTable;
+        return table?.EvaluationCountVolatile ?? 0L;
+    }
+
+    /// <summary>
+    /// One row per registered realm: what it is, what it is doing, and the replication work its sessions have been served.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The realm table is walked, not the hub's served list</b>, because the absence of a served realm is the fact worth reporting (see
+    /// <see cref="RuntimeStatsSnapshot.Realms"/>). The table hands back one consistent snapshot — count and array in one reference — so a realm registered or
+    /// removed while this runs makes the row list one longer or shorter, never torn.
+    /// </para>
+    /// <para>
+    /// <b>Empty for a single-realm engine.</b> Every figure on the snapshot already describes that realm, and a one-row array saying the same thing again would
+    /// invite a reader to add the two together. At scale this is O(registered realms) with a handful of loads each, off the tick, at human rate.
+    /// </para>
+    /// <para>
+    /// <b>Read off the tick thread, and the staleness is accepted</b> — the same trade the rest of this snapshot makes and for the same reason (see
+    /// <see cref="RuntimeStatsSnapshot"/>'s remarks on the telemetry ring). <b>Staleness is all that is accepted, though:</b> the hub's per-realm table is
+    /// reached through <c>SnapshotFor</c> rather than <c>For</c>, because the latter reads its array field twice and the tick can replace that array between
+    /// the two — a race that throws rather than returning an old number. A realm can appear or disappear between rows; no row can be torn. A figure one tick
+    /// old is the right answer for a stats endpoint and the wrong price to pay a publication protocol on the tick path for.
+    /// </para>
+    /// <para>
+    /// <b>The state read cannot throw.</b> <c>Realms.StateOf</c> raises for a realm that is not registered, and a realm removed between the snapshot and the
+    /// read is exactly that — which would turn an operator's stats call into a 500 once a dungeon closed under it. The realm's own <c>Closing</c> flag is the
+    /// answer in that case, and it is the last thing that was true of it.
+    /// </para>
+    /// </remarks>
+    private RealmStat[] ReadRealmStats()
+    {
+        var table = Engine?.RealmTable;
+        if (table == null || table.MaxRealms <= 1)
+        {
+            return [];
+        }
+
+        var hub = _subscriptionsRuntime?.Hub;
+        var registered = table.Registered;
+        var stats = new RealmStat[registered.Length];
+        for (var i = 0; i < registered.Length; i++)
+        {
+            var realm = registered[i];
+            var id = realm.Id.Value;
+            var replication = hub?.SnapshotFor(id);
+            stats[i] = new RealmStat(
+                id,
+                Engine.Realms.GenerationOf(realm.Id),
+                realm.Config?.Replication?.Kind ?? string.Empty,
+                realm.Closing ? RealmRunState.Closing : table.StateOfRow(id),
+                replication != null,
+                table.DivisorOf(id),
+
+                // Clamped: SessionsHere is a subtraction of two counters the tick moves independently, so an off-tick read can land between them and see a
+                // negative. A session count below zero is not a fact about any realm and would only ever be read as one.
+                Math.Max(0, replication?.SessionsHere ?? 0),
+                replication?.Enters ?? 0,
+                replication?.Updates ?? 0,
+                replication?.Leaves ?? 0,
+                replication?.CellsDelivered ?? 0,
+                replication?.Resets ?? 0,
+                replication?.Events ?? 0);
+        }
+
+        return stats;
+    }
+
+    /// <summary>Live entity count per registered archetype, named. Read from the engine, so it is meaningful before the first tick.</summary>
+    private ArchetypeStat[] ReadArchetypeStats()
+    {
+        var stats = new List<ArchetypeStat>();
+        foreach (var meta in ArchetypeRegistry.GetAllArchetypes())
+        {
+            if (meta == null)
+            {
+                continue;
+            }
+
+            stats.Add(new ArchetypeStat(meta.Name, Engine.GetArchetypeEntityCount(meta.ArchetypeId)));
+        }
+
+        return stats.ToArray();
+    }
+
     /// <summary>The scheduled systems' names, in schedule order — the labels of the built-in per-system metric the catalog declares.</summary>
     private string[] SystemNames()
     {
@@ -2835,31 +3066,46 @@ public sealed partial class TyphonRuntime : IDisposable
         // Flush the UoW to make all Deferred writes (including the tick fence publishes above) durable, then dispose. UoW.Flush in WAL mode calls
         // WalManager.RequestFlush + WaitForDurable(currentLsn), where currentLsn is captured at the moment of the call — so it includes every publish made
         // in WriteTickFence.
-        InspectorPhase(TickPhase.UowFlush, () =>
+        //
+        // Timed unconditionally (#CLI-04). The InspectorPhase span below measures the same thing but exists only while the profiler records, so with the
+        // profiler off there was no durability number at all and typhon.durability.wait.p99 emitted a hard zero. One Stopwatch pair per tick, on the path
+        // that just waited for an fsync, is not a cost worth gating — and a gated measurement is how the metric came to be unsourced in the first place.
+        var flushStart = Stopwatch.GetTimestamp();
+        try
         {
-            try
+            InspectorPhase(TickPhase.UowFlush, () =>
             {
-                _currentUow?.Flush();
-            }
-            catch (Exception)
-            {
-                // SUB-02's fourth clause, at the only point it can be observed: the flush throws out of this phase and the publication gate below is never
-                // reached, so the frames this tick produced would sit in their slots forever. Every session that produced one is closed here instead.
-                _subscriptionsRuntime?.DiscardFrames();
-                throw;
-            }
-            finally
-            {
-                _currentUow?.Dispose();
-                _currentUow = null;
-                TyphonEvent.EmitRuntimePhaseUoWFlush(scheduler.CurrentTickNumber, 0);
+                try
+                {
+                    _currentUow?.Flush();
+                }
+                catch (Exception)
+                {
+                    // SUB-02's fourth clause, at the only point it can be observed: the flush throws out of this phase and the publication gate below is never
+                    // reached, so the frames this tick produced would sit in their slots forever. Every session that produced one is closed here instead.
+                    _subscriptionsRuntime?.DiscardFrames();
+                    throw;
+                }
+                finally
+                {
+                    _currentUow?.Dispose();
+                    _currentUow = null;
+                    TyphonEvent.EmitRuntimePhaseUoWFlush(scheduler.CurrentTickNumber, 0);
 
-                // In the `finally`, so a flush that THREW still stamps. SUB-02's fourth clause is about exactly that tick — a flush that fails after
-                // frames were produced has to close every session, because produced-but-unpublished frames leave client baselines ahead of the
-                // clients — and a verifier for it needs to see that the flush was reached at all.
-                _subscriptionsContext.NoteFlush();
-            }
-        });
+                    // In the `finally`, so a flush that THREW still stamps. SUB-02's fourth clause is about exactly that tick — a flush that fails after
+                    // frames were produced has to close every session, because produced-but-unpublished frames leave client baselines ahead of the
+                    // clients — and a verifier for it needs to see that the flush was reached at all.
+                    _subscriptionsContext.NoteFlush();
+                }
+            });
+        }
+        finally
+        {
+            // In a `finally` for the same reason the stamp above is: a flush that THREW still waited, and it is the slowest durability event the engine can
+            // have. A tick reporting zero because its flush failed would hide exactly the outlier the percentile exists to show. A field write on the tick
+            // driver's own thread cannot itself throw, so this cannot displace the flush's exception.
+            scheduler.NoteUowFlushMs((float)Stopwatch.GetElapsedTime(flushStart).TotalMilliseconds);
+        }
 
         // Issue #234: compute per-tier budget metrics from this tick's system telemetry, for the next tick's TickContext.
         ComputeTierBudgetMetrics();

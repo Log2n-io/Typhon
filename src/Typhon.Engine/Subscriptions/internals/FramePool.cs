@@ -486,6 +486,33 @@ internal sealed unsafe class FramePool : ResourceNode, IMemoryResource, IMetricS
         return true;
     }
 
+    /// <summary>Non-zero once <see cref="KeepSlabsForOutstandingSends"/> has been called: the slabs are deliberately never freed.</summary>
+    private int _keepSlabsForOutstandingSends;
+
+    /// <summary>
+    /// Whether this pool's slabs were deliberately left allocated because a send was still reading out of one at teardown (#1006).
+    /// </summary>
+    public bool SlabsKeptForOutstandingSends => Volatile.Read(ref _keepSlabsForOutstandingSends) != 0;
+
+    /// <summary>
+    /// Leaves the slabs allocated for good, because a send pump outlived the quiesce and a transport may still be reading a frame out of one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The bytes a link is sending come from here.</b> <c>FrameBlock.Bytes</c> is a raw pointer into a slab, carried across the send's await as an
+    /// <c>nint</c> and handed to the transport; freeing the slab underneath is a read of freed memory in whatever is writing the socket. The quiesce in
+    /// <c>SendPump.Dispose</c> is bounded on purpose — a transport that never returns from a write must not hang the runtime's teardown — so the case is
+    /// reachable by construction, and a drain here would simply move the hang rather than remove it.
+    /// </para>
+    /// <para>
+    /// <b>So the slabs leak, deliberately, and only in that case.</b> A bounded leak at shutdown against a read of freed memory is not a close call. It has to
+    /// suppress the resource tree's cascade as well as this pool's own <c>Dispose</c>, because the slabs are children of this node and the tree frees children
+    /// whatever their owner skipped — which is why the <see cref="SessionSendState"/> half of #1006 could not be solved this way and moved to managed memory
+    /// instead. The frame bytes cannot: they exist to be handed to a socket without a copy.
+    /// </para>
+    /// </remarks>
+    public void KeepSlabsForOutstandingSends() => Volatile.Write(ref _keepSlabsForOutstandingSends, 1);
+
     /// <inheritdoc />
     protected override void Dispose(bool disposing)
     {
@@ -510,7 +537,17 @@ internal sealed unsafe class FramePool : ResourceNode, IMemoryResource, IMetricS
             _slabs.Clear();
         }
 
-        // ResourceNode.Dispose frees the slabs, which are children of this node.
+        // ResourceNode.Dispose frees the slabs, which are children of this node — unless a send is still reading out of one (#1006).
+        if (disposing && Volatile.Read(ref _keepSlabsForOutstandingSends) != 0)
+        {
+            // Unlink anyway. The slab leak on this path is deliberate; leaking the NODE too is not, and it was the more visible of the two: `RemoveChild`
+            // only drops this node from the parent's child map and raises the mutation event — it disposes nothing — so the slabs and their pointers are
+            // untouched by it, while the resource tree stops advertising a pool that no longer works. Skipping it also broke the very thing the removal below
+            // exists for: a pool recreated under the same id found the dead one still occupying it.
+            Parent?.RemoveChild(this);
+            return;
+        }
+
         base.Dispose(disposing);
 
         // Last, so the tree stays walkable while the children dispose — and so a pool recreated under the same id is not silently absent from the tree.

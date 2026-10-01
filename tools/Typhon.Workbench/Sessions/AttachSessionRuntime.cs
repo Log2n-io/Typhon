@@ -8,6 +8,7 @@ using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using Typhon.Profiler;
 using Typhon.Workbench.Dtos.Profiler;
+using Typhon.Workbench.Schema;
 
 namespace Typhon.Workbench.Sessions;
 
@@ -44,7 +45,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     private const int ConnectRetryCount = 3;
     private const int ConnectRetryDelayMs = 2000;
     private const int ReconnectDelayMs = 2000;
-    private const int MaxFrameBytes = 8 * 1024 * 1024;
+    /// <summary>
+    /// How long <see cref="StartAsync(Guid, string, ILogger, CancellationToken, CaptureMode)"/> waits for the handshake's Init frame before returning a
+    /// session without schema. The exporter writes Init on accept, so this is a ceiling on a pathological peer, not a latency the user normally pays.
+    /// </summary>
+    private const int InitHandshakeTimeoutSeconds = 5;
+    /// <summary>The wire's own limit, not this reader's preference — the producer checks the same constant before it sends (#WB-01).</summary>
+    private const int MaxFrameBytes = LiveStreamProtocol.MaxFrameBytes;
 
     /// <summary>Force-flush the in-progress chunk every N ms so partial chunks become visible to clients.</summary>
     private const int FlushChunkTimerMs = 200;
@@ -54,6 +61,25 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
 
     /// <summary>Coalesce GlobalMetricsUpdated SSE deltas to at most one per N ms.</summary>
     private const int GlobalMetricsTimerMs = 1000;
+
+    /// <summary>
+    /// Coalesce finalized tick summaries into one <c>tickSummariesAdded</c> SSE frame per N ms — the cadence
+    /// <c>claude/design/Profiler/08-profiler-live-replay-unification.md</c> §"Delta cadence" specifies.
+    /// </summary>
+    /// <remarks>
+    /// One frame per tick is one frame per engine tick: measured at 48.8/s against the SWG demo at <c>--hz 50</c> in
+    /// capture-everything mode. Each frame flips the client's <c>metadata</c> identity, which re-renders the profiler
+    /// tree and repaints both canvases — <c>drawTimeArea</c> ran 7 942 times in 166 s (42 s of main-thread time, 25 % of
+    /// wall) purely because the SSE rate set the repaint rate. The renderer cannot show 50 distinct frames a second
+    /// anyway, so the extra 40 are paid for nothing.
+    /// </remarks>
+    private const int TickSummaryFlushMs = 100;
+
+    /// <summary>
+    /// Flush the pending summaries early once this many have queued, so a burst (an engine catching up after a stall)
+    /// is not held for a full <see cref="TickSummaryFlushMs"/> window and does not grow one frame without bound.
+    /// </summary>
+    private const int TickSummaryFlushThreshold = 256;
 
     /// <summary>Per-subscriber bounded delta channel: SSE clients buffer up to this many deltas before being kicked.</summary>
     private const int SubscriberBufferSize = 1000;
@@ -89,6 +115,27 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// </summary>
     private byte[] _initialMetadataBytes;
 
+    /// <summary>
+    /// Schema over the six v7 static-structure sections of the first Init frame, or <c>null</c> when the engine sent them empty (#WB-01).
+    /// </summary>
+    /// <remarks>
+    /// Built once, on first Init, and never rebuilt: the Init signature includes the schema fingerprint, so a reconnect whose schema differs is
+    /// already an unrecoverable session rather than a session whose schema quietly changes underneath the panels.
+    /// </remarks>
+    private volatile IStaticSchemaProvider _staticSchema;
+
+    /// <summary>
+    /// Set once a <see cref="TraceEventKind.SpatialRealmTelemetry"/> record has been seen on this stream (#1083).
+    /// </summary>
+    /// <remarks>
+    /// <b>Observed, not declared — because the engine declares nothing about realms in its Init frame.</b> The attached engine's realm count is not a
+    /// static-structure table and there is no handshake field for it, so the only honest source is the telemetry itself: kind 67 is emitted once per
+    /// <i>runnable</i> realm per archetype, so seeing one is proof both that this engine has realms and that its spatial trace subtree is on. Both are
+    /// preconditions for the realm board showing anything, which makes a capability derived from the record exactly a capability derived from "there is
+    /// something to show". It latches: a realm going dormant stops the records, and must not retract a panel the user has open.
+    /// </remarks>
+    private volatile bool _sawRealmTelemetry;
+
     private LiveCacheTempFile _tempFile;
     private IncrementalCacheBuilder _builder;
     private long _timestampFrequency;
@@ -100,7 +147,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// <remarks>
     /// Compacting in place inside <see cref="_rawBlockBuffer"/> would in fact be safe — the write cursor never overtakes
     /// the read cursor, since a record is only copied after it has been walked. A separate buffer is used anyway so that
-    /// the raw block stays intact for the whole of <c>HandleBlock</c>: <see cref="ExtractThreadInfos"/> and any future
+    /// the raw block stays intact for the whole of <c>HandleBlock</c>: <see cref="ExtractBlockMetadata"/> and any future
     /// unfiltered inspection then read the engine's bytes, not a half-compacted version of them, with no ordering rule
     /// to remember.
     /// </remarks>
@@ -132,6 +179,15 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     private Timer _flushChunkTimer;
     private Timer _trailingTickTimer;
     private Timer _globalMetricsTimer;
+    private Timer _tickSummaryFlushTimer;
+
+    /// <summary>
+    /// Summaries finalized since the last <c>tickSummariesAdded</c> broadcast. Guarded by its own lock rather than
+    /// <see cref="_builderLock"/>: the producer holds the builder lock when it appends here, and the flush timer must
+    /// not contend for the builder lock just to drain a list.
+    /// </summary>
+    private readonly List<TickSummaryDto> _pendingSummaryDeltas = [];
+    private readonly object _pendingSummaryLock = new();
 
     private volatile string _connectionStatus = "connecting";
     private volatile bool _unrecoverable;
@@ -212,6 +268,22 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// <summary>True while the TCP socket is currently held open.</summary>
     public bool IsConnected => _connectionStatus == "connected";
 
+    /// <summary>
+    /// The attached engine's schema, or <c>null</c> until the first Init arrives and when that Init carried no static-structure tables.
+    /// <see cref="AttachSession"/> surfaces it as the session's <c>StaticSchemaProvider</c> and advertises
+    /// <see cref="SessionCapability.Schema"/> only while it is non-null.
+    /// </summary>
+    public IStaticSchemaProvider StaticSchema => _staticSchema;
+
+    /// <summary>
+    /// Whether this stream has carried per-realm spatial telemetry, which is what <see cref="AttachSession"/> turns into
+    /// <see cref="SessionCapability.Realms"/>.
+    /// </summary>
+    /// <remarks>
+    /// False on an engine with one realm, and on a realm engine whose spatial trace subtree is off — in both cases there are no rows to draw.
+    /// </remarks>
+    public bool HasRealmTelemetry => _sawRealmTelemetry;
+
     /// <summary>Set when an Init mismatch on reconnect made the session unrecoverable.</summary>
     public bool IsUnrecoverable => _unrecoverable;
 
@@ -271,8 +343,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     /// <see cref="CaptureMode.Everything"/> preserves the pre-#805 behaviour and is the default for every existing
     /// caller. <see cref="CaptureMode.CherryPick"/> starts the session idle — see <c>12-on-demand-tick-capture.md</c>.
     /// </param>
+    /// <param name="initHandshakeTimeout">
+    /// How long to wait for the handshake's Init frame before returning a schema-less session. Defaults to
+    /// <see cref="InitHandshakeTimeoutSeconds"/>; a test that wants to exercise the silent-peer path passes something short so the suite does not spend
+    /// five seconds proving a timeout fires.
+    /// </param>
     public static async Task<AttachSessionRuntime> StartAsync(Guid sessionId, string endpointAddress, ILogger logger, CancellationToken ct,
-        CaptureMode captureMode = CaptureMode.Everything)
+        CaptureMode captureMode = CaptureMode.Everything, TimeSpan initHandshakeTimeout = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(endpointAddress);
         var (host, port) = ParseEndpoint(endpointAddress);
@@ -325,6 +402,7 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         runtime._flushChunkTimer = new Timer(runtime.OnFlushChunkTimer, null, FlushChunkTimerMs, FlushChunkTimerMs);
         runtime._trailingTickTimer = new Timer(runtime.OnTrailingTickTimer, null, TrailingTickTimerMs, TrailingTickTimerMs);
         runtime._globalMetricsTimer = new Timer(runtime.OnGlobalMetricsTimer, null, GlobalMetricsTimerMs, GlobalMetricsTimerMs);
+        runtime._tickSummaryFlushTimer = new Timer(runtime.OnTickSummaryFlushTimer, null, TickSummaryFlushMs, TickSummaryFlushMs);
 
         _ = Task.Run(() => runtime.ReadLoopAsync(tcp))
             .ContinueWith(
@@ -332,6 +410,50 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                 default,
                 TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
+
+        // Wait for the handshake's Init frame before handing the runtime back, so the session's CAPABILITIES are settled when
+        // the caller projects it.
+        //
+        // `AttachSession.Capabilities` reports `schema` only once `StaticSchema` is non-null, and that is resolved while the
+        // Init frame is processed (#WB-01). Returning the moment the socket connects meant `SessionsController` serialised the
+        // DTO strictly before any frame had been read, so the created session ALWAYS advertised `profiler` alone — measured on
+        // the wire as `profiler` at create and `schema, profiler` three seconds later. The SPA seeds its store from the create
+        // response and re-reads a session only on profile attach/detach and pause flips, none of which happen on a plain
+        // attach, so the Schema Explorer stayed hidden in exactly the remote-attach mode #WB-01 exists to serve.
+        //
+        // Init is the first thing the exporter writes on accept, so in practice this resolves in milliseconds. The timeout
+        // exists because a live session is still worth having without it: an engine that sends no Init (or sends its schema
+        // tables empty) degrades to profiler-only rather than failing the attach, which is the same outcome as before.
+        var handshakeTimeout = initHandshakeTimeout > TimeSpan.Zero ? initHandshakeTimeout : TimeSpan.FromSeconds(InitHandshakeTimeoutSeconds);
+        try
+        {
+            await runtime.MetadataReady.WaitAsync(handshakeTimeout, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // WaitAsync's own timeout. The session lives; it simply has no schema to advertise yet.
+            runtime.LogInitHandshakeTimedOut(handshakeTimeout.TotalSeconds);
+        }
+        catch (OperationCanceledException)
+        {
+            // The CALLER gave up mid-handshake. This is the one path that must not merely log: the runtime already owns a connected socket, a detached read
+            // loop, the periodic timers and — once Init landed — a temp file and a cache builder, and because we are about to throw instead of returning it,
+            // nothing else will ever hold the reference that could dispose them. The connect loop above is careful to dispose its `TcpClient` on
+            // cancellation; without this the wait we added after it undoes that discipline and leaks the whole runtime for the process's lifetime.
+            runtime.Dispose();
+            throw;
+        }
+        catch (TimeoutException)
+        {
+            runtime.LogInitHandshakeTimedOut(handshakeTimeout.TotalSeconds);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // A faulted handshake (unrecoverable Init, disposed mid-connect) is the read loop's business to report, not a
+            // reason to refuse a session the socket already accepted.
+            runtime.LogInitHandshakeFaulted(ex);
+        }
+
         return runtime;
     }
 
@@ -727,6 +849,9 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                         // with the temp file. Save before anyone can dispose us.
                         AutoSaveOnTeardown("engine_shutdown");
                         ShutdownReceived?.Invoke("engine_shutdown");
+                        // Deltas coalesce on a 100 ms timer; the last window's ticks have to go out BEFORE the
+                        // shutdown frame or a client that stops reading on shutdown loses them.
+                        FlushPendingSummaryDeltas();
                         BroadcastDelta(new LiveStreamEventDto(Kind: "shutdown", Status: "engine_shutdown"));
                         return StreamEndReason.Shutdown;
 
@@ -807,6 +932,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             // as a self-contained .typhon-replay. The byte format here matches what TraceFileWriter emits for header + tables.
             _initialMetadataBytes = new byte[length];
             Array.Copy(payload, 0, _initialMetadataBytes, 0, length);
+
+            // #WB-01. An engine older than the change, or one whose schema did not fit the frame, sends these sections empty; a provider over
+            // nothing would render as "schema present but empty", which is a worse answer than the honest "unavailable" state. Component
+            // definitions are the discriminator because everything the Schema Inspector shows hangs off them.
+            _staticSchema = reader.ComponentDefinitions.Count > 0
+                ? new TraceSchemaProvider(reader.ComponentDefinitions, reader.ArchetypeDefinitions, reader.IndexCatalog)
+                : null;
 
             _tempFile = LiveCacheTempFile.Create(_sessionId);
             var profilerHeader = new ProfilerHeader { Version = (ushort)headerDto.Version, TimestampFrequency = headerDto.TimestampFrequency };
@@ -972,7 +1104,24 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         // chunk a record happens to land in (otherwise late-arriving worker ThreadInfo records get buried in
         // unloaded chunks). Runs on the UNFILTERED buffer — ThreadInfo is exempt anyway, but reading it here keeps
         // slot naming independent of capture state by construction rather than by coincidence.
-        ExtractThreadInfos(_rawBlockBuffer.AsSpan(0, uncompressedBytes));
+        //
+        // The same walk notes per-realm telemetry (#1083). It has to be the unfiltered one: kind 67 is NOT exempt, so in
+        // cherry-pick mode it is dropped before the builder for every tick outside an armed window - deriving the realm
+        // capability from the retained stream would make the Realms view appear and vanish with the capture arm.
+        //
+        // The capability is ANNOUNCED, not merely acquired, and that is the half that makes it reachable. A session is
+        // projected to the client once, at attach, and the client caches what that projection said. `schema` survives
+        // that because the Init frame has already arrived by the time the attach call returns; a realm record cannot,
+        // since it rides a later tick. Without this delta the server would grant `realms` to a client that never asks
+        // again, and the Realms view would stay absent from the View menu and the palette over a session that has it.
+        var hadRealms = _sawRealmTelemetry;
+        ExtractBlockMetadata(_rawBlockBuffer.AsSpan(0, uncompressedBytes));
+        if (!hadRealms && _sawRealmTelemetry)
+        {
+            // Carries no payload on purpose: `AttachSession.Capabilities` stays the single source of truth, and the
+            // client re-reads the session rather than merging a second, independently-computed list.
+            BroadcastDelta(new LiveStreamEventDto(Kind: "capabilitiesChanged"));
+        }
 
         // #805 on-demand tick capture: drop detail records for ticks outside an armed window. Filtering is per record,
         // never per block — a Block frame is a timestamp-ordered merge across all thread slots drained on a 1 ms
@@ -999,12 +1148,17 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
     }
 
     /// <summary>
-    /// Walk a raw record buffer for <see cref="TraceEventKind.ThreadInfo"/> records and populate
-    /// <see cref="_threadInfos"/>. Self-contained ThreadInfo wire walker.
-    /// Wire format: u16 size, u8 kind (=ThreadInfo), u8 threadSlot, i64 timestamp, then payload —
+    /// One walk of a raw record buffer for the two facts the session advertises about itself: <see cref="TraceEventKind.ThreadInfo"/> records populate
+    /// <see cref="_threadInfos"/>, and a <see cref="TraceEventKind.SpatialRealmTelemetry"/> record latches <see cref="_sawRealmTelemetry"/>.
+    /// Self-contained wire walker; only the common header is read for kinds it does not decode.
+    /// ThreadInfo wire format: u16 size, u8 kind (=ThreadInfo), u8 threadSlot, i64 timestamp, then payload —
     /// i32 managedThreadId, u16 nameByteCount, UTF-8 name bytes, u8 ThreadKind (Main=0/Worker=1/Pool=2/Other=3).
     /// </summary>
-    private void ExtractThreadInfos(ReadOnlySpan<byte> records)
+    /// <remarks>
+    /// <b>Two facts, one walk, because the walk is the cost.</b> Every record header is read here already; a second pass for realms would double a per-block
+    /// O(records) traversal to answer a question whose answer never changes after the first yes. The realm test is skipped entirely once latched.
+    /// </remarks>
+    private void ExtractBlockMetadata(ReadOnlySpan<byte> records)
     {
         const int CommonHeaderSize = 12;
         var pos = 0;
@@ -1016,6 +1170,10 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
                 break;
             }
             var kind = (TraceEventKind)records[pos + 2];
+            if (!_sawRealmTelemetry && kind == TraceEventKind.SpatialRealmTelemetry)
+            {
+                _sawRealmTelemetry = true;
+            }
             if (kind != TraceEventKind.ThreadInfo)
             {
                 pos += size;
@@ -1092,8 +1250,61 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
             ConsecutiveUnderrun: summary.ConsecutiveUnderrun);
         _tickSummaries.Add(dto);
         _metadataSnapshot = null;
+        // The in-process event stays per-tick — CaptureHarness and the capture window logic count ticks, and a
+        // coalesced event would make them wait on a timer. Only the SSE fan-out coalesces.
         TickSummaryAdded?.Invoke(dto);
-        BroadcastDelta(new LiveStreamEventDto(Kind: "tickSummaryAdded", TickSummary: dto));
+        bool flushNow;
+        lock (_pendingSummaryLock)
+        {
+            _pendingSummaryDeltas.Add(dto);
+            flushNow = _pendingSummaryDeltas.Count >= TickSummaryFlushThreshold;
+        }
+        if (flushNow)
+        {
+            FlushPendingSummaryDeltas();
+        }
+    }
+
+    /// <summary>
+    /// Deliver any buffered summaries to the CURRENT subscribers, before a new one is added and handed a metadata snapshot.
+    /// </summary>
+    /// <remarks>
+    /// A summary is appended to <c>_tickSummaries</c> — and so appears in the next metadata snapshot — the moment the builder finalizes its tick, but its
+    /// delta waits on the coalescing timer. A subscriber that attaches inside that window receives the summary twice: once inside the snapshot it seeds its
+    /// store from, and again in the next batch. Before coalescing, that window was one summary wide and closed in the same statement; it is now up to
+    /// <see cref="TickSummaryFlushMs"/> or <see cref="TickSummaryFlushThreshold"/> entries. Duplicates in a sorted array that
+    /// <c>viewRangeToTickRange</c> binary-searches give wrong ranges rather than an error, so the caller must drain BEFORE it subscribes: the drain reaches
+    /// the existing subscribers, and the new one gets those summaries exactly once, from the snapshot.
+    /// </remarks>
+    internal void FlushPendingSummariesBeforeSubscribe() => FlushPendingSummaryDeltas();
+
+    /// <summary>
+    /// Drain <see cref="_pendingSummaryDeltas"/> into one <c>tickSummariesAdded</c> delta. Safe to call from the flush
+    /// timer, from the producer when the buffer crosses <see cref="TickSummaryFlushThreshold"/>, and from shutdown —
+    /// an empty buffer broadcasts nothing.
+    /// </summary>
+    private void FlushPendingSummaryDeltas()
+    {
+        // Drain AND broadcast under the one lock. Three callers can race here — the flush timer, the producer crossing
+        // TickSummaryFlushThreshold, and shutdown — and draining outside the broadcast would let two disjoint batches
+        // reach a subscriber's channel in the wrong order. The client appends each batch to `metadata.tickSummaries`,
+        // which `viewRangeToTickRange` binary-searches, so an inversion there is a silently wrong chunk lookup rather
+        // than a visible glitch. `BroadcastDelta` only does a non-blocking TryWrite per subscriber (a full buffer is
+        // handed to a fire-and-forget task), so holding the lock across it costs nothing.
+        lock (_pendingSummaryLock)
+        {
+            if (_pendingSummaryDeltas.Count == 0) return;
+            var batch = _pendingSummaryDeltas.ToArray();
+            _pendingSummaryDeltas.Clear();
+            BroadcastDelta(new LiveStreamEventDto(Kind: "tickSummariesAdded", TickSummaries: batch));
+        }
+    }
+
+    private void OnTickSummaryFlushTimer(object _)
+    {
+        if (_disposed) return;
+        try { FlushPendingSummaryDeltas(); }
+        catch (ObjectDisposedException) { /* shutting down */ }
     }
 
     private void OnBuilderChunkFlushed(ChunkManifestEntry entry)
@@ -1107,6 +1318,13 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         _chunkManifest.Add(dto);
         _metadataSnapshot = null;
         ChunkAdded?.Invoke(dto);
+
+        // Deliver any buffered summaries BEFORE this chunk, because coalescing them bought batching at the cost of an ordering guarantee that used to be
+        // free. A chunk covers ticks the builder finalized earlier, so their summaries are already sitting in `_pendingSummaryDeltas` waiting on the timer;
+        // broadcasting the chunk first hands a client a chunk entry for ticks it has never heard of. That is not a cosmetic inversion — the client resolves a
+        // chunk lookup by binary-searching `metadata.tickSummaries`, so the symptom is a silently wrong chunk rather than a visible gap. Coalescing preserved
+        // ordering WITHIN the summary kind and lost it ACROSS kinds; this is the other half.
+        FlushPendingSummaryDeltas();
         BroadcastDelta(new LiveStreamEventDto(Kind: "chunkAdded", ChunkEntry: dto));
     }
 
@@ -1267,6 +1485,10 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         bw.Write(header.SystemCount);
         bw.Write(header.ArchetypeCount);
         bw.Write(header.ComponentTypeCount);
+        // #WB-01: the fingerprint is the only part of the signature that moves when a component's LAYOUT changes without its name or id — a
+        // revision bump, a field added, a field's offset moved. Before schema crossed the wire that was invisible and harmless; now the panels
+        // render field offsets read from this Init, so a reconnect that silently swapped them would draw the wrong bytes for the right names.
+        bw.Write(header.SchemaFingerprint ?? "0");
         foreach (var s in systems)
         {
             bw.Write(s.Index);
@@ -1422,7 +1644,21 @@ public sealed partial class AttachSessionRuntime : IDisposable, IChunkProvider
         try { _flushChunkTimer?.Dispose(); } catch { }
         try { _trailingTickTimer?.Dispose(); } catch { }
         try { _globalMetricsTimer?.Dispose(); } catch { }
+        try { _tickSummaryFlushTimer?.Dispose(); } catch { }
         try { _cts.Cancel(); } catch { }
+
+        // Drain AFTER the read loop has been told to stop, not before. Draining first left a window — the loop was still live across the flush, the
+        // `_disposed` store and the cancel — in which a finalized tick could land in `_pendingSummaryDeltas` and never be sent, which is exactly the loss the
+        // flush exists to prevent. The timers are already gone, so none of them can race this call.
+        //
+        // It NARROWS that window rather than closing it, and the distinction matters to whoever reads this next. `_cts.Cancel()` only REQUESTS cancellation;
+        // nothing joins the read loop (it is detached), so a record already inside `FeedRawRecords` can still finalize a tick and append after this drain has
+        // run. Closing it needs the loop joined, which teardown deliberately does not do — a transport that never returns from a read must not hang the
+        // session's disposal.
+        //
+        // This drain also runs after the `_disposed` store above, and is correct only because neither `FlushPendingSummaryDeltas` nor `BroadcastDelta` carries
+        // a `_disposed` guard. Adding one later — which would look like tightening — silently restores the loss.
+        try { FlushPendingSummaryDeltas(); } catch { }
         try { _cts.Dispose(); } catch { }
         try
         {

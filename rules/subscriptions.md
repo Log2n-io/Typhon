@@ -647,37 +647,83 @@
     only, in a realm-local slot, so a lookup in another realm's reads the unbound sentinel
   invariant a realm with no session stops being served (no mark, projection, index or frame work) until a session is placed in it again, when it is
     re-pushed whole and recounted as after a gap
+  invariant every SERIAL per-realm stage of a tick walks the SERVED set, never the realm registry — the overload step, the index build and world order,
+    the index finish, the far flushes, the LOD census, the queued shadow checks, the two chunk plans and the unplaced sweep each visit exactly the realms
+    served when they run; so the serial cost of a tick is O(served realms) and registering more realms adds nothing to it. The one per-tick term that is
+    O(registered) is the realm policy (RLM-03), and it is one walk per tick
   invariant an entity that moves to another realm is never carried in its old realm's frame: it leaves the source realm (a leave there, decoded
     with that realm's frame, its identity released) and enters the destination as a fresh entry projected in the destination's frame
   invariant a Near point and a ToKnown entity are filed in their realm, by that realm's cells, and match only that realm's sessions; ToRealm reaches
     the sessions of one realm or, with its subtree, of the realms below it in the parent tree — which routes and grants no visibility
   never decide isolation by geometry: identical local coordinates in two realms are the expected case
   scope: PushHub.Place, PushHub.For, PushHub.SweepUnplaced, PushReplication.L, ProjectionPass.ProjectBlock, FrameAssembler.Holds,
-    ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches
+    ArchetypeReplicationState.TryAttachBlock, ArchetypeReplicationState.MigrateEntry, EventHub.EncodeTick, RealmTree.Reaches,
+    PushHub.SetOverloadStep, PushHub.BuildIndexes, PushHub.PrepareFar, PushHub.EndFarFolds, PushHub.RecountLevels, PushHub.RunQueuedShadowChecks,
+    PushHub.BeginParallelIndex, PushHub.PrepareBlocks, PushHub.MarkPushed, PushHub.RealmPassSteps, RuntimeStatsSnapshot.RealmPassSteps,
+    RuntimeStatsSnapshot.RealmPolicyEvaluations, RuntimeStatsSnapshot.ReplicationPrologueMsTotal, RuntimeStatsSnapshot.ReplicationPrologueTicks
   on_violation: silent. A client sees or targets an entity of a world it is not in — a cheat, and a store holding two worlds' netIds.
   verified: RealmSessionTests.EachRealmsSessionsHoldThatRealmsEntitiesOnly_AtIdenticalLocalCoordinates,
     RealmSessionTests.ATeleportBetweenServedRealmsLeavesOneAndEntersTheOtherInItsFrame,
     RealmEventTests.ANearEventIsHeardInItsRealmOnly_AtIdenticalLocalCoordinates, RealmEventTests.AToKnownEventIsFiledInItsEntitysRealm,
     RealmSessionTests.ARealmNoSessionIsInStopsBeingServed_AndIsRefilledWhenOneReturns, RealmReplicationTests.AnEntityOfARealmNotServedIsNeverKnownToASession
+  note the "stops being served" half is OBSERVABLE from outside since SWG-08: RuntimeStatsSnapshot.Realms carries a row per REGISTERED realm with
+    Served plus its cumulative enters/updates/leaves/cells/resets/events, so "this realm cost nothing" and "this realm has no replication state at all"
+    are distinguishable without reaching into the hub — which is what lets the claim be checked at workload scale rather than on three realms.
+  note verified at workload scale by demo/SwgTatooine.Tests RealmCostChecks (a two-planet galaxy, ~1 200 interiors), which is NOT cited in verified:
+    above because the coverage audit scans test/ only. Its load-bearing case is AnInteriorTheLastSessionLeavesStopsBeingServedAndStopsCosting: a realm
+    is given replication state only when a session ENTERS it, so every assertion over realms no session was ever in passes whether or not
+    PushHub.SweepUnplaced releases a realm it is finished with — proved by mutant, which left the other four cases green.
+  note the O(served) half is COUNTED since PRV-04: RuntimeStatsSnapshot.RealmPassSteps adds the number of realms served to itself at each serial per-realm
+    stage of the blocks, mark, index and frame paths, so holding the served set fixed and doubling the registration must leave it unmoved — which no
+    assertion over Served itself could check, a stage walking the registry serving exactly the same set while doing hundreds of times the work.
+    RealmPolicyEvaluations is its companion and the honest half: policy is allowed to be O(registered), and what must hold of it is that it runs once per
+    tick. The counter is NOT exhaustive and its own remarks enumerate what it leaves out — PrepareBlocks's two bootstrap-guarded walks, and the per-chunk
+    stages (CountWorkers, PlaceWorker, FoldFarChunk) which run on worker threads where a shared add would measure itself.
+    Measured at workload scale by demo/SwgTatooine.Tests RealmScaleChecks (again not citable above — the audit scans test/ only): 15.016 serial passes per
+    served realm per tick, flat from 2 to 17 served realms, and 75.04 against 75.33 per tick at 1 236 and at 2 472 registered realms. Falsified by mutant —
+    one per-tick loop over RealmTable.Registered in the push prologue takes the per-served figure to 633 and the two registered figures to 1 311 against
+    2 547, reddening both cases while leaving the policy case correctly green.
 
 ### SUB-29: A session is in one realm at a time, and a realm switch is one published RESET|REALM frame `[fatal][silent]`
   invariant realm(s) ∈ {None} ∪ RealmId is one value per tick: the application's (Place(realm, pos) / Enter / Leave), the followed entity's after this
-    tick's fence (Bind, AroundControlled — a teleport switches its sessions in the same tick), or realm 0 (At); a session nobody placed is in realm 0
-    on an engine with one realm and in none on an engine with several, where it holds nothing positioned
+    tick's fence (Bind, AroundControlled, Follow(e) — a teleport switches its sessions in the same tick), or realm 0 (At); a session nobody placed is in
+    realm 0 on an engine with one realm and in none on an engine with several, where it holds nothing positioned
+  invariant Session(s).Follow(e) outranks the profile's own anchor while it is set and gives the session e's realm and centre — on a shape with no centre
+    (World, ClientRegion) the realm alone — and Follow(EntityId.Null) returns the session to the profile's anchor; following is NOT controlling, so no
+    SELF block and no owner field of e ever reaches a session that merely follows it (SUB-11), and e is absent from the owner-routing map that would
+    carry them; a followed entity that cannot be read leaves the session at its last position and realm, counting BoundLost (09 § 6)
+  invariant a realm removed while s is in it (unregistered, then emptied and dropped by a fence) puts s in None in the tick that sees it, publishes that
+    as a RESET whose REALM is NONE, and queues exactly ONE SessionEvent.RealmClosed{s, realm} naming the realm that went — not one per tick after it:
+    both the session's stored realm and its anchor cache are cleared, because either one left pointing at the dead id re-notices it for ever
   invariant s's committed realm changes only when a frame with RESET whose FIRST block is REALM(realm(s)) is published; a switch not published is
     retried as a RESET until one is (SUB-03); a switch of a session that has been sent any frame is a forced RESET, sent at once; only a session never
     framed has its first realm ride the first frame that has something to say
   invariant across a switch the link state (budget level, radius shrink, rate), the events cursor, SELF's pending owner mask, the ack cursor and netIds
     are preserved; the realm-local geometry is given back and taken anew, and a new realm-local slot under a client that holds frames is a RESET
-  invariant an entity-anchored session is never moved explicitly (Place(realm) / Enter / Leave throw); a realm-less Place on an engine with several
-    realms throws; a session observes its realm for the realm policy (RLM-03) while it is in it
+  invariant an entity-anchored session is never moved explicitly: Place(realm) / Enter / Leave throw, and TryEnter / TryPlace answer false and move
+    nothing — the test and the act are one call because ViewpointSource is internal and a requested profile is applied by the NEXT tick's prologue, so
+    an application that asks with IsAnchored and acts afterwards is asking about a state that changes between the two; a realm-less Place on an engine
+    with several realms throws; a session observes its realm for the realm policy (RLM-03) while it is in it
   scope: FrameAssembler.NoteRealm, FrameAssembler.CommitRealm, FrameAssembler.AnchorRealm, FrameAssembler.NoteRealmMoves, SessionFrameState.CommittedRealm,
-    PushHub.Place, SessionTable.SetRealm, SubscriptionsCommands.Enter, SubscriptionsCommands.Leave
+    PushHub.Place, SessionTable.SetRealm, SubscriptionsCommands.Enter, SubscriptionsCommands.Leave, SubscriptionsCommands.TryEnter,
+    SubscriptionsCommands.TryPlace, SubscriptionsCommands.IsAnchored, SubscriptionsCommands.TryRealmTarget, SessionRequest.Follow,
+    SubscriptionsCommands.Follow, SubscriptionsCommands.FollowedOf, SessionTable.SetFollowed, SessionTable.FollowedOf, SessionTable.AnchorsOf,
+    SessionTable.NoteRealmClosed, FrameAssembler.RealmClosed, SessionEventKind.RealmClosed, SessionEvent.Realm
   on_violation: silent. A client applies records of one realm over another's store — entities of a world it is not in, at coordinates that mean
     another place — or keeps a store the server believes cleared.
   verified: RealmSessionTests.PlacingIntoAnotherRealmIsOneResetRealmFrame, RealmSessionTests.ASwitchAndBackRefillsFromAResetAndLeavingIsAResetRealmNone,
-    RealmSessionTests.ASkippedRealmSwitchIsRetriedAsAReset, RealmSessionTests.AControlledSessionFollowsItsEntityIntoAnotherRealmInTheSameTick
-    (unplaced sessions, the link state kept and realm observation: the fixture's other tests)
+    RealmSessionTests.ASkippedRealmSwitchIsRetriedAsAReset, RealmSessionTests.AControlledSessionFollowsItsEntityIntoAnotherRealmInTheSameTick,
+    RealmSessionTests.AnAnchoredSessionAnswersTheTryOverloadsRatherThanRaising, RealmSessionTests.AnUnanchoredSessionIsMovedByTheTryOverloads,
+    RealmSessionTests.TryEnterAnswersForARealmThatIsGoneAndRaisesForAMisuse,
+    RealmSessionTests.ARealmRemovedUnderASessionMovesItToNoneAndTellsTheApplicationOnce,
+    RealmSessionTests.AnAnchoredSessionWhoseRealmIsRemovedIsAlsoMovedToNoneOnce,
+    RealmSessionTests.AFollowedEntityCrossingRealmsTakesItsSessionInTheSameTick,
+    RealmSessionTests.AFollowedSessionGetsThePositionButNotTheOwnerFieldsOfItsSubject,
+    RealmSessionTests.AFollowAnchorsASessionWhoseProfileDeclaredNoAnchor,
+    RealmSessionTests.TheImmediateFollowReleasesInTheSameTickTheApplicationPlacesTheSession
+    (unplaced sessions, the link state kept and realm observation: the fixture's other tests; Follow's own centre and release:
+    AFollowedSessionIsCentredAndRealmedOnItsEntityWithoutControllingIt, FollowOverridesTheProfilesOwnAnchorAndReleasingReturnsToIt,
+    ASessionWhoseFollowedEntityDiesKeepsItsLastViewpoint)
 
 ### SUB-30: A realm-framed value is encoded and decoded with exactly one realm's frame `[fatal][silent]`
   invariant a position (pos2/pos3: ENTITIES records, event and command fields, a region's vertices) and an AGG cell index are quantized over the

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -8,14 +8,6 @@ using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
-/// <summary>
-/// One session's inbound path: the ring a transport thread frames into, the per-type token buckets that gate it, and the region and sequence the tick keeps.
-/// </summary>
-/// <remarks>
-/// <b>Two owners, split by field and not by lock.</b> The ring is SPSC and needs neither side to hold anything; the buckets and the drop counters belong to
-/// the transport thread that owns the connection; the region, the last sequence and the delivered counters belong to the tick. Nothing here is written by
-/// both, which is what makes the whole path lock-free once a session exists (SUB-05's shape, one level below the session table).
-/// </remarks>
 /// <summary>
 /// A session's realm as its client holds it, for the transport's command decode (12-realms § 2.5): the realm of its last published <c>RESET</c> with its
 /// frame, the one before with its frame, and the tick of the switch between them. Immutable, replaced whole by the frame stage BEFORE the switching frame
@@ -48,6 +40,14 @@ internal sealed class SessionRealmView
     public uint SwitchTick { get; }
 }
 
+/// <summary>
+/// One session's inbound path: the ring a transport thread frames into, the per-type token buckets that gate it, and the region and sequence the tick keeps.
+/// </summary>
+/// <remarks>
+/// <b>Two owners, split by field and not by lock.</b> The ring is SPSC and needs neither side to hold anything; the buckets and the drop counters belong to
+/// the transport thread that owns the connection; the region, the last sequence and the delivered counters belong to the tick. Nothing here is written by
+/// both, which is what makes the whole path lock-free once a session exists (SUB-05's shape, one level below the session table).
+/// </remarks>
 internal sealed class SessionIngress
 {
     /// <summary>Creates a row for a session that has just taken a ring.</summary>
@@ -1067,7 +1067,19 @@ internal ref struct IngressCommandSink : ICommandSink
     /// <inheritdoc />
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
     {
-        // A command struct holds no text, and the registry refuses one at Start, so reaching here would mean the catalog and the binding disagree.
+        if (!_open || _current.IsClientRegion)
+        {
+            return;
+        }
+
+        // The reader validated the UTF-8 and capped the length before this; the binding refuses a struct field that cannot
+        // hold the declared cap. A field the bindings do not cover is one the catalog declares and the struct does not,
+        // which Start refuses — so the bound check is the same defence the Number path keeps.
+        var bindings = _current.Bindings;
+        if ((uint)field.Ordinal < (uint)bindings.Length && bindings[field.Ordinal].IsText)
+        {
+            bindings[field.Ordinal].StoreText(_payload, utf8);
+        }
     }
 
     /// <inheritdoc />

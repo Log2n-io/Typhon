@@ -209,8 +209,22 @@ internal sealed class RealmTable
     /// </summary>
     internal static int PhaseOf(ushort id) => (int)((id * 0x9E3779B1u) >> 16);
 
-    /// <summary>Evaluations run — tests read it to prove the policy runs once per tick.</summary>
-    internal long EvaluationCount { get; private set; }
+    private long _evaluationCount;
+
+    /// <summary>
+    /// Evaluations run — tests read it to prove the policy runs once per tick. Tick thread; see <see cref="EvaluationCountVolatile"/> for any other.
+    /// </summary>
+    internal long EvaluationCount => _evaluationCount;
+
+    /// <summary>
+    /// <see cref="EvaluationCount"/> for a reader on another thread: the same value through an acquire load.
+    /// </summary>
+    /// <remarks>
+    /// The counter is written by the tick thread alone and read by the stats snapshot off it. Nothing is published alongside it, so the only thing at stake is
+    /// the project's own ordering discipline — an acquire load costs a plain <c>mov</c> on x64 and one <c>ldar</c> on arm64, and it stops the next reader
+    /// having to re-derive why a plain read was safe.
+    /// </remarks>
+    internal long EvaluationCountVolatile => Volatile.Read(ref _evaluationCount);
 
     /// <summary>The realm's state this tick. Refuses an id that is not registered.</summary>
     internal RealmRunState StateOf(ushort id)
@@ -218,6 +232,16 @@ internal sealed class RealmTable
         _ = Get(id);
         return _state[id];
     }
+
+    /// <summary>
+    /// The state of a realm the caller already holds a <see cref="Realm"/> for: one byte load, no registration check.
+    /// </summary>
+    /// <remarks>
+    /// <b>For a reader that walked <see cref="Registered"/> and may have been overtaken.</b> <see cref="StateOf"/> refuses an unregistered id, which is right
+    /// for a caller naming one out of the blue and wrong for one holding a row from a snapshot: a realm removed between the walk and the read would turn a
+    /// stats call into an exception. The id is in range by construction here, and the slot keeps the last state the policy wrote for it.
+    /// </remarks>
+    internal RealmRunState StateOfRow(ushort id) => _state[id];
 
     /// <summary>True when <paramref name="id"/>'s clusters are dispatched this tick. Hot path: one byte load, no registration check.</summary>
     internal bool IsRunnable(ushort id) => _state[id] != RealmRunState.Dormant;
@@ -261,7 +285,7 @@ internal sealed class RealmTable
     /// </remarks>
     internal void EvaluatePolicy()
     {
-        EvaluationCount++;
+        _evaluationCount++;
         var changed = false;
         var nonRunnable = 0;
         var divided = 0;

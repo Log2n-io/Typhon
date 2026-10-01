@@ -1,188 +1,245 @@
-using System;
-using System.Globalization;
+﻿using System;
 
 namespace SwgTatooine;
 
-/// <summary>Argument parsing for the simulation driver. Every knob in <see cref="SimConfig"/> that a sweep moves.</summary>
+/// <summary>Argument parsing for the simulation driver. Every knob in <see cref="SimConfig"/> that a sweep moves, plus the flags that pick a mode.</summary>
+/// <remarks>
+/// <para>
+/// <b>Every flag is declared exactly once, here, and the declaration is what <c>--help</c> prints.</b> <see cref="ArgReader"/> records each one as it is
+/// read, so a flag that exists is listed and a token that is not a flag is refused — see its remarks for why a lenient parser made every A/B measurement
+/// in this demo unfalsifiable (SWG-07).
+/// </para>
+/// <para>
+/// <b><c>--serve</c> and <c>--sweep</c> are parsed here too, although they select a mode rather than configure the simulation.</b> They used to be read
+/// from <c>Program</c> and <c>Sweep</c> with their own copies of <c>IndexOf</c>, which meant the strict parse could not see them: every one of the four
+/// sweep flags would have been reported as unknown. A flag the mode reader owns and the argument reader does not know about is the same defect in a new
+/// place.
+/// </para>
+/// </remarks>
 public static class CommandLine
 {
+    /// <summary>Whether <c>--db-name</c> is something other than a bare, portable file name.</summary>
+    /// <param name="name">The requested database name.</param>
+    /// <returns><see langword="true"/> when it must be refused.</returns>
+    /// <remarks>
+    /// <b><see cref="System.IO.Path.GetInvalidFileNameChars"/> alone is not enough, and the gap shows only on Linux.</b> On Windows it returns 41 characters —
+    /// both separators and every control character; on Unix it returns exactly two, <c>'\0'</c> and <c>'/'</c>. So <c>--db-name "worlds\mine"</c> was
+    /// refused on the dev box and accepted on the server, where it would have become one file literally named <c>worlds\mine</c> — the failure this check
+    /// exists to turn into a refusal naming the flag. A control character went the same way, and a name carrying one is unreadable in a log and unquotable
+    /// in a shell whatever the filesystem permits. So the rule is stated here rather than delegated: no separator of either kind, no control character, plus
+    /// whatever else this platform rejects.
+    /// </remarks>
+    private static bool IsNotABareFileName(string name)
+    {
+        foreach (var ch in name)
+        {
+            if (ch is '/' or '\\' || char.IsControl(ch))
+            {
+                return true;
+            }
+        }
+
+        return name.IndexOfAny(System.IO.Path.GetInvalidFileNameChars()) >= 0;
+    }
+
+    /// <summary>Parses a command line.</summary>
+    /// <param name="args">The process arguments.</param>
+    /// <returns>The configuration. <see cref="SimConfig.HelpText"/> is set instead when the line asks for help.</returns>
+    /// <exception cref="ArgumentException">
+    /// A flag is unknown, misspelt, repeated, missing its value, or given a value that will not parse; or two settings contradict each other.
+    /// </exception>
     public static SimConfig Parse(string[] args)
     {
+        // Every fallback below is `c.X`, never a literal. A literal matching the field initialiser today is drift waiting to happen, and it would show up in
+        // the one place meant to be authoritative: `--help` would print a default the program does not use.
         var c = new SimConfig();
-        if (args == null)
-        {
-            return c;
-        }
+        var r = new ArgReader(args ?? []);
 
-        c.WorldEdgeKm = Float(args, "--world", c.WorldEdgeKm);
-        c.PopulationScale = Float(args, "--pop", c.PopulationScale);
-        c.CellSizeM = Float(args, "--cell", c.CellSizeM);
-        c.CellTreePromoteThreshold = Int(args, "--promote", c.CellTreePromoteThreshold);
-        c.CellTreePromoteTightness = Float(args, "--tightness", c.CellTreePromoteTightness);
-        c.ReclusterBudgetMs = Float(args, "--repair-budget", c.ReclusterBudgetMs);
-        c.ClusterTargetPackingSlack = Float(args, "--packing-slack", c.ClusterTargetPackingSlack);
-        c.ClusterTargetExtentRatio = Float(args, "--target-ratio", c.ClusterTargetExtentRatio);
-        c.ClusterRepairExtentRatio = Float(args, "--repair-ratio", c.ClusterRepairExtentRatio);
-        c.ClusterRepairCriticalExtentRatio = Float(args, "--repair-critical", c.ClusterRepairCriticalExtentRatio);
-        c.RepairWorstClustersPerUnit = Int(args, "--repair-unit", c.RepairWorstClustersPerUnit);
-        c.RepairCooldownTicks = Int(args, "--repair-cooldown", c.RepairCooldownTicks);
-        c.QueryEfficiencyTolerance = Float(args, "--eff-tol", c.QueryEfficiencyTolerance);
-        c.ShuttleShare = Float(args, "--shuttle-share", c.ShuttleShare);
-        c.ShuttleIntervalS = Float(args, "--shuttle-interval", c.ShuttleIntervalS);
-        c.BoardingWindowS = Float(args, "--boarding-window", c.BoardingWindowS);
-        c.Shuttles = Array.IndexOf(args, "--no-shuttles") < 0;
-        c.Planets = Int(args, "--planets", c.Planets);
-        if (c.Planets < 1)
-        {
-            throw new ArgumentException($"--planets takes 1 or more, not {c.Planets}");
-        }
+        r.Group("mode");
+        r.Switch("--help", "print this list and exit (or -h as the first argument)");
+        c.ServePort = r.Int("--serve", c.ServePort, "serve over WebSocket on this port instead of measuring; 0 measures", min: 0, max: 65535);
+        c.RunSweep = r.Switch("--sweep", "run the partitioning matrix instead of one configuration");
+        c.SweepWorlds = r.Floats("--sweep-worlds", c.SweepWorlds, "sweep axis: world edges, km");
+        c.SweepPops = r.Floats("--sweep-pops", c.SweepPops, "sweep axis: population scales");
+        c.SweepCells = r.Floats("--sweep-cells", c.SweepCells, "sweep axis: cell sizes, m at the real planet's scale");
 
-        c.Interiors = Array.IndexOf(args, "--interiors") >= 0;
-        c.InteriorNpcs = Int(args, "--interior-npcs", c.InteriorNpcs);
-        c.InteriorShare = Float(args, "--interior-share", c.InteriorShare);
-        c.InteriorStayS = Float(args, "--interior-stay", c.InteriorStayS);
-        c.InterPlanetShare = Float(args, "--interplanet-share", c.InterPlanetShare);
-        if (!(c.InteriorStayS > 0f) || c.InterPlanetShare is < 0f or > 1f)
-        {
-            throw new ArgumentException($"--interior-stay takes a positive value and --interplanet-share one in [0, 1], not {c.InteriorStayS} / "
-                + $"{c.InterPlanetShare}");
-        }
+        r.Group("world and population");
+        c.WorldEdgeKm = r.Float("--world", c.WorldEdgeKm, "planet edge, km; 16.384 is the real Tatooine", min: 0.001f);
+        c.PopulationScale = r.Float("--pop", c.PopulationScale, "multiplier on every population count", min: 0.0001f);
+        c.CellSizeM = r.Float("--cell", c.CellSizeM, "spatial cell edge, m; 0 derives 256 m scaled with the world", min: 0f);
+        c.Planets = r.Int("--planets", c.Planets, "how many planet realms to build", min: 1);
+        c.Interiors = r.Switch("--interiors", "give buildings interior realms");
+        c.InteriorNpcs = r.Int("--interior-npcs", c.InteriorNpcs, "NPCs per interior", min: 0);
+        c.InteriorShare = r.Float("--interior-share", c.InteriorShare, "share of players that go indoors", min: 0f, max: 1f);
+        c.InteriorStayS = r.Float("--interior-stay", c.InteriorStayS, "seconds a player stays indoors", min: 0.001f);
+        c.InteriorSleepS = r.Float("--interior-sleep", c.InteriorSleepS, "seconds an empty interior waits before going dormant", min: 0f);
+        c.InterPlanetShare = r.Float("--interplanet-share", c.InterPlanetShare, "share of shuttle trips that cross planets", min: 0f, max: 1f);
+        c.Space = r.Switch("--space", "build the space realm");
+        c.Starships = r.Int("--starships", c.Starships, "starships in space", min: 0);
+        c.RealmCensusHz = r.Float("--realm-census-hz", c.RealmCensusHz, "times a second a serving run counts each realm's population; 0 = never", min: 0f);
+        c.PlanetDivisor = r.Int("--planet-divisor", c.PlanetDivisor, "divide each planet's population by this", min: 1);
+        c.SpaceDivisor = r.Int("--space-divisor", c.SpaceDivisor, "divide space's population by this", min: 1);
+        c.Dungeons = r.Int("--dungeons", c.Dungeons, "dungeon realms per planet", min: 0);
+        c.DungeonIntervalS = r.Float("--dungeon-interval", c.DungeonIntervalS, "seconds between dungeon runs", min: 0.001f);
+        c.DungeonStayS = r.Float("--dungeon-stay", c.DungeonStayS, "seconds a party stays in a dungeon", min: 0.001f);
+        c.DungeonParty = r.Int("--dungeon-party", c.DungeonParty, "players per dungeon party", min: 1);
+        c.DungeonMobs = r.Int("--dungeon-mobs", c.DungeonMobs, "creatures per dungeon", min: 0);
+        c.ScaleContentWithWorld = !r.Switch("--no-content-scale", "keep authentic coordinates instead of stretching content to the world");
+        c.Seed = r.Int("--seed", c.Seed, "seed for every random decision");
 
-        c.Space = Array.IndexOf(args, "--space") >= 0;
-        c.InteriorSleepS = Float(args, "--interior-sleep", c.InteriorSleepS);
-        c.PlanetDivisor = Int(args, "--planet-divisor", c.PlanetDivisor);
-        c.SpaceDivisor = Int(args, "--space-divisor", c.SpaceDivisor);
-        c.Dungeons = Int(args, "--dungeons", c.Dungeons);
-        c.DungeonIntervalS = Float(args, "--dungeon-interval", c.DungeonIntervalS);
-        c.DungeonStayS = Float(args, "--dungeon-stay", c.DungeonStayS);
-        c.DungeonParty = Int(args, "--dungeon-party", c.DungeonParty);
-        c.DungeonMobs = Int(args, "--dungeon-mobs", c.DungeonMobs);
-        if (c.InteriorSleepS < 0f || c.PlanetDivisor < 1 || c.SpaceDivisor < 1 || c.Dungeons < 0 || !(c.DungeonIntervalS > 0f) || !(c.DungeonStayS > 0f)
-            || c.DungeonParty < 1 || c.DungeonMobs < 0)
-        {
-            throw new ArgumentException("--interior-sleep >= 0, --planet-divisor/--space-divisor >= 1, --dungeons >= 0, positive dungeon interval and stay, "
-                + "--dungeon-party >= 1, --dungeon-mobs >= 0");
-        }
+        r.Group("spatial partitioning");
+        c.CellTreePromoteThreshold = r.Int("--promote", c.CellTreePromoteThreshold, "entities in a cell before it is promoted to a tree", min: 1);
+        c.CellTreePromoteTightness = r.Float("--tightness", c.CellTreePromoteTightness, "extent/bound ratio a cell must exceed to be promoted", min: 0f);
+        c.ReclusterBudgetMs = r.Float("--repair-budget", c.ReclusterBudgetMs, "per-tick cluster repair budget, ms; 0 is unbounded", min: 0f);
+        c.ClusterTargetPackingSlack = r.Float("--packing-slack", c.ClusterTargetPackingSlack, "spare capacity a new cluster is given", min: 1f);
+        c.ClusterTargetExtentRatio = r.Float("--target-ratio", c.ClusterTargetExtentRatio, "extent/bound a new cluster aims for", min: 0f);
+        c.ClusterRepairExtentRatio = r.Float("--repair-ratio", c.ClusterRepairExtentRatio, "extent/bound above which a cluster is repaired", min: 0f);
+        c.ClusterRepairCriticalExtentRatio = r.Float("--repair-critical", c.ClusterRepairCriticalExtentRatio,
+            "extent/bound that makes a repair urgent", min: 0f);
+        c.RepairWorstClustersPerUnit = r.Int("--repair-unit", c.RepairWorstClustersPerUnit, "clusters repaired per unit of budget", min: 1);
+        c.RepairCooldownTicks = r.Int("--repair-cooldown", c.RepairCooldownTicks, "ticks before a repaired cluster may be repaired again", min: 0);
+        c.QueryEfficiencyTolerance = r.Float("--eff-tol", c.QueryEfficiencyTolerance, "reported query efficiency tolerance", min: 0f);
+        c.GridWideBound = r.Switch("--grid-wide-bound", "bound clusters by the grid rather than by the cell");
+        c.SimdNarrowphase = !r.Switch("--scalar-narrowphase", "use the scalar narrowphase instead of SIMD");
+        c.BatchSpawnSortThreshold = r.Int("--batch-sort", c.BatchSpawnSortThreshold, "batch size above which a spawn batch is sorted", min: 1);
+        c.BatchedSpatialWrites = !r.Switch("--per-entity-writespatial", "write spatial positions one entity at a time (P9 off)");
 
-        c.Starships = Int(args, "--starships", c.Starships);
-        if (c.Starships < 0)
-        {
-            throw new ArgumentException($"--starships takes 0 or more, not {c.Starships}");
-        }
+        r.Group("shuttles");
+        c.Shuttles = !r.Switch("--no-shuttles", "do not run shuttles at all");
+        c.ShuttleShare = r.Float("--shuttle-share", c.ShuttleShare, "share of players that travel", min: 0f, max: 1f);
+        c.ShuttleIntervalS = r.Float("--shuttle-interval", c.ShuttleIntervalS, "seconds between departures", min: 0.001f);
+        c.BoardingWindowS = r.Float("--boarding-window", c.BoardingWindowS, "seconds a shuttle boards for", min: 0.001f);
+        c.ShuttleBurst = r.Switch("--shuttle-burst", "land every passenger on one tick instead of trickling");
 
-        if (c.InteriorNpcs < 0 || c.InteriorShare is < 0f or > 1f)
-        {
-            throw new ArgumentException($"--interior-npcs takes 0 or more and --interior-share a value in [0, 1], not {c.InteriorNpcs} / {c.InteriorShare}");
-        }
-        c.ShuttleBurst = Array.IndexOf(args, "--shuttle-burst") >= 0;
-        c.Probe = Array.IndexOf(args, "--probe") >= 0;
-        c.WorkProbe = Array.IndexOf(args, "--work-probe") >= 0;
-        c.ChunkStats = Array.IndexOf(args, "--chunk-stats") >= 0;
-        c.SimdNarrowphase = Array.IndexOf(args, "--scalar-narrowphase") < 0;
-        c.BatchSpawnSortThreshold = Int(args, "--batch-sort", c.BatchSpawnSortThreshold);
-        c.TickRateHz = Int(args, "--hz", c.TickRateHz);
-        c.Unpaced = Array.IndexOf(args, "--unpaced") >= 0;
-        c.GridWideBound = Array.IndexOf(args, "--grid-wide-bound") >= 0;
-        c.RankWhenStarved = Array.IndexOf(args, "--rank-when-starved") >= 0;
-        c.WorkerCount = Int(args, "--workers", c.WorkerCount);
-        c.WarmTicks = Int(args, "--warm", c.WarmTicks);
-        c.MeasuredTicks = Int(args, "--ticks", c.MeasuredTicks);
-        c.PageCacheMiB = Int(args, "--cache-mib", c.PageCacheMiB);
-        c.Seed = Int(args, "--seed", c.Seed);
-        c.ParallelQueryMinChunkSize = Int(args, "--min-chunk", c.ParallelQueryMinChunkSize);
-        c.AwarenessMinChunk = Int(args, "--awareness-min-chunk", c.AwarenessMinChunk);
-        c.CostBasedChunking = Array.IndexOf(args, "--entity-chunking") < 0;
-        c.BatchedSpatialWrites = Array.IndexOf(args, "--per-entity-writespatial") < 0;
-        c.TickLogPath = Str(args, "--tick-log", null);
-        c.AwarenessApi = Str(args, "--awareness-api", "count") switch
+        r.Group("sessions and replication");
+        c.MaxClients = r.Int("--max-clients", c.MaxClients, "player sessions admitted at once; 0 is unlimited", min: 0);
+        c.MaxSpectators = r.Int("--max-spectators", c.MaxSpectators, "god-camera sessions admitted at once; 0 is unlimited", min: 0);
+        c.SessionBudgetBytesPerSecond = r.Int("--session-budget", c.SessionBudgetBytesPerSecond,
+            "per-player outbound budget, bytes per second; 0 is none", min: 0);
+        c.IngressBytesPerSecond = r.Int("--ingress-budget", c.IngressBytesPerSecond, "per-session inbound budget, bytes per second", min: 0);
+        c.PlayerLeaveM = r.Dbl("--player-leave", c.PlayerLeaveM, "players' leave radius, m; 0 is none", min: 0d);
+        c.GodRegionMaxEdgeM = r.Dbl("--god-region", c.GodRegionMaxEdgeM, "god camera's largest region edge, m; 0 keeps the whole-world camera", min: 0d);
+        c.GodNearBudget = r.Int("--god-near", c.GodNearBudget, "god camera's near budget, entities", min: 0);
+        c.SubscriptionsPushAutomatic = r.Choice("--subs-mode", "push", ["push", "push-auto"], "who detects a change: the simulation, or the engine")
+            == "push-auto";
+        c.SubscriptionsCollapseWorkUnits = r.Choice("--subs-pipeline", "staged", ["staged", "collapsed"], "run the frame pipeline staged or collapsed")
+            == "collapsed" ? int.MaxValue : 0;
+        c.SubscriptionsPhaseTiming = r.Switch("--subs-phases", "report per-phase replication timing");
+        c.DormancyTicks = r.Int("--dormancy", c.DormancyTicks, "ticks of stillness before a cluster sleeps; 0 is never", min: 0);
+
+        r.Group("runtime and scheduling");
+        c.TickRateHz = r.Int("--hz", c.TickRateHz, "tick rate; 10 is the baseline the published numbers are quoted at", min: 1, max: 100_000);
+        c.Unpaced = r.Switch("--unpaced", "tick back to back, for count-only comparisons; never for timings");
+        c.WorkerCount = r.Int("--workers", c.WorkerCount, "worker threads; 0 takes the processor count", min: 0, max: 4096);
+        c.WarmTicks = r.Int("--warm", c.WarmTicks, "ticks run before measuring starts", min: 0);
+        c.MeasuredTicks = r.Int("--ticks", c.MeasuredTicks, "ticks measured", min: 1);
+        c.PageCacheMiB = r.Int("--cache-mib", c.PageCacheMiB, "page cache size, MiB", min: 1);
+        c.ParallelQueryMinChunkSize = r.Int("--min-chunk", c.ParallelQueryMinChunkSize, "global parallel-query chunk floor", min: 0);
+        c.AwarenessMinChunk = r.Int("--awareness-min-chunk", c.AwarenessMinChunk, "chunk floor for the awareness system alone; 0 uses the global one", min: 0);
+        c.CostBasedChunking = !r.Switch("--entity-chunking", "chunk by entity count instead of by cost (P2 off)");
+        c.ParallelFence = !r.Switch("--serial-fence", "run the tick fence serially");
+        c.RankWhenStarved = r.Switch("--rank-when-starved", "rank work when the pool is starved");
+        c.WorkerIdleSpin = r.Int("--idle-spin", c.WorkerIdleSpin, "worker idle spin iterations", min: 0);
+        c.WorkerHotSpinners = r.IntOrNull("--sched-hot", "how many workers hot-spin; absent leaves the engine's own number");
+        c.WorkerParkAfterUs = r.IntOrNull("--sched-park-us", "park a worker after this many idle microseconds; absent leaves the engine's own number");
+        c.ForceAwareness = r.Switch("--awareness", "keep the awareness system even when replication is declared");
+        c.SplitAwareness = r.Switch("--split-awareness", "split awareness into two systems");
+        c.AwarenessApi = r.Choice("--awareness-api", "count", ["movenext", "count", "fill", "batch"], "how awareness drains each interest query") switch
         {
             "movenext" => AwarenessApi.MoveNext,
             "count" => AwarenessApi.Count,
             "fill" => AwarenessApi.Fill,
-            "batch" => AwarenessApi.Batch,
-            var other => throw new ArgumentException($"--awareness-api takes movenext, count, fill or batch, not '{other}'"),
+            _ => AwarenessApi.Batch,
         };
-        c.CombatApi = Str(args, "--combat-api", "movenext") switch
+        c.IdleCreatureFraction = r.Dbl("--idle-creatures", c.IdleCreatureFraction, "share of creatures that never think", min: 0d, max: 1d);
+        c.RespawnSeconds = r.Float("--respawn-s", c.RespawnSeconds, "seconds before a lair revives a killed creature", min: 0.001f);
+
+        r.Group("persistence and output");
+        c.DatabaseDirectory = r.Str("--db-dir", c.DatabaseDirectory, "where the database file is written", "<path>");
+        c.DatabaseName = r.Str("--db-name", c.DatabaseName, "the database's file name, without directory or extension", "<name>");
+        c.Persist = r.Switch("--persist", "keep the database across runs and reopen it instead of building a fresh world");
+        c.ReportDirectory = r.Str("--report-dir", null, "where --sweep writes its report", "<path>");
+        c.TickLogPath = r.Str("--tick-log", null, "write one line per tick here", "<path>");
+
+        r.Group("diagnostics — measurement only, and refused with --serve");
+        c.Probe = r.Switch("--probe", "time port queries around shuttle arrivals");
+        c.WorkProbe = r.Switch("--work-probe", "replay each awareness query and report the work it did");
+        c.ChunkStats = r.Switch("--chunk-stats", "report per-chunk parallel-query statistics");
+        c.FaultAtTick = r.Int("--fault-at-tick", c.FaultAtTick, "throw from a system on this tick, to exercise the crash artefact; 0 never faults", min: 0);
+
+        if (r.WantsHelp)
         {
-            "movenext" => CombatApi.MoveNext,
-            "batch" => CombatApi.Batch,
-            var other => throw new ArgumentException($"--combat-api takes movenext or batch, not '{other}'"),
-        };
-        if (Array.IndexOf(args, "--split-awareness") >= 0)
-        {
-            c.SplitAwareness = true;
+            c.HelpText = r.Help();
+            return c;
         }
 
-        // Replication is push (ADR-067); the one choice left is who detects a change: the simulation (Replicate) or, experimentally, the engine.
-        var subsMode = Str(args, "--subs-mode", "push");
-        c.SubscriptionsPushAutomatic = subsMode switch
-        {
-            "push" => false,
-            "push-auto" => true,
-            _ => throw new ArgumentException($"--subs-mode takes push or push-auto, not '{subsMode}' (the pull pipeline was removed, ADR-067)"),
-        };
-
-        c.WorkerIdleSpin = Int(args, "--idle-spin", c.WorkerIdleSpin);
-        if (Array.IndexOf(args, "--sched-hot") >= 0)
-        {
-            c.WorkerHotSpinners = Int(args, "--sched-hot", 0);
-        }
-
-        if (Array.IndexOf(args, "--sched-park-us") >= 0)
-        {
-            c.WorkerParkAfterUs = Int(args, "--sched-park-us", 0);
-        }
-        c.DormancyTicks = Int(args, "--dormancy", 0);
-        c.SessionBudgetBytesPerSecond = Int(args, "--session-budget", 0);
-        c.IngressBytesPerSecond = Int(args, "--ingress-budget", c.IngressBytesPerSecond);
-        c.PlayerLeaveM = Dbl(args, "--player-leave", 0d);
-        c.GodRegionMaxEdgeM = Dbl(args, "--god-region", 0d);
-        c.GodNearBudget = Int(args, "--god-near", c.GodNearBudget);
-        c.SubscriptionsPhaseTiming = Array.IndexOf(args, "--subs-phases") >= 0;
-        c.IdleCreatureFraction = Math.Clamp(Dbl(args, "--idle-creatures", 0d), 0d, 1d);
-
-        c.SubscriptionsCollapseWorkUnits = Str(args, "--subs-pipeline", "staged") switch
-        {
-            "staged" => 0,
-            "collapsed" => int.MaxValue,
-            var other => throw new ArgumentException($"--subs-pipeline takes collapsed or staged, not '{other}'"),
-        };
-
-        c.DatabaseDirectory = Str(args, "--db-dir", c.DatabaseDirectory);
-        if (Array.IndexOf(args, "--serial-fence") >= 0)
-        {
-            c.ParallelFence = false;
-        }
-
-        if (Array.IndexOf(args, "--no-content-scale") >= 0)
-        {
-            c.ScaleContentWithWorld = false;
-        }
-
+        r.RejectUnknown();
+        Validate(c);
         return c;
     }
 
-    private static string Str(string[] args, string name, string fallback)
+    /// <summary>
+    /// The cross-flag checks: a value that is individually well-formed but wrong, or a pair of settings that contradict each other.
+    /// </summary>
+    /// <param name="c">The parsed configuration.</param>
+    /// <exception cref="ArgumentException">A value is out of range, or two settings cannot both hold.</exception>
+    /// <remarks>
+    /// Separate from the reads so that <c>--help</c> reaches the flag list without passing through them. Every message names the flag rather than the
+    /// field, because the flag is what the operator typed.
+    /// <para>
+    /// It used to hold the single-flag ranges too, and it was incomplete in exactly the class of error it exists for: <c>--pop -1</c>, <c>--world -5</c>,
+    /// <c>--ticks -1</c>, <c>--cache-mib 0</c> and seven more parsed and ran, and <c>--pop -1</c> built an empty world and reported it as a measurement. A
+    /// range written beside its declaration cannot be forgotten when a flag is added; one written in a list at the end of the parse can, and was.
+    /// </para>
+    /// </remarks>
+    private static void Validate(SimConfig c)
     {
-        var i = Array.IndexOf(args, name);
-        return i >= 0 && i + 1 < args.Length ? args[i + 1] : fallback;
-    }
+        // Every single-flag range now lives on its own declaration, where it cannot be forgotten when a flag is added — see ArgReader.OutOfRange. What is left
+        // here is what no single declaration can see: combinations.
 
-    private static float Float(string[] args, string name, float fallback)
-    {
-        var i = Array.IndexOf(args, name);
-        return i >= 0 && i + 1 < args.Length && float.TryParse(args[i + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : fallback;
-    }
+        // --persist reopens one world; --sweep builds forty-five. Combined, every point after the first would measure whatever the point before it left behind,
+        // at a different world size and a different cell size, and report it as its own. That is the exact failure --persist defaults to off to avoid, so a
+        // command line asking for both is refused rather than silently resolved either way (P-1).
+        if (c.Persist && c.RunSweep)
+        {
+            throw new ArgumentException("--persist reopens one world and --sweep builds a fresh one per point, so every point after the first would measure "
+                + "the point before it. Pick one.");
+        }
 
-    private static int Int(string[] args, string name, int fallback)
-    {
-        var i = Array.IndexOf(args, name);
-        return i >= 0 && i + 1 < args.Length && int.TryParse(args[i + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : fallback;
-    }
+        if (string.IsNullOrWhiteSpace(c.DatabaseName) || IsNotABareFileName(c.DatabaseName))
+        {
+            throw new ArgumentException($"--db-name must be a bare file name with no directory and no invalid characters; got '{c.DatabaseName}'. "
+                + "Use --db-dir for the directory.");
+        }
 
-    private static double Dbl(string[] args, string name, double fallback)
-    {
-        var i = Array.IndexOf(args, name);
-        return i >= 0 && i + 1 < args.Length && double.TryParse(args[i + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out var v) ? v : fallback;
+        if (c.ServePort == 0)
+        {
+            return;
+        }
+
+        // A server runs forever; the three probes accumulate one sample per event for the whole run so that a median can be taken at the end. In a run with
+        // no end there is no end to take it at and the sample lists grow without bound — which is the same defect SWG-07 fixed in the shuttle report, and
+        // refusing the combination is cheaper and more honest than capping a measurement nobody can read.
+        if (c.Probe || c.WorkProbe || c.ChunkStats)
+        {
+            throw new ArgumentException("--probe, --work-probe and --chunk-stats collect samples for a report printed when a measured run ends, so they "
+                + "cannot be combined with --serve, which never ends. Run them without --serve.");
+        }
+
+        if (c.FaultAtTick > 0)
+        {
+            throw new ArgumentException("--fault-at-tick deliberately kills a tick, to exercise the crash artefact. It cannot be combined with --serve.");
+        }
+
+        if (c.RunSweep)
+        {
+            throw new ArgumentException("--sweep runs a matrix of measured runs and --serve runs one world forever; they are different modes. Pick one.");
+        }
+
+        if (c.Unpaced)
+        {
+            throw new ArgumentException("--unpaced ticks as fast as the box will go and disables the overload response, which is right for counting and "
+                + "wrong for a server clients connect to. It cannot be combined with --serve.");
+        }
     }
 }

@@ -251,6 +251,8 @@ public partial class DatabaseEngine
         var staleDropped = 0;
         var jumps = 0;
         var clamped = 0;
+        // Rides the realm-change branch this loop already takes to reload its grid and hysteresis margin (#1083).
+        var fold = default(RealmFold);
         var realmChanges = 0;
         var keyed = ss.HasRealmKey;
 
@@ -280,6 +282,7 @@ public partial class DatabaseEngine
                 var clusterRealm = clusterState.SpatialOfCluster(chunkId);
                 if (!ReferenceEquals(clusterRealm, realmSpatial))
                 {
+                    fold.Switch(clusterRealm);
                     realmSpatial = clusterRealm;
                     grid = realmSpatial.Grid;
                     cfg = ref grid.Config;
@@ -329,13 +332,18 @@ public partial class DatabaseEngine
                     if (destCellKey == currentCellKey)
                     {
                         staleDropped++;
+                        fold.T.StaleFlagsDropped++;
                         continue;
                     }
 
                     migrationsQueuedCount++;
                     var (dx, dy, dz) = grid.CellKeyToCoords(destCellKey);
-                    jumps += SpatialGrid.IsJump(cx, cy, cz, dx, dy, dz) ? 1 : 0;
-                    clamped += grid.IsClampedPoint(posX, posY, posZ, is3D) ? 1 : 0;
+                    var isJump = SpatialGrid.IsJump(cx, cy, cz, dx, dy, dz);
+                    var isClamped = grid.IsClampedPoint(posX, posY, posZ, is3D);
+                    jumps += isJump ? 1 : 0;
+                    clamped += isClamped ? 1 : 0;
+                    fold.T.JumpCrossings += isJump ? 1 : 0;
+                    fold.T.ClampedDestinations += isClamped ? 1 : 0;
                     TyphonEvent.EmitSpatialClusterMigrationDetect(archetypeId, chunkId, currentCellKey, destCellKey);
                     clusterState.EnqueueMigration(chunkId, slotIndex, grid.Realm.Value, destCellKey);
                     TyphonEvent.EmitSpatialClusterMigrationQueue(archetypeId, chunkId,
@@ -345,6 +353,7 @@ public partial class DatabaseEngine
         }
 
         clusterState.LastTickStaleFlagsDropped = staleDropped;
+        fold.Flush();
         AddCrossingClassification(clusterState, jumps, clamped);
         if (realmChanges != 0)
         {
@@ -405,6 +414,8 @@ public partial class DatabaseEngine
         {
             var migrationsQueuedCount = 0;
             var hysteresisAbsorbedCount = 0;
+            // Same discipline as the arm above: the realm-change branch already reloads cell size and the hysteresis margin, so the fold costs it nothing.
+            var fold = default(RealmFold);
             var clustersTouched = 0;
             var jumps = 0;
             var clamped = 0;
@@ -494,6 +505,7 @@ public partial class DatabaseEngine
                 var clusterRealm = clusterRealmMap[clusterChunkId];
                 if (clusterRealm != frameRealm)
                 {
+                    fold.Switch(clusterState.RealmSpatial[clusterRealm]);
                     frameRealm = clusterRealm;
                     grid = clusterState.RealmSpatial[clusterRealm].Grid;
                     ref readonly var cfg = ref grid.Config;
@@ -563,8 +575,12 @@ public partial class DatabaseEngine
                         {
                             migrationsQueuedCount++;
                             var (dx, dy, dz) = grid.CellKeyToCoords(newCellKey);
-                            jumps += SpatialGrid.IsJump(cx, cy, cz, dx, dy, dz) ? 1 : 0;
-                            clamped += grid.IsClampedPoint(posX, posY, posZ, is3D) ? 1 : 0;
+                            var isJump = SpatialGrid.IsJump(cx, cy, cz, dx, dy, dz);
+                            var isClamped = grid.IsClampedPoint(posX, posY, posZ, is3D);
+                            jumps += isJump ? 1 : 0;
+                            clamped += isClamped ? 1 : 0;
+                            fold.T.JumpCrossings += isJump ? 1 : 0;
+                            fold.T.ClampedDestinations += isClamped ? 1 : 0;
                             TyphonEvent.EmitSpatialClusterMigrationDetect(archetypeId, clusterChunkId, currentCellKey, newCellKey);
                             if (sink != null)
                             {
@@ -609,6 +625,7 @@ public partial class DatabaseEngine
                 clusterState.TotalHysteresisAbsorbedCount += hysteresisAbsorbedCount;
             }
 
+            fold.Flush();
             AddCrossingClassification(clusterState, jumps, clamped);
             if (realmChanges != 0)
             {
@@ -886,6 +903,9 @@ public partial class DatabaseEngine
         // switches realm at most once per realm it holds; with one realm this loads once.
         var gridRealm = -1;
         SpatialGrid grid = null;
+        // Rides the realm reload below. The prefix is sorted by (realm, cell), so a slice switches realm at most once per realm it holds — the fold costs
+        // one publish per realm the slice touched, not one per migration.
+        var fold = default(RealmFold);
         var transientMask = layout.TransientSlotMask;
         ref var ss = ref clusterState.SpatialSlot;
         var spatialCompSlot = ss.Slot;
@@ -951,21 +971,29 @@ public partial class DatabaseEngine
                     // The destination realm's state was created by the Prep tail's pre-size (a Migrate slice may not create it — MD-02). The fresh-cluster
                     // pair is a cell key of the realm it was allocated in: another realm's cell can carry the same key.
                     gridRealm = req.DestRealm;
-                    grid = clusterState.RealmSpatial[gridRealm].Grid;
+                    var destRealmSpatial = clusterState.RealmSpatial[gridRealm];
+                    fold.Switch(destRealmSpatial);
+                    grid = destRealmSpatial.Grid;
                     freshCell = -1;
                     freshCluster = -1;
                 }
 
+                // Counted over the whole slice, exactly as the archetype-wide trio beside it is — so the per-realm three still sum to the per-realm
+                // MigrationCount, which is the identity that makes the split checkable rather than plausible.
+                fold.T.MigrationCount++;
                 switch (req.Kind)
                 {
                     case MigrationKind.Relocation:
                         relocationCount++;
+                        fold.T.RelocationsExecuted++;
                         break;
                     case MigrationKind.Repair:
                         repairCount++;
+                        fold.T.RepairsExecuted++;
                         break;
                     default:
                         crossingCount++;
+                        fold.T.CrossingsExecuted++;
                         break;
                 }
 
@@ -1433,6 +1461,7 @@ public partial class DatabaseEngine
         var endTimestamp = Stopwatch.GetTimestamp();
         var durationMs = (endTimestamp - startTimestamp) * 1000.0 / Stopwatch.Frequency;
         // Accumulate per-slice counters atomically — multiple workers may slice the same archetype's PendingMigrations.
+        fold.Flush();
         Interlocked.Add(ref clusterState.LastTickMigrationCount, count);
         // #912. The number of spans summed into LastTickMigrationExecuteMs below, and the per-kind split of what they moved. Without the first, that sum
         // divided by an entity count cannot be told apart from the same work cut into more pieces — which is what raising the worker count does to it.

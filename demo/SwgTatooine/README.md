@@ -1,4 +1,4 @@
-# SWG Tatooine — a game-shaped workload for Typhon's spatial layer
+﻿# SWG Tatooine — a game-shaped workload for Typhon's spatial layer
 
 A server-side simulation of *Star Wars Galaxies*' planet Tatooine, built as a load for Typhon's spatial partitioning. No
 client, no rendering, no network: the planet is reconstructed into a real on-disk Typhon database and then ticked through
@@ -27,7 +27,7 @@ should constrain the other.
 | **World** | 16 384 m square, coordinates −8 192…+8 192 on X and Z, from Core3's own `coordinateMin`/`coordinateMax` |
 | **Content** | 7 cities, 7 points of interest, 8 creature spawn regions, player cities in 5 size tiers, player structures |
 | **Archetypes** | 5 — static world objects, creature lairs, creatures, city NPCs, players |
-| **Systems** | 12 (10 with `--no-shuttles`) over 7 phases, dispatched by `TyphonRuntime` |
+| **Systems** | 14 (12 with `--no-shuttles`) over 9 phases, dispatched by `TyphonRuntime` |
 | **Storage** | a real database with a real WAL; per-archetype `ClusterDurability.Checkpoint`, plus one `Versioned` component |
 | **Rate** | 10 Hz by default — SWG's server ran its AI and movement broadcast at roughly that |
 
@@ -43,7 +43,9 @@ The systems, in phase order:
 | `PlayerMove` | Move | Player position integration |
 | `NpcMove` | Move | City NPC drift — overwhelmingly stationary |
 | `Awareness` | Awareness | The interest query: for every player, everything within 192 m, per queried archetype |
-| `CreatureCombat` | Resolve | A 75 m query per creature; a creature in a player's line of fire takes damage, dies, and is revived by its lair |
+| `PlayerCombat` | Resolve | A fighting player fires at its own target, acquiring one within 75 m when it has none; pushes the damage as an event |
+| `CreatureCombat` | Resolve | A creature that has closed on its quarry attacks it — no query: it knows what it is fighting and reads that entity's position |
+| `CombatResolve` | Apply | Drains the event queue and applies every effect: damage, death, loot, mission payouts, cloning. The only writer of `Inventory` |
 | `Economy` | Economy | Harvesters and factories ticking their own counters |
 | `ShuttleProbe` | Report | Times queries at shuttleports after an arrival |
 | `SpatialTelemetry` | Report | Folds the previous fence's per-archetype maintenance counters |
@@ -126,6 +128,12 @@ the unit of work sync pages itself, which measured 4× slower in an earlier demo
 migration and AABB growth inline, so the fence never scans a dirty bitmap to discover what moved. For the scenery that
 means the largest population in the world costs the fence nothing per tick.
 
+**Two of the nine phases exist because the access deriver refused the alternative.** `Input` carries the tick's client
+intents, because applying one writes components that `Shuttle` also writes in `Spawn`. `Apply` carries the combat
+consumer, because it writes the very components the two combat producers read, and the only in-phase resolutions on offer
+would order the producers after the consumer that depends on them — a cycle. In both cases a phase boundary says the true
+thing an explicit edge would only enforce.
+
 **Phases do not imply a barrier.** Ordering comes from declared component access; a system that queries an archetype it
 does not declare runs concurrently with that archetype's writers. Every system here declares the placements its queries
 read, which is why `Awareness` names creature, NPC and structure placements it never writes.
@@ -197,6 +205,12 @@ Reading it:
 
 ### Where the time goes at `--pop 64`
 
+> **The `CreatureCombat` row below is superseded and should not be cited.** It was measured when combat ran from the
+> creature's side — one 75 m radius query per living creature per weapon cycle, which is what made it 18 % of the tick at
+> this population. SWG-02 inverted the model: a creature that is fighting runs **no query at all**, and a player runs one
+> only when it is fighting and has nobody to shoot. The table has not been re-measured; the rest of it is unaffected by
+> that change, and the combat row is the only one that is.
+
 One run at 1 024 m cells, 200 measured ticks — 1 072 848 entities, median tick **21.93 ms**. "Span" is wall-clock from
 the system's first chunk to its last; "worker time" is the CPU its chunks consumed across the pool:
 
@@ -220,8 +234,9 @@ the system's first chunk to its last; "worker time" is the CPU its chunks consum
 The shares sum past 100 % because systems that share no write run concurrently — the spans overlap. Adding the worker
 time up gives **≈ 553 ms of CPU compressed into a 21.9 ms tick**, a 25× speed-up on 32 threads, or 79 % of perfect.
 
-Two systems are the workload: interest management (`Awareness` walks only the 20 480 players, and spends 354 ms of CPU
-doing it) and combat's per-creature radius query. The five fence phases together cost 3.1 ms of the tick, of which `FencePrep` — which cannot
+Two systems were the workload: interest management (`Awareness` walks only the 20 480 players, and spends 354 ms of CPU
+doing it) and combat's per-creature radius query — the second of which SWG-02 removed, so this table's second-largest row
+no longer exists in the shape it describes. The five fence phases together cost 3.1 ms of the tick, of which `FencePrep` — which cannot
 parallelise for barrier-only archetypes — is half.
 
 ### What the tick fence costs
@@ -253,7 +268,23 @@ demo's CPU time is bimodal run to run; comparing two configurations needs interl
 
 ```bash
 dotnet run -c Release --project demo/SwgTatooine -- --pop 16 --cell 1024
+dotnet run -c Release --project demo/SwgTatooine -- --help          # every flag, its default and its range
 ```
+
+> ### The command line refuses what it does not understand (SWG-07, 2026-09-27)
+>
+> It used to read every flag with `IndexOf` + `TryParse` and fall back to the default on any failure, so a misspelt flag, a
+> malformed value and an absent flag were reported identically — which is to say not at all. **Five things are now fatal,
+> with exit code 2 and the token named:** an unknown flag (the nearest declared name is suggested), a value that will not
+> parse, a flag at the end of the line with no value, a value that is itself a flag, and **the same flag given twice** — the
+> last because `IndexOf` took the first occurrence, so appending a corrected `--hz 50` to a line that already said `--hz 10`
+> ran at 10. A well-formed value outside its range is refused as well, rather than clamped.
+>
+> **Two behaviour changes worth knowing:** `--serve` now requires its port — a bare `--serve`, and a malformed one such as
+> `--serve 808O`, both used to mean 8080 silently — and `--probe`, `--work-probe`, `--chunk-stats`, `--sweep` and
+> `--unpaced` are refused together with `--serve`, because they report at the end of a run that has an end.
+>
+> `--help` is generated from the declarations the parse walks, so a flag cannot exist without being listed.
 
 Each run creates `SwgTatooine_<pid>.typhon` beside the binary — about 180 MB of it at `--pop 64` — and deletes only a
 database of its own name at startup. Because the name carries the process id, finished runs leave theirs behind; delete
@@ -274,7 +305,6 @@ Useful flags:
 | `--chunk-stats` | off | Per-chunk timing for the awareness system: how evenly the chunks shared the pool |
 | `--work-probe` | off | Counts a sample of interest queries: cells walked, clusters opened, entities tested, hits, pages |
 | `--awareness-api <mode>` | count | `count`, `movenext`, `fill` or `batch` — how each interest query is drained |
-| `--combat-api <mode>` | movenext | `movenext` or `batch` — one query per creature, or one per creature cluster |
 | `--eff-tol <r>` / `--repair-cooldown <n>` | 0.1 / 50 | The two maintenance knobs above; `0` disables either |
 | `--promote <n>` / `--tightness <r>` | off / 1 | Turn per-cell R-tree promotion on |
 | `--no-shuttles` | shuttles on | Drop the shuttle systems and the mass-arrival traffic they produce |
@@ -294,6 +324,32 @@ Useful flags:
 | `--dungeon-party N` / `--dungeon-mobs N` | 8 / 24 | Players per party / mobs per dungeon |
 | `--tick-log <path>` | — | Every measured tick's duration, one per line |
 | `--seed <n>` | fixed | Every random decision, so two runs build the same world |
+| `--db-name <name>` | `SwgTatooine` | The database's file name, no directory and no extension. **No process id**, so a killed run leaves one database rather than one per run |
+| `--persist` | off | Keep the database across runs and **reopen** it instead of building a fresh world. The index is rebuilt from the entities on disk |
+| `--fault-at-tick N` | 0 | Throw from a system on tick N, to exercise the crash artefact. Refused with `--serve` |
+
+### Persistence, and what a crash leaves behind
+
+**Delete-on-start is the default and `--persist` opts in**, because the two ways of getting it wrong are not symmetrical: a run that wrongly persists measures a
+world some earlier run left behind — a different population, creatures that have already wandered — and reports it as its own, while a run that wrongly starts
+fresh loses a world and is obvious. There is deliberately no `--fresh`. `--persist` with `--sweep` is refused: every point after the first would measure the point
+before it.
+
+With `--persist`, a second run **reopens** rather than builds. Everything that is a statement about the database rather than about its contents — the grid, the
+realm registrations, `SetSpatialBarrierOnly`, the dormancy declarations — is re-issued, because none of it is persisted; only the contents are. The
+`WorldIndex` is then rebuilt **from the entities**, not by re-running the generator: cities and points of interest come from the map, which states them, while
+everything the generator's RNG produced (which building is a city's shuttleport, which buildings have doors and in what order) is read back off
+`Structure.OwnerRegion` and `Structure.PortalIndex`. Re-running the generator would describe the world as it was born rather than as it is, and would mean the
+demo could never open a database it had not made itself.
+
+Possession does not survive a restart: a player that some client was driving when the world was saved comes back on the simulation's own activity mix, because
+the session is gone and nothing else would ever release it.
+
+**A system that throws ends the run.** The engine's default is to isolate the fault — skip the failing system's branch, finish the tick, report it as a success —
+which for a measured run is the worst available outcome: the world is missing whatever that system was going to do and the report still prints a median. The demo
+runs with `SystemExceptionPolicy.AbortTickAndStop` instead, and writes a **crash artefact** beside the database: `reason.txt` (the tick and the failing system),
+`exception.txt` (the whole exception, stack included), `ticks.csv` (the durations leading up to it) and `census.txt` / `config.txt` (what world was running, and
+enough to run it again).
 
 Served (`--serve`), each kind of realm is replicated at its own scale (Realms G3): planets at the planet cell, an interior or a dungeon as one cell
 whose player sessions see everything in it, space at its 500 m cell. A player's session follows its player through doors, shuttles and dungeons, each

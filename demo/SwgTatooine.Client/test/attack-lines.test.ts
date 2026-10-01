@@ -1,3 +1,4 @@
+import { FLAT_GROUND } from '../src/terrain/ground-sampler';
 import { NullEngine } from '@babylonjs/core/Engines/nullEngine';
 import { Scene } from '@babylonjs/core/scene';
 import { WorldStore } from '@typhondb/client';
@@ -19,6 +20,7 @@ const view: FrameView = {
   viewportWidth: 800,
   viewportHeight: 800,
   selectedNetId: 0,
+  ground: FLAT_GROUND,
 };
 
 describe('AttackLines (NullEngine)', () => {
@@ -48,6 +50,16 @@ describe('AttackLines (NullEngine)', () => {
     lines.onAttack(4, 1, 2);
     lines.update(view);
     expect([lines.drawn, lines.instances]).toEqual([1, 1]);
+  });
+
+  it('puts both ends of a line on the ground under each end, not on one shared height', () => {
+    // The two creatures sit at x = 10 and x = 20. On a ramp they must take different heights: a line that sampled once —
+    // at the camera, or at the attacker — would be right at one end and buried or floating at the other.
+    const lines = setup();
+    lines.onAttack(4, 1, 2);
+    lines.update({ ...view, ground: { heightAt: (x) => x * 0.5 } });
+    expect(lines.heights[0]).toBeCloseTo(5, 5);
+    expect(lines.heights[1]).toBeCloseTo(10, 5);
   });
 
   it('draws a hit marker, two crossed instances, when only one end is held', () => {

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { usePostApiSessionsSessionIdQueryPlan } from '@/api/generated/query-console/query-console';
 import { useQueryConsoleStore } from '@/stores/useQueryConsoleStore';
+import { isProblemCode } from '@/api/problemDetails';
 
 /**
  * Cheap pre-flight: a DSL is plan-able only once it has a FROM clause. Skipping `/plan` for partial input
@@ -19,9 +20,9 @@ function isPlanCandidate(dsl: string): boolean {
  * failures (500, network) still surface in the Logs panel so server faults aren't hidden by this filter.
  */
 function silenceInvalidSyntax(error: unknown): boolean {
-  // FetchError carries the parsed ProblemDetails body under `.data`; we look up `.title` for the stable code.
-  const e = error as { data?: { title?: string }; status?: number };
-  return e?.status === 400 && e?.data?.title === 'invalid_query_syntax';
+  // Read through `problemDetails`: this was `.data.title`, which is never set on an error, so the filter silenced
+  // nothing and every keystroke that did not yet parse logged a server error into the Logs panel.
+  return isProblemCode(error, 'invalid_query_syntax');
 }
 
 /**

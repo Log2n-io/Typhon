@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Threading;
 
@@ -28,7 +28,11 @@ namespace SwgTatooine;
 public sealed partial class SimBridge
 {
     /// <summary>[CORE3] How often a dormant mission lair looks for a player to serve. Ties to the 5 s spawn-area cooldown.</summary>
-    private const int MissionOfferIntervalTicks = 50;
+    /// <remarks>
+    /// <b>In seconds, converted at the configured rate (S0-3).</b> It was a raw 50 ticks calibrated for 10 Hz, so at <c>--hz 50</c> offers fired five
+    /// times too often and the mission churn an <c>--hz</c> sweep measured was the sweep's own artefact.
+    /// </remarks>
+    private const float MissionOfferIntervalSeconds = 5f;
 
     /// <summary>Radius within which a dormant lair will look for a player to build a mission around.</summary>
     private const float MissionSeekRadiusM = 3000f;
@@ -38,14 +42,23 @@ public sealed partial class SimBridge
     /// </summary>
     public void MissionTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         var scale = _config.ContentScale;
         var minD = TatooineData.DestroyMissionMinDistanceM * scale;
         var spanD = (TatooineData.DestroyMissionMaxDistanceM - TatooineData.DestroyMissionMinDistanceM) * scale;
         var seek = MissionSeekRadiusM * scale;
+        var offerTicks = Math.Max(1, (int)(MissionOfferIntervalSeconds * _config.TickRateHz));
         var half = _config.WorldEdgeM * 0.5f;
         long issued = 0;
         long completed = 0;
+        var writer = ctx.Writer(CombatQueue);
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<CreatureLair>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -62,7 +75,6 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(CreatureLair.Bounds);
             var spawners = cluster.GetSpan(CreatureLair.Spawner);
             var vitals = cluster.GetSpan(CreatureLair.Vitals);
-            var chunk = cluster.ChunkId;
 
             var bits = bits0;
             while (bits != 0)
@@ -81,10 +93,28 @@ public sealed partial class SimBridge
 
                 if (lair.MissionId != 0)
                 {
-                    // Live. A destroyed lair ends its mission and goes back in the pool.
+                    // Live. A destroyed lair ends its mission, pays its owner and goes back in the pool.
+                    //
+                    // SWG-02 is what makes this branch reachable at all: until players could damage a lair, nothing in the world ever wrote LairVitals.Health
+                    // downward, so the 80-lair pool was issued within the first minutes of a run and no mission ever completed or was issued again (gap G1).
                     if (v.Health <= 0)
                     {
+                        // The payout, as an EVENT: this walk owns CreatureLair and may not write a Player's Versioned inventory from a parallel system. The
+                        // resolver applies it in the Resolve phase of THIS tick, in the tick's own unit of work.
+                        if (!lair.Owner.IsNull)
+                        {
+                            writer.Push(new CombatEvent
+                            {
+                                Target = lair.Owner,
+                                Attacker = EntityId.Null,
+                                Amount = lair.MissionId * TatooineData.MissionRewardPerDifficulty,
+                                Kind = CombatEventKind.MissionReward,
+                                TargetKind = CombatTargetKind.Player,
+                            });
+                        }
+
                         lair.MissionId = 0;
+                        lair.Owner = EntityId.Null;
                         v.Health = v.MaxHealth;
                         completed++;
                     }
@@ -98,13 +128,14 @@ public sealed partial class SimBridge
                     continue;
                 }
 
-                lair.RespawnCooldown = MissionOfferIntervalTicks;
+                lair.RespawnCooldown = offerTicks;
 
                 var lx = places[idx].X;
                 var lz = places[idx].Z;
                 var sphere = new BSphere2F { CenterX = lx, CenterY = lz, Radius = seek };
                 var e = Dbe.ClusterSpatialQuery<Player>(cluster.Realm).Radius(in sphere);
                 var foundPlayer = false;
+                var owner = EntityId.Null;
                 float px = 0f, pz = 0f;
                 try
                 {
@@ -113,6 +144,9 @@ public sealed partial class SimBridge
                         var hit = e.Current;
                         px = (float)((hit.MinX + hit.MaxX) * 0.5);   // f64 world frame (#914) to the simulation's f32
                         pz = (float)((hit.MinY + hit.MaxY) * 0.5);
+
+                        // The identity as well as the point (SWG-02). The query already had it; throwing it away is why a completed mission had nobody to pay.
+                        owner = hit.Entity;
                         foundPlayer = true;
                     }
                 }
@@ -126,23 +160,30 @@ public sealed partial class SimBridge
                     continue;
                 }
 
+                var key = cluster.GetEntityId(idx).EntityKey;
+
                 // Core3's twenty tries at a uniform 1-2 km, rejecting anything inside a city region.
                 for (var attempt = 0; attempt < 20; attempt++)
                 {
-                    var ang = Hash01(Salt(tick, chunk, idx, 0xB5297A4Du + (uint)attempt)) * MathF.PI * 2f;
-                    var dist = minD + (Hash01(Salt(tick, chunk, idx, 0x68E31DA4u + (uint)attempt)) * spanD);
+                    var ang = Hash01(Salt(tick, key, 0xB5297A4Du + (uint)attempt)) * MathF.PI * 2f;
+                    var dist = minD + (Hash01(Salt(tick, key, 0x68E31DA4u + (uint)attempt)) * spanD);
                     var tx = px + (MathF.Cos(ang) * dist);
                     var tz = pz + (MathF.Sin(ang) * dist);
-                    if (tx < -half || tx > half || tz < -half || tz > half || InsideCity(tx, tz))
+                    // The lair's own extent counts, and so does the builder's edge margin: a lair centred exactly on
+                    // the rim has an AABB four metres outside the grid, which the engine clamps without a word — and the
+                    // ground was then sampled at the point asked for rather than the point written (#1073).
+                    var reach = (half * WorldBuilder.InsideEdge) - places[idx].HalfExtent;
+                    if (tx < -reach || tx > reach || tz < -reach || tz > reach || InsideCity(tx, tz))
                     {
                         continue;
                     }
 
                     // Difficulty 1-9, and Core3's hit points for it.
-                    var difficulty = 1 + (int)(Hash01(Salt(tick, chunk, idx, 0x9E3779B7u)) * 9f);
-                    v.MaxHealth = difficulty * (900 + (int)(Hash01(Salt(tick, chunk, idx, 0x1E35A7BDu)) * 200));
+                    var difficulty = 1 + (int)(Hash01(Salt(tick, key, 0x9E3779B7u)) * 9f);
+                    v.MaxHealth = difficulty * (900 + (int)(Hash01(Salt(tick, key, 0x1E35A7BDu)) * 200));
                     v.Health = v.MaxHealth;
                     lair.MissionId = difficulty;
+                    lair.Owner = owner;
                     lair.AliveCount = 1;
 
                     // The teleport, done here rather than handed to a placement system: this walk owns CreatureLair, so
@@ -150,8 +191,21 @@ public sealed partial class SimBridge
                     // kilometres is the most violent thing in this simulation from the index's point of view — a cell
                     // change and a cluster-bound recomputation in one write — and it is the point rather than a cost.
                     var nb = default(LairPlacement);
-                    nb.SetAt(tx, tz, places[idx].HalfExtent);
+                    nb.SetAt(tx, tz, GroundAt(cluster.Realm, tx, tz), places[idx].HalfExtent);
                     cluster.WriteSpatial(CreatureLair.Bounds, idx, nb);
+
+                    // And TELL the player, which is the half of this loop that was missing: the lair moved, the waypoint did not exist, and a player "going to
+                    // fight" walked to a random point in a point-of-interest disc kilometres wide. Sent as an event for the same reason the payout is — this
+                    // walk owns CreatureLair and may not write a Player from a parallel system.
+                    writer.Push(new CombatEvent
+                    {
+                        Target = owner,
+                        Attacker = EntityId.Null,
+                        Kind = CombatEventKind.MissionAssigned,
+                        TargetKind = CombatTargetKind.Player,
+                        X = tx,
+                        Z = tz,
+                    });
                     issued++;
                     break;
                 }

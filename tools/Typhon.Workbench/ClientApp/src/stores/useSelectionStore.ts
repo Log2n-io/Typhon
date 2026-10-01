@@ -65,6 +65,9 @@ export type SelectionObjectType =
   | 'system'
   | 'component'
   | 'archetype'
+  // A world hosted by this database (#1083). Its ref is the realm id, a number — realm identity is really the pair
+  // (id, generation), but the id alone addresses it within one open, which is the only span a selection lives for.
+  | 'realm'
   | 'entity'
   | 'index'
   | 'field'

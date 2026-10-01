@@ -1,6 +1,25 @@
 {
   "description": "A DEBUG block holding one GRID: a flat 66 \u00D7 33 grid of 250 m cells from (-8192, -4096.5).",
   "catalog": "catalog-kitchen-sink",
+  "frame": {
+    "realmId": 3,
+    "generation": 7,
+    "kindIdx": 1,
+    "appTag": 12648430,
+    "posBits": 24,
+    "cellM": "4070000000000000",
+    "deep": true,
+    "min": [
+      "c0c0000000000000",
+      "c0c0000000000000",
+      "c050000000000000"
+    ],
+    "max": [
+      "40c0000000000000",
+      "40c0000000000000",
+      "4050000000000000"
+    ]
+  },
   "log": [
     {
       "call": "beginTick",

@@ -100,6 +100,18 @@ internal sealed class RealmArchetypeSpatial
     /// </summary>
     internal ReachScan ReachScratch;
 
+    /// <summary>
+    /// This realm's share of the archetype's per-tick maintenance rates — drift, tightness and the scan's own denominators, attributed to the realm that
+    /// produced them rather than summed into one archetype-wide figure that names no realm. Folded once per realm run by the fence, reset by
+    /// <c>ResetArchetypeFenceTickState</c>, and read by the telemetry publisher.
+    /// </summary>
+    /// <remarks>
+    /// A FIELD rather than a lazily-allocated object, unlike <see cref="ReachScratch"/> beside it: the reach scan owns three arrays sized by the escape-set
+    /// capacity and is worth deferring until the archetype is genuinely in two realms at once, while this is a few hundred bytes that every present realm
+    /// touches on the first tick it does any work at all. Deferring it would buy a null check on the fold's hot path and nothing else.
+    /// </remarks>
+    internal RealmTickCounters Counters;
+
     /// <summary>A realm's running state in the multi-realm reach walk. Fence-only, one archetype at a time.</summary>
     internal sealed class ReachScan
     {

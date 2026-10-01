@@ -17,9 +17,12 @@ export interface ObjectHit {
   readonly group: ObjectGroup;
 }
 
-export type ObjectGroup = 'Resources' | 'Components' | 'Archetypes' | 'Systems' | 'Queries';
+export type ObjectGroup = 'Resources' | 'Realms' | 'Components' | 'Archetypes' | 'Systems' | 'Queries';
 
-const GROUP_ORDER: ObjectGroup[] = ['Resources', 'Components', 'Archetypes', 'Systems', 'Queries'];
+// Realms sit above Components and Archetypes because a realm is coarser than either: it is a WORLD, and on a
+// realm database the first question is which one you are looking at. Resources stay first — they are the shell's own
+// tree and the only group present before a database is fully readable.
+const GROUP_ORDER: ObjectGroup[] = ['Resources', 'Realms', 'Components', 'Archetypes', 'Systems', 'Queries'];
 
 /** Which object groups are reachable in each session kind (session-kind filtering, suite C law 4). */
 const GROUPS_BY_KIND: Record<SessionKind, ObjectGroup[]> = {
@@ -27,12 +30,15 @@ const GROUPS_BY_KIND: Record<SessionKind, ObjectGroup[]> = {
   // #621: an Open session reaches everything — it is now also how you reach a capture, so Systems and Queries are
   // available to it whenever one is attached. Listing them here is the honest upper bound for a kind; the panels
   // themselves gate on the profiler capability, which is the condition that actually varies during a session's life.
-  open: ['Resources', 'Components', 'Archetypes', 'Systems', 'Queries'],
-  attach: ['Systems', 'Queries'],
+  open: ['Resources', 'Realms', 'Components', 'Archetypes', 'Systems', 'Queries'],
+  // Realms are listed for attach too, although the route that serves them is not built yet (#1083 rung 6): the group is
+  // driven by whether its SOURCE has rows, so listing it here costs nothing until it does and needs no second edit then.
+  attach: ['Realms', 'Systems', 'Queries'],
 };
 
 export interface ObjectSources {
   readonly resources?: ReadonlyArray<{ id: string; name: string; kind: string; path: string[]; raw: unknown }>;
+  readonly realms?: ReadonlyArray<{ id: number; label: string; sublabel: string }>;
   readonly components?: ReadonlyArray<{ typeName: string }>;
   readonly archetypes?: ReadonlyArray<{ archetypeId: string; componentTypes?: string[] }>;
   readonly systems?: ReadonlyArray<{ index: number | string; name: string | null }>;
@@ -63,6 +69,15 @@ export function buildObjectHits(query: string, sources: ObjectSources, kind: Ses
         if (out.length >= cap(out, group)) break;
         if (matches(query, r.name, r.kind, r.path.join('/'))) {
           out.push({ id: `resource:${r.id}`, type: 'resource', ref: { resourceId: r.id, kind: r.kind, name: r.name, path: r.path, raw: r.raw }, label: r.name, sublabel: r.path.join(' / '), group });
+        }
+      }
+    } else if (group === 'Realms' && sources.realms) {
+      for (const r of sources.realms) {
+        if (out.length >= cap(out, group)) break;
+        // Matched on the id as text as well as the label, so "@7" finds realm 7 — which is how anyone who has just read
+        // a realm id off a log or a wire frame will look for it.
+        if (matches(query, r.label, String(r.id))) {
+          out.push({ id: `realm:${r.id}`, type: 'realm', ref: r.id, label: r.label, sublabel: r.sublabel, group });
         }
       }
     } else if (group === 'Components' && sources.components) {

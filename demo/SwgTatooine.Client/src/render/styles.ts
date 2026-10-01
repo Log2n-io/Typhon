@@ -1,4 +1,4 @@
-import { AiMode, Archetype, PlayerActivity, StructureKind } from '../data/swg-schema';
+import { AiMode, PlayerActivity, StructureKind } from '../data/swg-schema';
 import { TEMPLATE_SIZE_M } from '../data/world-data';
 import type { ShapeKind } from './meshes';
 import { MODE_LIMIT, STYLE_LIMIT } from './view-math';
@@ -25,8 +25,15 @@ export interface StyleBounds {
   readonly centerY: Float64Array;
   /** Largest size component: the projected size that picks the LOD band. */
   readonly extent: Float64Array;
-  /** Height of the drawn (not grown) mesh's centre: where a click aims. */
+  /** Height of the drawn (not grown) mesh's centre: where a click aims when nothing is hit exactly. */
   readonly pickY: Float64Array;
+  /**
+   * `(width, height, length)` per style index, flat at stride 3.
+   *
+   * The same numbers as {@link LayerStyle.sizes}, in the layout the pick's box test wants. A pick runs over every drawn
+   * instance, and an array of tuples costs it a pointer chase each.
+   */
+  readonly sizesFlat: Float64Array;
 }
 
 export interface LayerStyle {
@@ -54,8 +61,12 @@ function withBounds(style: StyleInput): LayerStyle {
   const centerY = new Float64Array(STYLE_COUNT);
   const extent = new Float64Array(STYLE_COUNT);
   const pickY = new Float64Array(STYLE_COUNT);
+  const sizesFlat = new Float64Array(STYLE_COUNT * 3);
   for (let i = 0; i < STYLE_COUNT; i++) {
     const [w, h, l] = style.sizes[i] ?? style.sizes[0];
+    sizesFlat[i * 3] = w;
+    sizesFlat[i * 3 + 1] = h;
+    sizesFlat[i * 3 + 2] = l;
     // Every shape spans x and z in [−½, ½] and y in [0, 1] before scaling (`meshes.ts`), whatever its yaw. The sphere
     // around the grown shape also holds the plain one: its centre moves up by 0.2 h ≤ 0.4 r.
     radius[i] = SELECTED_MESH_SCALE * 0.5 * Math.hypot(w, h, l);
@@ -64,7 +75,7 @@ function withBounds(style: StyleInput): LayerStyle {
     pickY[i] = 0.5 * h;
   }
 
-  return { ...style, bounds: { radius, centerY, extent, pickY } };
+  return { ...style, bounds: { radius, centerY, extent, pickY, sizesFlat } };
 }
 
 const NO_TINT: [number, number, number, number] = [0, 0, 0, 0];
@@ -113,9 +124,12 @@ PLAYER_TINTS[PlayerActivity.Combat] = [1, 0.85, 0.1, 0.45];
 PLAYER_TINTS[PlayerActivity.ToShuttle] = [0.2, 0.9, 1, 0.35];
 PLAYER_TINTS[PlayerActivity.AwaitingShuttle] = [0.2, 0.9, 1, 0.6];
 
-export const LAYER_STYLES: readonly LayerStyle[] = (() => {
-  const styles: StyleInput[] = [];
-  styles[Archetype.WorldObject] = {
+/**
+ * The style of each known archetype, by the name the catalog gives it. Keyed by name rather than by index because the
+ * server numbers archetypes in its own order (`data/archetypes.ts`).
+ */
+const STYLE_INPUTS: Readonly<Record<string, StyleInput>> = {
+  WorldObject: {
     shape: 'box',
     colors: fill(STRUCTURE_COLORS, STYLE_COUNT, [0.7, 0.7, 0.7]),
     sizes: fill(STRUCTURE_SIZES, STYLE_COUNT, [4, 4, 4]),
@@ -124,8 +138,8 @@ export const LAYER_STYLES: readonly LayerStyle[] = (() => {
     heading: 'grid',
     spritePixels: 3,
     spriteLift: 3,
-  };
-  styles[Archetype.CreatureLair] = {
+  },
+  CreatureLair: {
     shape: 'mound',
     colors: fill(
       [
@@ -148,8 +162,8 @@ export const LAYER_STYLES: readonly LayerStyle[] = (() => {
     heading: 'grid',
     spritePixels: 4,
     spriteLift: 2,
-  };
-  styles[Archetype.Creature] = {
+  },
+  Creature: {
     shape: 'arrow',
     colors: fill(CREATURE_COLORS, STYLE_COUNT, [0.5, 0.45, 0.4]),
     sizes: fill(
@@ -162,8 +176,8 @@ export const LAYER_STYLES: readonly LayerStyle[] = (() => {
     heading: 'velocity',
     spritePixels: 3,
     spriteLift: 1,
-  };
-  styles[Archetype.CityNpc] = {
+  },
+  CityNpc: {
     shape: 'prism',
     colors: fill([[0.4, 0.55, 0.78]], STYLE_COUNT, [0.4, 0.55, 0.78]),
     sizes: fill([[0.7, 1.8, 0.7]], STYLE_COUNT, [0.7, 1.8, 0.7]),
@@ -172,8 +186,8 @@ export const LAYER_STYLES: readonly LayerStyle[] = (() => {
     heading: 'velocity',
     spritePixels: 2.5,
     spriteLift: 1,
-  };
-  styles[Archetype.Player] = {
+  },
+  Player: {
     shape: 'prism',
     colors: fill([[0.25, 0.92, 0.45]], STYLE_COUNT, [0.25, 0.92, 0.45]),
     sizes: fill([[1.1, 2.2, 1.1]], STYLE_COUNT, [1.1, 2.2, 1.1]),
@@ -182,6 +196,33 @@ export const LAYER_STYLES: readonly LayerStyle[] = (() => {
     heading: 'velocity',
     spritePixels: 5,
     spriteLift: 1.5,
-  };
-  return styles.map(withBounds);
-})();
+  },
+};
+
+/**
+ * An archetype this client has no art for: a small grey marker. A catalog is allowed to grow an archetype without the
+ * client being rebuilt, and drawing nothing would look exactly like the server not sending it.
+ */
+const UNKNOWN_STYLE: StyleInput = {
+  shape: 'box',
+  colors: fill([[0.55, 0.55, 0.6]], STYLE_COUNT, [0.55, 0.55, 0.6]),
+  sizes: fill([[2, 2, 2]], STYLE_COUNT, [2, 2, 2]),
+  tints: fill([], TINT_COUNT, NO_TINT),
+  flattenMode: -1,
+  heading: 'grid',
+  spritePixels: 3,
+  spriteLift: 1,
+};
+
+const RESOLVED = new Map<string, LayerStyle>();
+
+/** The style for one archetype name, built once per name. */
+export function styleFor(name: string): LayerStyle {
+  let style = RESOLVED.get(name);
+  if (style === undefined) {
+    style = withBounds(STYLE_INPUTS[name] ?? UNKNOWN_STYLE);
+    RESOLVED.set(name, style);
+  }
+
+  return style;
+}

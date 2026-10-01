@@ -1,4 +1,4 @@
-using NUnit.Framework;
+﻿using NUnit.Framework;
 using System;
 using System.Collections.Generic;
 using Typhon.Client;
@@ -63,9 +63,9 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="replicationCellM">The cell side the defaults declare, as <see cref="ReplicationHarness.Create"/>.</param>
     /// <returns>The harness.</returns>
     public static FrameHarness Create(DatabaseEngine engine, Action<SubscriptionsRegistry> declare, string name, SubscriptionsOptions options = null,
-        double replicationCellM = 0)
+        double replicationCellM = 0, int maxSessions = 256)
     {
-        var replication = ReplicationHarness.Create(engine, declare, name, options, replicationCellM);
+        var replication = ReplicationHarness.Create(engine, declare, name, options, replicationCellM, maxSessions);
         try
         {
             return new FrameHarness(replication);
@@ -275,10 +275,10 @@ sealed unsafe class FrameHarness : IDisposable
     public int Deliver(SessionId session)
     {
         var replica = _replicas[session.Value];
-        var send = Assembler.SendStateOf(session.Slot);
+        ref var send = ref Assembler.SendStateOf(session.Slot);
         var delivered = 0;
 
-        while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
             var bytes = new ReadOnlySpan<byte>(frame.Bytes, frame.Length);
             if (DigestFrames)
@@ -287,7 +287,7 @@ sealed unsafe class FrameHarness : IDisposable
             }
 
             replica.Apply(bytes);
-            send->CompleteSend(frame.Sequence);
+            send.CompleteSend(frame.Sequence);
             delivered++;
         }
 
@@ -299,11 +299,11 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns>How many frames were drained.</returns>
     public int Drain(SessionId session)
     {
-        var send = Assembler.SendStateOf(session.Slot);
+        ref var send = ref Assembler.SendStateOf(session.Slot);
         var drained = 0;
-        while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
-            send->CompleteSend(frame.Sequence);
+            send.CompleteSend(frame.Sequence);
             drained++;
         }
 
@@ -507,11 +507,11 @@ sealed unsafe class FrameHarness : IDisposable
     public List<byte[]> Collect(SessionId session)
     {
         var frames = new List<byte[]>();
-        var send = Assembler.SendStateOf(session.Slot);
-        while (send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
             frames.Add(new ReadOnlySpan<byte>(frame.Bytes, frame.Length).ToArray());
-            send->CompleteSend(frame.Sequence);
+            send.CompleteSend(frame.Sequence);
         }
 
         return frames;
@@ -522,8 +522,8 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns>The log, or <see langword="null"/> when no frame was ready.</returns>
     public FrameLog Read(SessionId session)
     {
-        var send = Assembler.SendStateOf(session.Slot);
-        if (!send->TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        if (!send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
         {
             return null;
         }
@@ -531,7 +531,7 @@ sealed unsafe class FrameHarness : IDisposable
         var log = new FrameLog();
         var bytes = new ReadOnlySpan<byte>(frame.Bytes, frame.Length);
         log.Decode(bytes, CatalogPlan, Subscriptions.Realm0Frame);
-        send->CompleteSend(frame.Sequence);
+        send.CompleteSend(frame.Sequence);
         return log;
     }
 
@@ -540,8 +540,8 @@ sealed unsafe class FrameHarness : IDisposable
     /// <returns><see langword="true"/> when one is ready.</returns>
     public bool HasFrame(SessionId session)
     {
-        var send = Assembler.SendStateOf(session.Slot);
-        return send->ReadySequence > send->SentSequence;
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        return send.ReadySequence > send.SentSequence;
     }
 
     /// <summary>The per-session frame state, for a test that has to set up a condition the engine reaches rarely.</summary>
@@ -993,13 +993,23 @@ sealed class FrameLog : ITickSink
     }
 }
 
-/// <summary>Records a replica's decoded events: each one's type and numeric fields, in order; <c>EventsLost</c> is summed, not listed.</summary>
+/// <summary>Records a replica's decoded events: each one's type, numeric fields and text, in order; <c>EventsLost</c> is summed, not listed.</summary>
 sealed class EventRecorder : IEventHandler
 {
     private Dictionary<string, double> _current;
+    private Dictionary<string, byte[]> _currentText;
 
     /// <summary>The events, in order: name and field values (a vector field's first component).</summary>
     public List<(string Name, Dictionary<string, double> Fields)> Received { get; } = [];
+
+    /// <summary>
+    /// The text fields of each received event, by index into <see cref="Received"/>, as the RAW decoded UTF-8.
+    /// </summary>
+    /// <remarks>
+    /// Bytes rather than strings, because what a test about text on the wire has to be able to say is that the bytes are
+    /// the ones that were sent — a string comparison would pass on a value that had been through a lossy decode.
+    /// </remarks>
+    public List<Dictionary<string, byte[]>> Texts { get; } = [];
 
     /// <summary>The sum of every <c>EventsLost</c> count received.</summary>
     public long Lost { get; private set; }
@@ -1020,9 +1030,11 @@ sealed class EventRecorder : IEventHandler
         LostOutOfPlace += _lost && _inFrame > 0 ? 1 : 0;
         _inFrame++;
         _current = new Dictionary<string, double>(StringComparer.Ordinal);
+        _currentText = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         if (!_lost)
         {
             Received.Add((type.Name, _current));
+            Texts.Add(_currentText);
         }
     }
 
@@ -1041,6 +1053,10 @@ sealed class EventRecorder : IEventHandler
     /// <inheritdoc />
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
     {
+        if (!_lost)
+        {
+            _currentText[field.Name] = utf8.ToArray();
+        }
     }
 
     /// <inheritdoc />

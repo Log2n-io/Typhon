@@ -271,9 +271,9 @@ describe('useProfilerSessionStore — applyLiveBatch (rAF-coalesced SSE)', () =>
     const before = useProfilerSessionStore.getState().metadata!;
 
     useProfilerSessionStore.getState().applyLiveBatch([
-      { kind: 'tickSummaryAdded', tickSummary: tick(1) },
-      { kind: 'tickSummaryAdded', tickSummary: tick(2) },
-      { kind: 'tickSummaryAdded', tickSummary: tick(3) },
+      { kind: 'tickSummariesAdded', tickSummaries: [tick(1)] },
+      { kind: 'tickSummariesAdded', tickSummaries: [tick(2)] },
+      { kind: 'tickSummariesAdded', tickSummaries: [tick(3)] },
     ]);
 
     const after = useProfilerSessionStore.getState().metadata!;
@@ -289,10 +289,10 @@ describe('useProfilerSessionStore — applyLiveBatch (rAF-coalesced SSE)', () =>
     const before = useProfilerSessionStore.getState();
 
     useProfilerSessionStore.getState().applyLiveBatch([
-      { kind: 'tickSummaryAdded', tickSummary: tick(1) },
+      { kind: 'tickSummariesAdded', tickSummaries: [tick(1)] },
       { kind: 'chunkAdded', chunkEntry: chunk(0, 1) },
       { kind: 'threadInfoAdded', threadInfo: { threadSlot: 5, name: 'Worker', managedThreadId: 42, kind: ThreadKind.Worker } },
-      { kind: 'tickSummaryAdded', tickSummary: tick(2) },
+      { kind: 'tickSummariesAdded', tickSummaries: [tick(2)] },
       { kind: 'chunkAdded', chunkEntry: chunk(1, 3) },
     ]);
 
@@ -324,10 +324,10 @@ describe('useProfilerSessionStore — applyLiveBatch (rAF-coalesced SSE)', () =>
     const fresh = makeMetadata({ tickSummaries: [tick(100)] });
 
     useProfilerSessionStore.getState().applyLiveBatch([
-      { kind: 'tickSummaryAdded', tickSummary: tick(1) },  // pre-snapshot — discarded
-      { kind: 'tickSummaryAdded', tickSummary: tick(2) },  // pre-snapshot — discarded
+      { kind: 'tickSummariesAdded', tickSummaries: [tick(1)] },  // pre-snapshot — discarded
+      { kind: 'tickSummariesAdded', tickSummaries: [tick(2)] },  // pre-snapshot — discarded
       { kind: 'metadata', metadata: fresh },
-      { kind: 'tickSummaryAdded', tickSummary: tick(101) }, // post-snapshot — kept
+      { kind: 'tickSummariesAdded', tickSummaries: [tick(101)] }, // post-snapshot — kept
     ]);
 
     const after = useProfilerSessionStore.getState().metadata!;
@@ -338,7 +338,7 @@ describe('useProfilerSessionStore — applyLiveBatch (rAF-coalesced SSE)', () =>
   it('treats shutdown event as terminal connection-status change', () => {
     useProfilerSessionStore.getState().setMetadata(makeMetadata());
     useProfilerSessionStore.getState().applyLiveBatch([
-      { kind: 'tickSummaryAdded', tickSummary: tick(1) },
+      { kind: 'tickSummariesAdded', tickSummaries: [tick(1)] },
       { kind: 'shutdown', status: 'engine_shutdown' },
     ]);
     expect(useProfilerSessionStore.getState().connectionStatus).toBe('disconnected');

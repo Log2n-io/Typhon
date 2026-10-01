@@ -268,7 +268,14 @@ public enum TraceEventKind : byte
     /// <c>budgetGrantedMs: f32</c>, <c>efficiencyTolerance: f32</c>, <c>candidatesPerHitSmoothed: f32</c>, <c>candidatesPerHitBest: f32</c>,
     /// <c>ticksAtWholeBudget: i32</c>, <c>controllerFlags: u8</c>, <c>efficiencyRebases: i32</c>, <c>repairCellsCooling: i32</c>,
     /// <c>repairValveFires: i32</c>, <c>repairedEntities: i32</c>, <c>repairQueueEvicted: i64</c>, <c>measuredNsPerEntity: f32</c>,
-    /// <c>driftTargetBoost: f32</c>. 139 bytes. Emitted every tick for every archetype with cluster state, whatever path its fence took.
+    /// <c>driftTargetBoost: f32</c> (139 bytes); then, appended for the realm census: <c>presentRealms: i32</c>, <c>runnableRealms: i32</c>. 147 bytes.
+    /// Emitted every tick for every archetype with cluster state, whatever path its fence took.
+    /// <para>
+    /// <b>The two realm counts are a census, not a dimension.</b> Every other field on this record is summed across every realm the archetype lives in, and
+    /// stays that way: the per-tick counters are owned per archetype, not per realm. The counts exist so a consumer reading
+    /// <see cref="SpatialRealmTelemetry"/> rows — emitted for runnable realms only — can say how many realms it is NOT showing, instead of presenting a
+    /// partial list as the whole.
+    /// </para>
     /// <para><b>Grow it only by appending — never reorder or remove a field.</b> The Workbench decoder reads it by offset, and a record written before an
     /// append must stay a prefix of one written after. A record shorter than 139 bytes predates the fields it lacks: treat them as absent, which its size
     /// says, not as zero, because several read zero as a meaning — a configured budget of 0 is "no enforcement". The generated C# decoder zero-fills
@@ -281,6 +288,124 @@ public enum TraceEventKind : byte
     /// surface has to ride an event. Shaped after <see cref="SchedulerSystemArchetype"/>, which is already a per-archetype per-tick record.
     /// </remarks>
     SpatialArchetypeTelemetry = 66,
+
+    /// <summary>
+    /// Per-REALM, per-archetype snapshot of the SHAPE of one realm's partition, so a live consumer can ask "which realm is hot / which realm is shaped
+    /// badly" instead of reading one number summed across every realm an archetype lives in. Instant-shaped.
+    /// Payload, all REQUIRED and in wire order: <c>realmId: u16</c>, <c>archetypeId: u16</c>, <c>runState: u8</c>
+    /// (the engine's <c>RealmRunState</c>: Dormant 0, Simulated 1, Active 2, Closing 3 — this assembly does not reference the engine, so the
+    /// values are named here rather than linked), <c>divisor: u8</c>, <c>cellSize: f32</c>, <c>cellCount: i32</c>, <c>gridDepth: i32</c>,
+    /// <c>clusters: i32</c>, <c>clusterReach: f32</c>, <c>escapedClusters: i32</c>, <c>promotedCells: i32</c>, <c>blockedCells: i32</c>,
+    /// <c>budgetConfiguredMs: f32</c>, <c>efficiencyTolerance: f32</c>. 46 bytes. Grow it only by appending, as with kind 66.
+    /// <para>
+    /// <b>The last two are DECLARED, not enforced.</b> Maintenance is budgeted per archetype and the budget actually spent comes from realm 0's grid, so two
+    /// realms declaring different values both run under realm 0's. A consumer must label them as the realm's declaration; kind 66's
+    /// <c>budgetConfiguredMs</c> is the ceiling a grant was measured against.
+    /// </para>
+    /// <para>
+    /// <b>Structure, not rates.</b> Every field here is per-realm state the realm itself owns — its grid, its own cell size, its own reach, its own
+    /// configured budget. The per-tick RATE counters (migrations, repair units, budget spent, the tightness means) are deliberately NOT here: they live on
+    /// <c>ArchetypeClusterState</c>, one set per archetype rather than one per realm, so a realm-keyed copy of them would report the sum across every realm
+    /// under one realm's name. That is worse than their absence, because it would look right. Splitting them is its own change; until then kind 66 remains
+    /// the only source for them and is archetype-wide by construction.
+    /// </para>
+    /// <para>
+    /// <b>Emitted for RUNNABLE realms only</b> (<c>Realms/02-runtime-lifecycle.md</c> §6: per realm-archetype telemetry is "thousands/tick → runnable
+    /// only"). A galaxy of a few thousand sleeping interiors would otherwise spend its trace bandwidth on rows that are all zero by definition. The realms
+    /// left out are not silently missing: kind 66 carries <c>presentRealms</c> and <c>runnableRealms</c> for the same archetype and tick, so a consumer can
+    /// state how many rows it is not showing — and a realm going dormant is then visible as a row disappearing while the skipped count rises.
+    /// </para>
+    /// Gated on <c>SpatialRealmTelemetryActive</c>.
+    /// </summary>
+    SpatialRealmTelemetry = 67,
+
+    /// <summary>
+    /// Per-REALM, per-archetype snapshot of what one realm's partition DID this tick — the maintenance rates, attributed to the realm that produced them.
+    /// The rate twin of <see cref="SpatialRealmTelemetry"/>'s shape. Instant-shaped.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Payload, all REQUIRED, tightly packed, in wire order: <c>realmId: u16</c>, <c>archetypeId: u16</c>, then three <c>f64</c>
+    /// (<c>tightnessExtentSum</c>, <c>tightnessBoundSum</c>, <c>relocationSpendNs</c>), then thirty <c>i32</c> in the order the engine's own counter block
+    /// declares them. 148 bytes. Grow it only by APPENDING, as with kinds 66 and 67.
+    /// </para>
+    /// <para>
+    /// <b>Why it is not part of kind 67.</b> The two have different absence meanings and neither row set contains the other. Kind 67 is emitted for
+    /// RUNNABLE realms, whether or not they did anything; this is emitted for realms the fence TOUCHED, runnable or not. One record carrying both would
+    /// make a missing row mean two things at once, which is the ambiguity SO-01's "zero means zero, never unknown" exists to forbid. Keeping them apart
+    /// also keeps the anomaly visible: a row here with no kind-67 row is a non-runnable realm that did maintenance work, which is worth an alert rather
+    /// than a silent drop.
+    /// </para>
+    /// <para>
+    /// <b>The tightness pair are SUMS, not means, and the sample count is beside them.</b> Kind 66 sends means because it is already archetype-wide and
+    /// has nothing left to fold. A consumer folding several realms cannot re-derive a mean from per-realm means — it would weight a realm that scanned one
+    /// cluster equally with one that scanned ten thousand, which is the exact error SO-01 names for the archetype fold. Sums over the summed sample count
+    /// are foldable across any set of realms; a zero sample count keeps "the fence wrote nothing" distinguishable from "the clusters are points".
+    /// </para>
+    /// <para>
+    /// <b><c>largestArrivalRun</c> folds with MAX, never with +.</b> It is the most crossings into one destination cell, so adding two realms' values
+    /// would report a burst neither cell received. Wire-identical to its neighbours; the contract is on the consumer, stated here because nothing in the
+    /// bytes says so — the same way kind 66 has to state that its migration time is CPU-milliseconds and not a span.
+    /// </para>
+    /// <para>
+    /// <b>No duration here is CPU-summed across workers</b>, so that clause does NOT bind this record. The two counters it was written for
+    /// (<c>migrationCpuMs</c> and the apply ticks) are archetype-wide and stay on kind 66; <c>relocationSpendNs</c> is computed once per archetype per tick
+    /// on the serial path, and the tightness pair are sums of ratios rather than elapsed time. Stated because the next reader will assume otherwise.
+    /// </para>
+    /// <para>
+    /// <b>Capped, and the cap is visible.</b> Volume scales with the realm count, so the emission stops at a bound per archetype per tick. Kind 66 carries
+    /// <c>ratesRealmsTouched</c> and <c>ratesRealmsEmitted</c> for the same archetype and tick: equal means nothing was truncated and an absent realm did
+    /// no work; <c>emitted &lt; touched</c> means a consumer must say how many realms that worked it is NOT showing. One count could not separate those,
+    /// because kind 66's other population figure is <c>presentRealms</c>, and present is not touched.
+    /// </para>
+    /// <para>Gated on <c>SpatialRealmRatesActive</c>, separately from kind 67 for the volume reason above.</para>
+    /// </remarks>
+    SpatialRealmRates = 70,
+
+    // ── Push replication: the operator's view of Subscriptions (instants) ──
+
+    /// <summary>
+    /// Server-wide push-replication figures, one record per stats emission (1 Hz, alongside the client-facing <c>STATS</c> block).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Payload, tightly packed with no alignment padding, in this order: <c>sessions: i32</c>, <c>netOutBytesPerSec: f32</c>,
+    /// <c>trackP99Ms: f32</c>, <c>durabilityWaitP99Ms: f32</c>, <c>framesSkipped: i64</c>, <c>framePoolRented: i32</c>,
+    /// <c>framePoolBlocks: i32</c>, <c>framePoolBudgetSkips: i64</c>, <c>reportedSessions: i32</c>. 44 bytes.
+    /// <b>Two fields belong here and are deliberately absent from this first version</b> — the live NetId count and the server-wide dropped-command total.
+    /// Neither the allocator nor the ingress table is reachable from the emission site, and threading a constructor dependency through
+    /// <c>FrameAssembler</c> for them is a worse trade than appending them later, which the append-only rule below exists to allow. They are omitted rather
+    /// than sent as zero, because a field that always reads zero is worse than a field that is not there. Grow it only by APPENDING, as with kinds 66 and 67 — a reader keyed on offsets
+    /// stays correct against an older producer, and the size guard is what lets a shorter record decode.
+    /// </para>
+    /// <para>
+    /// <b>A transport, not a measurement.</b> Every value here is one the engine already computes for the <c>STATS</c> wire block
+    /// that goes to game clients (<c>Subscriptions/internals/StatsEncoder.cs</c>); this re-emits it on the profiler wire, because an
+    /// attach session is a one-way stream with no way to call an accessor on the engine it watches. <c>reportedSessions</c> is how
+    /// many kind-69 rows accompany this record, so a panel can state how many sessions it is NOT showing rather than implying the
+    /// list is complete.
+    /// </para>
+    /// <para>Gated on <c>SubscriptionsServerTelemetryActive</c>.</para>
+    /// </remarks>
+    SubscriptionsServerTelemetry = 68,
+
+    /// <summary>
+    /// One connected session's push-replication figures. Emitted per session per stats emission, up to a cap.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Payload, tightly packed: <c>sessionId: u64</c>, <c>realmId: u16</c>, <c>bytesPerSec: f32</c>, <c>framesSkipped: i64</c>,
+    /// <c>degradeLevel: i32</c>. 26 bytes. Append-only, as above. <c>realmId</c> is <c>0xFFFF</c> for a session that has not been told its realm yet, which is
+    /// the committed realm's own "-1 before the first RESET" widened to an unsigned field — a consumer can tell that from "in realm 0".
+    /// </para>
+    /// <para>
+    /// <b>Capped by design, and the cap is visible.</b> Volume scales with the session count, not with the engine, so a server at
+    /// its 8192-session limit would otherwise spend the trace on rows nobody reads. The emission stops at a bound and kind 68's
+    /// <c>reportedSessions</c> against its <c>sessions</c> says what was left out.
+    /// </para>
+    /// <para>Gated on <c>SubscriptionsSessionTelemetryActive</c>, separately from kind 68 for that reason.</para>
+    /// </remarks>
+    SubscriptionsSessionTelemetry = 69,
 
     // ── .NET runtime GC suspension (span) ──
 
@@ -1159,9 +1284,10 @@ public static class TraceEventKindExtensions
         {
             return false;
         }
-        // #911: 64 is a span, 65 and 66 are instants. Their numeric neighbours (60-63) are all spans, so the two instants need an explicit carve-out — the
-        // EcsSpawnBatch lesson one group along. TraceEventShapeConsistencyTests holds this against the producers' declared Shape.
-        if (v == 65 || v == 66)
+        // #911: 64 is a span, 65 and 66 are instants; 67 joined them for the per-realm record, 68-69 for push replication's server record and
+        // its per-session rows, and 70 for the per-realm RATE rows. Their numeric neighbours (60-63) are all spans, so the instants need an explicit
+        // carve-out — the EcsSpawnBatch lesson one group along. TraceEventShapeConsistencyTests holds this against the producers' declared Shape.
+        if (v is 65 or 66 or 67 or 68 or 69 or 70)
         {
             return false;
         }

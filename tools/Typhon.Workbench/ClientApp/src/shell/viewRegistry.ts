@@ -76,6 +76,10 @@ export const ZONE_D_VIEW_ACTIVE: Readonly<Record<string, boolean>> = {
   // Attach-only in practice; the panel renders its own cold state elsewhere, so the scope map below carries 'profiler'
   // and the panel does the finer gating.
   SpatialMaintenance: true,
+  Subscriptions: true,
+  // #1083 rung 3 — the Realms navigator: which worlds this database holds. Scoped on the `realms` capability rather
+  // than on a session kind, for the reason the Schema Explorer is scoped on `schema`.
+  Realms: true,
 };
 
 // Returns whether a view (or a view-bound command) is currently reachable. An undefined id means the caller
@@ -103,11 +107,20 @@ export const ANY_ZONE_D_VIEW_ACTIVE: boolean = Object.values(ZONE_D_VIEW_ACTIVE)
 // shell-structural navigators (SchemaExplorer / SystemsQueriesNav / ResourceTree) are listed here even though they
 // are not in ZONE_D_VIEW_ACTIVE — they are still session-scoped. Unlisted ids default to `any` (Detail/Logs/Options
 // and every non-view command).
-export type ViewSessionScope = 'open' | 'profiler' | 'any';
+export type ViewSessionScope = 'open' | 'profiler' | 'schema' | 'realms' | 'any';
 
 const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
+  // Schema is its own scope since the engine started pushing its static-structure tables over the attach socket
+  // (#WB-01): an attach session has component layouts, archetype composition and the index catalog while having no
+  // browsable database at all. Scoping the Schema Explorer to `open` would hide it in precisely the mode — remote
+  // attach — the engine change exists to serve.
+  SchemaExplorer: 'schema',
+  // Realms is its own scope for the same reason, one turn further out (#1083): an Open session has realms because its
+  // file holds the catalog, and an Attach session will have realm STATE over a database it cannot browse. Scoping it to
+  // `open` would hide the live realm board in exactly the mode that most needs it; scoping it to `profiler` would hide
+  // the navigator on the database that has the realms. Neither existing scope describes it.
+  Realms: 'realms',
   // Open (.typhon) views
-  SchemaExplorer: 'open',
   DataBrowserEntities: 'open',
   DbMap: 'open',
   StorageHealth: 'open',
@@ -120,6 +133,7 @@ const VIEW_SESSION_SCOPE: Readonly<Record<string, ViewSessionScope>> = {
   Profiler: 'profiler',
   TopSpans: 'profiler',
   SpatialMaintenance: 'profiler',
+  Subscriptions: 'profiler',
   CallTree: 'profiler',
   SourcePreview: 'profiler',
   SystemDag: 'profiler',
@@ -165,6 +179,10 @@ export function isViewAvailableInKind(viewId: string | undefined, session: Sessi
       return session.kind === 'open';
     case 'profiler':
       return session.capabilities.includes('profiler');
+    case 'schema':
+      return session.capabilities.includes('schema');
+    case 'realms':
+      return session.capabilities.includes('realms');
   }
 }
 

@@ -132,7 +132,7 @@ public static class UnifiedDataStream
     /// the SSE response. Runtime kinds map to unified event types as follows:
     /// <list type="bullet">
     ///   <item><c>metadata</c> → <c>metadata</c> (bypasses filter)</item>
-    ///   <item><c>tickSummaryAdded</c> → <c>tick</c> (filtered, coalescing)</item>
+    ///   <item><c>tickSummariesAdded</c> → <c>tick</c> (filtered, coalescing — the batch's last entry wins)</item>
     ///   <item><c>heartbeat</c> → <c>heartbeat</c> (bypasses filter)</item>
     ///   <item><c>shutdown</c> → <c>shutdown</c> (bypasses filter)</item>
     ///   <item><c>chunkAdded</c> / <c>globalMetricsUpdated</c> / <c>threadInfoAdded</c> → <i>dropped</i> (not on the v1 unified surface — clients still get them via the existing <c>/profiler/stream</c>)</item>
@@ -169,8 +169,10 @@ public static class UnifiedDataStream
                         case "metadata" when evt.Metadata != null:
                             passthroughChannel.Writer.TryWrite(new UnifiedFrame("metadata", new { metadata = evt.Metadata }));
                             break;
-                        case "tickSummaryAdded" when evt.TickSummary != null:
-                            tickChannel.Writer.TryWrite(evt.TickSummary);
+                        case "tickSummariesAdded" when evt.TickSummaries is { Count: > 0 }:
+                            // The tick channel is latest-only by construction, so a coalesced batch reduces to its
+                            // last entry — writing every one would just overwrite the same slot N times.
+                            tickChannel.Writer.TryWrite(evt.TickSummaries[^1]);
                             break;
                         case "heartbeat":
                             passthroughChannel.Writer.TryWrite(new UnifiedFrame("heartbeat", new { status = evt.Status }));

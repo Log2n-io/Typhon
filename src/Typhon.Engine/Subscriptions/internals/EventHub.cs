@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -9,7 +9,15 @@ namespace Typhon.Engine.Internals;
 /// <summary>Where one wire field of an event is read from inside the event struct, resolved once at <c>Start</c> (09 § 11).</summary>
 internal readonly struct EventFieldBinding
 {
-    public EventFieldBinding(FieldPlan field, int offset, int components, CommandFieldElement element, int elementSize, bool entity)
+    public EventFieldBinding(
+        FieldPlan field,
+        int offset,
+        int components,
+        CommandFieldElement element,
+        int elementSize,
+        bool entity,
+        int textCapacity = 0,
+        int textWireCap = 0)
     {
         Field = field;
         Offset = offset;
@@ -17,6 +25,8 @@ internal readonly struct EventFieldBinding
         Element = element;
         ElementSize = elementSize;
         Entity = entity;
+        TextCapacity = textCapacity;
+        TextWireCap = textWireCap;
     }
 
     /// <summary>The wire field, in the catalog's wire order.</summary>
@@ -36,6 +46,57 @@ internal readonly struct EventFieldBinding
 
     /// <summary>An <see cref="EntityId"/>: it travels as the entity's netId, 0 when it has none.</summary>
     public bool Entity { get; }
+
+    /// <summary>An inline <c>Utf8Text</c>'s capacity, or 0 when the field is not text.</summary>
+    /// <remarks>
+    /// The layout is the type's: a <see cref="ushort"/> length at <see cref="Offset"/>, then that many UTF-8 bytes. It is
+    /// read out of the raw payload rather than through the type, because the payload in the arena is bytes and the encoder
+    /// never reconstitutes the struct.
+    /// </remarks>
+    public int TextCapacity { get; }
+
+    /// <summary>
+    /// The bytes this field may actually put on the wire — its codec's cap, which may be <b>smaller</b> than the struct's.
+    /// </summary>
+    /// <remarks>
+    /// The binder deliberately admits a struct larger than the cap, so that a 24-byte name field does not have to admit
+    /// 256 bytes from every client on every message. What it did not do is honour the cap: the text was clamped to the
+    /// STRUCT's capacity and then handed to <c>WireWriter.WriteStr</c> with the codec's, which throws — and the throw was
+    /// caught around the whole encode, so a single over-long string discarded the <b>entire event</b>, every other field
+    /// included, and no session ever saw it. <see cref="LoadText"/> honours this bound instead.
+    /// </remarks>
+    public int TextWireCap { get; }
+
+    /// <summary>Whether this field carries text rather than numbers.</summary>
+    public bool IsText => TextCapacity > 0;
+
+    /// <summary>The UTF-8 bytes of a text field, aliasing the payload.</summary>
+    public ReadOnlySpan<byte> LoadText(ReadOnlySpan<byte> payload)
+    {
+        var length = MemoryMarshal.Read<ushort>(payload[Offset..]);
+
+        // Clamped rather than trusted: the payload came from an application's struct, and a length past the capacity would
+        // read a neighbouring field onto the wire. The setter refuses it; this is the second line.
+        var bytes = payload.Slice(Offset + sizeof(ushort), Math.Min(length, TextCapacity));
+        if (bytes.Length <= TextWireCap)
+        {
+            return bytes;
+        }
+
+        // Past the codec's cap. Shortened here rather than left for WriteStr to refuse, because that refusal is an
+        // exception caught around the whole encode and it takes the event with it — a chat line one byte too long
+        // silently deleting its speaker, its sequence number and every other field of the message.
+        //
+        // Cut on a CODEPOINT boundary, never on a byte: a continuation byte left at the end is invalid UTF-8, which a
+        // strict reader is right to reject, and that would put the drop back one layer down.
+        var cut = TextWireCap;
+        while (cut > 0 && (bytes[cut] & 0xC0) == 0x80)
+        {
+            cut--;
+        }
+
+        return bytes[..cut];
+    }
 
     /// <summary>Reads the stored numbers.</summary>
     public void Load(ReadOnlySpan<byte> payload, Span<double> into)
@@ -147,7 +208,9 @@ internal sealed class EventTypeInfo
         var max = 5 + body.PackBytes + 8;
         foreach (var b in bindings)
         {
-            max += b.Field.Packed ? 0 : 5 * Math.Max(1, b.Components);
+            // A str is a varu length and up to its WIRE cap in bytes — not the struct's, which may be far larger and is
+            // never what reaches the frame; everything else is at most five bytes a number.
+            max += b.IsText ? 5 + b.TextWireCap : b.Field.Packed ? 0 : 5 * Math.Max(1, b.Components);
         }
 
         MaxBytes = max;
@@ -368,11 +431,11 @@ internal sealed class EventHub
 
     private static EventFieldBinding Bind(EventDeclaration declaration, Type type, FieldPlan field)
     {
-        if (field.ValueKind != FieldValueKind.Number)
+        if (field.ValueKind is not (FieldValueKind.Number or FieldValueKind.Text))
         {
             throw new InvalidOperationException(
-                $"Event '{declaration.Name}' field '{field.Name}' travels as {field.ValueKind}, and an event is an unmanaged struct, which holds no text, no " +
-                "blob and no list.");
+                $"Event '{declaration.Name}' field '{field.Name}' travels as {field.ValueKind}, and an event is an unmanaged struct: it carries numbers and " +
+                "an inline Utf8Text, but no blob and no list.");
         }
 
         var sourceName = field.Name;
@@ -388,6 +451,37 @@ internal sealed class EventHub
         var member = type.GetField(sourceName, BindingFlags.Public | BindingFlags.Instance)
                      ?? throw new InvalidOperationException($"Event '{declaration.Name}' carries '{field.Name}', and '{type.Name}' has no field '{sourceName}'.");
         var offset = (int)Marshal.OffsetOf(type, sourceName);
+        if (field.ValueKind == FieldValueKind.Text)
+        {
+            var capacity = MessageText.CapacityOf(member.FieldType)
+                           ?? throw new InvalidOperationException(
+                               $"Event '{declaration.Name}' field '{field.Name}' travels as a str, and '{type.Name}.{sourceName}' is a " +
+                               $"'{member.FieldType.Name}'. A str field is an inline text type — {MessageText.KnownTypes} — " +
+                               "because an event struct owns its bytes.");
+            // Only a capacity SMALLER than the wire cap is unsafe — then the wire admits more bytes than the struct can
+            // hold and the surplus is truncated silently. A capacity LARGER is allowed: the wire cap is then the tighter
+            // of the two, and `EventFieldBinding.LoadText` is what applies it. Demanding equality made one storage size
+            // the engine's ingress policy, since a 24-byte name field then had to admit 256 bytes from every client on
+            // every message — and the wire design names per-field `maxBytes` as exactly that knob.
+            if (capacity < field.Codec.MaxBytes)
+            {
+                throw new InvalidOperationException(
+                    $"Event '{declaration.Name}' field '{field.Name}' declares Codec.Str({field.Codec.MaxBytes}) and " +
+                    $"'{type.Name}.{sourceName}' holds only {capacity}. The struct must be able to carry the cap the wire " +
+                    "enforces, or the surplus is truncated without a word.");
+            }
+
+            return new EventFieldBinding(
+                field,
+                offset,
+                1,
+                CommandFieldElement.U8,
+                sizeof(byte),
+                entity: false,
+                textCapacity: capacity,
+                textWireCap: field.Codec.MaxBytes);
+        }
+
         if (member.FieldType == typeof(EntityId))
         {
             return new EventFieldBinding(field, offset, 1, CommandFieldElement.U64, sizeof(ulong), entity: true);
@@ -746,6 +840,12 @@ internal sealed class EventHub
             for (var i = body.PackedCount; i < bindings.Length; i++)
             {
                 var f = bindings[i];
+                if (f.IsText)
+                {
+                    w.WriteStr(f.LoadText(payload), f.Field.Codec.MaxBytes);
+                    continue;
+                }
+
                 if (f.Entity)
                 {
                     var entity = EntityId.FromRaw((long)MemoryMarshal.Read<ulong>(payload[f.Offset..]));

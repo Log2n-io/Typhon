@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
@@ -152,6 +152,26 @@ public ref struct WireWriter
 
         WriteVaru((uint)bytes.Length);
         WriteBytes(bytes);
+    }
+
+    /// <summary>Writes UTF-8 bytes as a <c>str</c>: <c>varu</c> length, then the bytes.</summary>
+    /// <param name="utf8">The bytes. Validity is the caller's to guarantee; a wire READER validates what it decodes.</param>
+    /// <param name="maxBytes">The field's cap.</param>
+    /// <exception cref="ArgumentException">It is longer than <paramref name="maxBytes"/>.</exception>
+    /// <remarks>
+    /// The span overload exists for a caller that already holds UTF-8 — an inline <c>Utf8Text</c> inside a message struct —
+    /// where the <see cref="WriteStr(string, int)"/> overload would decode to a string and re-encode it, per event, per
+    /// session.
+    /// </remarks>
+    public void WriteStr(ReadOnlySpan<byte> utf8, int maxBytes)
+    {
+        if (utf8.Length > maxBytes)
+        {
+            throw new ArgumentException($"string of {utf8.Length} UTF-8 bytes exceeds its cap of {maxBytes}", nameof(utf8));
+        }
+
+        WriteVaru((uint)utf8.Length);
+        utf8.CopyTo(Take(utf8.Length));
     }
 
     /// <summary>Writes a <c>str</c>: a <c>varu</c> byte length, then the UTF-8 bytes.</summary>

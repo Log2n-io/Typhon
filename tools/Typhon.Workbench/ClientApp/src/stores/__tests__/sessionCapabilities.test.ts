@@ -66,7 +66,10 @@ describe('session capabilities (#617)', () => {
   });
 
   it('the test-only kind→capability table matches what the server reports for plain sessions', () => {
-    expect(sessionCapabilitiesForKind('open')).toEqual(['database']);
+    // An open session's schema comes from its live engine, so the two travel together (#WB-01).
+    expect(sessionCapabilitiesForKind('open')).toEqual(['database', 'schema']);
+    // An attach session's does NOT: it acquires `schema` when its first Init frame turns out to carry the tables, which
+    // is a runtime fact this kind-keyed table cannot express — the same gap it already has for `profiler`.
     expect(sessionCapabilitiesForKind('attach')).toEqual(['profiler']);
     expect(sessionCapabilitiesForKind('none')).toEqual([]);
   });

@@ -1,7 +1,10 @@
-using NUnit.Framework;
+﻿using NUnit.Framework;
 using System;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Collections.Generic;
 using Typhon.Engine.Internals;
+using Typhon.Protocol;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine.Tests.Runtime;
@@ -34,6 +37,14 @@ public struct ProjDuel
 public struct ProjWhisper
 {
     public int Seq;
+}
+
+/// <summary>An event carrying text beside a number and an entity: a <c>str</c> travels in wire order like anything else.</summary>
+public struct ProjChat
+{
+    public EntityId Speaker;
+    public Utf8Text256 Text;
+    public ushort Seq;
 }
 
 /// <summary>An event every session hears.</summary>
@@ -81,6 +92,11 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
         subs.Event<ProjBoom>(e => e.RouteNear(b => new Vector3D(b.X, b.Y, 0d)));
         subs.Event<ProjDuel>(e => e.RouteToKnown(d => d.A, d => d.B));
         subs.Event<ProjWhisper>(e => e.RouteToSession());
+        subs.Event<ProjChat>(e => e
+            .Broadcast()
+            .Entity(c => c.Speaker, "speaker")
+            .Field(c => c.Text, Codec.Str(Utf8Text256.Capacity), "text")
+            .Field(c => c.Seq, Codec.U16, "seq"));
     }
 
     private static ProjBounds PointAt(float x, float y) => new() { Bounds = new AABB2F { MinX = x, MinY = y, MaxX = x, MaxY = y }, Speed = 1f };
@@ -478,6 +494,10 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
     {
         const int SessionCount = 8;
         const int EventsPerTick = 120;
+
+        // Built once, outside the measured loop: From() encodes a string, which allocates, and the subject here is what
+        // EMITTING and ENCODING cost — not what building a value costs.
+        var Chatter = Utf8Text256.From("Utinni! ça va, señor?");
         var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
         var creatures = Spawn(dbe, SessionCount, 20f);
         using var harness = Harness(dbe, nameof(EventsAllocateNothingPerEventAndReportTheirCost));
@@ -498,8 +518,13 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
                 for (var k = 0; k < perTick; k++)
                 {
                     var c = k % SessionCount;
-                    switch (k % 4)
+                    switch (k % 5)
                     {
+                        case 4:
+                            // Text costs the same as anything else per event: the payload is a memcpy of the struct, and
+                            // the encode writes a span. If either ever allocates, this is where it shows.
+                            commands.Emit(new ProjChat { Speaker = creatures[c], Text = Chatter, Seq = (ushort)k });
+                            break;
                         case 0:
                             commands.Emit(new ProjNotice { Seq = k, Kind = 1 });
                             break;
@@ -811,5 +836,182 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
 
         var seqs = harness.Replica(lobby).Events.Received.ConvertAll(e => (int)e.Fields["Seq"]);
         Assert.That(seqs, Is.EqualTo(new[] { 1, 2, 5, 6 }), "the broadcast and the whisper — no near, known or owner event: it has no view, and controls in none");
+    }
+
+    /// <summary>
+    /// An event's text reaches a client byte for byte, beside the numbers and the entity it travels with.
+    /// </summary>
+    /// <remarks>
+    /// <b>Asserted on BYTES, not on a string.</b> The failure this is written against is a length prefix or an offset that
+    /// is wrong by a little — which produces a string that still decodes, just not the one that was sent. Comparing the
+    /// decoded UTF-8 against the bytes that went in is the assertion that cannot pass on a near miss.
+    /// </remarks>
+    [Test]
+    public void AnEventCarriesTextByteForByte()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var creatures = Spawn(dbe, 1, 500f);
+        using var harness = Harness(dbe, nameof(AnEventCarriesTextByteForByte));
+        harness.RunFence = true;
+        var sessions = harness.OpenSessions(1, "near");
+        Assert.That(harness.Sessions.SetViewpoint(sessions[0], new Vector3D(0d, 0d, 0d)), Is.True);
+        for (var tick = 1; tick <= FillTicks; tick++)
+        {
+            harness.RunTick(tick);
+            harness.Deliver(sessions[0]);
+        }
+
+        // Multi-byte characters on purpose: a length in CHARACTERS rather than bytes passes an ASCII test and fails here.
+        const string Spoken = "Utinni! ça va, señor? \u00e6\u00f8\u00e5 \u3053\u3093\u306b\u3061\u306f";
+        var expected = System.Text.Encoding.UTF8.GetBytes(Spoken);
+
+        var commands = harness.Subscriptions.Commands;
+        commands.Emit(new ProjChat { Speaker = creatures[0], Text = Utf8Text256.From(Spoken), Seq = 11 });
+        commands.Emit(new ProjChat { Speaker = creatures[0], Text = default, Seq = 12 });
+        harness.RunTick(FillTicks + 1);
+        harness.Deliver(sessions[0]);
+
+        var replica = harness.Replica(sessions[0]);
+        var received = replica.Events.Received;
+        Assert.That(received, Has.Count.EqualTo(2), "both chats reached the session");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(received[0].Name, Is.EqualTo(nameof(ProjChat)));
+            Assert.That(replica.Events.Texts[0]["text"], Is.EqualTo(expected), "the text arrived byte for byte");
+            Assert.That(received[0].Fields["seq"], Is.EqualTo(11), "the field AFTER the text decoded, so the length prefix was right");
+            Assert.That(received[0].Fields["speaker"], Is.Not.Zero, "the entity before the text decoded too");
+
+            // Empty is a value, not an absence: it travels, and it arrives as zero bytes rather than as a missing field.
+            Assert.That(replica.Events.Texts[1], Does.ContainKey("text"));
+            Assert.That(replica.Events.Texts[1]["text"], Is.Empty);
+            Assert.That(received[1].Fields["seq"], Is.EqualTo(12));
+            Assert.That(harness.Subscriptions.Events.Rejected, Is.Zero);
+        });
+    }
+
+    /// <summary>Text at the declared capacity travels whole: the cap is inclusive, and the arena reservation covers it.</summary>
+    [Test]
+    public void AnEventCarriesTextAtItsFullCapacity()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        var creatures = Spawn(dbe, 1, 500f);
+        using var harness = Harness(dbe, nameof(AnEventCarriesTextAtItsFullCapacity));
+        harness.RunFence = true;
+        var sessions = harness.OpenSessions(1, "near");
+        Assert.That(harness.Sessions.SetViewpoint(sessions[0], new Vector3D(0d, 0d, 0d)), Is.True);
+        for (var tick = 1; tick <= FillTicks; tick++)
+        {
+            harness.RunTick(tick);
+            harness.Deliver(sessions[0]);
+        }
+
+        var full = new string('x', Utf8Text256.Capacity);
+        harness.Subscriptions.Commands.Emit(new ProjChat { Speaker = creatures[0], Text = Utf8Text256.From(full), Seq = 1 });
+        harness.RunTick(FillTicks + 1);
+        harness.Deliver(sessions[0]);
+
+        var replica = harness.Replica(sessions[0]);
+        Assert.Multiple(() =>
+        {
+            Assert.That(replica.Events.Texts[0]["text"], Has.Length.EqualTo(Utf8Text256.Capacity));
+            Assert.That(replica.Events.Received[0].Fields["seq"], Is.EqualTo(1), "the field after a full-capacity text still decoded");
+            Assert.That(harness.Subscriptions.Events.Rejected, Is.Zero);
+        });
+    }
+
+    /// <summary>
+    /// The EVENT-side binder refuses a str whose cap exceeds its field's capacity, and accepts one capped below it.
+    /// </summary>
+    /// <remarks>
+    /// The command side had both of these and the event side had neither, although the two run the same check on the same
+    /// two numbers — so a divergence between them would have been invisible. Refusing at Start is the whole point: the
+    /// alternative is truncation on the wire, which no test downstream can see.
+    /// </remarks>
+    [Test]
+    public void AnEventStrIsBoundAgainstItsFieldsCapacity()
+    {
+        Assert.Multiple(() =>
+        {
+            var over = Assert.Throws<InvalidOperationException>(
+                () => BindEvents(Codec.Str(Utf8Text256.Capacity + 8)));
+            Assert.That(over!.Message, Does.Contain(nameof(Utf8Text256)).Or.Contain(Utf8Text256.Capacity.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
+            Assert.DoesNotThrow(() => BindEvents(Codec.Str(64)), "a cap below the field's capacity is the tighter bound, not a fault");
+        });
+    }
+
+    /// <summary>
+    /// Text past the field's wire cap is SHORTENED; the event still travels, and the cut lands on a codepoint boundary.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The missing half of <see cref="AnEventStrIsBoundAgainstItsFieldsCapacity"/>, which asserts that
+    /// <c>Codec.Str(64)</c> over a <see cref="Utf8Text256"/> binds and stops there. That assertion was the licence for a
+    /// real defect: the text was clamped to the STRUCT's 256 and then handed to <c>WriteStr</c> with the codec's 64, which
+    /// throws — and the throw was caught around the whole encode. A chat line one byte too long therefore deleted the
+    /// <b>entire event</b>, its speaker and sequence number included, and the application was told nothing.
+    /// </para>
+    /// <para>
+    /// The boundary half matters as much: cutting 64 bytes into a multi-byte character leaves a continuation byte at the
+    /// end, which is invalid UTF-8 and which a strict reader is right to reject — putting the drop back one layer down.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void TextPastTheWireCapIsShortened_NotDroppedWithItsEvent()
+    {
+        // The binding directly: its two capacities are the whole subject, and standing a hub up to reach one would test
+        // the binder as well and say less about either.
+        var binding = new EventFieldBinding(
+            null, offset: 0, components: 1, element: CommandFieldElement.U8, elementSize: sizeof(byte), entity: false,
+            textCapacity: Utf8Text256.Capacity, textWireCap: 8);
+
+        Span<byte> payload = stackalloc byte[Utf8Text256.Capacity + 8];
+        payload.Clear();
+
+        // Ten ASCII bytes into an 8-byte cap: a clean cut at 8.
+        Write(payload, binding.Offset, Utf8Text256.From("abcdefghij"));
+        Assert.That(Encoding.UTF8.GetString(binding.LoadText(payload)), Is.EqualTo("abcdefgh"));
+
+        // Three 3-byte characters into an 8-byte cap. Cutting at byte 8 lands mid-character, so the answer is two
+        // characters and six bytes — never eight bytes of half-formed text.
+        Write(payload, binding.Offset, Utf8Text256.From("\u4e00\u4e8c\u4e09"));
+        var cutLength = binding.LoadText(payload).Length;
+        var cutText = Encoding.UTF8.GetString(binding.LoadText(payload));
+        Assert.Multiple(() =>
+        {
+            Assert.That(cutLength, Is.EqualTo(6), "cut back to the last whole character, not to the cap");
+            Assert.That(cutText, Is.EqualTo("\u4e00\u4e8c"));
+        });
+
+        // And text that fits is untouched.
+        Write(payload, binding.Offset, Utf8Text256.From("abc"));
+        Assert.That(Encoding.UTF8.GetString(binding.LoadText(payload)), Is.EqualTo("abc"));
+    }
+
+    /// <summary>Lays a <see cref="Utf8Text256"/> out the way the arena holds it: a ushort length, then the bytes.</summary>
+    private static void Write(Span<byte> payload, int offset, Utf8Text256 text)
+    {
+        var utf8 = text.Utf8;
+        MemoryMarshal.Write(payload[offset..], (ushort)utf8.Length);
+        payload.Slice(offset + sizeof(ushort), Utf8Text256.Capacity).Clear();
+        utf8.CopyTo(payload[(offset + sizeof(ushort))..]);
+    }
+
+    /// <summary>Builds an event hub whose one text field carries the given codec, so a binder refusal surfaces here.</summary>
+    private static EventHub BindEvents(Codec textCodec)
+    {
+        var subs = new SubscriptionsRegistry();
+        ProjectionTestSchema.DeclareCreature(subs);
+        subs.Profile("near", p => p.Sphere(Radius).Of<ProjCreature>());
+        subs.Event<ProjChat>(e => e
+            .Broadcast()
+            .Entity(c => c.Speaker, "speaker")
+            .Field(c => c.Text, textCodec, "text")
+            .Field(c => c.Seq, Codec.U16, "seq"));
+        subs.Freeze();
+
+        var export = CatalogBuilder.Build(subs, [], CatalogBuilder.DefaultAppName, appRevision: 0, tickPeriodUs: 10_000, systemNames: []);
+        return EventHub.Build(subs, CatalogPlan.Compile(export.Canonical));
     }
 }

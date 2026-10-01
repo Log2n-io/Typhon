@@ -50,7 +50,7 @@ export interface SlotThreadInfo {
  *
  * Replaces the old `LiveTickBatch` / per-tick payloads with growth deltas:
  *   - `metadata`             — full snapshot on connect / reconnect.
- *   - `tickSummaryAdded`     — one per tick the server's IncrementalCacheBuilder finalizes.
+ *   - `tickSummariesAdded`   — every tick the server's IncrementalCacheBuilder finalized in the last 100 ms.
  *   - `chunkAdded`           — one per chunk the builder flushes (becomes addressable via /chunks/{idx}).
  *   - `threadInfoAdded`      — one per (slot, name, kind) the runtime observes; replayed on every (re)connect.
  *   - `globalMetricsUpdated` — ~1 Hz coalesced p95 / max / total-events refresh.
@@ -59,7 +59,7 @@ export interface SlotThreadInfo {
  */
 export type LiveStreamPayload =
   | { kind: 'metadata'; metadata: ProfilerMetadataDto }
-  | { kind: 'tickSummaryAdded'; tickSummary: TickSummaryDto }
+  | { kind: 'tickSummariesAdded'; tickSummaries: TickSummaryDto[] }
   | { kind: 'chunkAdded'; chunkEntry: ChunkManifestEntryDto }
   | { kind: 'threadInfoAdded'; threadInfo: LiveThreadInfo }
   | { kind: 'globalMetricsUpdated'; globalMetrics: GlobalMetricsDto }
@@ -288,10 +288,13 @@ export const useProfilerSessionStore = create<ProfilerSessionStoreState>()((set)
             pendingMetrics = null;
             break;
           }
-          case 'tickSummaryAdded': {
-            (pendingTicks ??= []).push(ev.tickSummary);
-            const tn = Number(ev.tickSummary.tickNumber);
-            if (tn > latestTickNumber) latestTickNumber = tn;
+          case 'tickSummariesAdded': {
+            const target = (pendingTicks ??= []);
+            for (const summary of ev.tickSummaries) {
+              target.push(summary);
+              const tn = Number(summary.tickNumber);
+              if (tn > latestTickNumber) latestTickNumber = tn;
+            }
             break;
           }
           case 'chunkAdded':

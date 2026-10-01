@@ -2,14 +2,20 @@ import {
   archetypeOf,
   Capabilities,
   CommandQueue,
+  CommandRefused,
+  DebugGrid,
+  DebugSubType,
   FrameApplier,
   NOT_FOUND,
   PingScheduler,
+  PushGeometry,
+  PushShape,
   ReconnectingClient,
   RegionSender,
   slotOf,
   StreamRecorder,
   TickFlags,
+  WireReader,
   type AggregateGrid,
   type Clock,
   type Connection,
@@ -18,6 +24,8 @@ import {
   type SessionInfo,
   type WorldStore,
 } from '@typhondb/client';
+import { hullInRadiusM } from './replication-stats';
+import { realmViewOf, type RealmView } from './realm-view';
 
 /**
  * Where the client's world comes from. The renderer and the UI only ever see the SDK's store, clock and aggregate grid;
@@ -42,12 +50,44 @@ export interface SourceStats {
     readonly effectiveRadius: number;
     readonly worldEntities: number;
   } | null;
+  /**
+   * What this session costs the server, and what the link between them is doing (CLI3D-06). `null` when the source
+   * cannot say — the mock, which has no session.
+   *
+   * **Every figure here is the SERVER's or the link's, never the client's opinion of them.** `outBytesPerSec` is the
+   * session-scoped `STATS` metric, not {@link wireBytesPerSec}, which is this client's own estimate over arrival times:
+   * the two are shown side by side deliberately, because a gap between them is a fact worth seeing.
+   */
+  readonly session: SessionCost | null;
+}
+
+/** What one session costs the server, from server-authoritative metrics and the link's own counters. */
+export interface SessionCost {
+  /** Round trip from the `PING` loop, milliseconds; 0 before the first `PONG`. */
+  readonly rttMs: number;
+  /** `typhon.session.outBytesPerSec` — what the server says it is sending THIS session. */
+  readonly outBytesPerSec: number;
+  /** `typhon.session.skippedFrames` — frames the server chose not to send this session (a counter, not a rate). */
+  readonly skippedFrames: number;
+  /** `typhon.session.droppedCommands` — commands the server refused, rate limiting included. */
+  readonly droppedCommands: number;
+  /** Region requests this client sent, held back as not worth sending, and had refused. */
+  readonly regionsSent: number;
+  readonly regionsSuppressed: number;
+  readonly regionsRejected: number;
 }
 
 /** Receives events as frames are applied, after enters and updates and before leaves (`03-wire-protocol.md` § 5). */
 export interface EventSink {
   /** A hit. A netId of 0 is an end the client does not know; `hpAfter` is the target's health fraction after the hit. */
   onAttack(tick: number, attackerNetId: number, targetNetId: number, damage: number, hpAfter: number): void;
+  /**
+   * Something said within earshot (SWG-09).
+   *
+   * A session receives these only for speakers near its own viewpoint — 50 m, the range SWG's `/say` carried — and only
+   * in its own realm. So a quiet view is the routing working, not the feature missing.
+   */
+  onChat(tick: number, speakerNetId: number, text: string): void;
 }
 
 /** A simulated network link: the mock has one, a real connection does not. */
@@ -55,18 +95,114 @@ export interface LatencyControl {
   setLatency(latencyMs: number, jitterMs: number): void;
 }
 
+/**
+ * What the server says about this session's replication, from the `DEBUG` block (CLI3D-03).
+ *
+ * This is the engine's own account, not the client's: {@link geometry}`.radiusM` is the radius the session is **served**
+ * after any clamp, and its window is the cells actually delivered — which is the whole point of drawing it. Both objects
+ * are rewritten in place as frames arrive, so a reader compares `version` rather than identity.
+ */
+export interface DebugView {
+  /** The replication grid, or `null` before the session's first frame. */
+  readonly grid: DebugGrid | null;
+  /** The session's shape and delivered cells, or `null` while the server has sent none. */
+  readonly geometry: PushGeometry | null;
+}
+
+/** The one retained {@link DebugView} a source rewrites; readers only ever see it through the readonly face. */
+interface MutableDebugView {
+  grid: DebugGrid | null;
+  geometry: PushGeometry | null;
+}
+
 export interface DataSource {
   start(): void;
   dispose(): void;
+  /** Whether {@link setPaused} does anything a viewer can see. */
+  readonly canPause: boolean;
+  /**
+   * The store this source fills, when it owns one. A live connection does: only the server's catalog can size a store,
+   * and it arrives after the app is up — so the app adopts this once it appears, and again after a reconnect to a server
+   * whose catalog moved. A source that fills the world it was handed reports that same world here.
+   */
+  readonly world: WorldStore | null;
+  /** The far tier's counts for {@link world}, or `null` when the session has no aggregate grid. */
+  readonly grid: AggregateGrid | null;
+  /**
+   * The realm the session is in, or `null` in none — the scene the renderer must be drawing.
+   *
+   * <b>An accessor the app polls, not a callback it subscribes to.</b> The SDK's `onRealmChanged` fires inside
+   * `applier.apply()`, on the tick path: building a scene there would put the cost of a terrain swap inside the
+   * decode, and a throw would take the session down with it. So a source derives this once per change and the app
+   * notices it the way it already notices a new store — one reference compare at the top of the frame
+   * (`ClientApp.adoptSourceWorld`, whose comment explains why there is no other right moment).
+   */
+  readonly realm: RealmView | null;
+  /**
+   * How many `RESET` frames this source has applied — a counter the app compares, never a callback.
+   *
+   * <b>{@link realm} does not cover it.</b> A realm change is one of the ways the store is emptied; a reconnect, a
+   * profile switch and a variant switch are the others, and none of them moves the realm. Spectating an entity in the
+   * realm the session is already in is exactly that case: every netId the app holds is invalidated and nothing in
+   * {@link realm} moves. Polled for the same reason as {@link realm} — the SDK raises it on the tick path.
+   */
+  readonly resetCount: number;
+  /**
+   * The near tier's radius the source is actually being served, in metres, or 0 when it is not known yet.
+   *
+   * Its own accessor because the renderer reads it EVERY frame, and {@link stats} is a snapshot that allocates.
+   */
+  readonly effectiveRadiusM: number;
+  /**
+   * What the server reports about this session's replication, or `null` when the source cannot say — the mock, or a
+   * live session the server did not grant the `DEBUG` cap.
+   */
+  readonly debug: DebugView | null;
   /** The god camera's region of interest: a ground point and a radius (the built-in `ClientRegion` command). */
   setRegion(x: number, z: number, radius: number): void;
   setPaused(paused: boolean): void;
+  /** Whether {@link viewRealm} does anything: a live session whose catalog declares the command. */
+  readonly canViewRealm: boolean;
+  /**
+   * Asks the server to put this session in another realm. The answer is a `RESET|REALM` frame, or an `ACKS` refusal.
+   *
+   * <b>An ask, not a move.</b> The server decides — a realm that does not exist, or a session that is a player's rather
+   * than a camera's, is refused — so nothing here may assume the realm changed.
+   */
+  viewRealm(realmId: number): void;
+  /** Whether {@link spectate} does anything: a live session whose catalog declares the command. */
+  readonly canSpectate: boolean;
+  /**
+   * Asks the server to anchor this session on an entity, so the session follows it wherever it goes; 0 releases.
+   *
+   * <b>An ask, not a move</b>, like {@link viewRealm}: a netId the session was never shown, and a player's session
+   * rather than a camera's, are refused. Accepted, the answer is a `RESET` — the session's profile changed — which may
+   * or may not carry a new realm.
+   */
+  spectate(netId: number): void;
+  /**
+   * The netId this source last asked to ride, or 0. What the client BELIEVES, which is the only thing it can report:
+   * the anchor itself lives on the server and reaches the client as the shape of what it is served.
+   */
+  readonly spectatingNetId: number;
+  /**
+   * The netId of the entity this session controls, from the `SELF` block, or 0.
+   *
+   * <b>This is how a ride survives its own `RESET`.</b> Anchoring the session re-sends the whole view, and netIds are
+   * allocated densely per view, so the subject almost never keeps the id the viewer clicked. The server names it in
+   * `SELF` — that is what `Control` is for — so the client re-finds its subject by being told rather than by guessing.
+   */
+  readonly selfNetId: number;
   readonly stats: SourceStats;
   /** The simulated link's control, or null for a real connection. */
   readonly latency: LatencyControl | null;
 }
 
 export interface TyphonSourceOptions {
+  /** The server refused a realm change, or the local rate limit did. Nothing else will ever say so. */
+  readonly onRealmRefused?: () => void;
+  /** The server refused a ride, or the local rate limit did. Nothing else will ever say so. */
+  readonly onSpectateRefused?: () => void;
   /** The server's WebSocket URL, which must speak `typhon.3`. */
   readonly url: string;
   /** The clock render time comes from; the source feeds it every frame. */
@@ -102,9 +238,33 @@ export class TyphonSource implements DataSource {
   private commands: CommandQueue | null = null;
   private region: RegionSender | null = null;
   private attack: MessagePlan | null = null;
+  private chat: MessagePlan | null = null;
+  private pauseCommand: MessagePlan | null = null;
+  private viewRealmCommand: MessagePlan | null = null;
+  private spectateCommand: MessagePlan | null = null;
+  /** The sequence of the `Spectate` still awaiting an answer, or -1. */
+  private pendingSpectateSeq = -1;
+  /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
+  private spectating = 0;
+  /** The sequence of the `ViewRealm` still awaiting an answer, or -1. See {@link viewRealm}. */
+  private pendingRealmSeq = -1;
+  /** The realm the last `REALM` block put this session in, derived once per change rather than per frame. */
+  private currentRealm: RealmView | null = null;
+  /** How many `RESET` frames have been applied; see {@link DataSource.resetCount}. */
+  private resets = 0;
   private pendingRegion: { x: number; z: number; radius: number } | null = null;
   private lastSentRegion: { x: number; z: number; radius: number } | null = null;
   private paused = false;
+  /** The `DEBUG` block's two payloads, decoded in place: one object each for the session's life, not one per frame. */
+  private readonly debugGrid = new DebugGrid();
+  private readonly debugGeometry = new PushGeometry();
+  private readonly debugReader = new WireReader();
+  private readonly debugView: MutableDebugView = { grid: null, geometry: null };
+  private debugGridSeen = false;
+  private debugGeometrySeen = false;
+  /** The served radius derived from the newest geometry, and the version it came from. */
+  private servedRadiusM = 0;
+  private servedRadiusVersion = -1;
   private ticks = 0;
   private lastTick = 0;
   private viewComplete = false;
@@ -120,7 +280,10 @@ export class TyphonSource implements DataSource {
       url: options.url,
       kind: options.kind ?? 'god',
       token: options.token ?? '',
-      caps: Capabilities.Stats,
+      // DEBUG carries the replication grid and this session's delivered cells (CLI3D-03). The server grants it only under
+      // SessionLimits.AllowDebug — the demo's god kind has it, a player's does not — and a refusal is not an error: the
+      // SDK checks the granted set against what was asked and the overlay simply has nothing to draw.
+      caps: Capabilities.Stats | Capabilities.Debug,
       handlers: {
         onWelcome: (session, connection) => {
           this.onWelcome(session, connection);
@@ -151,6 +314,20 @@ export class TyphonSource implements DataSource {
     return this.applier?.grids[0] ?? null;
   }
 
+  /** What the server has said about this session's replication; both halves stay `null` until the first one arrives. */
+  /**
+   * The server's account of this session's replication.
+   *
+   * One retained object, rewritten in place — which is what {@link DebugView}'s own contract says and what this getter did
+   * not do. It is read once a frame in the live path, so a fresh literal here was 60 objects a second, invisible against
+   * the mock (whose `debug` is `null`) and real against a server.
+   */
+  get debug(): DebugView {
+    this.debugView.grid = this.debugGridSeen ? this.debugGrid : null;
+    this.debugView.geometry = this.debugGeometrySeen ? this.debugGeometry : null;
+    return this.debugView;
+  }
+
   get clock(): Clock {
     return this.options.clock;
   }
@@ -165,6 +342,34 @@ export class TyphonSource implements DataSource {
     return this.ping?.rttMs ?? 0;
   }
 
+  /**
+   * The near tier's radius the session is **actually served**, in metres, or 0 before it is known.
+   *
+   * **This reads the server's own geometry first** (CLI3D-06, possible only since CLI3D-03 put `PUSH_GEOMETRY` on the
+   * client): a sphere reports R′ as the session holds it, and a region reports the in-radius of the hull the server
+   * kept. Both are what the engine is serving *after* any clamp. Falling back to the requested radius is a last resort
+   * for a session with no `DEBUG` cap, and it is the number that was previously shown always — so the ground's
+   * near-radius ring and the heatmap fade were drawn at the radius the camera **asked for**, which is exactly the
+   * quantity #1075 says the server silently shrinks.
+   */
+  get effectiveRadiusM(): number {
+    const g = this.debugGeometrySeen ? this.debugGeometry : null;
+    if (g !== null) {
+      // Recomputed only when the server sent a new geometry: this is read once per frame by the renderer, and the hull
+      // walk is a square root per edge.
+      if (g.version !== this.servedRadiusVersion) {
+        this.servedRadiusVersion = g.version;
+        this.servedRadiusM = g.shape === PushShape.Sphere ? g.radiusM : hullInRadiusM(g);
+      }
+
+      if (this.servedRadiusM > 0) {
+        return this.servedRadiusM;
+      }
+    }
+
+    return this.lastSentRegion?.radius ?? this.pendingRegion?.radius ?? 0;
+  }
+
   get stats(): SourceStats {
     return {
       name: `typhon ${this.options.url}`,
@@ -175,6 +380,7 @@ export class TyphonSource implements DataSource {
       wireBytesPerSec: this.wireBytesPerSec(),
       applyMs: this.applyMs,
       server: this.serverStats(),
+      session: this.sessionCost(),
     };
   }
 
@@ -201,14 +407,112 @@ export class TyphonSource implements DataSource {
     this.sendRegion();
   }
 
-  /** A live server does not pause; this only stops the client asking for a new region. */
+  /**
+   * Stops and starts the SERVER's simulation, when the catalog declares the command for it.
+   *
+   * The world stops for every session, not just this one — see `SetPaused` in `TatooineReplication.cs` for why that is
+   * a demo control and what has to replace it. The region is held too, so the view does not wander while frozen.
+   */
   setPaused(paused: boolean): void {
     this.paused = paused;
+    if (this.pauseCommand !== null) {
+      this.commands?.enqueue(this.pauseCommand, { paused: paused ? 1 : 0 });
+    }
+
     if (!paused) {
       // A region set DURING the pause was stored and never sent, because sendRegion returns early while paused — so the server kept serving the
       // pre-pause disc until the camera happened to move again.
       this.sendRegion();
     }
+  }
+
+  /** Whether this session may ask to look at another realm: the catalog declares the command and the role may send it. */
+  get canViewRealm(): boolean {
+    return this.viewRealmCommand !== null;
+  }
+
+  /**
+   * Asks to be put in another realm.
+   *
+   * Rate-limited by the catalog at one per tick with a burst of two, because every accepted ask costs a whole-realm
+   * RESET — the dearest frame there is. A refused one is answered in `ACKS` rather than dropped, so a client that is
+   * waiting on the switch learns that it is not coming.
+   */
+  viewRealm(realmId: number): void {
+    if (this.viewRealmCommand === null) {
+      return;
+    }
+
+    // The sequence is KEPT, so the refusal the server sends can be matched to the ask that caused it. Without this the
+    // `ACKS` block — which the server was deliberately given reason codes to fill — reaches nothing, and a viewer whose
+    // crossing was refused waits out the fade's whole safety limit behind an opaque screen for an answer that had
+    // already arrived.
+    const seq = this.commands?.enqueue(this.viewRealmCommand, { realm: realmId }) ?? CommandRefused.RateLimited;
+    this.pendingRealmSeq = seq >= 0 ? seq : -1;
+    if (seq >= 0) {
+      // Asking for a realm ENDS a ride, server-side: an anchored session cannot be placed, so the server stops the ride
+      // and puts the session where it asked instead. Mirrored here so the HUD stops naming a subject the moment the
+      // viewer has said they want to be somewhere else, rather than a frame later when SELF reports it.
+      this.spectating = 0;
+    }
+    if (seq < 0) {
+      // The local bucket was empty, so nothing was sent and no ack will ever come for it. Refused here, immediately,
+      // rather than by a timeout later.
+      this.options.onRealmRefused?.();
+    }
+  }
+
+  /** Whether this session may ask to ride an entity: the catalog declares the command. */
+  get canSpectate(): boolean {
+    return this.spectateCommand !== null;
+  }
+
+  /** The netId this client last asked to ride; see {@link DataSource.spectatingNetId}. */
+  get spectatingNetId(): number {
+    return this.spectating;
+  }
+
+  /**
+   * Asks to ride an entity, or to stop.
+   *
+   * Rate-limited at one per tick with a burst of two, as `ViewRealm` is and for the same reason: every accepted ask
+   * changes the session's profile, and a profile change is a whole `RESET`.
+   */
+  spectate(netId: number): void {
+    if (this.spectateCommand === null) {
+      return;
+    }
+
+    const seq = this.commands?.enqueue(this.spectateCommand, { netId }) ?? CommandRefused.RateLimited;
+    this.pendingSpectateSeq = seq >= 0 ? seq : -1;
+    if (seq < 0) {
+      // Nothing was sent, so no ack will ever come for it. The belief is not updated: the client is still riding
+      // whatever it was riding, which is the truth.
+      this.options.onSpectateRefused?.();
+      return;
+    }
+
+    this.spectating = netId;
+  }
+
+  /** The controlled entity's netId, from `SELF`; see {@link DataSource.selfNetId}. */
+  get selfNetId(): number {
+    return this.applier?.selfState.netId ?? 0;
+  }
+
+  /** The realm this session is in, or `null` before its first `REALM` block and after a `REALM(NONE)`. */
+  get realm(): RealmView | null {
+    return this.currentRealm;
+  }
+
+  /** How many `RESET` frames have been applied; see {@link DataSource.resetCount}. */
+  get resetCount(): number {
+    return this.resets;
+  }
+
+  /** Whether the session can stop the server's simulation: the catalog declares the command. */
+  get canPause(): boolean {
+    return this.pauseCommand !== null;
   }
 
   private onWelcome(session: SessionInfo, connection: Connection): void {
@@ -218,13 +522,42 @@ export class TyphonSource implements DataSource {
       onEvent: (event) => {
         this.onEvent(event);
       },
+      // Counted rather than acted on, for the same reason as the realm below: this runs inside `applier.apply()`, and
+      // dropping the app's selection there would do it in the middle of a decode. The app compares the count at the
+      // top of its frame.
+      onReset: () => {
+        this.resets++;
+      },
       // The server drops the region it held on a realm change: the sender forgets it and the camera's goes out again.
-      onRealmChanged: () => {
+      //
+      // Deriving the view here rather than in the app is deliberate, and it is the only work this callback may do.
+      // It runs INSIDE `applier.apply()`, on the tick path: the app reads `realm` at the top of its frame instead,
+      // so a scene swap costs the frame that notices it rather than the decode that caused it.
+      onRealmChanged: (_previous, current) => {
+        this.currentRealm = realmViewOf(current);
+        this.pendingRealmSeq = -1;
         this.region?.realmChanged();
-        this.sendRegion();
+
+        // The PENDING region is dropped, not re-sent. It holds the camera's position in the realm being LEFT, and the
+        // camera does not move until `resetForRealm` runs at the top of the next frame — so re-sending it here encodes
+        // planet coordinates in the new realm's frame. `encodeQuant` clamps rather than throws, so a planet-sized quad
+        // collapses every corner onto one corner of a 64 m interior: a degenerate hull the server then refuses. The
+        // camera sends its own the moment it has moved.
+        this.pendingRegion = null;
+        this.lastSentRegion = null;
+      },
+      onDebug: (subType, data, offset, length) => {
+        this.onDebug(subType, data, offset, length);
       },
     });
     this.attack = plan.eventByName('Attack');
+    this.chat = plan.eventByName('Chat');
+
+    // A demo control: the server stops simulating for everyone. Absent from a catalog that does not declare it, in which
+    // case pausing does what it did before — nothing but hold the region.
+    this.pauseCommand = plan.commandByName('SetPaused');
+    this.viewRealmCommand = plan.commandByName('ViewRealm');
+    this.spectateCommand = plan.commandByName('Spectate');
     this.commands = new CommandQueue({ plan });
     this.region =
       plan.clientRegion === null
@@ -252,11 +585,51 @@ export class TyphonSource implements DataSource {
     this.sendRegion();
   }
 
+  /**
+   * A `DEBUG` sub-block. Unknown ones are ignored on purpose: the block is defined to be skippable, and `CLUSTER_AABBS`
+   * and `MIGRATIONS` are reserved for sub-types this client does not draw yet.
+   *
+   * A malformed payload is swallowed with a note rather than closing the session. `DEBUG` is an *overlay*: the rest of
+   * the frame has already been applied and is correct, and `PUSH_GEOMETRY` is explicitly experimental — its layout may
+   * change without a protocol version, so a server one step ahead of this client must cost the overlay, not the view.
+   */
+  private onDebug(subType: number, data: Uint8Array, offset: number, length: number): void {
+    const r = this.debugReader.reset(data.subarray(offset, offset + length));
+    try {
+      if (subType === DebugSubType.Grid) {
+        this.debugGrid.readFrom(r);
+        this.debugGridSeen = true;
+      } else if (subType === DebugSubType.PushGeometry) {
+        this.debugGeometry.readFrom(r);
+        this.debugGeometrySeen = true;
+      }
+    } catch (error) {
+      console.warn(
+        `typhon: a DEBUG sub-block 0x${subType.toString(16)} did not decode; the overlay keeps the last one`,
+        error,
+      );
+    } finally {
+      r.release();
+    }
+  }
+
   private onClose(): void {
     this.ping?.stop();
     this.ping = null;
     this.commands?.clear();
+
+    // Every belief about an outstanding ASK dies with the session that made it, and both halves matter. The ride:
+    // a resumed session is re-anchored by the server or it is not, and `SELF` says which — keeping the belief instead
+    // would leave the region suppressed for a god camera that is no longer riding anything, so it would be served
+    // nothing at all and never ask again. The sequences: a new `CommandQueue` starts again at 1, so a kept
+    // `pendingSpectateSeq` of 3 matches an unrelated post-reconnect command and rolls a live ride back on its ack.
+    this.spectating = 0;
+    this.pendingSpectateSeq = -1;
+    this.pendingRealmSeq = -1;
     // The store stays: a resume refills it with a RESET frame, and the renderer keeps drawing meanwhile.
+    // So does the realm, for the same reason and more strongly — a resumed session's first frame is a
+    // `RESET|REALM` of the realm its token recorded (12-realms § 1.6), so clearing it here would tear the scene
+    // down and build the same one back for the length of a reconnect.
   }
 
   private onTick(message: Uint8Array, recvMs: number): void {
@@ -280,9 +653,23 @@ export class TyphonSource implements DataSource {
 
     // Command outcomes arrive in the frame that carries their effects (§ 8): a refused region is one of them.
     const region = this.region;
-    if (region !== null) {
-      for (let i = 0; i < applier.acks.count; i++) {
-        region.onAck(applier.acks.seq[i], applier.acks.reason[i]);
+    for (let i = 0; i < applier.acks.count; i++) {
+      const seq = applier.acks.seq[i];
+      region?.onAck(seq, applier.acks.reason[i]);
+
+      // A refused realm change. The realm itself never arrives, so this is the only thing that will ever tell the app
+      // the crossing is not coming — everything else waits for a frame that was never going to be sent.
+      if (seq === this.pendingRealmSeq) {
+        this.pendingRealmSeq = -1;
+        this.options.onRealmRefused?.();
+      }
+
+      // A refused ride. The belief has to be rolled back here or the HUD keeps naming a subject the server declined,
+      // and the client's own release would then be a no-op against a server that never started.
+      if (seq === this.pendingSpectateSeq) {
+        this.pendingSpectateSeq = -1;
+        this.spectating = 0;
+        this.options.onSpectateRefused?.();
       }
     }
 
@@ -302,12 +689,25 @@ export class TyphonSource implements DataSource {
   }
 
   private onEvent(event: EventRecord): void {
+    if (this.chat !== null && event.type === this.chat) {
+      this.options.events.onChat(event.tick, event.number('speaker'), event.text('text'));
+      return;
+    }
+
     if (this.attack === null || event.type !== this.attack) {
       return;
     }
 
     const target = event.number('target');
-    this.options.events.onAttack(event.tick, 0, target, event.number('amount'), this.healthOf(target));
+    // Both ends, and either may be 0: the engine names an entity by the netId the SESSION holds, so an end this session
+    // was never shown travels as 0. The sink's contract already says so, and the renderer needs two ends for a line.
+    this.options.events.onAttack(
+      event.tick,
+      event.number('attacker'),
+      target,
+      event.number('amount'),
+      this.healthOf(target),
+    );
   }
 
   /** The target's health after the hit: events apply after this frame's updates, so the store already holds it. */
@@ -344,17 +744,16 @@ export class TyphonSource implements DataSource {
   }
 
   private wireBytesPerSec(): number {
-    // Pruned HERE as well as on arrival. Pruning only when a frame arrives means that when frames stop the window is never trimmed again and the rate
-    // freezes at the last second it saw — so a stalled session reads as a healthy one, which is the opposite of what the number is for.
+    // Counted over the last second WITHOUT trimming the window: this is reached through a getter, and a getter that
+    // mutates is a trap for whoever reads it next. It still has to ignore entries older than a second, or a stalled
+    // session would read as a healthy one — the rate would freeze at the last second it saw, which is the opposite of
+    // what the number is for. The window itself is trimmed in `onTick`, the one place that can make it grow.
     const horizon = performance.now() - 1000;
-    while (this.byteTimes.length > 0 && this.byteTimes[0] < horizon) {
-      this.byteTimes.shift();
-      this.byteCounts.shift();
-    }
-
     let total = 0;
-    for (const count of this.byteCounts) {
-      total += count;
+    for (let i = 0; i < this.byteTimes.length; i++) {
+      if (this.byteTimes[i] >= horizon) {
+        total += this.byteCounts[i];
+      }
     }
 
     return total;
@@ -363,7 +762,11 @@ export class TyphonSource implements DataSource {
   /** What the server's `STATS` block says, when the catalog declares the metrics it comes from. */
   private serverStats(): SourceStats['server'] {
     const applier = this.applier;
-    if (applier === null || !applier.stats.received) {
+
+    // `received` is "the frame just applied carried a STATS block", and a server emits one a SECOND — so it is false on
+    // nine frames out of ten at 10 Hz, and the HUD, which samples four times a second, essentially never saw one. What
+    // says a block has ever arrived is `tick`, which stays at the newest one (−1 before the first).
+    if (applier === null || applier.stats.tick < 0) {
       return null;
     }
 
@@ -371,15 +774,60 @@ export class TyphonSource implements DataSource {
       const metric = applier.plan.metricByName(name);
       return metric === null ? 0 : applier.stats.valueOf(metric);
     };
+
+    /** A labelled metric summed over its labels: `typhon.archetype.entities` carries one value per archetype. */
+    const total = (name: string): number => {
+      const metric = applier.plan.metricByName(name);
+      if (metric === null) {
+        return 0;
+      }
+
+      let sum = 0;
+      for (let i = 0; i < metric.valueCount; i++) {
+        sum += applier.stats.valueOf(metric, i);
+      }
+
+      return sum;
+    };
     return {
       simMs: value('typhon.tick.p50'),
       replicationMs: value('typhon.subscriptions.track.p99'),
       watched: applier.world.entityCount,
-      effectiveRadius: this.lastSentRegion?.radius ?? this.pendingRegion?.radius ?? 0,
+      effectiveRadius: this.effectiveRadiusM,
 
       // typhon.archetype.entities, not typhon.sessions: the latter is how many clients are connected, which is not the world's population by any
-      // reading and was being shown to the HUD under that name.
-      worldEntities: value('typhon.archetype.entities'),
+      // reading and was being shown to the HUD under that name. SUMMED over its labels — the metric carries one value per
+      // archetype, so reading value 0 showed the world's population as the number of city NPCs in it.
+      worldEntities: total('typhon.archetype.entities'),
+    };
+  }
+
+  /**
+   * What this session costs the server (CLI3D-06), or `null` before the first `STATS` block.
+   *
+   * The three `typhon.session.*` metrics are **session-scoped**: the server publishes them per session, so these are
+   * this client's own numbers rather than the server's totals. `skippedFrames` and `droppedCommands` are counters and
+   * are reported as such — they only ever rise, and a HUD that showed them as rates would be lying.
+   */
+  private sessionCost(): SessionCost | null {
+    const applier = this.applier;
+    if (applier === null || applier.stats.tick < 0) {
+      return null;
+    }
+
+    const value = (name: string): number => {
+      const metric = applier.plan.metricByName(name);
+      return metric === null ? 0 : applier.stats.valueOf(metric);
+    };
+
+    return {
+      rttMs: this.ping?.rttMs ?? 0,
+      outBytesPerSec: value('typhon.session.outBytesPerSec'),
+      skippedFrames: value('typhon.session.skippedFrames'),
+      droppedCommands: value('typhon.session.droppedCommands'),
+      regionsSent: this.region?.sentCount ?? 0,
+      regionsSuppressed: this.region?.suppressedCount ?? 0,
+      regionsRejected: this.region?.rejectedCount ?? 0,
     };
   }
 }

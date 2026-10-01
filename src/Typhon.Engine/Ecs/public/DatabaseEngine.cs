@@ -517,6 +517,48 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     // The persisted realm catalog (Realms D-1): every NAMED realm's identity. Null until a realm other than 0 is first registered on this database.
     private ComponentTable _realmsTable;
     private Dictionary<ushort, (int ChunkId, RealmR1 Row)> _persistedRealms;
+
+    // Realm generations, by id, published for readers that are not the tick.
+    //
+    // <b>A second copy of one number, and it exists because the first copy is a Dictionary.</b> _persistedRealms is written at run time — a registration
+    // inserts, a retirement removes — under _realmLifecycleLock, and Dictionary.TryGetValue concurrent with an insert that resizes is undefined: a wrong
+    // value, an IndexOutOfRangeException, or a spin. The generation is read from OUTSIDE the tick (an operator's stats call, an application's realm
+    // directory: RealmRegistry.GenerationOf), which cannot take that lock without letting a stats read stall a fence. So the one field those readers want is
+    // published on its own, in an array, with the ordering that makes a lock-free read correct.
+    //
+    // It is written only where a generation can change, which is a registration — every other catalog write preserves it — and cleared at retirement, which
+    // happens at open before any concurrent reader exists.
+    private int[] _realmGenerations;
+
+    /// <summary>
+    /// Realm <paramref name="id"/>'s generation, or 0 when it names no catalogued realm. Any thread.
+    /// </summary>
+    /// <remarks>
+    /// Two acquire loads and a bounds check: the array reference, then the slot. Growing the array replaces the reference rather than mutating it, so a reader
+    /// either sees the old array — which is complete for every id it covers — or the new one, never a half-copied one.
+    /// </remarks>
+    internal int RealmGenerationOf(ushort id)
+    {
+        var generations = Volatile.Read(ref _realmGenerations);
+        return generations != null && id < generations.Length ? Volatile.Read(ref generations[id]) : 0;
+    }
+
+    /// <summary>Publishes realm <paramref name="id"/>'s generation for <see cref="RealmGenerationOf"/>. Callers hold the realm lifecycle lock.</summary>
+    private void PublishRealmGeneration(ushort id, int generation)
+    {
+        var generations = _realmGenerations;
+        if (generations == null || id >= generations.Length)
+        {
+            var grown = new int[Math.Max(id + 1, Math.Max(8, (generations?.Length ?? 0) * 2))];
+            generations?.CopyTo(grown, 0);
+
+            // The copy is filled before the reference is published, so a reader never sees a grown array missing the entries the old one had.
+            Volatile.Write(ref _realmGenerations, grown);
+            generations = grown;
+        }
+
+        Volatile.Write(ref generations[id], generation);
+    }
     private ConcurrentDictionary<Type, ComponentTable> _componentTableByType;
 
     // ─── ArchetypeRegistry lifecycle tracking ───────────────────────────────────────────────────────────
@@ -776,6 +818,25 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// <summary>The per-DB routing id for a catalog archetype id — for tooling (Workbench) that holds catalog ids from the schema and needs the routing id
     /// that routing-based APIs (e.g. <see cref="Transaction.EnumerateArchetypeEntities"/>) expect. Returns <see cref="NoRoutingId"/> if unmapped.</summary>
     internal ushort RoutingIdForCatalog(ushort catalogId) => catalogId < (uint)_routingByCatalog.Length ? _routingByCatalog[catalogId] : NoRoutingId;
+
+    /// <summary>
+    /// What <see cref="EntityId.ArchetypeId"/> carries for <typeparamref name="TArch"/> in THIS database, so an application can tell which archetype an
+    /// entity id names. <see cref="NoRoutingId"/> when this database has no such archetype.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <see cref="EntityId.ArchetypeId"/> is public and, until this method existed, there was nothing to compare it against: the catalog-to-routing map is
+    /// internal, so an application holding an id of unknown provenance — one a client named, one read out of a spatial query over a union, one stored in a
+    /// component — could not discover which archetype it belonged to without opening it and guessing from a component read.
+    /// </para>
+    /// <para>
+    /// <b>Routing ids are per database and assigned in registration order</b> (resumed above the persisted high-water mark on reopen), so the value is stable
+    /// for the life of a database and must not be persisted by an application as if it were the schema's own id — that is
+    /// <see cref="ArchetypeMetadata.ArchetypeId"/>, the catalog id.
+    /// </para>
+    /// </remarks>
+    /// <typeparam name="TArch">The archetype.</typeparam>
+    public ushort ArchetypeIdOf<TArch>() where TArch : Archetype<TArch> => RoutingIdForCatalog(Archetype<TArch>.CatalogId);
     private Dictionary<string, FieldR1[]> _persistedFieldsByComponent;
     private ConcurrentDictionary<int, ChunkBasedSegment<PersistentStore>> _componentCollectionSegmentByStride;
     private ConcurrentDictionary<Type, VariableSizedBufferSegmentBase<PersistentStore>> _componentCollectionVSBSByType;
@@ -1017,6 +1078,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             }
 
             _persistedRealms[id] = (chunkId, row);
+            PublishRealmGeneration(id, row.Generation);
         }
 
         // The pages first, the bootstrap key last: SaveBootstrap fsyncs the meta slot at once, so saving it first would leave, across a crash, a key that
@@ -1979,6 +2041,16 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
         MMF.SaveBootstrap();
     }
 
+    /// <summary>
+    /// Realm 0's persisted grid, for a reader that has no realm table to ask.
+    /// </summary>
+    /// <remarks>
+    /// <b>The realm table is built during <c>InitializeArchetypes</c>, and a generic opener does not always get there</b> — the Workbench opening a database
+    /// whose schema assemblies are absent has the bootstrap records and no <c>_realms</c>. Realm 0's grid is in the bootstrap either way, because realm 0 keeps
+    /// the single-world record rather than a catalog row, so this is the only route to it for such a reader.
+    /// </remarks>
+    internal bool TryReadPersistedRealm0Grid(out SpatialGridConfig config) => TryLoadSpatialGridConfig(out config);
+
     /// <summary>Reads the persisted <see cref="SpatialGridConfig"/> written by <see cref="SaveSpatialGridConfig"/>; <see langword="false"/> when none was persisted.</summary>
     private bool TryLoadSpatialGridConfig(out SpatialGridConfig config)
     {
@@ -2702,6 +2774,8 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
                         throw new InvalidOperationException(
                             $"The realm catalog is corrupt: row {chunkId} names realm {realm.Id}, which is out of range or already catalogued.");
                     }
+
+                    PublishRealmGeneration((ushort)realm.Id, realm.Generation);
 
                     if (realm.State == RealmR1.StateClosing)
                     {

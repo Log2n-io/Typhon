@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -28,11 +28,21 @@ public sealed partial class SimBridge
     /// </remarks>
     public void CreatureThinkTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         var thinkMin = WorldBuilder.AiTicksMin(_config);
         var thinkSpan = Math.Max(1, WorldBuilder.AiTicksMax(_config) - thinkMin + 1);
         long aggroQueries = 0;
         long aggroHits = 0;
+        long chaseLost = 0;
+        long chaseGivenUp = 0;
+        long revived = 0;
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Creature>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -57,8 +67,10 @@ public sealed partial class SimBridge
             // Scheduling: written every tick by design, read by nobody on the wire, and in a component no projection names.
             var timers = cluster.GetSpan(Creature.Timers);
             var motions = cluster.GetSpan(Creature.Move);
+
+            // Read-only for the aggro gate, taken mutably only on the tick a creature is actually revived — the same discipline as the brains above.
             var vitals = cluster.GetReadOnlySpan(Creature.Vitals);
-            var chunk = cluster.ChunkId;
+            Span<CreatureVitals> vitalsRw = default;
 
             var bits = bits0;
             while (bits != 0)
@@ -71,6 +83,13 @@ public sealed partial class SimBridge
                 ref var t = ref timers[idx];
                 if (ai.Mode == AiMode.Dead)
                 {
+                    // The respawn countdown and the revival, which used to live in the combat system (SWG-02).
+                    //
+                    // Moved here because it is a MODE TRANSITION on the AI cadence, which is this system's whole subject — and because keeping it beside
+                    // combat made this the only writer of CreatureVitals in the Resolve phase, where the player's side of a fight has to read them. The
+                    // deriver is right to refuse that: a plain read facing a same-phase writer is an error, and the only in-phase fix would have ordered the
+                    // shooter after the corpse-counter for no reason anyone could state.
+                    Revive(in cluster, vitals, ref vitalsRw, ref brainsRw, ref t, idx, ref revived);
                     continue;
                 }
 
@@ -88,7 +107,10 @@ public sealed partial class SimBridge
                     continue;
                 }
 
-                t.ThinkCooldown = thinkMin + (int)(Hash01(Salt(tick, chunk, idx, 0x51ED2701u)) * thinkSpan);
+                // Taken here rather than at the top of the loop: only a creature that actually decides this tick draws, and an unconditional lookup would
+                // cost one per creature per tick for nothing.
+                var key = cluster.GetEntityId(idx).EntityKey;
+                t.ThinkCooldown = thinkMin + (int)(Hash01(Salt(tick, key, 0x51ED2701u)) * thinkSpan);
 
                 ref var move = ref motions[idx];
                 var x = places[idx].X;
@@ -111,7 +133,7 @@ public sealed partial class SimBridge
                     if (homeSq < 16f)
                     {
                         SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
-                        PickWanderDestination(ref move, in ai, tick, chunk, idx);
+                        PickWanderDestination(ref move, in ai, tick, key);
                     }
                     else
                     {
@@ -123,6 +145,47 @@ public sealed partial class SimBridge
 
                 if (ai.Mode is AiMode.Pursue or AiMode.Fighting)
                 {
+                    // SWG-02: a pursuer chases an ENTITY, and re-reads where that entity is on every decision.
+                    //
+                    // Before this the destination was the point the target occupied on the tick the aggro query found it, and it was never refreshed — so a
+                    // creature walked to a place its target had left and parked there for the rest of its life, with the parked population growing over a long
+                    // run (gap G6). The chase is also now finite: past MaxChaseRangeM the creature gives up, which is the constant Core3 calls MAX_OOS_RANGE
+                    // and which this world declared and never used.
+                    if (ai.Target.IsNull || !ctx.Accessor.TryOpen(ai.Target, out var quarry))
+                    {
+                        SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
+                        ClearTarget(in cluster, ref brainsRw, idx);
+                        PickWanderDestination(ref move, in ai, tick, key);
+                        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                        chaseLost++;
+                        continue;
+                    }
+
+                    var quarryAt = quarry.Read(Player.Bounds);
+                    var dxT = quarryAt.X - x;
+                    var dzT = quarryAt.Z - z;
+                    var targetSq = (dxT * dxT) + (dzT * dzT);
+
+                    // AC-3's leash. Distinct from LeashRadius above, which measures from the lair: this one measures from the QUARRY, and it is what stops a
+                    // creature following a mounted player across the planet at a speed it can never match.
+                    if (targetSq > MaxChaseRange * MaxChaseRange)
+                    {
+                        SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Wander);
+                        ClearTarget(in cluster, ref brainsRw, idx);
+                        PickWanderDestination(ref move, in ai, tick, key);
+                        Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
+                        chaseGivenUp++;
+                        continue;
+                    }
+
+                    // Guarded, like StandStill and for the same reason: this span is GetSpan-backed, so an unconditional store on a quarry that has not moved
+                    // marks the cluster changed for nothing.
+                    if (move.DestX != quarryAt.X || move.DestZ != quarryAt.Z)
+                    {
+                        move.DestX = quarryAt.X;
+                        move.DestZ = quarryAt.Z;
+                    }
+
                     // Close to weapon range, then STAND AND SHOOT.
                     //
                     // A pursuer that keeps steering once it is already in range writes a new position on every tick of every fight, which is the same
@@ -131,10 +194,6 @@ public sealed partial class SimBridge
                     //
                     // The break range is deliberately wider than the attack range. At equal thresholds a creature sitting on the boundary alternates
                     // between stopping and closing on successive decisions, which writes MORE than pursuing would.
-                    var dxT = move.DestX - x;
-                    var dzT = move.DestZ - z;
-                    var targetSq = (dxT * dxT) + (dzT * dzT);
-
                     if (ai.Mode == AiMode.Fighting)
                     {
                         var breakRange = _creatureAttackRange * AttackRangeHysteresis;
@@ -176,10 +235,10 @@ public sealed partial class SimBridge
                 }
                 else
                 {
-                    PickWanderDestination(ref move, in ai, tick, chunk, idx);
+                    PickWanderDestination(ref move, in ai, tick, key);
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, move.DestX, move.DestZ);
 
-                    var legTicks = 1 + (int)(Hash01(Salt(tick, chunk, idx, 0x1B873593u)) * _wanderLegTicks);
+                    var legTicks = 1 + (int)(Hash01(Salt(tick, key, 0x1B873593u)) * _wanderLegTicks);
                     t.MoveUntilTick = tick + legTicks;
                     t.RestUntilTick = t.MoveUntilTick + (legTicks * WanderRestToMoveRatio);
                 }
@@ -197,6 +256,7 @@ public sealed partial class SimBridge
                     {
                         var bestSq = double.MaxValue;
                         var found = false;
+                        var bestEntity = EntityId.Null;
                         float tx = 0f, tz = 0f;
                         while (e.MoveNext())
                         {
@@ -207,6 +267,7 @@ public sealed partial class SimBridge
                                 bestSq = hit.DistanceSq;
                                 tx = (float)((hit.MinX + hit.MaxX) * 0.5);
                                 tz = (float)((hit.MinY + hit.MaxY) * 0.5);
+                                bestEntity = hit.Entity;
                                 found = true;
                             }
                         }
@@ -215,6 +276,10 @@ public sealed partial class SimBridge
                         {
                             aggroHits++;
                             SetCreatureMode(cluster, ref brainsRw, idx, AiMode.Pursue);
+
+                            // The identity, not only the point (SWG-02). Without it the pursuit below has nothing to re-read and nothing to attack: shooter
+                            // and quarry identities were never captured anywhere, which is gap G7.
+                            BrainsRw(in cluster, ref brainsRw)[idx].Target = bestEntity;
                             move.DestX = tx;
                             move.DestZ = tz;
                             Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, x, z, tx, tz);
@@ -233,13 +298,28 @@ public sealed partial class SimBridge
             Interlocked.Add(ref _aggroQueries, aggroQueries);
             Interlocked.Add(ref _aggroHits, aggroHits);
         }
+
+        if (chaseLost != 0)
+        {
+            Interlocked.Add(ref _creaturesLostTarget, chaseLost);
+        }
+
+        if (chaseGivenUp != 0)
+        {
+            Interlocked.Add(ref _chaseGivenUp, chaseGivenUp);
+        }
+
+        if (revived != 0)
+        {
+            Interlocked.Add(ref _creaturesRespawned, revived);
+        }
     }
 
     /// <summary>Pick a new wander destination inside the leash radius.</summary>
-    private static void PickWanderDestination(ref CreatureMotion move, in CreatureBrain ai, long tick, int chunk, int idx)
+    private void PickWanderDestination(ref CreatureMotion move, in CreatureBrain ai, long tick, long key)
     {
-        var a = Hash01(Salt(tick, chunk, idx, 0x9E3779B9u)) * MathF.PI * 2f;
-        var r = ai.LeashRadius * 0.7f * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0x85EBCA6Bu)));
+        var a = Hash01(Salt(tick, key, 0x9E3779B9u)) * MathF.PI * 2f;
+        var r = ai.LeashRadius * 0.7f * MathF.Sqrt(Hash01(Salt(tick, key, 0x85EBCA6Bu)));
         move.DestX = ai.HomeX + (MathF.Cos(a) * r);
         move.DestZ = ai.HomeZ + (MathF.Sin(a) * r);
     }
@@ -284,23 +364,40 @@ public sealed partial class SimBridge
     /// Point a velocity at a destination at a given speed.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Takes the two velocity components by <c>ref</c> rather than the motion component, because the three motion types
     /// are distinct for the scheduler's benefit (see the header of <c>Components.cs</c>) and a shared helper would
     /// otherwise have to be written three times.
+    /// </para>
+    /// <para>
+    /// <b>Static and internal, so that the intent path uses THIS integration rather than a copy of it.</b> An intent is a destination and the server's own
+    /// movement is what carries a player to it — which is the whole of why a client cannot move faster than the server allows — and that argument holds only
+    /// while there is one integration. It was briefly two, line for line, with the tick period supplied separately to each; two implementations that must agree
+    /// and cannot be compared is the shape of the bug, not a duplication to tidy up later.
+    /// </para>
     /// </remarks>
-    private void Steer(ref float velX, ref float velZ, float speedMps, float x, float z, float destX, float destZ)
+    /// <param name="velX">The velocity's X component, written.</param>
+    /// <param name="velZ">The velocity's Z component, written.</param>
+    /// <param name="speedMps">Metres per second.</param>
+    /// <param name="metresPerTick">One tick's share of a second.</param>
+    /// <param name="x">Where the entity is.</param>
+    /// <param name="z">Where the entity is.</param>
+    /// <param name="destX">Where it is going.</param>
+    /// <param name="destZ">Where it is going.</param>
+    /// <returns>Whether the entity is going anywhere: <see langword="false"/> when it has arrived or has no speed.</returns>
+    internal static bool Steer(ref float velX, ref float velZ, float speedMps, float metresPerTick, float x, float z, float destX, float destZ)
     {
         var dx = destX - x;
         var dz = destZ - z;
         var len = MathF.Sqrt((dx * dx) + (dz * dz));
-        if (len < 0.001f)
+        if (len < 0.001f || speedMps <= 0f)
         {
             velX = 0f;
             velZ = 0f;
-            return;
+            return false;
         }
 
-        var step = speedMps * MetresPerTick;
+        var step = speedMps * metresPerTick;
         if (step > len)
         {
             step = len;
@@ -308,11 +405,114 @@ public sealed partial class SimBridge
 
         velX = dx / len * step;
         velZ = dz / len * step;
+        return true;
     }
+
+    /// <summary>
+    /// The A/B switch for rung (c)'s cost, read once from <c>SWG_NO_SLOPE</c>.
+    /// </summary>
+    /// <remarks>
+    /// The claim rung (c) makes is that it adds a second ground sample only where the terrain actually slows something, so
+    /// the flat majority of the planet pays arithmetic and nothing else. That is a claim about a measurement, and this is
+    /// what measures it: a <see langword="static readonly"/> <see cref="bool"/> the JIT folds after the static
+    /// constructor, so both arms are the same binary and neither pays a branch.
+    /// </remarks>
+    private static readonly bool SlopeDisabled = Environment.GetEnvironmentVariable("SWG_NO_SLOPE") == "1";
+
+    /// <summary>
+    /// Shortens a step that climbs, in place — terrain rung (c).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Called from the MOVE phase and not from <see cref="Steer"/> on purpose. Steer sets a velocity once, when an entity
+    /// re-decides; a leg then runs for tens of ticks. Scaling there would fix the speed of a whole leg to the grade at the
+    /// moment it was chosen, so a creature that set off across a flat basin would cross the mesa beyond it at basin speed.
+    /// The step is what the terrain acts on, and the step is here.
+    /// </para>
+    /// <para>
+    /// <b>The second ground sample is taken only when the step actually shortens.</b> The caller has already sampled the
+    /// full-speed end for its own <c>Y</c>, and <paramref name="groundY"/> is that sample; on flat ground — which is most
+    /// of the planet and all of every interior — the factor is 1, nothing is re-read, and this costs three subtractions
+    /// and a square root. Where it does shorten, the step ends somewhere else, and rung (b)'s invariant is that <c>Y</c> is
+    /// the ground at the position actually written — so it is re-read there rather than approximated.
+    /// </para>
+    /// <para>
+    /// The run is measured from the CLAMPED positions rather than from the intended step, so a step the world edge cut
+    /// short reports the grade over the distance actually covered instead of a shallower one over a distance that was not.
+    /// </para>
+    /// </remarks>
+    /// <param name="realm">The realm being moved in; a flat one can never slow anything, since both ends read zero.</param>
+    /// <param name="from">Where the step began. Its <c>Y</c> is the ground there, which is what makes this free.</param>
+    /// <param name="x">The step's end, shortened in place.</param>
+    /// <param name="z">The step's end, shortened in place.</param>
+    /// <param name="groundY">The ground at that end — re-sampled in place if the step moves.</param>
+    /// <param name="halfExtent">The entity's half extent, for the world-edge clamp.</param>
+    /// <param name="half">The world's half extent.</param>
+    internal void Slow<TPlace>(RealmId realm, in TPlace from, ref float x, ref float z, ref float groundY, float halfExtent, float half)
+        where TPlace : unmanaged, IGroundPlacement
+    {
+        if (SlopeDisabled)
+        {
+            return;
+        }
+
+        var dx = x - from.X;
+        var dz = z - from.Z;
+        var factor = SlopeSpeed.FactorForStep(from.Y, groundY, MathF.Sqrt((dx * dx) + (dz * dz)));
+        if (factor >= 1f)
+        {
+            return;
+        }
+
+        x = Math.Clamp(from.X + (dx * factor), -half + halfExtent, half - halfExtent);
+        z = Math.Clamp(from.Z + (dz * factor), -half + halfExtent, half - halfExtent);
+        groundY = GroundAt(realm, x, z);
+    }
+
+    /// <summary>The instance form, for the simulation's own systems: the same integration at this run's tick period.</summary>
+    /// <param name="velX">The velocity's X component, written.</param>
+    /// <param name="velZ">The velocity's Z component, written.</param>
+    /// <param name="speedMps">Metres per second.</param>
+    /// <param name="x">Where the entity is.</param>
+    /// <param name="z">Where the entity is.</param>
+    /// <param name="destX">Where it is going.</param>
+    /// <param name="destZ">Where it is going.</param>
+    private void Steer(ref float velX, ref float velZ, float speedMps, float x, float z, float destX, float destZ)
+        => Steer(ref velX, ref velZ, speedMps, MetresPerTick, x, z, destX, destZ);
 
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
     // Think — players
     // ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+
+    /// <summary>Player-ticks <see cref="PlayerThinkTick"/> declined to decide for because a client is driving that player (SWG-01).</summary>
+    private long _possessedSkipped;
+
+    /// <summary>
+    /// How many player-ticks the activity mix did not decide. Zero in a measurement run, which is what makes it a usable assertion: a non-zero value means a
+    /// session is driving somebody.
+    /// </summary>
+    public long PossessedSkipped => Interlocked.Read(ref _possessedSkipped);
+
+    /// <summary>
+    /// How often a simulated player says something, in seconds of simulated time (SWG-09).
+    /// </summary>
+    /// <remarks>
+    /// A minute is a compromise between a town that feels alive and a wire that is mostly chatter. It is a demo figure
+    /// and not an engine one: what it sets is how much work the 50 m fan-out is given to do, which is the thing worth
+    /// watching. Players are slower than the townsfolk below because there are far fewer of them per square metre.
+    /// </remarks>
+    private const float ChatEverySeconds = 60f;
+
+    /// <summary>
+    /// How often a city NPC says something, in seconds of simulated time (SWG-09).
+    /// </summary>
+    /// <remarks>
+    /// <b>Set by the geometry, not by taste.</b> A listener hears what is within 50 m of ITS OWN viewpoint — for a map
+    /// client, the centre of its region — and a town at these populations puts only about two NPCs in that disc. A
+    /// leisurely cadence there is a line every half minute at the point the camera is aimed at, which reads as broken,
+    /// so this is deliberately brisk.
+    /// </remarks>
+    private const float NpcChatEverySeconds = 8f;
 
     /// <summary>
     /// Player behaviour: an activity mix rather than one loop.
@@ -329,8 +529,25 @@ public sealed partial class SimBridge
     /// </remarks>
     public void PlayerThinkTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         var hz = _config.TickRateHz;
+
+        // About one line per simulated player per minute: enough that a town is audible and little enough that the wire
+        // is not mostly chat. Chat routes to sessions within 50 m, so what this costs a client scales with how crowded
+        // the place it is looking at is, not with the population.
+        var chatChance = 1f / MathF.Max(1f, ChatEverySeconds * hz);
+
+        // Accumulated locally and added once, rather than an interlocked increment per possessed player per tick from every parallel chunk. It is a diagnostic
+        // counter sitting next to its siblings in the same cache line, so the contended form would have chunks invalidating each other's line to maintain a
+        // number nobody reads inside the tick.
+        var skipped = 0L;
 
         using var clusters = ctx.ClusterIds != null
             ? ctx.Accessor.GetClusterEnumerator<Player>(ctx.ClusterIds, ctx.StartClusterIndex, ctx.EndClusterIndex)
@@ -347,7 +564,10 @@ public sealed partial class SimBridge
             var places = cluster.GetReadOnlySpan(Player.Bounds);
             var states = cluster.GetSpan(Player.State);
             var motions = cluster.GetSpan(Player.Move);
-            var chunk = cluster.ChunkId;
+
+            // Read-only, so asking who drives these players does not mark the cluster changed. One byte per player, contiguous: a cache line covers 64 of
+            // them, which is why possession is its own component rather than three more fields on PlayerState (SWG-01).
+            var controls = cluster.GetReadOnlySpan(Player.Control);
             var realm = cluster.Realm.Value;
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: N ticks elapse between two visits of a strided realm at divisor N
 
@@ -359,10 +579,36 @@ public sealed partial class SimBridge
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
 
+                // A possessed player is its client's to drive, and two deciders on one entity is the bug this guards (SWG-01). Nothing below runs for it: not
+                // the arrival test, not the re-decide, not the timer — a possessed player has no server-side activity timer at all, so ActivityTicks is zero
+                // and the re-decide below would fire on every tick and overwrite the destination the client just sent.
+                if (controls[idx].Kind != ControllerKind.InProcess)
+                {
+                    skipped++;
+                    continue;
+                }
+
                 ref var state = ref states[idx];
                 ref var move = ref motions[idx];
                 var x = places[idx].X;
                 var z = places[idx].Z;
+
+                // Per player per tick, unlike the creatures': a player draws on nearly every branch below, and there are orders of magnitude fewer of them.
+                var key = cluster.GetEntityId(idx).EntityKey;
+
+                // SWG-09: the world talks to itself, so the 50 m fan-out is something you can watch rather than a counter.
+                // A hashed cadence rather than a per-player timer: it needs no state, no component field and no extra
+                // write, and it spreads the utterances across ticks instead of bunching them on a shared countdown.
+                if (Hash01(Salt(tick, key, 0x5A17C8A7u)) < chatChance)
+                {
+                    TatooineReplication.Speak(
+                        ctx,
+                        cluster.GetEntityId(idx),
+                        in ChatLines.For(state.Activity, Salt(tick, key, 0x0C4A771Eu)),
+                        x,
+                        z,
+                        realm);
+                }
 
                 if (state.ActivityTicks > 0)
                 {
@@ -390,7 +636,7 @@ public sealed partial class SimBridge
                             {
                                 // At the door: queue the crossing, which TeleportSystem applies next tick. Standing still until then, so Move
                                 // writes nothing that the teleport would overwrite.
-                                EnterPortal(ref state, cluster.GetEntityId(idx), realm, places[idx].HalfExtent, Salt(tick, chunk, idx, 0x0D1CE5A7u));
+                                EnterPortal(ref state, cluster.GetEntityId(idx), realm, places[idx].HalfExtent, Salt(tick, key, 0x0D1CE5A7u));
                                 pushSlots |= 1UL << idx;
                             }
                             else if (state.Activity != PlayerActivity.Combat)
@@ -415,14 +661,14 @@ public sealed partial class SimBridge
                 if (realm >= _config.Planets)
                 {
                     // In an interior and done there: out through the door it came in by.
-                    ExitInterior(ref state, ref move, cluster.GetEntityId(idx), realm, places[idx].HalfExtent, Salt(tick, chunk, idx, 0x3A0B7C11u));
+                    ExitInterior(ref state, ref move, cluster.GetEntityId(idx), realm, places[idx].HalfExtent, Salt(tick, key, 0x3A0B7C11u));
                     pushSlots |= 1UL << idx;
                     continue;
                 }
 
-                var roll = Hash01(Salt(tick, chunk, idx, 0xC2B2AE35u));
+                var roll = Hash01(Salt(tick, key, 0xC2B2AE35u));
                 if (roll < 0.40f
-                    && TryWalkToPortal(ref state, ref move, x, z, realm, Salt(tick, chunk, idx, 0x7F4A7C15u), Salt(tick, chunk, idx, 0x2C1B3C6Du)))
+                    && TryWalkToPortal(ref state, ref move, x, z, realm, Salt(tick, key, 0x7F4A7C15u), Salt(tick, key, 0x2C1B3C6Du)))
                 {
                     // Into a building (Realms G1b): walking to its door, where the crossing is queued.
                 }
@@ -430,27 +676,27 @@ public sealed partial class SimBridge
                 {
                     // Idle in a city. Stationary, so free to the fence — and still expensive to every awareness query.
                     state.Activity = PlayerActivity.Idle;
-                    state.ActivityTicks = (20 * hz) + (int)(Hash01(Salt(tick, chunk, idx, 0x27D4EB2Fu)) * 100 * hz);
+                    state.ActivityTicks = (20 * hz) + (int)(Hash01(Salt(tick, key, 0x27D4EB2Fu)) * 100 * hz);
                     move.VelX = 0f;
                     move.VelZ = 0f;
                 }
                 else if (roll < 0.60f
-                         && TryTakeShuttle(ref state, ref move, x, z, realm, Salt(tick, chunk, idx, 0x3C6EF372u), Salt(tick, chunk, idx, 0x165667B1u)))
+                         && TryTakeShuttle(ref state, ref move, x, z, realm, Salt(tick, key, 0x3C6EF372u), Salt(tick, key, 0x165667B1u)))
                 {
                     // Taking the shuttle (#910): walking to this city's port, where the Shuttle system will board it.
                 }
                 else if (roll < 0.60f)
                 {
                     // Travel to another city — the long legs across open desert, which is where cell crossings come from.
-                    var c = PickCity(Salt(tick, chunk, idx, 0x165667B1u));
-                    var jitter = Hash01(Salt(tick, chunk, idx, 0x9E3779B1u)) * c.Radius;
-                    var ang = Hash01(Salt(tick, chunk, idx, 0x61C88647u)) * MathF.PI * 2f;
+                    var c = PickCity(Salt(tick, key, 0x165667B1u));
+                    var jitter = Hash01(Salt(tick, key, 0x9E3779B1u)) * c.Radius;
+                    var ang = Hash01(Salt(tick, key, 0x61C88647u)) * MathF.PI * 2f;
                     move.DestX = c.X + (MathF.Cos(ang) * jitter);
                     move.DestZ = c.Z + (MathF.Sin(ang) * jitter);
 
                     // Roughly half of travel was mounted or in a speeder: 12 m/s against 5 on foot, and the difference
                     // shows up directly as a cell-crossing rate.
-                    move.SpeedMps = Hash01(Salt(tick, chunk, idx, 0x2545F491u)) < 0.5f
+                    move.SpeedMps = Hash01(Salt(tick, key, 0x2545F491u)) < 0.5f
                         ? TatooineData.PlayerRunSpeedMps
                         : TatooineData.PlayerMountSpeedMps;
                     state.Activity = PlayerActivity.Travelling;
@@ -460,9 +706,9 @@ public sealed partial class SimBridge
                 else if (roll < 0.82f)
                 {
                     // Go and fight. The destination is a point of interest, which is where the lairs are.
-                    var poi = PickPoi(Salt(tick, chunk, idx, 0x85EBCA77u));
-                    var ang = Hash01(Salt(tick, chunk, idx, 0x1B873593u)) * MathF.PI * 2f;
-                    var r = poi.Radius * MathF.Sqrt(Hash01(Salt(tick, chunk, idx, 0xCC9E2D51u)));
+                    var poi = PickPoi(Salt(tick, key, 0x85EBCA77u));
+                    var ang = Hash01(Salt(tick, key, 0x1B873593u)) * MathF.PI * 2f;
+                    var r = poi.Radius * MathF.Sqrt(Hash01(Salt(tick, key, 0xCC9E2D51u)));
                     move.DestX = poi.X + (MathF.Cos(ang) * r);
                     move.DestZ = poi.Z + (MathF.Sin(ang) * r);
                     move.SpeedMps = TatooineData.PlayerMountSpeedMps;
@@ -475,8 +721,8 @@ public sealed partial class SimBridge
                 else
                 {
                     // Roaming: wander near where you already are — surveying, harvesting, looking around.
-                    var ang = Hash01(Salt(tick, chunk, idx, 0xCC9E2D51u)) * MathF.PI * 2f;
-                    var r = (200f + (Hash01(Salt(tick, chunk, idx, 0x1B873593u)) * 800f)) * _config.ContentScale;
+                    var ang = Hash01(Salt(tick, key, 0xCC9E2D51u)) * MathF.PI * 2f;
+                    var r = (200f + (Hash01(Salt(tick, key, 0x1B873593u)) * 800f)) * _config.ContentScale;
                     var half = _config.WorldEdgeM * 0.48f;
                     move.DestX = Math.Clamp(x + (MathF.Cos(ang) * r), -half, half);
                     move.DestZ = Math.Clamp(z + (MathF.Sin(ang) * r), -half, half);
@@ -490,7 +736,15 @@ public sealed partial class SimBridge
                 pushSlots |= 1UL << idx;
             }
 
-            TatooineReplication.Replicate(in cluster, pushSlots);
+            if (pushSlots != 0)
+            {
+                TatooineReplication.Replicate(in cluster, pushSlots);
+            }
+        }
+
+        if (skipped != 0)
+        {
+            Interlocked.Add(ref _possessedSkipped, skipped);
         }
     }
 
@@ -540,6 +794,13 @@ public sealed partial class SimBridge
     /// <summary>Integrate creature positions. The only creature system that writes a placement component.</summary>
     public void CreatureMoveTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var half = _config.WorldEdgeM * 0.5f;
         var batched = _config.BatchedSpatialWrites;
         var dormancy = _config.DormancyTicks > 0;
@@ -561,6 +822,11 @@ public sealed partial class SimBridge
             var motions = cluster.GetReadOnlySpan(Creature.Move);
             var brains = cluster.GetReadOnlySpan(Creature.Ai);
             var timers = cluster.GetReadOnlySpan(Creature.Timers);
+
+            // Taken only when a creature actually revived this tick, which is rare: GetSpan marks the column changed on handout, and a creature that merely
+            // moves must not dirty its timers.
+            var timersRw = Span<CreatureTimers>.Empty;
+
             // Realms G2: a realm at divisor N reaches this system once in N ticks, so its creatures cover N ticks' ground (1 at full rate).
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);
 
@@ -577,12 +843,14 @@ public sealed partial class SimBridge
                 var h = p.HalfExtent;
                 float x, z;
 
-                if (ai.Mode == AiMode.Wander && timers[idx].ThinkCooldown == 1 && p.X != ai.HomeX)
+                if (timers[idx].JustRevived != 0)
                 {
                     // Just revived: teleport home. The largest position jump the simulation makes, and the one that
-                    // forces both a cell change and a cluster-bound recomputation in the same tick.
+                    // forces both a cell change and a cluster-bound recomputation in the same tick. The flag is the
+                    // revival's own signal (S0-1) — inferring it from ThinkCooldown teleported living wanderers too.
                     x = ai.HomeX;
                     z = ai.HomeZ;
+                    TimersRw(in cluster, ref timersRw)[idx].JustRevived = 0;
                 }
                 else if ((move.VelX == 0f && move.VelZ == 0f) || ai.Mode == AiMode.Dead)
                 {
@@ -597,11 +865,12 @@ public sealed partial class SimBridge
                 // WriteSpatial rather than a plain span write: the barrier flags migration and AABB growth inline, which
                 // is what makes SetSpatialBarrierOnly correct for this archetype and lets the fence skip its slot scan.
                 var nb = default(CreaturePlacement);
-                nb.SetAt(x, z, h);
+                var gy = GroundAt(cluster.Realm, x, z);
+                Slow(cluster.Realm, in p, ref x, ref z, ref gy, h, half);
+                nb.SetAt(x, z, gy, h);
                 if (batched)
                 {
                     next[idx] = nb;
-                    moved |= 1UL << idx;
                 }
                 else
                 {
@@ -628,9 +897,27 @@ public sealed partial class SimBridge
         }
     }
 
+    /// <summary>The cluster's mutable timers, handed out on the first write of this cluster's walk and not before. See <see cref="CreatureMoveTick"/>.</summary>
+    private static Span<CreatureTimers> TimersRw(in ClusterRef<Creature> cluster, ref Span<CreatureTimers> rw)
+    {
+        if (rw.IsEmpty)
+        {
+            rw = cluster.GetSpan(Creature.Timers);
+        }
+
+        return rw;
+    }
+
     /// <summary>Integrate player positions.</summary>
     public void PlayerMoveTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var half = _config.WorldEdgeM * 0.5f;
         var batched = _config.BatchedSpatialWrites;
         Span<PlayerPlacement> next = stackalloc PlayerPlacement[64];
@@ -669,7 +956,9 @@ public sealed partial class SimBridge
                 var x = Math.Clamp(p.X + (move.VelX * k), -half + h, half - h);
                 var z = Math.Clamp(p.Z + (move.VelZ * k), -half + h, half - h);
                 var nb = default(PlayerPlacement);
-                nb.SetAt(x, z, h);
+                var gy = GroundAt(cluster.Realm, x, z);
+                Slow(cluster.Realm, in p, ref x, ref z, ref gy, h, half);
+                nb.SetAt(x, z, gy, h);
                 if (batched)
                 {
                     next[idx] = nb;
@@ -681,7 +970,9 @@ public sealed partial class SimBridge
                 }
             }
 
-            if (batched)
+            // The moved slots in one call, and only when something moved: 40 % of players are parked idle in a city, so
+            // without the mask test most clusters pay the barrier's bookkeeping for an empty write.
+            if (batched && moved != 0)
             {
                 cluster.WriteSpatial(Player.Bounds, moved, next);
             }
@@ -698,8 +989,19 @@ public sealed partial class SimBridge
     /// </remarks>
     public void NpcMoveTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         var batched = _config.BatchedSpatialWrites;
+
+        // A townsperson speaks about this often. They are the dense population, so this is the figure that decides
+        // whether a town sounds alive; the players' cadence is slower because there are far fewer of them per square.
+        var npcChatChance = 1f / MathF.Max(1f, NpcChatEverySeconds * _config.TickRateHz);
         Span<NpcPlacement> next = stackalloc NpcPlacement[64];
 
         using var clusters = ctx.ClusterIds != null
@@ -721,7 +1023,6 @@ public sealed partial class SimBridge
             var brains = cluster.GetReadOnlySpan(CityNpc.Ai);
             var timers = cluster.GetSpan(CityNpc.Timers);
             var motions = cluster.GetSpan(CityNpc.Move);
-            var chunk = cluster.ChunkId;
             var k = ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2, as for creatures
 
             var moved = 0UL;
@@ -730,6 +1031,25 @@ public sealed partial class SimBridge
             {
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
+
+                // SWG-09: the town talks. BEFORE the wander gate, because the NPCs standing still are most of them and a
+                // stall-holder who never speaks is exactly the one you would expect to. This is what makes a 50 m fan-out
+                // visible from a camera — players are one per few hundred square metres, and a town is dozens in one
+                // square.
+                // The key once, not three times: this roll is paid by EVERY townsperson every tick — that is the point of
+                // its placement — and the NPCs are the demo's densest population, so a repeated cluster lookup here is the
+                // one that multiplies. The surrounding loops hoist theirs for the same reason.
+                var npcId = cluster.GetEntityId(idx);
+                if (Hash01(Salt(tick, npcId.EntityKey, 0x70171CE1u)) < npcChatChance)
+                {
+                    TatooineReplication.Speak(
+                        ctx,
+                        npcId,
+                        in ChatLines.Townsperson(Salt(tick, npcId.EntityKey, 0x7A1C0FFEu)),
+                        places[idx].X,
+                        places[idx].Z,
+                        cluster.Realm.Value);
+                }
 
                 if (brains[idx].Mode != AiMode.Wander)
                 {
@@ -760,12 +1080,13 @@ public sealed partial class SimBridge
                 else
                 {
                     var brain = brains[idx];
-                    var ang = Hash01(Salt(tick, chunk, idx, 0x846CA68Bu)) * MathF.PI * 2f;
+                    var key = cluster.GetEntityId(idx).EntityKey;
+                    var ang = Hash01(Salt(tick, key, 0x846CA68Bu)) * MathF.PI * 2f;
                     move.DestX = brain.HomeX + (MathF.Cos(ang) * brain.LeashRadius);
                     move.DestZ = brain.HomeZ + (MathF.Sin(ang) * brain.LeashRadius);
                     Steer(ref move.VelX, ref move.VelZ, move.SpeedMps, p.X, p.Z, move.DestX, move.DestZ);
 
-                    var legTicks = 1 + (int)(Hash01(Salt(tick, chunk, idx, 0x7FEB352Du)) * _wanderLegTicks);
+                    var legTicks = 1 + (int)(Hash01(Salt(tick, key, 0x7FEB352Du)) * _wanderLegTicks);
                     ai.MoveUntilTick = tick + legTicks;
                     ai.RestUntilTick = ai.MoveUntilTick + (legTicks * WanderRestToMoveRatio);
                 }
@@ -776,7 +1097,11 @@ public sealed partial class SimBridge
                 }
 
                 var nb = default(NpcPlacement);
-                nb.SetAt(p.X + (move.VelX * k), p.Z + (move.VelZ * k), p.HalfExtent);
+                var nx = p.X + (move.VelX * k);
+                var nz = p.Z + (move.VelZ * k);
+                var ngy = GroundAt(cluster.Realm, nx, nz);
+                Slow(cluster.Realm, in p, ref nx, ref nz, ref ngy, p.HalfExtent, _config.WorldEdgeM * 0.5f);
+                nb.SetAt(nx, nz, ngy, p.HalfExtent);
                 if (batched)
                 {
                     next[idx] = nb;
@@ -788,7 +1113,8 @@ public sealed partial class SimBridge
                 }
             }
 
-            if (batched)
+            // Only 12 % of city NPCs wander at all, so the empty-mask case is the common one here.
+            if (batched && moved != 0)
             {
                 cluster.WriteSpatial(CityNpc.Bounds, moved, next);
             }
@@ -1082,6 +1408,13 @@ public sealed partial class SimBridge
     /// </remarks>
     public void EconomyTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         long ticked = 0;
 
         using var clusters = ctx.ClusterIds != null

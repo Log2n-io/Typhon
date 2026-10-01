@@ -1,8 +1,9 @@
+import { FLAT_GROUND } from '../src/terrain/ground-sampler';
 import { WorldStore } from '@typhondb/client';
 import { describe, expect, it } from 'vitest';
 import { Archetype, SWG_SCHEMA } from '../src/data/swg-schema';
 import { LayerPacker, type FrameView } from '../src/render/layer-packer';
-import { LAYER_STYLES } from '../src/render/styles';
+import { styleFor } from '../src/render/styles';
 import { extractFrustumPlanes, packedStyle, SELECTED_BIT } from '../src/render/view-math';
 
 /** Eye at the render origin looking down +Z, 90° vertical field of view, 800 × 800 CSS px: 400 px per metre at 1 m. */
@@ -28,13 +29,14 @@ function view(selectedNetId = 0): FrameView {
     viewportWidth: 800,
     viewportHeight: 800,
     selectedNetId,
+    ground: FLAT_GROUND,
   };
 }
 
 function setup() {
   const world = new WorldStore(SWG_SCHEMA, { maxNetId: 4096 });
   const store = world.archetypeStore(Archetype.Player);
-  const packer = new LayerPacker(Archetype.Player, LAYER_STYLES[Archetype.Player]);
+  const packer = new LayerPacker(Archetype.Player, styleFor('Player'));
   packer.bind(store);
   let tick = 1;
   world.beginFrame(tick);
@@ -66,8 +68,24 @@ describe('LayerPacker', () => {
     expect(packer.farCount).toBe(1);
     expect(packer.nearNetIds[0]).toBe(11);
     expect(packer.farNetIds[0]).toBe(12);
-    expect(Array.from(packer.nearData.subarray(0, 2))).toEqual([0, 100]);
+    // (x, y, z, packed): the altitude slot is 0 for a two-axis archetype, which every SWG one is (CLI3D-04).
+    expect(Array.from(packer.nearData.subarray(0, 3))).toEqual([0, 0, 100]);
     expect(packedStyle(packer.nearData[3])).toBe(0);
+  });
+
+  it('stands every instance on the ground, in both bands, at the ground under ITS OWN position', () => {
+    // The server is 2D, so an entity's own altitude is 0 and the terrain is the whole of its height. A sampler that
+    // returned one height for the frame — the camera's, say — would pass a test with one entity on flat ground; this one
+    // puts two at different x on a ramp, in different bands, so only a per-entity sample gets both right.
+    const { packer, place } = setup();
+    place(31, 0, 100); // mesh band
+    place(32, 40, 200); // sprite band
+    packer.pack({ ...view(), ground: { heightAt: (x, z) => x * 0.25 + z * 0.01 } });
+
+    expect(packer.nearCount).toBe(1);
+    expect(packer.farCount).toBe(1);
+    expect(packer.nearData[1]).toBeCloseTo(1, 6);
+    expect(packer.farData[1]).toBeCloseTo(12, 6);
   });
 
   it("keeps an entity just outside the frustum by less than its shape's bounds", () => {

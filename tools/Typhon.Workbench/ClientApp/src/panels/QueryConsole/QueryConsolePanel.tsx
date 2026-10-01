@@ -11,6 +11,7 @@ import { SpecChips } from './SpecChips';
 import { specToDsl } from './specToDsl';
 import { useSaveCurrent } from './useSaveCurrent';
 import { useQueryConsolePlan } from '@/hooks/queryConsole/useQueryConsolePlan';
+import { problemCode, problemMessage } from '@/api/problemDetails';
 
 // Vertical (row) split between the definition area (chips / DSL) and the result grid. Panel-local — not worth
 // persisting; resets to 50/50 on remount. Clamped so neither pane can be dragged shut.
@@ -115,9 +116,10 @@ export default function QueryConsolePanel(_props: IDockviewPanelProps) {
           });
         },
         onError: (err: unknown) => {
-          const e = err as { status?: number; data?: { title?: string; detail?: string } };
-          const code = e?.data?.title ?? 'error';
-          const message = e?.data?.detail ?? String(err);
+          // The server writes a code and a sentence; show both. See `problemDetails` for why this used to show
+          // neither — "error" over "FetchError: …", a designed answer rendered as a crash.
+          const code = problemCode(err) ?? 'error';
+          const message = problemMessage(err);
           setRunResult(null, 'error', code, message);
           appendHistory({
             dsl: dslDraft,

@@ -10,6 +10,8 @@ import { useResourceIndex } from '@/hooks/useResourceIndex';
 import { useComponentList } from '@/hooks/schema/useComponentList';
 import { useArchetypeList } from '@/hooks/schema/useArchetypeList';
 import { useQueryDefinitions } from '@/panels/QueryAnalyzer/useQueryDefinitions';
+import { useRealmList } from '@/hooks/realms/useRealmList';
+import { realmExtent, realmLabel } from '@/hooks/realms/types';
 import { useProfilerSessionStore } from '@/stores/useProfilerSessionStore';
 import { useSelectionStore } from '@/stores/useSelectionStore';
 import { useSessionStore } from '@/stores/useSessionStore';
@@ -65,6 +67,7 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
  const { list: components } = useComponentList();
  const { list: archetypes } = useArchetypeList();
  const { definitions: queries } = useQueryDefinitions();
+ const { list: realms } = useRealmList();
  const systems = useProfilerSessionStore((s) => s.metadata?.systems) ?? [];
  const select = useSelectionStore((s) => s.select);
  const kind = useSessionStore((s) => s.kind);
@@ -80,6 +83,7 @@ export default function CommandPalette({ open, onClose, anchorRef }: CommandPale
        {
          components: components.map((c) => ({ typeName: c.typeName })),
          archetypes: archetypes.map((a) => ({ archetypeId: a.archetypeId, componentTypes: a.componentTypes })),
+         realms: realms.map((r) => ({ id: r.id, label: realmLabel(r), sublabel: realmExtent(r.grid) })),
          systems,
          queries,
        },

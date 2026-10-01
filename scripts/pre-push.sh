@@ -118,6 +118,8 @@ PY
 step "rule scopes (gate: invariants)"          python3 scripts/check-rule-scopes.py --quiet
 step "rule coverage (gate: rule-coverage)"     python3 scripts/audit-rule-coverage.py
 step "test suppressions (gate: invariants)"    python3 scripts/lint-test-suppressions.py
+step "orphaned doc comments (gate: invariants)" python3 scripts/lint-orphaned-doc-comments.py --quiet
+step "native allocations (gate: invariants)"   python3 scripts/lint-native-allocations.py
 step "runsettings (gate: invariants)"          python3 scripts/check-runsettings.py
 step "gate filters (gate: invariants)"         python3 scripts/check-gate-filters.py --quiet --no-github
 step "blueprint public API (gate: invariants)" python3 scripts/check-blueprint-public-api.py --quiet
@@ -174,6 +176,35 @@ if [ "$BUILD" -eq 1 ]; then
   step "build websocket adapter tests (Release)" dotnet build "$WSADAPTER" -c Release
 fi
 suite_step "websocket adapter suite (Release)" "$WSADAPTER" pre-push-ws-adapter.trx
+
+# ── the rest of the gate's aux-tests job ─────────────────────────────────────────────────────────────────────────────
+#
+# The `aux-tests` job runs eight projects and this script ran exactly one of them — the WebSocket adapter, above. The other
+# seven were only ever exercised on a billed c6id instance: the same gap that sent one bug to the gate five times through
+# test/Typhon.Workbench.Tests, which is the founding story of this whole script. (The engine, workbench and client suites
+# above belong to other gate jobs, which is why they are not in this list.) They are seconds each, and two of them — the
+# demo suites — are where WP-3's own checks live, so a WP-3 change that broke a demo world would be found by CI, not here.
+AUX=(
+  test/Typhon.Analyzers.Tests/Typhon.Analyzers.Tests.csproj
+  test/Typhon.Generators.Tests/Typhon.Generators.Tests.csproj
+  test/Typhon.Protocol.Tests/Typhon.Protocol.Tests.csproj
+  test/Typhon.Shell.Tests/Typhon.Shell.Tests.csproj
+  test/Typhon.Samples.Swg.Tests/Typhon.Samples.Swg.Tests.csproj
+  demo/AntHill/AntHill.Harness.Tests/AntHill.Harness.Tests.csproj
+  demo/SwgTatooine.Tests/SwgTatooine.Tests.csproj
+)
+# Built when --build asks, OR when the Release assembly is simply not there. `suite_step` passes `--no-build`, so a project
+# never built in Release on this box fails with "test assembly not found" — which reads as a broken script rather than a
+# missing build, and would do so on every fresh worktree. Building all seven unconditionally was the first attempt and it
+# broke the promise in this script's own usage block: without --build there are no builds. ~20-40 s of MSBuild startup on
+# every run is not a rounding error on a script people are meant to run before every push.
+for proj in "${AUX[@]}"; do
+  name="$(basename "$proj" .csproj)"
+  if [ "$BUILD" -eq 1 ] || [ -z "$(find "$(dirname "$proj")/bin/Release" -name "${name}.dll" -print -quit 2>/dev/null)" ]; then
+    step "build ${name} (Release)" dotnet build "$proj" -c Release
+  fi
+  suite_step "${name} (Release, gate: aux-tests)" "$proj" "pre-push-${name}.trx"
+done
 if command -v npm >/dev/null 2>&1; then
   step "TypeScript SDK check (gate: subscriptions-sdk)" bash -c 'cd src/Typhon.Client.TypeScript && npm ci --silent && npm run check'
 else

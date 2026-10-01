@@ -1,4 +1,4 @@
-using SwgTatooine.Replication;
+﻿using SwgTatooine.Replication;
 using System;
 using System.IO;
 using System.Threading.Tasks;
@@ -27,13 +27,41 @@ public sealed partial class TatooineSim
     /// <returns>A task that completes when the host has stopped.</returns>
     public async Task ServeAsync(int port, string clientRoot)
     {
-        _viewTx = Dbe.CreateQuickTransaction();
-        _playerView = _viewTx.Query<Player>().ToView();
-        _creatureView = _viewTx.Query<Creature>().ToView();
-        _npcView = _viewTx.Query<CityNpc>().ToView();
-        _shipView = SpaceRealm >= 0 ? _viewTx.Query<Starship>().ToView() : null;
-        _lairView = _viewTx.Query<CreatureLair>().ToView();
-        _structureView = _viewTx.Query<WorldObject>().ToView();
+        StartReplication();
+        try
+        {
+            await TatooineHost
+                .ServeAsync(_runtime, port, clientRoot, realmsJson: RealmDirectoryJson(), realmInventory: RealmInventoryJson)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _runtime.Shutdown();
+        }
+    }
+
+    /// <summary>
+    /// The runtime this simulation is ticking, once <see cref="StartReplication"/> or <see cref="Run"/> has started one.
+    /// </summary>
+    /// <remarks>
+    /// Public for the same reason <see cref="Dbe"/> is: this is a demo whose purpose is to be driven from outside — by <c>Program</c>, by a sweep, and by
+    /// the checks beside it. A test that has to reach a private field through reflection is a test that breaks when the field is renamed, and stops
+    /// testing when the field is removed.
+    /// </remarks>
+    public TyphonRuntime Runtime => _runtime;
+
+    /// <summary>
+    /// Everything <see cref="ServeAsync"/> does except the web host: the views, the bridge, the replication declarations and a started runtime.
+    /// </summary>
+    /// <remarks>
+    /// <b>Split out so that replication can be exercised without a socket.</b> A transport is a seam
+    /// (<c>design/Subscriptions/04-transport.md § 2</c>): a test starts its own in-process transport against
+    /// <see cref="TyphonRuntime.StartSubscriptionTransport"/> and receives the same frames a WebSocket would carry. Going through the web host instead would
+    /// test Kestrel, bind a port, and make a check that is about a <c>KICK</c> fail for a reason that has nothing to do with one.
+    /// </remarks>
+    public void StartReplication()
+    {
+        BuildViews();
 
         _bridge = new SimBridge(_config, Map, Index)
         {
@@ -57,6 +85,12 @@ public sealed partial class TatooineSim
             CostBasedChunking = _config.CostBasedChunking,
             EnableParallelFence = _config.ParallelFence,
 
+            // The same strict policy the measured path takes (P-3), and for the server the argument is if anything stronger. Under the engine's default a
+            // faulting system's branch is skipped and the tick is reported as a SUCCESS, so a server whose combat resolution threw would keep publishing frames
+            // of a world in which nothing resolves — clients would see a frozen fight and no operator would learn why. A terminal stop is diagnosable and
+            // 08-hosting's systemd unit already answers it with Restart=on-failure, which restarts from a checkpoint rather than limping on.
+            SystemExceptionPolicy = SystemExceptionPolicy.AbortTickAndStop,
+
             // --subs-pipeline and --subs-mode. Every other field of the options is left at its default: these are the ones an A/B moves, and moving another
             // would make the two arms differ in more than the thing being measured.
             Subscriptions = new SubscriptionsOptions
@@ -77,11 +111,28 @@ public sealed partial class TatooineSim
         TatooineReplication.GodRegionMaxEdgeM = _config.GodRegionMaxEdgeM;
         TatooineReplication.GodNearBudget = _config.GodNearBudget;
         TatooineReplication.Planets = _config.Planets;
+        TatooineReplication.MaxClients = _config.MaxClients;
+        TatooineReplication.MaxSpectators = _config.MaxSpectators;
+
+        // What an intent is validated against: the world it must stay inside, and the tick it gets one step of (SWG-01). Required rather than defaulted, so a
+        // path that forgot it would refuse to start rather than clamp to the wrong world silently.
+        TatooineReplication.ConfigureIntents(Dbe, _config.WorldEdgeM, _config.TickRateHz);
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 
-        _runtime.OnTickAborted += (_, outcome)
-            => Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}'");
+        var aborts = 0;
+        _runtime.OnTickAborted += (_, outcome) =>
+        {
+            Console.WriteLine($"  !! tick {outcome.TickNumber} aborted: {outcome.Reason} in '{outcome.FailedSystemName}': {outcome.FailedSystemException}");
+
+            // The artefact, on the first abort only, exactly as the measured path does it (P-3). For a server this is the whole of the diagnosis: there is no
+            // report at the end of a run that never ends, so a fault that is not written down is a fault nobody can look at afterwards.
+            if (++aborts == 1)
+            {
+                CrashArtefactPath = WriteCrashArtefact(
+                    $"tick aborted: {outcome.Reason} in system '{outcome.FailedSystemName}'", outcome.FailedSystemException, outcome.TickNumber);
+            }
+        };
 
         TatooineReplication.Scheduler = _runtime.Scheduler;
         _runtime.Start();
@@ -90,27 +141,17 @@ public sealed partial class TatooineSim
         // declarations against the builder ones this way).
         var catalog = _runtime.SubscriptionsCatalogJson;
         Console.WriteLine($"  catalog {Typhon.Protocol.CatalogSerializer.HashBytes(catalog.Span):X16}, {catalog.Length} B");
-
-        try
-        {
-            await TatooineHost.ServeAsync(_runtime, port, clientRoot).ConfigureAwait(false);
-        }
-        finally
-        {
-            _runtime.Shutdown();
-        }
     }
 
-    /// <summary>The simulation's own schedule, plus the one system a server needs that a benchmark does not.</summary>
+    /// <summary>The simulation's own schedule, plus the two systems a server needs that a benchmark does not.</summary>
+    /// <remarks>
+    /// <b>They join the simulation's DAG rather than a DAG of their own, which they had until SWG-01.</b> Two DAGs on one track have no barrier between them
+    /// and cannot carry an edge to each other, so a session system in its own DAG could run concurrently with <c>PlayerThink</c> — which matters the moment it
+    /// applies an intent, because both write <c>PlayerMotion</c> — and concurrently with a second session system, which matters because session requests share
+    /// one unsynchronized segment. See <see cref="TatooineReplication.SessionTick"/>.
+    /// </remarks>
     private void BuildServeSchedule(RuntimeSchedule schedule)
-    {
-        BuildSchedule(schedule);
-
-        // A session with no profile is in no tick's session set and receives nothing, so this is what turns a connection into a viewer. It runs on the public
-        // track like any other system, which is the point: binding a session is application work, not engine work.
-        schedule.PublicTrack.DeclareDag("Replication").CallbackSystem("BindSessions", TatooineReplication.BindOpenedSessions)
-            .CallbackSystem("PlaceSessions", TatooineReplication.PlacePlayerSessions);
-    }
+        => BuildSchedule(schedule, replicating: true);
 
     /// <summary>Where the built browser client is expected, relative to the repository root.</summary>
     /// <param name="baseDirectory">The process's base directory.</param>

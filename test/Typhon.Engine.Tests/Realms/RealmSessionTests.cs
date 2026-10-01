@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -274,6 +275,91 @@ class RealmSessionTests : TestBase<RealmSessionTests>
             Assert.That(log.Flags & TickFlags.Reset, Is.EqualTo(TickFlags.Reset));
             Assert.That(log.Calls[1], Is.EqualTo("realm 1"));
             Assert.That(harness.Subscriptions.Commands.RealmOf(session), Is.EqualTo(new RealmId(1)));
+        });
+    }
+
+    /// <summary>
+    /// The Try overloads answer an anchored session instead of raising at it, and still do not move it.
+    /// </summary>
+    /// <remarks>
+    /// <b>SUB-29 is satisfied either way — what changes is whether an application can obey it.</b> Whether a session is anchored is decided by
+    /// <c>ViewpointSource</c>, which is internal, and a profile requested on one tick is applied by the next tick's prologue: so an application that asks
+    /// first and acts second is asking about a state that changes between the two, and the wrong answer is an exception on the tick thread. The test and the
+    /// act have to be one call, which is what these are.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void AnAnchoredSessionAnswersTheTryOverloadsRatherThanRaising()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, Follow)[0];
+        var ids = Spawn(dbe, 0, 3);
+        Assert.That(harness.Sessions.SetControlled(session, ids[0]), Is.True);
+        Run(harness, session, 3);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.IsAnchored(session), Is.True, "a profile declaring AroundControlled is what anchored means");
+            Assert.That(commands.ControlledOf(session), Is.EqualTo(ids[0]), "the anchor is readable, so an application need not mirror it");
+
+            // The whole point: the same condition, answered rather than thrown.
+            Assert.Throws<InvalidOperationException>(() => commands.Enter(session, new RealmId(1)));
+            Assert.That(commands.TryEnter(session, new RealmId(1)), Is.False, "TryEnter raised or moved an anchored session");
+            Assert.That(commands.TryPlace(session, new RealmId(1), new Vector3D(1, 1, 0)), Is.False, "TryPlace raised or moved an anchored session");
+
+            // SUB-29 itself: answering false is not a quiet move.
+            Assert.That(commands.RealmOf(session), Is.EqualTo(RealmId.Default), "a refused Try moved the session anyway");
+        });
+    }
+
+    /// <summary>
+    /// A session nothing anchors takes the Try overloads exactly as it takes the raising ones.
+    /// </summary>
+    /// <remarks>
+    /// The half that stops <c>TryEnter</c> being a no-op that always answers <see langword="false"/> — which would pass every assertion of the case above.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void AnUnanchoredSessionIsMovedByTheTryOverloads()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, World)[0];
+        Spawn(dbe, 1, 2);
+
+        Assert.That(commands.IsAnchored(session), Is.False);
+        Assert.That(commands.ControlledOf(session), Is.EqualTo(EntityId.Null), "nothing controls it");
+        Assert.That(commands.TryEnter(session, new RealmId(1)), Is.True, "an ordinary session was refused");
+        Run(harness, session, 3);
+        Assert.That(commands.RealmOf(session), Is.EqualTo(new RealmId(1)), "TryEnter answered true and did not move it");
+    }
+
+    /// <summary>
+    /// <c>TryEnter</c> answers <see langword="false"/> for a realm that is gone, and still raises for a caller's own mistake.
+    /// </summary>
+    /// <remarks>
+    /// <b>The line is what can change under the caller.</b> A realm being unregistered is a race — a dungeon closes at the first fence that finds it empty —
+    /// so it is an answer. <see cref="RealmId.None"/> is not: it cannot become a realm, and answering false for it would turn a misuse of the API into a
+    /// session that quietly never arrives.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void TryEnterAnswersForARealmThatIsGoneAndRaisesForAMisuse()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, World)[0];
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.TryEnter(session, new RealmId(9)), Is.False, "a realm this engine never registered is an answer, not an exception");
+            Assert.Throws<ArgumentException>(() => commands.TryEnter(session, RealmId.None), "RealmId.None is Leave(), and saying so is the point");
+            Assert.Throws<InvalidOperationException>(() => commands.TryEnter(session, new RealmId(2)),
+                "a realm declaring no replication is fixed when it is registered, so it is the application's bug and not a race");
         });
     }
 
@@ -813,6 +899,468 @@ class RealmSessionTests : TestBase<RealmSessionTests>
         commands.Leave(sessions[0]);
         harness.RunTick(harness.Tick + 1);
         Assert.That(dbe.RealmTable.ObserverCount(1), Is.Zero);
+    }
+
+    // ── SWG-10: SessionEvent.RealmClosed (12-realms § 1.6 Q7) ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// A realm unregistered and then removed with a session still in it moves that session to none and says so once.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the case a game meets on its first day and the engine had no way to report.</b> An instance, a dungeon, a house, a match — anything
+    /// registered at run time — is unregistered when it is finished with, and the fence removes it once it holds nothing. A session watching it then points at
+    /// a realm that does not exist, and before this it simply stopped being served with nothing said to the application: the demo sent an announcement of its
+    /// own and hoped the client acted on it.
+    /// <para>
+    /// <b>Once</b> is asserted over many ticks rather than one, because the natural wrong implementation fires on every tick afterwards: the notice is produced
+    /// by the frame prologue failing to resolve the session's realm, which it would go on failing to do for as long as the session kept pointing at it.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void ARealmRemovedUnderASessionMovesItToNoneAndTellsTheApplicationOnce()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, World)[0];
+
+        // A realm registered while the engine runs, which is the only kind that is ever removed.
+        dbe.Realms.Register(new RealmId(3), new RealmConfig
+        {
+            Grid = Realm1Grid(),
+            WhenUnobserved = RealmUnobserved.Simulate,
+            UnobservedTickDivisor = 1,
+            Replication = new RealmReplicationConfig { Kind = "interior", CellM = 8, AppTag = 7 },
+        });
+
+        Assert.That(commands.TryEnter(session, new RealmId(3)), Is.True);
+        Run(harness, session, 3);
+        Assert.That(commands.RealmOf(session), Is.EqualTo(new RealmId(3)), "precondition: the session is in the realm about to go");
+
+        // Unregistered (Closing), then removed by the first fence that finds it empty — it never held anything, so that is the next one.
+        var log = RemoveRealm(harness, dbe, new RealmId(3), session);
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.RealmOf(session), Is.EqualTo(RealmId.None), "the session was left pointing at a realm that does not exist");
+            Assert.That(log, Is.Not.Null, "a session whose realm went away is told, and the only way to tell a client is a frame");
+            Assert.That(log.Flags & TickFlags.Reset, Is.EqualTo(TickFlags.Reset));
+            Assert.That(log.Calls[1], Is.EqualTo("realm none"), "its client holds nothing now, and the REALM block is what says so (SUB-29)");
+        });
+
+        // Delivered by the next tick's Engine-Pre, as Opened and Closed are.
+        harness.RunTick(harness.Tick + 1);
+        var events = RealmClosures(harness);
+        Assert.Multiple(() =>
+        {
+            Assert.That(events, Has.Count.EqualTo(1), "exactly one event");
+            Assert.That(events[0].Kind, Is.EqualTo(SessionEventKind.RealmClosed));
+            Assert.That(events[0].Session, Is.EqualTo(session));
+            Assert.That(events[0].Realm, Is.EqualTo(new RealmId(3)), "the realm that went away — the key the application had it filed under");
+            Assert.That(events[0].ToString(), Does.Contain("realm 3"), "and it says which, because a log line that did not would be no use");
+        });
+
+        for (var i = 0; i < 8; i++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            Assert.That(RealmClosures(harness), Is.Empty, $"tick {i} after the removal produced a second RealmClosed");
+        }
+    }
+
+    /// <summary>
+    /// The same, for a session anchored to an entity that was destroyed with the realm rather than placed in it by hand.
+    /// </summary>
+    /// <remarks>
+    /// <b>A separate case because it is answered from a different place.</b> A placed session's realm is a field in the session table; an anchored one's is a
+    /// cache of its entity's last known realm, kept so that the common tick costs no entity probe. Clearing one and not the other leaves this arm firing the
+    /// event on every tick for ever, which is exactly what the first implementation did.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void AnAnchoredSessionWhoseRealmIsRemovedIsAlsoMovedToNoneOnce()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, Follow)[0];
+        dbe.Realms.Register(new RealmId(3), new RealmConfig
+        {
+            Grid = Realm1Grid(),
+            WhenUnobserved = RealmUnobserved.Simulate,
+            UnobservedTickDivisor = 1,
+            Replication = new RealmReplicationConfig { Kind = "interior", CellM = 8, AppTag = 7 },
+        });
+
+        var inside = Spawn(dbe, 3, 1);
+        Assert.That(harness.Sessions.SetControlled(session, inside[0]), Is.True);
+        Run(harness, session, 3);
+        Assert.That(commands.RealmOf(session), Is.EqualTo(new RealmId(3)), "precondition: its realm is its entity's");
+
+        // The realm is emptied the way an application empties one, then unregistered: the entity goes with it.
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            Assert.That(dbe.Realms.DestroyContents(new RealmId(3), tx), Is.EqualTo(1));
+            tx.Commit();
+        }
+
+        RemoveRealm(harness, dbe, new RealmId(3), session);
+        harness.RunTick(harness.Tick + 1);
+        var events = RealmClosures(harness);
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.RealmOf(session), Is.EqualTo(RealmId.None));
+            Assert.That(events, Has.Count.EqualTo(1));
+            Assert.That(events[0].Realm, Is.EqualTo(new RealmId(3)));
+        });
+
+        for (var i = 0; i < 8; i++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            Assert.That(RealmClosures(harness), Is.Empty, $"tick {i} after the removal produced a second RealmClosed");
+        }
+    }
+
+    // ── SWG-10: SessionRequest.Follow (12-realms § 2.2 Q5) ──────────────────────────────────────────────────────
+
+    /// <summary>
+    /// <c>Follow</c> centres the session on an entity it does not control, and takes it through that entity's realm changes.
+    /// </summary>
+    [Test]
+    public void AFollowedSessionIsCentredAndRealmedOnItsEntityWithoutControllingIt()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, Follow)[0];
+        var ids = Spawn(dbe, 0, 3);
+
+        Request(harness, session, r => r.Follow(ids[1]));
+        Run(harness, session, 3);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Sessions.FollowedOf(session), Is.EqualTo(ids[1]));
+            Assert.That(harness.Sessions.ControlledOf(session), Is.EqualTo(EntityId.Null), "following is not controlling");
+            Assert.That(commands.ControlledOf(session), Is.EqualTo(EntityId.Null), "and the engine says so when the application asks");
+            Assert.That(harness.Assembler.TryGetFollowed(session, out var at), Is.True, "the viewpoint is the entity's");
+            Assert.That(at.X, Is.EqualTo(15).Within(0.5), "entity 1 is at x = 15, which is where the session is looking from");
+            Assert.That(Held(harness, session), Is.GreaterThan(0));
+        });
+    }
+
+    /// <summary>
+    /// A session that follows an entity is served the entity's position and NOT its owner data; one that controls it is served both.
+    /// </summary>
+    /// <remarks>
+    /// <b>This is the reason the verb exists rather than the reason it is convenient.</b> An application that wanted a camera to ride a player had one way to
+    /// do it — make the session control the player — and that also sends the session the player's <c>SELF</c> block and its owner fields, which are its
+    /// private data. The two arms are asserted in one test on one archetype, because the claim is a difference and a test of the following arm alone would
+    /// pass against an engine that sends nobody owner fields at all.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void AFollowedSessionGetsThePositionButNotTheOwnerFieldsOfItsSubject()
+    {
+        using var dbe = SetupEngine();
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            subs.RealmKinds("interior");
+            subs.Archetype<RealmUnit>(a => a
+                .Motion(RealmUnit.Pos, m => m.Teleport(20))
+                .Owner(o => o.Field(RealmUnit.Pos, p => p.Tag, Codec.I32, "tag")));
+            subs.Profile(Follow, p => p.Sphere(30).AroundControlled().Of<RealmUnit>());
+        }, nameof(AFollowedSessionGetsThePositionButNotTheOwnerFieldsOfItsSubject), replicationCellM: 10);
+        harness.RunFence = true;
+
+        var sessions = harness.OpenSessions(2, Follow);
+        var follower = sessions[0];
+        var owner = sessions[1];
+        var ids = Spawn(dbe, 0, 2);
+
+        Request(harness, follower, r => r.Follow(ids[0]));
+        Assert.That(harness.Sessions.SetControlled(owner, ids[0]), Is.True);
+
+        // Both sessions' frames read on every tick, in one loop: a SELF is sent on the first frame after the control lands and then only when an owner group
+        // changes, so reading one session for three ticks and the other for the three after that is reading past it.
+        var selves = SelfBlocks(harness, 5, follower, owner);
+        var followerSelves = selves[0];
+        var ownerSelves = selves[1];
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Assembler.TryGetFollowed(follower, out _), Is.True, "the follower is looking from the entity, so it IS following it");
+            Assert.That(ownerSelves, Is.GreaterThan(0), "precondition: a controlling session is sent the entity's SELF block, or this test proves nothing");
+            Assert.That(followerSelves, Is.Zero, "a session that follows an entity is not that entity, and is sent no SELF block for it");
+            Assert.That(Controllers(harness, ids[0]), Does.Not.Contain((int)follower.Slot),
+                "the owner-routing map is keyed on control, and that is what keeps a follower out of the owner fields");
+            Assert.That(Controllers(harness, ids[0]), Does.Contain((int)owner.Slot), "precondition: the controlling session IS in it");
+        });
+    }
+
+    /// <summary>
+    /// <c>Follow</c> outranks the profile's own anchor while it is set, and <see cref="EntityId.Null"/> gives the profile its anchor back.
+    /// </summary>
+    [Test]
+    public void FollowOverridesTheProfilesOwnAnchorAndReleasingReturnsToIt()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var session = harness.OpenSessions(1, Follow)[0];
+        var ids = Spawn(dbe, 0, 3);
+
+        // Controlling one entity and following another: the viewpoint is the followed one's.
+        Assert.That(harness.Sessions.SetControlled(session, ids[0]), Is.True);
+        Request(harness, session, r => r.Follow(ids[2]));
+        Run(harness, session, 3);
+        Assert.That(harness.Assembler.TryGetFollowed(session, out var followed), Is.True);
+        Assert.That(followed.X, Is.EqualTo(25).Within(0.5), "entity 2's x, not entity 0's");
+
+        // Released: the profile's declared AroundControlled takes over again, with no other call.
+        Request(harness, session, r => r.Follow(EntityId.Null));
+        Run(harness, session, 3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Sessions.FollowedOf(session), Is.EqualTo(EntityId.Null));
+            Assert.That(harness.Assembler.TryGetFollowed(session, out var back), Is.True);
+            Assert.That(back.X, Is.EqualTo(5).Within(0.5), "entity 0's x: the profile's own anchor is in force again");
+        });
+    }
+
+    /// <summary>
+    /// A followed entity crossing a realm takes its session with it in the same tick, as a controlled one does.
+    /// </summary>
+    /// <remarks>
+    /// <b>Not the same code path as the controlled case, which is why it is its own test.</b> A controlled entity's crossing is noticed through the
+    /// owner-routing map — the fence's realm changes are walked against the sessions that control them — and a followed entity is deliberately not in that map.
+    /// The crossing has to be noticed the other way, through the set of entities the fence moved.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void AFollowedEntityCrossingRealmsTakesItsSessionInTheSameTick()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, Follow)[0];
+        var ids = Spawn(dbe, 0, 3);
+
+        Request(harness, session, r => r.Follow(ids[1]));
+        Run(harness, session, 3);
+        Assert.That(commands.RealmOf(session), Is.EqualTo(RealmId.Default), "precondition: it is in its subject's realm");
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Teleport(ids[1], RealmUnit.Pos, new RealmId(1), At(0, 0, 1, 1));
+            tx.Commit();
+        }
+
+        harness.RunTick(harness.Tick + 1);
+        var log = harness.Read(session);
+        Assert.Multiple(() =>
+        {
+            Assert.That(log, Is.Not.Null);
+            Assert.That(log.Flags & TickFlags.Reset, Is.EqualTo(TickFlags.Reset));
+            Assert.That(log.Calls[1], Is.EqualTo("realm 1"), "one frame, one RESET, the new realm first (SUB-29)");
+            Assert.That(commands.RealmOf(session), Is.EqualTo(new RealmId(1)));
+        });
+    }
+
+    /// <summary>
+    /// A followed entity that is destroyed leaves its session where it last saw it and counts a lost follow, as a bound one does (09 § 6).
+    /// </summary>
+    [Test]
+    public void ASessionWhoseFollowedEntityDiesKeepsItsLastViewpoint()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var session = harness.OpenSessions(1, Follow)[0];
+        var ids = Spawn(dbe, 0, 3);
+
+        Request(harness, session, r => r.Follow(ids[1]));
+        Run(harness, session, 3);
+        Assert.That(harness.Assembler.TryGetFollowed(session, out var before), Is.True);
+        var lostBefore = harness.Assembler.BoundLost;
+
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            tx.Destroy(ids[1]);
+            tx.Commit();
+        }
+
+        Run(harness, session, 3);
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Assembler.TryGetFollowed(session, out var after), Is.True, "it is still somewhere");
+            Assert.That(after.X, Is.EqualTo(before.X).Within(0.001), "and it is where its subject last was, not nowhere and not the origin");
+            Assert.That(harness.Assembler.BoundLost, Is.GreaterThan(lostBefore), "a follow the engine could not resolve is counted, not silent");
+            Assert.That(harness.Subscriptions.Commands.RealmOf(session), Is.EqualTo(RealmId.Default), "and it keeps the realm it was in");
+        });
+    }
+
+    /// <summary>
+    /// A run-time <c>Follow</c> anchors a session whose profile declared no anchor, and releasing it gives the application its realm back.
+    /// </summary>
+    /// <remarks>
+    /// <b>The condition has to be the engine's whole answer, not the profile's half of it.</b> While a session follows an entity the engine writes its realm
+    /// from that entity every tick, so an application calling <c>Enter</c> as well would be the second writer of one field — the thing 12-realms § 1.3 forbids
+    /// and the reason <c>Enter</c> throws for an anchored session at all. Reading only the declared profile would answer "not anchored" for a following
+    /// session on a <c>World</c> profile and let the two fight, silently, with the engine winning on the next tick.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void AFollowAnchorsASessionWhoseProfileDeclaredNoAnchor()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, World)[0];
+        var ids = Spawn(dbe, 0, 2);
+
+        Assert.That(commands.IsAnchored(session), Is.False, "precondition: a World profile declares no anchor");
+        Assert.That(commands.TryEnter(session, new RealmId(1)), Is.True, "precondition: so the application may move it");
+
+        Request(harness, session, r => r.Follow(ids[0]));
+        Run(harness, session, 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.IsAnchored(session), Is.True, "a followed session's realm is the engine's to move");
+            Assert.That(commands.TryEnter(session, new RealmId(1)), Is.False, "and the application is answered rather than allowed to fight it");
+            Assert.Throws<InvalidOperationException>(() => commands.Enter(session, new RealmId(1)));
+            Assert.That(commands.RealmOf(session), Is.EqualTo(RealmId.Default), "the follow won, and the refused Enter moved nothing");
+        });
+
+        Request(harness, session, r => r.Follow(EntityId.Null));
+        Run(harness, session, 2);
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.IsAnchored(session), Is.False, "released");
+            Assert.That(commands.TryEnter(session, new RealmId(1)), Is.True, "and the application has its realm back");
+        });
+    }
+
+    /// <summary>
+    /// The immediate <c>Follow</c> releases in the same tick, so stopping a follow and placing the session yourself is one tick's work.
+    /// </summary>
+    /// <remarks>
+    /// <b>The staged form cannot express the release, and that is the whole reason the immediate one exists.</b> <c>Session(s).Follow(null)</c> applies at the
+    /// next prologue, while <c>Leave</c>/<c>Enter</c>/<c>Place</c> apply now — so an application that asked to stop following and then placed the session in
+    /// the same tick met its own follow, still in force, and took a throw on the tick thread. It is the two-phase trap <c>TryEnter</c> was added to close,
+    /// met from the other side.
+    /// </remarks>
+    [Test]
+    [VerifiesRule("SUB-29")]
+    public void TheImmediateFollowReleasesInTheSameTickTheApplicationPlacesTheSession()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var commands = harness.Subscriptions.Commands;
+        var session = harness.OpenSessions(1, World)[0];
+        var ids = Spawn(dbe, 0, 2);
+
+        Assert.That(commands.Follow(session, ids[0]), Is.True, "the immediate Follow is refused");
+        Assert.Multiple(() =>
+        {
+            Assert.That(commands.FollowedOf(session), Is.EqualTo(ids[0]), "it took effect at once, not at the next prologue");
+            Assert.That(commands.IsAnchored(session), Is.True);
+
+            // The message must send the reader to the lever that works: this session's profile declares no anchor, so blaming the profile would be a dead end.
+            var raised = Assert.Throws<InvalidOperationException>(() => commands.Enter(session, new RealmId(1)));
+            Assert.That(raised.Message, Does.Contain("Follow(EntityId.Null)"), "the refusal does not name the way out");
+        });
+
+        // Released and placed in one tick, which the staged form cannot do.
+        Assert.That(commands.Follow(session, EntityId.Null), Is.True);
+        Assert.That(commands.TryEnter(session, new RealmId(1)), Is.True, "released, so the application may move it — in this same tick");
+        Run(harness, session, 3);
+        Assert.That(commands.RealmOf(session), Is.EqualTo(new RealmId(1)));
+    }
+
+    // ── helpers for the two above ───────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>Stages one session request and lets the next prologue apply it, as a system would.</summary>
+    private static void Request(FrameHarness harness, SessionId session, Action<SessionRequest> ask)
+    {
+        ask(harness.Subscriptions.Ingress.Requests.Request(0, session));
+        harness.Subscriptions.Ingress.Requests.Apply(harness.Sessions);
+    }
+
+    /// <summary>
+    /// This tick's <see cref="SessionEventKind.RealmClosed"/> events, as a system reading <c>subs.SessionEvents</c> in Engine-Pre would see them.
+    /// </summary>
+    /// <remarks>
+    /// It only reads. <c>RunTick</c> calls the table's <c>BeginTick</c> itself, exactly where Engine-Pre does, so the batch is already published by the time a
+    /// test looks — and publishing it a second time here would swap it straight back out and show an empty batch, which is a test that can only ever pass by
+    /// accident.
+    /// </remarks>
+    private static List<SessionEvent> RealmClosures(FrameHarness harness)
+    {
+        var events = new List<SessionEvent>();
+        foreach (ref readonly var e in harness.Sessions.Events)
+        {
+            if (e.Kind == SessionEventKind.RealmClosed)
+            {
+                events.Add(e);
+            }
+        }
+
+        return events;
+    }
+
+    /// <summary>
+    /// Unregisters <paramref name="realm"/> and runs the tick whose fence removes it, returning that tick's frame for the session.
+    /// </summary>
+    /// <remarks>
+    /// The removal is a fence, and the notice is the frame stage of the same tick finding the realm gone — so the caller's frame assertions are about this
+    /// tick, and its event assertions are about the next one, where the batch is published.
+    /// </remarks>
+    private static FrameLog RemoveRealm(FrameHarness harness, DatabaseEngine dbe, RealmId realm, SessionId session)
+    {
+        dbe.Realms.Unregister(realm);
+        harness.RunTick(harness.Tick + 1);
+        Assert.That(dbe.Realms.IsRegistered(realm), Is.False, "precondition: the fence removed the realm rather than only marking it Closing");
+        return harness.Read(session);
+    }
+
+    /// <summary>How many SELF blocks each of <paramref name="sessions"/> was sent over the next <paramref name="ticks"/> ticks.</summary>
+    /// <remarks>
+    /// Summed over several ticks rather than read off one: a SELF block is sent on the first frame after a control lands and then only when an owner group
+    /// changes, so which tick carries it is not something a test should pin. Every session is read on every tick, because reading one for a few ticks and then
+    /// the next for a few more reads the second one past its only SELF.
+    /// </remarks>
+    private static int[] SelfBlocks(FrameHarness harness, int ticks, params SessionId[] sessions)
+    {
+        var seen = new int[sessions.Length];
+        for (var i = 0; i < ticks; i++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            for (var s = 0; s < sessions.Length; s++)
+            {
+                while (harness.Read(sessions[s]) is { } log)
+                {
+                    seen[s] += log.Selves.Count;
+                }
+            }
+        }
+
+        return seen;
+    }
+
+    /// <summary>The session slots the owner-routing map says control <paramref name="entity"/>.</summary>
+    private static List<int> Controllers(FrameHarness harness, EntityId entity)
+    {
+        var self = harness.Subscriptions.Self;
+        var slots = new List<int>();
+        if (self == null)
+        {
+            return slots;
+        }
+
+        self.Refresh(harness.Sessions);
+        for (var slot = self.FirstControlling((ulong)entity.RawValue); slot >= 0; slot = self.NextControlling(slot))
+        {
+            slots.Add(slot);
+        }
+
+        return slots;
     }
 }
 

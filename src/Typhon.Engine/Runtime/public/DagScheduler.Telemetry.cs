@@ -152,7 +152,10 @@ public sealed partial class DagScheduler
             CurrentLevel = _overloadDetector.CurrentLevel,
             TickMultiplier = _tickMultiplier,
             EventQueueDepth = queueDepth,
-            LostWakes = lostWakesThisTick
+            LostWakes = lostWakesThisTick,
+            // Written by TyphonRuntime's flush phase, which runs inside TickEndCallback — before this method. Consumed
+            // and cleared here, so a tick that did not flush reports 0 rather than the previous tick's wait (#CLI-04).
+            UowFlushMs = ConsumeUowFlushMs(),
         };
 
         // Enrich with subscription metrics (Output phase duration, deltas pushed, overflows)

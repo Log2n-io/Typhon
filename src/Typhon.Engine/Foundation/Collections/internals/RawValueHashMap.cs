@@ -956,7 +956,9 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
             {
                 bufCapacity = totalEntries;
                 var bufBytes = (nuint)totalEntries * (nuint)entrySize;
+                // native-alloc: transient rehash buffer, freed before this call returns
                 nativeKeep = (byte*)NativeMemory.Alloc(bufBytes);
+                // native-alloc: transient rehash buffer, freed before this call returns
                 nativeMove = (byte*)NativeMemory.Alloc(bufBytes);
                 keepBuf = nativeKeep;
                 moveBuf = nativeMove;
@@ -1294,6 +1296,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
                         {
                             bufCap = Math.Max(bufCap * 2, n + count);
                             // Allocate before freeing: if Alloc throws, spilled still holds a live block for the finally, never a freed one.
+                            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
                             var grown = (byte*)NativeMemory.Alloc((nuint)bufCap * (nuint)(sizeof(TKey) + _valueSize));
                             NativeMemory.Free(spilled);
                             spilled = grown;

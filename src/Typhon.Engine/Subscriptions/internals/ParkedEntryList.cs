@@ -148,6 +148,7 @@ internal sealed unsafe class ParkedEntryList : IDisposable
             capacity *= 2;
         }
 
+        // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling, and the stride needs the 64-byte alignment
         var grown = (byte*)NativeMemory.AlignedAlloc((nuint)((nint)capacity * _stride), 64);
         if (_bytes != null)
         {

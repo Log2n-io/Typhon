@@ -460,6 +460,43 @@ unsafe class FramePoolTests
     }
 
     /// <summary>
+    /// <c>KeepSlabsForOutstandingSends</c> keeps the SLABS and still leaves the tree: the memory leak on that path is deliberate, the node was not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// #1006's trade: <c>FrameBlock.Bytes</c> is a raw pointer into a slab that a transport may still be writing to a socket, and <c>SendPump.Dispose</c>'s
+    /// quiesce is bounded on purpose, so freeing the slabs at teardown is a read of freed memory in whatever holds that pointer. The pool therefore skips its
+    /// own free — and skipped unlinking itself from the resource tree along with it, because both sat after one early return. That left a node advertising a
+    /// pool that answers no to every rent, and it defeated the reason the unlink exists at all: a pool recreated under the same id found the dead one holding
+    /// the slot.
+    /// </para>
+    /// <para>
+    /// Both halves are asserted because either alone passes for the wrong reason — freeing the slabs would also clear the tree, and leaving the node would
+    /// also keep the slabs.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void KeepSlabsForOutstandingSends_KeepsTheSlabsAndStillLeavesTheTree()
+    {
+        var pool = NewPool(AmpleBudget, "Frames");
+        Assert.That(pool.TryRent(512, out _), Is.True);
+        Assert.That(pool.TryRent(8192, out _), Is.True);
+        Assert.That(_allocator.PinnedLiveBlocks, Is.EqualTo(2), "the premise: there are slabs to keep");
+
+        pool.KeepSlabsForOutstandingSends();
+        pool.Dispose();
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(_allocator.PinnedLiveBlocks, Is.EqualTo(2),
+                "the slabs must survive — a send may still be reading a raw pointer into one (#1006)");
+            Assert.That(_graph.GetSnapshot().Nodes.ContainsKey("Root/Runtime/Frames"), Is.False,
+                "the pool is disposed, so the tree must not still advertise it");
+            Assert.That(pool.TryRent(512, out _), Is.False, "and it is disposed, whatever the tree says");
+        });
+    }
+
+    /// <summary>
     /// The whole point of renting native memory: the frame reaches a link as a <see cref="System.ReadOnlyMemory{T}"/> with no pointer over GC memory anywhere
     /// on the path, which is what <see cref="NativeFrameMemoryManager"/> exists for.
     /// </summary>

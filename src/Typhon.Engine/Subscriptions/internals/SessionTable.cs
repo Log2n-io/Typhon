@@ -380,6 +380,7 @@ internal sealed unsafe class SessionTable : IDisposable
             row->FrameBytes = Resolve(limits.FrameBytes, _options.FrameBytes);
             row->ClientMessageBytes = Resolve(limits.ClientMessageBytes, _options.ClientMessageBytes);
             row->Controlled = EntityId.Null;
+            row->Followed = EntityId.Null;
             _viewpoints[session.Slot] = default;
             _realms[session.Slot] = -1;
             _radii[session.Slot] = 0d;
@@ -1193,6 +1194,113 @@ internal sealed unsafe class SessionTable : IDisposable
         }
     }
 
+    /// <summary>The entity a session follows at run time, or <see cref="EntityId.Null"/>. Tick side, from the request log.</summary>
+    /// <param name="session">The identity.</param>
+    /// <param name="entity">The entity, or <see cref="EntityId.Null"/> to go back to the profile's own anchor.</param>
+    /// <returns><see langword="false"/> when the session is no longer open.</returns>
+    /// <remarks>
+    /// <b>No control version to bump.</b> <see cref="SelfTracker"/>'s reverse map is keyed on what a session CONTROLS, and a followed entity is deliberately
+    /// not in it: that map is how owner fields and the <c>SELF</c> block find their session, and a follower gets neither (12-realms § 2.2 Q5).
+    /// </remarks>
+    public bool SetFollowed(SessionId session, EntityId entity)
+    {
+        if (!TryEnter())
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!TryGetOpenRow(session, out var row))
+            {
+                return false;
+            }
+
+            row->Followed = entity;
+            return true;
+        }
+        finally
+        {
+            Exit();
+        }
+    }
+
+    /// <summary>The entity a session follows, or <see cref="EntityId.Null"/>. Tick side, like <see cref="ControlledOf"/> and for the same reason.</summary>
+    /// <param name="session">The identity.</param>
+    /// <returns>The entity.</returns>
+    public EntityId FollowedOf(SessionId session) => TryGetRow(session, out var row) ? row->Followed : EntityId.Null;
+
+    /// <summary>
+    /// Both of a session's anchor entities in one row read: what it controls, and what its viewpoint follows.
+    /// </summary>
+    /// <param name="session">The identity.</param>
+    /// <param name="controlled">What it controls, or <see cref="EntityId.Null"/>.</param>
+    /// <param name="followed">What it follows, or <see cref="EntityId.Null"/>.</param>
+    /// <remarks>
+    /// <b>One <see cref="TryGetRow"/> rather than two, because the frame prologue wants both for every session on every tick.</b> Each of the single-field
+    /// readers is a bounds check, an identity check and an acquire load of the gate, and the prologue asks for the follow unconditionally — a session anchored
+    /// to nothing at all still has to be asked, because that is how the engine learns it is not. The two fields are adjacent in the same cache line, so reading
+    /// them together costs one row read instead of two.
+    /// </remarks>
+    public void AnchorsOf(SessionId session, out EntityId controlled, out EntityId followed)
+    {
+        if (TryGetRow(session, out var row))
+        {
+            controlled = row->Controlled;
+            followed = row->Followed;
+            return;
+        }
+
+        controlled = followed = EntityId.Null;
+    }
+
+    /// <summary>
+    /// Moves a session out of a realm that has gone and queues the <see cref="SessionEventKind.RealmClosed"/> that says so.
+    /// </summary>
+    /// <param name="session">The identity.</param>
+    /// <param name="realm">The realm that was removed — the one the application knew the session by.</param>
+    /// <returns><see langword="false"/> when the session is gone, in which case nothing was queued.</returns>
+    /// <remarks>
+    /// <b>Clearing the stored realm is what makes the event fire once.</b> The frame prologue notices a vanished realm by resolving it and finding nothing
+    /// registered; if the session kept pointing at the dead id it would notice again on every tick for the rest of the session's life, and the application
+    /// would be told the same thing a hundred times a second. Writing <see cref="RealmId.NoneValue"/> here is therefore part of the contract, not tidying.
+    /// <para>
+    /// Tick side, from the frame prologue, and it takes <see cref="SetRealm"/>'s affinity guard because it writes the same two fields. An earlier version
+    /// skipped it on the grounds that "the prologue is the tick thread", which misreads what the guard is for: <see cref="ReplicationThreadAffinity"/> detects
+    /// two callers inside at once, not a change of thread, so being on the right thread is not the property it checks. It is
+    /// <c>[Conditional("DEBUG")]</c> and therefore free in Release.
+    /// </para>
+    /// </remarks>
+    public bool NoteRealmClosed(SessionId session, ushort realm)
+    {
+        if (!TryEnter())
+        {
+            return false;
+        }
+
+        _affinity.Enter(nameof(SessionTable), nameof(NoteRealmClosed));
+        try
+        {
+            // Open, not merely present: a session already Closing stays in the open list until its Closed event is delivered, so TryGetRow would hand a
+            // RealmClosed to an application that has already released everything it held for that session on Closed.
+            if (!TryGetOpenRow(session, out var row))
+            {
+                return false;
+            }
+
+            _realms[session.Slot] = RealmId.NoneValue;
+            _viewpoints[session.Slot] = default;
+            _events.Append(new SessionEvent(SessionEventKind.RealmClosed, session, (SessionRole)row->Role, _declaredLimits[session.Slot],
+                _appData[session.Slot], _sessionKinds[session.Slot], null, null, SessionId.None, default, 0, false, new RealmId(realm)));
+            return true;
+        }
+        finally
+        {
+            _affinity.Exit();
+            Exit();
+        }
+    }
+
     /// <summary>The entity a session controls, or <see cref="EntityId.Null"/>. Tick side, like the viewpoint.</summary>
     /// <param name="session">The identity.</param>
     /// <returns>The entity.</returns>
@@ -1340,6 +1448,7 @@ internal sealed unsafe class SessionTable : IDisposable
         _appData[slot] = null;
         _declaredLimits[slot] = null;
 
+        row->Followed = EntityId.Null;
         if (!row->Controlled.IsNull)
         {
             row->Controlled = EntityId.Null;
@@ -1646,6 +1755,17 @@ internal struct SessionRow
     /// <summary>The entity this session controls, or <see cref="EntityId.Null"/>.</summary>
     public EntityId Controlled;
 
+    /// <summary>
+    /// The entity this session's viewpoint follows at run time, or <see cref="EntityId.Null"/> — <c>Session(s).Follow(e)</c>, 12-realms § 2.2 Q5.
+    /// </summary>
+    /// <remarks>
+    /// <b>Beside <see cref="Controlled"/> rather than sharing it</b>, because they answer different questions and one field cannot answer both: controlling an
+    /// entity sends the session that entity's <c>SELF</c> block and owner fields, and following one must not. A watcher pointed at a player by reusing
+    /// <see cref="Controlled"/> is served the player's private data, which is the defect this field exists to make unrepresentable. It costs 8 bytes of the
+    /// tail the row already reserved, so the prologue reads it from the line it loaded for <see cref="Controlled"/> anyway.
+    /// </remarks>
+    public EntityId Followed;
+
     // Size pads the declared fields to a full cache line. The tail is deliberate headroom for the per-session state later slices add, so that adding
     // one does not silently take a session across two lines.
 
@@ -1687,6 +1807,7 @@ internal readonly struct SessionRowView
         FrameBytes = row->FrameBytes;
         ClientMessageBytes = row->ClientMessageBytes;
         Controlled = row->Controlled;
+        Followed = row->Followed;
         CloseCode = row->CloseCode;
         Role = row->Role;
         Flags = row->Flags;
@@ -1723,6 +1844,9 @@ internal readonly struct SessionRowView
 
     /// <summary>The entity this session controls, or <see cref="EntityId.Null"/>.</summary>
     public EntityId Controlled { get; }
+
+    /// <summary>The entity this session's viewpoint follows, or <see cref="EntityId.Null"/>.</summary>
+    public EntityId Followed { get; }
 
     /// <summary>The close code, once it is closing.</summary>
     public ushort CloseCode { get; }

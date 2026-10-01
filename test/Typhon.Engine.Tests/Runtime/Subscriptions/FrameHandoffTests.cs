@@ -485,7 +485,7 @@ unsafe class FrameHandoffTests
             try
             {
                 NativeMemory.Clear(live, (nuint)sizeof(Harness));
-                SessionSendState.Initialize((SessionSendState*)live->Send);
+                SessionSendState.Initialize(ref *(SessionSendState*)live->Send);
                 live->ProducerSeq = -1;
                 live->ConsumerSeq = -1;
                 live->ReadLow = -1;
@@ -578,7 +578,7 @@ unsafe class FrameHandoffTests
         var bytes = (byte*)state;
         try
         {
-            SessionSendState.Initialize(state);
+            SessionSendState.Initialize(ref *state);
 
             // A producer-only operation must dirty only the first line.
             Assert.That(state->TryBeginFrame(out var sequence, out _), Is.True);
@@ -650,7 +650,7 @@ unsafe class FrameHandoffTests
         var block = stackalloc byte[64];
         try
         {
-            SessionSendState.Initialize(state);
+            SessionSendState.Initialize(ref *state);
 
             for (var i = 0; i < SessionSendState.K; i++)
             {
@@ -695,7 +695,7 @@ unsafe class FrameHandoffTests
         var block = stackalloc byte[64];
         try
         {
-            SessionSendState.Initialize(state);
+            SessionSendState.Initialize(ref *state);
 
             Assert.That(state->TryBeginFrame(out var sequence, out _), Is.True);
             state->PublishFrame(sequence, new FrameBlock(block, 64), 8, tick: 12);
@@ -730,7 +730,7 @@ unsafe class FrameHandoffTests
         var block = stackalloc byte[128];
         try
         {
-            SessionSendState.Initialize(state);
+            SessionSendState.Initialize(ref *state);
 
             // Ticks 10 and 12 produce; tick 11 is silent. Under tick parity both would land in slot 0, one on top of the other.
             Assert.That(state->TryBeginFrame(out var first, out _), Is.True);
@@ -760,7 +760,7 @@ unsafe class FrameHandoffTests
         var block = stackalloc byte[64];
         try
         {
-            SessionSendState.Initialize(state);
+            SessionSendState.Initialize(ref *state);
 
             Assert.That(state->TryBeginFrame(out var sequence, out _), Is.True);
             state->AbandonFrame(sequence);
@@ -799,7 +799,7 @@ unsafe class FrameHandoffTests
         var block = stackalloc byte[64];
         try
         {
-            SessionSendState.Initialize(state);
+            SessionSendState.Initialize(ref *state);
 
             for (var i = 0; i < 60; i++)
             {
@@ -844,7 +844,7 @@ unsafe class FrameHandoffTests
         var state = NewState();
         try
         {
-            SessionSendState.Initialize(state);
+            SessionSendState.Initialize(ref *state);
             Assert.That(state->PingStamp, Is.Zero, "nothing has been heard from this slot yet");
 
             state->NotePing(0);
@@ -868,7 +868,7 @@ unsafe class FrameHandoffTests
         var state = NewState();
         try
         {
-            SessionSendState.Initialize(state);
+            SessionSendState.Initialize(ref *state);
 
             state->ReportAppliedTick(40);
             state->ReportAppliedTick(12);
@@ -909,7 +909,7 @@ unsafe class FrameHandoffTests
         var gate = new FramePublicationGate();
         try
         {
-            SessionSendState.Initialize(state);
+            SessionSendState.Initialize(ref *state);
 
             // Warm up: JIT every path, and let BOTH slots take their block — the second rent is an allocator call, and it must not land inside the window.
             RunHandoffs(state, pool, gate, 8, 8);
@@ -1010,7 +1010,7 @@ unsafe class FrameHandoffTests
 
         try
         {
-            SessionSendState.Initialize(state);
+            SessionSendState.Initialize(ref *state);
             NativeMemory.Clear(reading, (nuint)(64 * SessionSendState.K));
 
             var statePtr = (nint)state;

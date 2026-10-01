@@ -775,6 +775,7 @@ public unsafe partial class EntityAccessor
             {
                 newCap *= 2;
             }
+            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
             _commitStagingBuffer = (byte*)NativeMemory.Realloc(_commitStagingBuffer, (nuint)newCap);
             _commitStagingCapacity = newCap;
         }

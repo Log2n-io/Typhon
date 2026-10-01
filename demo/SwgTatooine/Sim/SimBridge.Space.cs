@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Numerics;
 using System.Threading;
 
@@ -29,6 +29,13 @@ public sealed partial class SimBridge
     /// <summary>Integrate every starship one tick towards its waypoint, picking a new one on arrival, and write the moved ones in one batch per cluster.</summary>
     public void ShipMoveTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         var perTick = 1d / _config.TickRateHz;
         Span<ShipPlacement> next = stackalloc ShipPlacement[64];
@@ -48,7 +55,6 @@ public sealed partial class SimBridge
 
             var places = cluster.GetReadOnlySpan(Starship.Bounds);
             var motions = cluster.GetSpan(Starship.Move);
-            var chunk = cluster.ChunkId;
             var moved = bits;
             var clusterDt = perTick * ctx.Realms.TicksPerVisit(cluster.Realm);   // Realms G2: N ticks per visit of a strided realm at divisor N
             while (bits != 0)
@@ -65,9 +71,10 @@ public sealed partial class SimBridge
                 var len = Math.Sqrt((dx * dx) + (dy * dy) + (dz * dz));
                 if (len < WaypointReachedM)
                 {
-                    move.DestX = (Hash01(Salt(tick, chunk, idx, 0x4CF5AD43u)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
-                    move.DestY = (Hash01(Salt(tick, chunk, idx, 0x2F8B6E1Du)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
-                    move.DestZ = (Hash01(Salt(tick, chunk, idx, 0x9D2C5680u)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
+                    var key = cluster.GetEntityId(idx).EntityKey;
+                    move.DestX = (Hash01(Salt(tick, key, 0x4CF5AD43u)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
+                    move.DestY = (Hash01(Salt(tick, key, 0x2F8B6E1Du)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
+                    move.DestZ = (Hash01(Salt(tick, key, 0x9D2C5680u)) - 0.5f) * (WorldBuilder.SpaceEdgeM - (4 * WorldBuilder.ShipHalfExtentM));
                     dx = move.DestX - x;
                     dy = move.DestY - y;
                     dz = move.DestZ - z;
@@ -94,6 +101,13 @@ public sealed partial class SimBridge
     /// <summary>A tenth of the fleet each tick scans a sphere around itself, in its own realm — a deep-grid 3D query.</summary>
     public void ShipScanTick(TickContext ctx)
     {
+        // Stopped by a client (TatooineReplication.SetPaused, a demo control). The simulation does nothing; replication,
+        // the session system and the engine's own stages keep running, or no client could ever ask to resume.
+        if (TatooineReplication.SimulationPaused)
+        {
+            return;
+        }
+
         var tick = ctx.TickNumber;
         long scans = 0;
         long contacts = 0;
@@ -111,7 +125,6 @@ public sealed partial class SimBridge
             }
 
             var places = cluster.GetReadOnlySpan(Starship.Bounds);
-            var chunk = cluster.ChunkId;
             var realm = cluster.Realm;
             var k = ctx.Realms.TicksPerVisit(realm);
             while (bits != 0)
@@ -119,7 +132,8 @@ public sealed partial class SimBridge
                 var idx = BitOperations.TrailingZeroCount(bits);
                 bits &= bits - 1;
                 // "A scan tick fell inside the k ticks this visit stands for" (review #4: `== 0` aliased with the divisor stride and some ships never scanned).
-                if ((tick + (chunk * 64) + idx) % ShipScanPeriodTicks >= k)
+                // Staggered by identity, not by chunk and slot: a repair or a migration must not reshuffle which tick a ship scans on (S0-4's defect).
+                if ((tick + cluster.GetEntityId(idx).EntityKey) % ShipScanPeriodTicks >= k)
                 {
                     continue;
                 }

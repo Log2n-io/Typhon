@@ -54,6 +54,11 @@ export const enum TraceEventKind {
   SpatialRepairUnit = 64,
   SpatialRelocationOutcome = 65,
   SpatialArchetypeTelemetry = 66,
+  SpatialRealmTelemetry = 67,
+  /** Instant — per-realm per-archetype maintenance RATES, for realms the fence touched (mirrored in `isInstantKind`). */
+  SpatialRealmRates = 70,
+  SubscriptionsServerTelemetry = 68,
+  SubscriptionsSessionTelemetry = 69,
 
   WalFlush = 80,
   WalSegmentRotate = 81,
@@ -767,6 +772,86 @@ export interface TraceEvent {
   packingBound?: number;
   cellTreePromotions?: number;
   cellTreeDemotions?: number;
+  // Appended in #941, decoded since #944. Zero on a trace captured before the append — the record is a strict prefix.
+  queryClustersOpened?: number;   // SUM across records for a window, never average (the field's own instruction)
+  queryCandidates?: number;
+  queryHits?: number;
+  budgetConfiguredMs?: number;    // the configured ReclusterBudgetMs — repeated per record because attach carries no config
+  budgetGrantedMs?: number;       // configured × the share the queries' efficiency earned
+  efficiencyTolerance?: number;   // zero means the controller is OFF, not that it is perfectly tolerant
+  candidatesPerHitSmoothed?: number;
+  candidatesPerHitBest?: number;  // the set point: lowest smoothed value since the last re-base
+  ticksAtWholeBudget?: number;
+  controllerFlags?: number;       // bit 0: enough hits to steer by. bit 1: this tick re-based the best
+  efficiencyRebases?: number;     // CUMULATIVE since the cluster state was created
+  repairCellsCooling?: number;    // a level, not a rate
+  repairValveFires?: number;
+  repairedEntities?: number;
+  repairQueueEvicted?: number;    // CUMULATIVE — differentiate across records
+  measuredNsPerEntity?: number;
+  driftTargetBoost?: number;      // 1 = no throttle; at its cap relocation detection is off
+  // Appended in #WB-05. A CENSUS, not a dimension: every counter above stays summed across realms.
+  presentRealms?: number;         // realms this archetype has cluster state in, runnable or not
+  runnableRealms?: number;        // how many of those sent a kind-67 row this tick
+
+  // SpatialRealmRates (kind 70) — one row per realm the fence TOUCHED, per archetype: that realm's share of the
+  // per-tick maintenance rates. Reuses `realmId` / `archetypeId` above, and every counter kind 66 already declares
+  // (`migrationCount`, `driftersDetected`, ...) — on a kind-70 record those carry ONE realm's value, not the sum.
+  ratesRealmsTouched?: number;    // realms with a row to send this tick, counted BEFORE the emitter's cap
+  ratesRealmsEmitted?: number;    // rows actually sent; less than touched means the cap truncated the set
+  tightnessExtentSum?: number;
+  tightnessBoundSum?: number;
+  relocationSpendNs?: number;
+  clustersScanned?: number;
+  driftAbsorbed?: number;
+  driftGatedClusters?: number;
+  driftSuppressedByDensity?: number;
+  crossingsExecuted?: number;
+  relocationsExecuted?: number;
+  repairsExecuted?: number;
+  jumpCrossings?: number;
+  clampedDestinations?: number;
+  staleFlagsDropped?: number;
+  repairedEntityCount?: number;
+  repairUnitCount?: number;
+  arrivalCellsTouched?: number;
+  largestArrivalRun?: number;
+
+  // SpatialRealmTelemetry (kind 67) — one row per RUNNABLE realm per archetype: that realm's partition SHAPE. The
+  // per-tick rate counters are absent on purpose — they are owned per archetype, so a realm-keyed copy would report
+  // the sum across realms under one realm's name.
+  realmId?: number;
+  runState?: number;              // RealmRunState: Dormant 0, Simulated 1, Active 2, Closing 3
+  divisor?: number;               // 1 = every tick; N = once every N. Saturated at 255 on the wire
+  cellSize?: number;              // THIS realm's cell edge — the field the whole record exists for
+  cellCount?: number;
+  gridDepth?: number;             // 1 for a flat realm
+  clusters?: number;              // this archetype's clusters in this realm
+  clusterReach?: number;          // read against cellSize, never on its own
+  escapedClusters?: number;
+  promotedCells?: number;
+  blockedCells?: number;
+  // ── Subscriptions operator telemetry (#WB-02, kinds 68 and 69) ────────────────────────────────────────────────────
+  // Server record (68). `sessions` is the population; `reportedSessions` is how many kind-69 rows accompanied it, and a
+  // consumer must render the difference rather than treat the rows as the whole list — the rows are capped at 64.
+  sessions?: number;
+  netOutBytesPerSec?: number;
+  trackP99Ms?: number;
+  durabilityWaitP99Ms?: number;
+  framesSkipped?: number;
+  framePoolRented?: number;
+  framePoolBlocks?: number;
+  framePoolBudgetSkips?: number;
+  reportedSessions?: number;
+  // Per-session row (69). `sessionId` fits a JS number: the engine packs slot | generation << 16 into 32 bits even
+  // though the wire field is u64. `realmId` is 0xFFFF for a session not yet told its realm, which is NOT realm 0.
+  sessionId?: number;
+  bytesPerSec?: number;
+  degradeLevel?: number;
+
+  // NOTE kind 67 reuses `budgetConfiguredMs` / `efficiencyTolerance` declared above for kind 66. On a REALM row they are
+  // that realm's DECLARATION: maintenance is budgeted per archetype from realm 0's grid, so a realm's declared value is
+  // not what the engine enforces. Kind 66's is the effective ceiling.
 
   // SpatialClusterMigrationDetectScan (kind 249) — fence-time scan span. Begin params:
   // archetypeId, scanSlotCount. Optional outcomes published at dispose.

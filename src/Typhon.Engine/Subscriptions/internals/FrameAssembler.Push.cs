@@ -118,27 +118,59 @@ internal sealed unsafe partial class FrameAssembler
             var source = hasProfile ? Profiles.SourceOf(profile) : ViewpointSource.Placed;
             var follow = EntityId.Null;
             int realm;
-            switch (source)
+
+            // Session(s).Follow(e) (12-realms § 2.2 Q5) outranks whatever the profile declared, and is legal on every shape: on a Sphere it is the centre and
+            // the realm, on a World or a ClientRegion the realm alone (§ 1.5), because those shapes have no centre to move. Both anchors come out of ONE row
+            // read: the follow has to be asked for unconditionally — that is how the engine learns a session follows nothing — and asking separately would be
+            // a second identity check and gate load per session per tick for a field adjacent to the one the Controlled case wants anyway.
+            _sessions.AnchorsOf(session, out var controlledEntity, out var followed);
+            if (!followed.IsNull)
             {
-                case ViewpointSource.Fixed:
-                    realm = RealmId.Default.Value;
-                    break;
-                case ViewpointSource.Bound:
-                    follow = Profiles.BoundEntityOf(profile);
-                    realm = AnchorRealm(session, follow, _anyRealmMoves && _movedEntities.Contains(follow.RawValue));
-                    break;
-                case ViewpointSource.Controlled:
-                    follow = _sessions.ControlledOf(session);
-                    realm = AnchorRealm(session, follow, _anyRealmMoves && Self == null && _movedEntities.Contains(follow.RawValue));
-                    break;
-                default:
-                    realm = PlacedRealm(session);
-                    break;
+                follow = followed;
+                // Bind's staleness rule, not Controlled's: the Self reverse map NoteRealmMoves walks is keyed on what a session CONTROLS, and a followed
+                // entity is deliberately absent from it (that map is how owner fields find their session, and a follower gets none). So the crossing is
+                // noticed the other way, through the moved set.
+                realm = AnchorRealm(session, follow, _anyRealmMoves && _movedEntities.Contains(follow.RawValue));
+                source = ViewpointSource.Bound;
+            }
+            else
+            {
+                switch (source)
+                {
+                    case ViewpointSource.Fixed:
+                        realm = RealmId.Default.Value;
+                        break;
+                    case ViewpointSource.Bound:
+                        follow = Profiles.BoundEntityOf(profile);
+                        realm = AnchorRealm(session, follow, _anyRealmMoves && _movedEntities.Contains(follow.RawValue));
+                        break;
+                    case ViewpointSource.Controlled:
+                        follow = controlledEntity;
+                        realm = AnchorRealm(session, follow, _anyRealmMoves && Self == null && _movedEntities.Contains(follow.RawValue));
+                        break;
+                    default:
+                        realm = PlacedRealm(session);
+                        break;
+                }
             }
 
             // The realm's kind picks the profile's variant (12-realms § 1.4) — in the switch itself, so a realm and variant change is one reset. A realm no
             // session may be in (no replication declared) puts the session in none; a kind the profile excludes serves it nothing there.
             var kind = RealmKindOf(realm);
+            if (kind == RealmGone && realm != RealmId.NoneValue)
+            {
+                // The realm was unregistered and a fence found it empty and removed it, with this session still in it (12-realms § 1.6, Q7). Nothing else can
+                // produce this: Enter and Place refuse an unregistered realm, and a followed entity's realm is registered while the entity is alive — so an
+                // unresolvable realm on a session that is in one means the realm went out from under it.
+                //
+                // It is noticed HERE rather than at the fence that removes the realm because the realm table is the engine's and the sessions are not: the
+                // fence cannot reach them. The prologue already resolves every session's realm, so this is one comparison on a value it was going to compute.
+                RealmClosed(session, (ushort)realm, source);
+                realm = RealmId.NoneValue;
+                kind = RealmGone;
+                RealmsClosed++;
+            }
+
             if (kind == UnreplicatedRealm)
             {
                 realm = RealmId.NoneValue;
@@ -316,7 +348,7 @@ internal sealed unsafe partial class FrameAssembler
             + $"(sort {p.SortTicks * f:F0}, merge {p.MergeTicks * f:F0}, finish {p.FinishTicks * f:F0}), gather busy {p.GatherTicks * f:F0} ms (cumulative)");
         // Realms (R4.6): the realms served now, with their sessions and the tick's events each; activations, deactivations and refusals since Start.
         var hub = p.Hub;
-        if (hub.Active.Length > 1 || hub.RealmsActivated > 0 || RealmsUnreplicated > 0 || RealmsUnserved > 0)
+        if (hub.Active.Length > 1 || hub.RealmsActivated > 0 || RealmsUnreplicated > 0 || RealmsUnserved > 0 || RealmsClosed > 0)
         {
             var served = new System.Text.StringBuilder();
             foreach (var r in hub.Active)
@@ -326,7 +358,8 @@ internal sealed unsafe partial class FrameAssembler
 
             Console.Error.WriteLine(
                 $"  PUSH REALMS: {hub.Active.Length} served [realm:sessions/events{served}]; activated {hub.RealmsActivated}, deactivated {hub.RealmsDeactivated}, "
-                + $"unservable {hub.RealmsUnservable}; session-ticks in an unreplicated realm {RealmsUnreplicated}, in an excluded kind {RealmsUnserved}");
+                + $"unservable {hub.RealmsUnservable}; session-ticks in an unreplicated realm {RealmsUnreplicated}, in an excluded kind {RealmsUnserved}; "
+                + $"sessions whose realm closed under them {RealmsClosed}");
         }
 
         Console.Error.WriteLine(
@@ -469,6 +502,36 @@ internal sealed unsafe partial class FrameAssembler
 
     /// <summary>What <see cref="RealmKindOf"/> answers for a registered realm no session may be in: no replication declared (12-realms § 2.1).</summary>
     private const int UnreplicatedRealm = -2;
+
+    /// <summary>
+    /// What <see cref="RealmKindOf"/> answers for no realm at all, and for one that is not registered — which, for a session that is IN one, means removed.
+    /// </summary>
+    private const int RealmGone = -1;
+
+    /// <summary>
+    /// Moves a session whose realm was removed under it into none, and tells the application once.
+    /// </summary>
+    /// <remarks>
+    /// Both halves of "once" are here. The session table's stored realm is cleared, so a placed session stops resolving the dead id; and the anchor cache is
+    /// cleared, so an entity-anchored session whose entity died with the realm stops being answered the dead realm from <see cref="AnchorRealm"/>'s memory of
+    /// it. Miss either and the event fires on every tick for the rest of the session.
+    /// </remarks>
+    private void RealmClosed(SessionId session, ushort realm, ViewpointSource source)
+    {
+        if (source is ViewpointSource.Bound or ViewpointSource.Controlled)
+        {
+            var slot = session.Slot;
+            if (slot < (uint)_anchorRealm.Length)
+            {
+                _anchorRealm[slot] = RealmId.NoneValue;
+            }
+        }
+
+        _sessions.NoteRealmClosed(session, realm);
+    }
+
+    /// <summary>Session-ticks whose realm had been removed under them, cumulative — one per session that lost a realm, not one per tick after.</summary>
+    public long RealmsClosed;
 
     /// <summary>Sessions whose realm has no replication declared — a followed entity that entered one — and so are in none; per session per tick.</summary>
     public long RealmsUnreplicated;
@@ -877,9 +940,9 @@ internal sealed unsafe partial class FrameAssembler
         // connected. Nothing was published before it, so the store it clears is empty.
         reset |= first;
 
-        var send = SendStateOf(slot);
-        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick) || SkipPolicy.AcknowledgementLag(send->ProducedTick, send->AckedTick) > _lagBoundTicks
-            || !send->TryBeginFrame(out var sequence, out var recycled))
+        ref var send = ref SendStateOf(slot);
+        if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick) || SkipPolicy.AcknowledgementLag(send.ProducedTick, send.AckedTick) > _lagBoundTicks
+            || !send.TryBeginFrame(out var sequence, out var recycled))
         {
             NoteSkip(state);
             return;
@@ -899,7 +962,7 @@ internal sealed unsafe partial class FrameAssembler
         if (length > _maxFrameBytes || !Pool.TryRentOrKeep(length, ref block, out var previous))
         {
             ReturnIfValid(block);
-            send->AbandonFrame(sequence);
+            send.AbandonFrame(sequence);
             NoteSkip(state);
             return;
         }
@@ -907,7 +970,7 @@ internal sealed unsafe partial class FrameAssembler
         ReturnIfValid(previous);
         buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
         PublishRealmView(session, state, reset);
-        send->PublishFrame(sequence, block, length, _tick);
+        send.PublishFrame(sequence, block, length, _tick);
         events?.NoteDelivered(count, lost);
         CommitSelf(session, state, in self, -1, ref counters);
         state.EventsCursor = (uint)_tick;
@@ -1133,7 +1196,7 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        var send = SendStateOf(session.Slot);
+        ref var send = ref SendStateOf(session.Slot);
         if (!SkipPolicy.ProducesOnTick(state.DegradeLevel, _tick))
         {
             NoteSkip(state);
@@ -1141,15 +1204,15 @@ internal sealed unsafe partial class FrameAssembler
             return;
         }
 
-        if (SkipPolicy.AcknowledgementLag(send->ProducedTick, send->AckedTick) > _lagBoundTicks)
+        if (SkipPolicy.AcknowledgementLag(send.ProducedTick, send.AckedTick) > _lagBoundTicks)
         {
-            send->NoteSkipped();
+            send.NoteSkipped();
             NoteSkip(state);
             push.NoteNotPublished(session);
             return;
         }
 
-        if (!send->TryBeginFrame(out var sequence, out var recycled))
+        if (!send.TryBeginFrame(out var sequence, out var recycled))
         {
             NoteSkip(state);
             push.NoteNotPublished(session);
@@ -1263,7 +1326,7 @@ internal sealed unsafe partial class FrameAssembler
 
         var aggWrite = aggDue && (aggRows > 0 || aggReset);
         var stats = Stats;
-        var emitStats = stats != null && stats.IsEmissionTick && (send->Caps & Capabilities.Stats) != 0;
+        var emitStats = stats != null && stats.IsEmissionTick && (send.Caps & Capabilities.Stats) != 0;
         var newlyComplete = complete && !state.ViewComplete;
 
         // DEBUG (09 § 15), for a session granted the cap — which admission grants only under AllowDebug: the grid with its first frame and every RESET, its
@@ -1271,7 +1334,7 @@ internal sealed unsafe partial class FrameAssembler
         var debugGrid = false;
         var debugGeometry = 0;
         var debugHash = 0UL;
-        if ((send->Caps & Capabilities.Debug) != 0 && (uint)session.Slot < (uint)_debugGeneration.Length)
+        if ((send.Caps & Capabilities.Debug) != 0 && (uint)session.Slot < (uint)_debugGeneration.Length)
         {
             var profile = _pushProfiles[index];
             var shape = _pushRegion[index] ? PushShape.Region : _pushWorld[index] ? PushShape.World : PushShape.Sphere;
@@ -1297,7 +1360,7 @@ internal sealed unsafe partial class FrameAssembler
         {
             // Nothing to say. The anchor may still have moved and a cell with nothing in it may have been delivered; neither changes what the client holds,
             // so the pending state is committed even though no frame is.
-            send->AbandonIdleFrame(sequence);
+            send.AbandonIdleFrame(sequence);
             ReturnIfValid(recycled);
             NoteSkip(state, counted: false);
             push.Commit(session);
@@ -1371,7 +1434,7 @@ internal sealed unsafe partial class FrameAssembler
         if (length > _maxFrameBytes)
         {
             counters.OversizeSkips++;
-            send->AbandonFrame(sequence);
+            send.AbandonFrame(sequence);
             ReturnIfValid(recycled);
             NoteSkip(state);
             push.NoteNotPublished(session);
@@ -1382,7 +1445,7 @@ internal sealed unsafe partial class FrameAssembler
         if (!Pool.TryRentOrKeep(length, ref block, out var previous))
         {
             ReturnIfValid(block);
-            send->AbandonFrame(sequence);
+            send.AbandonFrame(sequence);
             NoteSkip(state);
             push.NoteNotPublished(session);
             return;
@@ -1391,7 +1454,7 @@ internal sealed unsafe partial class FrameAssembler
         ReturnIfValid(previous);
         buffer[..length].CopyTo(new Span<byte>(block.Bytes, block.Capacity));
         PublishRealmView(session, state, reset);
-        send->PublishFrame(sequence, block, length, _tick);
+        send.PublishFrame(sequence, block, length, _tick);
         published = length;
         if (eventCount > 0)
         {

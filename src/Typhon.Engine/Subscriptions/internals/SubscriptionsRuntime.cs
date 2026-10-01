@@ -412,10 +412,6 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     public StatsEncoder Stats { get; }
 
     /// <summary>
-    /// The inbound path: a session's ring, the transport-side decode, and the Engine-Pre drain that turns it into the tick's typed buffers.
-    /// <see langword="null"/> on an inactive runtime.
-    /// </summary>
-    /// <summary>
     /// The nominal tick period a base tick rate implies, in microseconds.
     /// </summary>
     /// <param name="baseTickRate">The runtime's base tick rate, in hertz.</param>
@@ -428,6 +424,10 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     internal static uint NominalTickPeriodUsFor(int baseTickRate)
         => (uint)Math.Round(1_000_000.0 / Math.Max(1, baseTickRate), MidpointRounding.AwayFromZero);
 
+    /// <summary>
+    /// The inbound path: a session's ring, the transport-side decode, and the Engine-Pre drain that turns it into the tick's typed buffers.
+    /// <see langword="null"/> on an inactive runtime.
+    /// </summary>
     public SubscriptionsIngress Ingress => _ingress;
 
     /// <summary>
@@ -632,13 +632,13 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     /// <summary>The declared events' hub, or <see langword="null"/> when no event is declared.</summary>
     public EventHub Events { get; }
 
+    /// <summary>The engine-wide half of push replication: the collector and the served realms' replications (R4.1); null without a push path.</summary>
+    public PushHub Hub { get; private set; }
+
     /// <summary>
     /// Realm 0's frame (<c>typhon.3</c>), or <see langword="null"/> without a spatial grid: the <c>REALM</c> block every session's first frame carries, and
     /// the frame its positions — records, events, commands, regions, aggregate grids — are quantized over (SUB-30).
     /// </summary>
-    /// <summary>The engine-wide half of push replication: the collector and the served realms' replications (R4.1); null without a push path.</summary>
-    public PushHub Hub { get; private set; }
-
     public RealmFrame Realm0Frame { get; }
 
     /// <summary>Realm 0's frame: its grid's bounds, the replication cell, the default width, flat when the replication grid is one cell deep.</summary>
@@ -690,6 +690,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
 
     /// <summary>The push path, or <see langword="null"/> when no profile observes anything.</summary>
     internal PushReplication Push { get; private set; }
+
+    /// <summary>The send pump, so a teardown test can read what its quiesce observed (#1006).</summary>
+    internal SendPump SendPumpForTest => _sendPump;
 
     /// <summary>The owner routing (11 § 2.2), when an archetype declares owner fields; <see langword="null"/> otherwise.</summary>
     internal SelfTracker Self { get; private set; }
@@ -855,12 +858,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         var frames = _frames;
         if (frames != null && session.IsValid && session.Slot < Options.MaxSessions)
         {
-            var send = frames.SendStateOf(session.Slot);
-            SessionSendState.Initialize(send);
+            ref var send = ref frames.SendStateOf(session.Slot);
+            SessionSendState.Initialize(ref send);
 
             // Silence is measured from the handshake, not from the first PING: a client that completes HELLO and then says nothing must be closed on the same
             // schedule as one that stops mid-session, and a zero here would exempt it forever.
-            send->NotePing(Volatile.Read(ref _currentTick));
+            send.NotePing(Volatile.Read(ref _currentTick));
         }
 
         _sendPump?.AttachLink(session, link);
@@ -887,7 +890,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             return;
         }
 
-        frames.SendStateOf(session.Slot)->NoteCapsGranted(caps);
+        frames.SendStateOf(session.Slot).NoteCapsGranted(caps);
     }
 
     /// <inheritdoc />
@@ -907,9 +910,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             return;
         }
 
-        var send = frames.SendStateOf(session.Slot);
-        send->NotePing(Volatile.Read(ref _currentTick));
-        send->ReportAppliedTick(appliedTick);
+        ref var send = ref frames.SendStateOf(session.Slot);
+        send.NotePing(Volatile.Read(ref _currentTick));
+        send.ReportAppliedTick(appliedTick);
     }
 
     /// <inheritdoc />
@@ -1163,7 +1166,9 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         // Before the assembler, because a running pump holds a pointer into the assembler's frame pool for the duration of one send. Its Dispose quiesces.
         _sendPump?.Dispose();
 
-        _frames?.Dispose();
+        // #1006: the quiesce above is bounded, so a pump can still be inside a send here, holding a pointer into a frame-pool slab. The assembler leaves those
+        // slabs allocated rather than free them under a socket; its send states need no such care, being managed memory it references.
+        _frames?.Dispose(pumpsStillRunning: (_sendPump?.PumpsStillRunningAtDispose ?? 0) > 0);
     }
 
     /// <summary>

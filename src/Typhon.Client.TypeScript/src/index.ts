@@ -22,6 +22,7 @@ export {
 export { archetypeOf, NOT_FOUND, slotOf, WorldStore, type WorldStoreOptions } from './store/world-store.js';
 export { epochAt, evaluateLive, evaluateSlot, headingOf, MAX_MOTION_STRIDE, segmentEntryAt } from './motion/motion.js';
 export { Clock, type ClockOptions } from './clock/clock.js';
+export { monotonicNow } from './clock/now.js';
 export { AggregateGrid, type GridSchema } from './aggregates/aggregate-grid.js';
 export { FrameApplier, type FrameApplierOptions } from './apply/frame-applier.js';
 export { AckList, EventRecord, retainBytes, SelfState, SourceList, StatsState } from './apply/frame-state.js';
@@ -157,6 +158,7 @@ export {
 } from './protocol/tick-writer.js';
 export { readCommands, writeCommands, type CommandInput, type CommandSink } from './protocol/commands.js';
 export { NO_REALM, RealmFrame } from './protocol/realm-frame.js';
+export { DebugGrid, DebugSubType, PushGeometry, PushGeometryFlags, PushShape } from './protocol/debug-payloads.js';
 export {
   catalogHashFromHex,
   catalogHashToHex,

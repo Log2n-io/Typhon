@@ -1,3 +1,4 @@
+import { monotonicNow } from '../clock/now.js';
 import type { PingMessage, PongMessage } from '../protocol/messages.js';
 import { systemTimers, type TimerApi, type TimerHandle } from './socket.js';
 
@@ -45,7 +46,7 @@ export class PingScheduler {
 
     this.options = options;
     this.timers = options.timers ?? systemTimers;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? monotonicNow;
     this.intervalMs = 1000 / options.pingHz;
     this.weight = options.rttWeight ?? 0.125;
   }
@@ -95,10 +96,19 @@ export class PingScheduler {
     }
   }
 
+  /**
+   * Pings the transport refused, cumulative.
+   *
+   * Non-zero is not an error by itself — a ping landing in the same millisecond as a close is ordinary — but a number
+   * that keeps climbing means the socket has been unusable for a while and nothing has noticed.
+   */
+  failed = 0;
+
   /** Sends one `PING` immediately, off schedule. */
   pingNow(): void {
-    this.sent++;
+    // Counted AFTER the send, so a refused send does not leave `outstanding` permanently one too high.
     this.options.send({ clientMs: this.now() >>> 0, lastAppliedTick: this.options.lastAppliedTick() >>> 0 });
+    this.sent++;
   }
 
   /** Records the answer: its `clientMs` is the one this client sent, so the round trip needs no state per ping. */
@@ -113,8 +123,16 @@ export class PingScheduler {
   private schedule(): void {
     this.timer = this.timers.setTimeout(() => {
       this.timer = null;
-      this.pingNow();
+      // Re-armed BEFORE the send, and the send guarded. `Connection.send` throws for a socket that is not open, and any
+      // ping racing a close hits exactly that — so with the order the other way round the loop died on its first such
+      // throw and never rearmed. The server then saw a client that had stopped answering and closed it with 4001, which
+      // reads as a network fault and is not one. A ping that could not go out is a ping skipped, not the end of pinging.
       this.schedule();
+      try {
+        this.pingNow();
+      } catch {
+        this.failed++;
+      }
     }, this.intervalMs);
   }
 }

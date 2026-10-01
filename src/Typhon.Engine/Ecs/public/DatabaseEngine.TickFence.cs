@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Numerics;
@@ -371,11 +371,6 @@ public partial class DatabaseEngine
     }
 
     /// <summary>
-    /// Serializes dirty cluster entity data to WAL for all cluster-eligible archetypes.
-    /// Called from <see cref="WriteTickFence"/> after per-ComponentTable processing.
-    /// </summary>
-    /// <summary>Create a fresh CBS&lt;TransientStore&gt; for cluster Transient component storage.</summary>
-    /// <summary>
     /// Give a cluster state the means to build its shared per-cell R-Tree segment on first promotion (#872 step 9), and apply the configured thresholds.
     /// </summary>
     /// <remarks>
@@ -418,6 +413,7 @@ public partial class DatabaseEngine
     /// </summary>
     internal float ClusterCellTreePromoteTightness { get; set; } = SpatialOptions.DefaultCellTreePromoteTightness;
 
+    /// <summary>Create a fresh CBS&lt;TransientStore&gt; for cluster Transient component storage.</summary>
     private void CreateTransientClusterSegment(int stride, out TransientStore? store, out ChunkBasedSegment<TransientStore> segment)
     {
         store = new TransientStore(TransientOptions, MemoryAllocator, EpochManager, this);
@@ -484,6 +480,10 @@ public partial class DatabaseEngine
         }
     }
 
+    /// <summary>
+    /// Serializes dirty cluster entity data to WAL for all cluster-eligible archetypes.
+    /// Called from <see cref="WriteTickFence"/> after per-ComponentTable processing.
+    /// </summary>
     private void WriteClusterTickFence(long tickNumber, ref long highestLSN, ChangeSet changeSet)
     {
         // Issue #233: drain the wake requests collected during parallel system execution. Must run once BEFORE the per-archetype loop so each
@@ -914,6 +914,9 @@ public partial class DatabaseEngine
         clusterState.LastTickTightnessSamples = 0;
         clusterState.LastTickTightnessExtentSum = 0d;
         clusterState.LastTickTightnessBoundSum = 0d;
+        // The per-realm half of the block above (#1083). Same producers, same phase barrier, same plain stores — partitioned by the realm that produced them
+        // so a realm's rates can be read on their own instead of only as one archetype-wide sum that names no realm.
+        clusterState.ResetRealmTickCounters();
 
         // LastTickHysteresisAbsorbedCount was NOT reset here until #872, and DetectClusterMigrations only ever ASSIGNED it (=, not +=). A tick in which
         // detection did not run therefore reported the PREVIOUS tick's absorbed count as if it were this tick's — a stale reading indistinguishable from a live
@@ -1877,40 +1880,265 @@ public partial class DatabaseEngine
             pinsRejected: clusterState.LastTickPinsRejected,
             crossingsQueued: clusterState.LastTickCrossingsQueued);
 
-        var samples = clusterState.LastTickTightnessSamples;
-        TyphonEvent.EmitSpatialArchetypeTelemetry(
-            archetypeId: archetypeId,
-            activeClusters: clusterState.ActiveClusterCount,
-            migrations: clusterState.LastTickMigrationCount,
-            migrationCpuMs: (float)clusterState.LastTickMigrationTotalMs,
-            hysteresisAbsorbed: clusterState.LastTickHysteresisAbsorbedCount,
-            driftersDetected: clusterState.LastTickDriftersDetected,
-            repairUnits: clusterState.LastTickRepairUnitCount,
-            repairUnitsRefused: clusterState.LastTickRepairUnitsRefused,
-            repairQueueDepth: clusterState.RepairQueue?.Count ?? 0,
-            budgetUsedMs: (float)clusterState.LastTickReclusterBudgetUsedMs,
-            tightnessSamples: samples,
-            extentRatio: samples > 0 ? (float)(clusterState.LastTickTightnessExtentSum / samples) : 0f,
-            packingBound: samples > 0 ? (float)(clusterState.LastTickTightnessBoundSum / samples) : 0f,
-            cellTreePromotions: clusterState.LastTickCellTreePromotions,
-            cellTreeDemotions: clusterState.LastTickCellTreeDemotions,
-            queryClustersOpened: clusterState.LastTickQueryClustersOpened,
-            queryCandidates: clusterState.LastTickQueryCandidates,
-            queryHits: clusterState.LastTickQueryHits,
-            budgetConfiguredMs: grid != null ? grid.Config.ReclusterBudgetMs : 0f,
-            budgetGrantedMs: (float)clusterState.LastTickReclusterBudgetGrantedMs,
-            efficiencyTolerance: grid != null ? grid.Config.QueryEfficiencyTolerance : 0f,
-            candidatesPerHitSmoothed: (float)clusterState.QueryCandidatesPerHitSmoothed,
-            candidatesPerHitBest: (float)clusterState.QueryCandidatesPerHitBest,
-            ticksAtWholeBudget: clusterState.TicksAtWholeBudget,
-            controllerFlags: clusterState.ControllerFlags,
-            efficiencyRebases: (int)clusterState.TotalEfficiencyRebases,
-            repairCellsCooling: clusterState.RepairQueue?.CoolingCount ?? 0,
-            repairValveFires: clusterState.LastTickRepairValveFires,
-            repairedEntities: clusterState.LastTickRepairedEntityCount,
-            repairQueueEvicted: clusterState.RepairQueue?.TotalEvicted ?? 0L,
-            measuredNsPerEntity: (float)clusterState.LastTickMeasuredNsPerEntity,
-            driftTargetBoost: clusterState.DriftTargetBoost);
+        // The realm census, walked once for both records. Counted here rather than inside the per-realm emitter so the two records agree even when the
+        // per-realm kind is gated off: "runnable 3 of 1 188" must stay true whether or not the rows are being sent.
+        //
+        // Behind BOTH spatial gates, not merely the profiler's. An earlier comment here claimed this was "the same walk MaxClusterReachAcrossRealms already
+        // does" and therefore free — it is not: kind 66 carries no reach field and that method is not called on this path, so the walk is additive. With the
+        // profiler attached and both spatial kinds off, every archetype was paying O(present realms) plus a RealmTable.IsRunnable per realm every tick for
+        // records nobody asked for — on the galaxy of a few thousand sleeping interiors this file's own docs invoke, that is the wrong order of magnitude.
+        if (!TelemetryConfig.SpatialArchetypeTelemetryActive && !TelemetryConfig.SpatialRealmTelemetryActive && !TelemetryConfig.SpatialRealmRatesActive)
+        {
+            return;
+        }
+
+        var present = clusterState.PresentRealmSpatial;
+
+        // Only the two records that CONSUME it pay for it. `runnable` costs O(present) plus a RealmTable.IsRunnable per realm, and with only the rates leaf
+        // on nothing reads it — which is the regression the comment above was written about, one leaf later.
+        var runnable = TelemetryConfig.SpatialArchetypeTelemetryActive || TelemetryConfig.SpatialRealmTelemetryActive
+            ? CountRunnableRealms(present, clusterState.RealmTableOrNull) : 0;
+
+        // The RATE rows go out BEFORE kind 66, so the counts it carries are MEASURED by the walk that emitted them rather than predicted from the cap.
+        // Predicting made the two agree by construction, which is the one thing a self-check must not do: a row lost between the count and the emit would
+        // have been unreportable, and the field would have measured nothing. Ordering on the wire does not matter — a consumer keys both by tick.
+        //
+        // BOTH read zero when the leaf is off, rather than a true `touched` against an emitted of zero: a consumer reads a shortfall as "the cap truncated
+        // working realms", and saying that about a subtree nobody switched on would be a false alarm. "The feature is off" is already carried by the
+        // absence of the kind itself.
+        EmitSpatialRealmRates(archetypeId, present, out var ratesTouched, out var ratesEmitted);
+
+        // Gate kind 66's own emission too, not only the pair above. The generator puts `if (!TelemetryConfig.<Gate>) return;` INSIDE the emit body and C#
+        // evaluates a call's arguments first, so with ONLY the realm gate on this call still computed ~35 arguments — four divisions and several `?.Count`
+        // chains — every tick, per archetype, to be discarded on entry. That is the identical trap `FrameAssembler.EmitOperatorTelemetry` reads its flags up
+        // front to avoid; the two gates being independent is exactly what makes the combination reachable.
+        if (TelemetryConfig.SpatialArchetypeTelemetryActive)
+        {
+            var samples = clusterState.LastTickTightnessSamples;
+            TyphonEvent.EmitSpatialArchetypeTelemetry(
+                archetypeId: archetypeId,
+                activeClusters: clusterState.ActiveClusterCount,
+                migrations: clusterState.LastTickMigrationCount,
+                migrationCpuMs: (float)clusterState.LastTickMigrationTotalMs,
+                hysteresisAbsorbed: clusterState.LastTickHysteresisAbsorbedCount,
+                driftersDetected: clusterState.LastTickDriftersDetected,
+                repairUnits: clusterState.LastTickRepairUnitCount,
+                repairUnitsRefused: clusterState.LastTickRepairUnitsRefused,
+                repairQueueDepth: clusterState.RepairQueue?.Count ?? 0,
+                budgetUsedMs: (float)clusterState.LastTickReclusterBudgetUsedMs,
+                tightnessSamples: samples,
+                extentRatio: samples > 0 ? (float)(clusterState.LastTickTightnessExtentSum / samples) : 0f,
+                packingBound: samples > 0 ? (float)(clusterState.LastTickTightnessBoundSum / samples) : 0f,
+                cellTreePromotions: clusterState.LastTickCellTreePromotions,
+                cellTreeDemotions: clusterState.LastTickCellTreeDemotions,
+                queryClustersOpened: clusterState.LastTickQueryClustersOpened,
+                queryCandidates: clusterState.LastTickQueryCandidates,
+                queryHits: clusterState.LastTickQueryHits,
+                budgetConfiguredMs: grid != null ? grid.Config.ReclusterBudgetMs : 0f,
+                budgetGrantedMs: (float)clusterState.LastTickReclusterBudgetGrantedMs,
+                efficiencyTolerance: grid != null ? grid.Config.QueryEfficiencyTolerance : 0f,
+                candidatesPerHitSmoothed: (float)clusterState.QueryCandidatesPerHitSmoothed,
+                candidatesPerHitBest: (float)clusterState.QueryCandidatesPerHitBest,
+                ticksAtWholeBudget: clusterState.TicksAtWholeBudget,
+                controllerFlags: clusterState.ControllerFlags,
+                efficiencyRebases: (int)clusterState.TotalEfficiencyRebases,
+                repairCellsCooling: clusterState.RepairQueue?.CoolingCount ?? 0,
+                repairValveFires: clusterState.LastTickRepairValveFires,
+                repairedEntities: clusterState.LastTickRepairedEntityCount,
+                repairQueueEvicted: clusterState.RepairQueue?.TotalEvicted ?? 0L,
+                measuredNsPerEntity: (float)clusterState.LastTickMeasuredNsPerEntity,
+                driftTargetBoost: clusterState.DriftTargetBoost,
+                presentRealms: present.Length,
+                runnableRealms: runnable,
+                ratesRealmsTouched: ratesTouched,
+                ratesRealmsEmitted: ratesEmitted);
+        }
+
+        EmitSpatialRealmRows(clusterState, archetypeId, present);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="rs"/> is a realm the per-realm record is emitted for: one with a grid, that the policy considers runnable this tick.
+    /// </summary>
+    /// <remarks>
+    /// The single definition of "a realm that gets a row" (#WB-05). Kind 66's census and kind 67's rows both go through it, so the count and the rows can
+    /// never disagree — a census of 3 beside 4 rows reads as an engine bug and would be a duplicated predicate. A null realm table is the single-realm
+    /// engine, where realm 0 is always runnable.
+    /// </remarks>
+    /// <param name="rs">One realm's spatial state for this archetype.</param>
+    /// <param name="realms">The engine's realm table, or <see langword="null"/> for a non-realm engine.</param>
+    /// <returns><see langword="true"/> when the realm gets a row.</returns>
+    internal static bool RealmGetsATelemetryRow(RealmArchetypeSpatial rs, RealmTable realms)
+        => rs?.Grid != null && (realms == null || realms.IsRunnable(rs.Realm.Value));
+
+    /// <summary>
+    /// How many of <paramref name="present"/> get a per-realm telemetry row — kind 66's <c>runnableRealms</c>, against its <c>presentRealms</c>.
+    /// </summary>
+    /// <param name="present">The realms this archetype has cluster state in.</param>
+    /// <param name="realms">The engine's realm table, or <see langword="null"/>.</param>
+    /// <returns>The count.</returns>
+    internal static int CountRunnableRealms(ReadOnlySpan<RealmArchetypeSpatial> present, RealmTable realms)
+    {
+        var runnable = 0;
+        foreach (var rs in present)
+        {
+            if (RealmGetsATelemetryRow(rs, realms))
+            {
+                runnable++;
+            }
+        }
+
+        return runnable;
+    }
+
+    /// <summary>
+    /// One row per RUNNABLE realm this archetype has cluster state in (#WB-05, kind 67): that realm's grid, reach, outliers and configured budget.
+    /// </summary>
+    /// <remarks>
+    /// <para><b>Shape, never rates.</b> Every field is per-realm state the realm owns. The per-tick counters are owned per ARCHETYPE — one
+    /// <see cref="ArchetypeClusterState"/> serves every realm the archetype lives in — so a realm-keyed copy of them would report the sum under one realm's
+    /// name, which is worse than their absence because it would look right. Kind 66 remains their only source and is archetype-wide by construction.</para>
+    /// <para><b>Runnable only, and the skipped realms are accounted for rather than hidden.</b> <c>Realms/02-runtime-lifecycle.md</c> §6 bounds per
+    /// realm-archetype telemetry at "runnable only" because a galaxy of a few thousand sleeping interiors would otherwise spend the trace on rows that are
+    /// zero by definition. Kind 66 carries the present and runnable counts for the same tick, so a consumer states how many rows it is not showing — and a
+    /// realm going dormant is visible as a row disappearing while the skipped count rises.</para>
+    /// <para><b>Every read is O(1).</b> A pool's cluster count, a realm's reach, an escaped-set count, two list counts and four config fields — no walk of
+    /// cells, no allocation, and the whole method is behind the kind's own gate, so an engine not being watched pays the loop bound and nothing else.</para>
+    /// </remarks>
+    private static void EmitSpatialRealmRows(ArchetypeClusterState clusterState, ushort archetypeId, ReadOnlySpan<RealmArchetypeSpatial> present)
+    {
+        if (!TelemetryConfig.SpatialRealmTelemetryActive)
+        {
+            return;
+        }
+
+        var realms = clusterState.RealmTableOrNull;
+        foreach (var rs in present)
+        {
+            if (!RealmGetsATelemetryRow(rs, realms))
+            {
+                continue;
+            }
+
+            var config = rs.Grid.Config;
+            var divisor = realms?.DivisorOf(rs.Realm.Value) ?? 1;
+            TyphonEvent.EmitSpatialRealmTelemetry(
+                realmId: rs.Realm.Value,
+                archetypeId: archetypeId,
+                runState: (byte)(realms?.StateOf(rs.Realm.Value) ?? RealmRunState.Active),
+                // Saturated rather than wrapped: a divisor above 255 is not a policy any configuration reaches, and a wrapped 256 reading as 0 would say
+                // "every tick" about a realm visited once in 256.
+                divisor: (byte)Math.Min(divisor, byte.MaxValue),
+                cellSize: (float)config.CellSize,
+                cellCount: config.CellCount,
+                gridDepth: config.GridDepth,
+                clusters: rs.CellClusterPool?.ClusterListCount ?? 0,
+                clusterReach: Volatile.Read(ref rs.ClusterReach),
+                // Volatile, like every other read of this field in the engine: `RealmArchetypeSpatial` documents it as published with a release store, and the
+            // two reads on the lines around this one already pair with it. A plain load here can see a stale reference on arm64, hence a stale Count.
+            escapedClusters: Volatile.Read(ref rs.EscapedClusters).Count,
+                promotedCells: Volatile.Read(ref rs.PromotedCellCount),
+                blockedCells: rs.TightnessBlockedCells?.Count ?? 0,
+                budgetConfiguredMs: config.ReclusterBudgetMs,
+                efficiencyTolerance: config.QueryEfficiencyTolerance);
+        }
+    }
+
+    /// <summary>
+    /// The cap on kind-70 rows per archetype per tick. Volume scales with the realm count, so an engine hosting thousands of interiors would otherwise
+    /// spend its trace on rows nobody reads; 64 is chosen against what a panel can show, matching the operator-row cap the frame assembler uses.
+    /// </summary>
+    private const int RealmRatesRowCap = 64;
+
+    /// <summary>
+    /// Whether <paramref name="rs"/> gets a per-realm RATES row: one the fence touched this tick.
+    /// </summary>
+    /// <remarks>
+    /// The single definition, as <see cref="RealmGetsATelemetryRow"/> is for kind 67, so the census on kind 66 and the rows themselves can never disagree.
+    /// <b>Deliberately NOT the same predicate.</b> Kind 67 asks "is this realm runnable", which is a policy question and true of realms that did nothing;
+    /// this asks "did the fence do work here", which is true of realms policy is not running — and that case is the anomaly worth seeing, not a row to drop.
+    /// </remarks>
+    internal static bool RealmGetsARatesRow(RealmArchetypeSpatial rs) => rs != null && rs.Counters.F.Touched != 0;
+
+    /// <summary>
+    /// One row per realm the fence touched this tick, carrying that realm's per-tick maintenance rates (kind 70).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Called from Finalize, and that is the only correct place.</b> <c>ResetRealmTickCounters</c> runs in the NEXT tick's Prep, so these counters hold
+    /// this tick's work from the moment the fence's producers finish until then. Emitting anywhere in Prep would publish either the previous tick's numbers
+    /// (before the reset) or zeros (after it) — and both would look like a working feature reporting believable figures.
+    /// </para>
+    /// <para>
+    /// <b>The cap truncates a prefix of present order</b>, and the bias is real: with more touched realms than the cap, the same realms are dropped every
+    /// tick rather than a rotating sample. That is deliberate — rotating would put holes in every realm's series, spreading the ambiguity across all of
+    /// them instead of confining it to a tail a consumer can name from the two counts on kind 66. Sorting by busiest would be honest selection but puts a
+    /// sort on the fence path to serve a diagnostic.
+    /// </para>
+    /// </remarks>
+    private static void EmitSpatialRealmRates(ushort archetypeId, ReadOnlySpan<RealmArchetypeSpatial> present, out int touched, out int emitted)
+    {
+        touched = 0;
+        emitted = 0;
+        if (!TelemetryConfig.SpatialRealmRatesActive)
+        {
+            return;
+        }
+
+        foreach (var rs in present)
+        {
+            if (!RealmGetsARatesRow(rs))
+            {
+                continue;
+            }
+
+            // Counted for EVERY touched realm, including the ones past the cap — that is the whole point of reporting it beside `emitted`, and counting it
+            // after the `break` below would make the two equal by construction and the pair would measure nothing.
+            touched++;
+            if (emitted >= RealmRatesRowCap)
+            {
+                continue;
+            }
+
+            emitted++;
+            ref readonly var c = ref rs.Counters.F;
+            TyphonEvent.EmitSpatialRealmRates(
+                realmId: rs.Realm.Value,
+                archetypeId: archetypeId,
+                tightnessExtentSum: c.TightnessExtentSum,
+                tightnessBoundSum: c.TightnessBoundSum,
+                relocationSpendNs: c.RelocationSpendNs,
+                clustersScanned: c.ClustersScanned,
+                slotsScanned: c.SlotsScanned,
+                driftersDetected: c.DriftersDetected,
+                driftAbsorbed: c.DriftAbsorbed,
+                driftersUnplaced: c.DriftersUnplaced,
+                driftGatedClusters: c.DriftGatedClusters,
+                driftSuppressedByDensity: c.DriftSuppressedByDensity,
+                driftersUnplacedNoCandidate: c.DriftersUnplacedNoCandidate,
+                driftersSpilled: c.DriftersSpilled,
+                tightnessSamples: c.TightnessSamples,
+                migrationCount: c.MigrationCount,
+                crossingsExecuted: c.CrossingsExecuted,
+                relocationsExecuted: c.RelocationsExecuted,
+                repairsExecuted: c.RepairsExecuted,
+                jumpCrossings: c.JumpCrossings,
+                clampedDestinations: c.ClampedDestinations,
+                staleFlagsDropped: c.StaleFlagsDropped,
+                relocationsThrottled: c.RelocationsThrottled,
+                relocationsSuperseded: c.RelocationsSuperseded,
+                relocationsAdmitted: c.RelocationsAdmitted,
+                crossingsQueued: c.CrossingsQueued,
+                pinsRejected: c.PinsRejected,
+                repairedEntityCount: c.RepairedEntityCount,
+                repairUnitCount: c.RepairUnitCount,
+                repairUnitsRefused: c.RepairUnitsRefused,
+                repairValveFires: c.RepairValveFires,
+                arrivalCellsTouched: c.ArrivalCellsTouched,
+                largestArrivalRun: c.LargestArrivalRun,
+                cellTreePromotions: c.CellTreePromotions,
+                cellTreeDemotions: c.CellTreeDemotions);
+        }
     }
 
     /// <summary>

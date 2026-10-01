@@ -116,7 +116,9 @@ internal ref partial struct SpatialRelocationOutcomeEvent
     [BeginParam] public int Spilled;
     /// <summary>Pinned claims rejected at drain time and executed as first fit instead.</summary>
     [BeginParam] public int PinsRejected;
-    /// <summary>Cell-crossing requests the throttle found queued and charged. Never refused — present so the budget's denominator is on the timeline too.</summary>
+    /// <summary>
+    /// Cell-crossing requests the throttle found queued and charged. Never refused — present so the budget's denominator is on the timeline too.
+    /// </summary>
     [BeginParam] public int CrossingsQueued;
 }
 
@@ -164,7 +166,9 @@ internal ref partial struct SpatialArchetypeTelemetryEvent
     [BeginParam] public float PackingBound;
     /// <summary>Cell halves promoted to a per-cell R-Tree this tick.</summary>
     [BeginParam] public int CellTreePromotions;
-    /// <summary>Cell halves demoted back to the linear scan this tick. Kept separate from the promotions: a net of zero hides a cell thrashing between both.</summary>
+    /// <summary>
+    /// Cell halves demoted back to the linear scan this tick. Kept separate from the promotions: a net of zero hides a cell thrashing between both.
+    /// </summary>
     [BeginParam] public int CellTreeDemotions;
 
     // ── Appended for the maintenance controller (#906; rules SO-02, TH-04, RP-07). A record written before these is a strict prefix of one written after,
@@ -210,6 +214,200 @@ internal ref partial struct SpatialArchetypeTelemetryEvent
     [BeginParam] public float MeasuredNsPerEntity;
     /// <summary>The throttle's multiplier on the drift target (step 14, D2): 1 is none; at its cap relocation detection is off.</summary>
     [BeginParam] public float DriftTargetBoost;
+
+    // ── Appended for the realm census (#WB-05). Not a realm dimension: everything above stays summed across realms, because the counters are owned per
+    //    archetype. These two exist so a consumer of the per-realm rows can say how many rows it is NOT showing. ──────────────────────────────────────
+
+    /// <summary>Realms this archetype has cluster state in, runnable or not. The denominator of the per-realm rows.</summary>
+    [BeginParam] public int PresentRealms;
+    /// <summary>How many of those were runnable this tick — the number of <c>SpatialRealmTelemetry</c> rows emitted beside this record.</summary>
+    [BeginParam] public int RunnableRealms;
+
+    // ── Appended for the per-realm RATE rows (kind 70). Two counts rather than one, and the pair is load-bearing: kind 69 reports its row count against a
+    //    population it already carries, but this record's population is PresentRealms, and present is not touched. One number could not separate "the cap
+    //    truncated the rows" from "those realms did nothing", which are the two things a consumer must never confuse. ─────────────────────────────────
+
+    /// <summary>
+    /// Realms the fence touched this tick for this archetype — the realms that HAVE a kind-70 row to emit, counted BEFORE the cap.
+    /// </summary>
+    /// <remarks>
+    /// Before the cap on purpose. Counted after, it would equal <see cref="RatesRealmsEmitted"/> by construction and say nothing at all — the same
+    /// correction the frame assembler's window mark needed, for the same reason.
+    /// </remarks>
+    [BeginParam] public int RatesRealmsTouched;
+
+    /// <summary>
+    /// How many kind-70 rows were actually emitted beside this record. Equal to <see cref="RatesRealmsTouched"/> means nothing was truncated, and an absent
+    /// realm did no work; less than it means a consumer must state how many working realms it is NOT showing.
+    /// </summary>
+    [BeginParam] public int RatesRealmsEmitted;
+}
+
+/// <summary>
+/// Per-realm, per-archetype snapshot of one realm's partition SHAPE (#WB-05). Instant-shaped.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A TRANSPORT, like <see cref="SpatialArchetypeTelemetryEvent"/>, and for the same reason: the Workbench's attach session is a one-way trace stream with no
+/// way to call an accessor on the engine it is watching. Every value is a field the realm already owns.
+/// </para>
+/// <para>
+/// <b>Why shape and not rates.</b> After #1050 a realm owns its grid, its cell size, its dimensionality and its own maintenance budget, so "is spatial
+/// healthy" became a per-realm question — a 16 km planet and a 50 m dungeon have different pathologies and a thrashing dungeon is invisible behind a calm
+/// planet. What is per-realm TODAY is the shape: the grid, the reach, the outliers, the promoted and blocked cells, the configured budget. The per-tick rate
+/// counters are not — they live one-per-archetype on <c>ArchetypeClusterState</c> — so they are absent here rather than copied under a realm's name.
+/// </para>
+/// <para>
+/// <b>Runnable realms only</b>, per <c>Realms/02-runtime-lifecycle.md</c> §6. The realms left out are accounted for by
+/// <see cref="SpatialArchetypeTelemetryEvent.PresentRealms"/> / <see cref="SpatialArchetypeTelemetryEvent.RunnableRealms"/> on the same tick.
+/// </para>
+/// </remarks>
+[TraceEvent(TraceEventKind.SpatialRealmTelemetry, Shape = TraceEventShape.Instant, Gate = "SpatialRealmTelemetryActive")]
+internal ref partial struct SpatialRealmTelemetryEvent
+{
+    [BeginParam] public ushort RealmId;
+    [BeginParam] public ushort ArchetypeId;
+    /// <summary>The realm's run state this tick: <see cref="RealmRunState"/> — Dormant 0, Simulated 1, Active 2, Closing 3.</summary>
+    [BeginParam] public byte RunState;
+    /// <summary>The realm's tick divisor: 1 every tick, N once every N ticks. Saturates at 255, which no policy reaches.</summary>
+    [BeginParam] public byte Divisor;
+    /// <summary>This realm's own cell edge, in world units. The whole point of the record: it differs per realm.</summary>
+    [BeginParam] public float CellSize;
+    /// <summary>Cells in this realm's grid — what separates a planet from an interior more plainly than its bounds do.</summary>
+    [BeginParam] public int CellCount;
+    /// <summary>Cells along the third axis. 1 for a flat realm, so the record says the dimensionality without a separate flag.</summary>
+    [BeginParam] public int GridDepth;
+    /// <summary>This archetype's clusters in this realm. Zero for a realm whose entities have all left, which is a real state, not a missing row.</summary>
+    [BeginParam] public int Clusters;
+    /// <summary>
+    /// How far past its own cell a query must reach for this archetype's clusters IN THIS REALM, in world units. Read against
+    /// <see cref="CellSize"/>: a reach of 180 in a 64 m realm means the cell-level broadphase is pruning nothing.
+    /// </summary>
+    [BeginParam] public float ClusterReach;
+    /// <summary>Clusters excluded from the reach and visited by name instead. A handful is the design; a growing count is not.</summary>
+    [BeginParam] public int EscapedClusters;
+    /// <summary>Cell halves currently carrying a per-cell R-Tree in this realm.</summary>
+    [BeginParam] public int PromotedCells;
+    /// <summary>Cells whose tightness blocked a promotion in this realm.</summary>
+    [BeginParam] public int BlockedCells;
+    /// <summary>
+    /// This realm's <b>declared</b> <c>ReclusterBudgetMs</c> — what its <c>RealmConfig</c> asks for, NOT what the engine enforces.
+    /// </summary>
+    /// <remarks>
+    /// The distinction is load-bearing and a consumer must carry it. Maintenance is budgeted per ARCHETYPE (Realms D-6: "budget and repair queue stay per
+    /// archetype"), and the one budget actually spent is taken from realm 0's grid — <c>ApplyMigrationThrottle(PrimaryGrid, …)</c>. So two realms declaring
+    /// different values both get realm 0's, and a panel that presents this as the ceiling a grant was measured against would be comparing the grant to a
+    /// number nothing used. It is reported per row because the declaration is a real per-realm fact worth seeing — not least when it differs from what runs.
+    /// </remarks>
+    [BeginParam] public float BudgetConfiguredMs;
+    /// <summary>
+    /// This realm's <b>declared</b> <c>QueryEfficiencyTolerance</c>. Declared, for the same reason as <see cref="BudgetConfiguredMs"/>: one controller per
+    /// archetype steers the one budget, from every realm's queries mixed, using realm 0's tolerance. Zero declares the controller off for this realm.
+    /// </summary>
+    [BeginParam] public float EfficiencyTolerance;
+}
+
+/// <summary>
+/// What one realm's partition DID this tick, for one archetype — the rate twin of <see cref="SpatialRealmTelemetryEvent"/>'s shape.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Emitted for realms the fence TOUCHED</b>, which is a different set from kind 67's runnable realms and contains neither. A row here with no kind-67
+/// row is a non-runnable realm that did maintenance work — an anomaly worth seeing rather than a row to drop. Keeping the two records apart is what lets a
+/// missing row mean exactly one thing in each.
+/// </para>
+/// <para>
+/// <b>The field order is the engine counter block's own declaration order</b> (<c>RealmTickCounters.Fields</c>), so the emitter is a straight copy with no
+/// reordering. A swapped pair would compile and would be invisible until someone read a number that made no sense.
+/// </para>
+/// <para>
+/// <b>The tightness pair are SUMS with their sample count beside them, never means</b>, because a consumer folding realms must re-derive the mean from
+/// summed numerators over the summed count — averaging per-realm means weights a realm that scanned one cluster like one that scanned ten thousand.
+/// <b><see cref="LargestArrivalRun"/> folds with MAX, never with +.</b>
+/// </para>
+/// <para>
+/// <b>Capped per archetype per tick.</b> <see cref="SpatialArchetypeTelemetryEvent.RatesRealmsTouched"/> and
+/// <see cref="SpatialArchetypeTelemetryEvent.RatesRealmsEmitted"/> on the same tick say whether the cap fired: equal means an absent realm did no work,
+/// and a shortfall means a consumer must state how many working realms it is not showing.
+/// </para>
+/// </remarks>
+[TraceEvent(TraceEventKind.SpatialRealmRates, Shape = TraceEventShape.Instant, Gate = "SpatialRealmRatesActive")]
+internal ref partial struct SpatialRealmRatesEvent
+{
+    [BeginParam] public ushort RealmId;
+    [BeginParam] public ushort ArchetypeId;
+    /// <summary>Sum of the measured extent ratios behind <c>TightnessSamples</c>, for this realm.</summary>
+    [BeginParam] public double TightnessExtentSum;
+    /// <summary>Sum of the packing bounds behind <c>TightnessSamples</c>, for this realm.</summary>
+    [BeginParam] public double TightnessBoundSum;
+    /// <summary>Budget the admitted relocations of this realm were charged, in nanoseconds.</summary>
+    [BeginParam] public double RelocationSpendNs;
+    /// <summary>Clusters of this realm examined by the intra-cell drifter scan this tick.</summary>
+    [BeginParam] public int ClustersScanned;
+    /// <summary>Entity slots of this realm the AABB refresh actually walked this tick.</summary>
+    [BeginParam] public int SlotsScanned;
+    /// <summary>Entities of this realm the intra-cell scan found outside their cluster's target region this tick. Detection, not outcome.</summary>
+    [BeginParam] public int DriftersDetected;
+    /// <summary>Drifters of this realm left in place because they were inside the drift dead zone.</summary>
+    [BeginParam] public int DriftAbsorbed;
+    /// <summary>Drifters of this realm for which placement found no better cluster.</summary>
+    [BeginParam] public int DriftersUnplaced;
+    /// <summary>Clusters of this realm that passed the intra-cell drift gate.</summary>
+    [BeginParam] public int DriftGatedClusters;
+    /// <summary>Clusters of this realm above the configured floor but below their cell's density-derived target, so the drift scan never ran.</summary>
+    [BeginParam] public int DriftSuppressedByDensity;
+    /// <summary>The subset of <c>DriftersUnplaced</c> whose cell offered no candidate at all.</summary>
+    [BeginParam] public int DriftersUnplacedNoCandidate;
+    /// <summary>Drifters of this realm whose cell had candidates but no capacity left this pass.</summary>
+    [BeginParam] public int DriftersSpilled;
+    /// <summary>Clusters of this realm that contributed a tightness reading this tick — the denominator of the two sums above.</summary>
+    [BeginParam] public int TightnessSamples;
+    /// <summary>Migrations executed into this realm this tick. Its three kinds below sum to it exactly.</summary>
+    [BeginParam] public int MigrationCount;
+    /// <summary>Cell-crossing migrations executed into this realm.</summary>
+    [BeginParam] public int CrossingsExecuted;
+    /// <summary>Intra-cell relocations executed in this realm.</summary>
+    [BeginParam] public int RelocationsExecuted;
+    /// <summary>Repair moves executed in this realm.</summary>
+    [BeginParam] public int RepairsExecuted;
+    /// <summary>Crossings filed in this realm whose destination cell is not adjacent to the source cell.</summary>
+    [BeginParam] public int JumpCrossings;
+    /// <summary>Crossings filed in this realm whose position lay outside the grid and were clamped into an edge cell.</summary>
+    [BeginParam] public int ClampedDestinations;
+    /// <summary>Write-time crossing flags of this realm that the drain found describing an entity that is home, and dropped rather than executed.</summary>
+    [BeginParam] public int StaleFlagsDropped;
+    /// <summary>Intra-cell relocations of this realm the budget refused.</summary>
+    [BeginParam] public int RelocationsThrottled;
+    /// <summary>Relocations of this realm dropped because a mandatory request already names the same source slot.</summary>
+    [BeginParam] public int RelocationsSuperseded;
+    /// <summary>Intra-cell relocations of this realm the throttle admitted into the drain prefix.</summary>
+    [BeginParam] public int RelocationsAdmitted;
+    /// <summary>Mandatory cell-crossing requests of this realm the throttle found queued and charged.</summary>
+    [BeginParam] public int CrossingsQueued;
+    /// <summary>Pinned claims in this realm rejected at drain time and therefore executed as first fit.</summary>
+    [BeginParam] public int PinsRejected;
+    /// <summary>Entities of this realm re-packed by the repair path this tick.</summary>
+    [BeginParam] public int RepairedEntityCount;
+    /// <summary>Repair units admitted in this realm this tick.</summary>
+    [BeginParam] public int RepairUnitCount;
+    /// <summary>Repair units of this realm the remaining budget could not finish, and which were therefore never begun.</summary>
+    [BeginParam] public int RepairUnitsRefused;
+    /// <summary>Safety-valve admissions in this realm — repair units begun with insufficient budget because the cell was critical.</summary>
+    [BeginParam] public int RepairValveFires;
+    /// <summary>Distinct destination cells of this realm's drained cell crossings.</summary>
+    [BeginParam] public int ArrivalCellsTouched;
+    /// <summary>The most cell crossings into one destination cell of this realm this tick.</summary>
+    /// <remarks>
+    /// <b>A MAXIMUM, and the one member of this record that does not sum.</b> SO-01 requires the telemetry roll-up to fold by KIND rather than uniformly —
+    /// it is why <c>ClusterReach</c> maxes where the extensive counters sum — and the same applies along BOTH axes this record is folded on: adding two
+    /// realms' peaks, or one realm's peaks across a window, reports a burst no cell ever received. Nothing in the bytes says so, which is why it is said
+    /// here.
+    /// </remarks>
+    [BeginParam] public int LargestArrivalRun;
+    /// <summary>Cell halves of this realm promoted to a tree this tick.</summary>
+    [BeginParam] public int CellTreePromotions;
+    /// <summary>Cell halves of this realm that fell back from a tree this tick.</summary>
+    [BeginParam] public int CellTreeDemotions;
 }
 
 /// <summary>

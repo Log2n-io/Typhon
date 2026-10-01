@@ -70,7 +70,9 @@ export function isInstantKind(v: number): boolean {
   if (v === TraceEventKind.EcsSpawnBatch) return true;
   // #911 — 65/66 are instants sitting among spans (60-64). Same shape as the EcsSpawnBatch carve-out above, and missing it
   // would render both as phantom spans with a fabricated duration read out of their payload.
-  if (v === 65 || v === 66) return true;
+  if (v === 65 || v === 66 || v === 67) return true;                       // 67 joined them for the per-realm record (#WB-05)
+  if (v === 68 || v === 69) return true;                                   // push replication's server record and its session rows (#WB-02)
+  if (v === 70) return true;                                               // per-realm maintenance RATE rows, the rate twin of 67
   if (v >= 90 && v <= 116) return true;                                    // Concurrency tracing (Phase 2, #280)
   // Spatial tracing (Phase 3, #281) — mixed; instants are 127-135, 137, 140-142, 144, 145.
   if ((v >= 127 && v <= 135) || v === 137 || (v >= 140 && v <= 142) || v === 144 || v === 145) return true;
@@ -241,7 +243,18 @@ function decodeInstant(
         crossingsQueued: reader.readI32(payloadOffset + 30),
       };
 
-    case TraceEventKind.SpatialArchetypeTelemetry:
+    case TraceEventKind.SpatialArchetypeTelemetry: {
+      // #944. The record grew from 15 fields to 32 in #941 and this decoder read 14 of them, so the whole maintenance
+      // controller — the thing the #906 pacing campaign was built around — was on the wire and thrown away.
+      //
+      // Reads are bounded by the record's OWN size, exactly as the generated C# decoder bounds them: an instant has no
+      // optional mask, so the kind grows by APPENDING fields, a record written before an append is a strict prefix of
+      // one written after, and a field the record does not reach must decode as zero rather than read into the next
+      // record. `end` is where this record stops; `at` returns the value only when the field fits entirely inside it.
+      // A trace captured before #941 therefore still decodes, with the controller block reading zero throughout.
+      const end = pos + recordSize;
+      const at = <T,>(offset: number, size: number, read: (o: number) => T, zero: T): T =>
+        payloadOffset + offset + size <= end ? read(payloadOffset + offset) : zero;
       return {
         kind, threadSlot, tickNumber, timestampUs,
         archetypeId: reader.readU16(payloadOffset),
@@ -259,6 +272,142 @@ function decodeInstant(
         packingBound: reader.readF32(payloadOffset + 46),
         cellTreePromotions: reader.readI32(payloadOffset + 50),
         cellTreeDemotions: reader.readI32(payloadOffset + 54),
+        // ── appended in #941: the query tally the controller steers on (i64 on the wire; read as Number, which is exact
+        //    below 2^53 — a per-tick candidate count reaching that would need more entities than the engine can address)
+        queryClustersOpened: at(58, 8, reader.readI64AsNumber.bind(reader), 0),
+        queryCandidates: at(66, 8, reader.readI64AsNumber.bind(reader), 0),
+        queryHits: at(74, 8, reader.readI64AsNumber.bind(reader), 0),
+        // ── the controller's budget arithmetic
+        budgetConfiguredMs: at(82, 4, reader.readF32.bind(reader), 0),
+        budgetGrantedMs: at(86, 4, reader.readF32.bind(reader), 0),
+        efficiencyTolerance: at(90, 4, reader.readF32.bind(reader), 0),
+        candidatesPerHitSmoothed: at(94, 4, reader.readF32.bind(reader), 0),
+        candidatesPerHitBest: at(98, 4, reader.readF32.bind(reader), 0),
+        ticksAtWholeBudget: at(102, 4, reader.readI32.bind(reader), 0),
+        controllerFlags: at(106, 1, reader.readU8.bind(reader), 0),
+        efficiencyRebases: at(107, 4, reader.readI32.bind(reader), 0),
+        // ── repair health
+        repairCellsCooling: at(111, 4, reader.readI32.bind(reader), 0),
+        repairValveFires: at(115, 4, reader.readI32.bind(reader), 0),
+        repairedEntities: at(119, 4, reader.readI32.bind(reader), 0),
+        repairQueueEvicted: at(123, 8, reader.readI64AsNumber.bind(reader), 0),
+        measuredNsPerEntity: at(131, 4, reader.readF32.bind(reader), 0),
+        driftTargetBoost: at(135, 4, reader.readF32.bind(reader), 0),
+        // ── the realm census (#WB-05)
+        presentRealms: at(139, 4, reader.readI32.bind(reader), 0),
+        runnableRealms: at(143, 4, reader.readI32.bind(reader), 0),
+        // ── appended for the kind-70 row census. Through `at` like the block above: a trace captured before kind 70
+        //    existed is shorter here and must still decode, reading both as zero — which is also the right reading,
+        //    since such a trace carries no rate rows to be truncated.
+        ratesRealmsTouched: at(147, 4, reader.readI32.bind(reader), 0),
+        ratesRealmsEmitted: at(151, 4, reader.readI32.bind(reader), 0),
+      };
+    }
+
+    // #WB-02 — push replication's operator records. `framesSkipped` and `framePoolBudgetSkips` are i64 on the wire and
+    // read as Numbers: both are counts of frames, which cannot approach 2^53 in any session a human watches. The
+    // offsets are NOT naturally aligned (i64 at 16 and at 32, f32 at 4) because the generator packs without padding.
+    case TraceEventKind.SubscriptionsServerTelemetry: {
+      // Bounded by the record's OWN size, for the reason kind 66 is: the enum declares this payload append-only, so a
+      // record from an older producer is a strict prefix and a field it does not reach must read zero rather than the
+      // next record's bytes — or, for the block's last record, throw a DataView RangeError that nothing here catches and
+      // that costs the whole chunk (marked failed for 30 s, rendered as a gap).
+      const end68 = pos + recordSize;
+      const at68 = <T,>(offset: number, size: number, read: (o: number) => T, zero: T): T =>
+        payloadOffset + offset + size <= end68 ? read(payloadOffset + offset) : zero;
+      return {
+        kind, threadSlot, tickNumber, timestampUs,
+        sessions: at68(0, 4, (o) => reader.readI32(o), 0),
+        netOutBytesPerSec: at68(4, 4, (o) => reader.readF32(o), 0),
+        trackP99Ms: at68(8, 4, (o) => reader.readF32(o), 0),
+        durabilityWaitP99Ms: at68(12, 4, (o) => reader.readF32(o), 0),
+        framesSkipped: at68(16, 8, (o) => reader.readI64AsNumber(o), 0),
+        framePoolRented: at68(24, 4, (o) => reader.readI32(o), 0),
+        framePoolBlocks: at68(28, 4, (o) => reader.readI32(o), 0),
+        framePoolBudgetSkips: at68(32, 8, (o) => reader.readI64AsNumber(o), 0),
+        reportedSessions: at68(40, 4, (o) => reader.readI32(o), 0),
+      };
+    }
+
+    // The session id is u64 on the wire but the engine packs slot | generation << 16, so the value always fits a
+    // Number; reading the low word alone would drop the generation and make two sessions in one slot indistinguishable.
+    case TraceEventKind.SubscriptionsSessionTelemetry: {
+      const end69 = pos + recordSize;
+      const at69 = <T,>(offset: number, size: number, read: (o: number) => T, zero: T): T =>
+        payloadOffset + offset + size <= end69 ? read(payloadOffset + offset) : zero;
+      return {
+        kind, threadSlot, tickNumber, timestampUs,
+        sessionId: at69(0, 8, (o) => reader.readI64AsNumber(o), 0),
+        // The sentinel, not 0: a row too short to carry its realm has NOT told us it is in realm 0.
+        realmId: at69(8, 2, (o) => reader.readU16(o), 0xffff),
+        bytesPerSec: at69(10, 4, (o) => reader.readF32(o), 0),
+        framesSkipped: at69(14, 8, (o) => reader.readI64AsNumber(o), 0),
+        degradeLevel: at69(22, 4, (o) => reader.readI32(o), 0),
+      };
+    }
+
+    // #WB-05 — one row per runnable realm per archetype. Fixed shape, and every offset from cellSize on is 6 mod 4
+    // because the generator packs two u16s then two u8s with no padding: a decoder that assumed float alignment here
+    // would read plausible garbage.
+    case TraceEventKind.SpatialRealmTelemetry:
+      return {
+        kind, threadSlot, tickNumber, timestampUs,
+        realmId: reader.readU16(payloadOffset),
+        archetypeId: reader.readU16(payloadOffset + 2),
+        runState: reader.readU8(payloadOffset + 4),
+        divisor: reader.readU8(payloadOffset + 5),
+        cellSize: reader.readF32(payloadOffset + 6),
+        cellCount: reader.readI32(payloadOffset + 10),
+        gridDepth: reader.readI32(payloadOffset + 14),
+        clusters: reader.readI32(payloadOffset + 18),
+        clusterReach: reader.readF32(payloadOffset + 22),
+        escapedClusters: reader.readI32(payloadOffset + 26),
+        promotedCells: reader.readI32(payloadOffset + 30),
+        blockedCells: reader.readI32(payloadOffset + 34),
+        budgetConfiguredMs: reader.readF32(payloadOffset + 38),
+        efficiencyTolerance: reader.readF32(payloadOffset + 42),
+      };
+
+    // Kind 70 — one realm's per-tick maintenance RATES for one archetype. Field order is the engine counter block's own
+    // declaration order, so the offsets below run straight through: three f64 then thirty i32, no padding.
+    case TraceEventKind.SpatialRealmRates:
+      return {
+        kind, threadSlot, tickNumber, timestampUs,
+        realmId: reader.readU16(payloadOffset),
+        archetypeId: reader.readU16(payloadOffset + 2),
+        tightnessExtentSum: reader.readF64(payloadOffset + 4),
+        tightnessBoundSum: reader.readF64(payloadOffset + 12),
+        relocationSpendNs: reader.readF64(payloadOffset + 20),
+        clustersScanned: reader.readI32(payloadOffset + 28),
+        slotsScanned: reader.readI32(payloadOffset + 32),
+        driftersDetected: reader.readI32(payloadOffset + 36),
+        driftAbsorbed: reader.readI32(payloadOffset + 40),
+        driftersUnplaced: reader.readI32(payloadOffset + 44),
+        driftGatedClusters: reader.readI32(payloadOffset + 48),
+        driftSuppressedByDensity: reader.readI32(payloadOffset + 52),
+        driftersUnplacedNoCandidate: reader.readI32(payloadOffset + 56),
+        driftersSpilled: reader.readI32(payloadOffset + 60),
+        tightnessSamples: reader.readI32(payloadOffset + 64),
+        migrationCount: reader.readI32(payloadOffset + 68),
+        crossingsExecuted: reader.readI32(payloadOffset + 72),
+        relocationsExecuted: reader.readI32(payloadOffset + 76),
+        repairsExecuted: reader.readI32(payloadOffset + 80),
+        jumpCrossings: reader.readI32(payloadOffset + 84),
+        clampedDestinations: reader.readI32(payloadOffset + 88),
+        staleFlagsDropped: reader.readI32(payloadOffset + 92),
+        relocationsThrottled: reader.readI32(payloadOffset + 96),
+        relocationsSuperseded: reader.readI32(payloadOffset + 100),
+        relocationsAdmitted: reader.readI32(payloadOffset + 104),
+        crossingsQueued: reader.readI32(payloadOffset + 108),
+        pinsRejected: reader.readI32(payloadOffset + 112),
+        repairedEntityCount: reader.readI32(payloadOffset + 116),
+        repairUnitCount: reader.readI32(payloadOffset + 120),
+        repairUnitsRefused: reader.readI32(payloadOffset + 124),
+        repairValveFires: reader.readI32(payloadOffset + 128),
+        arrivalCellsTouched: reader.readI32(payloadOffset + 132),
+        largestArrivalRun: reader.readI32(payloadOffset + 136),
+        cellTreePromotions: reader.readI32(payloadOffset + 140),
+        cellTreeDemotions: reader.readI32(payloadOffset + 144),
       };
 
     case TraceEventKind.GcStart:

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
+import { Profiler } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import SystemsQueriesNavigatorPanel from '@/panels/SystemsQueriesNavigator/SystemsQueriesNavigatorPanel';
 import { useSessionStore } from '@/stores/useSessionStore';
@@ -160,5 +161,72 @@ describe('SystemsQueriesNavigator', () => {
       // explicit tabindex" invariant in the roving-focus test below.
       expect(verb.getAttribute('tabindex')).toBe('-1');
     });
+  });
+});
+
+describe('SystemsQueriesNavigator — a live batch must not re-render this tree', () => {
+  // The defect: this panel subscribed to `s.metadata`, whose object identity flips on every `applyLiveBatch` —
+  // once per animation frame while a live session ingests — because the appended tickSummaries / chunkManifest /
+  // globalMetrics live on that same DTO. The panel reads only `systems`, which does not change, so every one of
+  // those renders was pure waste. Measured against the SWG demo at 50 Hz over 55 s before the fix: 37 532
+  // VerbButton renders (682/s), 10 017 SystemNavRow, ~21 500 for the radix roving-focus primitives — about two
+  // thirds of every component render in the app. In React's dev build each render also writes a
+  // `performance.measure` that nothing clears, so the tab reached its heap limit at roughly two minutes.
+
+  it('does not re-render when metadata identity flips but systems is unchanged', () => {
+    const systems = [sys(0, 'Movement'), sys(1, 'Damage')];
+    useProfilerSessionStore.setState({
+      metadata: { systems, tickSummaries: [] } as unknown as ProfilerMetadataDto,
+      buildError: null,
+    });
+
+    // Count COMMITS of the panel's own tree with React's Profiler. A wrapper component around the panel would not
+    // do: the panel subscribes to the store itself, so it re-renders without its parent re-rendering, and a counter
+    // in the parent stays at 1 whether the bug is present or not.
+    let commits = 0;
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <Profiler id="nav" onRender={() => { commits += 1; }}>
+          <SystemsQueriesNavigatorPanel />
+        </Profiler>
+      </QueryClientProvider>,
+    );
+    const afterMount = commits;
+
+    // Exactly what applyLiveBatch does for an appended tick: a NEW metadata object, the SAME systems array.
+    // Wrapped in act() so React actually flushes — without it nothing renders and the assertion below passes
+    // for the wrong reason, which is the trap this kind of test falls into.
+    // One act() per batch, so each flushes as its own commit the way a real animation frame does. Wrapping the whole
+    // loop in a single act() would let React coalesce twenty updates into one commit, and the regression would show as
+    // a single extra render instead of twenty.
+    for (let i = 1; i <= 20; i++) {
+      act(() => {
+        useProfilerSessionStore.setState((prev) => ({
+          metadata: { ...prev.metadata, tickSummaries: new Array(i) } as unknown as ProfilerMetadataDto,
+        }));
+      });
+    }
+
+    expect(commits).toBe(afterMount);
+    // And the panel is still showing what it showed — the narrow selector did not cost correctness.
+    expect(screen.getByText('Movement')).toBeTruthy();
+  });
+
+  it('DOES re-render when the systems array itself changes', () => {
+    // The other half of the contract: narrowing must not make the panel blind to a new trace.
+    useProfilerSessionStore.setState({
+      metadata: { systems: [sys(0, 'Movement')] } as unknown as ProfilerMetadataDto,
+      buildError: null,
+    });
+    renderNav();
+    expect(screen.getByText('Movement')).toBeTruthy();
+
+    act(() => {
+      useProfilerSessionStore.setState({
+        metadata: { systems: [sys(0, 'Movement'), sys(1, 'Damage')] } as unknown as ProfilerMetadataDto,
+      });
+    });
+    expect(screen.getByText('Damage')).toBeTruthy();
   });
 });

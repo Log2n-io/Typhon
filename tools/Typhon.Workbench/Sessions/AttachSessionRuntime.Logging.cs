@@ -14,6 +14,13 @@ public sealed partial class AttachSessionRuntime
     [LoggerMessage(Level = LogLevel.Warning, Message = "Attach: connection to engine lost, reconnecting...")]
     private partial void LogConnectionLost();
 
+    [LoggerMessage(Level = LogLevel.Warning,
+        Message = "Attach: no Init frame within {TimeoutSeconds}s of connecting — the session starts without schema and advertises the profiler capability only")]
+    private partial void LogInitHandshakeTimedOut(double timeoutSeconds);
+
+    [LoggerMessage(Level = LogLevel.Warning, Message = "Attach: the Init handshake faulted; the session starts without schema")]
+    private partial void LogInitHandshakeFaulted(System.Exception exception);
+
     [LoggerMessage(Level = LogLevel.Error, Message = "Attach: unexpected error in read loop")]
     private partial void LogUnexpectedError(System.Exception exception);
 
