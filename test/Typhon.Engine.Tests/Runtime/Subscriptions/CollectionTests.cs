@@ -285,7 +285,18 @@ sealed class CollectionTests : TestBase<CollectionTests>
     }
 
     [Test]
-    public void TheArenaAndTheIndexHoldNothingNoEntryNamesAfterChurn()
+    public void TheArenaAndTheIndexHoldNothingNoEntryNamesAfterChurn() => Churn(200);
+
+    // E-7 at its stated length. The same cases as the 200-cycle test, longer: the gate runs that one, this one the nightly tier.
+    [Test]
+    [Explicit("E-7's full length, 10 000 churn cycles — about 2 s, past the unit-test budget; the gate runs the 200-cycle form")]
+    [Category("Nightly")]
+    [CancelAfter(300_000)]
+    public void TheArenaAndTheIndexHoldNothingNoEntryNamesAfterTenThousandChurnCycles() => Churn(10_000);
+
+    // Waves of four bags, each naming the keeper twice, spawned and destroyed: afterwards only the keeper's bodies are live, no pair names a dead
+    // referrer, and no −1 went unmatched.
+    private void Churn(int cycles)
     {
         var dbe = Engine(ServiceProvider);
         var keeper = Spawn(dbe, 10f);
@@ -296,7 +307,7 @@ sealed class CollectionTests : TestBase<CollectionTests>
         harness.RunTick(tick++);
         harness.RunTick(tick++);
         var start = state.WideBodies.LiveBodies;
-        for (var cycle = 0; cycle < 200; cycle++)
+        for (var cycle = 0; cycle < cycles; cycle++)
         {
             var wave = Enumerable.Range(0, 4).Select(i => Spawn(harness.Engine, 20f + i, Item(i, $"w{cycle}", keeper), Item(i + 1, "x", keeper))).ToArray();
             harness.RunTick(tick++);
@@ -365,6 +376,65 @@ sealed class CollectionTests : TestBase<CollectionTests>
             Assert.That(index.PairCount, Is.Zero, "every pair went with its entry, whichever worker ended it");
             Assert.That(index.DroppedDecrements, Is.Zero);
             Assert.That(harness.Subscriptions.ReplicationStates[harness.PlanIndex(nameof(ProjBagged))].CollectionDecodeFaults, Is.Zero);
+        });
+    }
+
+    // E-15 (SUB-07): text, references and collections, re-encoded and stored again every tick, allocate nothing once the buffers have their size. Every
+    // bag's level changes each tick, and the level shares its group with the collection, so the whole group — elements, their text, their references —
+    // is encoded, compared and rewritten into its wide body each tick. Measured: the projection and the frames — SUB-07's stages — and nothing the harness
+    // does around them on the same thread: the application's writes, the fence (which the runtime runs with the tick's change set, the harness without),
+    // and the send side, whose ClearReady the runtime's pump calls each tick and the harness has to call itself or the ready list grows.
+    [Test]
+    [VerifiesRule("SUB-07")]
+    public void ASteadyStateTickWithTextReferencesAndCollectionsAllocatesNothing()
+    {
+        var dbe = Engine(ServiceProvider);
+        var keeper = Spawn(dbe, 10f);
+        var (harness, session, archetype) = Start(dbe);
+        using var _ = harness;
+        harness.RunFence = false;
+        var bags = Enumerable.Range(0, 8).Select(b => Spawn(harness.Engine, 20f + b, Item(1, "épée", keeper), Item(2, "sword", keeper), Item(3, "s")))
+            .ToArray();
+        var allocated = 0L;
+        const int Warm = 100;
+        const int Measured = 200;
+        for (var tick = 1L; tick <= Warm + Measured; tick++)
+        {
+            using (var tx = harness.Engine.CreateQuickTransaction())
+            {
+                foreach (var bag in bags)
+                {
+                    tx.OpenMut(bag).Write(ProjBagged.Bag).Level = (int)tick;
+                }
+
+                tx.Commit();
+            }
+
+            foreach (var bag in bags)
+            {
+                Push(harness, bag);
+            }
+
+            harness.Engine.WriteTickFence(tick);
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            harness.RunUpToFrames(tick);
+            harness.RunFramesOnly(tick);
+            if (tick > Warm)
+            {
+                allocated += GC.GetAllocatedBytesForCurrentThread() - before;
+            }
+
+            harness.Assembler.Gate.Publish(tick);
+            harness.Assembler.ClearReady();
+            harness.Deliver(session);
+        }
+
+        var items = Items(harness, session, archetype, bags[^1]);
+        Assert.Multiple(() =>
+        {
+            Assert.That((items.Count, items.Text(0, "Name"), items.Number(1, "Owner")), Is.EqualTo((3, "épée", (double)harness.NetIdOf(keeper))),
+                "precondition: the bags replicated, text and references included");
+            Assert.That(allocated, Is.Zero, $"{Measured} steady ticks allocated {allocated} managed bytes");
         });
     }
 

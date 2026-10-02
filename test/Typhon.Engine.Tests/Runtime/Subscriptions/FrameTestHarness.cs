@@ -181,9 +181,19 @@ sealed unsafe class FrameHarness : IDisposable
     private void PublishTick(long tick) =>
         Subscriptions.PublishTickState(tick, System.Diagnostics.Stopwatch.GetTimestamp(), Assembler.TickMultiplier);
 
+    // The message is built only when the check fails: an interpolated message passed to Assert.That is built on every call, and the allocation tests
+    // measure these calls.
+    private void RequireNextTick(long tick)
+    {
+        if (Tick != 0 && tick != Tick + 1)
+        {
+            Assert.Fail($"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        }
+    }
+
     public void RunTick(long tick, int workers = 1)
     {
-        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        RequireNextTick(tick);
         Tick = tick;
 
         PublishTick(tick);
@@ -219,7 +229,7 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="tick">The tick number, which must advance.</param>
     public void SkipTick(long tick)
     {
-        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        RequireNextTick(tick);
         Tick = tick;
         PublishTick(tick);
         if (RunFence)
@@ -235,7 +245,7 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="tick">The tick number, which must advance.</param>
     public void RunTickWithoutIndex(long tick)
     {
-        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        RequireNextTick(tick);
         Tick = tick;
         PublishTick(tick);
         if (RunFence)
@@ -252,7 +262,7 @@ sealed unsafe class FrameHarness : IDisposable
     /// <param name="workers">Worker-pool width.</param>
     public void RunUpToFrames(long tick, int workers = 1)
     {
-        Assert.That(Tick == 0 || tick == Tick + 1, Is.True, $"tick {tick} follows tick {Tick}: the harness runs ticks back to back");
+        RequireNextTick(tick);
         Tick = tick;
         PublishTick(tick);
         if (RunFence)

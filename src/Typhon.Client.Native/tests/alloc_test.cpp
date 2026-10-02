@@ -86,6 +86,39 @@ TEST(Allocation_ASteadyStateFrameAllocatesNothing)
     }
 }
 
+// E-14 with collections (W34): the tick-coll frame, applied once as it is — a RESET, which shapes the store and SELF by design — then again and again
+// with the RESET bit cleared, re-sends both entities' lists, their text and the controlled entity's owner list over the same netIds. After the warm-up
+// every column, arena and slot has its size, so a frame of collections allocates nothing.
+TEST(Allocation_ASteadyCollectionFrameAllocatesNothing)
+{
+    CountingHooks hooks;
+    FrameApplier applier(PlanOf("catalog-coll"));
+    const auto reset = GoldenBin("tick-coll");
+    CHECK((reset[5] & TickFlags::Reset) != 0);
+    applier.Apply(reset);
+    auto frame = reset;
+    frame[5] = static_cast<std::uint8_t>(frame[5] & ~TickFlags::Reset);
+    for (int warm = 0; warm < 4; warm++)
+    {
+        applier.Apply(frame);
+    }
+
+    const auto [news, hookAllocs] = CountAllocations(
+        [&]
+        {
+            for (int i = 0; i < 50; i++)
+            {
+                applier.Apply(frame);
+            }
+        });
+    CHECK_MSG(news == 0 && hookAllocs == 0, news << " operator new and " << hookAllocs << " hook allocations over 50 collection frames");
+
+    const ArchetypePlan& locker = *applier.Plan().ArchetypeByName("Locker");
+    const ArchetypeStore& store = applier.World().Archetype(static_cast<std::size_t>(locker.idx));
+    const CollectionValue* items = store.CollectionAt(store.FieldIndex("items"), SlotOf(applier.World().Locate(2)));
+    CHECK(items != nullptr && items->Count() == 4 && items->Total() == 9);
+}
+
 TEST(Allocation_ASteadyStateCommandBatchAllocatesNothing)
 {
     CountingHooks hooks;
