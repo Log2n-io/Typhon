@@ -115,6 +115,14 @@ class Program
                 return;
             }
 
+            // Checked BEFORE --profile-spawn, because Contains is a substring-free exact match per element but the two flags are easy to confuse and the
+            // burst profile is the one that runs a real tick loop.
+            if (args.Contains("--profile-spawn-burst"))
+            {
+                SpawnBurstProfile.Run();
+                return;
+            }
+
             if (args.Contains("--profile-spawn"))
             {
                 SpawnProfile.Run();

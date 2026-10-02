@@ -217,6 +217,7 @@ internal abstract partial class BTree<TKey, TStore>
                 }
                 else // cant add, spill or split
                 {
+                    Interlocked.Increment(ref _storage.Owner._leafFullCount);
                     // Sibling operations use sibAccessor to avoid evicting parent path pages from primary CA
                     //
                     // Issue #297: VerifySpillInvariant — only spill when prev/next ranges are consistent with `this` (i.e., the B-link sort invariant hasn't
@@ -239,9 +240,11 @@ internal abstract partial class BTree<TKey, TStore>
                                         && SpillRightSortInvariantHolds(nextForSpill, ref sibAccessor, ref accessor);
                     if (spillLeftOk)
                     {
+                        Interlocked.Increment(ref _storage.Owner._spillLeftCount);
                         var first = InsertPopFirst(index, item, ref accessor);
                         var prev = GetPrevious(ref accessor);
                         prev.PushLast(first, ref sibAccessor);
+                        Interlocked.Increment(ref _storage.Owner._spillEntriesMoved);
 
                         // Bulk spill: move additional items to left neighbor to reduce future LeafFull frequency.
                         // Without bulk, spill moves 1 item → node stays at capacity → every subsequent sequential
@@ -253,6 +256,7 @@ internal abstract partial class BTree<TKey, TStore>
                         {
                             int prevRoom = prev.GetCapacity() - prev.GetCount(ref sibAccessor);
                             extraSpill = Math.Min(extraSpill, prevRoom);
+                            Interlocked.Add(ref _storage.Owner._spillEntriesMoved, extraSpill);
                             for (int s = 0; s < extraSpill; s++)
                             {
                                 prev.PushLast(PopFirstInternal(ref accessor), ref sibAccessor);
@@ -270,9 +274,11 @@ internal abstract partial class BTree<TKey, TStore>
                     }
                     else if (spillRightOk)
                     {
+                        Interlocked.Increment(ref _storage.Owner._spillRightCount);
                         var last = InsertPopLast(index, item, ref accessor);
                         var next = GetNext(ref accessor);
                         next.PushFirst(last, ref sibAccessor);
+                        Interlocked.Increment(ref _storage.Owner._spillEntriesMoved);
 
                         // Bulk spill: move additional items to right neighbor to reduce future LeafFull frequency.
                         int targetCount = GetCapacity() / 2;
@@ -281,6 +287,7 @@ internal abstract partial class BTree<TKey, TStore>
                         {
                             int nextRoom = next.GetCapacity() - next.GetCount(ref sibAccessor);
                             extraSpill = Math.Min(extraSpill, nextRoom);
+                            Interlocked.Add(ref _storage.Owner._spillEntriesMoved, extraSpill);
                             for (int s = 0; s < extraSpill; s++)
                             {
                                 next.PushFirst(PopLastInternal(ref accessor), ref sibAccessor);

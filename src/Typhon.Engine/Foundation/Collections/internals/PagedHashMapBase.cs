@@ -35,6 +35,17 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     /// <summary>Diagnostic: total splits performed.</summary>
     internal long _splitCount;
 
+    // Insert-cost diagnostics (#1098). Both sit on paths that already allocate a chunk or rewrite a whole bucket chain, so one interlocked add beside them is
+    // not measurable. They are the two numbers that decide whether a parallel bulk insert can partition this map by bucket: a chained overflow chunk is
+    // bucket-local and therefore partition-safe, whereas a split rewrites the round-robin bucket `Next` — NOT the bucket being inserted into — plus the
+    // directory and the meta, so it crosses every partition at once. Nothing counted either.
+
+    /// <summary>Diagnostic: overflow chunks chained onto a full bucket. Bucket-local, so partition-safe.</summary>
+    internal long _overflowChunksChained;
+
+    /// <summary>Diagnostic: entries re-hashed and rewritten by <c>ExecuteSplit</c> — the O(batch) term in a bulk insert.</summary>
+    internal long _splitEntriesRehashed;
+
     /// <summary>Diagnostic: OLC read restarts due to version mismatch.</summary>
     internal long _olcRestarts;
 
@@ -43,6 +54,15 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
 
     /// <summary>Maximum load factor before triggering a split.</summary>
     private const double MaxLoadFactor = 0.75;
+
+    /// <summary>
+    /// The same threshold, readable by the derived bulk-insert path so its refusal is phrased against the number that actually gates a split (#1100).
+    /// </summary>
+    /// <remarks>
+    /// A second literal would be the classic drift: raise the threshold here and a bulk insert would refuse batches the per-insert path accepts, or worse,
+    /// accept batches that then split inside a region built on nothing splitting.
+    /// </remarks>
+    protected const double MaxLoadFactorForBulk = MaxLoadFactor;
 
     /// <summary>Whether this hash map supports multiple values per key via VSBS buffer indirection.</summary>
     protected readonly bool _allowMultiple;
@@ -328,8 +348,98 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     }
 
     /// <summary>
+    /// Advance the linear hash state until a batch of <paramref name="additionalEntries"/> further inserts cannot trigger a split, and return how many
+    /// splits that took (#1100).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>What this is for, and it is not a saving.</b> A parallel insert region can be partitioned by bucket only if no insert inside it changes the
+    /// structure. A split does: it takes the global split lock, splits the round-robin bucket <c>Next</c> rather than the bucket being inserted into, and
+    /// rewrites the directory and the meta — so it crosses every partition at once. Running the splits here, serially, before the region opens, leaves the
+    /// parallel inserts with nothing but bucket-local appends. The entries relocated are the same either way; what is bought is partition safety.
+    /// </para>
+    /// <para>
+    /// <b>Why <see cref="EnsureCapacity"/> cannot do this, measured rather than reasoned.</b> That method pre-allocates chunks and the directory and leaves
+    /// <see cref="PackedMeta"/> alone, and <c>ShouldSplit</c> reads the bucket count out of <see cref="PackedMeta"/> — so it changes the COST of a split
+    /// and not whether one happens. Called before a 3 000-spawn concentrated burst it produced figures identical in every column: 189 splits, 1 769 entries
+    /// rehashed, 162 overflow chunks, 445 buckets. <c>PreSizingTheEntityMapDoesNotRemoveItsSplits</c> pins that, because the opposite was asserted in a
+    /// design note first and believed for a while.
+    /// </para>
+    /// <para>
+    /// <b>Serial by contract.</b> The caller must hold the structure quiescent — this is the fence's <c>Prepare</c>, before any worker is admitted. The
+    /// split lock is still taken per split, so a concurrent caller cannot corrupt anything, but it could leave the state short of the target and the
+    /// return value then understates what happened. The bound exists for the same reason the per-insert path has one: a load factor computed from a
+    /// corrupt count must not spin forever.
+    /// </para>
+    /// </remarks>
+    /// <param name="additionalEntries">Entries the caller is about to insert.</param>
+    /// <param name="changeSet">Change set for the chunk writes the splits perform.</param>
+    /// <returns>Splits performed. Zero means the state already had room for the batch.</returns>
+    public int AdvanceHashStateFor(int additionalEntries, ChangeSet changeSet = null)
+    {
+        if (additionalEntries < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(additionalEntries), additionalEntries, "A batch size cannot be negative.");
+        }
+
+        // Pre-allocate first: every split below would otherwise be able to trigger a page-level grow, which is exactly what EnsureCapacity is for. The two
+        // are complements, not alternatives — that is the distinction the corrected note above turns on.
+        EnsureCapacity((int)Math.Min(int.MaxValue, Interlocked.Read(ref _entryCount) + additionalEntries), changeSet);
+
+        var performed = 0;
+
+        // One split per iteration, each admitting BucketCapacity * MaxLoadFactor more entries, so the count is bounded by the batch. The +2 is slack for
+        // the load factor landing exactly on the threshold.
+        var ceiling = (int)((additionalEntries / Math.Max(1.0, BucketCapacity * MaxLoadFactor)) + 2);
+        while (performed < ceiling && WouldSplitAfter(additionalEntries))
+        {
+            if (!TryAcquireSplitLock())
+            {
+                // Someone else is splitting, which means the caller broke the quiescence contract. Stop rather than spin: the state is still correct, and
+                // the shortfall shows up as a split inside the parallel region, which that region asserts against.
+                break;
+            }
+
+            try
+            {
+                var accessor = _segment.CreateChunkAccessor(changeSet);
+                try
+                {
+                    ExecuteSplit(ref accessor, changeSet);
+                }
+                finally
+                {
+                    accessor.Dispose();
+                }
+
+                Interlocked.Increment(ref _splitCount);
+                performed++;
+            }
+            finally
+            {
+                ReleaseSplitLock();
+            }
+        }
+
+        return performed;
+    }
+
+    /// <summary>Whether the load factor would be over the threshold once <paramref name="additionalEntries"/> more entries are in.</summary>
+    /// <remarks>
+    /// The same arithmetic as <c>ShouldSplit</c>, asked about a future count rather than the present one. Kept beside it deliberately: if the threshold or
+    /// the formula ever changes, the two must change together or a pre-advance will leave a region that splits anyway.
+    /// </remarks>
+    private bool WouldSplitAfter(int additionalEntries)
+    {
+        var (_, _, bucketCount) = ReadMeta();
+        var entries = Interlocked.Read(ref _entryCount) + additionalEntries;
+        return (double)entries / ((long)bucketCount * BucketCapacity) > MaxLoadFactor;
+    }
+
+    /// <summary>
     /// Pre-allocate backing storage so that organic splits triggered by subsequent inserts are cheap (no page-level Grow). Does NOT advance the linear
-    /// hash state — entry redistribution happens correctly via per-insert <see cref="ExecuteSplit"/>.
+    /// hash state — entry redistribution happens correctly via per-insert <see cref="ExecuteSplit"/>; to do that, use
+    /// <see cref="AdvanceHashStateFor"/>.
     /// </summary>
     public void EnsureCapacity(int totalEntries, ChangeSet changeSet = null)
     {
@@ -460,6 +570,19 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     // ═══════════════════════════════════════════════════════════════════════
     // Test helpers (internal for InternalsVisibleTo)
     // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Clear the insert-cost diagnostics so one burst can be counted in isolation from the engine's own start-up inserts (#1098). Reset only on a quiescent
+    /// map — the counters cannot be cleared atomically with respect to a live writer.
+    /// </summary>
+    internal void ResetDiagnostics()
+    {
+        Interlocked.Exchange(ref _splitCount, 0);
+        Interlocked.Exchange(ref _olcRestarts, 0);
+        Interlocked.Exchange(ref _writeLockFailures, 0);
+        Interlocked.Exchange(ref _overflowChunksChained, 0);
+        Interlocked.Exchange(ref _splitEntriesRehashed, 0);
+    }
 
     /// <summary>Test-accessible wrapper for <see cref="GetBucketChunkId"/>.</summary>
     internal int GetBucketChunkIdForTest(int bucketId, ref ChunkAccessor<TStore> accessor) => GetBucketChunkId(bucketId, ref accessor);

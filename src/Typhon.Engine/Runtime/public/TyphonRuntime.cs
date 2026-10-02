@@ -65,6 +65,15 @@ public sealed partial class TyphonRuntime : IDisposable
     // not here and not on the tick context — see SubscriptionsRuntime's remarks.
     private SubscriptionsRuntime _subscriptionsRuntime;
 
+    /// <summary>
+    /// This tick's deferred entity commands (#1099), or null when the runtime has no database engine — a standalone scheduler, which has nothing to spawn
+    /// into. Bound to the resolved worker count in the constructor and cleared at tick start.
+    /// </summary>
+    private readonly EntityCommandBuffer _entityCommands;
+
+    /// <summary>Applies <see cref="_entityCommands"/> once per tick, just before the fence. Null when there is no engine to spawn into.</summary>
+    private readonly EntityCommandDrain _entityCommandDrain;
+
     /// <summary>The replication track's tick-scoped context. Internal: the session count is written by ingress, and tests read its ordering journal.</summary>
     internal SubscriptionsContext SubscriptionsContextForTest => _subscriptionsContext;
 
@@ -169,6 +178,20 @@ public sealed partial class TyphonRuntime : IDisposable
 
     /// <summary>The underlying database engine.</summary>
     public DatabaseEngine Engine { get; }
+
+    /// <summary>
+    /// This tick's deferred entity commands (#1099) — what <c>ctx.Commands</c> queues into. Null for a runtime with no database engine.
+    /// </summary>
+    /// <remarks>
+    /// Exposed for telemetry and for tests: <see cref="EntityCommandBuffer.Count"/>, <see cref="EntityCommandBuffer.PendingEntities"/>,
+    /// <see cref="EntityCommandBuffer.OverflowCount"/> and <see cref="EntityCommandBuffer.RejectedCount"/> are the numbers that say whether a tick lost
+    /// anything. Systems must queue through <c>ctx.Commands</c>, which binds the handle to their own worker slot.
+    /// </remarks>
+    public EntityCommandBuffer EntityCommands => _entityCommands;
+
+    /// <summary>Entities and commands the most recent drain applied — zero on a tick that queued nothing. Diagnostics and tests.</summary>
+    internal (int Entities, int Commands) LastEntityCommandsApplied =>
+        _entityCommandDrain == null ? (0, 0) : (_entityCommandDrain.LastAppliedEntities, _entityCommandDrain.LastAppliedCommands);
 
     /// <summary>The DAG scheduler driving tick execution.</summary>
     public DagScheduler Scheduler { get; }
@@ -305,6 +328,16 @@ public sealed partial class TyphonRuntime : IDisposable
         var closeBoundTicks = SkipPolicy.CloseBoundTicks(options.Subscriptions, SubscriptionsRuntime.NominalTickPeriodUsFor(options.BaseTickRate));
         _netIds = new NetIdAllocator("Subscriptions.NetIds", scheduler, quarantineTicks: Math.Max(1, closeBoundTicks) + 1);
         _subscriptions = new SubscriptionsRegistry(options.Subscriptions);
+
+        // The key-block stride is derived from the worker count, which is first known here — the same moment DagScheduler binds the event queues, and for
+        // the same reason. No engine means nothing to spawn into, so the buffer stays null and `ctx.Commands` reports invalid rather than throwing.
+        if (engine != null)
+        {
+            _entityCommands = new EntityCommandBuffer(engine, options.EntityCommandsPerTick);
+            _entityCommands.BindWorkerSlots(scheduler.WorkerSlotCount, scheduler.WorkerCount);
+            _entityCommands.Logger = logger;
+            _entityCommandDrain = new EntityCommandDrain(engine);
+        }
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];
         _systemViews = new ViewBase[scheduler.AllSystemCount];
@@ -786,6 +819,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Subscriptions = _subscriptionsRuntime?.Commands,
+                CommandBuffer = _entityCommands,
                 // Runs on whichever thread called Shutdown()/FatalStop() — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
                 ChunkCount = 1
@@ -2410,6 +2444,7 @@ public sealed partial class TyphonRuntime : IDisposable
             ChunkCount = totalChunks,
             TierBudgetMetrics = _previousTickMetrics,
             SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
+            CommandBuffer = _entityCommands,
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId)
         };
         ctx.DebugValidateWorkerId(Scheduler.WorkerSlotCount, sys.Name);
@@ -2543,6 +2578,7 @@ public sealed partial class TyphonRuntime : IDisposable
             SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
             Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
+            CommandBuffer = _entityCommands,
             WorkerId = workerId,
             ChunkIndex = chunkIndex,
             ChunkCount = totalChunks
@@ -2705,6 +2741,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
                 Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
+                CommandBuffer = _entityCommands,
                 WorkerId = workerId,
                 ChunkIndex = chunkIndex,
                 ChunkCount = totalChunks
@@ -2770,6 +2807,9 @@ public sealed partial class TyphonRuntime : IDisposable
 
     private void OnTickStartInternal(DagScheduler scheduler)
     {
+        // Before any system body runs, so a command queued this tick cannot be cleared by it. O(1) on a tick that queued nothing.
+        _entityCommands?.Reset();
+
         var now = Stopwatch.GetTimestamp();
         _currentDeltaTime = _previousTickTimestamp > 0 ? (float)((now - _previousTickTimestamp) / (double)Stopwatch.Frequency) : 0f;
         _previousTickTimestamp = now;
@@ -2815,6 +2855,7 @@ public sealed partial class TyphonRuntime : IDisposable
                 TierBudgetMetrics = _previousTickMetrics,
                 SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
                 Subscriptions = _subscriptionsRuntime?.Commands,
+                CommandBuffer = _entityCommands,
                 // Runs on the tick thread before any worker wakes — no worker slot belongs to it (#860).
                 WorkerId = TickContext.NonWorkerId,
                 ChunkCount = 1
@@ -3035,6 +3076,20 @@ public sealed partial class TyphonRuntime : IDisposable
         // so no frame can carry both the leave of an identity's old holder and the enter of its new one — the wire applies leaves last, so such a frame would
         // land the leave on the entity that just entered. Once per tick, on the driver thread, before the track dispatches.
         _netIds.DrainQuarantine();
+
+        // Apply this tick's deferred entity commands (#1102). HERE, and the position is three separate decisions.
+        //
+        // Before the fence, because an entity queued this tick has to be cluster-slotted and index-visible by the time the fence's own phases run — the AABB
+        // refresh, the index merge, the spatial maintenance — or it is a tick late to all of them. Before FenceWindow.Open() specifically, so this is ordinary
+        // engine code holding an ordinary transaction: no licence taken, no invariant suspended, nothing to argue about under EW-01.
+        //
+        // On the tick driver rather than in the fence DAG, because the DAG has two arms. A drain inside it would have to be built into FenceExecBundle AND
+        // duplicated for hosts running with EnableParallelFence off; here one call serves both.
+        //
+        // Serially, which is a retreat from the ENG-01 design and is priced: about 1 us a spawn plus 0.2 us an indexed field, measured over a hundred
+        // 3 000-entity bursts, so the realistic mass-death burst is ~3 ms. Worth removing from the tick eventually, not worth new concurrency inside the
+        // B+Tree and the EntityMap to remove today.
+        _entityCommandDrain?.Apply(_entityCommands);
 
         try
         {
@@ -3567,6 +3622,7 @@ public sealed partial class TyphonRuntime : IDisposable
             SpatialGrid = new SpatialGridAccessor(Engine?.Realm0Grid),
             Realms = new RealmsAccessor(Engine?.RealmTable, amortizedDt, _systemStrided[sysIdx]),
             Subscriptions = _subscriptionsRuntime?.CommandsFor(workerId),
+            CommandBuffer = _entityCommands,
             WorkerId = workerId,
             // Single-invocation system: one chunk, index 0. Left at the default 0 before #860, which made the documented slicing formula
             // (start = ChunkIndex * len / ChunkCount) divide by zero for any non-chunked system that used it.

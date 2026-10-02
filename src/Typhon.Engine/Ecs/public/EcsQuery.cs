@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics.X86;
@@ -554,6 +555,46 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     // Spatial predicates
     // ═══════════════════════════════════════════════════════════════════════
 
+    /// <summary>
+    /// Guard: the component carries <c>[SpatialIndex]</c>, so there is a tree to query. Unconditional, not strict-mode gated (#897).
+    /// </summary>
+    /// <typeparam name="T">The component named by the spatial predicate.</typeparam>
+    /// <exception cref="InvalidOperationException">The component has no spatial index.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this one is not behind <see cref="CheckConfig.Enabled"/>.</b> That gate exists so a cheap user-facing check costs nothing when off, and
+    /// the bargain it offers is "a diagnostic when strict mode is on, silence when it is off". Here the alternative to the diagnostic is not silence:
+    /// the query dereferences a null index state and the user gets a bare <see cref="NullReferenceException"/> from inside the engine. That reads as an
+    /// engine bug, so it gets filed as one instead of prompting the attribute that was missing. A misleading diagnostic is worse than none, which is
+    /// what makes this check different from the others behind the gate.
+    /// </para>
+    /// <para>
+    /// <b>And it costs nothing measurable.</b> A query builder is constructed once per query, never per entity, so this is one null test on a path that
+    /// already did a dictionary lookup for the component table on the line above.
+    /// </para>
+    /// <para>
+    /// The typed surface, <c>ClusterSpatialQuery&lt;TArch&gt;</c>, has always thrown here and named the fix. This brings the fluent surface to the same
+    /// behaviour rather than inventing one.
+    /// </para>
+    /// </remarks>
+    private readonly void RequireSpatialIndex<T>() where T : unmanaged
+    {
+        if (_spatialTable?.SpatialIndex == null)
+        {
+            ThrowNoSpatialIndex<T>();
+        }
+    }
+
+    /// <summary>Out of line, so the message is not built into every inlined predicate call — the shape <c>ClusterSpatialQuery</c> uses.</summary>
+    /// <typeparam name="T">The component named by the spatial predicate.</typeparam>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowNoSpatialIndex<T>() =>
+        throw new InvalidOperationException(
+            $"Component {typeof(T).Name} has no [SpatialIndex], so it cannot answer a spatial predicate "
+            + "(WhereNearby / WhereInAABB / WhereRay / WhereFrustum). Put [SpatialIndex] on the component's AABB or bounding-sphere field, and ensure "
+            + "ConfigureSpatialGrid was called on the engine before InitializeArchetypes.");
+
     /// <summary>Guard: at most one spatial predicate per query — a second call would silently overwrite the first.</summary>
     private readonly void ThrowIfSpatialAlreadySet()
     {
@@ -593,7 +634,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        RequireSpatialIndex<T>();
         _spatialQueryType = SpatialQueryType.Radius;
         _spatialParams[0] = centerX; _spatialParams[1] = centerY; _spatialParams[2] = centerZ; _spatialParams[3] = radius;
         // Phase 7: ECS:Query:Spatial:Attach instant. queryBox encodes the bounding box of the radius sphere.
@@ -606,7 +647,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        RequireSpatialIndex<T>();
         _spatialQueryType = SpatialQueryType.AABB;
         _spatialParams[0] = minX; _spatialParams[1] = minY; _spatialParams[2] = minZ;
         _spatialParams[3] = maxX; _spatialParams[4] = maxY; _spatialParams[5] = maxZ;
@@ -621,7 +662,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
     {
         ThrowIfSpatialAlreadySet();
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        RequireSpatialIndex<T>();
         _spatialQueryType = SpatialQueryType.Ray;
         _spatialParams[0] = originX; _spatialParams[1] = originY; _spatialParams[2] = originZ;
         _spatialParams[3] = dirX; _spatialParams[4] = dirY; _spatialParams[5] = dirZ; _spatialParams[6] = maxDist;
@@ -666,7 +707,7 @@ public unsafe struct EcsQuery<TArchetype> where TArchetype : class
         }
 
         _spatialTable = _tx.DBE.GetComponentTable<T>();
-        CheckConfig.Require(CheckConfig.Enabled, _spatialTable?.SpatialIndex != null, $"Component {typeof(T).Name} has no [SpatialIndex]");
+        RequireSpatialIndex<T>();
         _spatialQueryType = SpatialQueryType.Frustum;
         _frustumPlanes = planes.ToArray();
         _frustumPlaneCount = planeCount;

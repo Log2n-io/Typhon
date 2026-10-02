@@ -42,6 +42,26 @@ public class RuntimeOptions
     public float EntityMapBulkMinEntriesPerBucket { get; init; } = EntityMapUpdateStaging.DefaultMinEntriesPerBucket;
 
     /// <summary>
+    /// Entity commands (<c>ctx.Commands.Spawn</c> / <c>Destroy</c>) this runtime is sized for per tick, across every worker (#1099). Default 4 096.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A hint for sizing and a ceiling for loss — not a limit that fails the tick.</b> The budget is split across worker slots at bind and each
+    /// segment grows on demand toward the whole figure, so a skewed tick can legitimately exceed the per-slot share. Past the figure itself a command is
+    /// dropped, <see cref="EntityCommandBuffer.OverflowCount"/> counts it exactly, and the tick continues. That is a deliberate choice against failing
+    /// the tick: this is a number an application has to pick before it has met its own worst tick, and the worst tick is the mass-death event nobody
+    /// sizes correctly the first time. Losing some corpses loudly beats losing the frame.
+    /// </para>
+    /// <para>
+    /// <b>It also derives the key-block size, which is why that is capped rather than trusted.</b> Each producer takes a block of
+    /// <c>clamp(EntityCommandsPerTick / stride, 16, max(16, 1024 / stride))</c> keys per generation, and an unissued block tail is key space spent. The
+    /// 1 024 product cap bounds that at about 0.57 % of an archetype's 2^48 keys per year at a continuous 50 Hz; derived uncapped from this option it
+    /// would burn 36.8 % per year at stride 8 and 73.5 % at stride 32. So raising this option costs memory and nothing else.
+    /// </para>
+    /// </remarks>
+    public int EntityCommandsPerTick { get; init; } = 4096;
+
+    /// <summary>
     /// Target tick rate in Hz. Default: 60.
     /// The scheduler uses metronome-style tick advancement to prevent drift.
     /// </summary>
