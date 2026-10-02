@@ -100,6 +100,8 @@ class ShutdownDrainTests : TestBase<ShutdownDrainTests>
         var ids = new HashSet<EntityId>();
         var box = new AABB2F { MinX = at - 0.5f, MinY = at - 0.5f, MaxX = at + 1.5f, MaxY = at + 1.5f };
         Span<ClusterSpatialQueryResult> buffer = new ClusterSpatialQueryResult[16];
+        // A query reads cluster chunks, which only an epoch scope keeps from being reclaimed under it.
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
         var e = dbe.ClusterSpatialQuery<ShutdownDrainUnit>().AABB(in box);
         try
         {
