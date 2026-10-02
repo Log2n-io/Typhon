@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -367,6 +368,54 @@ public unsafe partial class Transaction
     // ═══════════════════════════════════════════════════════════════════════
 
     /// <summary>
+    /// Guard: this archetype can be spawned into — it has metadata, and this database has per-archetype state for it.
+    /// Unconditional, not strict-mode gated (#1095).
+    /// </summary>
+    /// <typeparam name="TArch">The archetype the caller named.</typeparam>
+    /// <param name="meta">Its metadata, as already loaded by the caller.</param>
+    /// <exception cref="InvalidOperationException">The archetype has no metadata, or this database was never initialized for it.</exception>
+    /// <remarks>
+    /// <para>
+    /// <b>Why this is not behind <see cref="CheckConfig.Enabled"/>.</b> That gate's bargain is "a diagnostic when strict mode is on, silence when it is
+    /// off", and it holds for a check whose failure is harmless. Both subjects here are dereferenced immediately after — <c>meta!.ArchetypeId</c> on the
+    /// next line, and the engine state inside <c>SpawnInternal</c> — so with the checks folded away the caller got a
+    /// <see cref="NullReferenceException"/> from engine internals for the most ordinary mistake there is: never calling
+    /// <see cref="DatabaseEngine.InitializeArchetypes"/>. That reads as an engine bug and gets filed as one. Same defect as the four fluent spatial
+    /// predicates in #897.
+    /// </para>
+    /// <para>
+    /// <b>The second condition is the one that fires, and the first is near-unreachable.</b> Worth writing down, because the obvious reading is backwards:
+    /// <c>Archetype&lt;TArch&gt;.Metadata</c> is <c>_metadata ?? EnsureFinalized()</c>, and <c>EnsureFinalized</c> registers the archetype in the process
+    /// catalog on read — so merely asking for it makes it non-null. A declared archetype therefore has metadata whether or not anyone registered its
+    /// components. What "forgot to register" actually looks like is metadata present and this database's <c>_archetypeStates</c> slot empty, which is the
+    /// <c>EntityMap</c> condition. The null-metadata branch stays as a belt-and-braces guard against an engine-side registry failure, not a user mistake.
+    /// </para>
+    /// <para>
+    /// <b>And it is free on a per-entity path, which is why the cost note that used to sit here does not apply.</b> That note said the gate had to
+    /// short-circuit before the array index because the index itself can throw and so cannot be folded. True, but the index is paid regardless: the very
+    /// next call, <c>SpawnInternal</c>, opens with <c>_dbe._archetypeStates[meta.ArchetypeId]</c>, and so do the batch paths. The check adds one field
+    /// load and one compare ahead of a B+Tree insert and an MVCC write.
+    /// </para>
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void RequireSpawnable<TArch>(ArchetypeMetadata meta) where TArch : Archetype<TArch>
+    {
+        if (meta == null || _dbe._archetypeStates[meta.ArchetypeId]?.EntityMap == null)
+        {
+            ThrowNotSpawnable<TArch>();
+        }
+    }
+
+    /// <summary>Out of line, so the message is not built into every inlined spawn.</summary>
+    /// <typeparam name="TArch">The archetype the caller named.</typeparam>
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowNotSpawnable<TArch>() =>
+        throw new InvalidOperationException(
+            $"Archetype {typeof(TArch).Name} is not registered with this database, so there is nothing to spawn into. Register its components with "
+            + "DatabaseEngine.RegisterComponentFromAccessor (or RegisterComponents) and then call DatabaseEngine.InitializeArchetypes before spawning.");
+
+    /// <summary>
     /// Spawns a new entity of archetype <typeparamref name="TArch"/> with the supplied initial component values.
     /// Components not covered by <paramref name="values"/> are zero-initialized and disabled.
     /// The entity is stored in a pending map and inserted into the LinearHash at commit with BornTSN = TSN.
@@ -377,13 +426,7 @@ public unsafe partial class Transaction
     public EntityId Spawn<TArch>(params ReadOnlySpan<ComponentValue> values) where TArch : Archetype<TArch>
     {
         var meta = Archetype<TArch>.Metadata;
-        CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        // Inline-guard (not Require): the array-indexed condition can throw IndexOutOfRange, so the JIT can't DCE it — the
-        // folded gate must short-circuit before it, keeping this per-entity Spawn path zero-cost when strict mode is off.
-        if (CheckConfig.Enabled && _dbe._archetypeStates[meta!.ArchetypeId]?.EntityMap == null)
-        {
-            ThrowHelper.ThrowInvalidOp($"Archetype {typeof(TArch).Name} EntityMap not initialized — call DatabaseEngine.InitializeArchetypes first");
-        }
+        RequireSpawnable<TArch>(meta);
 
         var scope = TyphonEvent.BeginEcsSpawn(meta!.ArchetypeId);
         // PROFILING-SPAN-NO-THROW-BEGIN — body MUST NOT throw. SpawnInternal is engine-internal (allocation + B+Tree insert + MVCC).
@@ -404,9 +447,7 @@ public unsafe partial class Transaction
     public void SpawnBatch<TArch>(Span<EntityId> ids, params ComponentValue[] sharedValues) where TArch : Archetype<TArch>
     {
         var meta = Archetype<TArch>.Metadata;
-        CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        CheckConfig.Require(CheckConfig.Enabled, _dbe._archetypeStates[meta!.ArchetypeId]?.EntityMap != null,
-            $"Archetype {typeof(TArch).Name} EntityMap not initialized");
+        RequireSpawnable<TArch>(meta);
 
         EnsureMutable();
         State = TransactionState.InProgress;
@@ -517,9 +558,7 @@ public unsafe partial class Transaction
     public int SpawnBatchAllocate<TArch>(int count, Span<EntityId> ids) where TArch : Archetype<TArch>
     {
         var meta = Archetype<TArch>.Metadata;
-        CheckConfig.Require(CheckConfig.Enabled, meta != null, $"Archetype {typeof(TArch).Name} not registered");
-        CheckConfig.Require(CheckConfig.Enabled, _dbe._archetypeStates[meta!.ArchetypeId]?.EntityMap != null,
-            $"Archetype {typeof(TArch).Name} EntityMap not initialized");
+        RequireSpawnable<TArch>(meta);
         CheckConfig.Require(CheckConfig.Enabled, ids.Length >= count, $"ids span must be at least count elements");
 
         if (count == 0)
@@ -2542,7 +2581,7 @@ public unsafe partial class Transaction
 
                             if (orderGrid == null)
                             {
-                                realm = orderClusterState.SpawnFallbackRealm(entry.SpawnRealm);
+                                realm = orderClusterState!.SpawnFallbackRealm(entry.SpawnRealm);
                                 grid = _dbe.RealmTable.Get(realm).Grid;
                             }
                             else
@@ -2552,7 +2591,7 @@ public unsafe partial class Transaction
                         }
 
                         SpatialGrid.ReadSpatialCenter3D(row + fieldOffset, fieldType, out var x, out var y, out var z);
-                        cellKey = grid.WorldToCellKey(x, y, z);
+                        cellKey = grid!.WorldToCellKey(x, y, z);
                         grid.CellOrigin(cellKey, out var ox, out var oy, out var oz);
                         mortonKey = ArchetypeClusterState.EncodeIntraCellMorton((float)(x - ox), (float)(y - oy), (float)(z - oz),
                             (float)grid.Config.InverseCellSize);
