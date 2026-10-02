@@ -585,6 +585,7 @@ class EntityCommandWriteSideTests : TestBase<EntityCommandWriteSideTests>
     /// </remarks>
     [TestCase(3000)]
     [TestCase(4096)]
+    [VerifiesRule("EC-02")]
     public void OneProducerCanQueueTheWholeDeclaredBudget(int budget)
     {
         using var dbe = SetupEngine();

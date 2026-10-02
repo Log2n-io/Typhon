@@ -810,3 +810,57 @@ tick. The hand-written window pass does not survive that, and three shipped copi
   note: no RuleMutant. The guard was mutation-verified by hand when it landed — widening it to `newest < -99` reproduced the exact
         `ArgumentOutOfRangeException` the empty-ring test names — and a mutant of `TryGetRange` itself is caught by the exhaustive cross-check,
         which calls `GetTick` on every tick the helper returns
+
+## Module: Deferred Entity Commands
+
+`ctx.Commands` lets a system inside a parallel chunk queue a spawn or a destroy and get the entity's final id back
+immediately (#1099). The id comes from a per-chunk key block, which is the whole reason the push path needs no atomic
+per command — and the reason the disjointness question below has a wrong answer that looks right.
+
+### EC-01: A key block is owned by a (archetype, ChunkIndex) pair, and that pair is NOT exclusive `[fatal][silent]`
+  invariant ∀ reserved runs r1, r2 issued by EntityKeyBlocks: r1 ∩ r2 = ∅
+  invariant the scheduler guarantees disjoint WORKER SLOTS, not disjoint ChunkIndex values:
+            ∃ sys_a, sys_b with no derived dependency, both dispatched with ChunkCount == 1,
+            both therefore reporting ChunkIndex == 0, running concurrently
+  invariant ⟹ the cursor for (archetype, ChunkIndex) may be read-modify-written by more than one
+            thread at a time, and must be updated atomically
+  scope: EntityKeyBlocks.Reserve, EntityKeyBlocks.TryEnsureGeneration, TickContext.Commands
+  rationale: striding key blocks by ChunkIndex rather than by worker slot is what makes an issued id
+    independent of which worker picked the chunk up, and therefore reproducible at a different worker
+    count. That is correct and worth keeping. What it does NOT buy is exclusivity: slot disjointness is
+    a scheduler guarantee, chunk-index disjointness is not, and `ctx.Commands` requires no resource
+    declaration, so two systems can hold the same chunk index in the same tick with no edge between
+    them. A CallbackSystem is one chunk, so two of them is the easiest case, not an exotic one.
+  enforced_by:
+    - the (generation, used) pair is one packed long, updated by Interlocked.CompareExchange, so a
+      losing producer retries and re-reads rather than overwriting
+    - a generation's base is published once under a CAS gate and read with Volatile.Read, so the base
+      a retry reads is the one the winner wrote
+  on_violation: two producers are handed the SAME key. Two identical EntityIds reach
+    SpawnBatchAllocateRaw, which inserts two rows into the EntityMap under one key — silently, with no
+    throw and no counter, and every later lookup of that key resolves to whichever row it finds first.
+  verified: EntityCommandReviewFixTests.TwoProducersOnOneChunkIndexNeverShareAKey — two writers on one
+            chunk index and two worker slots, released by a barrier and repeated, asserting the issued
+            key sets are disjoint; EntityCommandReviewFixTests.EveryReservedRunIsDisjoint — the same
+            property over randomised (chunk, count) sequences, which also covers the block-boundary case
+            where a run takes a fresh generation and must not reissue the tail it left
+  note: the reproducibility guarantee is therefore scoped, and the scope is the rule rather than a
+        caveat: an id sequence reproduces across worker counts while ONE system owns an archetype's
+        spawning in a tick. Two concurrent systems spawning into one archetype have a timing-dependent
+        order, and no cursor discipline fixes that — only keying the block by system index as well would,
+        which nothing needs yet.
+
+### EC-02: The declared per-tick command budget is the real bound on one producer `[silent]`
+  invariant EntityKeyBlocks.MaxKeysPerProducerPerTick >= RuntimeOptions.EntityCommandsPerTick
+  scope: EntityKeyBlocks.DeriveBlockSize, EntityKeyBlocks constructor (_maxGenerations)
+  rationale: a block is the budget divided by the stride, and a producer that exhausts one takes
+    another generation. If the generation ceiling is a constant rather than derived from the budget,
+    the two numbers disagree and the smaller one wins without saying so.
+  on_violation: a producer is refused inside its declared budget and the caller gets EntityId.Null for
+    entities it had every reason to expect. Measured before the fix: a block capped at 1 024 / stride
+    with an 8-generation ceiling let ONE chunk queue 1 024 entities per tick whatever the budget said,
+    so a 3 000-entity burst from a serial system silently lost 1 976 of them — found by counting rows in
+    the entity map, not by any counter, because the per-tick counters had been cleared by then.
+  verified: EntityCommandWriteSideTests.OneProducerCanQueueTheWholeDeclaredBudget — asserted from ONE
+            chunk deliberately, because spread over eight the old arithmetic would have passed
+

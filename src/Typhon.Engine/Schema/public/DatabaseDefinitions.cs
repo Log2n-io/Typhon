@@ -202,10 +202,6 @@ public class DatabaseDefinitions
     }
 
     /// <summary>
-    /// Reflects a <c>[Component]</c>-annotated struct into a pure-data <see cref="ComponentSchemaSpec"/>. This is the ONLY place the schema-build path touches
-    /// <c>GetFields</c>/<c>GetCustomAttribute</c>; source-generated components bypass it entirely by supplying their spec directly.
-    /// </summary>
-    /// <summary>
     /// Refuses a component field whose CLR type has no schema mapping, naming the component, the field and the type.
     /// </summary>
     /// <remarks>
@@ -233,6 +229,10 @@ public class DatabaseDefinitions
             + "ComponentCollection<T>, EntityId, or EntityLink<T> for a typed entity reference). A field with no schema type was previously dropped "
             + "silently, which left it invisible to the Workbench, un-indexable and absent from replication.");
 
+    /// <summary>
+    /// Reflects a <c>[Component]</c>-annotated struct into a pure-data <see cref="ComponentSchemaSpec"/>. This is the ONLY place the schema-build path touches
+    /// <c>GetFields</c>/<c>GetCustomAttribute</c>; source-generated components bypass it entirely by supplying their spec directly.
+    /// </summary>
     private static ComponentSchemaSpec ReflectComponentSpec(Type t)
     {
         var ca = t.GetCustomAttribute<ComponentAttribute>();

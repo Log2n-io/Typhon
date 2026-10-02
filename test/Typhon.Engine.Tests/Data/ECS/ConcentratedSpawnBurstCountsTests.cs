@@ -366,6 +366,10 @@ class ConcentratedSpawnBurstCountsTests : TestBase<ConcentratedSpawnBurstCountsT
     [TestCase(3000, true)]
     [TestCase(3000, false)]
     [Explicit("wall-clock measurement; run on demand, never in the gate")]
+    // Manual and not Nightly: a wall-clock figure compared against nothing is not a gate signal, and the nightly would record a number no one
+    // reads. It exists to be run by hand when a cost claim is in question, and to leave its method written down -- three harnesses got this
+    // measurement wrong before one got it right.
+    [Category("Manual")]
     public void ThePriceOfABurst(int batch, bool ascending)
     {
         // ONE engine per case, because the fixture's provider hands out one per test and asking it twice reopens the same database file — which NREs in

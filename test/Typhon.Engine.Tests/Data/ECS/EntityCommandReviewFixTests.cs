@@ -51,6 +51,7 @@ class EntityCommandReviewFixTests : TestBase<EntityCommandReviewFixTests>
     /// </remarks>
     [Test]
     [Repeat(5)]
+    [VerifiesRule("EC-01")]
     public void TwoProducersOnOneChunkIndexNeverShareAKey()
     {
         using var dbe = SetupEngine();
@@ -226,6 +227,7 @@ class EntityCommandReviewFixTests : TestBase<EntityCommandReviewFixTests>
     /// generation, and the tail it leaves must not be reissued.
     /// </remarks>
     [Test]
+    [VerifiesRule("EC-01")]
     public void EveryReservedRunIsDisjoint()
     {
         using var dbe = SetupEngine();
