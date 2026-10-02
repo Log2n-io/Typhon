@@ -342,7 +342,13 @@ A runtime strict-mode check, opt-in in every build (see DV-01), that catches dec
       return before TickStartCallback, so no UoW is created and no SV/Transient write happens. This rule's failure mode is mutate-then-skip;
       with no mutation there is nothing for a fence to cover. The damage a fence failure DOES leave is on its own tick, and stopping bounds
       it rather than undoing it.
-  scope: TyphonRuntime.OnTickEndInternal; RuntimeOptions.SystemExceptionPolicy = AbortTickAndStop; DagScheduler.ExecuteCallbacks
+  invariant a graceful stop keeps the tick in flight whole: TyphonRuntime.Shutdown, called off the tick thread, closes the tick entry and
+      waits for the tick it did not stop in time — its systems, its fence, its flush — before the workers go. A stop that abandons a tick
+      between its systems and its fence is mutate-then-skip by another route (#1085: the moved entities a box query then missed, the
+      un-logged pages a checkpoint could then persist). On the tick thread (an OnTickAborted handler calling it) it cannot wait for the
+      tick it is part of, and a tick hung past the drain's timeout is logged and abandoned
+  scope: TyphonRuntime.OnTickEndInternal; RuntimeOptions.SystemExceptionPolicy = AbortTickAndStop; DagScheduler.ExecuteCallbacks;
+    TyphonRuntime.Shutdown, DagScheduler.StopTicksAndDrain
   on_violation: SingleVersion / Transient writes are made IN PLACE into cluster pages and receive their WAL record at
     the fence. Skipping the fence leaves the page mutated, dirty and un-logged; the checkpoint thread then persists it
     on its own schedule, producing a durable mutation with no WAL record behind it. CK-02's WAL-before-data ordering
@@ -357,7 +363,8 @@ A runtime strict-mode check, opt-in in every build (see DV-01), that catches dec
     together and only together. Engine-tagged systems are exempt from the scheduler's tick-abort guard, which is what
     makes the fence run on an aborted tick, so the replication track does NOT inherit the suppression: it opts out
     itself, in every stage's ShouldRun.
-  verified: SubscriptionsTrackTests.AbortedTick_StillFencesAndFlushes_ButNeitherComputesNorPublishes [VerifiesRule]
+  verified: SubscriptionsTrackTests.AbortedTick_StillFencesAndFlushes_ButNeitherComputesNorPublishes [VerifiesRule];
+    ShutdownDrainTests.AShutdownDuringATick_LeavesThatTickFenced [VerifiesRule] (red when the drain does not wait)
 
 ### TP-02: Parallel cluster dispatch binds to the system's own view archetype `[fatal][silent]`
   invariant a system's cluster-range dispatch binds to the ArchetypeClusterState of THAT system's queried archetype,

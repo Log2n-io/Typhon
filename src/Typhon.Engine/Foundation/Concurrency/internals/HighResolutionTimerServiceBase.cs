@@ -119,6 +119,9 @@ public abstract class HighResolutionTimerServiceBase : ResourceNode, IMetricSour
     /// <summary>Whether the timer thread is currently running.</summary>
     public bool IsRunning => _thread != null && _thread.IsAlive;
 
+    /// <summary>Whether the calling thread is this service's timer thread: a wait for the tick in flight from there would wait on itself.</summary>
+    protected bool IsOnTimerThread => _thread != null && Thread.CurrentThread == _thread;
+
     // ═══════════════════════════════════════════════════════════════
     // Constructor
     // ═══════════════════════════════════════════════════════════════

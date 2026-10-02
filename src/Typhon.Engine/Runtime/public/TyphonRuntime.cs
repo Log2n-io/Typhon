@@ -724,9 +724,27 @@ public sealed partial class TyphonRuntime : IDisposable
     internal FenceEntityMapUpdateExecSystem FenceEntityMapUpdateExec => _fenceEntityMapUpdateExec;
 
     /// <summary>
-    /// Gracefully shuts down the runtime. Stops the subscription server, fires <see cref="OnShutdown"/>, then stops the scheduler.
+    /// Gracefully shuts down the runtime. Stops starting ticks and waits for the one in flight to finish — its systems, its fence, its flush — then stops the
+    /// subscription server, fires <see cref="OnShutdown"/>, and stops the scheduler.
     /// </summary>
-    public void Shutdown() => StopInternal(true);
+    /// <remarks>
+    /// The wait is what makes the world read after this a fenced one. Without it a stop landing between a tick's systems and its fence left their writes
+    /// committed and unfenced — moves the spatial index had not caught up with, realm changes not migrated — until a later fence or a reopen fixed them.
+    /// Called on the tick thread (an <see cref="OnTickAborted"/> handler) it cannot wait for the tick it is part of; a tick that hangs past
+    /// <see cref="ShutdownDrainTimeout"/> is logged and abandoned, as before.
+    /// </remarks>
+    public void Shutdown()
+    {
+        if (Scheduler.StopTicksAndDrain(ShutdownDrainTimeout) == DagScheduler.DrainOutcome.TimedOut)
+        {
+            LogShutdownDrainTimedOut(ShutdownDrainTimeout.TotalSeconds);
+        }
+
+        StopInternal(true);
+    }
+
+    /// <summary>How long <see cref="Shutdown"/> waits for the tick in flight. A tick is milliseconds; this only bounds a tick that hangs.</summary>
+    private static readonly TimeSpan ShutdownDrainTimeout = TimeSpan.FromSeconds(10);
 
     /// <summary>
     /// Stops the runtime **without** running the <see cref="OnShutdown"/> hook — the fatal path, for a host reacting to <see cref="OnTickAborted"/> (issue #567).
@@ -737,9 +755,10 @@ public sealed partial class TyphonRuntime : IDisposable
     /// writes on top of it would persist state derived from a tick that never finished. Everything else — subscription server, profiler, scheduler — is
     /// torn down exactly as in <see cref="Shutdown"/>.
     /// <para>
-    /// <b>Neither this nor <see cref="Shutdown"/> is a quiescence point.</b> Both stop new ticks; neither waits for the tick in flight. The expected caller
-    /// is an <see cref="OnTickAborted"/> handler, which runs on the tick thread — so this typically returns into the very tick it is stopping, which then
-    /// finishes and posts its accounting. Dispose the runtime when you need "nothing is running": <see cref="Dispose"/> joins the tick thread.
+    /// <b>This is not a quiescence point.</b> It stops new ticks and does not wait for the tick in flight, which <see cref="Shutdown"/> does when called off
+    /// the tick thread. The expected caller is an <see cref="OnTickAborted"/> handler, which runs on the tick thread — so this typically returns into the very
+    /// tick it is stopping, which then finishes and posts its accounting. Dispose the runtime when you need "nothing is running": <see cref="Dispose"/> joins
+    /// the tick thread.
     /// </para>
     /// </remarks>
     public void FatalStop() => StopInternal(false);
