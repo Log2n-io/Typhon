@@ -28,6 +28,9 @@ public class GoldenMessageTests
             ("catalog-exact", CatalogSamples.Exact(),
                 "The exact wire (W32, W33): u64, i64, f64, varu64 and vari64 on onEnter, group and owner fields, count shapes with their hints, and the "
                 + "same codecs on an event and a command."),
+            ("catalog-coll", CatalogSamples.Collections(),
+                "Collections (W34) on a public group, an onEnter field and an owner group; elements with a pack (bool, bits), a str, an entityRef, a u64 "
+                + "and an f32 × 2 point, declared out of wire order."),
         })
         {
             var bytes = CatalogSerializer.ToCanonicalUtf8(catalog);

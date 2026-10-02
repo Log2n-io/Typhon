@@ -295,6 +295,11 @@ public sealed class SelfState
     /// <summary>Owner field bytes by ordinal.</summary>
     public byte[][] Bytes { get; private set; } = [];
 
+    /// <summary>Owner collections by ordinal (W34); <see langword="null"/> until received or when the field is not a collection.</summary>
+    public CollectionValue[] Collections { get; private set; } = [];
+
+    internal CollectionValue CollectionAt(FieldPlan field) => Collections[field.Ordinal] ??= new CollectionValue(field);
+
     internal void Receive(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask)
     {
         // Owner values belong to one entity (W17): a control change starts from nothing, and SUB-11 resends every owner group in its frame. netId 0 is
@@ -306,6 +311,7 @@ public sealed class SelfState
             Integers = [];
             Texts = [];
             Bytes = [];
+            Collections = [];
         }
         else if (Archetype != archetype || NetId != netId)
         {
@@ -314,6 +320,7 @@ public sealed class SelfState
             Integers = new ulong[archetype.OwnerFields.Length][];
             Texts = new string[archetype.OwnerFields.Length];
             Bytes = new byte[archetype.OwnerFields.Length][];
+            Collections = new CollectionValue[archetype.OwnerFields.Length];
         }
 
         NetId = netId;
@@ -337,6 +344,7 @@ public sealed class SelfState
         Integers = [];
         Texts = [];
         Bytes = [];
+        Collections = [];
         Received = false;
         OwnerMask = 0;
     }

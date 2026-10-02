@@ -33,10 +33,28 @@ public:
 
     // A list: `count` elements of field.components numbers each, flattened.
     virtual void List(const FieldPlan& field, int count, const double* values) = 0;
+
+    // A collection (W34): `sent` elements follow, each opened by CollectionElement and made of its element fields' calls (fields whose
+    // FieldPlan::parent is `field`). sent < total is a truncation the server made. A no-op by default: an event or a command carries none.
+    virtual void Collection(const FieldPlan& field, int total, int sent)
+    {
+        (void)field;
+        (void)total;
+        (void)sent;
+    }
+
+    // Opens element `index` of `field`: the calls that follow, up to the next element, are its fields.
+    virtual void CollectionElement(const FieldPlan& field, int index)
+    {
+        (void)field;
+        (void)index;
+    }
 };
 
 // The largest number of components one decode yields, a list's included.
 inline constexpr int MaxListComponents = protocol::MaxListCount * 4;
+
+struct NamedValue;
 
 // A value to encode: numbers (one for a scalar or a boolean; the components of a vector, a quaternion or a count; a list's flattened
 // elements), 64-bit integers as bit patterns (W32), UTF-8 text, or bytes (bytes, blob, or an unknown codec written verbatim).
@@ -48,6 +66,7 @@ struct FieldValue {
         Text,
         Bytes,
         Integers,
+        Elements,
     };
 
     Kind kind = Kind::Absent;
@@ -55,6 +74,10 @@ struct FieldValue {
     std::string_view text;
     std::span<const std::uint8_t> bytes;
     std::span<const std::uint64_t> integers;
+    // W34: a collection's elements, each its fields' values by name, and the entity's total — at least elements.size(); 0 means exactly
+    // those.
+    std::span<const std::span<const NamedValue>> elements;
+    int total = 0;
 
     // One factory per kind: a positional brace initializer silently changes meaning when a member is added.
     static FieldValue OfNumbers(std::span<const double> values)
@@ -86,6 +109,15 @@ struct FieldValue {
         FieldValue v;
         v.kind = Kind::Integers;
         v.integers = values;
+        return v;
+    }
+
+    static FieldValue OfElements(std::span<const std::span<const NamedValue>> elements, int total = 0)
+    {
+        FieldValue v;
+        v.kind = Kind::Elements;
+        v.elements = elements;
+        v.total = total;
         return v;
     }
 };
@@ -120,6 +152,10 @@ void WritePackedBits(std::uint8_t* pack, int offset, int count, std::uint32_t va
 // throws std::out_of_range: a bug on this side, never peer input.
 void WriteSection(WireWriter& w, const SectionPlan& section, std::span<const NamedValue> values, bool strictEnums = false,
                   const RealmFrame* frame = nullptr);
+
+// Writes a collection's header, varu total | varu sent (W34); its elements follow, each a WriteSection over FieldPlan::elementSection.
+// Throws std::out_of_range unless sent <= total and sent <= the codec's maxCount.
+void WriteCollectionHeader(WireWriter& w, const FieldPlan& f, std::uint32_t total, std::uint32_t sent);
 
 // Encodes one numeric value from `c`.
 void WriteNumber(WireWriter& w, const FieldPlan& f, std::span<const double> c, const RealmFrame* frame = nullptr);

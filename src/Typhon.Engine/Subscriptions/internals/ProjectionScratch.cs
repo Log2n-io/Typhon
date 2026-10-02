@@ -27,7 +27,7 @@ internal sealed unsafe class ProjectionScratch : IDisposable
     private bool _disposed;
 
     /// <summary>Native bytes this scratch holds, for the owner's resource accounting.</summary>
-    public long EstimatedBytes => ((long)_codeCapacity * sizeof(ulong)) + _scratchCapacity;
+    public long EstimatedBytes => ((long)_codeCapacity * sizeof(ulong)) + _scratchCapacity + _collectionCapacity;
 
     /// <summary>
     /// The code scratch: one <c>ulong</c> per (field ordinal, slot) pair, so a column walk writes a whole column and the per-slot encoders read down it.
@@ -74,6 +74,34 @@ internal sealed unsafe class ProjectionScratch : IDisposable
         return _scratch;
     }
 
+    private byte* _collection;
+    private int _collectionCapacity;
+
+    /// <summary>
+    /// The collection scratch (13 § 6.5): a batch of raw elements and their codes, carved by the caller. Separate from <see cref="Scratch"/> because it is
+    /// taken while that one is in use.
+    /// </summary>
+    /// <param name="count">Bytes needed.</param>
+    /// <returns>At least <paramref name="count"/> bytes, 8-aligned.</returns>
+    public byte* Collection(int count)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (count > _collectionCapacity)
+        {
+            var capacity = _collectionCapacity == 0 ? 256 : _collectionCapacity;
+            while (capacity < count)
+            {
+                capacity *= 2;
+            }
+
+            // native-alloc: doubling growth buffer: Realloc grows in place, where a resource-tree block would be disposed and re-parented on every doubling
+            _collection = (byte*)NativeMemory.Realloc(_collection, (nuint)capacity);
+            _collectionCapacity = capacity;
+        }
+
+        return _collection;
+    }
+
     /// <inheritdoc />
     public void Dispose()
     {
@@ -85,9 +113,11 @@ internal sealed unsafe class ProjectionScratch : IDisposable
         _disposed = true;
         NativeMemory.Free(_codes);
         NativeMemory.Free(_scratch);
+        NativeMemory.Free(_collection);
         _codes = null;
         _scratch = null;
-        _codeCapacity = _scratchCapacity = 0;
+        _collection = null;
+        _codeCapacity = _scratchCapacity = _collectionCapacity = 0;
     }
 }
 

@@ -153,6 +153,12 @@ internal static class CatalogBuilder
                     "The catalog names a field's group, so a bit with no group behind it would describe a mask bit no client could read.");
             }
 
+            // A collection's element fields name their enums in its codec (W34): their value sets join the catalog's.
+            foreach (var element in field.Collection?.Fields ?? [])
+            {
+                RegisterEnum(enums, element.EnumType, $"archetype '{archetype}' collection '{field.Name}' element field '{element.Name}'");
+            }
+
             result.Add(new CatalogField
             {
                 Name = field.Name,

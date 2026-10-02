@@ -5,6 +5,7 @@
 #include <string_view>
 
 #include "catalog/catalog_plan.hpp"
+#include "store/collection_value.hpp"
 #include "store/memory.hpp"
 
 // The per-frame and per-session state a TICK carries besides entities (the TypeScript SDK's apply/frame-state.ts): the controlled
@@ -44,6 +45,10 @@ public:
     std::span<const std::uint64_t> Integers(int field) const;
     std::string_view Text(int field) const;
     std::span<const std::uint8_t> Bytes(int field) const;
+    // An owner collection field's value (W34); null for another kind and before the first list of the current controlled entity.
+    const CollectionValue* Collection(int field) const;
+    // The decoder's write path: the owner collection a list is decoded into.
+    CollectionValue& CollectionFor(const FieldPlan& field);
 
     // The first number of an owner field by name, or NaN when never received.
     double Number(std::string_view name, int component = 0) const;
@@ -54,6 +59,7 @@ private:
     Vec<Vec<double>> numbers_;
     Vec<Vec<std::uint64_t>> integers_;
     Vec<Vec<std::uint8_t>> values_;
+    Vec<CollectionValue> collections_;
     Vec<std::uint8_t> present_;
 };
 

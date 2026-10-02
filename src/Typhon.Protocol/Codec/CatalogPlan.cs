@@ -26,6 +26,9 @@ public enum FieldValueKind
     /// <summary>A counted sequence of numeric elements.</summary>
     List,
 
+    /// <summary>A collection of records (W34): a total, then the elements sent, each one section of <see cref="FieldPlan.ElementSection"/>.</summary>
+    Collection,
+
     /// <summary>A codec this library does not know, skipped by its declared width.</summary>
     Skipped,
 }
@@ -65,6 +68,7 @@ public sealed class FieldPlan
             CodecKind.Str => (FieldValueKind.Text, 0),
             CodecKind.Bytes or CodecKind.Blob => (FieldValueKind.Bytes, 0),
             CodecKind.List => (FieldValueKind.List, 0),
+            CodecKind.Coll => (FieldValueKind.Collection, 0),
             CodecKind.Unknown => (FieldValueKind.Skipped, 0),
             _ => (FieldValueKind.Number, count),
         };
@@ -80,6 +84,33 @@ public sealed class FieldPlan
 
             Element = new FieldPlan(name, null, codec.Of);
             Components = Element.Components;
+        }
+
+        if (Kind == CodecKind.Coll)
+        {
+            // The trust boundary again: a collection's element is a flat section — no list, no collection, no position inside it — and its bound is one a
+            // client can size a store from, whether or not the catalog was validated.
+            var declared = codec.Element?.Fields;
+            if (declared is null or { Length: 0 } || codec.MaxCount is < 1 or > ProtocolConstants.MaxCollCount)
+            {
+                throw new CatalogException([$"coll '{name}' needs an element of at least one field and maxCount in [1, {ProtocolConstants.MaxCollCount}]"]);
+            }
+
+            var elements = new FieldPlan[declared.Length];
+            for (var i = 0; i < elements.Length; i++)
+            {
+                var f = declared[i] ?? throw new CatalogException([$"coll '{name}' has a null element field"]);
+                if (f.Codec == null
+                    || f.Codec.Kind is CodecKind.Coll or CodecKind.List or CodecKind.Pos2 or CodecKind.Pos3 or CodecKind.Vel2 or CodecKind.Vel3
+                        or CodecKind.Bytes or CodecKind.Blob)
+                {
+                    throw new CatalogException([$"coll '{name}' element field '{f.Name}' cannot be '{f.Codec?.Type}'"]);
+                }
+
+                elements[i] = new FieldPlan(f.Name, f, f.Codec, enums) { Ordinal = i, Parent = this };
+            }
+
+            ElementSection = new SectionPlan(elements);
         }
 
         // A position's quantum is the realm frame's (typhon.3), per frame: RealmFrame.Step. A quant has one range whatever its count: every component
@@ -135,6 +166,12 @@ public sealed class FieldPlan
 
     /// <summary>For a list, the element's plan.</summary>
     public FieldPlan Element { get; }
+
+    /// <summary>For a collection, its element's fields as one section (W34), each field's <see cref="Ordinal"/> its place in the element.</summary>
+    public SectionPlan ElementSection { get; }
+
+    /// <summary>For a collection's element field, the collection; <see langword="null"/> otherwise.</summary>
+    public FieldPlan Parent { get; private init; }
 
     /// <summary>For a velocity: the unit's binary exponent — one code is <c>2^VelocityUnitExp</c> metres per tick (W5).</summary>
     public int VelocityUnitExp { get; }

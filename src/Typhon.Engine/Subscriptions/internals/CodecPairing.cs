@@ -43,6 +43,12 @@ internal enum ColumnPath : byte
     /// the projection — 0 for none, or for a target with no identity yet (13 § 5). The exact integer path with a resolving reader.
     /// </summary>
     EntityRef,
+
+    /// <summary>
+    /// A <c>ComponentCollection&lt;T&gt;</c> into <c>coll</c> (W34): no code row — the section encoder reads the buffer and encodes each element's fields,
+    /// and the section is wide (13 § 6.5).
+    /// </summary>
+    Collection,
 }
 
 /// <summary>
@@ -195,6 +201,30 @@ internal static class CodecPairing
     public static Codec Resolve(Type storedType, Codec codec, string where, out string shape)
     {
         ArgumentNullException.ThrowIfNull(storedType);
+
+        // A collection (W34): its bound is declared, its element is T's fields, each in its exact codec.
+        var elementType = CollectionElementOf(storedType);
+        if (elementType != null)
+        {
+            shape = null;
+            if (codec.IsExact || codec.Catalog?.Kind != CodecKind.Coll)
+            {
+                throw new InvalidOperationException(
+                    $"{where} is a ComponentCollection<{elementType.Name}>, which travels as Codec.Coll(maxCount): a collection's bound is load-bearing and " +
+                    "has no default (W34).");
+            }
+
+            return codec.WithCatalog(new CatalogCodec
+            {
+                Kind = CodecKind.Coll, MaxCount = codec.Catalog.MaxCount, Element = new CatalogElement { Fields = ElementFields(elementType, where) },
+            });
+        }
+
+        if (codec.Catalog?.Kind == CodecKind.Coll)
+        {
+            throw new InvalidOperationException($"{where} declares Codec.Coll on a {storedType.Name}: a collection is a ComponentCollection<T> field.");
+        }
+
         var fieldShape = FieldShape.Of(storedType);
         shape = fieldShape?.Name ?? (storedType == typeof(char) ? "char" : storedType == typeof(Variant) ? "variant" : null);
 
@@ -348,6 +378,18 @@ internal static class CodecPairing
         var type = enumType != null ? Enum.GetUnderlyingType(sourceType) : sourceType;
         var kind = codec.Kind;
 
+        // A collection (W34), on an entity's field only: an event is a value in a queue, and a collection handle in it has no buffer the track can trust.
+        if (CollectionElementOf(sourceType) != null)
+        {
+            if (kind != CodecKind.Coll || message)
+            {
+                throw new InvalidOperationException(
+                    $"{where} is a {sourceType.Name}: a collection travels as Codec.Coll(maxCount), and only on an archetype's field (W34).");
+            }
+
+            return ColumnPath.Collection;
+        }
+
         // An entity's reference field (13 § 5): resolved to its target's netId, so it travels as entityRef and as nothing else — its bits are a routing id
         // and a key, which mean nothing to a client. A message's EntityId is the event and command binders' to judge.
         if (!message && IsReference(sourceType))
@@ -473,6 +515,43 @@ internal static class CodecPairing
     /// other type. Its text is UTF-8 up to the first zero byte, at most one byte less than the buffer.
     /// </summary>
     public static int TextCapacityOf(Type type) => type == typeof(String64) || type == typeof(Variant) ? 64 : type == typeof(String1024) ? 1024 : 0;
+
+    /// <summary>The element type of a <c>ComponentCollection&lt;T&gt;</c>, <c>T</c>; <see langword="null"/> for any other type.</summary>
+    public static Type CollectionElementOf(Type type) =>
+        type is { IsGenericType: true } && type.GetGenericTypeDefinition() == typeof(ComponentCollection<>) ? type.GenericTypeArguments[0] : null;
+
+    /// <summary>
+    /// A collection element's public instance fields (W34), each in its exact codec — as a bare <c>[Replicate]</c> resolves it — and judged by this table:
+    /// an element holds what an archetype field may, a <c>String64</c> and an <c>EntityLink&lt;T&gt;</c> included, but never another collection.
+    /// </summary>
+    /// <param name="elementType">The element type.</param>
+    /// <param name="where">Names the collection in a refusal.</param>
+    /// <returns>The element's catalog fields, in declaration order; canonicalization sorts them.</returns>
+    public static CatalogField[] ElementFields(Type elementType, string where)
+    {
+        var members = elementType.GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        if (members.Length == 0)
+        {
+            throw new InvalidOperationException($"{where} collects {elementType.Name}, which has no public field to send.");
+        }
+
+        var fields = new CatalogField[members.Length];
+        for (var i = 0; i < members.Length; i++)
+        {
+            var member = members[i];
+            var at = $"{where}, element field '{member.Name}'";
+            if (CollectionElementOf(member.FieldType) != null)
+            {
+                throw new InvalidOperationException($"{at} is a collection: an element holds no collection of its own (W34).");
+            }
+
+            var codec = Resolve(member.FieldType, Codec.Exact, at, out var shape);
+            Classify(member.FieldType, codec.Catalog, codec.Saturating, at);
+            fields[i] = new CatalogField { Name = member.Name, Codec = codec.Catalog, Shape = shape, Enum = codec.EnumType?.Name };
+        }
+
+        return fields;
+    }
 
     /// <summary>Whether <paramref name="type"/> names an entity: an <see cref="EntityId"/>, or the <c>EntityLink&lt;T&gt;</c> that wraps one.</summary>
     public static bool IsReference(Type type) =>

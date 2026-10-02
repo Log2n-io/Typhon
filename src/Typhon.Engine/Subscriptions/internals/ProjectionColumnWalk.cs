@@ -178,6 +178,9 @@ internal static class ProjectionColumnWalk
             case ColumnPath.Text:
                 // No code: the section encoder reads text straight from the column into the wide body (13 § 6.3).
                 return 0;
+            case ColumnPath.Collection:
+                // No code: the section encoder reads the buffer and encodes each element (13 § 6.5).
+                return 0;
             case ColumnPath.EntityRef:
                 // Resolved by the projection, which holds what a column cannot: the target's entry and the identities taken this tick (13 § 5). A caller
                 // reaching here would leave the row as it found it.

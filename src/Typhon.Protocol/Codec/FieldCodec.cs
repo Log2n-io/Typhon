@@ -39,6 +39,30 @@ public interface IFieldSink
     /// <param name="count">The element count.</param>
     /// <param name="components">The flattened element values; valid only for the duration of the call.</param>
     void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components);
+
+    /// <summary>
+    /// A collection field (W34): <paramref name="sent"/> elements follow, each opened by <see cref="CollectionElement"/> and made of its element fields'
+    /// calls (fields whose <see cref="FieldPlan.Parent"/> is <paramref name="field"/>). <paramref name="sent"/> &lt; <paramref name="total"/> is a
+    /// truncation the server made.
+    /// </summary>
+    /// <param name="field">The collection field.</param>
+    /// <param name="total">How many elements the entity holds.</param>
+    /// <param name="sent">How many follow.</param>
+    /// <remarks>
+    /// A no-op by default, for the sinks that never meet one — an event or a command carries no collection (W34). A tick sink that decodes entities
+    /// implements it: a default member called through a struct sink boxes it.
+    /// </remarks>
+    void Collection(FieldPlan field, int total, int sent)
+    {
+    }
+
+    /// <summary>Opens element <paramref name="index"/> of <paramref name="field"/>: the calls that follow, up to the next element, are its fields.</summary>
+    /// <param name="field">The collection field.</param>
+    /// <param name="index">The element's index, from 0.</param>
+    /// <remarks>A no-op by default, as <see cref="Collection"/> is.</remarks>
+    void CollectionElement(FieldPlan field, int index)
+    {
+    }
 }
 
 /// <summary>
@@ -61,6 +85,19 @@ public sealed class FieldValue
 
     /// <summary>Bytes, for a <c>bytes</c> or <c>blob</c> field.</summary>
     public byte[] Bytes { get; init; }
+
+    /// <summary>
+    /// A collection's elements (W34), each the values of its element fields in wire order (<see cref="FieldPlan.Ordinal"/>); they are the ones sent.
+    /// </summary>
+    public FieldValue[][] Elements { get; init; }
+
+    /// <summary>A collection's total: how many elements the entity holds, at least <see cref="Elements"/>' count; 0 means exactly those.</summary>
+    public int Total { get; init; }
+
+    /// <summary>A collection of <paramref name="elements"/>, every one of them sent.</summary>
+    /// <param name="elements">Each element's field values, in wire order.</param>
+    /// <returns>The field value.</returns>
+    public static FieldValue OfElements(params FieldValue[][] elements) => new() { Elements = elements };
 
     /// <summary>A scalar.</summary>
     /// <param name="value">The value.</param>
@@ -157,6 +194,9 @@ public static class FieldCodec
                 case FieldValueKind.List:
                     ReadList(ref reader, f, frameTick, ref sink, frame);
                     break;
+                case FieldValueKind.Collection:
+                    ReadCollection(ref reader, f, frameTick, ref sink, frame);
+                    break;
                 case FieldValueKind.Skipped:
                     reader.Skip(f.Codec.FixedBytes);
                     break;
@@ -226,6 +266,9 @@ public static class FieldCodec
                     break;
                 case FieldValueKind.List:
                     WriteList(ref writer, f, value.Numbers ?? [], frame);
+                    break;
+                case FieldValueKind.Collection:
+                    WriteCollection(ref writer, f, value, frame);
                     break;
                 case FieldValueKind.Skipped:
                     // A codec newer than this library: only its width is known, so the caller supplies the encoded bytes verbatim.
@@ -601,6 +644,60 @@ public static class FieldCodec
         for (var e = 0; e < count; e++)
         {
             WriteNumber(ref writer, field.Element, flattened.Slice(e * stride, stride), frame);
+        }
+    }
+
+    private static void ReadCollection<TSink>(ref WireReader reader, FieldPlan field, uint frameTick, ref TSink sink, RealmFrame frame)
+        where TSink : IFieldSink, allows ref struct
+    {
+        var total = reader.ReadVaru();
+        var sent = reader.ReadVaru();
+        if (sent > total || sent > (uint)field.Codec.MaxCount)
+        {
+            throw WireFormatException.Malformed(
+                $"coll '{field.Name}' sends {sent} of {total} element(s); at most {field.Codec.MaxCount}, and never more than its total");
+        }
+
+        // Every element is at least one byte: a count the message cannot hold is refused before a store sizes for it.
+        if (sent > (uint)reader.Remaining)
+        {
+            throw WireFormatException.Malformed($"coll '{field.Name}' sends {sent} element(s) with {reader.Remaining} byte(s) left");
+        }
+
+        sink.Collection(field, (int)Math.Min(total, int.MaxValue), (int)sent);
+        for (var e = 0; e < (int)sent; e++)
+        {
+            sink.CollectionElement(field, e);
+            ReadSection(ref reader, field.ElementSection, frameTick, ref sink, frame);
+        }
+    }
+
+    /// <summary>
+    /// Writes a collection's header, <c>varu total | varu sent</c> (W34); its elements follow, each written with <see cref="WriteSection"/> over
+    /// <see cref="FieldPlan.ElementSection"/>.
+    /// </summary>
+    /// <param name="writer">The writer.</param>
+    /// <param name="field">The collection field.</param>
+    /// <param name="total">How many elements the entity holds.</param>
+    /// <param name="sent">How many follow: at most <paramref name="total"/> and the codec's <c>maxCount</c>.</param>
+    public static void WriteCollectionHeader(ref WireWriter writer, FieldPlan field, int total, int sent)
+    {
+        if (sent < 0 || sent > total || sent > field.Codec.MaxCount)
+        {
+            throw new ArgumentException($"coll '{field.Name}' cannot send {sent} of {total} element(s); at most {field.Codec.MaxCount}");
+        }
+
+        writer.WriteVaru((uint)total);
+        writer.WriteVaru((uint)sent);
+    }
+
+    private static void WriteCollection(ref WireWriter writer, FieldPlan field, FieldValue value, RealmFrame frame)
+    {
+        var elements = value.Elements ?? [];
+        WriteCollectionHeader(ref writer, field, Math.Max(value.Total, elements.Length), elements.Length);
+        foreach (var element in elements)
+        {
+            WriteSection(ref writer, field.ElementSection, f => (uint)f.Ordinal < (uint)element.Length ? element[f.Ordinal] : null, frame);
         }
     }
 

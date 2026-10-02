@@ -21,6 +21,7 @@ import {
   type TickSink,
 } from '../protocol/tick-reader.js';
 import type { ArchetypeStore } from '../store/archetype-store.js';
+import type { CollectionValue } from '../store/collection-value.js';
 import type { FieldArray, NumericFieldKind } from '../store/schema.js';
 import { archetypeOf, NOT_FOUND, slotOf, WorldStore } from '../store/world-store.js';
 import { AckList, EventRecord, retainBytes, SelfState, SourceList, StatsState } from './frame-state.js';
@@ -148,6 +149,9 @@ export class FrameApplier implements TickSink, EntitiesTarget {
   private storeFields: Int32Array = new Int32Array(0);
   private storeKinds: Int8Array = new Int8Array(0);
   private slot = 0;
+  /** The collection being decoded (W34) and its element: an element field's value goes there, whatever the target. */
+  private collectionValue: CollectionValue | null = null;
+  private element = 0;
   private grid: AggregateGrid | null = null;
   /** This frame's leaves, applied last: netId and the archetype of the block that carried it. */
   private leaves = new Uint32Array(256);
@@ -173,7 +177,12 @@ export class FrameApplier implements TickSink, EntitiesTarget {
       const fields = this.world.archetypeStore(a.idx).schema.fields;
       return Int8Array.from(this.storeFieldOf[a.idx]!, (index) => {
         const kind = index < 0 ? undefined : fields[index]!.kind;
-        return kind === undefined || kind === 'text' || kind === 'bytes' || kind === 'u64' || kind === 'i64'
+        return kind === undefined ||
+          kind === 'text' ||
+          kind === 'bytes' ||
+          kind === 'coll' ||
+          kind === 'u64' ||
+          kind === 'i64'
           ? -1
           : COLUMN_KIND[kind];
       });
@@ -293,6 +302,7 @@ export class FrameApplier implements TickSink, EntitiesTarget {
   }
 
   beginEntities(archetype: ArchetypePlan): void {
+    this.collectionValue = null;
     this.archetype = archetype.idx;
     this.store = this.world.archetypeStore(archetype.idx);
     this.storeFields = this.storeFieldOf[archetype.idx]!;
@@ -431,9 +441,15 @@ export class FrameApplier implements TickSink, EntitiesTarget {
 
   endTick(): void {
     this.target = Target.None;
+    this.collectionValue = null;
   }
 
   number(field: FieldPlan, values: Float64Array): void {
+    if (field.parent !== null) {
+      this.collectionValue?.setNumber(field, this.element, values);
+      return;
+    }
+
     if (this.target === Target.Entity) {
       const index = this.storeFields[field.index]!;
       if (index >= 0) {
@@ -452,6 +468,11 @@ export class FrameApplier implements TickSink, EntitiesTarget {
   }
 
   integer64(field: FieldPlan, words: Uint32Array): void {
+    if (field.parent !== null) {
+      this.collectionValue?.setInteger64(field, this.element, words);
+      return;
+    }
+
     if (this.target === Target.Entity) {
       const index = this.storeFields[field.index]!;
       if (index >= 0) {
@@ -469,6 +490,11 @@ export class FrameApplier implements TickSink, EntitiesTarget {
   }
 
   text(field: FieldPlan, value: string): void {
+    if (field.parent !== null) {
+      this.collectionValue?.setText(field, this.element, value);
+      return;
+    }
+
     if (this.target === Target.Entity) {
       const index = this.storeFields[field.index]!;
       if (index >= 0) {
@@ -480,6 +506,11 @@ export class FrameApplier implements TickSink, EntitiesTarget {
   }
 
   bytes(field: FieldPlan, data: Uint8Array, offset: number, length: number): void {
+    if (field.parent !== null) {
+      // A plan refuses bytes in a collection's element; never routed by the element's index into the record's fields.
+      return;
+    }
+
     if (this.target === Target.Entity) {
       const index = this.storeFields[field.index]!;
       if (index >= 0) {
@@ -493,6 +524,25 @@ export class FrameApplier implements TickSink, EntitiesTarget {
 
   list(): void {
     // Lists are event and command fields only: the catalog refuses them on archetypes and owner sections.
+  }
+
+  /** W34: an entity's or the controlled entity's collection, overwritten whole into the columns it already has. */
+  collection(field: FieldPlan, total: number, sent: number): void {
+    let value: CollectionValue | null = null;
+    if (this.target === Target.Entity) {
+      const index = this.storeFields[field.index]!;
+      value = index >= 0 ? this.store!.collectionAt(index, this.slot, field) : null;
+    } else if (this.target === Target.Owner) {
+      value = this.selfState.collectionAt(field);
+    }
+
+    value?.begin(total, sent);
+    this.collectionValue = value;
+    this.element = 0;
+  }
+
+  collectionElement(_field: FieldPlan, index: number): void {
+    this.element = index;
   }
 }
 

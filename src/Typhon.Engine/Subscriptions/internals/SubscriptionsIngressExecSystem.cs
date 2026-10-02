@@ -1107,6 +1107,17 @@ internal ref struct IngressCommandSink : ICommandSink
     }
 
     /// <inheritdoc />
+    /// <remarks>A command never carries a collection (W34): the catalog refuses one there, so this is never called.</remarks>
+    public void Collection(FieldPlan field, int total, int sent)
+    {
+    }
+
+    /// <inheritdoc />
+    public void CollectionElement(FieldPlan field, int index)
+    {
+    }
+
+    /// <inheritdoc />
     public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
     {
         if (!_open || !_current.IsClientRegion || field.Name != BuiltInCommands.RegionVerticesField)

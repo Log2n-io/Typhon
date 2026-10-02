@@ -101,6 +101,8 @@ std::optional<FieldKind> FieldKindOf(const FieldPlan& field)
         case CodecKind::Bytes:
         case CodecKind::Blob:
             return FieldKind::Bytes;
+        case CodecKind::Coll:
+            return FieldKind::Collection;
         case CodecKind::Unknown:
             return std::nullopt;
         default:

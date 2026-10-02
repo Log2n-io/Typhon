@@ -19,6 +19,8 @@ namespace json {
 class Value;
 }
 
+struct CatalogElement;
+
 struct CatalogCodec {
     std::string t;
     std::optional<int> bits;
@@ -34,6 +36,8 @@ struct CatalogCodec {
     std::optional<int> fixedBytes;
     // W33: how many values of the codec the field carries, 2..16; absent is one.
     std::optional<int> count;
+    // W34: a collection's element — its fields, shaped like a command's.
+    std::shared_ptr<const CatalogElement> element;
 };
 
 struct CatalogField {
@@ -47,6 +51,11 @@ struct CatalogField {
     std::optional<std::string> shape;
 
     bool IsOnEnter() const { return onEnter.value_or(false); }
+};
+
+// A collection's element (W34): fields with a name, a codec, and optionally an enum and a shape — never a collection.
+struct CatalogElement {
+    std::vector<CatalogField> fields;
 };
 
 struct CatalogPosition {

@@ -268,6 +268,7 @@ void FrameApplier::BeginEntities(const ArchetypePlan& archetype)
     archetype_ = static_cast<std::uint32_t>(archetype.idx);
     store_ = &world_.Archetype(archetype_);
     target_ = Target::None;
+    collection_ = nullptr;
 }
 
 void FrameApplier::Enter(std::uint32_t netId, std::span<const double> position, std::span<const double> velocity, std::uint32_t t0,
@@ -379,11 +380,22 @@ void FrameApplier::Ext(std::uint32_t appTypeId, std::span<const std::uint8_t> pa
 
 void FrameApplier::UnknownBlock(std::uint8_t) { target_ = Target::None; }
 
-void FrameApplier::EndTick() { target_ = Target::None; }
+void FrameApplier::EndTick()
+{
+    target_ = Target::None;
+    collection_ = nullptr;
+}
 
 void FrameApplier::Number(const FieldPlan& field, const double* values)
 {
-    if (target_ == Target::Entity)
+    if (field.parent != nullptr)
+    {
+        if (collection_ != nullptr)
+        {
+            collection_->SetNumbers(field, element_, values);
+        }
+    }
+    else if (target_ == Target::Entity)
     {
         const int index = StoreField(field);
         if (index >= 0)
@@ -399,7 +411,14 @@ void FrameApplier::Number(const FieldPlan& field, const double* values)
 
 void FrameApplier::Integer64(const FieldPlan& field, const std::uint64_t* values)
 {
-    if (target_ == Target::Entity)
+    if (field.parent != nullptr)
+    {
+        if (collection_ != nullptr)
+        {
+            collection_->SetIntegers(field, element_, values);
+        }
+    }
+    else if (target_ == Target::Entity)
     {
         const int index = StoreField(field);
         if (index >= 0)
@@ -415,7 +434,14 @@ void FrameApplier::Integer64(const FieldPlan& field, const std::uint64_t* values
 
 void FrameApplier::Text(const FieldPlan& field, std::string_view utf8)
 {
-    if (target_ == Target::Entity)
+    if (field.parent != nullptr)
+    {
+        if (collection_ != nullptr)
+        {
+            collection_->SetText(field, element_, utf8);
+        }
+    }
+    else if (target_ == Target::Entity)
     {
         const int index = StoreField(field);
         if (index >= 0)
@@ -431,6 +457,12 @@ void FrameApplier::Text(const FieldPlan& field, std::string_view utf8)
 
 void FrameApplier::Bytes(const FieldPlan& field, std::span<const std::uint8_t> data)
 {
+    if (field.parent != nullptr)
+    {
+        // A plan refuses bytes in a collection's element; never routed by the element's index into the record's fields.
+        return;
+    }
+
     if (target_ == Target::Entity)
     {
         const int index = StoreField(field);
@@ -449,5 +481,27 @@ void FrameApplier::List(const FieldPlan&, int, const double*)
 {
     // Lists are event and command fields only: the catalog refuses them on archetypes and owner sections.
 }
+
+void FrameApplier::Collection(const FieldPlan& field, int total, int sent)
+{
+    // An entity's or the controlled entity's collection, overwritten whole into the columns it already has.
+    collection_ = nullptr;
+    if (target_ == Target::Entity)
+    {
+        const int index = StoreField(field);
+        collection_ = index >= 0 ? &store_->CollectionFor(index, slot_, field) : nullptr;
+    }
+    else if (target_ == Target::Owner)
+    {
+        collection_ = &self_.CollectionFor(field);
+    }
+
+    if (collection_ != nullptr)
+    {
+        collection_->Begin(static_cast<std::uint32_t>(total), static_cast<std::uint32_t>(sent));
+    }
+}
+
+void FrameApplier::CollectionElement(const FieldPlan&, int index) { element_ = static_cast<std::uint32_t>(index); }
 
 }  // namespace typhon::client

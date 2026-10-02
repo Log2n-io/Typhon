@@ -541,6 +541,9 @@ typhon_status typhon_archetype_view_get(const typhon_client* client, uint32_t ar
                  });
 }
 
+// typhon_column::kind is the FieldKind as is: the two enumerations must stay in step.
+static_assert(static_cast<int>(FieldKind::Bytes) == TYPHON_FIELD_BYTES && static_cast<int>(FieldKind::Collection) == TYPHON_FIELD_COLLECTION);
+
 typhon_status typhon_field_column(const typhon_client* client, uint32_t archetype, uint32_t field, typhon_column* out)
 {
     return Guard(const_cast<typhon_client*>(client),

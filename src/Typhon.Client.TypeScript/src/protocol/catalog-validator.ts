@@ -176,6 +176,13 @@ export function checkCanonical(c: Catalog, problems: string[]): void {
     if (a.owner !== undefined && (!ascending(a.owner.groups) || !fieldsInLayoutOrder(a.owner.fields, a.owner.groups))) {
       fail(`archetype '${a.name}' owner groups or fields are not in wire order`);
     }
+
+    // A collection's element is a section of its own (W34): its fields in wire order too.
+    for (const f of [...a.fields, ...(a.owner?.fields ?? [])]) {
+      if (f.codec.element !== undefined && !fieldsInLayoutOrder(f.codec.element.fields, [])) {
+        fail(`archetype '${a.name}' collection '${f.name}' element fields are not in wire order`);
+      }
+    }
   });
 
   checkReservedOrder(c.events, reservedEventIdx, ProtocolConstants.firstAppEventIdx, 'event', fail);
@@ -341,7 +348,7 @@ function checkArchetype(a: CatalogArchetype, enums: Catalog['enums'], maxBytes: 
       problems.push(`${at} names group '${f.group}', which the archetype does not declare`);
     }
 
-    checkField(at, f, enums, false, maxBytes, problems);
+    checkField(at, f, enums, FieldPlace.Archetype, maxBytes, problems);
   }
 
   if (a.position !== undefined) {
@@ -361,7 +368,7 @@ function checkArchetype(a: CatalogArchetype, enums: Catalog['enums'], maxBytes: 
         problems.push(`${at} must name one of the owner groups, and cannot be onEnter`);
       }
 
-      checkField(at, f, enums, false, maxBytes, problems);
+      checkField(at, f, enums, FieldPlace.Archetype, maxBytes, problems);
     }
   }
 }
@@ -395,15 +402,24 @@ function checkMessageFields(
       problems.push(`${at}: event and command fields carry no group and no onEnter`);
     }
 
-    checkField(at, f, enums, true, maxBytes, problems);
+    checkField(at, f, enums, FieldPlace.Message, maxBytes, problems);
   }
 }
+
+/** Where a field is declared, which decides the codecs it may take: a list in a message, a collection on an archetype. */
+const FieldPlace = {
+  Archetype: 0,
+  Message: 1,
+  Element: 2,
+} as const;
+
+type FieldPlace = (typeof FieldPlace)[keyof typeof FieldPlace];
 
 function checkField(
   at: string,
   f: CatalogField,
   enums: Catalog['enums'],
-  allowList: boolean,
+  place: FieldPlace,
   maxBytes: number,
   problems: string[],
 ): void {
@@ -416,11 +432,24 @@ function checkField(
     problems.push(`${at}: a vel codec is only valid inside a position`);
   }
 
-  if (kind === CodecKind.List && !allowList) {
+  if (kind === CodecKind.List && place !== FieldPlace.Message) {
     problems.push(`${at}: a list is only valid in event and command fields`);
   }
 
-  checkCodec(at, f.codec, maxBytes, problems);
+  if (kind === CodecKind.Coll && place !== FieldPlace.Archetype) {
+    problems.push(
+      `${at}: a coll is only valid on an archetype field, never in a message or inside another coll's element`,
+    );
+  }
+
+  if (
+    place === FieldPlace.Element &&
+    (kind === CodecKind.Pos2 || kind === CodecKind.Pos3 || kind === CodecKind.Bytes || kind === CodecKind.Blob)
+  ) {
+    problems.push(`${at}: a coll element field cannot be '${f.codec.t}'`);
+  }
+
+  checkCodec(at, f.codec, maxBytes, problems, enums);
   if (f.shape !== undefined && (f.shape === '' || encodeUtf8(f.shape).length > ProtocolConstants.shapeMaxBytes)) {
     // Any other value is accepted: a shape is a hint, and one this library does not know is ignored (W33).
     problems.push(`${at}: shape must be 1..${ProtocolConstants.shapeMaxBytes} UTF-8 bytes`);
@@ -587,6 +616,8 @@ const Parameter = {
   List: 64,
   FixedBytes: 128,
   Count: 256,
+  MaxCount: 512,
+  Element: 1024,
 } as const;
 
 function readParameters(kind: CodecKind): number {
@@ -618,13 +649,21 @@ function readKindParameters(kind: CodecKind): number {
     case CodecKind.Blob:
       return Parameter.MaxBytes;
     case CodecKind.List:
-      return Parameter.List;
+      return Parameter.List | Parameter.MaxCount;
+    case CodecKind.Coll:
+      return Parameter.MaxCount | Parameter.Element;
     default:
       return 0;
   }
 }
 
-function checkCodec(at: string, codec: CatalogCodec, maxBytes: number, problems: string[]): void {
+function checkCodec(
+  at: string,
+  codec: CatalogCodec,
+  maxBytes: number,
+  problems: string[],
+  enums: Catalog['enums'] = {},
+): void {
   const kind = codecKindOf(codec.t);
   if (kind !== CodecKind.Unknown) {
     // A parameter the kind does not read would be ignored here and honoured by another decoder: every decoder must read
@@ -636,7 +675,9 @@ function checkCodec(at: string, codec: CatalogCodec, maxBytes: number, problems:
       (codec.unitExp !== undefined ? Parameter.UnitExp : 0) |
       (nonZero(codec.n) ? Parameter.N : 0) |
       (nonZero(codec.maxBytes) ? Parameter.MaxBytes : 0) |
-      (codec.of !== undefined || nonZero(codec.minCount) || nonZero(codec.maxCount) ? Parameter.List : 0) |
+      (codec.of !== undefined || nonZero(codec.minCount) ? Parameter.List : 0) |
+      (nonZero(codec.maxCount) ? Parameter.MaxCount : 0) |
+      (codec.element !== undefined ? Parameter.Element : 0) |
       (nonZero(codec.fixedBytes) ? Parameter.FixedBytes : 0) |
       (nonZero(codec.count) ? Parameter.Count : 0);
     if ((present & ~readParameters(kind)) !== 0) {
@@ -757,8 +798,46 @@ function checkCodec(at: string, codec: CatalogCodec, maxBytes: number, problems:
 
       break;
     }
+    case CodecKind.Coll:
+      checkElement(at, codec, enums, maxBytes, problems);
+      break;
     default:
       break;
+  }
+}
+
+/** A collection (W34): a required bound, and an element of one or more fields, each shaped like a command field. */
+function checkElement(
+  at: string,
+  codec: CatalogCodec,
+  enums: Catalog['enums'],
+  maxBytes: number,
+  problems: string[],
+): void {
+  const max = codec.maxCount ?? 0;
+  if (!(Number.isInteger(max) && max >= 1 && max <= ProtocolConstants.maxCollCount)) {
+    problems.push(`${at}: a coll needs maxCount in [1, ${ProtocolConstants.maxCollCount}]`);
+  }
+
+  const fields = codec.element?.fields;
+  if (fields === undefined || fields.length === 0) {
+    problems.push(`${at}: a coll needs an element with at least one field`);
+    return;
+  }
+
+  const names = new Set<string>();
+  for (const f of fields) {
+    const fieldAt = `${at} element field '${f.name}'`;
+    if (names.has(f.name)) {
+      problems.push(`${fieldAt} is declared twice`);
+    }
+
+    names.add(f.name);
+    if ((f.group !== undefined && f.group !== '') || f.onEnter === true || f.smoothing !== undefined) {
+      problems.push(`${fieldAt}: an element field carries no group, no onEnter and no smoothing`);
+    }
+
+    checkField(fieldAt, f, enums, FieldPlace.Element, maxBytes, problems);
   }
 }
 

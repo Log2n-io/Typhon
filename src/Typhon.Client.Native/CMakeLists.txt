@@ -49,6 +49,7 @@ set(TYPHON_SOURCES
   src/store/memory.cpp
   src/store/schema.cpp
   src/store/archetype_store.cpp
+  src/store/collection_value.cpp
   src/store/world_store.cpp
   src/motion/motion.cpp
   src/clock/clock.cpp

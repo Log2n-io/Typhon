@@ -439,6 +439,22 @@ public readonly struct Codec : IEquatable<Codec>
     }
 
     /// <summary>
+    /// A <c>ComponentCollection&lt;T&gt;</c> field as a collection (W34): its first <paramref name="maxCount"/> elements, each element field in its exact
+    /// codec, and the collection's real count — a longer one is cut and the client sees it was. The whole list travels when it changes.
+    /// </summary>
+    /// <param name="maxCount">The most elements sent, 1 to 65 535. Required: a collection's bound is load-bearing and has no default.</param>
+    /// <returns>The codec; its element is filled from <c>T</c>'s fields where the field is declared.</returns>
+    public static Codec Coll(int maxCount)
+    {
+        if (maxCount is < 1 or > ProtocolConstants.MaxCollCount)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxCount), maxCount, $"Codec.Coll needs 1 <= maxCount <= {ProtocolConstants.MaxCollCount}.");
+        }
+
+        return new Codec(new CatalogCodec { Kind = CodecKind.Coll, MaxCount = maxCount });
+    }
+
+    /// <summary>
     /// Marks this integer codec as the explicit narrowing of a wider source: out-of-range values clamp to the codec's range, and a projected field counts
     /// every clamp. A field whose integral source the codec cannot hold — an <c>int</c> in a <c>u8</c>, a <c>long</c> in a <c>varu</c> — is refused
     /// without it, because a silent truncation is a bug that only shows up once a value is large.

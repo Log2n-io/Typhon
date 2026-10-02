@@ -58,6 +58,10 @@ public sealed class FrameApplier
     private AggregateGrid _aggregate;
     private int _slot;
 
+    // The collection being decoded (W34) and its element: an element field's value goes there, whatever the record's target.
+    private CollectionValue _collection;
+    private int _element;
+
     /// <summary>Creates an applier.</summary>
     /// <param name="store">The store frames are applied to.</param>
     /// <param name="events">Receives decoded events, or <see langword="null"/> to drop them.</param>
@@ -115,6 +119,7 @@ public sealed class FrameApplier
     {
         _archetype = _store.Archetypes[archetype.Idx];
         _target = Target.None;
+        _collection = null;
     }
 
     private void Enter(uint netId, scoped ReadOnlySpan<double> position, scoped ReadOnlySpan<double> velocity, uint t0, byte epoch)
@@ -262,6 +267,16 @@ public sealed class FrameApplier
 
     private void Number(FieldPlan field, scoped ReadOnlySpan<double> components)
     {
+        if (field.Parent != null)
+        {
+            if (_collection != null)
+            {
+                components.CopyTo(_collection.Numbers[field.Ordinal].AsSpan(_element * field.Components, field.Components));
+            }
+
+            return;
+        }
+
         switch (_target)
         {
             case Target.Entity:
@@ -278,6 +293,16 @@ public sealed class FrameApplier
 
     private void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
     {
+        if (field.Parent != null)
+        {
+            if (_collection != null)
+            {
+                components.CopyTo(_collection.Integers[field.Ordinal].AsSpan(_element * field.Components, field.Components));
+            }
+
+            return;
+        }
+
         switch (_target)
         {
             case Target.Entity:
@@ -294,6 +319,17 @@ public sealed class FrameApplier
 
     private void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
     {
+        if (field.Parent != null)
+        {
+            if (_collection != null)
+            {
+                var texts = _collection.Texts[field.Ordinal];
+                texts[_element] = Same(texts[_element], utf8) ? texts[_element] : Utf8(utf8);
+            }
+
+            return;
+        }
+
         switch (_target)
         {
             case Target.Entity:
@@ -310,6 +346,12 @@ public sealed class FrameApplier
 
     private void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes)
     {
+        if (field.Parent != null)
+        {
+            // A plan refuses bytes in a collection's element; never routed by the element's ordinal into the record's fields.
+            return;
+        }
+
         switch (_target)
         {
             case Target.Entity:
@@ -322,6 +364,46 @@ public sealed class FrameApplier
                 _events?.Bytes(field, bytes);
                 break;
         }
+    }
+
+    // A collection (W34), entity or owner: its elements overwrite the list whole, into the columns it already has.
+    private void Collection(FieldPlan field, int total, int sent)
+    {
+        _collection = _target switch
+        {
+            Target.Entity => _archetype.CollectionAt(field, _slot),
+            Target.Self => _store.Self.CollectionAt(field),
+            _ => null,
+        };
+
+        _collection?.Begin(total, sent);
+        _element = 0;
+    }
+
+    private void CollectionElement(FieldPlan field, int index) => _element = index;
+
+    // A list's text rarely changes between two sends of it: an equal string is kept rather than decoded again.
+    private static bool Same(string held, ReadOnlySpan<byte> utf8) =>
+        held != null && System.Text.Encoding.UTF8.GetByteCount(held) == utf8.Length && Utf8Equals(held, utf8);
+
+    // Decoded a chunk at a time against the held string, so a long text compares without a buffer of its length.
+    private static bool Utf8Equals(string held, ReadOnlySpan<byte> utf8)
+    {
+        Span<char> chunk = stackalloc char[128];
+        var rest = held.AsSpan();
+        while (!utf8.IsEmpty)
+        {
+            System.Text.Unicode.Utf8.ToUtf16(utf8, chunk, out var read, out var written);
+            if (read == 0 || written > rest.Length || !chunk[..written].SequenceEqual(rest[..written]))
+            {
+                return false;
+            }
+
+            utf8 = utf8[read..];
+            rest = rest[written..];
+        }
+
+        return rest.IsEmpty;
     }
 
     private void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
@@ -417,6 +499,7 @@ public sealed class FrameApplier
             }
 
             _applier._target = Target.None;
+            _applier._collection = null;
         }
 
         public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) => _applier.Number(field, components);
@@ -428,6 +511,10 @@ public sealed class FrameApplier
         public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes) => _applier.Bytes(field, bytes);
 
         public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components) => _applier.List(field, count, components);
+
+        public void Collection(FieldPlan field, int total, int sent) => _applier.Collection(field, total, sent);
+
+        public void CollectionElement(FieldPlan field, int index) => _applier.CollectionElement(field, index);
     }
 
     // A text field that changes allocates its new string: the one allocation a decode makes, and only for a field that travelled. An empty text reuses

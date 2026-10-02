@@ -9,7 +9,7 @@ namespace {
 constexpr std::array<std::string_view, CodecKindCount> Tokens = {
     "",     "bool", "u8",    "i8",    "u16",   "i16",   "u32",   "i32",  "varu",  "vari",      "f32", "f16",   "quant", "pos2",   "pos3",
     "vec2", "vec3", "vel2",  "vel3",  "unorm", "snorm", "angle", "quat3", "bits", "entityRef", "str", "bytes", "blob",  "tickLo", "list",
-    "u64",  "i64",  "f64",   "varu64", "vari64",
+    "u64",  "i64",  "f64",   "varu64", "vari64", "coll",
 };
 
 }  // namespace

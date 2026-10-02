@@ -704,13 +704,21 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
         var any = false;
         for (var a = 0; a < plans.Length; a++)
         {
-            if (!observed[a] || plans[a].ReferenceCount == 0)
+            if (!observed[a] || (plans[a].ReferenceCount == 0 && !Array.Exists(plans[a].Collections, c => c.HasReferences)))
             {
                 continue;
             }
 
             any = true;
-            foreach (var field in (CompiledField[])[.. plans[a].Fields, .. plans[a].OwnerFields])
+
+            // A collection's element references are references too (13 § 5), checked the same way.
+            var fields = new List<CompiledField>([.. plans[a].Fields, .. plans[a].OwnerFields]);
+            foreach (var collection in plans[a].Collections)
+            {
+                fields.AddRange(collection.Fields);
+            }
+
+            foreach (var field in fields)
             {
                 if (field.Path == ColumnPath.EntityRef && field.ReferenceTarget != null && !ObservesSubtree(plans, observed, field.ReferenceTarget))
                 {
@@ -1078,6 +1086,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
     private ArchetypeReplicationState[] AttachReplicationStates(DatabaseEngine engine, IResource parent, NetIdAllocator netIds)
     {
         var states = new ArchetypeReplicationState[Plans.Length];
+        CatalogPlan wire = null;
 
         // Assigned to the field as they are created rather than at the end: a throw half way through has to reach Dispose with the states already built, or
         // their pools' native slabs and their registry nodes outlive the runtime that failed to start.
@@ -1094,6 +1103,10 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             states[i].TickPeriodSeconds = NominalTickPeriodSeconds;
             states[i].SizeClampCounters(plan.Fields.Length + plan.OwnerFields.Length);
             states[i].AttachWideSections(plan, engine.MemoryAllocator, Options);
+
+            // A collection's buffer segment, and the catalog section its stored body decodes with when its element names entities (13 § 6.5).
+            wire ??= plan.Collections.Length > 0 ? CatalogPlan.Compile(Catalog.Canonical) : null;
+            states[i].AttachCollections(plan, engine, wire?.ArchetypeByName(plan.Name));
             states[i].AttachTo(clusterState);
 
             // Narrowed HERE and nowhere else, because this is the only place a compiled plan and its cluster state are both in hand. Until this runs the

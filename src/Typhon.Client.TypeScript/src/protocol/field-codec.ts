@@ -36,6 +36,14 @@ export interface FieldSink {
   bytes(field: FieldPlan, data: Uint8Array, offset: number, length: number): void;
   /** A list: `count` elements of `field.components` numbers each, flattened in `values[0 .. count × components)`. */
   list(field: FieldPlan, count: number, values: Float64Array): void;
+  /**
+   * W34: a collection — `sent` elements follow, each opened by {@link collectionElement} and made of its element fields'
+   * calls (fields whose `parent` is `field`). `sent < total` is a truncation the server made. Optional: an event or a
+   * command never carries one.
+   */
+  collection?(field: FieldPlan, total: number, sent: number): void;
+  /** W34: opens element `index` of `field`; the calls that follow, up to the next element, are its fields. */
+  collectionElement?(field: FieldPlan, index: number): void;
 }
 
 /**
@@ -43,7 +51,14 @@ export interface FieldSink {
  * flattened elements; a bigint (or bigints) for a 64-bit integer field (W32), which also takes safe-integer numbers; a
  * string for `str`; bytes for `bytes`, `blob`, or an unknown codec written verbatim.
  */
-export type FieldValue = number | boolean | bigint | ArrayLike<number> | ArrayLike<bigint> | string | Uint8Array;
+export type FieldValue =
+  number | boolean | bigint | ArrayLike<number> | ArrayLike<bigint> | string | Uint8Array | CollectionValue;
+
+/** W34: a collection's value — its elements' values by element field name, all sent, and its total (at least that many). */
+export interface CollectionValue {
+  readonly elements: readonly FieldValues[];
+  readonly total?: number;
+}
 
 /** Field values by wire name. */
 export type FieldValues = Readonly<Record<string, FieldValue | undefined>>;
@@ -111,10 +126,44 @@ export function readSection(
       case ValueKind.List:
         readList(r, f, frameTick, sink, frame);
         break;
+      case ValueKind.Collection:
+        readCollection(r, f, frameTick, sink, strictEnums, frame);
+        break;
       default:
         r.skip(f.fixedBytes);
         break;
     }
+  }
+}
+
+/** W34: `varu total | varu sent | element^sent`, sent ≤ min(total, maxCount), else 1007. */
+function readCollection(
+  r: WireReader,
+  f: FieldPlan,
+  frameTick: number,
+  sink: FieldSink,
+  strictEnums: boolean,
+  frame: RealmFrame | null,
+): void {
+  const total = r.varu();
+  const sent = r.varu();
+  if (sent > total || sent > f.maxCount) {
+    throw malformed(
+      `coll '${f.name}' sends ${sent} of ${total} element(s); at most ${f.maxCount}, and never more than its total`,
+    );
+  }
+
+  // Every element is at least one byte: a count the message cannot hold is refused before a store sizes for it.
+  if (sent > r.remaining) {
+    throw malformed(`coll '${f.name}' sends ${sent} element(s) with ${r.remaining} byte(s) left`);
+  }
+
+  // The total as the other SDKs report it: clamped to a signed 32-bit count.
+  sink.collection?.(f, Math.min(total, 0x7fffffff), sent);
+  const section = f.elementSection!;
+  for (let e = 0; e < sent; e++) {
+    sink.collectionElement?.(f, e);
+    readSection(r, section, frameTick, sink, strictEnums, frame);
   }
 }
 
@@ -427,6 +476,26 @@ export function writeSection(
       case ValueKind.List:
         writeList(w, f, componentsOf(value, f), frame);
         break;
+      case ValueKind.Collection: {
+        const coll = value as CollectionValue | undefined;
+        if (coll?.elements === undefined) {
+          throw new RangeError(`coll '${f.name}' needs { elements, total? }`);
+        }
+
+        const sent = coll.elements.length;
+        const total = Math.max(coll.total ?? 0, sent);
+        if (sent > f.maxCount) {
+          throw new RangeError(`coll '${f.name}' cannot send ${sent} element(s); at most ${f.maxCount}`);
+        }
+
+        w.varu(total);
+        w.varu(sent);
+        for (const element of coll.elements) {
+          writeSection(w, f.elementSection!, element, strictEnums, frame);
+        }
+
+        break;
+      }
       default:
         // A codec newer than this library: only its width is known, so the caller supplies the encoded bytes verbatim.
         if (!(value instanceof Uint8Array) || value.length !== f.fixedBytes) {
@@ -662,7 +731,13 @@ function numberOf(value: FieldValue | undefined, f: FieldPlan, index: number): n
     return value ? 1 : 0;
   }
 
-  if (value === undefined || typeof value === 'string' || typeof value === 'bigint' || value.length <= index) {
+  if (
+    value === undefined ||
+    typeof value === 'string' ||
+    typeof value === 'bigint' ||
+    isCollection(value) ||
+    value.length <= index
+  ) {
     throw new RangeError(`no numeric value supplied for field '${f.name}'`);
   }
 
@@ -686,12 +761,17 @@ function componentsOf(value: FieldValue | undefined, f: FieldPlan): ArrayLike<nu
     value === undefined ||
     typeof value === 'string' ||
     typeof value === 'bigint' ||
+    isCollection(value) ||
     (value.length > 0 && typeof value[0] === 'bigint')
   ) {
     throw new RangeError(`no numeric value supplied for field '${f.name}'`);
   }
 
   return value as ArrayLike<number>;
+}
+
+function isCollection(value: FieldValue): value is CollectionValue {
+  return typeof value === 'object' && 'elements' in value;
 }
 
 function refuseEnum(f: FieldPlan, value: number): void {

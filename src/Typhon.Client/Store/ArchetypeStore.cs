@@ -44,6 +44,7 @@ public sealed class ArchetypeStore
         Integers = new ulong[plan.Fields.Length][];
         Texts = new string[plan.Fields.Length][];
         BytesColumns = new byte[plan.Fields.Length][][];
+        Collections = new CollectionValue[plan.Fields.Length][];
         Grow(InitialCapacity);
     }
 
@@ -94,6 +95,15 @@ public sealed class ArchetypeStore
 
     /// <summary>Per field ordinal: the bytes per slot, or <see langword="null"/> for a non-bytes field.</summary>
     public byte[][][] BytesColumns { get; }
+
+    /// <summary>
+    /// Per field ordinal: the collection per slot (W34), made on the slot's first one and kept, or <see langword="null"/> for a field that is not a
+    /// collection.
+    /// </summary>
+    public CollectionValue[][] Collections { get; }
+
+    /// <summary>The collection a slot holds for a field, made on first use.</summary>
+    internal CollectionValue CollectionAt(FieldPlan field, int slot) => Collections[field.Ordinal][slot] ??= new CollectionValue(field);
 
     /// <summary>Slots that entered this frame, in <c>[0, EnteredCount)</c>.</summary>
     public int[] Entered { get; private set; } = [];
@@ -200,6 +210,9 @@ public sealed class ArchetypeStore
             {
                 BytesColumns[f][slot] = null;
             }
+
+            // Kept, emptied: its columns are the next occupant's to reuse.
+            Collections[f]?[slot]?.Reset();
         }
 
         if (Dims > 0)
@@ -294,6 +307,9 @@ public sealed class ArchetypeStore
                     break;
                 case FieldValueKind.Bytes:
                     BytesColumns[f] = Resize(BytesColumns[f] ?? [], capacity);
+                    break;
+                case FieldValueKind.Collection:
+                    Collections[f] = Resize(Collections[f] ?? [], capacity);
                     break;
             }
         }

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
+using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
 
@@ -319,6 +320,12 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
     private void EndEntryAt(byte* hot, byte* cold, byte* owner, int worker)
     {
+        // A collection's references are in its stored body, which is about to go: read them back first (13 § 5, W34).
+        if (_collectionReferenceBodies.Length != 0 && References != null)
+        {
+            DropCollectionReferences(hot, owner, worker);
+        }
+
         var refs = _wideRefs;
         if (refs.Length != 0)
         {
@@ -361,6 +368,152 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// here logs.
     /// </summary>
     internal ReferenceIndex References;
+
+    // ── Collections (W34, 13 § 6.5) ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>The buffer segment of each collection the plan projects, by <see cref="CompiledCollection.Index"/>.</summary>
+    internal VariableSizedBufferSegmentBase<PersistentStore>[] CollectionSegments = [];
+
+    /// <summary>
+    /// Per public group, the catalog section a stored body decodes with when the group holds a collection whose element names entities; <see langword="null"/>
+    /// for every other group. Owner groups in <see cref="CollectionReferenceOwnerSections"/>.
+    /// </summary>
+    internal SectionPlan[] CollectionReferenceSections = [];
+
+    /// <summary>As <see cref="CollectionReferenceSections"/>, per owner group.</summary>
+    internal SectionPlan[] CollectionReferenceOwnerSections = [];
+
+    private (WideRef At, SectionPlan Section)[] _collectionReferenceBodies = [];
+    private CollectionContext[] _collectionContexts = [];
+    // Per thread, not per state: an entry ends on a projection worker, on a fence slice or in the drain, several of them on one state at once.
+    [ThreadStatic]
+    private static uint[] EndScratch;
+
+    /// <summary>
+    /// Binds the plan's collections to their buffer segments and, where an element names entities, its groups to the catalog sections their stored bodies
+    /// decode with. Once, when the plan is attached; after <see cref="AttachWideSections"/>, whose layout it reads.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A collection's element size disagrees with its buffer segment's.</exception>
+    public void AttachCollections(CompiledProjectionPlan plan, DatabaseEngine engine, ArchetypePlan wire)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        if (plan.Collections.Length == 0)
+        {
+            return;
+        }
+
+        var segments = new VariableSizedBufferSegmentBase<PersistentStore>[plan.Collections.Length];
+        foreach (var collection in plan.Collections)
+        {
+            var segment = engine.GetComponentCollectionVSBS(collection.ElementType);
+            if (segment.ElementSize != collection.ElementSize)
+            {
+                throw new InvalidOperationException(
+                    $"Archetype '{plan.Name}' collects {collection.ElementType.Name}, whose buffer holds {segment.ElementSize}-byte elements, " +
+                    $"and its fields were laid out for {collection.ElementSize}: an element struct must be blittable — no bool, no char — for its " +
+                    "offsets to be the buffer's.");
+            }
+
+            segments[collection.Index] = segment;
+        }
+
+        CollectionSegments = segments;
+        CollectionReferenceSections = ReferenceSections(plan.Fields, plan.Groups, wire?.GroupSections);
+        CollectionReferenceOwnerSections = ReferenceSections(plan.OwnerFields, plan.OwnerGroups, wire?.OwnerSections);
+
+        var bodies = new List<(WideRef, SectionPlan)>();
+        for (var g = 0; g < plan.Groups.Length; g++)
+        {
+            if (CollectionReferenceSections[g] != null)
+            {
+                var offset = Layout.PackedStateOffsetInHotEntry + plan.Groups[g].Section.StoredOffset;
+                bodies.Add((new WideRef { Region = WideRef.Hot, Offset = offset }, CollectionReferenceSections[g]));
+            }
+        }
+
+        for (var g = 0; g < plan.OwnerGroups.Length; g++)
+        {
+            if (CollectionReferenceOwnerSections[g] != null)
+            {
+                bodies.Add((new WideRef { Region = WideRef.Owner, Offset = plan.OwnerGroups[g].Section.StoredOffset }, CollectionReferenceOwnerSections[g]));
+            }
+        }
+
+        _collectionReferenceBodies = bodies.ToArray();
+    }
+
+    // The catalog section of each group holding a collection whose element names entities; null for the others.
+    private static SectionPlan[] ReferenceSections(CompiledField[] fields, CompiledGroup[] groups, SectionPlan[] wire)
+    {
+        var sections = new SectionPlan[groups.Length];
+        for (var g = 0; g < groups.Length; g++)
+        {
+            var section = groups[g].Section;
+            for (var i = section.FirstField; i < section.FirstField + section.FieldCount; i++)
+            {
+                if (fields[i].Collection is { HasReferences: true } && wire != null && g < wire.Length)
+                {
+                    sections[g] = wire[g];
+                }
+            }
+        }
+
+        return sections;
+    }
+
+    /// <summary>The collection reader of projection chunk <paramref name="worker"/>; sized by <see cref="BeginProjectTick"/>.</summary>
+    internal CollectionContext CollectionContextFor(int worker) =>
+        (uint)worker < (uint)_collectionContexts.Length ? _collectionContexts[worker] : null;
+
+    // Every netId an ending entry's collections name stops counting it as a referrer, as its held netIds do.
+    private void DropCollectionReferences(byte* hot, byte* owner, int worker)
+    {
+        var referrer = ((ReplicationHotEntry*)hot)->Entity.RawValue;
+        foreach (var (at, section) in _collectionReferenceBodies)
+        {
+            var reference = (at.Region == WideRef.Hot ? hot : owner) + at.Offset;
+            var handle = Unsafe.ReadUnaligned<uint>(reference);
+            var length = Unsafe.ReadUnaligned<uint>(reference + sizeof(uint));
+            if (handle == 0 || WideBodies == null)
+            {
+                continue;
+            }
+
+            var collector = new CollectionReferenceCollector { Buffer = EndScratch ??= new uint[64] };
+            try
+            {
+                var reader = new WireReader(WideBodies.Read(handle, length));
+                FieldCodec.ReadSection(ref reader, section, 0, ref collector);
+            }
+            catch (WireFormatException)
+            {
+                // Bytes this projection wrote and its catalog describes: unreachable, and an entry ending is no place to throw.
+                NoteCollectionDecodeFault();
+                continue;
+            }
+
+            EndScratch = collector.Buffer;
+            for (var i = 0; i < collector.Count; i++)
+            {
+                if (worker >= 0)
+                {
+                    References.Note(worker, collector.Buffer[i], referrer, -1);
+                }
+                else
+                {
+                    References.NoteShared(collector.Buffer[i], referrer, -1);
+                }
+            }
+        }
+    }
+
+    private long _collectionDecodeFaults;
+
+    /// <summary>Stored collection bodies that failed to decode when their references were read back: zero, or the catalog and the encoder disagree.</summary>
+    public long CollectionDecodeFaults => Volatile.Read(ref _collectionDecodeFaults);
+
+    /// <summary>Records one stored collection body that failed to decode.</summary>
+    internal void NoteCollectionDecodeFault() => Interlocked.Increment(ref _collectionDecodeFaults);
 
     // The entry's regions are block or parked-list memory, native and engine-owned; the references are read and zeroed through the region pointers the
     // callers already hold, unaligned, and the handles go back under one acquisition of the arena's lock.
@@ -776,6 +929,18 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         // and only a pushed slot is ever reached. It sizes the very first refill and nothing after it — see NetIdLeaseSet.BeginTick.
         _netIdLeases.BeginTick(NetIds, workers, _watchedBlocks.Count * Layout.SlotCount);
 
+        if (CollectionSegments.Length != 0 && _collectionContexts.Length < workers)
+        {
+            var contexts = new CollectionContext[workers];
+            Array.Copy(_collectionContexts, contexts, _collectionContexts.Length);
+            for (var i = _collectionContexts.Length; i < workers; i++)
+            {
+                contexts[i] = new CollectionContext(this, CollectionSegments.Length);
+            }
+
+            _collectionContexts = contexts;
+        }
+
         // Every identity a lease can hand out this tick is at or below the high-water mark the refill just moved: reserved here, bound from the chunks.
         EntityIndex?.Reserve(NetIds.HighWaterMark);
         _scratch.BeginTick(workers);
@@ -1165,7 +1330,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
         // A released block's entries end with it: their wide bodies go back before the block does, or they would stay live with nothing naming them; and
         // their references stop counting them as referrers.
-        if (_wideRefs.Length != 0 || (References != null && Layout.ReferenceBytes != 0))
+        if (_wideRefs.Length != 0 || (References != null && (Layout.ReferenceBytes != 0 || _collectionReferenceBodies.Length != 0)))
         {
             for (var s = 0; s < Layout.SlotCount; s++)
             {

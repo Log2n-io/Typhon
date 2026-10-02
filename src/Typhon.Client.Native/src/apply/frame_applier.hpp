@@ -102,6 +102,8 @@ public:
     void Text(const FieldPlan& field, std::string_view utf8) override;
     void Bytes(const FieldPlan& field, std::span<const std::uint8_t> data) override;
     void List(const FieldPlan& field, int count, const double* values) override;
+    void Collection(const FieldPlan& field, int total, int sent) override;
+    void CollectionElement(const FieldPlan& field, int index) override;
 
 private:
     class EventPass;
@@ -136,6 +138,9 @@ private:
     std::uint32_t archetype_ = 0;
     ArchetypeStore* store_ = nullptr;
     std::uint32_t slot_ = 0;
+    // The collection being decoded (W34) and its element: an element field's value goes there, whatever the target.
+    CollectionValue* collection_ = nullptr;
+    std::uint32_t element_ = 0;
     AggregateGrid* grid_ = nullptr;
     // This frame's leaves, applied last: netId and the archetype of the block that carried it.
     Vec<std::uint32_t> leaves_;

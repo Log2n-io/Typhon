@@ -28,9 +28,14 @@ enum class FieldKind : std::uint8_t
     F64,
     Text,
     Bytes,
+    // W34: one CollectionValue per slot.
+    Collection,
 };
 
-constexpr bool IsNumericKind(FieldKind kind) { return kind != FieldKind::Text && kind != FieldKind::Bytes; }
+constexpr bool IsNumericKind(FieldKind kind) { return kind != FieldKind::Text && kind != FieldKind::Bytes && kind != FieldKind::Collection; }
+
+// Text and bytes: a per-field arena.
+constexpr bool IsArenaKind(FieldKind kind) { return kind == FieldKind::Text || kind == FieldKind::Bytes; }
 
 struct FieldSchema {
     std::string name;

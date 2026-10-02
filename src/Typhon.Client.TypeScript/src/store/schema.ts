@@ -13,8 +13,11 @@ export type NumericFieldKind = 'u8' | 'i8' | 'u16' | 'i16' | 'u32' | 'i32' | 'f3
 /** Storage of one decoded 64-bit integer (W32): a `BigUint64Array` or a `BigInt64Array` column. */
 export type Integer64FieldKind = 'u64' | 'i64';
 
-/** Storage of one decoded field: a numeric typed array, a 64-bit integer array, or one string or byte array per slot. */
-export type FieldKind = NumericFieldKind | Integer64FieldKind | 'text' | 'bytes';
+/**
+ * Storage of one decoded field: a numeric typed array, a 64-bit integer array, one string or byte array per slot, or a
+ * collection per slot (W34).
+ */
+export type FieldKind = NumericFieldKind | Integer64FieldKind | 'text' | 'bytes' | 'coll';
 
 const FIELD_KINDS: ReadonlySet<string> = new Set<FieldKind>([
   'u8',
@@ -29,6 +32,7 @@ const FIELD_KINDS: ReadonlySet<string> = new Set<FieldKind>([
   'i64',
   'text',
   'bytes',
+  'coll',
 ]);
 
 /** The most numbers one numeric field holds per slot: a `count` of 16 (W33). */
@@ -112,7 +116,7 @@ export function allocateField(kind: NumericFieldKind, length: number): FieldArra
 }
 
 export function isNumericKind(kind: FieldKind): kind is NumericFieldKind {
-  return kind !== 'text' && kind !== 'bytes' && kind !== 'u64' && kind !== 'i64';
+  return kind !== 'text' && kind !== 'bytes' && kind !== 'u64' && kind !== 'i64' && kind !== 'coll';
 }
 
 export function isInteger64Kind(kind: FieldKind): kind is Integer64FieldKind {

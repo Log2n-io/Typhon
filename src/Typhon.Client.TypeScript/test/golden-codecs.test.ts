@@ -139,7 +139,8 @@ describe('golden codec vectors', () => {
     const covered = new Set(names.map((name) => codecKindOf((goldenJson(name) as CodecVector).codec.t)));
     const missing = CODEC_TOKENS.filter((_, kind) => {
       const k = kind as CodecKind;
-      return k !== CodecKind.Unknown && !isPacked(k) && !covered.has(k);
+      // A collection is a section of fields, not one value: tick-coll and the wire refusals are its vectors (W34).
+      return k !== CodecKind.Unknown && k !== CodecKind.Coll && !isPacked(k) && !covered.has(k);
     });
     expect(missing).toEqual([]);
   });

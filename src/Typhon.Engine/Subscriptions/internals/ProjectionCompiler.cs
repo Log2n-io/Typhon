@@ -216,6 +216,7 @@ internal static class ProjectionCompiler
         // Each reference keeps the netId it last resolved to in the cold entry, public fields first (13 § 5).
         var references = NumberReferences(fields, 0);
         references = NumberReferences(ownerFields, references);
+        var collections = ListCollections(fields, ownerFields);
 
         // Two sizes per section (13 § 6): what it can put on the wire, which sizes the encode scratch and a record's frame space, and what it takes in its
         // entry — the same for an inline section, an 8-byte arena reference for a wide one. Only the second moves an offset, so a scalar archetype's
@@ -319,8 +320,28 @@ internal static class ProjectionCompiler
             MaxOwnerBodyBytes = ownerBodyBytes,
             HasWideSections = hasWide,
             ReferenceCount = references,
+            Collections = collections,
+            ResolvesReferences = references > 0 || Array.Exists(collections, static c => c.HasReferences),
             TickSlotCount = motionTickSlots + groupNames.Length,
         };
+    }
+
+    // The archetype's collections, numbered in field order, public then owner, each with its row in the code scratch.
+    private static CompiledCollection[] ListCollections(CompiledField[] fields, CompiledField[] ownerFields)
+    {
+        var collections = new List<CompiledCollection>();
+        for (var i = 0; i < fields.Length + ownerFields.Length; i++)
+        {
+            var collection = (i < fields.Length ? fields[i] : ownerFields[i - fields.Length]).Collection;
+            if (collection != null)
+            {
+                collection.Index = collections.Count;
+                collection.Row = i;
+                collections.Add(collection);
+            }
+        }
+
+        return collections.ToArray();
     }
 
     // Gives each reference field its slot in the cold entry's reference region, continuing from `next`; returns the next free slot.
@@ -454,9 +475,13 @@ internal static class ProjectionCompiler
                 $"Archetype '{projection.Name}' declares field '{field.Name}' with codec '{codec.Type}', which the column walk has no path for.");
         }
 
+        // A collection's element (W34): compiled here, where the field's codec carries the element T's fields resolved to.
+        var collection = path == ColumnPath.Collection ? CompileCollection(projection.Name, field.Name, source.DotNetType, codec) : null;
+
         // A reference sent once is never corrected: an onEnter field — and a static archetype's, all of which fold into onEnter — reaches a client in its
-        // enter record only, so the netId it names would outlive its holder on every client that entered the entity (SUB-31). It belongs in a group.
-        if (path == ColumnPath.EntityRef && section == 0)
+        // enter record only, so the netId it names would outlive its holder on every client that entered the entity (SUB-31). It belongs in a group. A
+        // collection whose element holds one is a reference too.
+        if ((path == ColumnPath.EntityRef || collection is { HasReferences: true }) && section == 0)
         {
             throw new InvalidOperationException(
                 $"Archetype '{projection.Name}' declares the reference '{field.Name}' {(projection.IsStatic ? "on a static archetype" : "OnEnter")}. A " +
@@ -466,6 +491,7 @@ internal static class ProjectionCompiler
 
         // A Fraction over text reads two numbers that are not there: ResolveSourceType refuses it, naming the type.
         var sourceType = path == ColumnPath.EntityRef ? ProjectionSourceType.Reference
+            : path == ColumnPath.Collection ? ProjectionSourceType.Collection
             : textCapacity > 0 && ratioOffset < 0 ? ProjectionSourceType.Text
             : shape != null ? (shape.Element == typeof(double) ? ProjectionSourceType.Double : ProjectionSourceType.Single)
             : ResolveSourceType(projection, field, source);
@@ -517,12 +543,13 @@ internal static class ProjectionCompiler
             Packed = packed,
             BitOffset = packed ? bitOffset : 0,
             BitCount = bitCount,
-            MaxBodyBytes = packed ? 0 : MaxEncodedBytes(codec),
+            MaxBodyBytes = packed ? 0 : collection != null ? CollectionMaxBytes(collection) : MaxEncodedBytes(codec),
             Owner = field.Owner,
             Shape = field.Shape,
             ComponentCount = 1,
             TextCapacity = textCapacity,
             ReferenceTarget = path == ColumnPath.EntityRef ? CodecPairing.ReferenceTarget(source.DotNetType) : null,
+            Collection = collection,
         };
 
         if (shape == null || path == ColumnPath.Quaternion)
@@ -571,7 +598,7 @@ internal static class ProjectionCompiler
                 continue;
             }
 
-            wide |= fields[i].Path == ColumnPath.Text;
+            wide |= fields[i].Path is ColumnPath.Text or ColumnPath.Collection;
 
             if (first < 0)
             {
@@ -768,13 +795,27 @@ internal static class ProjectionCompiler
 
     private static ProjectionSourceType ResolveSourceType(ArchetypeProjection projection, ProjectedField field, DBComponentDefinition.Field source)
     {
-        var type = source.DotNetType;
+        var resolved = SourceTypeOf(source.DotNetType);
+        if (resolved == ProjectionSourceType.None)
+        {
+            throw new InvalidOperationException(
+                $"Archetype '{projection.Name}' replicates '{field.Name}' from '{field.ComponentName}.{field.SourceFieldName}', which is a " +
+                $"'{source.DotNetType?.Name ?? source.Type.ToString()}'. A projected field is one number: the column walk reads a boolean, an integer, a " +
+                "float or an enum backed by one of those.");
+        }
+
+        return resolved;
+    }
+
+    // The primitive a CLR type is read as: an enum by its underlying type; None for anything that is not one number.
+    private static ProjectionSourceType SourceTypeOf(Type type)
+    {
         if (type != null && type.IsEnum)
         {
             type = Enum.GetUnderlyingType(type);
         }
 
-        var resolved = type == null ? ProjectionSourceType.None : Type.GetTypeCode(type) switch
+        return type == null ? ProjectionSourceType.None : Type.GetTypeCode(type) switch
         {
             TypeCode.Boolean => ProjectionSourceType.Boolean,
             TypeCode.SByte => ProjectionSourceType.SByte,
@@ -789,17 +830,134 @@ internal static class ProjectionCompiler
             TypeCode.Double => ProjectionSourceType.Double,
             _ => ProjectionSourceType.None,
         };
+    }
 
-        if (resolved == ProjectionSourceType.None)
+    // ── Collections ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A collection field's element (W34, 13 § 6.5): <c>T</c>'s fields, as the codec resolved them, in the catalog's wire order and at their offsets in
+    /// <c>T</c>. A <see cref="bool"/> or <see cref="char"/> element field is refused: its marshalled width differs from its width in the buffer, so its
+    /// offset could not be trusted — the rule a command struct follows for the same reason.
+    /// </summary>
+    private static CompiledCollection CompileCollection(string archetype, string field, Type collectionType, CatalogCodec codec)
+    {
+        var elementType = CodecPairing.CollectionElementOf(collectionType);
+        var where = $"Archetype '{archetype}' collection '{field}'";
+        var declared = codec.Element?.Fields ?? [];
+
+        // The catalog's canonical element order (CatalogSerializer): packed first, then by ordinal name.
+        var ordered = (CatalogField[])declared.Clone();
+        Array.Sort(ordered, static (a, b) =>
         {
-            throw new InvalidOperationException(
-                $"Archetype '{projection.Name}' replicates '{field.Name}' from '{field.ComponentName}.{field.SourceFieldName}', which is a " +
-                $"'{source.DotNetType?.Name ?? source.Type.ToString()}'. A projected field is one number: the column walk reads a boolean, an integer, a " +
-                "float or an enum backed by one of those.");
+            var byPacking = (IsPacked(a.Codec) ? 0 : 1).CompareTo(IsPacked(b.Codec) ? 0 : 1);
+            return byPacking != 0 ? byPacking : string.CompareOrdinal(a.Name, b.Name);
+        });
+
+        var size = System.Runtime.InteropServices.Marshal.SizeOf(elementType);
+        var fields = new List<CompiledField>();
+        var packBits = 0;
+        var references = false;
+        foreach (var f in ordered)
+        {
+            var member = elementType.GetField(f.Name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance)
+                         ?? throw new InvalidOperationException($"{where}: {elementType.Name} has no field '{f.Name}'.");
+            var memberType = member.FieldType;
+            if (memberType == typeof(bool) || memberType == typeof(char))
+            {
+                throw new InvalidOperationException(
+                    $"{where}: element field '{f.Name}' is a {memberType.Name}, whose marshalled width differs from its width in the collection's buffer, " +
+                    "so its offset cannot be trusted. Store it as a byte (or a ushort) and declare it so.");
+            }
+
+            var offset = (int)System.Runtime.InteropServices.Marshal.OffsetOf(elementType, f.Name);
+            var path = CodecPairing.Classify(memberType, f.Codec, false, $"{where}, element field '{f.Name}'");
+            var shape = FieldShape.Of(memberType);
+            var text = CodecPairing.TextCapacityOf(memberType);
+            var sourceType = path == ColumnPath.EntityRef ? ProjectionSourceType.Reference
+                : text > 0 ? ProjectionSourceType.Text
+                : shape != null ? (shape.Element == typeof(double) ? ProjectionSourceType.Double : ProjectionSourceType.Single)
+                : SourceTypeOf(memberType);
+            if (sourceType == ProjectionSourceType.None)
+            {
+                throw new InvalidOperationException($"{where}: element field '{f.Name}' is a {memberType.Name}, which has no column path.");
+            }
+
+            references |= path == ColumnPath.EntityRef;
+            var packed = IsPacked(f.Codec);
+            var bitCount = !packed ? 0 : f.Codec.Kind == CodecKind.Bool ? 1 : f.Codec.N;
+            var (intMin, intMax) = CodecPairing.ClampRange(f.Codec);
+            var compiled = new CompiledField
+            {
+                Name = f.Name,
+                ComponentSize = size,
+                FieldOffsetInComponent = offset,
+                RatioOffsetInComponent = -1,
+                SourceType = sourceType,
+                Codec = f.Codec,
+                CodecKind = f.Codec.Kind,
+                CodecBits = f.Codec.Kind == CodecKind.Bits ? f.Codec.N : f.Codec.Bits,
+                VectorScale = f.Codec.Kind is CodecKind.Vec2 or CodecKind.Vec3 ? f.Codec.Scale : 0d,
+                EnumType = memberType.IsEnum ? memberType : null,
+                Path = path,
+                IntMin = intMin,
+                IntMax = intMax,
+                QuantMin = f.Codec.Kind == CodecKind.Quant ? f.Codec.Min[0] : 0d,
+                QuantMax = f.Codec.Kind == CodecKind.Quant ? f.Codec.Max[0] : 0d,
+                GroupBit = -1,
+                Ordinal = fields.Count,
+                Packed = packed,
+                BitOffset = packed ? packBits : 0,
+                BitCount = bitCount,
+                MaxBodyBytes = packed ? 0 : MaxEncodedBytes(f.Codec),
+                Shape = f.Shape,
+                ComponentCount = 1,
+                TextCapacity = text,
+                ReferenceTarget = path == ColumnPath.EntityRef ? CodecPairing.ReferenceTarget(memberType) : null,
+            };
+            packBits += bitCount;
+
+            if (shape == null || path == ColumnPath.Quaternion)
+            {
+                if (path == ColumnPath.Quaternion)
+                {
+                    var offsets = new int[shape.Count];
+                    for (var k = 0; k < offsets.Length; k++)
+                    {
+                        offsets[k] = offset + shape.Offsets[k];
+                    }
+
+                    compiled = compiled with { ShapeOffsets = offsets };
+                }
+
+                fields.Add(compiled);
+                continue;
+            }
+
+            for (var k = 0; k < shape.Count; k++)
+            {
+                fields.Add(compiled with
+                {
+                    FieldOffsetInComponent = offset + shape.Offsets[k], Ordinal = fields.Count, Component = k, ComponentCount = shape.Count,
+                });
+            }
         }
 
-        return resolved;
+        var compiledFields = fields.ToArray();
+        return new CompiledCollection
+        {
+            ElementType = elementType,
+            ElementSize = size,
+            MaxCount = codec.MaxCount,
+            Fields = compiledFields,
+            Section = SectionOf(compiledFields, 0),
+            HasReferences = references,
+        };
     }
+
+    // varu total | varu sent | element^maxCount, at its widest. In 64 bits, saturated: a product past int.MaxValue must reach the wide-section limit's
+    // refusal, not wrap below it.
+    private static int CollectionMaxBytes(CompiledCollection collection) =>
+        (int)Math.Min(int.MaxValue, 10L + ((long)collection.MaxCount * collection.Section.MaxBodyBytes));
 
     private static void RefuseUnsupportedFieldCodec(ArchetypeProjection projection, ProjectedField field, CatalogCodec codec, bool shape, bool text)
     {

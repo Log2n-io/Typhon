@@ -22,6 +22,8 @@ inline constexpr int MaxGroups = 8;
 inline constexpr int MaxArchetypes = 255;
 inline constexpr int MaxPackedBits = 24;
 inline constexpr int MaxListCount = 255;
+// W34: the largest maxCount a coll may declare.
+inline constexpr int MaxCollCount = 65535;
 // The most values one count field carries (W33).
 inline constexpr int MaxCount = 16;
 // The longest shape hint, in UTF-8 bytes (W33).

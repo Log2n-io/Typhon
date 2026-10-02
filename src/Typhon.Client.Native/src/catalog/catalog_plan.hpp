@@ -28,11 +28,16 @@ enum class ValueKind : std::uint8_t
     Skipped = 4,
     // W32: one to sixteen 64-bit integers, as their bit patterns — a signed codec's as two's complement.
     Integer64 = 5,
+    // W34: a collection — a total, then the elements sent, each one section of FieldPlan::elementSection.
+    Collection = 6,
 };
+
+struct SectionPlan;
 
 // One field compiled: its codec's parameters resolved into the numbers the arithmetic needs, and its place in its section.
 struct FieldPlan {
     FieldPlan(std::string name, int index, const CatalogField* field, const CatalogCodec& codec, const Catalog& catalog);
+    ~FieldPlan();
 
     std::string name;
     // Position in its record's field list (archetype public fields, owner fields, or a message body); -1 otherwise.
@@ -50,6 +55,11 @@ struct FieldPlan {
     // W33: the codec's count, 1 when the catalog declares none.
     int count = 1;
     std::unique_ptr<FieldPlan> element;
+    // W34: a collection's element fields, each's index its place in the element, and the element as one section.
+    std::vector<std::unique_ptr<FieldPlan>> elementFields;
+    std::unique_ptr<SectionPlan> elementSection;
+    // W34: for a collection's element field, the collection; null otherwise.
+    FieldPlan* parent = nullptr;
     int bits = 0;
     double min[1] = {0};
     double step[1] = {0};

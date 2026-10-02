@@ -8,6 +8,8 @@ import {
   type FieldArray,
   type Integer64FieldArray,
 } from './schema.js';
+import type { FieldPlan } from '../protocol/catalog.js';
+import { CollectionValue } from './collection-value.js';
 
 /**
  * The largest render delay the store's motion ring is sized for, by default: the `Clock`'s own default `maxDelayMs`
@@ -137,6 +139,7 @@ export class ArchetypeStore {
   private integerWords: (Uint32Array | null)[] = [];
   private texts: (string[] | null)[] = [];
   private bytes: (Uint8Array[] | null)[] = [];
+  private collections: ((CollectionValue | null)[] | null)[] = [];
   private readonly fieldIndexByName: Map<string, number>;
 
   /** The start tick of {@link resetMotion} and {@link pushSegment}, handed on as a one-slot array. */
@@ -232,6 +235,25 @@ export class ArchetypeStore {
     return array;
   }
 
+  /**
+   * The collection a slot holds for a field (W34), made on its first one and kept: an entity's list is overwritten whole
+   * each time it arrives, into the columns it already has.
+   */
+  collectionAt(index: number, slot: number, field: FieldPlan): CollectionValue {
+    const column = this.collections[index];
+    if (column === undefined || column === null) {
+      throw new Error(`Archetype '${this.schema.name}' has no collection field #${index}`);
+    }
+
+    return (column[slot] ??= new CollectionValue(field));
+  }
+
+  /** The collection a slot holds for a field, by name, or `undefined` before its first one. */
+  collection(name: string, slot: number): CollectionValue | undefined {
+    const index = this.fieldIndexByName.get(name);
+    return index === undefined ? undefined : (this.collections[index]?.[slot] ?? undefined);
+  }
+
   /** The byte arrays of a bytes field, one per slot. */
   bytesAt(index: number): Uint8Array[] {
     const array = this.bytes[index];
@@ -290,6 +312,9 @@ export class ArchetypeStore {
       } else if (this.integerWords[f] != null) {
         const components = this.fieldComponents[f]!;
         this.integerWords[f]!.fill(0, 2 * slot * components, 2 * (slot + 1) * components);
+      } else if (this.collections[f] != null) {
+        // Kept, emptied: its columns are the next occupant's to reuse.
+        this.collections[f]![slot]?.reset();
       } else {
         const text = this.texts[f];
         if (text !== null && text !== undefined) {
@@ -521,6 +546,9 @@ export class ArchetypeStore {
     );
     this.bytes = this.schema.fields.map((field, i) =>
       field.kind === 'bytes' ? grownList(this.bytes[i] ?? [], newCapacity, EMPTY_BYTES) : null,
+    );
+    this.collections = this.schema.fields.map((field, i) =>
+      field.kind === 'coll' ? grownList<CollectionValue | null>(this.collections[i] ?? [], newCapacity, null) : null,
     );
 
     this.entered = grown(new Uint32Array(newCapacity), this.entered);

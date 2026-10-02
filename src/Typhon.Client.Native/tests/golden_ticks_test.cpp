@@ -7,6 +7,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <stdexcept>
 
 #include "apply/frame_applier.hpp"
 
@@ -100,4 +101,104 @@ TEST(GoldenTicks_ExactValuesLandInTypedColumns)
 
     CHECK_EQ(self.Integers(pin)[0], 0x8000000000000001ull);
     CHECK_EQ(applier.World().anomalies, 0u);
+}
+
+// W34: the tick-coll vector in the store — an entity's and the controlled entity's lists overwrite whole, keep their total when
+// truncated, and keep their columns between sends (the .NET CollectionStoreTests and the TypeScript collections test).
+TEST(GoldenTicks_TheCollectionVectorLandsInTheStore)
+{
+    const auto plan = PlanOf("catalog-coll");
+    FrameApplier applier(plan);
+    applier.Apply(GoldenBin("tick-coll"));
+
+    const std::uint32_t one = applier.World().Locate(1);
+    const std::uint32_t two = applier.World().Locate(2);
+    const ArchetypeStore& store = applier.World().Archetype(ArchetypeOf(one));
+    const int items = store.FieldIndex("items");
+    const int tags = store.FieldIndex("tags");
+    CHECK(store.Schema().fields[static_cast<std::size_t>(items)].kind == FieldKind::Collection);
+
+    // netId 1 entered with no item and one tag, then a state sent one item: the list is that one.
+    const CollectionValue* first = store.CollectionAt(items, SlotOf(one));
+    CHECK(first != nullptr);
+    CHECK(first->Total() == 1 && first->Count() == 1 && !first->Truncated());
+    CHECK_EQ(first->NumberAt(0, "id"), 65535.0);
+    CHECK_EQ(first->NumberAt(0, "owner"), 4000000000.0);
+    CHECK(first->TextAt(0, "name").empty());
+    CHECK_EQ(store.CollectionAt(tags, SlotOf(one))->NumberAt(0, "tag"), 9.0);
+
+    // netId 2: four of nine sent, in the state's order — the enter's list is overwritten whole.
+    const CollectionValue* second = store.CollectionAt(items, SlotOf(two));
+    CHECK(second->Total() == 9 && second->Count() == 4 && second->Truncated());
+    CHECK(second->TextAt(0, "name") == "bouclier \xC3\xB8" && second->TextAt(1, "name") == "sword");
+    CHECK(second->TextAt(2, "name") == "bouclier \xC3\xB8" && second->TextAt(3, "name").empty());
+    CHECK(second->NumberAt(0, "stack") == 31 && second->NumberAt(1, "stack") == 3);
+    CHECK(second->NumberAt(0, "lit") == 0 && second->NumberAt(1, "lit") == 1);
+    CHECK_EQ(store.CollectionAt(tags, SlotOf(two))->Count(), 3u);
+    // Past Count() nothing is readable by name.
+    CHECK_THROWS(std::out_of_range, (void)second->NumberAt(4, "stack"));
+
+    // SELF: the owner collection of the controlled entity.
+    const SelfState& self = applier.Self();
+    int keys = -1;
+    for (const auto& f : self.archetype->ownerFields)
+    {
+        if (f->name == "keys")
+        {
+            keys = f->index;
+        }
+    }
+
+    const CollectionValue* held = self.Collection(keys);
+    CHECK(held != nullptr && held->Total() == 2 && held->Count() == 2);
+    CHECK_EQ(held->IntegerAt(0, "code"), UINT64_MAX);
+    CHECK_EQ(held->NumberAt(0, "where"), 1.5);
+    CHECK_EQ(applier.World().anomalies, 0u);
+}
+
+// A change of controlled entity drops the previous one's collection, even where the new archetype's owner field at its place is a number.
+TEST(Collections_AControlChangeDropsTheOwnerCollection)
+{
+    const auto coll = PlanOf("catalog-coll");
+    const auto kitchen = PlanOf("catalog-kitchen-sink");
+    const ArchetypePlan& locker = *coll->ArchetypeByName("Locker");
+    const ArchetypePlan* numeric = nullptr;
+    for (const auto& a : kitchen->Archetypes())
+    {
+        if (!a->ownerFields.empty() && a->ownerFields[0]->valueKind == ValueKind::Number)
+        {
+            numeric = a.get();
+        }
+    }
+
+    CHECK(numeric != nullptr && locker.ownerFields[0]->valueKind == ValueKind::Collection);
+    SelfState self;
+    self.Receive(&locker, 1, 0, 1);
+    self.CollectionFor(*locker.ownerFields[0]).Begin(2, 2);
+    CHECK(self.Collection(0) != nullptr);
+
+    self.Receive(numeric, 2, 0, 1);
+    const double one = 1;
+    self.SetNumber(*numeric->ownerFields[0], &one);
+    CHECK(self.Collection(0) == nullptr);
+    self.Receive(&locker, 3, 0, 1);
+    CHECK(self.Collection(0) == nullptr);
+}
+
+// The capacity grows to the largest list and is kept; a shorter list reuses it, and the cut is visible.
+TEST(Collections_AListGrowsShrinksAndReusesItsColumns)
+{
+    const auto coll = PlanOf("catalog-coll");
+    const FieldPlan& keys = *coll->ArchetypeByName("Locker")->ownerFields[0];
+    CollectionValue value;
+    value.Bind(keys);
+    value.Begin(2, 2);
+    const std::uint32_t grown = value.Capacity();
+    CHECK(grown >= 2);
+    value.Begin(9, 1);
+    CHECK(value.Capacity() == grown && value.Count() == 1 && value.Total() == 9 && value.Truncated());
+    CHECK_THROWS(std::out_of_range, (void)value.NumberAt(1, "where"));
+    CHECK_THROWS(std::out_of_range, (void)value.Numbers(99));
+    value.Reset();
+    CHECK(value.Count() == 0 && value.Capacity() == grown && !value.Truncated());
 }

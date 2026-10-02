@@ -20,6 +20,8 @@ public class GoldenRefusalTests
 {
     private static readonly CatalogPlan Kitchen = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.KitchenSink()));
 
+    private static readonly CatalogPlan Collections = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.Collections()));
+
     [Test]
     public void Refusals()
     {
@@ -72,6 +74,14 @@ public class GoldenRefusalTests
         Tick(cases, "period-truncated", [MessageTypes.Tick, 0x70, 0x11, 0x01, 0x00, (byte)TickFlags.Period, 0x01, 0x02]);
         byte[] emptyLedger = [BlockTypes.Entities, 0x05, ledger, 0x00, 0x00, 0x00, 0x00];
         Tick(cases, "entities-block-twice-for-one-archetype", [MessageTypes.Tick, 0x70, 0x11, 0x01, 0x00, 0x00, .. emptyLedger, .. emptyLedger]);
+
+        // W34, against catalog-coll: a state record of Locker's one group, whose body opens with the items collection (total, sent).
+        var locker = (byte)Collections.ArchetypeByName("Locker").Idx;
+        Tick(cases, "coll-sent-over-total", Block(BlockTypes.Entities, locker, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00), catalog: "catalog-coll");
+        Tick(cases, "coll-sent-over-max-count", Block(BlockTypes.Entities, locker, 0x00, 0x00, 0x01, 0x01, 0x01, 0x05, 0x05, 0x00),
+            catalog: "catalog-coll");
+        Tick(cases, "coll-element-truncated", Block(BlockTypes.Entities, locker, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x23),
+            catalog: "catalog-coll");
 
         // typhon.3 (12-realms § 5.2): a REALM only as the first block of a RESET frame, with a valid frame; nothing positioned while no realm is held.
         byte[] realm = Realm(CatalogSamples.KitchenFrame);
@@ -159,13 +169,16 @@ public class GoldenRefusalTests
         });
     }
 
-    private static void Tick(JsonArray cases, string name, byte[] bytes, ushort expected = CloseCodes.MalformedPayload, bool held = true)
+    // A tick against catalog-kitchen-sink unless the case names another catalog — which its JSON then carries, for a client to decode it against.
+    private static void Tick(JsonArray cases, string name, byte[] bytes, ushort expected = CloseCodes.MalformedPayload, bool held = true,
+        string catalog = null)
     {
+        var plan = catalog == null ? Kitchen : Collections;
         var code = Refusal(name, bytes, b =>
         {
             var sink = new RecordingSink();
             var frame = held ? CatalogSamples.KitchenFrame : null;
-            TickReader.Read(b, Kitchen, ref frame, ref sink);
+            TickReader.Read(b, plan, ref frame, ref sink);
         });
 
         Assert.That(code, Is.EqualTo(expected), name);
@@ -173,6 +186,11 @@ public class GoldenRefusalTests
         if (!held)
         {
             json["held"] = false;
+        }
+
+        if (catalog != null)
+        {
+            json["catalog"] = catalog;
         }
 
         cases.Add(json);

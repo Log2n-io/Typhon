@@ -43,6 +43,7 @@ void SelfState::Shape(const ArchetypePlan* owner)
     numbers_.resize(count);
     integers_.resize(count);
     values_.resize(count);
+    collections_.resize(count);
     present_.assign(count, 0);
     for (std::size_t i = 0; i < count; i++)
     {
@@ -50,6 +51,15 @@ void SelfState::Shape(const ArchetypePlan* owner)
         numbers_[i].assign(f.valueKind == ValueKind::Number ? static_cast<std::size_t>(f.components) : 0, 0.0);
         integers_[i].assign(f.valueKind == ValueKind::Integer64 ? static_cast<std::size_t>(f.components) : 0, 0);
         values_[i].clear();
+        if (f.valueKind == ValueKind::Collection)
+        {
+            collections_[i].Bind(f);
+        }
+        else
+        {
+            // The previous controlled entity's list, if this place held one, is not this field's.
+            collections_[i] = CollectionValue{};
+        }
     }
 }
 
@@ -94,6 +104,21 @@ void SelfState::SetBytes(const FieldPlan& field, std::span<const std::uint8_t> d
 {
     Assign(values_[static_cast<std::size_t>(field.index)], data.data(), data.size());
     present_[static_cast<std::size_t>(field.index)] = 1;
+}
+
+const CollectionValue* SelfState::Collection(int field) const
+{
+    const auto at = static_cast<std::size_t>(field);
+    return at < collections_.size() && present_[at] != 0 && archetype != nullptr
+                   && collections_[at].Field() == archetype->ownerFields[at].get()
+               ? &collections_[at]
+               : nullptr;
+}
+
+CollectionValue& SelfState::CollectionFor(const FieldPlan& field)
+{
+    present_[static_cast<std::size_t>(field.index)] = 1;
+    return collections_[static_cast<std::size_t>(field.index)];
 }
 
 std::span<const double> SelfState::Numbers(int field) const

@@ -1,0 +1,615 @@
+{
+  "description": "RESET, then ENTITIES for catalog-coll\u0027s Locker \u2014 an empty collection, one element, a full one at maxCount, a truncated one (9 held, 4 sent), elements with a bool and a bits pack, a str, an entityRef past 2\u00B3\u00B9, an onEnter collection \u2014 and SELF with an owner collection of a u64 and an f32 \u00D7 2 point.",
+  "catalog": "catalog-coll",
+  "log": [
+    {
+      "call": "beginTick",
+      "tick": 70000,
+      "flags": 3,
+      "periodUs": 0
+    },
+    {
+      "call": "beginEntities",
+      "archetype": "Locker"
+    },
+    {
+      "call": "enter",
+      "netId": 1,
+      "position": [],
+      "velocity": [],
+      "t0": 0,
+      "epoch": 0
+    },
+    {
+      "call": "collection",
+      "field": "tags",
+      "total": 1,
+      "sent": 1
+    },
+    {
+      "call": "collectionElement",
+      "field": "tags",
+      "index": 0
+    },
+    {
+      "call": "number",
+      "field": "tag",
+      "values": [
+        "4022000000000000"
+      ]
+    },
+    {
+      "call": "collection",
+      "field": "items",
+      "total": 0,
+      "sent": 0
+    },
+    {
+      "call": "number",
+      "field": "level",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "enter",
+      "netId": 2,
+      "position": [],
+      "velocity": [],
+      "t0": 0,
+      "epoch": 0
+    },
+    {
+      "call": "collection",
+      "field": "tags",
+      "total": 3,
+      "sent": 3
+    },
+    {
+      "call": "collectionElement",
+      "field": "tags",
+      "index": 0
+    },
+    {
+      "call": "number",
+      "field": "tag",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "collectionElement",
+      "field": "tags",
+      "index": 1
+    },
+    {
+      "call": "number",
+      "field": "tag",
+      "values": [
+        "406fe00000000000"
+      ]
+    },
+    {
+      "call": "collectionElement",
+      "field": "tags",
+      "index": 2
+    },
+    {
+      "call": "number",
+      "field": "tag",
+      "values": [
+        "4060000000000000"
+      ]
+    },
+    {
+      "call": "collection",
+      "field": "items",
+      "total": 4,
+      "sent": 4
+    },
+    {
+      "call": "collectionElement",
+      "field": "items",
+      "index": 0
+    },
+    {
+      "call": "number",
+      "field": "lit",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stack",
+      "values": [
+        "4008000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "id",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "name",
+      "utf8": "73776f7264"
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "401c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "weight",
+      "values": [
+        "4004000000000000"
+      ]
+    },
+    {
+      "call": "collectionElement",
+      "field": "items",
+      "index": 1
+    },
+    {
+      "call": "number",
+      "field": "lit",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stack",
+      "values": [
+        "403f000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "id",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "name",
+      "utf8": "626f75636c69657220c3b8"
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "weight",
+      "values": [
+        "8000000000000000"
+      ]
+    },
+    {
+      "call": "collectionElement",
+      "field": "items",
+      "index": 2
+    },
+    {
+      "call": "number",
+      "field": "lit",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stack",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "id",
+      "values": [
+        "40efffe000000000"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "name",
+      "utf8": ""
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "41edcd6500000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "weight",
+      "values": [
+        "47efffffe0000000"
+      ]
+    },
+    {
+      "call": "collectionElement",
+      "field": "items",
+      "index": 3
+    },
+    {
+      "call": "number",
+      "field": "lit",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stack",
+      "values": [
+        "4008000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "id",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "name",
+      "utf8": "73776f7264"
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "401c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "weight",
+      "values": [
+        "4004000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "level",
+      "values": [
+        "406fe00000000000"
+      ]
+    },
+    {
+      "call": "state",
+      "netId": 1,
+      "groupMask": 1
+    },
+    {
+      "call": "collection",
+      "field": "items",
+      "total": 1,
+      "sent": 1
+    },
+    {
+      "call": "collectionElement",
+      "field": "items",
+      "index": 0
+    },
+    {
+      "call": "number",
+      "field": "lit",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stack",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "id",
+      "values": [
+        "40efffe000000000"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "name",
+      "utf8": ""
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "41edcd6500000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "weight",
+      "values": [
+        "47efffffe0000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "level",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "state",
+      "netId": 2,
+      "groupMask": 1
+    },
+    {
+      "call": "collection",
+      "field": "items",
+      "total": 9,
+      "sent": 4
+    },
+    {
+      "call": "collectionElement",
+      "field": "items",
+      "index": 0
+    },
+    {
+      "call": "number",
+      "field": "lit",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stack",
+      "values": [
+        "403f000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "id",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "name",
+      "utf8": "626f75636c69657220c3b8"
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "weight",
+      "values": [
+        "8000000000000000"
+      ]
+    },
+    {
+      "call": "collectionElement",
+      "field": "items",
+      "index": 1
+    },
+    {
+      "call": "number",
+      "field": "lit",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stack",
+      "values": [
+        "4008000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "id",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "name",
+      "utf8": "73776f7264"
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "401c000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "weight",
+      "values": [
+        "4004000000000000"
+      ]
+    },
+    {
+      "call": "collectionElement",
+      "field": "items",
+      "index": 2
+    },
+    {
+      "call": "number",
+      "field": "lit",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stack",
+      "values": [
+        "403f000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "id",
+      "values": [
+        "4000000000000000"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "name",
+      "utf8": "626f75636c69657220c3b8"
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "weight",
+      "values": [
+        "8000000000000000"
+      ]
+    },
+    {
+      "call": "collectionElement",
+      "field": "items",
+      "index": 3
+    },
+    {
+      "call": "number",
+      "field": "lit",
+      "values": [
+        "3ff0000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "stack",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "id",
+      "values": [
+        "40efffe000000000"
+      ]
+    },
+    {
+      "call": "text",
+      "field": "name",
+      "utf8": ""
+    },
+    {
+      "call": "number",
+      "field": "owner",
+      "values": [
+        "41edcd6500000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "weight",
+      "values": [
+        "47efffffe0000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "level",
+      "values": [
+        "4008000000000000"
+      ]
+    },
+    {
+      "call": "self",
+      "archetype": "Locker",
+      "netId": 2,
+      "lastSeq": 4,
+      "ownerMask": 1
+    },
+    {
+      "call": "collection",
+      "field": "keys",
+      "total": 2,
+      "sent": 2
+    },
+    {
+      "call": "collectionElement",
+      "field": "keys",
+      "index": 0
+    },
+    {
+      "call": "integer64",
+      "field": "code",
+      "values": [
+        "ffffffffffffffff"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "where",
+      "values": [
+        "3ff8000000000000",
+        "c0c0000000000000"
+      ]
+    },
+    {
+      "call": "collectionElement",
+      "field": "keys",
+      "index": 1
+    },
+    {
+      "call": "integer64",
+      "field": "code",
+      "values": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "number",
+      "field": "where",
+      "values": [
+        "0000000000000000",
+        "0000000000000000"
+      ]
+    },
+    {
+      "call": "endTick"
+    }
+  ]
+}

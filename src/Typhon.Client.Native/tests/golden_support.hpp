@@ -75,6 +75,8 @@ public:
     void Text(const client::FieldPlan& field, std::string_view utf8) override;
     void Bytes(const client::FieldPlan& field, std::span<const std::uint8_t> data) override;
     void List(const client::FieldPlan& field, int count, const double* values) override;
+    void Collection(const client::FieldPlan& field, int total, int sent) override;
+    void CollectionElement(const client::FieldPlan& field, int index) override;
 
 private:
     const client::ArchetypePlan* archetype_ = nullptr;

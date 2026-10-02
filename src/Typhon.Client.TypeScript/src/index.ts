@@ -25,6 +25,7 @@ export {
   segmentHistoryFor,
 } from './store/archetype-store.js';
 export { archetypeOf, NOT_FOUND, slotOf, WorldStore, type WorldStoreOptions } from './store/world-store.js';
+export { CollectionValue } from './store/collection-value.js';
 export { epochAt, evaluateLive, evaluateSlot, headingOf, MAX_MOTION_STRIDE, segmentEntryAt } from './motion/motion.js';
 export { Clock, type ClockOptions } from './clock/clock.js';
 export { monotonicNow } from './clock/now.js';

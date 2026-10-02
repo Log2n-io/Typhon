@@ -75,14 +75,17 @@
   never resolve a component's column, a slot's stride or a field's offset from anything but the archetype's layout and the component's
     measured schema — not from a copy, not from a recomputation, not from a structure replication owns
   never reach a value through a component segment, a chunk accessor or an entity-location map: replication addresses SLOTS OF A CLUSTER,
-    never entities of a table
+    never entities of a table — with one exception, a collection's elements (below)
+  invariant ∀ projected ComponentCollection<T> field c: c's HANDLE is read through the cluster layout like any field; its ELEMENTS are read
+    through T's VariableSizedBufferSegment only, lock-free (ReadElementsUnlocked), with the projection worker's own chunk accessor, inside
+    the chunk's EpochGuard, in the replication track only — and the element layout is T's, compiled once at Start
   never invoke a selector, a delegate or reflection per entity — a declaration's field name becomes an offset once, at Start, or it is
     refused there by name
   scope: ProjectionCompiler.Compile, ProjectionCompiler.VelocityCodec, CompiledField.ComponentSlot,
     CompiledField.ComponentOffsetInCluster, CompiledField.ComponentSize, CompiledField.FieldOffsetInComponent,
     CompiledPosition.FieldOffsetInComponent, CompiledProjectionPlan.ClusterLayout, ProjectionColumn, ProjectionColumnWalk.Quantize,
     ProjectionColumnWalk.Walk, ArchetypeMetadata.GetSlot, ArchetypeClusterInfo.ComponentOffset, ArchetypeClusterInfo.ComponentSize,
-    DBComponentDefinition.SpatialField, ClusterRef.GetReadOnlySpan
+    DBComponentDefinition.SpatialField, ClusterRef.GetReadOnlySpan, CollectionContext.Bind, VariableSizedBufferSegment.ReadElementsUnlocked
   on_violation: a second reader of the storage, with its own idea of where a value lives. It does not fail — it reads the neighbouring
     field, or the neighbouring slot, and replicates that. Every client then agrees with every other client on a world the server does not
     have, and nothing on either side reports an error. The engine's own layout moves under refactors (a component gains a field, a
@@ -98,6 +101,10 @@
     something faster takes it, and the first clause is then violated by a diff that looks local.
   note Versioned components are no exception and need none: a cluster slot caches the committed HEAD (copied there at commit), so the
     projection reads it through `ClusterRef.GetReadOnlySpan` like any other column, and after the fence it is the tick's committed value.
+  note amended for collections (#1085, 13 § 6.5): a collection's elements do not live in the cluster — the slot holds a buffer id — so the
+    buffer segment is the only place they can be read. The exception is narrow: the handle still comes from the layout, nothing else is
+    reached through a segment, and the read is unlocked only because the replication track runs in the tick's exclusive window (EW-01),
+    where nothing writes a collection. Every other caller reads a buffer through the locked ReadAllElementsRaw.
   note defined in the design series at design/Subscriptions/01-model.md § 2 and design/Subscriptions/02-execution.md § 4.
   verified: ProjectionReadsClusterLayoutTests.ProjectedValuesEqualClusterRefSpans (the read: a component written through
     ClusterRef.GetSpan — the path that sets no dirty bit — projects to exactly what ClusterRef.GetReadOnlySpan reports, field by field

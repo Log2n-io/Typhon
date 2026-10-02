@@ -77,7 +77,9 @@ typedef enum typhon_field_kind
     TYPHON_FIELD_F32 = 8,
     TYPHON_FIELD_F64 = 9,
     TYPHON_FIELD_TEXT = 10,
-    TYPHON_FIELD_BYTES = 11
+    TYPHON_FIELD_BYTES = 11,
+    /* W34: a collection per slot. The C API reports the kind only; its elements are read through the C++ store (CollectionValue). */
+    TYPHON_FIELD_COLLECTION = 12
 } typhon_field_kind;
 
 /* The update-mask bit a motion segment sets, above the eight change-group bits. */
@@ -178,7 +180,7 @@ typedef struct typhon_column
     uint32_t kind;
     /* Values per slot: 1 to 16 (a count, W33). A U64 / I64 column holds 64-bit integers exactly (W32). */
     int32_t components;
-    /* capacity x components values of `kind`; NULL for text and bytes. */
+    /* capacity x components values of `kind`; NULL for text, bytes and a collection. */
     const void* data;
 } typhon_column;
 

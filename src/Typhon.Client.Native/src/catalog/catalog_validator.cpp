@@ -256,7 +256,19 @@ enum Parameter : int
     PList = 64,
     PFixedBytes = 128,
     PCount = 256,
+    PMaxCount = 512,
+    PElement = 1024,
 };
+
+// Where a field is declared, which decides the codecs it may take: a list in a message, a collection on an archetype.
+enum class FieldPlace
+{
+    Archetype,
+    Message,
+    Element,
+};
+
+void CheckField(const std::string& at, const CatalogField& f, const Catalog& c, FieldPlace place, long long maxBytes, Problems& p);
 
 int ReadKindParameters(CodecKind kind);
 
@@ -289,7 +301,9 @@ int ReadKindParameters(CodecKind kind)
         case CodecKind::Blob:
             return PMaxBytes;
         case CodecKind::List:
-            return PList;
+            return PList | PMaxCount;
+        case CodecKind::Coll:
+            return PMaxCount | PElement;
         default:
             return 0;
     }
@@ -342,7 +356,10 @@ void CheckBounds(const std::string& at, const CatalogCodec& codec, std::size_t a
     }
 }
 
-void CheckCodec(const std::string& at, const CatalogCodec& codec, long long maxBytes, Problems& p)
+void CheckElement(const std::string& at, const CatalogCodec& codec, const Catalog& c, long long maxBytes, Problems& p);
+
+// `c` resolves a collection's element enums; null where no collection can appear (a list element).
+void CheckCodec(const std::string& at, const CatalogCodec& codec, long long maxBytes, Problems& p, const Catalog* c = nullptr)
 {
     const CodecKind kind = CodecKindOf(codec.t);
     if (kind != CodecKind::Unknown)
@@ -351,8 +368,9 @@ void CheckCodec(const std::string& at, const CatalogCodec& codec, long long maxB
         const int present = (NonZero(codec.bits) ? PBits : 0) | (codec.min.has_value() || codec.max.has_value() ? PBounds : 0)
                             | (codec.scale.has_value() && *codec.scale != 0 ? PScale : 0) | (codec.unitExp.has_value() ? PUnitExp : 0)
                             | (NonZero(codec.n) ? PN : 0) | (NonZero(codec.maxBytes) ? PMaxBytes : 0)
-                            | (codec.of != nullptr || NonZero(codec.minCount) || NonZero(codec.maxCount) ? PList : 0)
-                            | (NonZero(codec.fixedBytes) ? PFixedBytes : 0) | (NonZero(codec.count) ? PCount : 0);
+                            | (codec.of != nullptr || NonZero(codec.minCount) ? PList : 0) | (NonZero(codec.maxCount) ? PMaxCount : 0)
+                            | (codec.element != nullptr ? PElement : 0) | (NonZero(codec.fixedBytes) ? PFixedBytes : 0)
+                            | (NonZero(codec.count) ? PCount : 0);
         if ((present & ~ReadParameters(kind)) != 0)
         {
             p.push_back(at + ": codec '" + codec.t + "' carries a parameter its kind does not read");
@@ -460,12 +478,53 @@ void CheckCodec(const std::string& at, const CatalogCodec& codec, long long maxB
 
             break;
         }
+        case CodecKind::Coll:
+            if (c != nullptr)
+            {
+                CheckElement(at, codec, *c, maxBytes, p);
+            }
+
+            break;
         default:
             break;
     }
 }
 
-void CheckField(const std::string& at, const CatalogField& f, const Catalog& c, bool allowList, long long maxBytes, Problems& p)
+// A collection (W34): a required bound, and an element of one or more fields, each shaped like a command field.
+void CheckElement(const std::string& at, const CatalogCodec& codec, const Catalog& c, long long maxBytes, Problems& p)
+{
+    const int max = codec.maxCount.value_or(0);
+    if (!(max >= 1 && max <= protocol::MaxCollCount))
+    {
+        p.push_back(at + ": a coll needs maxCount in [1, " + std::to_string(protocol::MaxCollCount) + "]");
+    }
+
+    if (codec.element == nullptr || codec.element->fields.empty())
+    {
+        p.push_back(at + ": a coll needs an element with at least one field");
+        return;
+    }
+
+    std::set<std::string> names;
+    for (const CatalogField& f : codec.element->fields)
+    {
+        const std::string fieldAt = at + " element field '" + f.name + "'";
+        if (names.count(f.name) != 0)
+        {
+            p.push_back(fieldAt + " is declared twice");
+        }
+
+        names.insert(f.name);
+        if ((f.group.has_value() && !f.group->empty()) || f.IsOnEnter() || f.smoothing.has_value())
+        {
+            p.push_back(fieldAt + ": an element field carries no group, no onEnter and no smoothing");
+        }
+
+        CheckField(fieldAt, f, c, FieldPlace::Element, maxBytes, p);
+    }
+}
+
+void CheckField(const std::string& at, const CatalogField& f, const Catalog& c, FieldPlace place, long long maxBytes, Problems& p)
 {
     if (f.name.empty())
     {
@@ -478,12 +537,23 @@ void CheckField(const std::string& at, const CatalogField& f, const Catalog& c, 
         p.push_back(at + ": a vel codec is only valid inside a position");
     }
 
-    if (kind == CodecKind::List && !allowList)
+    if (kind == CodecKind::List && place != FieldPlace::Message)
     {
         p.push_back(at + ": a list is only valid in event and command fields");
     }
 
-    CheckCodec(at, f.codec, maxBytes, p);
+    if (kind == CodecKind::Coll && place != FieldPlace::Archetype)
+    {
+        p.push_back(at + ": a coll is only valid on an archetype field, never in a message or inside another coll's element");
+    }
+
+    if (place == FieldPlace::Element
+        && (kind == CodecKind::Pos2 || kind == CodecKind::Pos3 || kind == CodecKind::Bytes || kind == CodecKind::Blob))
+    {
+        p.push_back(at + ": a coll element field cannot be '" + f.codec.t + "'");
+    }
+
+    CheckCodec(at, f.codec, maxBytes, p, &c);
     if (f.shape.has_value() && (f.shape->empty() || f.shape->size() > static_cast<std::size_t>(protocol::ShapeMaxBytes)))
     {
         // Any other value is accepted: a shape is a hint, and one this library does not know is ignored (W33).
@@ -613,7 +683,7 @@ void CheckArchetype(const CatalogArchetype& a, const Catalog& c, long long maxBy
             p.push_back(at + " names group '" + *f.group + "', which the archetype does not declare");
         }
 
-        CheckField(at, f, c, false, maxBytes, p);
+        CheckField(at, f, c, FieldPlace::Archetype, maxBytes, p);
     }
 
     if (a.position.has_value())
@@ -638,7 +708,7 @@ void CheckArchetype(const CatalogArchetype& a, const Catalog& c, long long maxBy
                 p.push_back(at + " must name one of the owner groups, and cannot be onEnter");
             }
 
-            CheckField(at, f, c, false, maxBytes, p);
+            CheckField(at, f, c, FieldPlace::Archetype, maxBytes, p);
         }
     }
 }
@@ -660,7 +730,7 @@ void CheckMessageFields(const std::string& where, const std::vector<CatalogField
             p.push_back(at + ": event and command fields carry no group and no onEnter");
         }
 
-        CheckField(at, f, c, true, maxBytes, p);
+        CheckField(at, f, c, FieldPlace::Message, maxBytes, p);
     }
 }
 
@@ -952,6 +1022,23 @@ void CheckCanonical(const Catalog& c, Problems& p)
         if (a.owner.has_value() && (!Ascending(a.owner->groups) || !FieldsInLayoutOrder(a.owner->fields, a.owner->groups)))
         {
             fail("archetype '" + a.name + "' owner groups or fields are not in wire order");
+        }
+
+        // A collection's element is a section of its own (W34): its fields in wire order too.
+        const auto elementsInOrder = [&](const std::vector<CatalogField>& fields)
+        {
+            for (const CatalogField& f : fields)
+            {
+                if (f.codec.element != nullptr && !FieldsInLayoutOrder(f.codec.element->fields, {}))
+                {
+                    fail("archetype '" + a.name + "' collection '" + f.name + "' element fields are not in wire order");
+                }
+            }
+        };
+        elementsInOrder(a.fields);
+        if (a.owner.has_value())
+        {
+            elementsInOrder(a.owner->fields);
         }
     }
 

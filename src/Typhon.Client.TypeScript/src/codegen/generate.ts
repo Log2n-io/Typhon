@@ -102,7 +102,10 @@ export function generateDecoders(plan: CatalogPlan, canonicalBytes: Uint8Array, 
   const bodies: string[] = [];
   const names: string[] = [];
   for (const archetype of plan.archetypes) {
-    const decodable = archetype.fields.every((f) => f.valueKind !== ValueKind.List);
+    // A list is a message's, and a collection (W34) is decoded by the interpreter: neither is generated.
+    const decodable = archetype.fields.every(
+      (f) => f.valueKind !== ValueKind.List && f.valueKind !== ValueKind.Collection,
+    );
     if (!decodable) {
       names.push('null');
       continue;

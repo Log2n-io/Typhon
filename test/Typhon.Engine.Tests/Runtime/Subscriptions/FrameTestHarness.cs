@@ -650,7 +650,7 @@ sealed unsafe class FrameHarness : IDisposable
                             var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
                             var worker = projected++ % lists;
                             ProjectionPass.ProjectBlock(plans[a], a, state, worker, block, clusterBase, transientBase, stamp,
-                                plans[a].ReferenceCount > 0 ? references?.ResolverFor(worker) : null);
+                                plans[a].ResolvesReferences ? references?.ResolverFor(worker) : null);
                         }
                     }
                     finally
@@ -662,9 +662,13 @@ sealed unsafe class FrameHarness : IDisposable
             }
             finally
             {
-                for (var w = 0; references != null && watched != 0 && w < lists; w++)
+                for (var w = 0; watched != 0 && w < lists; w++)
                 {
-                    references.ResolverFor(w).Close();
+                    references?.ResolverFor(w).Close();
+                    foreach (var state in states)
+                    {
+                        state.CollectionContextFor(w)?.Close();
+                    }
                 }
             }
         }
@@ -826,6 +830,13 @@ sealed class SessionReplica
     {
         var (store, plan, slot) = Locate(archetype, netId, field);
         return store.Texts[plan.Ordinal][slot];
+    }
+
+    /// <summary>A collection field (W34) of an entity the replica holds.</summary>
+    public CollectionValue Collection(int archetype, uint netId, string field)
+    {
+        var (store, plan, slot) = Locate(archetype, netId, field);
+        return store.Collections[plan.Ordinal][slot];
     }
 
     private (ArchetypeStore Store, FieldPlan Plan, int Slot) Locate(int archetype, uint netId, string field)

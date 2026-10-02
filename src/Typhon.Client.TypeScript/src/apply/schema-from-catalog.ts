@@ -51,6 +51,8 @@ export function fieldKindOf(field: FieldPlan): FieldKind | null {
     case CodecKind.Bytes:
     case CodecKind.Blob:
       return 'bytes';
+    case CodecKind.Coll:
+      return 'coll';
     case CodecKind.Unknown:
       return null;
     default:
@@ -79,7 +81,9 @@ export function worldSchemaFromCatalog(catalog: Catalog | CatalogPlan): WorldSch
         fields.push({
           name: f.name,
           kind,
-          ...(kind !== 'text' && kind !== 'bytes' && f.components !== 1 ? { components: f.components } : {}),
+          ...(kind !== 'text' && kind !== 'bytes' && kind !== 'coll' && f.components !== 1
+            ? { components: f.components }
+            : {}),
           ...(group >= 0 ? { group } : {}),
         });
       }

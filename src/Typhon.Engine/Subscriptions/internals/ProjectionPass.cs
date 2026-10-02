@@ -270,6 +270,13 @@ internal static unsafe class ProjectionPass
 
         var referenceIndex = plan.ReferenceCount > 0 ? state.References : null;
 
+        // Collections (13 § 6.5): the worker's reader, its batch carved for this block. A slot whose element named an entity with no identity yet is
+        // pushed again, as a top-level reference's is.
+        var collections = plan.Collections.Length > 0 ? state.CollectionContextFor(worker) : null;
+        collections?.Bind(arena, plan);
+        var collectionIndex = collections != null ? state.References : null;
+        var collectionUnresolved = 0UL;
+
         // ── 4. Scratch, carved once per block ────────────────────────────────────────────────────────────────────────────────────────────────────────────
         var packBytes = MaxPackBytes(plan);
         // Sized by what a section can put on the wire, not by what its entry stores: a wide section is encoded whole before it is compared (13 § 6.3).
@@ -463,17 +470,26 @@ internal static unsafe class ProjectionPass
             }
 
             // ── Groups: encode, compare, stamp ──────────────────────────────────────────────────────────────────────────────────────────────────────────
-            var text = new TextSource(state, clusterLayout, clusterBase, transientBase, slot);
+            var text = new TextSource(state, clusterLayout, clusterBase, transientBase, slot, collections, references);
             var wideFailed = false;
+            var named = new CollectionNames(collectionIndex, worker, hot->Entity.RawValue);
+            collections?.Unresolved = false;
+
             var changed = EncodeAndCompare(plan.Groups, fields, 0, codes, slot, pack, groupScratch, hotBytes + layout.PackedStateOffsetInHotEntry,
-                groupLength, groupOffset, hot, tick, initialize, in text, wideBodies, ref wideFailed);
+                groupLength, groupOffset, hot, tick, initialize, in text, wideBodies, ref wideFailed, state.CollectionReferenceSections, in named);
 
             var ownerChanged = 0;
             if (ownerFields.Length > 0)
             {
                 ownerChanged = EncodeAndCompare(plan.OwnerGroups, ownerFields, fields.Length, codes, slot, pack, ownerScratch,
                     blockBytes + layout.OwnerOffset + (slot * layout.OwnerEntrySize), ownerLength, ownerOffset, hot, tick, initialize, in text, wideBodies,
-                    ref wideFailed, stampTicks: false);
+                    ref wideFailed, state.CollectionReferenceOwnerSections, in named, stampTicks: false);
+            }
+
+            if (collections is { Unresolved: true })
+            {
+                collectionUnresolved |= 1UL << slot;
+                hub?.Repush(pushIndex, block->ChunkId, 1UL << slot);
             }
 
             // ── The enter cache, before the event: a failure to store it has to be able to take the initialization back ───────────────────────────────
@@ -577,7 +593,7 @@ internal static unsafe class ProjectionPass
         Interlocked.Exchange(ref block->ArrivedSlots, 0UL);
 
         // A referrer still waiting on its target's identity is "not projected" for the dormant skip, which then lets its re-push through.
-        block->ProjectedWatchedMask = watched & ~unresolved;
+        block->ProjectedWatchedMask = watched & ~(unresolved | collectionUnresolved);
         block->ProjectedOccupancy = *(ulong*)clusterBase;
         state.NoteProjected(blocks: 1, slots: visited, records: records, releases: released);
         state.NoteSegments(segmentsEmitted, shadowSegments);
@@ -729,7 +745,7 @@ internal static unsafe class ProjectionPass
     /// <returns>The mask of groups whose body changed.</returns>
     private static int EncodeAndCompare(CompiledGroup[] groups, CompiledField[] fields, int rowBase, ulong* codes, int slot, Span<byte> pack, byte* scratch,
         byte* stored, Span<int> lengths, Span<int> offsets, ReplicationHotEntry* hot, uint tick, bool initialize, in TextSource text, WideBodyArena wideBodies,
-        ref bool wideFailed, bool stampTicks = true)
+        ref bool wideFailed, SectionPlan[] referenceSections, in CollectionNames named, bool stampTicks = true)
     {
         var changed = 0;
         for (var g = 0; g < groups.Length; g++)
@@ -737,6 +753,10 @@ internal static unsafe class ProjectionPass
             ref readonly var group = ref groups[g];
             var max = group.Section.MaxBodyBytes;
             var destination = new Span<byte>(scratch + offsets[g], max);
+
+            // A group whose collection's element names entities: the netIds it names now are gathered by the encode, and compared with the stored body's.
+            var referencing = named.Index != null && (uint)g < (uint)referenceSections.Length ? referenceSections[g] : null;
+            text.Collections?.ResetNetIds();
 
             // Zeroed BEFORE the encode, not after it: the padding is what makes the fixed-width comparison below exact, and clearing only the tail would
             // leave whatever the previous slot's longer body wrote there.
@@ -753,10 +773,17 @@ internal static unsafe class ProjectionPass
                     continue;
                 }
 
+                // What the body named before it is replaced: the reverse index counts the difference, per occurrence (13 § 5).
+                var before = referencing != null ? text.Collections.NamedBy(wideBodies, at, referencing) : default;
                 if (!StoreWide(wideBodies, at, destination[..length]))
                 {
                     wideFailed = true;
                     continue;
+                }
+
+                if (referencing != null)
+                {
+                    NoteCollectionReferences(in named, before, text.Collections.NetIds);
                 }
             }
             else
@@ -793,6 +820,17 @@ internal static unsafe class ProjectionPass
         }
 
         var writer = new WireWriter(destination);
+        WriteSectionBody(ref writer, fields, section, codes, rowBase, slot, pack, in text);
+        return writer.Position;
+    }
+
+    /// <summary>
+    /// Writes one section's body into <paramref name="writer"/>: a record section's, or a collection element's — whose clamps and cuts count on the
+    /// collection's row, <paramref name="clampRow"/>, rather than on a row of their own.
+    /// </summary>
+    private static void WriteSectionBody(ref WireWriter writer, CompiledField[] fields, in CompiledSection section, ulong* codes, int rowBase, int slot,
+        Span<byte> pack, in TextSource text, int clampRow = -1)
+    {
         if (section.PackBytes > 0)
         {
             var packed = pack[..section.PackBytes];
@@ -818,16 +856,164 @@ internal static unsafe class ProjectionPass
                 if (text.Write(ref writer, field))
                 {
                     // Cut at its cap, at a code point: counted on the field's row, beside the clamps (13 § 2.3).
-                    text.State.NoteClamps(rowBase + index, 1);
+                    text.State.NoteClamps(clampRow >= 0 ? clampRow : rowBase + index, 1);
                 }
 
                 continue;
             }
 
+            if (field.Path == ColumnPath.Collection)
+            {
+                WriteCollection(ref writer, field, in text);
+                continue;
+            }
+
             WriteCode(ref writer, field, codes[((rowBase + index) * MaxSlots) + slot]);
         }
+    }
 
-        return writer.Position;
+    /// <summary>
+    /// Writes a collection (W34, 13 § 6.5): its real count and the count sent — at most its <c>maxCount</c>, a cut counted on its row — then each element as
+    /// a section of its own. Elements are read from the buffer in batches of <see cref="MaxSlots"/> and walked column by column, as a cluster's slots are;
+    /// a reference is resolved per element, and the netIds named are gathered for the reverse index.
+    /// </summary>
+    private static void WriteCollection(ref WireWriter writer, in CompiledField field, in TextSource text)
+    {
+        var collection = field.Collection;
+        var context = text.Collections;
+        var state = text.State;
+        var segments = state.CollectionSegments;
+        if (context == null || (uint)collection.Index >= (uint)segments.Length)
+        {
+            // No reader — a fixture driving the pass bare: an empty collection, still well-formed.
+            writer.WriteVaru(0);
+            writer.WriteVaru(0);
+            return;
+        }
+
+        var segment = segments[collection.Index];
+        ref var accessor = ref context.Accessor(collection.Index);
+        var bufferId = Unsafe.ReadUnaligned<int>(text.FieldAddress(field));
+        var total = segment.GetElementCount(bufferId, ref accessor);
+        var sent = Math.Min(total, collection.MaxCount);
+        writer.WriteVaru((uint)total);
+        writer.WriteVaru((uint)sent);
+        if (sent < total)
+        {
+            state.NoteClamps(collection.Row, 1);
+        }
+
+        var size = collection.ElementSize;
+        var bytes = context.ElementBytes;
+        var codes = context.ElementCodes;
+        var pack = new Span<byte>(context.ElementPack, context.ElementPackBytes);
+        var cursor = new VariableSizedBufferSegmentBase<PersistentStore>.BufferCursor(bufferId);
+        for (var done = 0; done < sent;)
+        {
+            var batch = Math.Min(MaxSlots, sent - done);
+            var elements = new Span<byte>(bytes, batch * size);
+            var read = segment.ReadElementsUnlocked(ref cursor, elements, ref accessor);
+            if (read < batch)
+            {
+                // A buffer shorter than its count: unreachable in the exclusive window, and zeroes encode rather than whatever the scratch held.
+                elements[(read * size)..].Clear();
+            }
+
+            var mask = batch >= MaxSlots ? ulong.MaxValue : (1UL << batch) - 1;
+            for (var i = 0; i < collection.Fields.Length; i++)
+            {
+                ref readonly var element = ref collection.Fields[i];
+                var row = codes + (i * MaxSlots);
+                switch (element.Path)
+                {
+                    case ColumnPath.Text:
+                    case ColumnPath.Collection:
+                        continue;
+                    case ColumnPath.EntityRef:
+                        ResolveElements(in element, bytes, batch, row, text.References, context);
+                        continue;
+                }
+
+                var clamps = ProjectionColumnWalk.Quantize(element, ProjectionColumn.Over(elements, element), mask, new Span<ulong>(row, MaxSlots));
+                if (clamps != 0)
+                {
+                    state.NoteClamps(collection.Row, clamps);
+                }
+            }
+
+            for (var e = 0; e < batch; e++)
+            {
+                var source = new TextSource(state, text.Layout, bytes, null, e);
+                WriteSectionBody(ref writer, collection.Fields, collection.Section, codes, 0, e, pack, in source, collection.Row);
+            }
+
+            done += batch;
+        }
+    }
+
+    // A reference element field's codes: the netId each element names, gathered for the reverse index; a target with no identity yet pushes the entity
+    // again (13 § 5). Pointers over the context's batch (native scratch), read at e < count ≤ MaxSlots elements of field.ComponentSize: the column
+    // walk's own idiom, which these rows feed.
+    private static void ResolveElements(in CompiledField field, byte* elements, int count, ulong* row, ReferenceResolver references, CollectionContext context)
+    {
+        for (var e = 0; e < count; e++)
+        {
+            var target = EntityId.FromRaw(Unsafe.ReadUnaligned<long>(elements + (e * field.ComponentSize) + field.FieldOffsetInComponent));
+            var pending = false;
+            var netId = references?.Resolve(target, out pending) ?? NetIdAllocator.NoNetId;
+            row[e] = netId;
+            context.Unresolved |= pending;
+            if (netId != NetIdAllocator.NoNetId)
+            {
+                context.AddNetId(netId);
+            }
+        }
+    }
+
+    /// <summary>Who names what, for a collection's references: the index, the worker's log and the referrer.</summary>
+    private readonly struct CollectionNames
+    {
+        public CollectionNames(ReferenceIndex index, int worker, ulong referrer)
+        {
+            Index = index;
+            Worker = worker;
+            Referrer = referrer;
+        }
+
+        public ReferenceIndex Index { get; }
+
+        public int Worker { get; }
+
+        public ulong Referrer { get; }
+    }
+
+    // The netIds a collection body names now against those it named: each one's change in occurrences is one delta in the reverse index.
+    private static void NoteCollectionReferences(in CollectionNames named, Span<uint> before, Span<uint> after)
+    {
+        before.Sort();
+        after.Sort();
+        int b = 0, a = 0;
+        while (b < before.Length || a < after.Length)
+        {
+            var netId = b < before.Length && (a >= after.Length || before[b] <= after[a]) ? before[b] : after[a];
+            var delta = 0;
+            while (b < before.Length && before[b] == netId)
+            {
+                delta--;
+                b++;
+            }
+
+            while (a < after.Length && after[a] == netId)
+            {
+                delta++;
+                a++;
+            }
+
+            if (delta != 0)
+            {
+                named.Index.Note(named.Worker, netId, named.Referrer, delta);
+            }
+        }
     }
 
     /// <summary>Whether a wide section's stored body is exactly <paramref name="body"/>: the same length, then the same bytes.</summary>
@@ -862,27 +1048,42 @@ internal static unsafe class ProjectionPass
     /// </summary>
     private readonly struct TextSource
     {
-        private readonly ArchetypeClusterInfo _layout;
         private readonly byte* _clusterBase;
         private readonly byte* _transientBase;
         private readonly int _slot;
 
-        public TextSource(ArchetypeReplicationState state, ArchetypeClusterInfo layout, byte* clusterBase, byte* transientBase, int slot)
+        public TextSource(ArchetypeReplicationState state, ArchetypeClusterInfo layout, byte* clusterBase, byte* transientBase, int slot,
+            CollectionContext collections = null, ReferenceResolver references = null)
         {
             State = state;
-            _layout = layout;
+            Layout = layout;
             _clusterBase = clusterBase;
             _transientBase = transientBase;
             _slot = slot;
+            Collections = collections;
+            References = references;
         }
 
         public ArchetypeReplicationState State { get; }
 
+        /// <summary>The cluster layout the columns are read through.</summary>
+        public ArchetypeClusterInfo Layout { get; }
+
+        /// <summary>The worker's collection reader, or <see langword="null"/> where no collection is read — inside an element, or a bare fixture.</summary>
+        public CollectionContext Collections { get; }
+
+        /// <summary>The worker's reference reader, for a collection's reference elements; <see langword="null"/> resolves every one to 0.</summary>
+        public ReferenceResolver References { get; }
+
+        /// <summary>Where the slot's value of <paramref name="field"/> is.</summary>
+        public byte* FieldAddress(in CompiledField field) =>
+            StoreFor(Layout, _transientBase, _clusterBase, field.ComponentSlot) + field.ComponentOffsetInCluster + (_slot * field.ComponentSize)
+            + field.FieldOffsetInComponent;
+
         /// <summary>Writes the slot's text as a <c>str</c>, cut to the codec's cap at a code point; <see langword="true"/> when it was cut.</summary>
         public bool Write(ref WireWriter writer, in CompiledField field)
         {
-            var at = StoreFor(_layout, _transientBase, _clusterBase, field.ComponentSlot) + field.ComponentOffsetInCluster + (_slot * field.ComponentSize)
-                + field.FieldOffsetInComponent;
+            var at = FieldAddress(field);
             var stored = new ReadOnlySpan<byte>(at, field.TextCapacity - 1);
             var end = stored.IndexOf((byte)0);
             var utf8 = end < 0 ? stored : stored[..end];

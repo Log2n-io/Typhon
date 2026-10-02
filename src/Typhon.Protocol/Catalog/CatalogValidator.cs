@@ -226,7 +226,7 @@ public static class CatalogValidator
                 problems.Add($"{at} names group '{f.Group}', which the archetype does not declare");
             }
 
-            CheckField(at, f, enums, allowList: false, maxBytes, problems);
+            CheckField(at, f, enums, FieldPlace.Archetype, maxBytes, problems);
         }
 
         if (a.Position != null)
@@ -257,7 +257,7 @@ public static class CatalogValidator
                     problems.Add($"{at} must name one of the owner groups, and cannot be onEnter");
                 }
 
-                CheckField(at, f, enums, allowList: false, maxBytes, problems);
+                CheckField(at, f, enums, FieldPlace.Archetype, maxBytes, problems);
             }
         }
     }
@@ -301,11 +301,19 @@ public static class CatalogValidator
                 problems.Add($"{at}: event and command fields carry no group and no onEnter");
             }
 
-            CheckField(at, f, enums, allowList: true, maxBytes, problems);
+            CheckField(at, f, enums, FieldPlace.Message, maxBytes, problems);
         }
     }
 
-    private static void CheckField(string at, CatalogField f, Dictionary<string, string[]> enums, bool allowList, int maxBytes, List<string> problems)
+    // Where a field is declared, which decides the codecs it may take: a list in a message, a collection on an archetype, neither in an element.
+    private enum FieldPlace
+    {
+        Archetype,
+        Message,
+        Element,
+    }
+
+    private static void CheckField(string at, CatalogField f, Dictionary<string, string[]> enums, FieldPlace place, int maxBytes, List<string> problems)
     {
         if (string.IsNullOrEmpty(f.Name))
         {
@@ -323,12 +331,22 @@ public static class CatalogValidator
             problems.Add($"{at}: a vel codec is only valid inside a position");
         }
 
-        if (f.Codec.Kind == CodecKind.List && !allowList)
+        if (f.Codec.Kind == CodecKind.List && place != FieldPlace.Message)
         {
             problems.Add($"{at}: a list is only valid in event and command fields");
         }
 
-        CheckCodec(at, f.Codec, maxBytes, problems);
+        if (f.Codec.Kind == CodecKind.Coll && place != FieldPlace.Archetype)
+        {
+            problems.Add($"{at}: a coll is only valid on an archetype field, never in a message or inside another coll's element");
+        }
+
+        if (place == FieldPlace.Element && f.Codec.Kind is CodecKind.Pos2 or CodecKind.Pos3 or CodecKind.Bytes or CodecKind.Blob)
+        {
+            problems.Add($"{at}: a coll element field cannot be '{f.Codec.Type}'");
+        }
+
+        CheckCodec(at, f.Codec, maxBytes, problems, enums);
 
         if (f.Shape != null && (f.Shape.Length == 0 || Encoding.UTF8.GetByteCount(f.Shape) > ProtocolConstants.ShapeMaxBytes))
         {
@@ -553,7 +571,7 @@ public static class CatalogValidator
         }
     }
 
-    private static void CheckCodec(string at, CatalogCodec codec, int maxBytes, List<string> problems)
+    private static void CheckCodec(string at, CatalogCodec codec, int maxBytes, List<string> problems, Dictionary<string, string[]> enums = null)
     {
         CheckUnreadParameters(at, codec, problems);
         if (codec.Count != 0 && TakesCount(codec.Kind) && codec.Count is < 2 or > ProtocolConstants.MaxCount)
@@ -650,6 +668,48 @@ public static class CatalogValidator
                 }
 
                 break;
+            case CodecKind.Coll:
+                CheckElement(at, codec, enums ?? new Dictionary<string, string[]>(), maxBytes, problems);
+                break;
+        }
+    }
+
+    // A collection (W34): a bound — required, there is no default — and an element of one or more fields, each shaped like a command field.
+    private static void CheckElement(string at, CatalogCodec codec, Dictionary<string, string[]> enums, int maxBytes, List<string> problems)
+    {
+        if (codec.MaxCount is < 1 or > ProtocolConstants.MaxCollCount)
+        {
+            problems.Add($"{at}: a coll needs maxCount in [1, {ProtocolConstants.MaxCollCount}]");
+        }
+
+        var fields = codec.Element?.Fields;
+        if (fields is null or { Length: 0 })
+        {
+            problems.Add($"{at}: a coll needs an element with at least one field");
+            return;
+        }
+
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var f in fields)
+        {
+            if (f == null)
+            {
+                problems.Add($"{at} element: a field is null");
+                continue;
+            }
+
+            var fieldAt = $"{at} element field '{f.Name}'";
+            if (!names.Add(f.Name ?? string.Empty))
+            {
+                problems.Add($"{fieldAt} is declared twice");
+            }
+
+            if (!string.IsNullOrEmpty(f.Group) || f.OnEnter || f.Smoothing != null)
+            {
+                problems.Add($"{fieldAt}: an element field carries no group, no onEnter and no smoothing");
+            }
+
+            CheckField(fieldAt, f, enums, FieldPlace.Element, maxBytes, problems);
         }
     }
 
@@ -687,7 +747,8 @@ public static class CatalogValidator
             CodecKind.Unorm or CodecKind.Snorm or CodecKind.Angle => Parameter.Bits,
             CodecKind.Bits or CodecKind.Bytes => Parameter.N,
             CodecKind.Str or CodecKind.Blob => Parameter.MaxBytes,
-            CodecKind.List => Parameter.List,
+            CodecKind.List => Parameter.List | Parameter.MaxCount,
+            CodecKind.Coll => Parameter.MaxCount | Parameter.Element,
             _ => Parameter.None,
         };
 
@@ -703,7 +764,9 @@ public static class CatalogValidator
         present |= codec.UnitExp != null ? Parameter.UnitExp : 0;
         present |= codec.N != 0 ? Parameter.N : 0;
         present |= codec.MaxBytes != 0 ? Parameter.MaxBytes : 0;
-        present |= codec.Of != null || codec.MinCount != 0 || codec.MaxCount != 0 ? Parameter.List : 0;
+        present |= codec.Of != null || codec.MinCount != 0 ? Parameter.List : 0;
+        present |= codec.MaxCount != 0 ? Parameter.MaxCount : 0;
+        present |= codec.Element != null ? Parameter.Element : 0;
         present |= codec.FixedBytes != 0 ? Parameter.FixedBytes : 0;
         present |= codec.Count != 0 ? Parameter.Count : 0;
 
@@ -727,6 +790,8 @@ public static class CatalogValidator
         List = 64,
         FixedBytes = 128,
         Count = 256,
+        MaxCount = 512,
+        Element = 1024,
     }
 
     private static void CheckBits(string at, int bits, List<string> problems)

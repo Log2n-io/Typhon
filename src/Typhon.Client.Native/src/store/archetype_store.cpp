@@ -134,6 +134,7 @@ ArchetypeStore::ArchetypeStore(ArchetypeSchema schema, int segmentHistory, std::
         components_.push_back(IsNumericKind(field.kind) ? field.components : 0);
         numeric_.push_back(MakeColumn(field.kind));
         arenas_.emplace_back();
+        collections_.emplace_back();
     }
 
     Grow(std::max<std::uint32_t>(1, std::min(initialCapacity, MaxCapacity)));
@@ -237,6 +238,34 @@ std::span<const std::uint8_t> ArchetypeStore::BytesAt(int field, std::uint32_t s
     return arenas_[static_cast<std::size_t>(field)].At(slot);
 }
 
+const CollectionValue* ArchetypeStore::CollectionAt(int field, std::uint32_t slot) const
+{
+    if (field < 0 || static_cast<std::size_t>(field) >= schema_.fields.size()
+        || schema_.fields[static_cast<std::size_t>(field)].kind != FieldKind::Collection)
+    {
+        throw std::logic_error("Archetype '" + schema_.name + "' has no collection field #" + std::to_string(field));
+    }
+
+    if (slot >= capacity_)
+    {
+        throw std::out_of_range("slot " + std::to_string(slot) + " is beyond the store");
+    }
+
+    const CollectionValue& value = collections_[static_cast<std::size_t>(field)][slot];
+    return value.Field() == nullptr ? nullptr : &value;
+}
+
+CollectionValue& ArchetypeStore::CollectionFor(int field, std::uint32_t slot, const FieldPlan& plan)
+{
+    CollectionValue& value = collections_[static_cast<std::size_t>(field)][slot];
+    if (value.Field() == nullptr)
+    {
+        value.Bind(plan);
+    }
+
+    return value;
+}
+
 void ArchetypeStore::SetNumbers(int field, std::uint32_t slot, const double* values)
 {
     const int components = components_[static_cast<std::size_t>(field)];
@@ -298,9 +327,13 @@ std::uint32_t ArchetypeStore::Allocate(std::uint32_t netId)
             const std::size_t components = static_cast<std::size_t>(components_[f]);
             std::visit([&](auto& column) { std::fill_n(column.begin() + slot * components, components, typename std::remove_reference_t<decltype(column)>::value_type{}); }, numeric_[f]);
         }
-        else
+        else if (IsArenaKind(schema_.fields[f].kind))
         {
             arenas_[f].Clear(slot);
+        }
+        else
+        {
+            collections_[f][slot].Reset();
         }
     }
 
@@ -336,7 +369,7 @@ void ArchetypeStore::Release(std::uint32_t slot, bool immediate)
     // A departed entity's text and bytes are dead: a compaction must not keep copying them until the slot is reused.
     for (std::size_t f = 0; f < arenas_.size(); f++)
     {
-        if (!IsNumericKind(schema_.fields[f].kind))
+        if (IsArenaKind(schema_.fields[f].kind))
         {
             arenas_[f].Release(slot);
         }
@@ -450,9 +483,13 @@ void ArchetypeStore::Grow(std::uint32_t newCapacity)
             const std::size_t length = static_cast<std::size_t>(newCapacity) * static_cast<std::size_t>(components_[f]);
             std::visit([length](auto& column) { column.resize(length); }, numeric_[f]);
         }
-        else
+        else if (IsArenaKind(schema_.fields[f].kind))
         {
             arenas_[f].Grow(newCapacity);
+        }
+        else
+        {
+            collections_[f].resize(newCapacity);
         }
     }
 

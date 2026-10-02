@@ -56,6 +56,13 @@ export interface CatalogCodec {
   readonly fixedBytes?: number;
   /** W33: how many values of this codec the field carries, 2..16; absent is one. */
   readonly count?: number;
+  /** W34: a collection's element — its fields, shaped like a command's. */
+  readonly element?: CatalogElement;
+}
+
+/** A collection's element (W34): fields with a name, a codec, and optionally an enum and a shape; never a collection. */
+export interface CatalogElement {
+  readonly fields: readonly CatalogField[];
 }
 
 export interface CatalogField {
@@ -348,10 +355,10 @@ function readMetric(m: JsonObject, where: string, p: string[]): CatalogMetric {
   return metric;
 }
 
-function readField(f: JsonObject, where: string, p: string[]): CatalogField {
+function readField(f: JsonObject, where: string, p: string[], inCollection = false): CatalogField {
   const field: Mutable<CatalogField> = {
     name: str(f, 'name', where, p),
-    codec: readCodec(f.codec, `${where}.codec`, p),
+    codec: readCodec(f.codec, `${where}.codec`, p, false, inCollection),
   };
   const group = optionalString(f, 'group', where, p);
   if (group !== undefined) {
@@ -388,9 +395,10 @@ const CODEC_INTEGERS = ['bits', 'unitExp', 'n', 'maxBytes', 'minCount', 'maxCoun
 
 /**
  * A codec, and for a list its element. An element's own `of` is refused rather than read, so the recursion is one level
- * deep however far the JSON nests: a hostile catalog cannot exhaust the stack here.
+ * deep however far the JSON nests: a hostile catalog cannot exhaust the stack here. A collection's element fields are
+ * read one level down the same way: a collection inside one is refused, not read (W34).
  */
-function readCodec(raw: unknown, where: string, p: string[], element = false): CatalogCodec {
+function readCodec(raw: unknown, where: string, p: string[], element = false, inCollection = false): CatalogCodec {
   const c = asObject(raw, where, p);
   const codec: Mutable<CatalogCodec> = { t: str(c, 't', where, p) };
   for (const key of CODEC_INTEGERS) {
@@ -415,7 +423,17 @@ function readCodec(raw: unknown, where: string, p: string[], element = false): C
     if (element) {
       p.push(`${where}.of: a list element cannot itself be a list`);
     } else {
-      codec.of = readCodec(c.of, `${where}.of`, p, true);
+      codec.of = readCodec(c.of, `${where}.of`, p, true, inCollection);
+    }
+  }
+
+  if (present(c.element)) {
+    if (element || inCollection) {
+      p.push(`${where}.element: a coll is only valid on an archetype field, never inside another coll's element`);
+    } else {
+      const at = `${where}.element`;
+      const o = asObject(c.element, at, p);
+      codec.element = { fields: list(o.fields, `${at}.fields`, p, (f, fieldAt) => readField(f, fieldAt, p, true)) };
     }
   }
 
@@ -553,6 +571,8 @@ export const ValueKind = {
   Skipped: 4,
   /** W32: one to sixteen 64-bit integers, handed over as lo/hi 32-bit words — a `number` cannot hold them. */
   Integer64: 5,
+  /** W34: a collection — a total, then the elements sent, each one section of {@link FieldPlan.elementSection}. */
+  Collection: 6,
 } as const;
 
 export type ValueKind = (typeof ValueKind)[keyof typeof ValueKind];
@@ -594,6 +614,10 @@ export class FieldPlan {
   readonly count: number;
   /** For a list, the element's plan. */
   readonly element: FieldPlan | null;
+  /** For a collection (W34), its element's fields as one section; each field's {@link index} is its place in it. */
+  readonly elementSection: SectionPlan | null;
+  /** For a collection's element field, the collection; `null` otherwise. */
+  parent: FieldPlan | null = null;
   /** Byte-aligned width for the quantizing kinds: 8, 16, 24 or 32. */
   readonly bits: number;
   /** Per axis: lower bound (quant, pos). */
@@ -682,6 +706,10 @@ export class FieldPlan {
         valueKind = ValueKind.List;
         components = 0;
         break;
+      case CodecKind.Coll:
+        valueKind = ValueKind.Collection;
+        components = 0;
+        break;
       case CodecKind.Unknown:
         valueKind = ValueKind.Skipped;
         components = 0;
@@ -709,6 +737,43 @@ export class FieldPlan {
       components = this.element.components;
     } else {
       this.element = null;
+    }
+
+    if (kind === CodecKind.Coll) {
+      // The trust boundary again: a flat element — no list, no collection, no position — and a bound a store sizes from.
+      const fields = codec.element?.fields;
+      if (
+        fields === undefined ||
+        fields.length === 0 ||
+        !(Number.isInteger(this.maxCount) && this.maxCount >= 1 && this.maxCount <= ProtocolConstants.maxCollCount)
+      ) {
+        throw refuse(
+          `coll '${name}' needs an element of at least one field and maxCount in [1, ${ProtocolConstants.maxCollCount}]`,
+        );
+      }
+
+      const plans = fields.map((f, i) => {
+        const k = codecKindOf(f.codec.t);
+        if (
+          k === CodecKind.Coll ||
+          k === CodecKind.List ||
+          k === CodecKind.Pos2 ||
+          k === CodecKind.Pos3 ||
+          k === CodecKind.Vel2 ||
+          k === CodecKind.Vel3 ||
+          k === CodecKind.Bytes ||
+          k === CodecKind.Blob
+        ) {
+          throw refuse(`coll '${name}' element field '${f.name}' cannot be '${f.codec.t}'`);
+        }
+
+        const plan = new FieldPlan(f.name, i, f, f.codec, enums);
+        plan.parent = this;
+        return plan;
+      });
+      this.elementSection = new SectionPlan(plans);
+    } else {
+      this.elementSection = null;
     }
 
     this.valueKind = valueKind;

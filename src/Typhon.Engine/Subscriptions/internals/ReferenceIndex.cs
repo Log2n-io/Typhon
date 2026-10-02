@@ -253,6 +253,11 @@ internal sealed unsafe class ReferenceIndex : IDisposable
     private int _freeNode = -1;
     private int[] _head = new int[256];
     private readonly List<(ulong Referrer, uint NetId)> _referrers = [];
+
+    // The identities taken at this step and the previous one: a collection's body still names a taken netId until its referrer is projected again, and
+    // the −1 that projection logs is expected, not a dropped decrement.
+    private HashSet<uint> _takenNow = [];
+    private HashSet<uint> _takenBefore = [];
     private bool _disposed;
 
     /// <summary>The index of a runtime whose plans project references.</summary>
@@ -420,6 +425,9 @@ internal sealed unsafe class ReferenceIndex : IDisposable
             return 0;
         }
 
+        (_takenBefore, _takenNow) = (_takenNow, _takenBefore);
+        _takenNow.Clear();
+
         _referrers.Clear();
         foreach (var state in states)
         {
@@ -556,10 +564,15 @@ internal sealed unsafe class ReferenceIndex : IDisposable
             return;
         }
 
-        // A −1 for a pair already gone: a taken referrer that could not be located in its block when its pair was dropped.
+        // A −1 for a pair already gone: a collection's re-projection after its netId was taken — expected — or a taken referrer that could not be
+        // located in its block when its pair was dropped.
         if (delta.Sign <= 0)
         {
-            DroppedDecrements++;
+            if (!_takenNow.Contains(delta.NetId) && !_takenBefore.Contains(delta.NetId))
+            {
+                DroppedDecrements++;
+            }
+
             return;
         }
 
@@ -583,6 +596,8 @@ internal sealed unsafe class ReferenceIndex : IDisposable
         {
             return;
         }
+
+        _takenNow.Add(netId);
 
         while (at >= 0)
         {

@@ -158,11 +158,11 @@ private:
         return metric;
     }
 
-    CatalogField ReadField(const Value& f, const std::string& where)
+    CatalogField ReadField(const Value& f, const std::string& where, bool inCollection = false)
     {
         CatalogField field;
         field.name = Str(f, "name", where);
-        field.codec = ReadCodec(f.Find("codec"), where + ".codec", false);
+        field.codec = ReadCodec(f.Find("codec"), where + ".codec", false, inCollection);
         field.group = OptionalString(f, "group", where);
         if (Present(f.Find("onEnter")))
         {
@@ -183,9 +183,10 @@ private:
     }
 
     // A codec, and for a list its element. An element's own `of` is refused rather than read, so the recursion is one level deep
-    // however far the JSON nests.
+    // however far the JSON nests. A collection's element fields are read one level down the same way: a collection inside one is
+    // refused, not read (W34).
 public:
-    CatalogCodec ReadCodec(const Value* raw, const std::string& where, bool element)
+    CatalogCodec ReadCodec(const Value* raw, const std::string& where, bool element, bool inCollection = false)
     {
         const Value& c = AsObject(raw, where);
         CatalogCodec codec;
@@ -228,7 +229,24 @@ public:
             }
             else
             {
-                codec.of = std::make_shared<const CatalogCodec>(ReadCodec(c.Find("of"), where + ".of", true));
+                codec.of = std::make_shared<const CatalogCodec>(ReadCodec(c.Find("of"), where + ".of", true, inCollection));
+            }
+        }
+
+        if (Present(c.Find("element")))
+        {
+            if (element || inCollection)
+            {
+                p_.push_back(where + ".element: a coll is only valid on an archetype field, never inside another coll's element");
+            }
+            else
+            {
+                const std::string at = where + ".element";
+                const Value& o = AsObject(c.Find("element"), at);
+                auto collected = std::make_shared<CatalogElement>();
+                List(o.Find("fields"), at + ".fields",
+                     [&](const Value& f, const std::string& fieldAt) { collected->fields.push_back(ReadField(f, fieldAt, true)); });
+                codec.element = std::move(collected);
             }
         }
 

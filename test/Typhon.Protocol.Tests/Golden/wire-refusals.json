@@ -314,6 +314,27 @@
       "closeCode": 1007
     },
     {
+      "name": "coll-sent-over-total",
+      "kind": "tick",
+      "hex": "0270110100000109000000010101010200",
+      "closeCode": 1007,
+      "catalog": "catalog-coll"
+    },
+    {
+      "name": "coll-sent-over-max-count",
+      "kind": "tick",
+      "hex": "0270110100000109000000010101050500",
+      "closeCode": 1007,
+      "catalog": "catalog-coll"
+    },
+    {
+      "name": "coll-element-truncated",
+      "kind": "tick",
+      "hex": "0270110100000109000000010101010123",
+      "closeCode": 1007,
+      "catalog": "catalog-coll"
+    },
+    {
       "name": "realm-without-reset",
       "kind": "tick",
       "hex": "0270110100000943030007000201eeffc000180000000000007040000000000000c0c0000000000000c0c000000000000050c0000000000000c040000000000000c0400000000000005040",

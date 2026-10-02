@@ -360,6 +360,83 @@ internal static class CatalogSamples
         ],
     };
 
+    /// <summary>
+    /// catalog-coll (W34): collections on every section an archetype has — a public group whose element carries a pack (a <c>bool</c> and a <c>bits</c>),
+    /// a <c>str</c>, an <c>entityRef</c>, a <c>u16</c> and an <c>f32</c>; an onEnter one of a single <c>u8</c>; and an owner one with a <c>u64</c> and an
+    /// <c>f32 × 2</c> point. Declared out of wire order, so canonicalization is what orders the elements.
+    /// </summary>
+    internal static Catalog Collections() => new()
+    {
+        Protocol = new CatalogProtocolVersion { Major = 3 },
+        App = new CatalogApp { Name = "Collections", Revision = 1 },
+        Tick = new CatalogTick { PeriodUs = 50_000, PingHz = 4 },
+        Limits = new CatalogLimits { FrameBytes = 65_536, ClientMessageBytes = 1024 },
+        Archetypes =
+        [
+            new CatalogArchetype
+            {
+                Name = "Locker",
+                Groups = ["bag"],
+                Fields =
+                [
+                    new CatalogField
+                    {
+                        Name = "items", Group = "bag",
+                        Codec = new CatalogCodec
+                        {
+                            Kind = CodecKind.Coll, MaxCount = 4,
+                            Element = new CatalogElement
+                            {
+                                Fields =
+                                [
+                                    new CatalogField { Name = "weight", Codec = new CatalogCodec { Kind = CodecKind.F32 } },
+                                    new CatalogField { Name = "name", Codec = new CatalogCodec { Kind = CodecKind.Str, MaxBytes = 16 } },
+                                    new CatalogField { Name = "owner", Codec = new CatalogCodec { Kind = CodecKind.EntityRef } },
+                                    new CatalogField { Name = "stack", Codec = new CatalogCodec { Kind = CodecKind.Bits, N = 5 } },
+                                    new CatalogField { Name = "id", Codec = new CatalogCodec { Kind = CodecKind.U16 } },
+                                    new CatalogField { Name = "lit", Codec = new CatalogCodec { Kind = CodecKind.Bool } },
+                                ],
+                            },
+                        },
+                    },
+                    new CatalogField
+                    {
+                        Name = "tags", OnEnter = true,
+                        Codec = new CatalogCodec
+                        {
+                            Kind = CodecKind.Coll, MaxCount = 3,
+                            Element = new CatalogElement { Fields = [new CatalogField { Name = "tag", Codec = new CatalogCodec { Kind = CodecKind.U8 } }] },
+                        },
+                    },
+                    new CatalogField { Name = "level", Codec = new CatalogCodec { Kind = CodecKind.U8 }, Group = "bag" },
+                ],
+                Owner = new CatalogOwner
+                {
+                    Groups = ["secret"],
+                    Fields =
+                    [
+                        new CatalogField
+                        {
+                            Name = "keys", Group = "secret",
+                            Codec = new CatalogCodec
+                            {
+                                Kind = CodecKind.Coll, MaxCount = 2,
+                                Element = new CatalogElement
+                                {
+                                    Fields =
+                                    [
+                                        new CatalogField { Name = "where", Codec = new CatalogCodec { Kind = CodecKind.F32, Count = 2 }, Shape = "point2" },
+                                        new CatalogField { Name = "code", Codec = new CatalogCodec { Kind = CodecKind.U64 } },
+                                    ],
+                                },
+                            },
+                        },
+                    ],
+                },
+            },
+        ],
+    };
+
     private static CatalogPosition MovingLinear() => new()
     {
         Kind = CatalogPosition.MotionKind,

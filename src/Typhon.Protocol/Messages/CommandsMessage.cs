@@ -126,5 +126,14 @@ public static class CommandsMessage
         public readonly void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components)
         {
         }
+
+        // A command never carries a collection: the validator refuses one there (W34).
+        public readonly void Collection(FieldPlan field, int total, int sent)
+        {
+        }
+
+        public readonly void CollectionElement(FieldPlan field, int index)
+        {
+        }
     }
 }

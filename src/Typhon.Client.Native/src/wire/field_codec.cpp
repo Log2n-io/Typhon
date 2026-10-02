@@ -1,5 +1,6 @@
 #include "wire/field_codec.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <stdexcept>
@@ -47,6 +48,31 @@ void ReadList(WireReader& r, const FieldPlan& f, std::uint32_t frameTick, FieldS
     }
 
     sink.List(f, static_cast<int>(count), values);
+}
+
+void ReadCollection(WireReader& r, const FieldPlan& f, std::uint32_t frameTick, FieldSink& sink, bool strictEnums, const RealmFrame* frame)
+{
+    const std::uint32_t total = r.Varu();
+    const std::uint32_t sent = r.Varu();
+    if (sent > total || sent > static_cast<std::uint32_t>(f.maxCount))
+    {
+        throw Malformed("coll '" + f.name + "' sends " + std::to_string(sent) + " of " + std::to_string(total) + " element(s); at most "
+                        + std::to_string(f.maxCount) + ", and never more than its total");
+    }
+
+    // Every element is at least one byte: a count the message cannot hold is refused before a store sizes for it.
+    if (sent > r.Remaining())
+    {
+        throw Malformed("coll '" + f.name + "' sends " + std::to_string(sent) + " element(s) with " + std::to_string(r.Remaining())
+                        + " byte(s) left");
+    }
+
+    sink.Collection(f, static_cast<int>(std::min<std::uint32_t>(total, 0x7FFFFFFF)), static_cast<int>(sent));
+    for (std::uint32_t e = 0; e < sent; e++)
+    {
+        sink.CollectionElement(f, static_cast<int>(e));
+        ReadSection(r, *f.elementSection, frameTick, sink, strictEnums, frame);
+    }
 }
 
 [[noreturn]] void OutOfRange(const FieldPlan& f, double v, const std::string& range)
@@ -185,6 +211,9 @@ void ReadSection(WireReader& r, const SectionPlan& section, std::uint32_t frameT
             }
             case ValueKind::List:
                 ReadList(r, f, frameTick, sink, frame);
+                break;
+            case ValueKind::Collection:
+                ReadCollection(r, f, frameTick, sink, strictEnums, frame);
                 break;
             case ValueKind::Skipped:
                 r.Skip(static_cast<std::size_t>(f.fixedBytes));
@@ -424,6 +453,22 @@ void WriteSection(WireWriter& w, const SectionPlan& section, std::span<const Nam
             case ValueKind::List:
                 WriteList(w, f, NumbersOf(value, f), frame);
                 break;
+            case ValueKind::Collection:
+            {
+                if (value == nullptr || value->kind != FieldValue::Kind::Elements)
+                {
+                    throw std::out_of_range("coll '" + f.name + "' needs elements");
+                }
+
+                const auto sent = static_cast<std::uint32_t>(value->elements.size());
+                WriteCollectionHeader(w, f, std::max(static_cast<std::uint32_t>(std::max(value->total, 0)), sent), sent);
+                for (const auto& element : value->elements)
+                {
+                    WriteSection(w, *f.elementSection, element, strictEnums, frame);
+                }
+
+                break;
+            }
             case ValueKind::Skipped:
                 // A codec newer than this library: only its width is known, so the caller supplies the encoded bytes verbatim.
                 if (value == nullptr || value->kind != FieldValue::Kind::Bytes || value->bytes.size() != static_cast<std::size_t>(f.fixedBytes))
@@ -436,6 +481,18 @@ void WriteSection(WireWriter& w, const SectionPlan& section, std::span<const Nam
                 break;
         }
     }
+}
+
+void WriteCollectionHeader(WireWriter& w, const FieldPlan& f, std::uint32_t total, std::uint32_t sent)
+{
+    if (sent > total || sent > static_cast<std::uint32_t>(f.maxCount))
+    {
+        throw std::out_of_range("coll '" + f.name + "' cannot send " + std::to_string(sent) + " of " + std::to_string(total)
+                                + " element(s); at most " + std::to_string(f.maxCount));
+    }
+
+    w.Varu(total);
+    w.Varu(sent);
 }
 
 namespace {

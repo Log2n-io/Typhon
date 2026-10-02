@@ -7,6 +7,7 @@ import {
   type MetricPlan,
 } from '../protocol/catalog.js';
 import { isSigned64 } from '../protocol/codec-kinds.js';
+import { CollectionValue } from '../store/collection-value.js';
 import { bigintOf } from '../protocol/int64.js';
 
 /*
@@ -72,6 +73,14 @@ export class SelfState {
   bytes: (Uint8Array | null)[] = [];
   /** Per owner field: 1 once a value has been received for the current controlled entity. */
   present: Uint8Array = new Uint8Array(0);
+  /** Per owner field: its collection (W34), or `null` until received or when the field is not one. */
+  collections: (CollectionValue | null)[] = [];
+
+  /** The collection of an owner field, made on its first arrival. */
+  collectionAt(field: FieldPlan): CollectionValue {
+    this.present[field.index] = 1;
+    return (this.collections[field.index] ??= new CollectionValue(field));
+  }
 
   /**
    * A `SELF` block begins. A different controlled entity starts from no values: SUB-11 then sends every group.
@@ -94,6 +103,7 @@ export class SelfState {
       this.words = [];
       this.texts = [];
       this.bytes = [];
+      this.collections = [];
       this.present = new Uint8Array(0);
     } else if (this.archetype !== archetype || this.netId !== netId) {
       const fields = archetype.ownerFields;
@@ -102,6 +112,7 @@ export class SelfState {
       this.words = fields.map((f) => new Uint32Array(f.valueKind === ValueKind.Integer64 ? 2 * f.components : 0));
       this.texts = fields.map(() => null);
       this.bytes = fields.map(() => null);
+      this.collections = fields.map(() => null);
       this.present = new Uint8Array(fields.length);
     }
 
@@ -127,6 +138,7 @@ export class SelfState {
     this.words = [];
     this.texts = [];
     this.bytes = [];
+    this.collections = [];
     this.present = new Uint8Array(0);
     this.version++;
   }

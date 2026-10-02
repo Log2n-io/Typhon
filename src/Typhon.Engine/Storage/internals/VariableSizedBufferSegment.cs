@@ -195,6 +195,64 @@ public unsafe class VariableSizedBufferSegmentBase<TStore> where TStore : struct
         return accessor.GetChunk<VariableSizedBufferRootHeader>(bufferId, false).TotalCount;
     }
 
+    /// <summary>Where a <see cref="ReadElementsUnlocked"/> walk of a buffer stands: the chunk it reads next and the element in it.</summary>
+    internal struct BufferCursor
+    {
+        /// <summary>A cursor at the first element of <paramref name="bufferId"/>; the null buffer yields nothing.</summary>
+        public BufferCursor(int bufferId)
+        {
+            BufferId = bufferId;
+            ChunkId = bufferId;
+            Index = 0;
+        }
+
+        /// <summary>The buffer's root chunk.</summary>
+        public readonly int BufferId;
+
+        /// <summary>The chunk read next; 0 once the chain is exhausted.</summary>
+        public int ChunkId;
+
+        /// <summary>The next element's index in <see cref="ChunkId"/>.</summary>
+        public int Index;
+    }
+
+    /// <summary>
+    /// Copies the next elements of a buffer into <paramref name="dest"/> as raw bytes — as many whole elements as it holds — and advances
+    /// <paramref name="cursor"/>; returns how many were copied, 0 once the buffer is exhausted.
+    /// </summary>
+    /// <remarks>
+    /// <b>No lock, by contract</b>: for the replication track only, which runs inside the tick's exclusive window (EW-01), where nothing writes a collection,
+    /// and which reads a buffer in batches it cannot hold a lock across. <see cref="ReadAllElementsRaw"/> is the locked reader for every other caller.
+    /// </remarks>
+    internal int ReadElementsUnlocked(ref BufferCursor cursor, Span<byte> dest, ref ChunkAccessor<TStore> accessor)
+    {
+        var capacity = dest.Length / ElementSize;
+        var copied = 0;
+        while (cursor.ChunkId != 0 && copied < capacity)
+        {
+            // A page-cache chunk, addressed as every reader of this segment does; the copy out is a span bounded by the chunk's element count.
+            var addr = accessor.GetChunkAddress(cursor.ChunkId, false);
+            var header = (VariableSizedBufferChunkHeader*)addr;
+            var count = header->ElementCount;
+            var take = Math.Min(count - cursor.Index, capacity - copied);
+            if (take > 0)
+            {
+                var payload = addr + (cursor.ChunkId == cursor.BufferId ? RootHeaderTotalSize : sizeof(VariableSizedBufferChunkHeader));
+                new ReadOnlySpan<byte>(payload + (cursor.Index * ElementSize), take * ElementSize).CopyTo(dest[(copied * ElementSize)..]);
+                copied += take;
+                cursor.Index += take;
+            }
+
+            if (cursor.Index >= count)
+            {
+                cursor.ChunkId = header->NextChunkId;
+                cursor.Index = 0;
+            }
+        }
+
+        return copied;
+    }
+
     /// <summary>
     /// Copies every element of <paramref name="bufferId"/> into <paramref name="dest"/> as raw bytes, and returns the number of elements copied.
     /// </summary>

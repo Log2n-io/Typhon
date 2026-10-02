@@ -270,6 +270,14 @@ export class RecordingSink implements TickSink, CommandSink {
     this.log.push({ call: 'list', field: field.name, count, values: bitsOf(values, count * field.components) });
   }
 
+  collection(field: FieldPlan, total: number, sent: number): void {
+    this.log.push({ call: 'collection', field: field.name, total, sent });
+  }
+
+  collectionElement(field: FieldPlan, index: number): void {
+    this.log.push({ call: 'collectionElement', field: field.name, index });
+  }
+
   /** The views as handed out, which the reader sizes exactly: `dims` values, and a velocity only when one travels. */
   private motion(position: Float64Array, velocity: Float64Array): { position: string[]; velocity: string[] } {
     const p = this.archetype?.position ?? null;

@@ -329,4 +329,14 @@ void RecordingSink::List(const client::FieldPlan& field, int count, const double
                                  {"values", BitsArray({values, static_cast<std::size_t>(count * field.components)})}}));
 }
 
+void RecordingSink::Collection(const client::FieldPlan& field, int total, int sent)
+{
+    log.push_back(Entry("collection", {{"field", Str(field.name)}, {"total", Num(total)}, {"sent", Num(sent)}}));
+}
+
+void RecordingSink::CollectionElement(const client::FieldPlan& field, int index)
+{
+    log.push_back(Entry("collectionElement", {{"field", Str(field.name)}, {"index", Num(index)}}));
+}
+
 }  // namespace typhon::test

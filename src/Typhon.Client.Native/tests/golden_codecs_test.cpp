@@ -189,7 +189,8 @@ TEST(GoldenCodecs_EveryByteAlignedKindHasAVector)
     for (int k = 1; k < CodecKindCount; k++)
     {
         const auto kind = static_cast<CodecKind>(k);
-        CHECK_MSG(IsPacked(kind) || covered.count(kind) != 0, "no codec vector for " << CodecToken(kind));
+        // A collection's element is a catalog section, not a codec: the tick-coll vector covers it.
+        CHECK_MSG(IsPacked(kind) || kind == CodecKind::Coll || covered.count(kind) != 0, "no codec vector for " << CodecToken(kind));
     }
 }
 

@@ -83,6 +83,24 @@ function dump(applier: FrameApplier): unknown {
             return bytesOf(s.wordsAt(index));
           }
 
+          // A collection (W34): each live slot's list, its total, count and element columns.
+          if (f.valueKind === ValueKind.Collection) {
+            return JSON.stringify(
+              Array.from(s.live.subarray(0, s.liveCount), (slot) => {
+                const c = s.collection(f.name, slot);
+                return c === undefined
+                  ? null
+                  : {
+                      total: c.total,
+                      count: c.count,
+                      numbers: c.numbers.map((n) => (n === null ? null : bytesOf(n))),
+                      words: c.words.map((w) => (w === null ? null : bytesOf(w))),
+                      texts: c.texts.map((t) => (t === null ? null : t.slice(0, c.count))),
+                    };
+              }),
+            );
+          }
+
           try {
             return JSON.stringify(s.textAt(index));
           } catch {
@@ -199,7 +217,12 @@ describe('typhon-codegen', () => {
       add((goldenJson(name) as { catalog: string }).catalog, [goldenBin(name)]);
     }
 
-    expect([...byCatalog.keys()].sort()).toEqual(['catalog-exact', 'catalog-kitchen-sink', 'catalog-wide']);
+    expect([...byCatalog.keys()].sort()).toEqual([
+      'catalog-coll',
+      'catalog-exact',
+      'catalog-kitchen-sink',
+      'catalog-wide',
+    ]);
     for (const [catalog, messages] of byCatalog) {
       const { decoders } = await generated(catalog, goldenBin(catalog));
       const [interpreter, gen] = pair(goldenBin(catalog), decoders);

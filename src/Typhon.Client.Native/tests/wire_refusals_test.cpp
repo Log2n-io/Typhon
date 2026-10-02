@@ -67,7 +67,9 @@ TEST(WireRefusals_EveryCaseIsRefusedWithItsCloseCode)
                     }
                     else if (kind == "tick")
                     {
-                        TickReader reader(kitchen);
+                        // A case decoded against another catalog names it (a collection's needs catalog-coll).
+                        const Value* own = c.Find("catalog");
+                        TickReader reader(own != nullptr ? PlanOf(own->AsString()) : kitchen);
                         const Value* held = c.Find("held");
                         reader.realm = held != nullptr && !held->AsBool() ? nullptr : frame;
                         reader.Read(bytes, sink);

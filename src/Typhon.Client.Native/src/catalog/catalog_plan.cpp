@@ -97,6 +97,10 @@ FieldPlan::FieldPlan(std::string fieldName, int fieldIndex, const CatalogField* 
             valueKind = ValueKind::List;
             components = 0;
             break;
+        case CodecKind::Coll:
+            valueKind = ValueKind::Collection;
+            components = 0;
+            break;
         case CodecKind::Unknown:
             valueKind = ValueKind::Skipped;
             components = 0;
@@ -167,6 +171,35 @@ FieldPlan::FieldPlan(std::string fieldName, int fieldIndex, const CatalogField* 
         components = element->components;
     }
 
+    if (kind == CodecKind::Coll)
+    {
+        // The trust boundary again: a flat element — no list, no collection, no position — and a bound a store sizes from.
+        if (codec.element == nullptr || codec.element->fields.empty() || !(maxCount >= 1 && maxCount <= protocol::MaxCollCount))
+        {
+            throw Refuse("coll '" + name + "' needs an element of at least one field and maxCount in [1, "
+                         + std::to_string(protocol::MaxCollCount) + "]");
+        }
+
+        std::vector<FieldPlan*> plans;
+        const auto& elementDecl = codec.element->fields;
+        for (std::size_t i = 0; i < elementDecl.size(); i++)
+        {
+            const CodecKind k = CodecKindOf(elementDecl[i].codec.t);
+            if (k == CodecKind::Coll || k == CodecKind::List || k == CodecKind::Pos2 || k == CodecKind::Pos3 || k == CodecKind::Vel2
+                || k == CodecKind::Vel3 || k == CodecKind::Bytes || k == CodecKind::Blob)
+            {
+                throw Refuse("coll '" + name + "' element field '" + elementDecl[i].name + "' cannot be '" + elementDecl[i].codec.t + "'");
+            }
+
+            auto plan = std::make_unique<FieldPlan>(elementDecl[i].name, static_cast<int>(i), &elementDecl[i], elementDecl[i].codec, catalog);
+            plan->parent = this;
+            plans.push_back(plan.get());
+            elementFields.push_back(std::move(plan));
+        }
+
+        elementSection = std::make_unique<SectionPlan>(std::move(plans));
+    }
+
     // A position's quantum is the realm frame's (typhon.3, SUB-30): RealmFrame.step, per frame.
     if (kind == CodecKind::Quant)
     {
@@ -195,6 +228,8 @@ FieldPlan::FieldPlan(std::string fieldName, int fieldIndex, const CatalogField* 
     top = byteAligned ? math::UnsignedTop(bits) : 0;
     limit = byteAligned ? math::SymmetricLimit(bits) : 0;
 }
+
+FieldPlan::~FieldPlan() = default;
 
 SectionPlan::SectionPlan(std::vector<FieldPlan*> sectionFields) : fields(std::move(sectionFields))
 {

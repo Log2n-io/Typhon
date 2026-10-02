@@ -349,11 +349,11 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         // the same pair ClusterRef resolves a column through. One accessor per chunk per archetype, not one per block.
         var persistent = clusterState.ClusterSegment;
         var transient = clusterState.TransientSegment;
-        var persistentAccessor = persistent != null ? persistent.CreateChunkAccessor() : default;
-        var transientAccessor = transient != null ? transient.CreateChunkAccessor() : default;
+        var persistentAccessor = persistent?.CreateChunkAccessor() ?? default;
+        var transientAccessor = transient?.CreateChunkAccessor() ?? default;
 
         // A reference reader for the worker's share, when the archetype projects one (13 § 5): its EntityMap accessors live as long as the share.
-        var references = plan.ReferenceCount > 0 ? state.References?.ResolverFor(chunkIndex) : null;
+        var references = plan.ResolvesReferences ? state.References?.ResolverFor(chunkIndex) : null;
         references?.Open();
         try
         {
@@ -390,6 +390,7 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         finally
         {
             references?.Close();
+            state.CollectionContextFor(chunkIndex)?.Close();
             persistentAccessor.Dispose();
             transientAccessor.Dispose();
         }

@@ -45,9 +45,11 @@ enum class CodecKind : std::uint8_t
     F64 = 32,
     Varu64 = 33,
     Vari64 = 34,
+    // W34: a collection of records on an archetype field — varu total | varu sent | element^sent.
+    Coll = 35,
 };
 
-inline constexpr int CodecKindCount = 35;
+inline constexpr int CodecKindCount = 36;
 
 // The kind a wire token names; Unknown for an empty or unrecognised token.
 CodecKind CodecKindOf(std::string_view token);

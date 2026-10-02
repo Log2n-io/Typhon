@@ -7,6 +7,8 @@
 #include <string_view>
 #include <variant>
 
+#include "store/byte_arena.hpp"
+#include "store/collection_value.hpp"
 #include "store/memory.hpp"
 #include "store/schema.hpp"
 
@@ -31,44 +33,6 @@ constexpr int MotionSegmentsOffset(int history) { return (5 * history + 2 + 7) &
 //   padding to a multiple of 8
 //   segments          H x p0[dims] v[dims] (f64: metres and metres per tick)
 constexpr int MotionRecordBytes(int dims, int history) { return MotionSegmentsOffset(history) + history * 2 * dims * 8; }
-
-// The text or bytes values of one field, one per slot, in a per-field arena (13 § 7): a slot keeps its reservation and rewrites in
-// place while a new value fits; a larger value is appended, and the arena is compacted into its spare buffer once half of it is dead.
-// After warm-up a changed value allocates nothing.
-class ByteArena {
-public:
-    std::span<const std::uint8_t> At(std::uint32_t slot) const
-    {
-        return {data_.data() + offset_[slot], length_[slot]};
-    }
-
-    void Set(std::uint32_t slot, std::span<const std::uint8_t> value);
-
-    // Empties a slot's value, keeping its reservation for the next occupant.
-    void Clear(std::uint32_t slot) { length_[slot] = 0; }
-
-    // Gives a slot's reservation back: its bytes are dead, and a compaction no longer copies them.
-    void Release(std::uint32_t slot)
-    {
-        dead_ += reserved_[slot];
-        reserved_[slot] = 0;
-        length_[slot] = 0;
-    }
-    void Grow(std::size_t slots);
-
-    // Bytes held by the arena, live and dead: for tests and diagnostics.
-    std::size_t ArenaBytes() const { return data_.size(); }
-
-private:
-    void Compact();
-
-    Vec<std::uint8_t> data_;
-    Vec<std::uint8_t> spare_;
-    Vec<std::uint32_t> offset_;
-    Vec<std::uint32_t> length_;
-    Vec<std::uint32_t> reserved_;
-    std::size_t dead_ = 0;
-};
 
 // One numeric column: `capacity x components` values of the field's decoded type. The alternative index is the FieldKind.
 using NumericColumn = std::variant<Vec<std::uint8_t>, Vec<std::int8_t>, Vec<std::uint16_t>, Vec<std::int16_t>, Vec<std::uint32_t>,
@@ -137,11 +101,17 @@ public:
     std::string_view TextAt(int field, std::uint32_t slot) const;
     std::span<const std::uint8_t> BytesAt(int field, std::uint32_t slot) const;
 
+    // A collection field's value at a slot (W34), or null before its first list: an entity's list is overwritten whole into the columns
+    // it already has. Throws std::logic_error for a field that is not a collection.
+    const CollectionValue* CollectionAt(int field, std::uint32_t slot) const;
+
     // The decoder's write paths.
     void SetNumbers(int field, std::uint32_t slot, const double* values);
     void SetIntegers(int field, std::uint32_t slot, const std::uint64_t* values);
     void SetText(int field, std::uint32_t slot, std::string_view utf8);
     void SetBytes(int field, std::uint32_t slot, std::span<const std::uint8_t> data);
+    // The collection a slot holds for a field, bound to `plan` on its first list and kept.
+    CollectionValue& CollectionFor(int field, std::uint32_t slot, const FieldPlan& plan);
 
     // Starts a frame: releases the slots freed by the previous one and clears the change lists.
     void BeginFrame();
@@ -214,6 +184,8 @@ private:
     // Per field: its numeric column, or its arena; the other is unused.
     std::vector<NumericColumn> numeric_;
     std::vector<ByteArena> arenas_;
+    // Per field: one collection per slot, or empty for a field that is not one.
+    std::vector<Vec<CollectionValue>> collections_;
 
     std::uint32_t capacity_ = 0;
     std::uint32_t version_ = 0;

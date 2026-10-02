@@ -61,6 +61,52 @@ public class GoldenCatalogRefusalTests
         Refuse(cases, "u64-metric", "not a metric codec", Mutate(exact, c => AppMetric(c)["codec"] = JsonNode.Parse("""{"t":"u64"}""")));
         Refuse(cases, "shape-empty", "shape must be", Mutate(exact, c => CrateField(c, "box")["shape"] = ""));
 
+        // W34: a collection on an entity field, its element in wire order — "lit" packed first, then "name", then "who", which the cases mutate so the
+        // order stays canonical and each is refused for its own reason.
+        var withColl = Canonical(Base(extra: new CatalogField
+        {
+            Name = "bag", Group = "state",
+            Codec = new CatalogCodec
+            {
+                Kind = CodecKind.Coll, MaxCount = 4,
+                Element = new CatalogElement
+                {
+                    Fields =
+                    [
+                        new CatalogField { Name = "who", Codec = new CatalogCodec { Kind = CodecKind.EntityRef } },
+                        new CatalogField { Name = "name", Codec = new CatalogCodec { Kind = CodecKind.Str, MaxBytes = 8 } },
+                        new CatalogField { Name = "lit", Codec = new CatalogCodec { Kind = CodecKind.Bool } },
+                    ],
+                },
+            },
+        }));
+        Accept(cases, "coll-on-an-entity-field", withColl);
+        Refuse(cases, "coll-without-max-count", "needs maxCount", Mutate(withColl, c => CrateField(c, "bag")["codec"]!.AsObject().Remove("maxCount")));
+        Refuse(cases, "coll-max-count-over-65535", "needs maxCount", Mutate(withColl, c => CrateField(c, "bag")["codec"]!["maxCount"] = 65536));
+        Refuse(cases, "coll-empty-element", "at least one field",
+            Mutate(withColl, c => CrateField(c, "bag")["codec"]!["element"]!["fields"] = new JsonArray()));
+        Refuse(cases, "coll-with-count", "does not read", Mutate(withColl, c => CrateField(c, "bag")["codec"]!["count"] = 2));
+        Refuse(cases, "coll-in-an-element", "only valid on an archetype field", Mutate(withColl, c => CollElement(c, 2)["codec"] = JsonNode.Parse(
+            """{"t":"coll","maxCount":2,"element":{"fields":[{"name":"x","codec":{"t":"u8"}}]}}""")));
+        Refuse(cases, "coll-in-an-event", "only valid on an archetype field", Mutate(withColl, c => EventField(c)["codec"] = JsonNode.Parse(
+            """{"t":"coll","maxCount":2,"element":{"fields":[{"name":"x","codec":{"t":"u8"}}]}}""")));
+        Refuse(cases, "coll-element-with-a-group", "no group", Mutate(withColl, c => CollElement(c, 2)["group"] = "state"));
+        Refuse(cases, "coll-element-pos2", "cannot be", Mutate(withColl, c => CollElement(c, 2)["codec"] = JsonNode.Parse("""{"t":"pos2"}""")));
+        Refuse(cases, "coll-element-list", "only valid in event and command fields", Mutate(withColl, c => CollElement(c, 2)["codec"] = JsonNode.Parse(
+            """{"t":"list","of":{"t":"u8"},"maxCount":2}""")));
+        Refuse(cases, "coll-element-bytes", "cannot be", Mutate(withColl, c => CollElement(c, 2)["codec"] = JsonNode.Parse("""{"t":"bytes","n":4}""")));
+        Refuse(cases, "coll-element-blob", "cannot be", Mutate(withColl, c => CollElement(c, 2)["codec"] = JsonNode.Parse("""{"t":"blob","maxBytes":8}""")));
+        Refuse(cases, "coll-element-on-enter", "no onEnter", Mutate(withColl, c => CollElement(c, 2)["onEnter"] = true));
+        Refuse(cases, "coll-element-with-smoothing", "no smoothing", Mutate(withColl, c => CollElement(c, 2)["smoothing"] = "linear"));
+        Refuse(cases, "coll-element-declared-twice", "declared twice", Mutate(withColl, c => CollElement(c, 1)["name"] = "who"));
+        Refuse(cases, "coll-element-out-of-order", "not canonical", Mutate(withColl, c =>
+        {
+            var fields = CrateField(c, "bag")["codec"]!["element"]!["fields"]!.AsArray();
+            var who = fields[2]!.DeepClone();
+            fields[2] = fields[1]!.DeepClone();
+            fields[1] = who;
+        }));
+
         const string parse = "does not parse";
         const string canonical = "not canonical";
         Refuse(cases, "not-an-object", parse, "[]");
@@ -176,6 +222,9 @@ public class GoldenCatalogRefusalTests
 
         throw new InvalidOperationException($"Crate has no field '{name}'");
     }
+
+    // Crate's "bag" collection's element field at a wire-order index.
+    private static JsonNode CollElement(JsonNode catalog, int index) => CrateField(catalog, "bag")["codec"]!["element"]!["fields"]![index]!;
 
     private static JsonNode AppMetric(JsonNode catalog)
     {

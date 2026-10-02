@@ -205,4 +205,10 @@ internal sealed class RecordingSink : ITickSink, ICommandSink
 
     public void List(FieldPlan field, int count, scoped ReadOnlySpan<double> components) =>
         Log.Add(new JsonObject { ["call"] = "list", ["field"] = field.Name, ["count"] = count, ["values"] = Golden.Bits(components) });
+
+    public void Collection(FieldPlan field, int total, int sent) =>
+        Log.Add(new JsonObject { ["call"] = "collection", ["field"] = field.Name, ["total"] = total, ["sent"] = sent });
+
+    public void CollectionElement(FieldPlan field, int index) =>
+        Log.Add(new JsonObject { ["call"] = "collectionElement", ["field"] = field.Name, ["index"] = index });
 }

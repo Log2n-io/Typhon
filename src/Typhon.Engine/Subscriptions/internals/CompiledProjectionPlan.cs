@@ -56,6 +56,45 @@ internal enum ProjectionSourceType : byte
 
     /// <summary>An entity reference: an <see cref="EntityId"/> or an <c>EntityLink&lt;T&gt;</c>, eight bytes resolved to a netId (13 § 5).</summary>
     Reference,
+
+    /// <summary>A <c>ComponentCollection&lt;T&gt;</c>: a buffer id, its elements read from the collection's buffer segment (13 § 6.5).</summary>
+    Collection,
+}
+
+/// <summary>
+/// A collection field's element (W34, 13 § 6.5), resolved: the element's fields at their offsets in <c>T</c>, in wire order, and the bounds its section
+/// is sized from.
+/// </summary>
+/// <remarks>
+/// An element field is a <see cref="CompiledField"/> whose "column" is the element buffer: <see cref="CompiledField.ComponentSize"/> is the element's size,
+/// <see cref="CompiledField.FieldOffsetInComponent"/> its offset in <c>T</c>, and the cluster offset 0 — so the column walk reads a run of elements exactly
+/// as it reads a cluster's slots.
+/// </remarks>
+internal sealed class CompiledCollection
+{
+    /// <summary>The element type <c>T</c>.</summary>
+    public Type ElementType { get; init; }
+
+    /// <summary>Bytes of one element in the buffer: <c>sizeof(T)</c>.</summary>
+    public int ElementSize { get; init; }
+
+    /// <summary>The most elements sent.</summary>
+    public int MaxCount { get; init; }
+
+    /// <summary>The element's fields in wire order — packed first, then by ordinal name — with a count field's sub-fields consecutive.</summary>
+    public CompiledField[] Fields { get; init; }
+
+    /// <summary>The element as one section: its pack, then its byte-aligned fields.</summary>
+    public CompiledSection Section { get; init; }
+
+    /// <summary>Whether an element field is a reference: the collection's netIds are counted in the reverse index per occurrence (13 § 5).</summary>
+    public bool HasReferences { get; init; }
+
+    /// <summary>The collection's index among the archetype's (<see cref="CompiledProjectionPlan.Collections"/>), which names its buffer segment.</summary>
+    public int Index { get; internal set; }
+
+    /// <summary>The field's row in the code scratch and the clamp counters: a truncation and an element's clamp count there.</summary>
+    public int Row { get; internal set; }
 }
 
 /// <summary>
@@ -198,6 +237,9 @@ internal readonly struct CompiledField
 
     /// <summary>For an <c>EntityLink&lt;T&gt;</c> field, <c>T</c>; <see langword="null"/> for an untyped <see cref="EntityId"/> and any other field.</summary>
     public Type ReferenceTarget { get; init; }
+
+    /// <summary>For a collection field (<see cref="ColumnPath.Collection"/>), its element; <see langword="null"/> otherwise.</summary>
+    public CompiledCollection Collection { get; init; }
 
     /// <inheritdoc/>
     public override string ToString() => $"{Name} @ +{ComponentOffsetInCluster}/{ComponentSize}+{FieldOffsetInComponent} as {Codec?.Type}";
@@ -447,6 +489,12 @@ internal sealed class CompiledProjectionPlan
 
     /// <summary>Whether any section of the archetype is wide, so its replication state holds a <see cref="WideBodyArena"/>.</summary>
     public bool HasWideSections { get; init; }
+
+    /// <summary>The archetype's collections (W34), public fields' then owner fields', each knowing its <see cref="CompiledCollection.Index"/>.</summary>
+    public CompiledCollection[] Collections { get; init; } = [];
+
+    /// <summary>Whether the projection resolves references: a reference field, or a collection whose element holds one (13 § 5).</summary>
+    public bool ResolvesReferences { get; init; }
 
     /// <summary>
     /// How many reference fields the archetype projects, public and owner: each keeps the netId it last resolved to in the cold entry, which is what the

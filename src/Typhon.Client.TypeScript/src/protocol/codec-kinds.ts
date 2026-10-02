@@ -41,6 +41,8 @@ export const CodecKind = {
   F64: 32,
   Varu64: 33,
   Vari64: 34,
+  /** W34: a collection of records on an archetype field — `varu total | varu sent | element^sent`. */
+  Coll: 35,
 } as const;
 
 export type CodecKind = (typeof CodecKind)[keyof typeof CodecKind];
@@ -82,6 +84,7 @@ export const CODEC_TOKENS: readonly string[] = [
   'f64',
   'varu64',
   'vari64',
+  'coll',
 ];
 
 const kindByToken = new Map<string, CodecKind>(CODEC_TOKENS.map((token, kind) => [token, kind as CodecKind]));
