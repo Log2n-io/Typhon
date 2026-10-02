@@ -18,6 +18,10 @@
 using namespace typhon::client;
 using namespace typhon::test;
 
+// The probe's allocation escapes through a volatile store: a new/delete pair whose pointer goes nowhere may be elided (C++14), and GCC does
+// elide it once the replaced operator new lives in another translation unit, which left the counter's own check reading zero.
+static int* volatile g_probe;
+
 TEST(Allocation_TheCounterSeesWhatItMustSee)
 {
     // A measurement that cannot fail is not one: an allocation through each door has to register.
@@ -25,8 +29,8 @@ TEST(Allocation_TheCounterSeesWhatItMustSee)
     const auto [news, hookAllocs] = CountAllocations(
         []
         {
-            auto* p = new int(3);
-            delete p;
+            g_probe = new int(3);
+            delete g_probe;
             Vec<int> v(10);
         });
     // At least: a Debug standard library adds its own bookkeeping allocations (MSVC's iterator proxies), never fewer.
