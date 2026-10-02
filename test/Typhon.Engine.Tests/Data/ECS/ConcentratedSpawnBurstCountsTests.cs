@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.DependencyInjection;
@@ -337,5 +338,87 @@ class ConcentratedSpawnBurstCountsTests : TestBase<ConcentratedSpawnBurstCountsT
             Assert.That(advanced.MapBuckets, Is.GreaterThanOrEqualTo(plain.MapBuckets),
                 "and the map must end at least as wide — the growth happened, it just happened earlier");
         });
+    }
+    /// <summary>
+    /// How long a 3 000-spawn concentrated burst actually takes to commit and fence, which is the number #1102's partitioning decision turns on.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b><c>[Explicit]</c>, so the gate never runs it</b> — a wall-clock figure would be a flaky gate job. Run with
+    /// <c>dotnet test -c Release --filter "FullyQualifiedName~ThePriceOfABurst"</c>.
+    /// </para>
+    /// <para>
+    /// <b>Measured through the real spawn path, which took three attempts.</b> A harness calling <c>tree.Add</c> directly was tried first and measured
+    /// nothing useful: index writes outside a transaction leave pages dirty that nothing commits, the page cache hit its 1 024-dirty-page ceiling, and the
+    /// run spent its time in backpressure waits. Holding one <c>EpochGuard</c> across the pre-load made it worse by stopping eviction outright. The
+    /// supported path commits, so the checkpointer drains and the figure is of the work rather than of the stall.
+    /// </para>
+    /// <para>
+    /// <b>What it includes, which is the point rather than a caveat.</b> Everything a spawn burst pays at the fence: the cluster slot claim, the EntityMap
+    /// insert, every indexed field's B+Tree insert and the spatial index. #1102 has to fit all of it in a tick, so the total is the budget and the
+    /// per-structure split only matters once the total is known to be a problem.
+    /// </para>
+    /// <para>
+    /// <b>The ordering pair is a validity control.</b> The shuffled arm does 7.8x the index's structural work (counted, not timed, in this fixture's other
+    /// cases). If the two arms time the same, the index is not where the time goes — which would itself answer #1102's question, in the other direction.
+    /// </para>
+    /// </remarks>
+    [TestCase(3000, true)]
+    [TestCase(3000, false)]
+    [Explicit("wall-clock measurement; run on demand, never in the gate")]
+    public void ThePriceOfABurst(int batch, bool ascending)
+    {
+        // ONE engine per case, because the fixture's provider hands out one per test and asking it twice reopens the same database file — which NREs in
+        // LoadPersistedArchetypes. Repeats come from running the command three times, which is this project's documented practice for a perf claim.
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<BurstMobData>();
+        dbe.InitializeArchetypes();
+
+        var keys = new int[batch];
+        for (var i = 0; i < batch; i++)
+        {
+            keys[i] = i;
+        }
+
+        if (!ascending)
+        {
+            var rng = new Random(1102);
+            for (var i = batch - 1; i > 0; i--)
+            {
+                var j = rng.Next(i + 1);
+                (keys[i], keys[j]) = (keys[j], keys[i]);
+            }
+        }
+
+        var sw = Stopwatch.StartNew();
+        using (var tx = dbe.CreateQuickTransaction())
+        {
+            for (var i = 0; i < batch; i++)
+            {
+                // CellId from the LOOP index, not from the key, so both arms spawn into the identical cell sequence and the only thing that varies is
+                // the index key's order. The first version used keys[i] % CellCount and therefore varied cluster placement too — which is most of a
+                // spawn's cost — so its 2.7x was measuring two changes at once.
+                var d = new BurstMobData(i % CellCount, keys[i], i);
+                tx.Spawn<BurstMob>(BurstMob.Data.Set(in d));
+            }
+
+            tx.Commit();
+        }
+
+        var commitMs = sw.Elapsed.TotalMilliseconds;
+        dbe.WriteTickFence(0);
+        sw.Stop();
+
+        var totalMs = sw.Elapsed.TotalMilliseconds;
+        TestContext.Out.WriteLine($"RESULT {batch} spawns, {(ascending ? "sorted" : "shuffled")}: commit {commitMs:F2} ms, "
+            + $"+fence {totalMs - commitMs:F2} ms, total {totalMs:F2} ms");
+        TestContext.Out.WriteLine($"  per spawn {totalMs * 1000 / batch:F2} us; {totalMs / 20 * 100:F1} % of a 20 ms tick at 50 Hz");
+
+        var meta = ArchetypeRegistry.GetMetadata<BurstMob>();
+        var cluster = dbe._archetypeStates[meta.ArchetypeId].ClusterState;
+        var keyTree = (BTree<int, PersistentStore>)cluster.IndexSlots[0].Fields[1].Index;
+        TestContext.Out.WriteLine($"  tree: height={keyTree.Height} deferred={keyTree.DeferredNodeCount} splits={keyTree.SplitCount} "
+            + $"spillL={keyTree.SpillLeftCount} spillR={keyTree.SpillRightCount} moved={keyTree.SpillEntriesMoved} "
+            + $"pessimisticRestarts={keyTree.PessimisticRestarts} moveRight={keyTree.MoveRightCount}");
     }
 }
