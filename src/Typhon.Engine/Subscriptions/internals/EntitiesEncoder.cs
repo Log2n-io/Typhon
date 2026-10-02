@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using Typhon.Protocol;
@@ -58,7 +59,44 @@ internal sealed unsafe class ArchetypeEncodePlan
     public int WireIndex { get; init; }
 
     /// <summary>The block layout the records are copied out of.</summary>
-    public ReplicationBlockLayout Layout { get; init; }
+    /// <remarks>
+    /// The offsets a record's copy needs are kept beside it as plain fields: the layout is a twenty-field struct, and reading one of its properties through
+    /// this one copied all of it — enough that <see cref="Hot"/> was not inlined, and every record of every frame paid a call and the copy.
+    /// </remarks>
+    public ReplicationBlockLayout Layout
+    {
+        get => _layout;
+        init
+        {
+            _layout = value;
+            _hotOffset = value.HotOffset;
+            _hotStride = value.HotStride;
+            _coldOffset = value.ColdOffset;
+            _coldStride = value.ColdStride;
+            _ownerOffset = value.OwnerOffset;
+            _ownerStride = value.OwnerEntrySize;
+            PackedStateOffset = value.PackedStateOffsetInHotEntry;
+            SegmentOffset = value.SegmentOffsetInHotEntry;
+            SegmentBytes = value.SegmentBytes;
+        }
+    }
+
+    private readonly ReplicationBlockLayout _layout;
+    private readonly int _hotOffset;
+    private readonly int _hotStride;
+    private readonly int _coldOffset;
+    private readonly int _coldStride;
+    private readonly int _ownerOffset;
+    private readonly int _ownerStride;
+
+    /// <summary>The packed state's offset in a hot entry: <see cref="ReplicationBlockLayout.PackedStateOffsetInHotEntry"/>.</summary>
+    public int PackedStateOffset { get; private init; }
+
+    /// <summary>The motion segment's offset in a hot entry: <see cref="ReplicationBlockLayout.SegmentOffsetInHotEntry"/>.</summary>
+    public int SegmentOffset { get; private init; }
+
+    /// <summary>The motion segment's length: <see cref="ReplicationBlockLayout.SegmentBytes"/>.</summary>
+    public int SegmentBytes { get; private init; }
 
     /// <summary>Whether the archetype declares a position at all.</summary>
     public bool HasPosition { get; init; }
@@ -160,26 +198,29 @@ internal sealed unsafe class ArchetypeEncodePlan
 
         var all = (byte)((1 << Groups.Length) - 1);
         return HasBody(OnEnter, Cold(block, slot) + Layout.EnterBodyOffsetInColdEntry)
-               && PresentGroups(Groups, Hot(block, slot) + Layout.PackedStateOffsetInHotEntry, all) == all;
+               && PresentGroups(Groups, Hot(block, slot) + PackedStateOffset, all) == all;
     }
 
     /// <summary>The address of one slot's hot entry inside <paramref name="block"/>.</summary>
     /// <param name="block">The replication block.</param>
     /// <param name="slot">The slot.</param>
     /// <returns>The entry's first byte.</returns>
-    public byte* Hot(nint block, int slot) => (byte*)block + Layout.HotOffset + (slot * Layout.HotStride);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public byte* Hot(nint block, int slot) => (byte*)block + _hotOffset + (slot * _hotStride);
 
     /// <summary>The address of one slot's cold entry inside <paramref name="block"/>.</summary>
     /// <param name="block">The replication block.</param>
     /// <param name="slot">The slot.</param>
     /// <returns>The entry's first byte.</returns>
-    public byte* Cold(nint block, int slot) => (byte*)block + Layout.ColdOffset + (slot * Layout.ColdStride);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public byte* Cold(nint block, int slot) => (byte*)block + _coldOffset + (slot * _coldStride);
 
     /// <summary>The address of one slot's owner entry inside <paramref name="block"/>; meaningful only when the archetype declares owner fields.</summary>
     /// <param name="block">The replication block.</param>
     /// <param name="slot">The slot.</param>
     /// <returns>The entry's first byte.</returns>
-    public byte* Owner(nint block, int slot) => (byte*)block + Layout.OwnerOffset + (slot * Layout.OwnerEntrySize);
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public byte* Owner(nint block, int slot) => (byte*)block + _ownerOffset + (slot * _ownerStride);
 
     /// <summary>
     /// The real length of a stored section body, which is at most <see cref="SectionWalk.MaxBytes"/> and is exactly it whenever no field is variable-length.
@@ -187,13 +228,11 @@ internal sealed unsafe class ArchetypeEncodePlan
     /// <param name="walk">The section.</param>
     /// <param name="body">The stored body, zero-padded to <see cref="SectionWalk.MaxBytes"/>.</param>
     /// <returns>Bytes to copy onto the wire.</returns>
-    public static int BodyLength(in SectionWalk walk, byte* body)
-    {
-        if (walk.FixedBytes >= 0)
-        {
-            return walk.FixedBytes;
-        }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int BodyLength(in SectionWalk walk, byte* body) => walk.FixedBytes >= 0 ? walk.FixedBytes : ScanBodyLength(in walk, body);
 
+    private static int ScanBodyLength(in SectionWalk walk, byte* body)
+    {
         var at = walk.PackBytes;
         var widths = walk.FieldBytes;
         for (var i = 0; i < widths.Length; i++)
@@ -403,11 +442,11 @@ internal static unsafe class EntitiesEncoder
     /// to produce the same bytes for the same slot, or a client would see one entity described two ways depending on which path its session happened to
     /// take. Sharing the statement that does the writing makes that true by construction instead of by a comparison test that can only sample.
     /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteSegmentRecord(ref WireWriter w, ArchetypeEncodePlan plan, ref long prev, uint netId, nint block, int slot)
     {
-        var layout = plan.Layout;
         WriteGap(ref w, ref prev, netId);
-        w.WriteBytes(new ReadOnlySpan<byte>(plan.Hot(block, slot) + layout.SegmentOffsetInHotEntry, layout.SegmentBytes));
+        w.WriteBytes(new ReadOnlySpan<byte>(plan.Hot(block, slot) + plan.SegmentOffset, plan.SegmentBytes));
     }
 
     /// <summary>
@@ -420,9 +459,10 @@ internal static unsafe class EntitiesEncoder
     /// <param name="block">The replication block.</param>
     /// <param name="slot">The slot.</param>
     /// <param name="mask">The groups this record carries.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void WriteStateRecord(ref WireWriter w, ArchetypeEncodePlan plan, ref long prev, uint netId, nint block, int slot, byte mask)
     {
-        var state = plan.Hot(block, slot) + plan.Layout.PackedStateOffsetInHotEntry;
+        var state = plan.Hot(block, slot) + plan.PackedStateOffset;
         WriteGap(ref w, ref prev, netId);
         w.WriteU8(mask);
         for (var g = 0; g < plan.Groups.Length; g++)
@@ -435,7 +475,7 @@ internal static unsafe class EntitiesEncoder
     }
 
     private static byte PresentMask(ArchetypeEncodePlan plan, in FrameRecord record) =>
-        plan.PresentGroups(plan.Groups, plan.Hot(record.Block, record.Slot) + plan.Layout.PackedStateOffsetInHotEntry, record.GroupMask);
+        plan.PresentGroups(plan.Groups, plan.Hot(record.Block, record.Slot) + plan.PackedStateOffset, record.GroupMask);
 
     /// <summary>
     /// Writes a sub-list made of one run this session owns: the run count, then that run's record count.
@@ -517,6 +557,7 @@ internal static unsafe class EntitiesEncoder
     /// <summary>The largest <c>ACKS</c> block <paramref name="count"/> records need.</summary>
     public static int MaxAcksBytes(int count) => 16 + (count * 3);
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteSection(ref WireWriter w, in ArchetypeEncodePlan.SectionWalk walk, byte* region, WideBodyArena arena)
     {
         if (walk.MaxBytes == 0)
@@ -538,17 +579,24 @@ internal static unsafe class EntitiesEncoder
         w.WriteBytes(arena.Read(handle, length));
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void WriteGap(ref WireWriter w, ref long prev, uint netId)
     {
         // The frame stage sorts every sub-list and names each entity once per sub-list, so an out-of-order or repeated id here is a defect in this engine
         // rather than bad input — and one that would silently shift every following record, since the gap is relative.
         if (netId <= prev)
         {
-            throw new InvalidOperationException(
-                $"ENTITIES records must be ascending and distinct by netId: {netId} follows {prev}. The sub-list reached the encoder unsorted.");
+            ThrowUnsorted(netId, prev);
         }
 
         w.WriteVaru((uint)(netId - prev - 1));
         prev = netId;
     }
+
+    // Out of line, so the message's formatting does not keep WriteGap — called once per record — from being inlined.
+    [DoesNotReturn]
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowUnsorted(uint netId, long prev) =>
+        throw new InvalidOperationException(
+            $"ENTITIES records must be ascending and distinct by netId: {netId} follows {prev}. The sub-list reached the encoder unsorted.");
 }
