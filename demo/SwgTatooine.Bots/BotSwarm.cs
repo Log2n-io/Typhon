@@ -623,6 +623,10 @@ public sealed class BotSwarm : IAsyncDisposable
         {
         }
 
+        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+        {
+        }
+
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
         {
         }

@@ -1,4 +1,6 @@
 using System;
+using System.Runtime.CompilerServices;
+using System.Threading;
 using Typhon.Protocol;
 
 namespace Typhon.Engine.Internals;
@@ -42,8 +44,14 @@ internal sealed unsafe class ArchetypeEncodePlan
         /// <summary>Where the section's body begins inside the stored region it shares with its siblings.</summary>
         public int Offset { get; init; }
 
-        /// <summary>The section's widest body, which is what the stored region reserves for it.</summary>
+        /// <summary>The section's widest body on the wire.</summary>
         public int MaxBytes { get; init; }
+
+        /// <summary>
+        /// Whether the section is stored out of line (13 § 6): its region holds a <c>u32</c> arena handle and a <c>u32</c> length rather than the body, and
+        /// the body is copied from <see cref="ArchetypeEncodePlan.Arena"/> — its length is stored, so nothing is walked.
+        /// </summary>
+        public bool Wide { get; init; }
     }
 
     /// <summary>The archetype's canonical wire index — what an <c>ENTITIES</c> block's first <c>varu</c> carries.</summary>
@@ -93,6 +101,67 @@ internal sealed unsafe class ArchetypeEncodePlan
 
     /// <summary>The largest number of bytes one state record can occupy, gap and mask included.</summary>
     public int MaxStateBytes { get; init; }
+
+    /// <summary>
+    /// The archetype's wide section bodies (13 § 6); <see langword="null"/> when no section is wide. Bound once the replication state exists.
+    /// </summary>
+    public WideBodyArena Arena { get; set; }
+
+    private long _wideMisses;
+
+    /// <summary>
+    /// Records, or a record's groups, left out of a frame because a wide body they name was missing. Zero in a healthy run: the projection stores a body
+    /// before any record can name its entry. Non-zero is a defect made visible — the frame stage never throws over it.
+    /// </summary>
+    public long WideMisses => Volatile.Read(ref _wideMisses);
+
+    internal void NoteWideMiss() => Interlocked.Increment(ref _wideMisses);
+
+    /// <summary>Whether a section's stored body can be copied: always for an inline one; for a wide one, a live handle holding its stored length.</summary>
+    internal bool HasBody(in SectionWalk walk, byte* region)
+    {
+        if (!walk.Wide || walk.MaxBytes == 0)
+        {
+            return true;
+        }
+
+        var reference = region + walk.Offset;
+        var handle = Unsafe.ReadUnaligned<uint>(reference);
+        var length = Unsafe.ReadUnaligned<uint>(reference + sizeof(uint));
+        return handle != 0 && Arena != null && length != 0 && length <= (uint)walk.MaxBytes && Arena.Read(handle, length).Length == (int)length;
+    }
+
+    /// <summary><paramref name="mask"/> without the groups whose wide body is missing; the mask itself when the archetype has no wide section.</summary>
+    internal byte PresentGroups(SectionWalk[] groups, byte* region, byte mask)
+    {
+        if (Arena == null)
+        {
+            return mask;
+        }
+
+        for (var g = 0; g < groups.Length; g++)
+        {
+            if ((mask & (1 << g)) != 0 && !HasBody(groups[g], region))
+            {
+                mask &= (byte)~(1 << g);
+            }
+        }
+
+        return mask;
+    }
+
+    /// <summary>Whether an enter record can be written whole: the onEnter body and every group's.</summary>
+    internal bool EnterComplete(nint block, int slot)
+    {
+        if (Arena == null)
+        {
+            return true;
+        }
+
+        var all = (byte)((1 << Groups.Length) - 1);
+        return HasBody(OnEnter, Cold(block, slot) + Layout.EnterBodyOffsetInColdEntry)
+               && PresentGroups(Groups, Hot(block, slot) + Layout.PackedStateOffsetInHotEntry, all) == all;
+    }
 
     /// <summary>The address of one slot's hot entry inside <paramref name="block"/>.</summary>
     /// <param name="block">The replication block.</param>
@@ -217,11 +286,30 @@ internal static unsafe class EntitiesEncoder
         var layout = plan.Layout;
 
         // ── enters ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        WriteRunHeader(ref w, enters.Length);
+        //
+        // A record whose wide body is missing is left out, counted, and never thrown over (the frame stage runs on the tick path): the run's count is
+        // the records actually written, so those are counted first. Free for an archetype with no wide section.
+        var enterCount = enters.Length;
+        if (plan.Arena != null)
+        {
+            enterCount = 0;
+            for (var i = 0; i < enters.Length; i++)
+            {
+                enterCount += plan.EnterComplete(enters[i].Block, enters[i].Slot) ? 1 : 0;
+            }
+        }
+
+        WriteRunHeader(ref w, enterCount);
         var prev = -1L;
         for (var i = 0; i < enters.Length; i++)
         {
             ref readonly var record = ref enters[i];
+            if (plan.Arena != null && !plan.EnterComplete(record.Block, record.Slot))
+            {
+                plan.NoteWideMiss();
+                continue;
+            }
+
             WriteGap(ref w, ref prev, record.NetId);
             var hot = plan.Hot(record.Block, record.Slot);
             var cold = plan.Cold(record.Block, record.Slot);
@@ -240,13 +328,13 @@ internal static unsafe class EntitiesEncoder
                 }
             }
 
-            WriteSection(ref w, plan.OnEnter, cold + layout.EnterBodyOffsetInColdEntry);
+            WriteSection(ref w, plan.OnEnter, cold + layout.EnterBodyOffsetInColdEntry, plan.Arena);
 
             // Every group, in canonical order, with no mask: an enter is the whole entity (W16).
             var state = hot + layout.PackedStateOffsetInHotEntry;
             for (var g = 0; g < plan.Groups.Length; g++)
             {
-                WriteSection(ref w, plan.Groups[g], state);
+                WriteSection(ref w, plan.Groups[g], state, plan.Arena);
             }
         }
 
@@ -260,12 +348,34 @@ internal static unsafe class EntitiesEncoder
         }
 
         // ── state records ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-        WriteRunHeader(ref w, states.Length);
+        //
+        // A group whose wide body is missing is dropped from its record, and a record left with no group is dropped whole — counted, as for enters.
+        var stateCount = states.Length;
+        if (plan.Arena != null)
+        {
+            stateCount = 0;
+            for (var i = 0; i < states.Length; i++)
+            {
+                stateCount += PresentMask(plan, states[i]) != 0 ? 1 : 0;
+            }
+        }
+
+        WriteRunHeader(ref w, stateCount);
         prev = -1;
         for (var i = 0; i < states.Length; i++)
         {
             ref readonly var record = ref states[i];
-            WriteStateRecord(ref w, plan, ref prev, record.NetId, record.Block, record.Slot, record.GroupMask);
+            var mask = PresentMask(plan, record);
+            if (mask != record.GroupMask)
+            {
+                plan.NoteWideMiss();
+                if (mask == 0)
+                {
+                    continue;
+                }
+            }
+
+            WriteStateRecord(ref w, plan, ref prev, record.NetId, record.Block, record.Slot, mask);
         }
 
         // ── leaves, last ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -319,10 +429,13 @@ internal static unsafe class EntitiesEncoder
         {
             if ((mask & (1 << g)) != 0)
             {
-                WriteSection(ref w, plan.Groups[g], state);
+                WriteSection(ref w, plan.Groups[g], state, plan.Arena);
             }
         }
     }
+
+    private static byte PresentMask(ArchetypeEncodePlan plan, in FrameRecord record) =>
+        plan.PresentGroups(plan.Groups, plan.Hot(record.Block, record.Slot) + plan.Layout.PackedStateOffsetInHotEntry, record.GroupMask);
 
     /// <summary>
     /// Writes a sub-list made of one run this session owns: the run count, then that run's record count.
@@ -358,6 +471,17 @@ internal static unsafe class EntitiesEncoder
     /// <param name="owner">The slot's owner entry.</param>
     public static void WriteSelf(ref WireWriter w, ArchetypeEncodePlan plan, uint netId, ushort lastSeq, byte mask, byte* owner)
     {
+        // An owner group whose wide body is missing is left out of the mask, counted — never thrown over.
+        if (owner != null)
+        {
+            var present = plan.PresentGroups(plan.OwnerGroups, owner, mask);
+            if (present != mask)
+            {
+                plan.NoteWideMiss();
+                mask = present;
+            }
+        }
+
         var mark = TickWriter.BeginBlock(ref w, BlockTypes.Self);
         w.WriteVaru((uint)plan.WireIndex);
         w.WriteVaru(netId);
@@ -367,7 +491,7 @@ internal static unsafe class EntitiesEncoder
         {
             if ((mask & (1 << g)) != 0)
             {
-                WriteSection(ref w, plan.OwnerGroups[g], owner);
+                WriteSection(ref w, plan.OwnerGroups[g], owner, plan.Arena);
             }
         }
 
@@ -393,7 +517,7 @@ internal static unsafe class EntitiesEncoder
     /// <summary>The largest <c>ACKS</c> block <paramref name="count"/> records need.</summary>
     public static int MaxAcksBytes(int count) => 16 + (count * 3);
 
-    private static void WriteSection(ref WireWriter w, in ArchetypeEncodePlan.SectionWalk walk, byte* region)
+    private static void WriteSection(ref WireWriter w, in ArchetypeEncodePlan.SectionWalk walk, byte* region, WideBodyArena arena)
     {
         if (walk.MaxBytes == 0)
         {
@@ -401,7 +525,17 @@ internal static unsafe class EntitiesEncoder
         }
 
         var body = region + walk.Offset;
-        w.WriteBytes(new ReadOnlySpan<byte>(body, ArchetypeEncodePlan.BodyLength(in walk, body)));
+        if (!walk.Wide)
+        {
+            w.WriteBytes(new ReadOnlySpan<byte>(body, ArchetypeEncodePlan.BodyLength(in walk, body)));
+            return;
+        }
+
+        // The callers checked the body is there (ArchetypeEncodePlan.HasBody) before writing anything of its record, and the arena does not change
+        // during the frame stage — so this reads exactly what was checked.
+        var handle = Unsafe.ReadUnaligned<uint>(body);
+        var length = Unsafe.ReadUnaligned<uint>(body + sizeof(uint));
+        w.WriteBytes(arena.Read(handle, length));
     }
 
     private static void WriteGap(ref WireWriter w, ref long prev, uint netId)

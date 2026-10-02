@@ -58,6 +58,11 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     private ushort[] _generations;
     private uint[] _nextFree;
 
+    // One bit per identity out on a lease and not yet known spent (13 § 5). A lease is filled and settled at the track's serial blocks step, so between two
+    // steps the bit is constant: an identity found in an entry with its bit set was taken during this tick's projection, and a reference to it resolves to
+    // 0 until the next tick — the same answer whichever worker got there first, which is what keeps a deterministic projection deterministic.
+    private ulong[] _leased;
+
     private uint _freeHead = FreeListEnd;
 
     // Quarantine, as a ring of per-tick buckets (D1). A release joins the current bucket; DrainQuarantine rotates the ring and splices the bucket that is now
@@ -101,6 +106,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
         // +1 so index 0 exists and stays reserved, keeping netId usable directly as an array index.
         _generations = new ushort[initialCapacity + 1];
         _nextFree = new uint[initialCapacity + 1];
+        _leased = new ulong[(initialCapacity + 1 + 63) >> 6];
         _bucketHeads = new uint[quarantineTicks];
         _bucketTails = new uint[quarantineTicks];
         for (var i = 0; i < quarantineTicks; i++)
@@ -156,7 +162,7 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
     /// compaction pass.
     /// </para>
     /// </remarks>
-    public long EstimatedBytes => ((long)_generations.Length * 2L) + ((long)_nextFree.Length * 4L) + 64L;
+    public long EstimatedBytes => ((long)_generations.Length * 2L) + ((long)_nextFree.Length * 4L) + (_leased.Length * 8L) + 64L;
 
     /// <inheritdoc />
     public int EstimatedMemorySize
@@ -240,6 +246,9 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
             {
                 _generations[netId]++;
             }
+
+            // A lease handing back an identity it never spent.
+            _leased[netId >> 6] &= ~(1UL << (int)(netId & 63));
 
             // Appended to the CURRENT bucket's tail, not pushed onto the free list. FIFO within a bucket is incidental — every entry in one becomes
             // reissuable at the same moment — but a tail pointer is what lets the drain splice in O(1).
@@ -341,6 +350,23 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
         return _generations[netId];
     }
 
+    /// <summary>Marks <paramref name="netId"/> as out on a lease: it may be taken by a worker during the next projection. Serial, at the blocks step.</summary>
+    public void MarkLeased(uint netId) => _leased[netId >> 6] |= 1UL << (int)(netId & 63);
+
+    /// <summary>Marks a leased <paramref name="netId"/> as spent — taken by an entry in a projection already finished. Serial, at the blocks step.</summary>
+    public void MarkSpent(uint netId) => _leased[netId >> 6] &= ~(1UL << (int)(netId & 63));
+
+    /// <summary>
+    /// Whether <paramref name="netId"/> is out on a lease: an entry holding it took it during the projection running now, so a reference to it is resolved
+    /// next tick, not this one (13 § 5). Read from the projection's workers; written only at the serial blocks step.
+    /// </summary>
+    public bool IsLeased(uint netId)
+    {
+        var words = _leased;
+        var word = netId >> 6;
+        return word < (uint)words.Length && (words[word] & (1UL << (int)(netId & 63))) != 0;
+    }
+
     /// <summary>
     /// Doubles the addressable capacity. Called only while the replicated population is still growing.
     /// </summary>
@@ -358,8 +384,12 @@ internal sealed class NetIdAllocator : ResourceNode, IMemoryResource
         var nextFree = new uint[newLength];
         Array.Copy(_nextFree, nextFree, _nextFree.Length);
 
+        var leased = new ulong[(newLength + 63) >> 6];
+        Array.Copy(_leased, leased, _leased.Length);
+
         _generations = generations;
         _nextFree = nextFree;
+        _leased = leased;
     }
 
     /// <inheritdoc />

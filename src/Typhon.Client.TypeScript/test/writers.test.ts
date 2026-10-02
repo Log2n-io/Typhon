@@ -227,6 +227,7 @@ describe.skipIf(gc === undefined && (process.env.CI ?? '') === '')('decoders reu
     const discard: CommandSink = {
       command: () => undefined,
       number: () => undefined,
+      integer64: () => undefined,
       text: () => undefined,
       bytes: () => undefined,
       list: () => undefined,
@@ -290,6 +291,7 @@ describe('a released reader', () => {
       unknownBlock: noop,
       endTick: noop,
       number: noop,
+      integer64: noop,
       text: noop,
       bytes: noop,
       list: noop,

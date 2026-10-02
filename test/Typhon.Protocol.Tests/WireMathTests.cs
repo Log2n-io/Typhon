@@ -41,6 +41,60 @@ public class WireMathTests
     }
 
     /// <summary>
+    /// A position pass computes a frame's step once and encodes with <see cref="WireMath.EncodeQuantWithStep"/>: every code must be the one the
+    /// two-division form gives — a step recomputed per value, then divided by — on dyadic and non-dyadic ranges, at every width, at the edges and at random.
+    /// </summary>
+    [Test]
+    public void AStepComputedOnceGivesTheSameCodeAsOneComputedPerValue()
+    {
+        static uint PerValue(double v, double min, double max, int bits)
+        {
+            var step = (max - min) / WireMath.Pow2(bits);
+            var x = (v - min) / step;
+            if (!(x > 0))
+            {
+                return 0;
+            }
+
+            var top = WireMath.Pow2(bits) - 1;
+            var r = WireMath.RoundHalfAwayFromZero(x);
+            return (uint)(r > top ? top : r);
+        }
+
+        var random = new Random(1085);
+        var ranges = new[] { (-8192.0, 8192.0), (-1000.3, 2711.9), (0.0, 1.0), (-0.1, 0.7), (-3e5, 3e5), (17.25, 9001.5) };
+        var mismatches = 0;
+        foreach (var bits in new[] { 8, 16, 24, 32 })
+        {
+            foreach (var (min, max) in ranges)
+            {
+                var step = WireMath.QuantStep(min, max, bits);
+                var top = WireMath.Pow2(bits) - 1;
+                var edges = new[]
+                {
+                    min, max, min - step, max - (step / 2), min + (step / 2), double.NaN, double.NegativeInfinity, double.PositiveInfinity, -0.0,
+                };
+                foreach (var v in edges)
+                {
+                    mismatches += WireMath.EncodeQuantWithStep(v, min, step, top) == PerValue(v, min, max, bits) ? 0 : 1;
+                }
+
+                for (var i = 0; i < 20_000; i++)
+                {
+                    // Uniform over the range, a little past each end, and on exact half steps where the tie rule decides.
+                    var v = i % 4 == 0
+                        ? min + ((random.Next(0, 1 << Math.Min(bits, 30)) + 0.5) * step)
+                        : min - step + (random.NextDouble() * (max - min + (2 * step)));
+                    mismatches += WireMath.EncodeQuantWithStep(v, min, step, top) == PerValue(v, min, max, bits) ? 0 : 1;
+                    mismatches += WireMath.EncodeQuant(v, min, max, bits) == PerValue(v, min, max, bits) ? 0 : 1;
+                }
+            }
+        }
+
+        Assert.That(mismatches, Is.Zero);
+    }
+
+    /// <summary>
     /// AC-12's encoder property: a value inside a quantizer's range decodes within half a step of itself — ties aside, the error bound W1 moves out of
     /// the cross-language comparison (which is bit-exact) and into the encoder.
     /// </summary>

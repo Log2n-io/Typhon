@@ -135,6 +135,40 @@ describe('worldSchemaFromCatalog', () => {
   });
 });
 
+describe('FrameApplier on the exact wire (W32, W33)', () => {
+  it('stores 64-bit values exactly in bigint columns, counts per slot, and hands them to events and SELF', () => {
+    const exact = CatalogPlan.compile(parseCatalog(goldenBin('catalog-exact')));
+    const audits: { amount: bigint | undefined; corner: number[] }[] = [];
+    const applier = new FrameApplier(exact, {
+      onEvent: (event: EventRecord) => {
+        audits.push({ amount: event.integer64('amount'), corner: [0, 1, 2].map((i) => event.number('corner', i)) });
+      },
+    });
+    applier.apply(goldenBin('tick-exact'));
+
+    const vault = applier.world.archetypeStore(exact.archetypeByName('Vault')!.idx);
+    const at = (netId: number): number => slot(applier, netId);
+    const balance = vault.field64('balance');
+    const id = vault.field64('id');
+    expect(balance).toBeInstanceOf(BigUint64Array);
+    expect(id).toBeInstanceOf(BigInt64Array);
+    // The state records swapped the two entities' money groups: netId 1 now holds the second value set.
+    expect(balance[at(1)]).toBe(2n ** 64n - 1n);
+    expect(balance[at(2)]).toBe(2n ** 64n - 1n);
+    expect(vault.field64('delta')[at(1)]).toBe(-(2n ** 53n) - 1n);
+    expect(id[at(1)]).toBe(-(2n ** 63n));
+    expect(id[at(2)]).toBe(-1n);
+    // netId 2's state carried the shape group: the first value set's box, six f32 components per slot.
+    const box = vault.field('box');
+    expect(Array.from(box.subarray(6 * at(2), 6 * at(2) + 6))).toEqual([-1, -2, -3, 1, 2, 3.5]);
+
+    expect(audits).toEqual([{ amount: -(2n ** 53n) - 1n, corner: [1, Infinity, -2.5] }]);
+    expect(applier.selfState.integer64('pin')).toBe(0x8000_0000_0000_0001n);
+    expect(applier.selfState.number('scale', 1)).toBe(-Number.MIN_VALUE);
+    expect(applier.world.anomalies).toBe(0);
+  });
+});
+
 describe('FrameApplier', () => {
   it('keeps slots stable: a slot freed in a frame is reused only in a later one', () => {
     const applier = new FrameApplier(plan, { initialRealm: KITCHEN });

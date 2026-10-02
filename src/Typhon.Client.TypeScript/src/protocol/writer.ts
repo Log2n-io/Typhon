@@ -129,6 +129,40 @@ export class WireWriter {
     this.varu(((value << 1) ^ (value >> 31)) >>> 0);
   }
 
+  /** A little-endian `u64` / `i64` (W32) from its words: `lo`, then `hi`. */
+  u64Words(lo: number, hi: number): void {
+    this.u32(lo >>> 0);
+    this.u32(hi >>> 0);
+  }
+
+  /** A `varu64` (W32) from its words: minimal unsigned LEB128, 1–10 bytes. */
+  varu64Words(lo: number, hi: number): void {
+    let l = lo >>> 0;
+    let h = hi >>> 0;
+    this.ensure(10);
+    const b = this.buffer;
+    while (h !== 0 || l >= 0x80) {
+      b[this.pos++] = (l & 0x7f) | 0x80;
+      l = ((l >>> 7) | ((h & 0x7f) << 25)) >>> 0;
+      h >>>= 7;
+    }
+
+    b[this.pos++] = l;
+  }
+
+  /** A `vari64` (W32) from the two's-complement words of a signed value: zigzag64, then `varu64`. */
+  vari64Words(lo: number, hi: number): void {
+    // (v << 1) ^ (v >> 63), across the two words.
+    let zlo = (lo << 1) >>> 0;
+    let zhi = ((hi << 1) | (lo >>> 31)) >>> 0;
+    if ((hi & 0x80000000) !== 0) {
+      zlo = ~zlo >>> 0;
+      zhi = ~zhi >>> 0;
+    }
+
+    this.varu64Words(zlo, zhi);
+  }
+
   /**
    * An IEEE single, narrowed with ties to even; NaN as `0x7FC00000`. ECMA-262 lets `setFloat32` write any NaN pattern
    * (V8 keeps the sign of the NaN it was given), so the canonical bytes are written explicitly.

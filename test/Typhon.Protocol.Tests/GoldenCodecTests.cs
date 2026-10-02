@@ -49,6 +49,61 @@ public class GoldenCodecTests
             S(uint.MaxValue), S(uint.MaxValue - 65535));
     }
 
+    /// <summary>
+    /// W32: the 64-bit codecs at the edges a double cannot hold — 2⁵³ ± 1 and the extremes — and the varint at every 7-bit length edge up to ten bytes.
+    /// Values are bit patterns (16 hex digits, a signed one's two's complement), never doubles.
+    /// </summary>
+    [Test]
+    public void Integers64()
+    {
+        const ulong p53 = 1UL << 53;
+        Vector("codec-u64", "u64 (W32): 0, 1, 2⁵³ − 1, 2⁵³, 2⁵³ + 1 — the first integers a double cannot tell apart — 2⁶³ − 1, 2⁶³ and 2⁶⁴ − 1.",
+            new CatalogCodec { Kind = CodecKind.U64 }, U(0), U(1), U(p53 - 1), U(p53), U(p53 + 1), U(long.MaxValue), U(1UL << 63), U(ulong.MaxValue));
+        Vector("codec-i64", "i64 (W32): 0, ±1, ±(2⁵³ + 1), and both extremes.", new CatalogCodec { Kind = CodecKind.I64 },
+            I(0), I(-1), I(1), I((long)p53 + 1), I(-(long)p53 - 1), I(long.MaxValue), I(long.MinValue));
+
+        var edges = new List<FieldValue> { U(0) };
+        for (var k = 1; k <= 9; k++)
+        {
+            edges.Add(U((1UL << (7 * k)) - 1));
+            edges.Add(U(1UL << (7 * k)));
+        }
+
+        edges.Add(U(ulong.MaxValue));
+        Vector("codec-varu64", "varu64 (W32) at every length edge, 2⁷ᵏ − 1 and 2⁷ᵏ for k = 1..9, to the ten-byte 2⁶⁴ − 1.",
+            new CatalogCodec { Kind = CodecKind.Varu64 }, [.. edges]);
+        Vector("codec-varu64-lenient", "Decode-only varu64: over-long forms are accepted while they fit 64 bits in ten bytes — 0 in two bytes, 0 in ten, and "
+            + "2⁶³ from a tenth byte of 0x01.",
+            new CatalogCodec { Kind = CodecKind.Varu64 }, Raw(0x80, 0x00), Raw(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00),
+            Raw(0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01));
+        Vector("codec-vari64", "vari64 (W32): zigzag64 at small magnitudes, ±(2⁵³ + 1), and both extremes (ten bytes each).",
+            new CatalogCodec { Kind = CodecKind.Vari64 }, I(0), I(-1), I(1), I(-64), I(64), I((long)p53 + 1), I(-(long)p53 - 1), I(long.MinValue),
+            I(long.MaxValue));
+        Vector("codec-f64", "f64 (W32): ±0, ±∞, NaN written as 0x7FF8000000000000, the smallest subnormal, the largest finite, 0.1; decode-only, a negative "
+            + "NaN and a signalling NaN both decode as the canonical NaN.",
+            new CatalogCodec { Kind = CodecKind.F64 }, S(0), S(-0.0), S(Inf), S(-Inf), S(Nan), S(double.Epsilon), S(double.MaxValue), S(0.1),
+            Raw(0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF8, 0xFF), Raw(0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x7F));
+    }
+
+    /// <summary>
+    /// W33: a <c>count</c> field is that many values of its codec, back to back in its shape's component order — a point, a box, a sphere, and the widest
+    /// count, on a float, a double, a quantizer, a byte and a 64-bit varint.
+    /// </summary>
+    [Test]
+    public void Counts()
+    {
+        Vector("codec-f32-x3", "f32 × 3 — a point3 (W33): x y z, twelve bytes, each value narrowed as a lone f32 would be.",
+            new CatalogCodec { Kind = CodecKind.F32, Count = 3 }, V(1.5, -2.25, 0.1), V(Nan, Inf, -0.0));
+        Vector("codec-f64-x6", "f64 × 6 — an aabb3 (W33): minX minY minZ maxX maxY maxZ, 48 bytes.",
+            new CatalogCodec { Kind = CodecKind.F64, Count = 6 }, V(-1e300, -0.5, double.Epsilon, 1e300, 0.5, double.MaxValue));
+        Vector("codec-quant-x4", "quant × 4 over [−1000, 1000) at 16 bits — a bsphere3 (W33): cx cy cz r, every component over the codec's one range.",
+            new CatalogCodec { Kind = CodecKind.Quant, Min = [-1000], Max = [1000], Bits = 16, Count = 4 }, V(0, -1000, 999.99, 12.5), V(Nan, 2000, -2000, 0.25));
+        Vector("codec-u8-x16", "u8 × 16 — the widest count (W33): sixteen bytes in order.",
+            new CatalogCodec { Kind = CodecKind.U8, Count = 16 }, V(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 254, 255));
+        Vector("codec-varu64-x3", "varu64 × 3 (W33 over W32): three 64-bit varints back to back, each its own length.",
+            new CatalogCodec { Kind = CodecKind.Varu64, Count = 3 }, U(0, 1UL << 53, ulong.MaxValue));
+    }
+
     [Test]
     public void Floats()
     {
@@ -379,7 +434,11 @@ public class GoldenCodecTests
     private static JsonObject EncodeCase(ref WireWriter w, FieldPlan plan, uint frameTick, FieldValue input, RealmFrame frame = null)
     {
         var start = w.Position;
-        if (input.Numbers != null)
+        if (input.Integers != null)
+        {
+            FieldCodec.WriteInteger64(ref w, plan, input.Integers);
+        }
+        else if (input.Numbers != null)
         {
             FieldCodec.WriteNumber(ref w, plan, input.Numbers, frame);
         }
@@ -389,20 +448,36 @@ public class GoldenCodecTests
         }
 
         var length = w.Position - start;
-        Span<double> decoded = stackalloc double[4];
         var r = new WireReader(w.Written.Slice(start, length));
-        FieldCodec.ReadNumber(ref r, plan, frameTick, decoded, frame);
+        JsonArray decodedJson;
+        if (plan.ValueKind == FieldValueKind.Integer64)
+        {
+            Span<ulong> decoded = stackalloc ulong[ProtocolConstants.MaxCount];
+            FieldCodec.ReadInteger64(ref r, plan, decoded);
+            decodedJson = Golden.Bits64(decoded[..plan.Components]);
+        }
+        else
+        {
+            Span<double> decoded = stackalloc double[ProtocolConstants.MaxCount];
+            FieldCodec.ReadNumber(ref r, plan, frameTick, decoded, frame);
+            decodedJson = Golden.Bits(decoded[..plan.Components]);
+        }
+
         Assert.That(r.IsAtEnd, Is.True, $"{plan.Codec.Type}: decode consumed {r.Position} of {length} bytes");
 
         var json = new JsonObject();
-        if (input.Numbers != null)
+        if (input.Integers != null)
+        {
+            json["input"] = Golden.Bits64(input.Integers);
+        }
+        else if (input.Numbers != null)
         {
             json["input"] = Golden.Bits(input.Numbers);
         }
 
         json["offset"] = start;
         json["length"] = length;
-        json["decoded"] = Golden.Bits(decoded[..plan.Components]);
+        json["decoded"] = decodedJson;
         return json;
     }
 
@@ -430,6 +505,10 @@ public class GoldenCodecTests
     private static FieldValue Raw(params byte[] bytes) => new() { Bytes = bytes };
 
     private static FieldValue V(params double[] v) => FieldValue.Of(v);
+
+    private static FieldValue U(params ulong[] v) => FieldValue.OfUInt64(v);
+
+    private static FieldValue I(params long[] v) => FieldValue.OfInt64(v);
 
     /// <summary>Compiles a lone codec into a plan through a one-field event, the same way a catalog would.</summary>
     private sealed class FieldPlanBuilder

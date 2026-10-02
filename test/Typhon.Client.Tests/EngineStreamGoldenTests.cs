@@ -185,6 +185,8 @@ public class EngineStreamGoldenTests
 
         public void Number(FieldPlan field, scoped ReadOnlySpan<double> components) { }
 
+        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components) { }
+
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) { }
 
         public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes) { }

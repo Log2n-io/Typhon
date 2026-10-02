@@ -88,7 +88,7 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
                 .Field(m => m.Half, Codec.F16)
                 .Field(m => m.Where, Codec.Quant(-8192, 8192, 24))
                 .Field(m => m.Target, Codec.EntityRef)
-                .Field(m => m.Flag, Codec.Bool));
+                .Field(m => m.Flag, Codec.Bool.Saturate()));
             subs.Command<FuzzWide>(c => c
                 .Roles(SessionRole.Player)
                 .Rate(20, 20)
@@ -99,7 +99,7 @@ unsafe class ClientInputFuzzTests : TestBase<ClientInputFuzzTests>
                 .Field(m => m.Heading, Codec.Angle(16))
                 .Field(m => m.Unit, Codec.Unorm(8))
                 .Field(m => m.Signed, Codec.Snorm(16))
-                .Field(m => m.Few, Codec.Bits(3))
+                .Field(m => m.Few, Codec.Bits(3).Saturate())
                 .Field(m => m.Mode, Codec.Enum<FuzzMode>(2)));
             subs.Command<FuzzMove>(c => c
                 .Roles(SessionRole.Spectator, SessionRole.Player)

@@ -3,6 +3,7 @@ using System;
 using System.Linq;
 using System.Collections.Generic;
 using System.Linq.Expressions;
+using System.Reflection;
 using Typhon.Protocol;
 
 namespace Typhon.Engine;
@@ -815,17 +816,31 @@ internal static class SubscriptionsNames
     internal static int ComponentTypeId<TComponent>(Comp<TComponent> component) where TComponent : unmanaged => component._componentTypeId;
 
     internal static ProjectedField BuildField<TComponent, TField>(Comp<TComponent> component, Expression<Func<TComponent, TField>> selector, Codec codec,
-        string name, string group, bool onEnter, bool owner)
+        string name, string group, bool onEnter, bool owner, bool ratio = false)
         where TComponent : unmanaged
     {
         var sourceField = SelectorField(selector, onEnter ? "OnEnter" : "Field");
         var wireName = string.IsNullOrWhiteSpace(name) ? sourceField : name;
         RefuseReservedName(wireName, "A field");
-        RefuseUnnarrowed64Bit<TField>(wireName, codec);
 
         if (!codec.IsDeclared)
         {
             throw new ArgumentException($"Field '{wireName}' needs a codec.", nameof(codec));
+        }
+
+        // A Fraction encodes the RATIO of two fields, a double, never the field itself: the table judges what is encoded, so it is not asked here.
+        string shape = null;
+        if (!ratio)
+        {
+            var stored = StoredType(typeof(TComponent), sourceField, typeof(TField));
+            var where = $"Field '{wireName}' of '{typeof(TComponent).Name}'";
+            codec = CodecPairing.Resolve(stored, codec, where, out shape);
+            CodecPairing.Classify(stored, codec.Catalog, codec.Saturating, where);
+        }
+        else if (FieldShape.Of(StoredType(typeof(TComponent), sourceField, typeof(TField))) is { } fractionShape)
+        {
+            throw new ArgumentException($"Field '{wireName}' is a Fraction over a {fractionShape.Type.Name}, a {fractionShape.Name}: a ratio divides two " +
+                                        "scalars, and a shape has no single value to divide.", nameof(selector));
         }
 
         return new ProjectedField
@@ -838,20 +853,33 @@ internal static class SubscriptionsNames
             OnEnter = onEnter,
             Owner = owner,
             Codec = codec,
+            Shape = shape,
         };
     }
+
+    /// <summary>
+    /// The type of the field a selector names, as stored — not the selector's own type. <c>ExpressionParser</c> sees through a cast, so
+    /// <c>x =&gt; (byte)x.Count</c> names an <c>int</c> field, and judging the <c>byte</c> would let a narrowing past the pairing table.
+    /// </summary>
+    private static Type StoredType(Type owner, string fieldName, Type selected)
+        => owner.GetField(fieldName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+               ?.FieldType
+           ?? selected;
 
     internal static ProjectedField BuildMessageField<TMessage, TField>(Expression<Func<TMessage, TField>> selector, Codec codec, string name, string owner)
     {
         var sourceField = SelectorField(selector, "Field");
         var wireName = string.IsNullOrWhiteSpace(name) ? sourceField : name;
         RefuseReservedName(wireName, "A field");
-        RefuseUnnarrowed64Bit<TField>(wireName, codec);
 
         if (!codec.IsDeclared)
         {
             throw new ArgumentException($"Field '{wireName}' of '{owner}' needs a codec.", nameof(codec));
         }
+
+        var stored = StoredType(typeof(TMessage), sourceField, typeof(TField));
+        codec = CodecPairing.Resolve(stored, codec, $"Field '{wireName}' of '{owner}'", out var shape);
+        CodecPairing.Classify(stored, codec.Catalog, codec.Saturating, $"Field '{wireName}' of '{owner}'", message: true);
 
         return new ProjectedField
         {
@@ -859,6 +887,7 @@ internal static class SubscriptionsNames
             ComponentName = typeof(TMessage).Name,
             SourceFieldName = sourceField,
             Codec = codec,
+            Shape = shape,
         };
     }
 
@@ -896,19 +925,4 @@ internal static class SubscriptionsNames
         return owner ? ArchetypeProjection.DefaultOwnerGroup : ArchetypeProjection.DefaultGroup;
     }
 
-    private static void RefuseUnnarrowed64Bit<TField>(string name, Codec codec)
-    {
-        if (typeof(TField) != typeof(long) && typeof(TField) != typeof(ulong))
-        {
-            return;
-        }
-
-        if (!codec.Saturating)
-        {
-            throw new InvalidOperationException(
-                $"Field '{name}' reads a 64-bit integer, and no 64-bit integer reaches the wire. Narrow it explicitly — " +
-                "Codec.VarUInt.Saturate() clamps to 32 bits and counts the clamps — so the loss is a decision rather than a truncation nobody sees until " +
-                "the value is large.");
-        }
-    }
 }

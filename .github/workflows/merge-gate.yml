@@ -41,6 +41,7 @@ jobs:
       workbench: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.workbench }}
       aux: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.aux }}
       sdk: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.sdk }}
+      native: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.native }}
       tla: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.tla }}
       rules: ${{ steps.dispatch.outputs.pr && 'true' || steps.filter.outputs.rules }}
       # `[no-ut]` in the PR head commit message → skip the heavy aws-gate suites (self-declared small-fix bypass).
@@ -164,6 +165,25 @@ jobs:
               - 'test/Typhon.Protocol.Tests/Golden/**'
               - 'Directory.Build.props'
               - 'Typhon.slnx'
+              - '.github/workflows/merge-gate.yml'
+            # The native C/C++ SDK (13 § 7): its own sources, the golden vectors it decodes, and everything its live differential
+            # test runs — the E2E host (whose closure is the engine), the .NET client that replays the native run, and the script
+            # that drives both. The engine is in because a change to what the engine sends is exactly what the live test is for.
+            native:
+              - 'src/Typhon.Client.Native/**'
+              - 'test/Typhon.Protocol.Tests/Golden/**'
+              - 'test/Typhon.Subscriptions.E2EHost/**'
+              - 'test/Typhon.Client.Tests/**'
+              - 'src/Typhon.Client/**'
+              - 'src/Typhon.Protocol/**'
+              - 'src/Typhon.Engine/**'
+              - 'src/Typhon.Schema.Definition/**'
+              - 'src/Typhon.Analyzers/**'
+              - 'src/Typhon.Generators/**'
+              - 'src/Typhon.Generators.Consumer/**'
+              - 'src/Typhon.Profiler/**'
+              - 'scripts/native-live-test.py'
+              - 'Directory.Build.props'
               - '.github/workflows/merge-gate.yml'
             tla:
               - 'src/Typhon.Engine/Durability/**'
@@ -834,7 +854,7 @@ jobs:
 
       - name: Test — .NET client
         run: |
-          dotnet test test/Typhon.Client.Tests/Typhon.Client.Tests.csproj -c Release --filter "TestCategory!=Quarantine" \
+          dotnet test test/Typhon.Client.Tests/Typhon.Client.Tests.csproj -c Release --filter "TestCategory!=Quarantine&TestCategory!=NativeSdk" \
             --logger "trx;LogFileName=Typhon.Client.Tests.trx" --results-directory TestResults
 
       # typecheck + eslint + prettier + vitest, the vitest suites decoding the same golden vectors as the .NET client.
@@ -854,9 +874,51 @@ jobs:
           path: TestResults/*.trx
           if-no-files-found: ignore
 
+  # ---- The native C/C++ SDK (13 § 7): three toolchains, warnings as errors, the golden vectors, the C-compiled header test, ASan/UBSan,
+  # and — on one leg — the live differential test against Typhon.Subscriptions.E2EHost over TCP. Free runners. ----
+  native-sdk:
+    needs: changes
+    if: needs.changes.outputs.native == 'true' && needs.changes.outputs.skip_ut != 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: gcc, os: ubuntu-latest, cc: gcc, cxx: g++, sanitize: 'OFF', live: true }
+          - { name: clang-asan, os: ubuntu-latest, cc: clang, cxx: clang++, sanitize: 'ON', live: false }
+          - { name: msvc, os: windows-latest, cc: '', cxx: '', sanitize: 'OFF', live: false }
+    name: native-sdk (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure
+        shell: bash
+        run: |
+          compilers=""
+          if [ -n "${{ matrix.cc }}" ]; then compilers="-DCMAKE_C_COMPILER=${{ matrix.cc }} -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}"; fi
+          cmake -S src/Typhon.Client.Native -B build/native -DCMAKE_BUILD_TYPE=Release -DTYPHON_NATIVE_SANITIZE=${{ matrix.sanitize }} $compilers
+
+      - name: Build
+        run: cmake --build build/native --config Release --parallel
+
+      # The golden vectors, decoded bit for bit, and the header compiled as C.
+      - name: Test
+        run: ctest --test-dir build/native -C Release --output-on-failure
+
+      - uses: actions/setup-dotnet@v5
+        if: matrix.live
+        with:
+          dotnet-version: '10.0.x'
+
+      # The native client against a live engine over TCP, then the .NET client replaying the same bytes: one replica, frame for frame.
+      - name: Live differential test
+        if: matrix.live
+        run: python3 scripts/native-live-test.py --live build/native/typhon_client_live --config Release
+
   # ---- The ONLY required check. Aggregates: skipped → pass, failure/cancelled → fail. ----
   gate:
-    needs: [changes, aws-gate, aws-gate-selfhosted, aux-tests, subscriptions-sdk, tla, rule-coverage, invariants, closing-keywords]
+    needs: [changes, aws-gate, aws-gate-selfhosted, aux-tests, subscriptions-sdk, native-sdk, tla, rule-coverage, invariants, closing-keywords]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -873,7 +935,8 @@ jobs:
           # Hyphenated job names need bracket notation in an expression — `needs.aux-tests` parses as subtraction.
           auxt="${{ needs['aux-tests'].result }}"
           sdk="${{ needs['subscriptions-sdk'].result }}"
-          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  aux-tests=$auxt  subscriptions-sdk=$sdk  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords  is_fork=$fork"
+          native="${{ needs['native-sdk'].result }}"
+          echo "changes=$changes  aws-gate=$aws  aws-gate-selfhosted=$awssh  aux-tests=$auxt  subscriptions-sdk=$sdk  native-sdk=$native  tla=$tla  rule-coverage=$rules  invariants=$inv  closing-keywords=$keywords  is_fork=$fork"
           fail=0
           # changes must succeed; the two aws-gate variants + tla may legitimately be 'skipped' (nothing relevant
           # changed, or the other runner variant is inactive), and closing-keywords is 'skipped' on push/dispatch.
@@ -885,6 +948,8 @@ jobs:
           case "$auxt" in failure|cancelled) echo "aux-tests failed"; fail=1 ;; esac
           # subscriptions-sdk is path-gated the same way.
           case "$sdk" in failure|cancelled) echo "subscriptions-sdk failed"; fail=1 ;; esac
+          # native-sdk too: 'skipped' when nothing it builds changed.
+          case "$native" in failure|cancelled) echo "native-sdk failed"; fail=1 ;; esac
           # rule-coverage is path-gated like tla, so 'skipped' is legitimate; a REGRESSION is not (#703).
           case "$rules" in failure|cancelled) echo "rule-coverage audit failed"; fail=1 ;; esac
           # invariants has no `if:` guard — it runs on every event, so anything but success is a red gate.

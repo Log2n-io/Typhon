@@ -106,7 +106,7 @@ public static class DatabaseSchemaExtensions
     /// <summary>
     /// Maps a CLR type to its schema <see cref="FieldType"/>, resolving primitives, the built-in value types (points, quaternions, bounding volumes, strings),
     /// nested components (types marked with <see cref="ComponentAttribute"/>), <see cref="ComponentCollection{T}"/> collections, and <c>EntityLink&lt;T&gt;</c>
-    /// foreign keys (indexed as <see cref="FieldType.Long"/>).
+    /// foreign keys and <c>EntityId</c> references (both as <see cref="FieldType.Long"/>).
     /// </summary>
     /// <param name="t">The CLR type to map.</param>
     /// <returns>
@@ -172,6 +172,13 @@ public static class DatabaseSchemaExtensions
         // EntityLink<T> is an 8-byte FK reference (wraps EntityId) — index as Long.
         // Check by name since EntityLink<> is in Typhon.Engine, not Typhon.Schema.Definition.
         if (t.IsGenericType && t.GetGenericTypeDefinition().Name == "EntityLink`1")
+        {
+            return (FieldType.Long, FieldType.None);
+        }
+
+        // EntityId, the untyped reference EntityLink<T> wraps: the same eight bytes, so the same Long. Unmapped, a component's EntityId field was dropped from
+        // its schema and nothing could read it — replication's entityRef included (13 § 5).
+        if (t.FullName == "Typhon.Engine.EntityId")
         {
             return (FieldType.Long, FieldType.None);
         }

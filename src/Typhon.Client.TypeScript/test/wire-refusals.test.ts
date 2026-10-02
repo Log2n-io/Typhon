@@ -39,6 +39,8 @@ interface RefusalCase {
   readonly type?: number;
   readonly hex: string;
   readonly closeCode: number;
+  /** A tick case decodes against this catalog when it names one (W34's cases name catalog-coll), else the vector's. */
+  readonly catalog?: string;
   /** A tick case decodes with the vector's frame held, unless this is false. */
   readonly held?: boolean;
 }
@@ -58,6 +60,19 @@ function closeCodeOf(action: () => void): number {
 }
 
 const kitchen = CatalogPlan.compile(parseCatalog(goldenBin('catalog-kitchen-sink')));
+
+// A tick case may name another catalog than the vector's (W34's against catalog-coll).
+const plans = new Map<string, CatalogPlan>([['catalog-kitchen-sink', kitchen]]);
+function planOf(name: string | undefined): CatalogPlan {
+  const key = name ?? 'catalog-kitchen-sink';
+  let plan = plans.get(key);
+  if (plan === undefined) {
+    plan = CatalogPlan.compile(parseCatalog(goldenBin(key)));
+    plans.set(key, plan);
+  }
+
+  return plan;
+}
 
 const parsers: Record<number, (message: Uint8Array) => unknown> = {
   [MessageType.Hello]: parseHello,
@@ -88,7 +103,7 @@ describe('golden wire-refusals', () => {
             break;
           }
           case 'tick': {
-            const reader = new TickReader(kitchen);
+            const reader = new TickReader(planOf(c.catalog));
             reader.realm = c.held === false ? null : frame;
             reader.read(bytes, sink);
             break;

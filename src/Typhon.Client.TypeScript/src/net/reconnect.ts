@@ -210,6 +210,9 @@ export class ReconnectingClient {
         onWelcome: (session, c) => {
           this.opened++;
           this.backoff.reset();
+          // A new session: the previous one's token names a session this server has replaced. This one's arrives with its close.
+          this.resumeToken = null;
+          this.resumeDeadlineMs = 0;
           this.handlers.onWelcome?.(session, c);
         },
         onClose: (close) => {
@@ -226,8 +229,12 @@ export class ReconnectingClient {
     const connection = this.current;
     this.current = null;
     this.cache = connection?.catalogCache ?? this.cache;
-    this.resumeToken = close.resumeToken;
-    this.resumeDeadlineMs = close.resumeDeadlineMs;
+    // Only a close that carries a token replaces it: an attempt that failed before WELCOME had no session, and the token of the one that
+    // did is still good within its grace — the network blip resume exists for.
+    if (close.resumeToken !== null) {
+      this.resumeToken = close.resumeToken;
+      this.resumeDeadlineMs = close.resumeDeadlineMs;
+    }
     this.handlers.onClose?.(close);
     if (!this.running) {
       return;

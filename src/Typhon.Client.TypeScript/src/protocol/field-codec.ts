@@ -13,6 +13,7 @@ import {
   encodeVel,
   TAU,
 } from './math.js';
+import { wordsOf } from './int64.js';
 import type { WireReader } from './reader.js';
 import type { RealmFrame } from './realm-frame.js';
 import type { WireWriter } from './writer.js';
@@ -24,19 +25,40 @@ import type { WireWriter } from './writer.js';
 export interface FieldSink {
   /** A numeric field: `values[0 .. field.components)`. */
   number(field: FieldPlan, values: Float64Array): void;
+  /**
+   * A 64-bit integer field (W32): component `i` is `words[2i]` (low 32 bits) and `words[2i + 1]` (high), a signed
+   * codec's as its two's complement — `bigintOf` makes the value. Words, not bigints: a decode allocates nothing.
+   */
+  integer64(field: FieldPlan, words: Uint32Array): void;
   /** A text field, already validated as UTF-8. */
   text(field: FieldPlan, value: string): void;
   /** A `bytes` or `blob` field: `data[offset .. offset + length)`, a view of the message. */
   bytes(field: FieldPlan, data: Uint8Array, offset: number, length: number): void;
   /** A list: `count` elements of `field.components` numbers each, flattened in `values[0 .. count × components)`. */
   list(field: FieldPlan, count: number, values: Float64Array): void;
+  /**
+   * W34: a collection — `sent` elements follow, each opened by {@link collectionElement} and made of its element fields'
+   * calls (fields whose `parent` is `field`). `sent < total` is a truncation the server made. Optional: an event or a
+   * command never carries one.
+   */
+  collection?(field: FieldPlan, total: number, sent: number): void;
+  /** W34: opens element `index` of `field`; the calls that follow, up to the next element, are its fields. */
+  collectionElement?(field: FieldPlan, index: number): void;
 }
 
 /**
- * A value to encode: a number (or boolean) for a scalar; numbers for a vector, a quaternion or a list's flattened
- * elements; a string for `str`; bytes for `bytes`, `blob`, or an unknown codec written verbatim.
+ * A value to encode: a number (or boolean) for a scalar; numbers for a vector, a quaternion, a `count` or a list's
+ * flattened elements; a bigint (or bigints) for a 64-bit integer field (W32), which also takes safe-integer numbers; a
+ * string for `str`; bytes for `bytes`, `blob`, or an unknown codec written verbatim.
  */
-export type FieldValue = number | boolean | ArrayLike<number> | string | Uint8Array;
+export type FieldValue =
+  number | boolean | bigint | ArrayLike<number> | ArrayLike<bigint> | string | Uint8Array | CollectionValue;
+
+/** W34: a collection's value — its elements' values by element field name, all sent, and its total (at least that many). */
+export interface CollectionValue {
+  readonly elements: readonly FieldValues[];
+  readonly total?: number;
+}
 
 /** Field values by wire name. */
 export type FieldValues = Readonly<Record<string, FieldValue | undefined>>;
@@ -45,7 +67,8 @@ export type FieldValues = Readonly<Record<string, FieldValue | undefined>>;
 export const MAX_LIST_COMPONENTS = ProtocolConstants.maxListCount * 4;
 
 // Shared by every decode: a value is handed to its sink before the next one is read, so one buffer of each is enough.
-const scalar = new Float64Array(4);
+const scalar = new Float64Array(ProtocolConstants.maxCount);
+const words = new Uint32Array(2 * ProtocolConstants.maxCount);
 const listValues = new Float64Array(MAX_LIST_COMPONENTS);
 
 /**
@@ -88,6 +111,10 @@ export function readSection(
 
         sink.number(f, scalar);
         break;
+      case ValueKind.Integer64:
+        readInteger64(r, f, words, 0);
+        sink.integer64(f, words);
+        break;
       case ValueKind.Text:
         sink.text(f, r.str(f.maxBytes));
         break;
@@ -99,10 +126,44 @@ export function readSection(
       case ValueKind.List:
         readList(r, f, frameTick, sink, frame);
         break;
+      case ValueKind.Collection:
+        readCollection(r, f, frameTick, sink, strictEnums, frame);
+        break;
       default:
         r.skip(f.fixedBytes);
         break;
     }
+  }
+}
+
+/** W34: `varu total | varu sent | element^sent`, sent ≤ min(total, maxCount), else 1007. */
+function readCollection(
+  r: WireReader,
+  f: FieldPlan,
+  frameTick: number,
+  sink: FieldSink,
+  strictEnums: boolean,
+  frame: RealmFrame | null,
+): void {
+  const total = r.varu();
+  const sent = r.varu();
+  if (sent > total || sent > f.maxCount) {
+    throw malformed(
+      `coll '${f.name}' sends ${sent} of ${total} element(s); at most ${f.maxCount}, and never more than its total`,
+    );
+  }
+
+  // Every element is at least one byte: a count the message cannot hold is refused before a store sizes for it.
+  if (sent > r.remaining) {
+    throw malformed(`coll '${f.name}' sends ${sent} element(s) with ${r.remaining} byte(s) left`);
+  }
+
+  // The total as the other SDKs report it: clamped to a signed 32-bit count.
+  sink.collection?.(f, Math.min(total, 0x7fffffff), sent);
+  const section = f.elementSection!;
+  for (let e = 0; e < sent; e++) {
+    sink.collectionElement?.(f, e);
+    readSection(r, section, frameTick, sink, strictEnums, frame);
   }
 }
 
@@ -123,6 +184,52 @@ export function readNumber(
   frame: RealmFrame | null = null,
 ): void {
   switch (f.kind) {
+    case CodecKind.Pos2:
+    case CodecKind.Pos3:
+    case CodecKind.Vec2:
+    case CodecKind.Vec3:
+    case CodecKind.Vel2:
+    case CodecKind.Vel3:
+    case CodecKind.Quat3:
+      readNumberShape(r, f, out, offset, frame);
+      break;
+    default:
+      // A scalar codec: `components` is its count (W33), each value read in turn.
+      for (let i = 0; i < f.components; i++) {
+        readScalar(r, f, frameTick, out, offset + i);
+      }
+
+      break;
+  }
+}
+
+/** Decodes a 64-bit integer field (W32) into `out[at ..]` as lo/hi words, one pair per component. */
+export function readInteger64(r: WireReader, f: FieldPlan, out: Uint32Array, at: number): void {
+  for (let i = 0; i < f.components; i++) {
+    const k = at + 2 * i;
+    switch (f.kind) {
+      case CodecKind.U64:
+      case CodecKind.I64:
+        r.u64Into(out, k);
+        break;
+      case CodecKind.Varu64:
+        r.varu64Into(out, k);
+        break;
+      case CodecKind.Vari64:
+        r.vari64Into(out, k);
+        break;
+      default:
+        throw new Error(`'${f.codec.t}' is not a 64-bit integer codec`);
+    }
+  }
+}
+
+/** One value of a scalar codec into `out[offset]`, the unit a count repeats. */
+function readScalar(r: WireReader, f: FieldPlan, frameTick: number, out: Float64Array, offset: number): void {
+  switch (f.kind) {
+    case CodecKind.F64:
+      r.f64Into(out, offset);
+      break;
     case CodecKind.U8:
       out[offset] = r.u8();
       break;
@@ -159,6 +266,43 @@ export function readNumber(
       r.unsignedInto(f.bits, out, offset);
       out[offset] = f.min[0]! + out[offset]! * f.step[0]!;
       break;
+    case CodecKind.Unorm:
+      // decodeUnorm: q ÷ top.
+      r.unsignedInto(f.bits, out, offset);
+      out[offset] = out[offset]! / f.top;
+      break;
+    case CodecKind.Snorm: {
+      // decodeSnorm: max(q ÷ limit, −1).
+      r.signedInto(f.bits, out, offset);
+      const x = out[offset]! / f.limit;
+      out[offset] = x < -1 ? -1 : x;
+      break;
+    }
+    case CodecKind.Angle:
+      // decodeAngle: q × τ ÷ 2^bits, where 2^bits = top + 1 exactly.
+      r.signedInto(f.bits, out, offset);
+      out[offset] = (out[offset]! * TAU) / (f.top + 1);
+      break;
+    case CodecKind.TickLo: {
+      // decodeTickLo.
+      const low = r.u16();
+      out[offset] = (frameTick - ((frameTick - low) & 0xffff)) >>> 0;
+      break;
+    }
+    default:
+      throw new Error(`'${f.codec.t}' is not a byte-aligned numeric codec`);
+  }
+}
+
+/** A position, vector, velocity or quaternion: several numbers that make one value. */
+function readNumberShape(
+  r: WireReader,
+  f: FieldPlan,
+  out: Float64Array,
+  offset: number,
+  frame: RealmFrame | null,
+): void {
+  switch (f.kind) {
     case CodecKind.Pos2:
     case CodecKind.Pos3: {
       // Realm-framed (typhon.3, SUB-30): width, bounds and step are the session's frame's.
@@ -196,36 +340,13 @@ export function readNumber(
       }
 
       break;
-    case CodecKind.Unorm:
-      // decodeUnorm: q ÷ top.
-      r.unsignedInto(f.bits, out, offset);
-      out[offset] = out[offset]! / f.top;
-      break;
-    case CodecKind.Snorm: {
-      // decodeSnorm: max(q ÷ limit, −1).
-      r.signedInto(f.bits, out, offset);
-      const x = out[offset]! / f.limit;
-      out[offset] = x < -1 ? -1 : x;
-      break;
-    }
-    case CodecKind.Angle:
-      // decodeAngle: q × τ ÷ 2^bits, where 2^bits = top + 1 exactly.
-      r.signedInto(f.bits, out, offset);
-      out[offset] = (out[offset]! * TAU) / (f.top + 1);
-      break;
     case CodecKind.Quat3: {
       const low = r.u16();
       decodeQuat3Halves(low, r.u16(), out, offset);
       break;
     }
-    case CodecKind.TickLo: {
-      // decodeTickLo.
-      const low = r.u16();
-      out[offset] = (frameTick - ((frameTick - low) & 0xffff)) >>> 0;
-      break;
-    }
     default:
-      throw new Error(`'${f.codec.t}' is not a byte-aligned numeric codec`);
+      throw new Error(`'${f.codec.t}' is not a multi-component codec`);
   }
 }
 
@@ -326,6 +447,9 @@ export function writeSection(
 
         writeNumber(w, f, componentsOf(value, f), 0, frame);
         break;
+      case ValueKind.Integer64:
+        writeInteger64(w, f, value);
+        break;
       case ValueKind.Text:
         if (typeof value !== 'string') {
           throw new RangeError(`field '${f.name}' needs a string`);
@@ -352,6 +476,26 @@ export function writeSection(
       case ValueKind.List:
         writeList(w, f, componentsOf(value, f), frame);
         break;
+      case ValueKind.Collection: {
+        const coll = value as CollectionValue | undefined;
+        if (coll?.elements === undefined) {
+          throw new RangeError(`coll '${f.name}' needs { elements, total? }`);
+        }
+
+        const sent = coll.elements.length;
+        const total = Math.max(coll.total ?? 0, sent);
+        if (sent > f.maxCount) {
+          throw new RangeError(`coll '${f.name}' cannot send ${sent} element(s); at most ${f.maxCount}`);
+        }
+
+        w.varu(total);
+        w.varu(sent);
+        for (const element of coll.elements) {
+          writeSection(w, f.elementSection!, element, strictEnums, frame);
+        }
+
+        break;
+      }
       default:
         // A codec newer than this library: only its width is known, so the caller supplies the encoded bytes verbatim.
         if (!(value instanceof Uint8Array) || value.length !== f.fixedBytes) {
@@ -376,8 +520,131 @@ export function writeNumber(
     throw new RangeError(`field '${f.name}' needs ${f.components} component(s), got ${c.length - offset}`);
   }
 
+  switch (f.kind) {
+    case CodecKind.Pos2:
+    case CodecKind.Pos3:
+    case CodecKind.Vec2:
+    case CodecKind.Vec3:
+    case CodecKind.Vel2:
+    case CodecKind.Vel3:
+    case CodecKind.Quat3:
+      writeNumberShape(w, f, c, offset, frame);
+      break;
+    default:
+      // A scalar codec: `components` is its count (W33), each value written in turn.
+      for (let i = 0; i < f.components; i++) {
+        writeScalar(w, f, c[offset + i]!);
+      }
+
+      break;
+  }
+}
+
+const valueWords = new Uint32Array(2 * ProtocolConstants.maxCount);
+
+/**
+ * Encodes a 64-bit integer field (W32) from a bigint, bigints, a safe-integer number or numbers. Out of the codec's range
+ * throws a `RangeError`.
+ */
+export function writeInteger64(w: WireWriter, f: FieldPlan, value: FieldValue | undefined): void {
+  const signed = f.kind === CodecKind.I64 || f.kind === CodecKind.Vari64;
+  for (let i = 0; i < f.components; i++) {
+    let item: bigint | number | undefined;
+    if (typeof value === 'bigint' || typeof value === 'number') {
+      item = i === 0 ? value : undefined;
+    } else if (
+      value !== undefined &&
+      typeof value !== 'string' &&
+      typeof value !== 'boolean' &&
+      !(value instanceof Uint8Array)
+    ) {
+      item = (value as ArrayLike<bigint | number>)[i];
+    }
+
+    if (item === undefined) {
+      throw new RangeError(`field '${f.name}' needs ${f.components} 64-bit integer(s)`);
+    }
+
+    wordsOf(item, signed, valueWords, 2 * i, `field '${f.name}'`);
+  }
+
+  writeInteger64Words(w, f, valueWords, 0);
+}
+
+/** Encodes a 64-bit integer field (W32) from lo/hi words at `words[at ..]`, one pair per component. */
+export function writeInteger64Words(w: WireWriter, f: FieldPlan, source: ArrayLike<number>, at: number): void {
+  for (let i = 0; i < f.components; i++) {
+    const lo = source[at + 2 * i]!;
+    const hi = source[at + 2 * i + 1]!;
+    switch (f.kind) {
+      case CodecKind.U64:
+      case CodecKind.I64:
+        w.u64Words(lo, hi);
+        break;
+      case CodecKind.Varu64:
+        w.varu64Words(lo, hi);
+        break;
+      case CodecKind.Vari64:
+        w.vari64Words(lo, hi);
+        break;
+      default:
+        throw new Error(`'${f.codec.t}' is not a 64-bit integer codec`);
+    }
+  }
+}
+
+/** A position, vector, velocity or quaternion from `c[offset ..]`. */
+function writeNumberShape(
+  w: WireWriter,
+  f: FieldPlan,
+  c: ArrayLike<number>,
+  offset: number,
+  frame: RealmFrame | null,
+): void {
   const v = c[offset]!;
   switch (f.kind) {
+    case CodecKind.Pos2:
+    case CodecKind.Pos3: {
+      if (frame === null) {
+        throw new Error(
+          `position '${f.name}' is realm-framed (typhon.3) and no realm frame was given to encode it over`,
+        );
+      }
+
+      for (let i = 0; i < f.components; i++) {
+        w.bits(encodeQuant(c[offset + i]!, frame.min[i]!, frame.step[i]!, frame.top), frame.positionBits);
+      }
+
+      break;
+    }
+    case CodecKind.Vec2:
+    case CodecKind.Vec3:
+      for (let i = 0; i < f.components; i++) {
+        w.bits(encodeVec(c[offset + i]!, f.scale, f.limit), f.bits);
+      }
+
+      break;
+    case CodecKind.Vel2:
+    case CodecKind.Vel3:
+      for (let i = 0; i < f.components; i++) {
+        w.bits(encodeVel(c[offset + i]!, f.velocityUnit, f.limit), f.bits);
+      }
+
+      break;
+    case CodecKind.Quat3:
+      w.u32(encodeQuat3(v, c[offset + 1]!, c[offset + 2]!, c[offset + 3]!));
+      break;
+    default:
+      throw new Error(`'${f.codec.t}' is not a multi-component codec`);
+  }
+}
+
+/** One value of a scalar codec, the unit a count repeats. */
+function writeScalar(w: WireWriter, f: FieldPlan, v: number): void {
+  switch (f.kind) {
+    case CodecKind.F64:
+      w.f64(v);
+      break;
     case CodecKind.U8:
       w.u8(toUnsigned(v, 0xff, f));
       break;
@@ -412,34 +679,6 @@ export function writeNumber(
     case CodecKind.Quant:
       w.bits(encodeQuant(v, f.min[0]!, f.step[0]!, f.top), f.bits);
       break;
-    case CodecKind.Pos2:
-    case CodecKind.Pos3: {
-      if (frame === null) {
-        throw new Error(
-          `position '${f.name}' is realm-framed (typhon.3) and no realm frame was given to encode it over`,
-        );
-      }
-
-      for (let i = 0; i < f.components; i++) {
-        w.bits(encodeQuant(c[offset + i]!, frame.min[i]!, frame.step[i]!, frame.top), frame.positionBits);
-      }
-
-      break;
-    }
-    case CodecKind.Vec2:
-    case CodecKind.Vec3:
-      for (let i = 0; i < f.components; i++) {
-        w.bits(encodeVec(c[offset + i]!, f.scale, f.limit), f.bits);
-      }
-
-      break;
-    case CodecKind.Vel2:
-    case CodecKind.Vel3:
-      for (let i = 0; i < f.components; i++) {
-        w.bits(encodeVel(c[offset + i]!, f.velocityUnit, f.limit), f.bits);
-      }
-
-      break;
     case CodecKind.Unorm:
       w.bits(encodeUnorm(v, f.top), f.bits);
       break;
@@ -448,9 +687,6 @@ export function writeNumber(
       break;
     case CodecKind.Angle:
       w.bits(encodeAngle(v, f.bits), f.bits);
-      break;
-    case CodecKind.Quat3:
-      w.u32(encodeQuat3(v, c[offset + 1]!, c[offset + 2]!, c[offset + 3]!));
       break;
     case CodecKind.TickLo:
       w.u16(toUnsigned(v, 0xffffffff, f) & 0xffff);
@@ -495,11 +731,22 @@ function numberOf(value: FieldValue | undefined, f: FieldPlan, index: number): n
     return value ? 1 : 0;
   }
 
-  if (value === undefined || typeof value === 'string' || value.length <= index) {
+  if (
+    value === undefined ||
+    typeof value === 'string' ||
+    typeof value === 'bigint' ||
+    isCollection(value) ||
+    value.length <= index
+  ) {
     throw new RangeError(`no numeric value supplied for field '${f.name}'`);
   }
 
-  return value[index]!;
+  const item = value[index]!;
+  if (typeof item !== 'number') {
+    throw new RangeError(`field '${f.name}' takes numbers; a bigint belongs on a 64-bit integer field`);
+  }
+
+  return item;
 }
 
 const one: number[] = [0];
@@ -510,11 +757,21 @@ function componentsOf(value: FieldValue | undefined, f: FieldPlan): ArrayLike<nu
     return one;
   }
 
-  if (value === undefined || typeof value === 'string') {
+  if (
+    value === undefined ||
+    typeof value === 'string' ||
+    typeof value === 'bigint' ||
+    isCollection(value) ||
+    (value.length > 0 && typeof value[0] === 'bigint')
+  ) {
     throw new RangeError(`no numeric value supplied for field '${f.name}'`);
   }
 
-  return value;
+  return value as ArrayLike<number>;
+}
+
+function isCollection(value: FieldValue): value is CollectionValue {
+  return typeof value === 'object' && 'elements' in value;
 }
 
 function refuseEnum(f: FieldPlan, value: number): void {

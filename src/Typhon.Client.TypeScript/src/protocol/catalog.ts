@@ -1,5 +1,5 @@
 import { checkCanonical, validateCatalog } from './catalog-validator.js';
-import { codecKindOf, CodecKind, isListElement, isPacked } from './codec-kinds.js';
+import { codecKindOf, CodecKind, isListElement, isPacked, takesCount } from './codec-kinds.js';
 import { BuiltInCommand, ProtocolConstants } from './constants.js';
 import { malformed } from './errors.js';
 import { quantStep, symmetricLimit, unsignedTop } from './math.js';
@@ -54,6 +54,15 @@ export interface CatalogCodec {
   readonly maxCount?: number;
   /** Declared only by a codec newer than the client may know, so the field can be skipped instead of refused. */
   readonly fixedBytes?: number;
+  /** W33: how many values of this codec the field carries, 2..16; absent is one. */
+  readonly count?: number;
+  /** W34: a collection's element — its fields, shaped like a command's. */
+  readonly element?: CatalogElement;
+}
+
+/** A collection's element (W34): fields with a name, a codec, and optionally an enum and a shape; never a collection. */
+export interface CatalogElement {
+  readonly fields: readonly CatalogField[];
 }
 
 export interface CatalogField {
@@ -68,6 +77,11 @@ export interface CatalogField {
   /** A key of {@link Catalog.enums}; allowed on `bits`, `u8`, `u16` and `varu` (W13). */
   readonly enum?: string;
   readonly smoothing?: string;
+  /**
+   * W33: what the values mean — `point3`, `aabb2`, `quat`… A hint: it changes no byte, and a value this library does not
+   * know is ignored.
+   */
+  readonly shape?: string;
 }
 
 /** An archetype's position (W15, W16). */
@@ -341,10 +355,10 @@ function readMetric(m: JsonObject, where: string, p: string[]): CatalogMetric {
   return metric;
 }
 
-function readField(f: JsonObject, where: string, p: string[]): CatalogField {
+function readField(f: JsonObject, where: string, p: string[], inCollection = false): CatalogField {
   const field: Mutable<CatalogField> = {
     name: str(f, 'name', where, p),
-    codec: readCodec(f.codec, `${where}.codec`, p),
+    codec: readCodec(f.codec, `${where}.codec`, p, false, inCollection),
   };
   const group = optionalString(f, 'group', where, p);
   if (group !== undefined) {
@@ -369,16 +383,22 @@ function readField(f: JsonObject, where: string, p: string[]): CatalogField {
     field.smoothing = smoothing;
   }
 
+  const shape = optionalString(f, 'shape', where, p);
+  if (shape !== undefined) {
+    field.shape = shape;
+  }
+
   return field;
 }
 
-const CODEC_INTEGERS = ['bits', 'unitExp', 'n', 'maxBytes', 'minCount', 'maxCount', 'fixedBytes'] as const;
+const CODEC_INTEGERS = ['bits', 'unitExp', 'n', 'maxBytes', 'minCount', 'maxCount', 'fixedBytes', 'count'] as const;
 
 /**
  * A codec, and for a list its element. An element's own `of` is refused rather than read, so the recursion is one level
- * deep however far the JSON nests: a hostile catalog cannot exhaust the stack here.
+ * deep however far the JSON nests: a hostile catalog cannot exhaust the stack here. A collection's element fields are
+ * read one level down the same way: a collection inside one is refused, not read (W34).
  */
-function readCodec(raw: unknown, where: string, p: string[], element = false): CatalogCodec {
+function readCodec(raw: unknown, where: string, p: string[], element = false, inCollection = false): CatalogCodec {
   const c = asObject(raw, where, p);
   const codec: Mutable<CatalogCodec> = { t: str(c, 't', where, p) };
   for (const key of CODEC_INTEGERS) {
@@ -403,7 +423,17 @@ function readCodec(raw: unknown, where: string, p: string[], element = false): C
     if (element) {
       p.push(`${where}.of: a list element cannot itself be a list`);
     } else {
-      codec.of = readCodec(c.of, `${where}.of`, p, true);
+      codec.of = readCodec(c.of, `${where}.of`, p, true, inCollection);
+    }
+  }
+
+  if (present(c.element)) {
+    if (element || inCollection) {
+      p.push(`${where}.element: a coll is only valid on an archetype field, never inside another coll's element`);
+    } else {
+      const at = `${where}.element`;
+      const o = asObject(c.element, at, p);
+      codec.element = { fields: list(o.fields, `${at}.fields`, p, (f, fieldAt) => readField(f, fieldAt, p, true)) };
     }
   }
 
@@ -528,7 +558,10 @@ function intArray(value: unknown, where: string, p: string[]): number[] {
 
 /** What a decoded field value is made of. */
 export const ValueKind = {
-  /** One to four numbers ({@link FieldPlan.components}): integers, quantized scalars, vectors, a quaternion. */
+  /**
+   * One to sixteen numbers ({@link FieldPlan.components}): integers up to 32 bits, floats, quantized scalars, vectors, a
+   * quaternion — everything a binary64 holds exactly.
+   */
   Number: 0,
   Text: 1,
   Bytes: 2,
@@ -536,6 +569,10 @@ export const ValueKind = {
   List: 3,
   /** A codec this library does not know, skipped by its declared width. */
   Skipped: 4,
+  /** W32: one to sixteen 64-bit integers, handed over as lo/hi 32-bit words — a `number` cannot hold them. */
+  Integer64: 5,
+  /** W34: a collection — a total, then the elements sent, each one section of {@link FieldPlan.elementSection}. */
+  Collection: 6,
 } as const;
 
 export type ValueKind = (typeof ValueKind)[keyof typeof ValueKind];
@@ -571,10 +608,16 @@ export class FieldPlan {
   /** For a packed field, its width in bits. */
   readonly bitCount: number;
   readonly valueKind: ValueKind;
-  /** Numbers per value (per element, for a list); 0 for text and bytes. */
+  /** Numbers per value (per element, for a list); 0 for text and bytes. A `count` field's count (W33). */
   readonly components: number;
+  /** W33: the codec's count, 1 when the catalog declares none. */
+  readonly count: number;
   /** For a list, the element's plan. */
   readonly element: FieldPlan | null;
+  /** For a collection (W34), its element's fields as one section; each field's {@link index} is its place in it. */
+  readonly elementSection: SectionPlan | null;
+  /** For a collection's element field, the collection; `null` otherwise. */
+  parent: FieldPlan | null = null;
   /** Byte-aligned width for the quantizing kinds: 8, 16, 24 or 32. */
   readonly bits: number;
   /** Per axis: lower bound (quant, pos). */
@@ -616,8 +659,26 @@ export class FieldPlan {
     this.enumNames =
       enumName !== undefined && Object.prototype.hasOwnProperty.call(enums, enumName) ? enums[enumName]! : null;
 
+    // A count sizes the decoder's buffers, so it is bounded here whether or not the catalog was validated (W33). A codec
+    // newer than this library is skipped by its fixedBytes, whatever count it carries. 0 is absent, as the validator reads
+    // it. A value no field holds (a list element, a metric, a position) is one value: its buffers are sized for that.
+    const declaredCount = kind === CodecKind.Unknown || codec.count === 0 ? undefined : codec.count;
+    if (
+      declaredCount !== undefined &&
+      !(
+        field !== null &&
+        takesCount(kind) &&
+        Number.isInteger(declaredCount) &&
+        declaredCount >= 2 &&
+        declaredCount <= ProtocolConstants.maxCount
+      )
+    ) {
+      throw refuse(`field '${name}' carries count ${declaredCount} on '${codec.t}'`);
+    }
+
+    this.count = declaredCount ?? 1;
     let valueKind: ValueKind = ValueKind.Number;
-    let components = 1;
+    let components = this.count;
     switch (kind) {
       case CodecKind.Pos2:
       case CodecKind.Vec2:
@@ -645,9 +706,19 @@ export class FieldPlan {
         valueKind = ValueKind.List;
         components = 0;
         break;
+      case CodecKind.Coll:
+        valueKind = ValueKind.Collection;
+        components = 0;
+        break;
       case CodecKind.Unknown:
         valueKind = ValueKind.Skipped;
         components = 0;
+        break;
+      case CodecKind.U64:
+      case CodecKind.I64:
+      case CodecKind.Varu64:
+      case CodecKind.Vari64:
+        valueKind = ValueKind.Integer64;
         break;
       default:
         break;
@@ -668,22 +739,57 @@ export class FieldPlan {
       this.element = null;
     }
 
+    if (kind === CodecKind.Coll) {
+      // The trust boundary again: a flat element — no list, no collection, no position — and a bound a store sizes from.
+      const fields = codec.element?.fields;
+      if (
+        fields === undefined ||
+        fields.length === 0 ||
+        !(Number.isInteger(this.maxCount) && this.maxCount >= 1 && this.maxCount <= ProtocolConstants.maxCollCount)
+      ) {
+        throw refuse(
+          `coll '${name}' needs an element of at least one field and maxCount in [1, ${ProtocolConstants.maxCollCount}]`,
+        );
+      }
+
+      const plans = fields.map((f, i) => {
+        const k = codecKindOf(f.codec.t);
+        if (
+          k === CodecKind.Coll ||
+          k === CodecKind.List ||
+          k === CodecKind.Pos2 ||
+          k === CodecKind.Pos3 ||
+          k === CodecKind.Vel2 ||
+          k === CodecKind.Vel3 ||
+          k === CodecKind.Bytes ||
+          k === CodecKind.Blob
+        ) {
+          throw refuse(`coll '${name}' element field '${f.name}' cannot be '${f.codec.t}'`);
+        }
+
+        const plan = new FieldPlan(f.name, i, f, f.codec, enums);
+        plan.parent = this;
+        return plan;
+      });
+      this.elementSection = new SectionPlan(plans);
+    } else {
+      this.elementSection = null;
+    }
+
     this.valueKind = valueKind;
     this.components = components;
 
-    // A position's quantum is the realm frame's (typhon.3, SUB-30): RealmFrame.step, per frame.
+    // A position's quantum is the realm frame's (typhon.3, SUB-30): RealmFrame.step, per frame. A quant has one range
+    // whatever its count (W33): every component quantizes over min[0]..max[0].
     if (kind === CodecKind.Quant) {
       const min = codec.min;
       const max = codec.max;
-      if (min?.length !== components || max?.length !== components) {
-        throw refuse(`field '${name}': ${codec.t} needs ${components} min and max value(s)`);
+      if (min?.length !== 1 || max?.length !== 1) {
+        throw refuse(`field '${name}': ${codec.t} needs one min and one max value`);
       }
 
       this.min = Float64Array.from(min);
-      this.step = new Float64Array(components);
-      for (let i = 0; i < components; i++) {
-        this.step[i] = quantStep(min[i]!, max[i]!, this.bits);
-      }
+      this.step = Float64Array.of(quantStep(min[0]!, max[0]!, this.bits));
     } else {
       this.min = NO_AXES;
       this.step = NO_AXES;

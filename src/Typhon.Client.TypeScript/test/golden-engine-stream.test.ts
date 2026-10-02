@@ -121,6 +121,8 @@ class RecordingSink implements TickSink {
 
   number(): void {}
 
+  integer64(): void {}
+
   text(): void {}
 
   bytes(): void {}

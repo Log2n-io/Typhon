@@ -35,6 +35,14 @@ export const CodecKind = {
   Blob: 27,
   TickLo: 28,
   List: 29,
+  /** W32: 64-bit codecs, decoded as 64-bit integers or binary64 — never through a narrower number. */
+  U64: 30,
+  I64: 31,
+  F64: 32,
+  Varu64: 33,
+  Vari64: 34,
+  /** W34: a collection of records on an archetype field — `varu total | varu sent | element^sent`. */
+  Coll: 35,
 } as const;
 
 export type CodecKind = (typeof CodecKind)[keyof typeof CodecKind];
@@ -71,6 +79,12 @@ export const CODEC_TOKENS: readonly string[] = [
   'blob',
   'tickLo',
   'list',
+  'u64',
+  'i64',
+  'f64',
+  'varu64',
+  'vari64',
+  'coll',
 ];
 
 const kindByToken = new Map<string, CodecKind>(CODEC_TOKENS.map((token, kind) => [token, kind as CodecKind]));
@@ -110,4 +124,41 @@ const LIST_ELEMENTS: ReadonlySet<CodecKind> = new Set([
 /** Whether a codec may be a list element: numeric, byte-aligned, and independent of the frame (W28). */
 export function isListElement(kind: CodecKind): boolean {
   return LIST_ELEMENTS.has(kind);
+}
+
+const COUNTABLE: ReadonlySet<CodecKind> = new Set([
+  CodecKind.U8,
+  CodecKind.I8,
+  CodecKind.U16,
+  CodecKind.I16,
+  CodecKind.U32,
+  CodecKind.I32,
+  CodecKind.U64,
+  CodecKind.I64,
+  CodecKind.Varu,
+  CodecKind.Vari,
+  CodecKind.Varu64,
+  CodecKind.Vari64,
+  CodecKind.F16,
+  CodecKind.F32,
+  CodecKind.F64,
+  CodecKind.Quant,
+  CodecKind.Unorm,
+  CodecKind.Snorm,
+  CodecKind.Angle,
+]);
+
+/** Whether a codec may carry a `count` (W33): the byte-aligned scalar codecs. */
+export function takesCount(kind: CodecKind): boolean {
+  return COUNTABLE.has(kind);
+}
+
+/** Whether a codec decodes to 64-bit integers (W32), which a `number` cannot hold. */
+export function isInteger64(kind: CodecKind): boolean {
+  return kind === CodecKind.U64 || kind === CodecKind.I64 || kind === CodecKind.Varu64 || kind === CodecKind.Vari64;
+}
+
+/** Whether a 64-bit integer codec is signed: its words are a two's complement. */
+export function isSigned64(kind: CodecKind): boolean {
+  return kind === CodecKind.I64 || kind === CodecKind.Vari64;
 }

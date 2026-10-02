@@ -867,6 +867,25 @@ public sealed class SubscriptionsCommands
         }
     }
 
+    /// <summary>
+    /// The projection's column walk — every scalar field of every pushed slot read and coded, references resolved, clamps noted — per tick, in ms of thread
+    /// time summed over workers. An upper bound on what a vectorized walk could cut (13 § 4.1): the resolution and the clamp notes stay scalar. Zero unless
+    /// phase timing is on.
+    /// </summary>
+    public double ProjectWalkMs => PerTickMs(ref SubscriptionsProjectExecSystem.ProjectWalkTicks);
+
+    /// <summary>
+    /// The projection's blocks, read and encoded, per tick, in ms of CPU summed over workers: <see cref="ProjectPrologueMs"/>' busy time less the claiming
+    /// and the waits, the denominator <see cref="ProjectWalkMs"/> is a share of. Zero unless phase timing is on.
+    /// </summary>
+    public double ProjectBlocksMs => PerTickMs(ref SubscriptionsProjectExecSystem.ProjectBlockTicks);
+
+    private static double PerTickMs(ref long ticks)
+    {
+        var n = Volatile.Read(ref SubscriptionsProjectExecSystem.PrologueCount);
+        return n == 0 ? 0d : Volatile.Read(ref ticks) * 1000d / System.Diagnostics.Stopwatch.Frequency / n;
+    }
+
     /// <summary>The frame stage's single-threaded prologue, per tick, in ms.</summary>
     public (double Prologue, double Sweep, double Prepare) FramePrologueMs => _ingress.Frames == null ? default : _ingress.Frames.PrologueMs;
 

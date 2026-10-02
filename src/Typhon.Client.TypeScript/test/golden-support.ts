@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  hex64,
   RealmFrame,
   type ArchetypePlan,
   type CommandSink,
@@ -85,6 +86,16 @@ export function bitsOf(values: ArrayLike<number>, count: number): string[] {
   const result: string[] = [];
   for (let i = 0; i < count; i++) {
     result.push(bits(values[i]!));
+  }
+
+  return result;
+}
+
+/** 64-bit integers (W32) as lo/hi words, rendered as the vectors write them: sixteen hex digits of the bit pattern. */
+export function wordsHex(words: ArrayLike<number>, count: number): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < count; i++) {
+    result.push(hex64(words[2 * i]!, words[2 * i + 1]!));
   }
 
   return result;
@@ -243,6 +254,10 @@ export class RecordingSink implements TickSink, CommandSink {
     this.log.push({ call: 'number', field: field.name, values: bitsOf(values, field.components) });
   }
 
+  integer64(field: FieldPlan, words: Uint32Array): void {
+    this.log.push({ call: 'integer64', field: field.name, values: wordsHex(words, field.components) });
+  }
+
   text(field: FieldPlan, value: string): void {
     this.log.push({ call: 'text', field: field.name, utf8: hex(encoder.encode(value)) });
   }
@@ -253,6 +268,14 @@ export class RecordingSink implements TickSink, CommandSink {
 
   list(field: FieldPlan, count: number, values: Float64Array): void {
     this.log.push({ call: 'list', field: field.name, count, values: bitsOf(values, count * field.components) });
+  }
+
+  collection(field: FieldPlan, total: number, sent: number): void {
+    this.log.push({ call: 'collection', field: field.name, total, sent });
+  }
+
+  collectionElement(field: FieldPlan, index: number): void {
+    this.log.push({ call: 'collectionElement', field: field.name, index });
   }
 
   /** The views as handed out, which the reader sizes exactly: `dims` values, and a velocity only when one travels. */

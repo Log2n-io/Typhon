@@ -1,0 +1,24 @@
+{
+  "description": "varu64 \u00D7 3 (W33 over W32): three 64-bit varints back to back, each its own length.",
+  "codec": {
+    "t": "varu64",
+    "count": 3
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000",
+        "0020000000000000",
+        "ffffffffffffffff"
+      ],
+      "offset": 0,
+      "length": 19,
+      "decoded": [
+        "0000000000000000",
+        "0020000000000000",
+        "ffffffffffffffff"
+      ]
+    }
+  ]
+}

@@ -156,6 +156,45 @@ public ref struct WireReader
     /// <returns>The value.</returns>
     public ulong ReadU64() => BinaryPrimitives.ReadUInt64LittleEndian(Take(8));
 
+    /// <summary>Reads a little-endian two's-complement <c>i64</c>.</summary>
+    /// <returns>The value.</returns>
+    public long ReadI64() => BinaryPrimitives.ReadInt64LittleEndian(Take(8));
+
+    /// <summary>
+    /// Reads a <c>varu64</c> (W32): unsigned LEB128, at most ten bytes, fitting 64 bits. An over-long form is accepted while it fits; a tenth byte above
+    /// <c>0x01</c> carries bits past the 64th and is malformed.
+    /// </summary>
+    /// <returns>The value.</returns>
+    public ulong ReadVaru64()
+    {
+        ulong result = 0;
+        for (var shift = 0; shift < 70; shift += 7)
+        {
+            var b = ReadU8();
+            if (shift == 63 && b > 0x01)
+            {
+                throw WireFormatException.Malformed("varu64 does not fit 64 bits");
+            }
+
+            result |= (ulong)(b & 0x7F) << shift;
+            if ((b & 0x80) == 0)
+            {
+                return result;
+            }
+        }
+
+        // Unreachable: a tenth byte above 0x01 throws above, and one at or below it has no continuation bit.
+        return result;
+    }
+
+    /// <summary>Reads a <c>vari64</c> (W32): a zigzag-mapped <c>varu64</c>.</summary>
+    /// <returns>The value.</returns>
+    public long ReadVari64()
+    {
+        var u = ReadVaru64();
+        return (long)(u >> 1) ^ -(long)(u & 1);
+    }
+
     /// <summary>Reads a little-endian IEEE double.</summary>
     /// <returns>The value; every NaN pattern decodes as the canonical NaN.</returns>
     public double ReadF64() => WireMath.CanonicalizeNaN(BinaryPrimitives.ReadDoubleLittleEndian(Take(8)));
