@@ -55,6 +55,15 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     /// <summary>Maximum load factor before triggering a split.</summary>
     private const double MaxLoadFactor = 0.75;
 
+    /// <summary>
+    /// The same threshold, readable by the derived bulk-insert path so its refusal is phrased against the number that actually gates a split (#1100).
+    /// </summary>
+    /// <remarks>
+    /// A second literal would be the classic drift: raise the threshold here and a bulk insert would refuse batches the per-insert path accepts, or worse,
+    /// accept batches that then split inside a region built on nothing splitting.
+    /// </remarks>
+    protected const double MaxLoadFactorForBulk = MaxLoadFactor;
+
     /// <summary>Whether this hash map supports multiple values per key via VSBS buffer indirection.</summary>
     protected readonly bool _allowMultiple;
 
