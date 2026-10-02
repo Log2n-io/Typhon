@@ -50,16 +50,26 @@ public static class WireMath
     /// <param name="max">The declared maximum (exclusive).</param>
     /// <param name="bits">8, 16, 24 or 32.</param>
     /// <returns>The code, in [0, 2ᵇ − 1].</returns>
-    public static uint EncodeQuant(double v, double min, double max, int bits)
+    public static uint EncodeQuant(double v, double min, double max, int bits) => EncodeQuantWithStep(v, min, QuantStep(min, max, bits), Pow2(bits) - 1);
+
+    /// <summary>
+    /// <see cref="EncodeQuant"/> with its step and top code computed once by the caller — the same operations on the same values, so the same code: a
+    /// caller quantizing many values over one range divides once per value instead of twice.
+    /// </summary>
+    /// <param name="v">The value.</param>
+    /// <param name="min">The declared minimum.</param>
+    /// <param name="step">The quantum, exactly as <see cref="QuantStep"/> computes it.</param>
+    /// <param name="top">The top code, <c>2ᵇ − 1</c>.</param>
+    /// <returns>The code, in [0, top].</returns>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static uint EncodeQuantWithStep(double v, double min, double step, double top)
     {
-        var step = (max - min) / Pow2(bits);
         var x = (v - min) / step;
         if (!(x > 0))
         {
             return 0;
         }
 
-        var top = Pow2(bits) - 1;
         var r = RoundHalfAwayFromZero(x);
         return (uint)(r > top ? top : r);
     }

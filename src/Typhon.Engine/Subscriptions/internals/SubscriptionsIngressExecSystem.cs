@@ -466,6 +466,10 @@ internal sealed class SubscriptionsIngress : IDisposable
         {
         }
 
+        public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+        {
+        }
+
         public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
         {
         }
@@ -1065,6 +1069,21 @@ internal ref struct IngressCommandSink : ICommandSink
     }
 
     /// <inheritdoc />
+    public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components)
+    {
+        if (!_open || _current.IsClientRegion)
+        {
+            return;
+        }
+
+        var bindings = _current.Bindings;
+        if ((uint)field.Ordinal < (uint)bindings.Length)
+        {
+            bindings[field.Ordinal].StoreInteger64(_payload, components, signedWire: field.Kind is CodecKind.I64 or CodecKind.Vari64);
+        }
+    }
+
+    /// <inheritdoc />
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8)
     {
         if (!_open || _current.IsClientRegion)
@@ -1084,6 +1103,17 @@ internal ref struct IngressCommandSink : ICommandSink
 
     /// <inheritdoc />
     public void Bytes(FieldPlan field, scoped ReadOnlySpan<byte> bytes)
+    {
+    }
+
+    /// <inheritdoc />
+    /// <remarks>A command never carries a collection (W34): the catalog refuses one there, so this is never called.</remarks>
+    public void Collection(FieldPlan field, int total, int sent)
+    {
+    }
+
+    /// <inheritdoc />
+    public void CollectionElement(FieldPlan field, int index)
     {
     }
 

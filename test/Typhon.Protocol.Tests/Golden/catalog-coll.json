@@ -1,0 +1,5 @@
+{
+  "description": "Collections (W34) on a public group, an onEnter field and an owner group; elements with a pack (bool, bits), a str, an entityRef, a u64 and an f32 \u00D7 2 point, declared out of wire order.",
+  "hash": "ca8c436e4aaff21b",
+  "byteCount": 1087
+}

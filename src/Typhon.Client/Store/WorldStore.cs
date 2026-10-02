@@ -283,11 +283,22 @@ public sealed class SelfState
     /// <summary>Owner field numbers by <see cref="FieldPlan.Ordinal"/>; <see langword="null"/> until received or when not numeric.</summary>
     public double[][] Numbers { get; private set; } = [];
 
+    /// <summary>
+    /// Owner 64-bit integer fields (W32) by ordinal, as bit patterns — a signed value's two's complement; <see langword="null"/> until received or when the
+    /// field is not a 64-bit integer.
+    /// </summary>
+    public ulong[][] Integers { get; private set; } = [];
+
     /// <summary>Owner field texts by ordinal.</summary>
     public string[] Texts { get; private set; } = [];
 
     /// <summary>Owner field bytes by ordinal.</summary>
     public byte[][] Bytes { get; private set; } = [];
+
+    /// <summary>Owner collections by ordinal (W34); <see langword="null"/> until received or when the field is not a collection.</summary>
+    public CollectionValue[] Collections { get; private set; } = [];
+
+    internal CollectionValue CollectionAt(FieldPlan field) => Collections[field.Ordinal] ??= new CollectionValue(field);
 
     internal void Receive(ArchetypePlan archetype, uint netId, ushort lastSeq, byte ownerMask)
     {
@@ -297,15 +308,19 @@ public sealed class SelfState
         {
             Archetype = null;
             Numbers = [];
+            Integers = [];
             Texts = [];
             Bytes = [];
+            Collections = [];
         }
         else if (Archetype != archetype || NetId != netId)
         {
             Archetype = archetype;
             Numbers = new double[archetype.OwnerFields.Length][];
+            Integers = new ulong[archetype.OwnerFields.Length][];
             Texts = new string[archetype.OwnerFields.Length];
             Bytes = new byte[archetype.OwnerFields.Length][];
+            Collections = new CollectionValue[archetype.OwnerFields.Length];
         }
 
         NetId = netId;
@@ -326,8 +341,10 @@ public sealed class SelfState
         NetId = 0;
         LastSeq = 0;
         Numbers = [];
+        Integers = [];
         Texts = [];
         Bytes = [];
+        Collections = [];
         Received = false;
         OwnerMask = 0;
     }

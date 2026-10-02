@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-09-25 |
+| Last Updated | 2026-10-02 |
 | Domain | Engine-owned replication: per-entity replication state, its storage, and what bounds its cost |
 
 > Invariants that keep replication cost tied to what changed, keep what a session holds exactly what its geometry names, and keep per-entity
@@ -75,14 +75,17 @@
   never resolve a component's column, a slot's stride or a field's offset from anything but the archetype's layout and the component's
     measured schema — not from a copy, not from a recomputation, not from a structure replication owns
   never reach a value through a component segment, a chunk accessor or an entity-location map: replication addresses SLOTS OF A CLUSTER,
-    never entities of a table
+    never entities of a table — with one exception, a collection's elements (below)
+  invariant ∀ projected ComponentCollection<T> field c: c's HANDLE is read through the cluster layout like any field; its ELEMENTS are read
+    through T's VariableSizedBufferSegment only, lock-free (ReadElementsUnlocked), with the projection worker's own chunk accessor, inside
+    the chunk's EpochGuard, in the replication track only — and the element layout is T's, compiled once at Start
   never invoke a selector, a delegate or reflection per entity — a declaration's field name becomes an offset once, at Start, or it is
     refused there by name
   scope: ProjectionCompiler.Compile, ProjectionCompiler.VelocityCodec, CompiledField.ComponentSlot,
     CompiledField.ComponentOffsetInCluster, CompiledField.ComponentSize, CompiledField.FieldOffsetInComponent,
     CompiledPosition.FieldOffsetInComponent, CompiledProjectionPlan.ClusterLayout, ProjectionColumn, ProjectionColumnWalk.Quantize,
     ProjectionColumnWalk.Walk, ArchetypeMetadata.GetSlot, ArchetypeClusterInfo.ComponentOffset, ArchetypeClusterInfo.ComponentSize,
-    DBComponentDefinition.SpatialField, ClusterRef.GetReadOnlySpan
+    DBComponentDefinition.SpatialField, ClusterRef.GetReadOnlySpan, CollectionContext.Bind, VariableSizedBufferSegment.ReadElementsUnlocked
   on_violation: a second reader of the storage, with its own idea of where a value lives. It does not fail — it reads the neighbouring
     field, or the neighbouring slot, and replicates that. Every client then agrees with every other client on a world the server does not
     have, and nothing on either side reports an error. The engine's own layout moves under refactors (a component gains a field, a
@@ -98,6 +101,10 @@
     something faster takes it, and the first clause is then violated by a diff that looks local.
   note Versioned components are no exception and need none: a cluster slot caches the committed HEAD (copied there at commit), so the
     projection reads it through `ClusterRef.GetReadOnlySpan` like any other column, and after the fence it is the tick's committed value.
+  note amended for collections (#1085, 13 § 6.5): a collection's elements do not live in the cluster — the slot holds a buffer id — so the
+    buffer segment is the only place they can be read. The exception is narrow: the handle still comes from the layout, nothing else is
+    reached through a segment, and the read is unlocked only because the replication track runs in the tick's exclusive window (EW-01),
+    where nothing writes a collection. Every other caller reads a buffer through the locked ReadAllElementsRaw.
   note defined in the design series at design/Subscriptions/01-model.md § 2 and design/Subscriptions/02-execution.md § 4.
   verified: ProjectionReadsClusterLayoutTests.ProjectedValuesEqualClusterRefSpans (the read: a component written through
     ClusterRef.GetSpan — the path that sets no dirty bit — projects to exactly what ClusterRef.GetReadOnlySpan reports, field by field
@@ -923,7 +930,7 @@
     how much it missed after.
   verified: EventDeliveryTests.EveryEventReachesExactlyItsSessionsAtEverySkipRate (random broadcast and owner events, skip 0–90 %: once each, in order,
     received + lost = routed; Near and ToKnown included), EventDeliveryTests.AnEventReachesItsSessionsWithItsValues,
-    EventDeliveryTests.EveryCodecShapeRoundTripsAndABadValueDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
+    EventDeliveryTests.EveryCodecShapeRoundTripsAndADeclaredNarrowingClamps, EventDeliveryTests.AnEnumValueOutsideItsNamesDropsOnlyItsEvent, EventDeliveryTests.GeometricRoutesDedupeRespectTheirRadiusAndNameTheDestroyed,
     EventDeliveryTests.WorldSessionsLateSessionsAndWorkerOrder, EventDeliveryTests.AKnownEventReachesASessionTheEntityLeftThisTick,
     EventDeliveryTests.ASessionWithNoProfileHearsBroadcastsAndItsOwnEvents. Falsifiability: filing only the current v̂ turns the leaving-entity case red; a frame that carries only its own tick's events turns the
     30–90 % cases red; a loss count of 0 turns the 60 and 90 % cases red; dropping the dedupe turns the oracle and the dedupe case red.
@@ -1039,3 +1046,25 @@
     multiset of (identity, cell, secondary) against the runs' raw events; PushIndexTests.AnEmptyWorldIndexesNothingWhateverTheGrid.
     Falsifiability: PushIndexTests.AnIndexThatMisfilesSecondariesIsCaught. The cost clause is timed by the explicit
     PushIndexTests.AnEmptyWorldCostsTheSameWhateverTheCellSide, not in the gate; the never clause has no test.
+
+### SUB-31: A reference field never names, for longer than one tick, a netId whose holder is not the entity it was resolved from `[fatal][silent]`
+  invariant a reference field (an EntityId or EntityLink<T> in entityRef, 13 § 5) encodes its target's netId when the target is replicated, alive and
+    identified before the tick, and 0 otherwise; a target whose identity is taken during the tick reads 0 that tick, whichever worker projects it first
+    (NetIdAllocator.IsLeased), and its referrer is pushed again so it resolves the next
+  invariant when a netId is released — by the projection or as an orphan — every referrer whose cold entry names it is pushed at the next blocks step, so
+    it re-resolves (to 0, or to the target's new identity) in the tick after the release, long before the quarantine lets the netId be reissued
+  invariant the reverse index counts exactly what live entries name: a projection logs ±1 only where a resolution differs from the entry's held netId,
+    and every path that ends an entry (the projection's ClearEntry, a cross-realm move, a migration or drain overwrite, a dropped park, a released block)
+    logs its −1s
+  never declare a reference in an onEnter section or on a static archetype: sent once, it can never be corrected (refused at Start)
+  never replicate an EntityLink<T> whose T, and every archetype deriving from it, no profile observes (refused at Start)
+  scope: ReferenceIndex.Step, ReferenceIndex.Note, ReferenceIndex.NoteShared, ReferenceResolver.Resolve, ProjectionPass.ProjectBlock,
+    ArchetypeReplicationState.EndEntry, NetIdAllocator.IsLeased, NetIdLeaseSet.BeginTick, ReplicationBlockLayout.ReferenceOffsetInColdEntry
+  on_violation: silent. A reference left naming a released netId resolves, once the number is reissued, to whoever holds it next: a client draws a
+    sword in the wrong hand, a target lock on a stranger, with no error anywhere.
+  rationale: a stored body names a netId, and nothing else re-pushes the referrer when its target goes; a reverse index fed by changes keeps the cost
+    with the references that change, not with the archetype (SUB-13).
+  verified: ReferenceTests.UnderReuseNoFrameNamesAnotherHolder (a churning oracle with identities reissued every tick it can: in every frame a reference
+    names 0 or its own target, and one naming an identity nobody holds is fixed by the next frame — red when the reverse index's step is skipped),
+    ReferenceTests.ADestroyedTargetMakesEveryReferrerSendZeroWithinOneTick, ReferenceTests.AReferenceCarriesItsTargetsNetIdAndATargetIdentifiedThisTickResolvesTheNext,
+    ReferenceTests.TheIndexCountsExactlyWhatLiveEntriesNameAfterChurn, ReferenceTests.AReferenceOnEnterOrToAnArchetypeNobodyObservesIsRefused.

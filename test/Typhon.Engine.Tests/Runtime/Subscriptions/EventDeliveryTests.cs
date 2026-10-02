@@ -72,6 +72,12 @@ public struct ProjBoolEvent
     public bool Flag;
 }
 
+/// <summary>An enum field whose names fit its codec: no <c>Saturate</c> needed, and a value cast in from outside the names is refused by the encoder.</summary>
+struct ProjModeEvent
+{
+    public ProjAiMode Mode;
+}
+
 /// <summary>
 /// Server events to clients (09 § 11, step 2.5a): emitted by systems, encoded once, routed per session — to every session, or to the one controlling the
 /// entity named — and caught up from the event log by a session that missed frames, or counted into <c>EventsLost</c> past it.
@@ -319,11 +325,11 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
 
     /// <summary>
     /// The compiled encoder against the client's decoder, across codec shapes — packed bool and bits, quant, angle, varint, an entity with no replication,
-    /// f32 — each value arriving as its codec rounds it; a value its codec cannot carry drops that event, counted, and the tick goes on.
+    /// f32 — each value arriving as its codec rounds it, and a declared narrowing (Saturate) clamping rather than dropping the event.
     /// </summary>
     [Test]
     [VerifiesRule("SUB-21")]
-    public void EveryCodecShapeRoundTripsAndABadValueDropsOnlyItsEvent()
+    public void EveryCodecShapeRoundTripsAndADeclaredNarrowingClamps()
     {
         var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
         Spawn(dbe, 1, 0f);
@@ -332,13 +338,13 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
             ProjectionTestSchema.DeclareCreature(subs);
             subs.Profile("near", p => p.Sphere(Radius).Of<ProjCreature>());
             subs.Event<ProjRich>(e => e.Broadcast()
-                .Field(r => r.Flag, Codec.Bool)
-                .Field(r => r.Level, Codec.Bits(5))
+                .Field(r => r.Flag, Codec.Bool.Saturate())
+                .Field(r => r.Level, Codec.Bits(5).Saturate())
                 .Field(r => r.Pitch, Codec.Quant(-10, 10, 16))
                 .Field(r => r.Turn, Codec.Angle(16))
                 .Field(r => r.Delta, Codec.VarInt)
                 .Field(r => r.Big, Codec.F32));
-        }, nameof(EveryCodecShapeRoundTripsAndABadValueDropsOnlyItsEvent), replicationCellM: ProjectionTestSchema.ReplicationCellFor(Radius));
+        }, nameof(EveryCodecShapeRoundTripsAndADeclaredNarrowingClamps), replicationCellM: ProjectionTestSchema.ReplicationCellFor(Radius));
         harness.RunFence = true;
         var session = harness.OpenSessions(1, "near")[0];
         Assert.That(harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d)), Is.True);
@@ -363,9 +369,10 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
         var got = harness.Replica(session).Events.Received;
         Assert.Multiple(() =>
         {
-            Assert.That(harness.Subscriptions.Events.Rejected, Is.EqualTo(1), "a level of 40 does not fit five bits");
-            Assert.That(got, Has.Count.EqualTo(1), "the bad event is dropped, the good one travels");
-            var f = got[0].Fields;
+            Assert.That(harness.Subscriptions.Events.Rejected, Is.Zero, "Level's narrowing is declared (Saturate), so 40 clamps rather than refusing");
+            Assert.That(got, Has.Count.EqualTo(2), "both events travel");
+            Assert.That(got[0].Fields["Level"], Is.EqualTo(31), "a level of 40 clamps to five bits' largest code (13 § 2.3)");
+            var f = got[1].Fields;
             Assert.That(f["Flag"], Is.EqualTo(1));
             Assert.That(f["Level"], Is.EqualTo(21));
             Assert.That(f["Pitch"], Is.EqualTo(3.3).Within(20.0 / 65535));
@@ -373,6 +380,42 @@ sealed class EventDeliveryTests : TestBase<EventDeliveryTests>
             Assert.That(f["Delta"], Is.EqualTo(-300));
             Assert.That(f["Who"], Is.Zero, "a live entity with no replication is netId 0, unknown");
             Assert.That(f["Big"], Is.EqualTo(1234.5));
+        });
+    }
+
+    /// <summary>
+    /// A value its codec cannot carry and the declaration did not narrow — an enum cast from outside its names — drops that event, counted, and the tick
+    /// goes on with the others.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-21")]
+    public void AnEnumValueOutsideItsNamesDropsOnlyItsEvent()
+    {
+        var dbe = ProjectionTestSchema.SetupEngine(ServiceProvider);
+        Spawn(dbe, 1, 0f);
+        using var harness = FrameHarness.Create(dbe, subs =>
+        {
+            ProjectionTestSchema.DeclareCreature(subs);
+            subs.Profile("near", p => p.Sphere(Radius).Of<ProjCreature>());
+            subs.Event<ProjModeEvent>(e => e.Broadcast().Field(m => m.Mode, Codec.Enum<ProjAiMode>(bits: 3)));
+        }, nameof(AnEnumValueOutsideItsNamesDropsOnlyItsEvent), replicationCellM: ProjectionTestSchema.ReplicationCellFor(Radius));
+        harness.RunFence = true;
+        var session = harness.OpenSessions(1, "near")[0];
+        Assert.That(harness.Sessions.SetViewpoint(session, new Vector3D(0d, 0d, 0d)), Is.True);
+        harness.RunTick(1);
+        harness.Deliver(session);
+
+        harness.Subscriptions.Commands.Emit(new ProjModeEvent { Mode = (ProjAiMode)200 });
+        harness.Subscriptions.Commands.Emit(new ProjModeEvent { Mode = ProjAiMode.Wander });
+        harness.RunTick(2);
+        harness.Deliver(session);
+
+        var got = harness.Replica(session).Events.Received;
+        Assert.Multiple(() =>
+        {
+            Assert.That(harness.Subscriptions.Events.Rejected, Is.EqualTo(1), "200 is not one of the enum's names and does not fit three bits");
+            Assert.That(got, Has.Count.EqualTo(1), "the bad event is dropped, the good one travels");
+            Assert.That(got[0].Fields["Mode"], Is.EqualTo((int)ProjAiMode.Wander));
         });
     }
 

@@ -20,6 +20,8 @@ public class GoldenRefusalTests
 {
     private static readonly CatalogPlan Kitchen = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.KitchenSink()));
 
+    private static readonly CatalogPlan Collections = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.Collections()));
+
     [Test]
     public void Refusals()
     {
@@ -28,6 +30,14 @@ public class GoldenRefusalTests
         Codec(cases, "varu-over-32-bits", new CatalogCodec { Kind = CodecKind.Varu }, [0xFF, 0xFF, 0xFF, 0xFF, 0x10]);
         Codec(cases, "varu-six-bytes", new CatalogCodec { Kind = CodecKind.Varu }, [0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
         Codec(cases, "varu-truncated", new CatalogCodec { Kind = CodecKind.Varu }, [0x80]);
+        // W32: a tenth byte above 0x01 carries bits past the 64th; an eleventh byte is past any 64-bit value.
+        Codec(cases, "varu64-tenth-byte-0x02", new CatalogCodec { Kind = CodecKind.Varu64 }, [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x02]);
+        Codec(cases, "varu64-eleven-bytes", new CatalogCodec { Kind = CodecKind.Varu64 },
+            [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00]);
+        Codec(cases, "vari64-tenth-byte-0x7f", new CatalogCodec { Kind = CodecKind.Vari64 },
+            [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        Codec(cases, "u64-truncated", new CatalogCodec { Kind = CodecKind.U64 }, [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]);
+        Codec(cases, "f64-x3-truncated", new CatalogCodec { Kind = CodecKind.F64, Count = 3 }, new byte[20]);
         Codec(cases, "u32-truncated", new CatalogCodec { Kind = CodecKind.U32 }, [0x01, 0x02]);
         Codec(cases, "bytes-truncated", new CatalogCodec { Kind = CodecKind.Bytes, N = 4 }, [0x01, 0x02]);
         Codec(cases, "str-over-cap", new CatalogCodec { Kind = CodecKind.Str, MaxBytes = 4 }, [0x05, 0x31, 0x32, 0x33, 0x34, 0x35]);
@@ -64,6 +74,14 @@ public class GoldenRefusalTests
         Tick(cases, "period-truncated", [MessageTypes.Tick, 0x70, 0x11, 0x01, 0x00, (byte)TickFlags.Period, 0x01, 0x02]);
         byte[] emptyLedger = [BlockTypes.Entities, 0x05, ledger, 0x00, 0x00, 0x00, 0x00];
         Tick(cases, "entities-block-twice-for-one-archetype", [MessageTypes.Tick, 0x70, 0x11, 0x01, 0x00, 0x00, .. emptyLedger, .. emptyLedger]);
+
+        // W34, against catalog-coll: a state record of Locker's one group, whose body opens with the items collection (total, sent).
+        var locker = (byte)Collections.ArchetypeByName("Locker").Idx;
+        Tick(cases, "coll-sent-over-total", Block(BlockTypes.Entities, locker, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02, 0x00), catalog: "catalog-coll");
+        Tick(cases, "coll-sent-over-max-count", Block(BlockTypes.Entities, locker, 0x00, 0x00, 0x01, 0x01, 0x01, 0x05, 0x05, 0x00),
+            catalog: "catalog-coll");
+        Tick(cases, "coll-element-truncated", Block(BlockTypes.Entities, locker, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x23),
+            catalog: "catalog-coll");
 
         // typhon.3 (12-realms § 5.2): a REALM only as the first block of a RESET frame, with a valid frame; nothing positioned while no realm is held.
         byte[] realm = Realm(CatalogSamples.KitchenFrame);
@@ -151,13 +169,16 @@ public class GoldenRefusalTests
         });
     }
 
-    private static void Tick(JsonArray cases, string name, byte[] bytes, ushort expected = CloseCodes.MalformedPayload, bool held = true)
+    // A tick against catalog-kitchen-sink unless the case names another catalog — which its JSON then carries, for a client to decode it against.
+    private static void Tick(JsonArray cases, string name, byte[] bytes, ushort expected = CloseCodes.MalformedPayload, bool held = true,
+        string catalog = null)
     {
+        var plan = catalog == null ? Kitchen : Collections;
         var code = Refusal(name, bytes, b =>
         {
             var sink = new RecordingSink();
             var frame = held ? CatalogSamples.KitchenFrame : null;
-            TickReader.Read(b, Kitchen, ref frame, ref sink);
+            TickReader.Read(b, plan, ref frame, ref sink);
         });
 
         Assert.That(code, Is.EqualTo(expected), name);
@@ -165,6 +186,11 @@ public class GoldenRefusalTests
         if (!held)
         {
             json["held"] = false;
+        }
+
+        if (catalog != null)
+        {
+            json["catalog"] = catalog;
         }
 
         cases.Add(json);

@@ -1,4 +1,15 @@
-import { allocateField, isNumericKind, MOTION_CHANGE_BIT, type ArchetypeSchema, type FieldArray } from './schema.js';
+import {
+  allocateField,
+  allocateInteger64Field,
+  isInteger64Kind,
+  isNumericKind,
+  MOTION_CHANGE_BIT,
+  type ArchetypeSchema,
+  type FieldArray,
+  type Integer64FieldArray,
+} from './schema.js';
+import type { FieldPlan } from '../protocol/catalog.js';
+import { CollectionValue } from './collection-value.js';
 
 /**
  * The largest render delay the store's motion ring is sized for, by default: the `Clock`'s own default `maxDelayMs`
@@ -123,8 +134,12 @@ export class ArchetypeStore {
   leftCount = 0;
 
   private numeric: (FieldArray | null)[] = [];
+  private integers: (Integer64FieldArray | null)[] = [];
+  /** Per 64-bit field, a `Uint32Array` over its column's buffer: the decoder's word path, which allocates no bigint. */
+  private integerWords: (Uint32Array | null)[] = [];
   private texts: (string[] | null)[] = [];
   private bytes: (Uint8Array[] | null)[] = [];
+  private collections: ((CollectionValue | null)[] | null)[] = [];
   private readonly fieldIndexByName: Map<string, number>;
 
   /** The start tick of {@link resetMotion} and {@link pushSegment}, handed on as a one-slot array. */
@@ -152,7 +167,9 @@ export class ArchetypeStore {
     this.motionSegmentsOffset = motionSegmentsOffset(segmentHistory);
     this.motionRecordBytes = this.hasPosition ? motionRecordBytes(this.dims, segmentHistory) : 0;
     this.motionStride = 2 * this.dims;
-    this.fieldComponents = schema.fields.map((f) => (isNumericKind(f.kind) ? (f.components ?? 1) : 0));
+    this.fieldComponents = schema.fields.map((f) =>
+      isNumericKind(f.kind) || isInteger64Kind(f.kind) ? (f.components ?? 1) : 0,
+    );
     this.fieldIndexByName = new Map(schema.fields.map((f, i) => [f.name, i]));
     this.grow(Math.max(1, initialCapacity));
   }
@@ -180,6 +197,34 @@ export class ArchetypeStore {
     return array;
   }
 
+  /**
+   * The column holding a 64-bit integer field (W32), by name: `capacity × components` values, a `BigUint64Array` for
+   * `u64`/`varu64` and a `BigInt64Array` for `i64`/`vari64`. Reading an element makes a bigint; re-read the column after
+   * {@link version} changes.
+   */
+  field64(name: string): Integer64FieldArray {
+    const index = this.fieldIndexByName.get(name);
+    const array = index === undefined ? undefined : this.integers[index];
+    if (array === undefined || array === null) {
+      throw new Error(`Archetype '${this.schema.name}' has no 64-bit field '${name}'`);
+    }
+
+    return array;
+  }
+
+  /**
+   * A 64-bit field's column as 32-bit words over the same buffer — element `i`'s low word at `2i + LOW_WORD`, its high
+   * word at `2i + HIGH_WORD` (see `int64.ts`): the allocation-free write path a decoder uses.
+   */
+  wordsAt(index: number): Uint32Array {
+    const array = this.integerWords[index];
+    if (array === undefined || array === null) {
+      throw new Error(`Archetype '${this.schema.name}' has no 64-bit field #${index}`);
+    }
+
+    return array;
+  }
+
   /** The strings of a text field, one per slot. */
   textAt(index: number): string[] {
     const array = this.texts[index];
@@ -188,6 +233,25 @@ export class ArchetypeStore {
     }
 
     return array;
+  }
+
+  /**
+   * The collection a slot holds for a field (W34), made on its first one and kept: an entity's list is overwritten whole
+   * each time it arrives, into the columns it already has.
+   */
+  collectionAt(index: number, slot: number, field: FieldPlan): CollectionValue {
+    const column = this.collections[index];
+    if (column === undefined || column === null) {
+      throw new Error(`Archetype '${this.schema.name}' has no collection field #${index}`);
+    }
+
+    return (column[slot] ??= new CollectionValue(field));
+  }
+
+  /** The collection a slot holds for a field, by name, or `undefined` before its first one. */
+  collection(name: string, slot: number): CollectionValue | undefined {
+    const index = this.fieldIndexByName.get(name);
+    return index === undefined ? undefined : (this.collections[index]?.[slot] ?? undefined);
   }
 
   /** The byte arrays of a bytes field, one per slot. */
@@ -245,6 +309,12 @@ export class ArchetypeStore {
         } else {
           array.fill(0, slot * components, (slot + 1) * components);
         }
+      } else if (this.integerWords[f] != null) {
+        const components = this.fieldComponents[f]!;
+        this.integerWords[f]!.fill(0, 2 * slot * components, 2 * (slot + 1) * components);
+      } else if (this.collections[f] != null) {
+        // Kept, emptied: its columns are the next occupant's to reuse.
+        this.collections[f]![slot]?.reset();
       } else {
         const text = this.texts[f];
         if (text !== null && text !== undefined) {
@@ -455,11 +525,30 @@ export class ArchetypeStore {
 
       return next;
     });
+    this.integers = this.schema.fields.map((field, i) => {
+      const kind = field.kind;
+      if (!isInteger64Kind(kind)) {
+        return null;
+      }
+
+      const next = allocateInteger64Field(kind, newCapacity * this.fieldComponents[i]!);
+      const previous = this.integers[i];
+      if (previous !== undefined && previous !== null) {
+        // Bits, not values: a BigUint64Array and a BigInt64Array of one kind each, so a word copy is exact either way.
+        new Uint32Array(next.buffer).set(new Uint32Array(previous.buffer));
+      }
+
+      return next;
+    });
+    this.integerWords = this.integers.map((column) => (column === null ? null : new Uint32Array(column.buffer)));
     this.texts = this.schema.fields.map((field, i) =>
       field.kind === 'text' ? grownList(this.texts[i] ?? [], newCapacity, '') : null,
     );
     this.bytes = this.schema.fields.map((field, i) =>
       field.kind === 'bytes' ? grownList(this.bytes[i] ?? [], newCapacity, EMPTY_BYTES) : null,
+    );
+    this.collections = this.schema.fields.map((field, i) =>
+      field.kind === 'coll' ? grownList<CollectionValue | null>(this.collections[i] ?? [], newCapacity, null) : null,
     );
 
     this.entered = grown(new Uint32Array(newCapacity), this.entered);

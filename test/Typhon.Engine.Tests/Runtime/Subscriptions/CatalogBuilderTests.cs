@@ -476,7 +476,7 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
                 .Motion(ProjCreature.Bounds, m => m.Tolerance(0.05).Teleport(ProjectionTestSchema.MaxSpeedMps))
                 .OnEnter(ProjCreature.Ai, x => x.Template, Codec.U8, name: "template")
                 .Field(ProjCreature.Ai, x => x.Mode, Codec.Enum<ProjAiMode>(bits: 3), name: "mode")
-                .Field(ProjCreature.Ai, x => x.Alerted, Codec.Bool, name: "alerted")
+                .Field(ProjCreature.Ai, x => x.Alerted, Codec.Bool.Saturate(), name: "alerted")
                 .Field(ProjCreature.Ai, x => x.Level, Codec.U16, name: "rank", group: "vitals")
                 .Fraction(ProjCreature.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals"));
             ProjectionTestSchema.DeclarePlayer(subs);
@@ -518,7 +518,7 @@ class CatalogBuilderTests : TestBase<CatalogBuilderTests>
 
         var ex = Assert.Throws<InvalidOperationException>(() => Build(dbe, subs => subs.Archetype<ProjCreature>(a => a
             .Motion(ProjCreature.Bounds, m => m.Teleport(ProjectionTestSchema.MaxSpeedMps))
-            .Field(ProjCreature.Ai, x => x.Template, Codec.Enum<SparseMode>(bits: 4), name: "mode"))));
+            .Field(ProjCreature.Ai, x => x.Template, Codec.Enum<SparseMode>(bits: 4).Saturate(), name: "mode"))));
 
         Assert.Multiple(() =>
         {

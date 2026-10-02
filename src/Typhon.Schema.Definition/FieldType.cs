@@ -106,7 +106,7 @@ public static class DatabaseSchemaExtensions
     /// <summary>
     /// Maps a CLR type to its schema <see cref="FieldType"/>, resolving primitives, the built-in value types (points, quaternions, bounding volumes, strings),
     /// nested components (types marked with <see cref="ComponentAttribute"/>), <see cref="ComponentCollection{T}"/> collections, and <c>EntityLink&lt;T&gt;</c>
-    /// foreign keys (indexed as <see cref="FieldType.Long"/>).
+    /// foreign keys and <c>EntityId</c> references (both as <see cref="FieldType.Long"/>).
     /// </summary>
     /// <param name="t">The CLR type to map.</param>
     /// <returns>
@@ -176,15 +176,18 @@ public static class DatabaseSchemaExtensions
             return (FieldType.Long, FieldType.None);
         }
 
-        // A bare EntityId, same 8 bytes, also as Long. By full name for the same reason as above — EntityId lives in Typhon.Engine, which this assembly
-        // does not reference.
+        // A bare EntityId, the untyped reference EntityLink<T> wraps: the same eight bytes, so the same Long. By full name for the same reason as above —
+        // EntityId lives in Typhon.Engine, which this assembly does not reference.
         //
-        // WHY BOTH EXIST, because the obvious reading is that EntityLink<T> supersedes this. EntityLink<T> carries the target archetype in its type, which
-        // is what makes it a checkable foreign key, and it is the right choice whenever the target archetype is known. It cannot express a POLYMORPHIC
-        // reference, and those are real: the SWG demo's PlayerSession.Target resolves whatever netId a client sent and classifies the archetype afterwards,
-        // deliberately, so that "attack that cantina" produces a clean refusal rather than a type error. Before this mapping existed such a field returned
-        // None and was dropped from the schema without a word — present in the struct's bytes and readable from C#, but with no field id, so invisible to
-        // the Workbench, un-indexable, and absent from anything schema-driven. Three fields in the demo were in that state.
+        // Added independently on two branches, which is worth noting: the exact-wire work needed it because an unmapped EntityId field was dropped from its
+        // schema and replication's entityRef could not read it (subscriptions 13 § 5), and #1099 needed it because the same silence hid three fields in the
+        // SWG demo — present in the struct's bytes and readable from C#, but with no field id, so invisible to the Workbench, un-indexable, and absent from
+        // everything schema-driven.
+        //
+        // WHY BOTH THIS AND EntityLink<T> EXIST, because the obvious reading is that the typed one supersedes the bare one. EntityLink<T> carries the target
+        // archetype in its type, which is what makes it a checkable foreign key, and it is the right choice whenever the target archetype is known. It cannot
+        // express a POLYMORPHIC reference, and those are real: the demo's PlayerSession.Target resolves whatever netId a client sent and classifies the
+        // archetype afterwards, deliberately, so that "attack that cantina" produces a clean refusal rather than a type error.
         if (t.FullName == "Typhon.Engine.EntityId")
         {
             return (FieldType.Long, FieldType.None);

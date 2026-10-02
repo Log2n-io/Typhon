@@ -61,6 +61,18 @@ internal static class GoldenFiles
         return array;
     }
 
+    // A 64-bit integer (W32) as its bit pattern, the same 16 hex digits a double's bits take: the codec says which one a field holds.
+    internal static JsonArray Bits64(ReadOnlySpan<ulong> values)
+    {
+        var array = new JsonArray();
+        foreach (var v in values)
+        {
+            array.Add(v.ToString("x16", CultureInfo.InvariantCulture));
+        }
+
+        return array;
+    }
+
     internal static string Hex(ReadOnlySpan<byte> bytes) => Convert.ToHexString(bytes).ToLowerInvariant();
 
     private static string Directory()
@@ -101,6 +113,8 @@ internal sealed class EventRecorder(WorldStore store) : IEventHandler
             known[field.Name] = store.TryLocate((uint)components[0], out _, out _);
         }
     }
+
+    public void Integer64(FieldPlan field, scoped ReadOnlySpan<ulong> components) => _fields[field.Name] = GoldenFiles.Bits64(components);
 
     public void Text(FieldPlan field, scoped ReadOnlySpan<byte> utf8) => _fields[field.Name] = GoldenFiles.Hex(utf8);
 
@@ -171,6 +185,7 @@ internal static class StreamSnapshot
                 JsonNode value = f.ValueKind switch
                 {
                     FieldValueKind.Number when store.Self.Numbers[f.Ordinal] != null => GoldenFiles.Bits(store.Self.Numbers[f.Ordinal]),
+                    FieldValueKind.Integer64 when store.Self.Integers[f.Ordinal] != null => GoldenFiles.Bits64(store.Self.Integers[f.Ordinal]),
                     FieldValueKind.Text when store.Self.Texts[f.Ordinal] != null => GoldenFiles.Hex(Encoding.UTF8.GetBytes(store.Self.Texts[f.Ordinal])),
                     FieldValueKind.Bytes when store.Self.Bytes[f.Ordinal] != null => GoldenFiles.Hex(store.Self.Bytes[f.Ordinal]),
                     _ => null,
@@ -247,6 +262,7 @@ internal static class StreamSnapshot
     private static JsonNode FieldJson(ArchetypeStore a, FieldPlan f, int slot) => f.ValueKind switch
     {
         FieldValueKind.Number => GoldenFiles.Bits(a.Numbers[f.Ordinal].AsSpan(slot * f.Components, f.Components)),
+        FieldValueKind.Integer64 => GoldenFiles.Bits64(a.Integers[f.Ordinal].AsSpan(slot * f.Components, f.Components)),
         FieldValueKind.Text => a.Texts[f.Ordinal][slot] == null ? null : GoldenFiles.Hex(Encoding.UTF8.GetBytes(a.Texts[f.Ordinal][slot])),
         FieldValueKind.Bytes => a.BytesColumns[f.Ordinal][slot] == null ? null : GoldenFiles.Hex(a.BytesColumns[f.Ordinal][slot]),
         _ => null,

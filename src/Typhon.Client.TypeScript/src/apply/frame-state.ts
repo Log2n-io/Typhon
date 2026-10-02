@@ -6,6 +6,9 @@ import {
   type MessagePlan,
   type MetricPlan,
 } from '../protocol/catalog.js';
+import { isSigned64 } from '../protocol/codec-kinds.js';
+import { CollectionValue } from '../store/collection-value.js';
+import { bigintOf } from '../protocol/int64.js';
 
 /*
  * The per-frame and per-session state a `TICK` carries besides entities: the controlled entity's owner values (`SELF`),
@@ -59,12 +62,25 @@ export class SelfState {
 
   /** Per owner field (by `FieldPlan.index`): its numbers, `components` wide; empty for text and bytes. */
   numbers: Float64Array[] = [];
+  /**
+   * Per owner field: a 64-bit integer field's lo/hi words (W32), `2 × components` wide; empty for other kinds. `bigintOf`
+   * makes a value of a pair.
+   */
+  words: Uint32Array[] = [];
   /** Per owner field: its text, or `null` until received. */
   texts: (string | null)[] = [];
   /** Per owner field: its bytes, or `null` until received. */
   bytes: (Uint8Array | null)[] = [];
   /** Per owner field: 1 once a value has been received for the current controlled entity. */
   present: Uint8Array = new Uint8Array(0);
+  /** Per owner field: its collection (W34), or `null` until received or when the field is not one. */
+  collections: (CollectionValue | null)[] = [];
+
+  /** The collection of an owner field, made on its first arrival. */
+  collectionAt(field: FieldPlan): CollectionValue {
+    this.present[field.index] = 1;
+    return (this.collections[field.index] ??= new CollectionValue(field));
+  }
 
   /**
    * A `SELF` block begins. A different controlled entity starts from no values: SUB-11 then sends every group.
@@ -84,15 +100,19 @@ export class SelfState {
 
       this.archetype = null;
       this.numbers = [];
+      this.words = [];
       this.texts = [];
       this.bytes = [];
+      this.collections = [];
       this.present = new Uint8Array(0);
     } else if (this.archetype !== archetype || this.netId !== netId) {
       const fields = archetype.ownerFields;
       this.archetype = archetype;
       this.numbers = fields.map((f) => new Float64Array(f.valueKind === ValueKind.Number ? f.components : 0));
+      this.words = fields.map((f) => new Uint32Array(f.valueKind === ValueKind.Integer64 ? 2 * f.components : 0));
       this.texts = fields.map(() => null);
       this.bytes = fields.map(() => null);
+      this.collections = fields.map(() => null);
       this.present = new Uint8Array(fields.length);
     }
 
@@ -115,8 +135,10 @@ export class SelfState {
     this.received = false;
     this.ownerMask = 0;
     this.numbers = [];
+    this.words = [];
     this.texts = [];
     this.bytes = [];
+    this.collections = [];
     this.present = new Uint8Array(0);
     this.version++;
   }
@@ -128,6 +150,26 @@ export class SelfState {
     }
 
     this.present[field.index] = 1;
+  }
+
+  setInteger64(field: FieldPlan, words: Uint32Array): void {
+    const target = this.words[field.index]!;
+    for (let i = 0; i < target.length; i++) {
+      target[i] = words[i]!;
+    }
+
+    this.present[field.index] = 1;
+  }
+
+  /** A 64-bit owner field's component (W32) by name, or `undefined` when it was never received. Allocates a bigint. */
+  integer64(name: string, component = 0): bigint | undefined {
+    const index = this.archetype?.ownerFields.findIndex((f) => f.name === name) ?? -1;
+    if (index < 0 || this.present[index] !== 1 || this.words[index]!.length === 0) {
+      return undefined;
+    }
+
+    const w = this.words[index]!;
+    return bigintOf(w[2 * component]!, w[2 * component + 1]!, isSigned64(this.archetype!.ownerFields[index]!.kind));
   }
 
   setText(field: FieldPlan, value: string): void {
@@ -159,6 +201,8 @@ export class EventRecord {
   readonly offsets: Int32Array;
   /** Numeric fields' components and lists' flattened elements. */
   readonly numbers: Float64Array;
+  /** 64-bit integer fields' components as lo/hi words (W32), from `2 × offsets[i]`. */
+  readonly words: Uint32Array;
   /** Per body field: a list's element count, or a bytes field's length. */
   readonly counts: Int32Array;
   /** Per body field: its text; empty for other kinds. */
@@ -180,12 +224,13 @@ export class EventRecord {
       size +=
         f.valueKind === ValueKind.List
           ? f.maxCount * f.components
-          : f.valueKind === ValueKind.Number
+          : f.valueKind === ValueKind.Number || f.valueKind === ValueKind.Integer64
             ? f.components
             : 0;
     }
 
     this.numbers = new Float64Array(size);
+    this.words = new Uint32Array(2 * size);
     this.texts = fields.map(() => '');
     this.bytes = fields.map(() => EMPTY_BYTES);
   }
@@ -211,10 +256,28 @@ export class EventRecord {
     return this.type.body.fields.findIndex((f) => f.name === name);
   }
 
+  /** A 64-bit integer field's component (W32), by field name, or `undefined` for no such field. Allocates a bigint. */
+  integer64(name: string, component = 0): bigint | undefined {
+    const index = this.fieldIndex(name);
+    if (index < 0) {
+      return undefined;
+    }
+
+    const at = 2 * (this.offsets[index]! + component);
+    return bigintOf(this.words[at]!, this.words[at + 1]!, isSigned64(this.type.body.fields[index]!.kind));
+  }
+
   setNumber(field: FieldPlan, values: Float64Array): void {
     const at = this.offsets[field.index]!;
     for (let i = 0; i < field.components; i++) {
       this.numbers[at + i] = values[i]!;
+    }
+  }
+
+  setInteger64(field: FieldPlan, words: Uint32Array): void {
+    const at = 2 * this.offsets[field.index]!;
+    for (let i = 0; i < 2 * field.components; i++) {
+      this.words[at + i] = words[i]!;
     }
   }
 

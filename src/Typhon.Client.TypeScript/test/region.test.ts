@@ -199,6 +199,7 @@ describe('RegionSender', () => {
         list: (field, count, values) => {
           decoded[field.name] = Array.from(values.subarray(0, count * field.components));
         },
+        integer64: () => undefined,
         text: () => undefined,
         bytes: () => undefined,
       },

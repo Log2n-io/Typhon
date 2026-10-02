@@ -303,12 +303,33 @@ public static class CatalogSerializer
         return new CatalogOwner { Groups = groups, Fields = SortedArchetypeFields(owner.Fields, groups) };
     }
 
-    private static CatalogField[] SortedArchetypeFields(CatalogField[] fields, string[] sortedGroups) =>
-        Sorted(fields, (a, b) =>
+    private static CatalogField[] SortedArchetypeFields(CatalogField[] fields, string[] sortedGroups)
+    {
+        var sorted = Sorted(fields, (a, b) =>
         {
             var bySection = Section(a, sortedGroups).CompareTo(Section(b, sortedGroups));
             return bySection != 0 ? bySection : CompareWithinSection(a, b);
         });
+
+        // A collection's element is a section of its own (W34): its fields in wire order too.
+        for (var i = 0; i < sorted.Length; i++)
+        {
+            var f = sorted[i];
+            if (f.Codec.Kind == CodecKind.Coll)
+            {
+                sorted[i] = new CatalogField
+                {
+                    Name = f.Name, Group = f.Group, OnEnter = f.OnEnter, Enum = f.Enum, Smoothing = f.Smoothing, Shape = f.Shape,
+                    Codec = new CatalogCodec
+                    {
+                        Type = f.Codec.Type, MaxCount = f.Codec.MaxCount, Element = new CatalogElement { Fields = SortedMessageFields(f.Codec.Element.Fields) },
+                    },
+                };
+            }
+        }
+
+        return sorted;
+    }
 
     private static CatalogField[] SortedMessageFields(CatalogField[] fields) => Sorted(fields, static (a, b) => CompareWithinSection(a, b));
 

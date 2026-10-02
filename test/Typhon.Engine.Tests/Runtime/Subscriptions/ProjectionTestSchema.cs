@@ -67,7 +67,7 @@ struct ProjAi
 
     /// <summary>A flag, stored as a byte rather than a <c>bool</c>: a reflection-measured <c>bool</c> offset is refused outright (SCHEMA-07).</summary>
     [Field]
-    [Replicate(CodecKind.Bool, Name = "alerted")]
+    [Replicate(CodecKind.Bool, Name = "alerted", Saturate = true)]
     public byte Alerted;
 
     [Field]
@@ -100,7 +100,7 @@ struct ProjWallet
     public long Credits;
 
     [Field]
-    [Owner(CodecKind.Varu, Name = "items", Group = "bag")]
+    [Owner(CodecKind.Varu, Name = "items", Group = "bag", Saturate = true)]
     public int ItemCount;
 }
 
@@ -248,7 +248,7 @@ static class ProjectionTestSchema
             .Motion(ProjCreature.Bounds, m => m.Tolerance(0.05).Teleport(MaxSpeedMps))
             .OnEnter(ProjCreature.Ai, x => x.Template, Codec.U8, name: "template")
             .Field(ProjCreature.Ai, x => x.Mode, Codec.Enum<ProjAiMode>(bits: 3), name: "mode")
-            .Field(ProjCreature.Ai, x => x.Alerted, Codec.Bool, name: "alerted")
+            .Field(ProjCreature.Ai, x => x.Alerted, Codec.Bool.Saturate(), name: "alerted")
             .Field(ProjCreature.Ai, x => x.Level, Codec.U16, name: "level", group: "vitals")
             .Fraction(ProjCreature.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals"));
     }
@@ -259,7 +259,7 @@ static class ProjectionTestSchema
         subs.Archetype<ProjCreature>(a => a
             .Fraction(ProjCreature.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals")
             .Field(ProjCreature.Ai, x => x.Level, Codec.U16, name: "level", group: "vitals")
-            .Field(ProjCreature.Ai, x => x.Alerted, Codec.Bool, name: "alerted")
+            .Field(ProjCreature.Ai, x => x.Alerted, Codec.Bool.Saturate(), name: "alerted")
             .Field(ProjCreature.Ai, x => x.Mode, Codec.Enum<ProjAiMode>(bits: 3), name: "mode")
             .OnEnter(ProjCreature.Ai, x => x.Template, Codec.U8, name: "template")
             .Motion(ProjCreature.Bounds, m => m.Tolerance(0.05).Teleport(MaxSpeedMps)));
@@ -273,7 +273,7 @@ static class ProjectionTestSchema
             .Fraction(ProjPlayer.Vitals, v => v.Health, v => v.MaxHealth, bits: 8, name: "hp", group: "vitals")
             .Owner(o => o
                 .Field(ProjPlayer.Wallet, w => w.Credits, Codec.VarUInt.Saturate(), name: "credits")
-                .Field(ProjPlayer.Wallet, w => w.ItemCount, Codec.VarUInt, name: "items", group: "bag")));
+                .Field(ProjPlayer.Wallet, w => w.ItemCount, Codec.VarUInt.Saturate(), name: "items", group: "bag")));
     }
 
     /// <summary>A static archetype: sent once on enter, never updated, so it has no change groups at all.</summary>
@@ -299,7 +299,7 @@ static class ProjectionTestSchema
             .Field(ProjFlyer.Ai, x => x.Template, Codec.VarUInt, name: "aaa")
             .Field(ProjFlyer.Ai, x => x.Alerted, Codec.VarUInt, name: "bbb")
             .Field(ProjFlyer.Ai, x => x.Level, Codec.VarUInt, name: "ccc")
-            .Field(ProjFlyer.Ai, x => x.ThinkCooldown, Codec.VarUInt, name: "ddd"));
+            .Field(ProjFlyer.Ai, x => x.ThinkCooldown, Codec.VarInt, name: "ddd"));
 
         return ProjectionCompiler.Compile(subs, dbe, TickPeriodSeconds, largestTickMultiplier)[0];
     }

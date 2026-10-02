@@ -95,8 +95,8 @@ class ProjectionReadsClusterLayoutTests : TestBase<ProjectionReadsClusterLayoutT
             tx.Commit();
         }
 
-        var codes = new uint[64];
-        var expected = new uint[64];
+        var codes = new ulong[64];
+        var expected = new ulong[64];
         var visited = 0;
         using (var tx = dbe.CreateQuickTransaction())
         {
@@ -176,11 +176,10 @@ class ProjectionReadsClusterLayoutTests : TestBase<ProjectionReadsClusterLayoutT
             RatioOffsetInComponent = -1,
             SourceType = ProjectionSourceType.UInt32,
             CodecKind = CodecKind.U32,
-            CodeMin = 0d,
-            CodeMax = uint.MaxValue,
+            Path = ColumnPath.ExactInteger,
         };
 
-        var codes = new uint[64];
+        var codes = new ulong[64];
         var column = new ProjectionColumn(backing.AsSpan(0, slotCount * stride), stride, 0);
         var covered = column.SlotCount;
         ProjectionColumnWalk.Quantize(field, column, ulong.MaxValue, codes);
@@ -190,7 +189,7 @@ class ProjectionReadsClusterLayoutTests : TestBase<ProjectionReadsClusterLayoutT
             Assert.That(covered, Is.EqualTo(slotCount));
             for (var slot = 0; slot < slotCount; slot++)
             {
-                Assert.That(codes[slot], Is.EqualTo((uint)(slot + 1)), $"slot {slot} is inside the column and is read");
+                Assert.That(codes[slot], Is.EqualTo((ulong)(slot + 1)), $"slot {slot} is inside the column and is read");
             }
 
             for (var slot = slotCount; slot < codes.Length; slot++)
@@ -228,9 +227,10 @@ class ProjectionReadsClusterLayoutTests : TestBase<ProjectionReadsClusterLayoutT
             SourceType = ProjectionSourceType.Int32,
             CodecKind = CodecKind.Unorm,
             CodecBits = 8,
+            Path = ColumnPath.Quantizing,
         };
 
-        var codes = new uint[64];
+        var codes = new ulong[64];
         var column = new ProjectionColumn(backing.AsSpan(0, slotCount * stride), stride, 0);
         ProjectionColumnWalk.Quantize(field, column, ulong.MaxValue, codes);
 
@@ -351,7 +351,7 @@ class ProjectionReadsClusterLayoutTests : TestBase<ProjectionReadsClusterLayoutT
     /// Fills <paramref name="expected"/> from the cluster's own read-only spans. A local function would be shorter; a <c>ReadOnlySpan&lt;T&gt;</c> cannot be
     /// captured by a lambda, and reading the values any other way would stop the comparison being against <c>GetReadOnlySpan</c>.
     /// </summary>
-    private static void Expect(ulong slots, uint[] expected, ReadOnlySpan<ProjAi> ai, ReadOnlySpan<ProjVitals> vitals, string name)
+    private static void Expect(ulong slots, ulong[] expected, ReadOnlySpan<ProjAi> ai, ReadOnlySpan<ProjVitals> vitals, string name)
     {
         Array.Clear(expected);
         var bits = slots;
@@ -362,7 +362,7 @@ class ProjectionReadsClusterLayoutTests : TestBase<ProjectionReadsClusterLayoutT
             expected[slot] = name switch
             {
                 "level" => ai[slot].Level,
-                "mode" => (uint)ai[slot].Mode,
+                "mode" => (ulong)ai[slot].Mode,
                 "alerted" => ai[slot].Alerted,
                 "template" => ai[slot].Template,
                 "hp" => WireMath.EncodeUnorm((double)vitals[slot].Health / vitals[slot].MaxHealth, 8),
@@ -371,8 +371,8 @@ class ProjectionReadsClusterLayoutTests : TestBase<ProjectionReadsClusterLayoutT
         }
     }
 
-    private static void AssertColumn(CompiledProjectionPlan plan, string name, ReadOnlySpan<byte> componentColumn, ulong slots, uint[] codes,
-        uint[] expected)
+    private static void AssertColumn(CompiledProjectionPlan plan, string name, ReadOnlySpan<byte> componentColumn, ulong slots, ulong[] codes,
+        ulong[] expected)
     {
         var field = ProjectionTestSchema.FieldNamed(plan.Fields, name);
         Assert.That(field.Name, Is.EqualTo(name), $"the plan holds a field named '{name}'");

@@ -1,0 +1,99 @@
+{
+  "description": "vari64 (W32): zigzag64 at small magnitudes, \u00B1(2\u2075\u00B3 \u002B 1), and both extremes (ten bytes each).",
+  "codec": {
+    "t": "vari64"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 1,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "ffffffffffffffff"
+      ],
+      "offset": 1,
+      "length": 1,
+      "decoded": [
+        "ffffffffffffffff"
+      ]
+    },
+    {
+      "input": [
+        "0000000000000001"
+      ],
+      "offset": 2,
+      "length": 1,
+      "decoded": [
+        "0000000000000001"
+      ]
+    },
+    {
+      "input": [
+        "ffffffffffffffc0"
+      ],
+      "offset": 3,
+      "length": 1,
+      "decoded": [
+        "ffffffffffffffc0"
+      ]
+    },
+    {
+      "input": [
+        "0000000000000040"
+      ],
+      "offset": 4,
+      "length": 2,
+      "decoded": [
+        "0000000000000040"
+      ]
+    },
+    {
+      "input": [
+        "0020000000000001"
+      ],
+      "offset": 6,
+      "length": 8,
+      "decoded": [
+        "0020000000000001"
+      ]
+    },
+    {
+      "input": [
+        "ffdfffffffffffff"
+      ],
+      "offset": 14,
+      "length": 8,
+      "decoded": [
+        "ffdfffffffffffff"
+      ]
+    },
+    {
+      "input": [
+        "8000000000000000"
+      ],
+      "offset": 22,
+      "length": 10,
+      "decoded": [
+        "8000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "7fffffffffffffff"
+      ],
+      "offset": 32,
+      "length": 10,
+      "decoded": [
+        "7fffffffffffffff"
+      ]
+    }
+  ]
+}

@@ -24,6 +24,39 @@ internal static class MessageText
 {
     private static readonly ConcurrentDictionary<Type, int?> Capacities = new();
 
+    /// <summary>
+    /// The longest prefix of <paramref name="utf8"/> that is at most <paramref name="maxBytes"/> long and valid UTF-8, ending on a code point.
+    /// </summary>
+    /// <remarks>
+    /// A string field's bytes are the application's, and its own setter truncates by byte: a multi-byte character cut in two, or bytes that were never
+    /// UTF-8, would be refused by every strict decoder. Sending the valid prefix keeps the record — and the frame — decodable; the caller counts the cut.
+    /// </remarks>
+    /// <param name="utf8">The stored text, up to its terminator.</param>
+    /// <param name="maxBytes">The codec's cap.</param>
+    /// <returns>The prefix to send.</returns>
+    public static ReadOnlySpan<byte> ValidPrefix(ReadOnlySpan<byte> utf8, int maxBytes)
+    {
+        var limited = utf8.Length > maxBytes ? utf8[..maxBytes] : utf8;
+        var at = 0;
+        while (at < limited.Length)
+        {
+            if (limited[at] < 0x80)
+            {
+                at++;
+                continue;
+            }
+
+            if (System.Text.Rune.DecodeFromUtf8(limited[at..], out _, out var consumed) != System.Buffers.OperationStatus.Done)
+            {
+                break;
+            }
+
+            at += consumed;
+        }
+
+        return limited[..at];
+    }
+
     /// <summary>The capacity of an inline text type, or <see langword="null"/> when the type is not one.</summary>
     /// <param name="type">A message field's CLR type.</param>
     /// <returns>Its capacity in UTF-8 bytes, or <see langword="null"/>.</returns>

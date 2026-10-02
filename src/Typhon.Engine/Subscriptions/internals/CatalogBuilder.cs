@@ -132,10 +132,16 @@ internal static class CatalogBuilder
     private static CatalogField[] BuildFields(string archetype, CompiledField[] fields, CompiledGroup[] groups, Dictionary<string, ProjectedField> declared,
         Dictionary<string, string[]> enums)
     {
-        var result = new CatalogField[fields.Length];
+        // One catalog field per declared field: a count field compiled to one sub-field per component (13 § 4), and the catalog names it once, at its
+        // first component, with its whole codec.
+        var result = new List<CatalogField>(fields.Length);
         for (var i = 0; i < fields.Length; i++)
         {
             ref readonly var field = ref fields[i];
+            if (field.Component > 0)
+            {
+                continue;
+            }
 
             // GroupBit is -1 for section 0, which is the onEnter section — and for a Static archetype, whose fields the compiler folds into it because a
             // record that is sent once and never updated belongs to no change group (W15).
@@ -147,17 +153,24 @@ internal static class CatalogBuilder
                     "The catalog names a field's group, so a bit with no group behind it would describe a mask bit no client could read.");
             }
 
-            result[i] = new CatalogField
+            // A collection's element fields name their enums in its codec (W34): their value sets join the catalog's.
+            foreach (var element in field.Collection?.Fields ?? [])
+            {
+                RegisterEnum(enums, element.EnumType, $"archetype '{archetype}' collection '{field.Name}' element field '{element.Name}'");
+            }
+
+            result.Add(new CatalogField
             {
                 Name = field.Name,
                 Codec = field.Codec,
                 Group = onEnter ? null : groups[field.GroupBit].Name,
                 OnEnter = onEnter,
                 Enum = EnumOf(declared, field.Name, enums, $"archetype '{archetype}' field '{field.Name}'"),
-            };
+                Shape = field.Shape,
+            });
         }
 
-        return result;
+        return result.ToArray();
     }
 
     private static CatalogPosition BuildPosition(CompiledPosition position)
@@ -390,6 +403,7 @@ internal static class CatalogBuilder
                 Name = field.Name,
                 Codec = field.Codec.Catalog,
                 Enum = RegisterEnum(enums, enumType, $"{where} field '{field.Name}'"),
+                Shape = field.Shape,
             };
         }
 

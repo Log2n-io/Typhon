@@ -14,12 +14,16 @@ import {
   decodeVec,
   decodeVel,
   FieldPlan,
+  hex64,
   isPacked,
+  isSigned64,
+  readInteger64,
   readNumber,
   readSection,
   SectionPlan,
   WireReader,
   WireWriter,
+  writeInteger64,
   writeNumber,
   writeSection,
   type CatalogCodec,
@@ -135,7 +139,8 @@ describe('golden codec vectors', () => {
     const covered = new Set(names.map((name) => codecKindOf((goldenJson(name) as CodecVector).codec.t)));
     const missing = CODEC_TOKENS.filter((_, kind) => {
       const k = kind as CodecKind;
-      return k !== CodecKind.Unknown && !isPacked(k) && !covered.has(k);
+      // A collection is a section of fields, not one value: tick-coll and the wire refusals are its vectors (W34).
+      return k !== CodecKind.Unknown && k !== CodecKind.Coll && !isPacked(k) && !covered.has(k);
     });
     expect(missing).toEqual([]);
   });
@@ -183,12 +188,35 @@ describe('golden codec vectors', () => {
             }
 
             break;
+          case CodecKind.U64:
+          case CodecKind.I64:
+          case CodecKind.Varu64:
+          case CodecKind.Vari64: {
+            // W32: bit patterns, never a double. Encoded from bigints, as an application holds 64-bit values.
+            const words = new Uint32Array(2 * plan.components);
+            readInteger64(reader, plan, words, 0);
+            const decoded = Array.from({ length: plan.components }, (_, i) => hex64(words[2 * i]!, words[2 * i + 1]!));
+            expect(decoded, `${at}: decoded bits`).toEqual(c.decoded);
+            if (c.input === undefined) {
+              encoded = false;
+            } else {
+              const signed = isSigned64(plan.kind);
+              writeInteger64(
+                writer,
+                plan,
+                c.input.map((h) => (signed ? BigInt.asIntN(64, BigInt(`0x${h}`)) : BigInt(`0x${h}`))),
+              );
+            }
+
+            break;
+          }
           default: {
-            const out = new Float64Array(4);
+            const out = new Float64Array(16);
             readNumber(reader, plan, vector.frameTick, out, 0, frame);
             expect(bitsOf(out, plan.components), `${at}: decoded bits`).toEqual(c.decoded);
-            const viaMath = new Float64Array(4);
-            if (decodeWithMath(range, plan, vector.frameTick, viaMath, frame)) {
+            const viaMath = new Float64Array(16);
+            // math.ts decodes one value: a count's components are held to the vector by readNumber above.
+            if (plan.count === 1 && decodeWithMath(range, plan, vector.frameTick, viaMath, frame)) {
               expect(bitsOf(viaMath, plan.components), `${at}: math.ts decoder bits`).toEqual(c.decoded);
             }
 

@@ -295,6 +295,174 @@ public class GoldenTickTests
         return record;
     }
 
+    /// <summary>
+    /// The exact wire end to end (W32, W33): a TICK against catalog-exact whose entity, owner and event fields carry the 64-bit integers past 2⁵³, f64 at
+    /// its edges, and count shapes — what no double-only decoder can render.
+    /// </summary>
+    [Test]
+    public void Exact()
+    {
+        var plan = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.Exact()));
+        var vault = plan.ArchetypeByName("Vault");
+        var buffer = new byte[4096];
+        var w = new WireWriter(buffer);
+        TickWriter.WriteHeader(ref w, Tick, TickFlags.ViewComplete | TickFlags.Reset);
+
+        var first = VaultValues(long.MinValue, (1UL << 53) + 1, long.MinValue, double.Epsilon, ulong.MaxValue, true);
+        var second = VaultValues(-1, ulong.MaxValue, -((1L << 53) + 1), double.NaN, 0, false);
+        TickWriter.WriteEntities(ref w, Tick, vault,
+            [new EnterRecord { NetId = 1, Values = first }, new EnterRecord { NetId = 2, Values = second }],
+            [],
+            [new StateRecord { NetId = 1, GroupMask = 0b11, Values = second }, new StateRecord { NetId = 2, GroupMask = 0b10, Values = first }],
+            []);
+        TickWriter.WriteEvents(ref w,
+        [
+            (plan.EventByName("Audit"), new RecordValues
+            {
+                ["amount"] = FieldValue.OfInt64(-(1L << 53) - 1), ["at"] = FieldValue.Of(-0.0), ["corner"] = FieldValue.Of(1, double.PositiveInfinity, -2.5),
+                ["who"] = FieldValue.Of(2),
+            }),
+        ]);
+        TickWriter.WriteSelf(ref w, vault, 1, 9, 0b1, new RecordValues
+        {
+            ["pin"] = FieldValue.OfUInt64(0x8000_0000_0000_0001UL), ["scale"] = FieldValue.Of(double.MaxValue, -double.Epsilon),
+        });
+
+        var sink = new RecordingSink();
+        RealmFrame frame = null;
+        TickReader.Read(w.Written, plan, ref frame, ref sink);
+        var log = sink.Log;
+
+        Assert.That(log.Where(e => e["call"]!.GetValue<string>() == "integer64" && e["field"]!.GetValue<string>() == "balance")
+                .Select(e => e["values"]![0]!.GetValue<string>()),
+            Is.EqualTo(new[] { "0020000000000001", "ffffffffffffffff", "ffffffffffffffff" }),
+            "2⁵³ + 1 and 2⁶⁴ − 1 survive, which a double would round; netId 2's state carries the shape group alone");
+
+        Golden.Assert("tick-exact", w.Written.ToArray(), new JsonObject
+        {
+            ["description"] = "RESET, then ENTITIES for catalog-exact's Vault — enters and states with u64/i64/varu64/vari64 past 2⁵³, f64 edges (the "
+                + "smallest subnormal, NaN) and count shapes (aabb3, point3, bsphere3, quat) — then an Audit event (i64, −0, f32 × 3 with ∞, an entityRef) "
+                + "and SELF with an owner u64 and an f64 × 2.",
+            ["catalog"] = "catalog-exact",
+            ["log"] = log.DeepClone(),
+        });
+    }
+
+    /// <summary>
+    /// Collections end to end (W34): a TICK against catalog-coll — an empty collection, one element, a full one at <c>maxCount</c>, a truncated one
+    /// (<c>sent &lt; total</c>), elements with a pack, a <c>str</c> and an <c>entityRef</c>, an onEnter collection, and an owner one in <c>SELF</c>.
+    /// </summary>
+    [Test]
+    public void Collections()
+    {
+        var plan = CatalogPlan.Compile(CatalogSerializer.Canonicalize(CatalogSamples.Collections()));
+        var locker = plan.ArchetypeByName("Locker");
+        var items = Array.Find(locker.Fields, f => f.Name == "items");
+        var tags = Array.Find(locker.Fields, f => f.Name == "tags");
+        var keys = Array.Find(locker.OwnerFields, f => f.Name == "keys");
+        var buffer = new byte[4096];
+        var w = new WireWriter(buffer);
+        TickWriter.WriteHeader(ref w, Tick, TickFlags.ViewComplete | TickFlags.Reset);
+
+        var sword = Item(1, "sword", 7, 3, true, 2.5);
+        var shield = Item(2, "bouclier ø", 0, 31, false, -0.0);
+        var ring = Item(65535, "", 4_000_000_000, 0, true, float.MaxValue);
+        TickWriter.WriteEntities(ref w, Tick, locker,
+            [
+                new EnterRecord
+                {
+                    NetId = 1,
+                    Values = new RecordValues { ["items"] = Coll(items, 0), ["tags"] = Coll(tags, 0, Tag(9)), ["level"] = FieldValue.Of(1) },
+                },
+                new EnterRecord
+                {
+                    NetId = 2,
+                    Values = new RecordValues
+                    {
+                        ["items"] = Coll(items, 0, sword, shield, ring, sword), ["tags"] = Coll(tags, 0, Tag(0), Tag(255), Tag(128)),
+                        ["level"] = FieldValue.Of(255),
+                    },
+                },
+            ],
+            [],
+            [
+                new StateRecord { NetId = 1, GroupMask = 1, Values = new RecordValues { ["items"] = Coll(items, 0, ring), ["level"] = FieldValue.Of(2) } },
+                new StateRecord
+                {
+                    NetId = 2,
+                    GroupMask = 1,
+                    Values = new RecordValues { ["items"] = Coll(items, 9, shield, sword, shield, ring), ["level"] = FieldValue.Of(3) },
+                },
+            ],
+            []);
+        TickWriter.WriteSelf(ref w, locker, 2, 4, 0b1, new RecordValues
+        {
+            ["keys"] = Coll(keys, 2,
+                new RecordValues { ["code"] = FieldValue.OfUInt64(ulong.MaxValue), ["where"] = FieldValue.Of(1.5, -8192) },
+                new RecordValues { ["code"] = FieldValue.OfUInt64(0), ["where"] = FieldValue.Of(0, 0) }),
+        });
+
+        var sink = new RecordingSink();
+        RealmFrame frame = null;
+        TickReader.Read(w.Written, plan, ref frame, ref sink);
+        var log = sink.Log;
+
+        Assert.Multiple(() =>
+        {
+            var collections = log.Where(e => e["call"]!.GetValue<string>() == "collection")
+                .Select(e => $"{e["field"]!.GetValue<string>()} {e["total"]!.GetValue<int>()}/{e["sent"]!.GetValue<int>()}");
+            Assert.That(collections, Is.EqualTo(new[] { "tags 1/1", "items 0/0", "tags 3/3", "items 4/4", "items 1/1", "items 9/4", "keys 2/2" }),
+                "onEnter before the groups; the truncated list keeps its total");
+            Assert.That(log.Where(e => e["call"]!.GetValue<string>() == "text").Select(e => Encoding.UTF8.GetString(Convert.FromHexString(
+                e["utf8"]!.GetValue<string>()))).Take(2), Is.EqualTo(new[] { "sword", "bouclier ø" }));
+            Assert.That(log.First(e => e["call"]!.GetValue<string>() == "number" && e["field"]!.GetValue<string>() == "owner"
+                && e["values"]![0]!.GetValue<string>() == Golden.Bits(4_000_000_000)), Is.Not.Null, "an entityRef past 2³¹");
+        });
+
+        Golden.Assert("tick-coll", w.Written.ToArray(), new JsonObject
+        {
+            ["description"] = "RESET, then ENTITIES for catalog-coll's Locker — an empty collection, one element, a full one at maxCount, a truncated "
+                + "one (9 held, 4 sent), elements with a bool and a bits pack, a str, an entityRef past 2³¹, an onEnter collection — and SELF with an owner "
+                + "collection of a u64 and an f32 × 2 point.",
+            ["catalog"] = "catalog-coll",
+            ["log"] = log.DeepClone(),
+        });
+    }
+
+    private static RecordValues Item(int id, string name, uint owner, int stack, bool lit, double weight) => new()
+    {
+        ["id"] = FieldValue.Of(id), ["name"] = FieldValue.Of(name), ["owner"] = FieldValue.Of(owner), ["stack"] = FieldValue.Of(stack),
+        ["lit"] = FieldValue.Of(lit ? 1 : 0), ["weight"] = FieldValue.Of(weight),
+    };
+
+    private static RecordValues Tag(int tag) => new() { ["tag"] = FieldValue.Of(tag) };
+
+    // A collection value: each element's named values in its element section's wire order.
+    private static FieldValue Coll(FieldPlan field, int total, params RecordValues[] elements)
+    {
+        var ordered = new FieldValue[elements.Length][];
+        for (var e = 0; e < elements.Length; e++)
+        {
+            ordered[e] = field.ElementSection.Fields.Select(f => elements[e][f.Name]).ToArray();
+        }
+
+        return new FieldValue { Elements = ordered, Total = total };
+    }
+
+    private static RecordValues VaultValues(long id, ulong balance, long delta, double rate, ulong seen, bool open) => new()
+    {
+        ["id"] = FieldValue.OfInt64(id),
+        ["balance"] = FieldValue.OfUInt64(balance),
+        ["delta"] = FieldValue.OfInt64(delta),
+        ["rate"] = FieldValue.Of(rate),
+        ["seen"] = FieldValue.OfUInt64(seen),
+        ["open"] = FieldValue.Of(open ? 1 : 0),
+        ["box"] = FieldValue.Of(-1, -2, -3, 1, 2, 3.5),
+        ["spot"] = FieldValue.Of(0.1, -1e300, 1e-300),
+        ["reach"] = FieldValue.Of(10, -20, 999.99, 1.5),
+        ["spin"] = FieldValue.Of(0, 0, 0.70710678118654757, 0.70710678118654757),
+    };
+
     private static JsonArray Record(ReadOnlySpan<byte> message)
     {
         var sink = new RecordingSink();

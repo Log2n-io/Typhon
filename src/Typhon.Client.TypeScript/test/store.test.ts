@@ -385,8 +385,8 @@ describe('validateSchema', () => {
 
   it('rejects a field kind the store does not know', () => {
     expect(() => {
-      validateSchema(world({ index: 0, name: 'X', groups: [], fields: [{ name: 'f', kind: 'u64' as 'u32' }] }));
-    }).toThrow(/kind 'u64'/);
+      validateSchema(world({ index: 0, name: 'X', groups: [], fields: [{ name: 'f', kind: 'u128' as 'u32' }] }));
+    }).toThrow(/kind 'u128'/);
   });
 
   it('rejects a tick period that is not a positive integer of microseconds', () => {
@@ -398,7 +398,7 @@ describe('validateSchema', () => {
     }
   });
 
-  it('rejects a misplaced index, an unknown group and a component count outside 1..4', () => {
+  it('rejects a misplaced index, an unknown group and a component count outside 1..16', () => {
     expect(() => {
       validateSchema(world({ index: 1, name: 'X', groups: [], fields: [] }));
     }).toThrow(/index/);
@@ -406,7 +406,7 @@ describe('validateSchema', () => {
       validateSchema(world({ index: 0, name: 'X', groups: ['a'], fields: [{ name: 'f', kind: 'u8', group: 3 }] }));
     }).toThrow(/group/);
     expect(() => {
-      validateSchema(world({ index: 0, name: 'X', groups: [], fields: [{ name: 'f', kind: 'f64', components: 5 }] }));
+      validateSchema(world({ index: 0, name: 'X', groups: [], fields: [{ name: 'f', kind: 'f64', components: 17 }] }));
     }).toThrow(/components/);
   });
 });

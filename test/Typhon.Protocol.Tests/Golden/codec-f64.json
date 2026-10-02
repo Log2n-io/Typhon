@@ -1,0 +1,103 @@
+{
+  "description": "f64 (W32): \u00B10, \u00B1\u221E, NaN written as 0x7FF8000000000000, the smallest subnormal, the largest finite, 0.1; decode-only, a negative NaN and a signalling NaN both decode as the canonical NaN.",
+  "codec": {
+    "t": "f64"
+  },
+  "frameTick": 70000,
+  "cases": [
+    {
+      "input": [
+        "0000000000000000"
+      ],
+      "offset": 0,
+      "length": 8,
+      "decoded": [
+        "0000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "8000000000000000"
+      ],
+      "offset": 8,
+      "length": 8,
+      "decoded": [
+        "8000000000000000"
+      ]
+    },
+    {
+      "input": [
+        "7ff0000000000000"
+      ],
+      "offset": 16,
+      "length": 8,
+      "decoded": [
+        "7ff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "fff0000000000000"
+      ],
+      "offset": 24,
+      "length": 8,
+      "decoded": [
+        "fff0000000000000"
+      ]
+    },
+    {
+      "input": [
+        "nan"
+      ],
+      "offset": 32,
+      "length": 8,
+      "decoded": [
+        "nan"
+      ]
+    },
+    {
+      "input": [
+        "0000000000000001"
+      ],
+      "offset": 40,
+      "length": 8,
+      "decoded": [
+        "0000000000000001"
+      ]
+    },
+    {
+      "input": [
+        "7fefffffffffffff"
+      ],
+      "offset": 48,
+      "length": 8,
+      "decoded": [
+        "7fefffffffffffff"
+      ]
+    },
+    {
+      "input": [
+        "3fb999999999999a"
+      ],
+      "offset": 56,
+      "length": 8,
+      "decoded": [
+        "3fb999999999999a"
+      ]
+    },
+    {
+      "offset": 64,
+      "length": 8,
+      "decoded": [
+        "nan"
+      ]
+    },
+    {
+      "offset": 72,
+      "length": 8,
+      "decoded": [
+        "nan"
+      ]
+    }
+  ]
+}
