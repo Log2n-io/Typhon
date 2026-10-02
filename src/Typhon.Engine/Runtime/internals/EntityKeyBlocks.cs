@@ -54,20 +54,39 @@ internal struct ArchetypeKeyGenerations
 internal sealed class EntityKeyBlocks
 {
     /// <summary>
-    /// Generations one archetype may take in one tick before a producer is refused. A refusal here is counted as an overflow, not thrown: the real bound
-    /// on a tick's spawns is <c>EntityCommandsPerTick</c>, and this ceiling exists so a runaway cannot quietly consume key space instead of being seen.
+    /// Hard ceiling on generations per archetype per tick, whatever the budget asks for — a backstop against a corrupt count spinning this loop, not the
+    /// operating limit. The operating limit is <see cref="_maxGenerations"/>, derived from the declared budget.
     /// </summary>
-    internal const int MaxGenerationsPerTick = 8;
+    internal const int GenerationCeiling = 256;
 
     /// <summary>Floor on a block, for the same reason <c>EventQueue</c> floors a segment at 16: below it, a burst spends more on generations than on keys.</summary>
     internal const int MinBlockSize = 16;
 
     /// <summary>
-    /// Ceiling on <c>Stride × BlockSize</c>. Solving <c>Stride × BlockSize × 1.5768e9 ticks/year ≤ 0.01 × 2^48</c> gives 1 785; 1 024 is the power of two
-    /// under it, worth ~0.57 % of one archetype's key space per year and ~174 years to exhaustion. The cap, not the block size, is what makes the scheme
-    /// safe: derived uncapped from <c>EntityCommandsPerTick</c> it burns 36.8 % per year at stride 8 and 73.5 % at stride 32.
+    /// Keys one archetype's generation reserves: <c>Stride × BlockSize</c>. Kept as documentation of the figure the burn arithmetic below is stated in.
     /// </summary>
-    internal const int KeyBlockBudgetPerTick = 1024;
+    /// <remarks>
+    /// <para>
+    /// <b>This used to CAP <see cref="DeriveBlockSize"/>, and the cap was a silent functional limit rather than the safety measure it was described as.</b>
+    /// With <c>Stride × BlockSize ≤ 1024</c> and a stride of 8, a block was 128 keys; against the old eight-generation ceiling that made 1 024 the most any
+    /// one producer could ever queue in a tick, regardless of <c>EntityCommandsPerTick</c>. A <c>CallbackSystem</c> is ONE chunk, so one producer, so a
+    /// 3 000-entity burst from one silently lost 1 976 of its entities. Measured: 102 400 entities created from 100 bursts of 3 000, which is exactly
+    /// 100 × 1 024.
+    /// </para>
+    /// <para>
+    /// <b>The burn the cap was protecting against is real but was priced against the wrong workload.</b> A generation reserves <c>Stride × BlockSize</c>
+    /// keys and a single active producer uses one block of it, so striding wastes <c>Stride - 1</c> blocks per generation — and it wastes them exactly when
+    /// only one chunk is spawning, which is the serial case. The old arithmetic then assumed that happening on EVERY tick forever. A burst workload is not
+    /// that: 3 000 entities from one producer every 21 ticks at 50 Hz takes three generations of 8 × 1 024, so 24 576 keys about 2.4 times a second, which
+    /// is 0.55 % of one archetype's 2^48 per year and roughly 180 years to exhaustion. Sustained flat out on every tick it would be far worse — which is
+    /// what <c>EntityCommandsPerTick</c> is now honestly the knob for, since the burn scales with it.
+    /// </para>
+    /// <para>
+    /// <b>And the waste disappears when the work is parallel</b>, which is the case the striding exists for: eight chunks each taking their own block out of
+    /// one generation reserve nothing they do not issue.
+    /// </para>
+    /// </remarks>
+    internal const int DocumentedBurnPerGeneration = 1024;
 
     private readonly DatabaseEngine _engine;
 
@@ -76,24 +95,40 @@ internal sealed class EntityKeyBlocks
 
     private readonly int _blockSize;
 
+    /// <summary>Generations a producer may take this tick, derived so that <c>_maxGenerations × BlockSize</c> covers the declared per-tick budget.</summary>
+    private readonly int _maxGenerations;
+
     // Per-archetype publication state, one line each. Indexed by INTERNAL archetype id.
     private ArchetypeKeyGenerations[] _archetypes;
 
-    // Published bases: [archetype * MaxGenerationsPerTick + generation]. Written once per (archetype, generation) under the Claiming gate and read with
+    // Published bases: [archetype * _maxGenerations + generation]. Written once per (archetype, generation) under the Claiming gate and read with
     // Volatile.Read by everyone else, which is the release/acquire pair the project's arm64 ordering rule asks for on cross-thread publication.
     private long[] _bases;
 
-    // Per-producer bump cursors, CHUNK-MAJOR: [chunkIndex * _archetypeStride + archetype]. Chunk-major so one producer's cursors are contiguous and two
-    // producers never share a cache line (each chunk's region is padded up to a multiple of 64 bytes). Reset per tick.
-    private int[] _cursorGeneration;
-    private int[] _cursorUsed;
+    // Per-producer bump cursors, CHUNK-MAJOR: [chunkIndex * _archetypeStride + archetype]. One packed long per (chunk, archetype): generation in the high
+    // 32 bits, keys used in the low 32.
+    //
+    // PACKED AND CAS'd, which the first version was not, and that was a duplicate-id defect rather than a missed optimisation. It read `used`, computed a
+    // key and wrote `used + count` back with plain loads and stores, resting on chunk-index disjointness — but the scheduler guarantees disjoint worker
+    // SLOTS, and says nothing about chunk indices ACROSS systems. Two systems with no DAG edge between them run concurrently, and a CallbackSystem is one
+    // chunk, so two of them both see ChunkIndex 0, both read used == 0, and both return the same key. Two identical EntityIds, then two rows in the
+    // EntityMap under one key. The pair has to move together, hence one long rather than two ints.
+    //
+    // Chunk-major and 8 longs to a region so one producer's cursors are contiguous and two producers never share a 64-byte line — the earlier `& ~7` on
+    // INTS padded to 32 bytes and let adjacent chunk indices, which are exactly the concurrent producers, share one (rule MD-03).
+    private long[] _cursors;
     private int _archetypeStride;
 
-    internal EntityKeyBlocks(DatabaseEngine engine, int stride, int blockSize)
+    internal EntityKeyBlocks(DatabaseEngine engine, int stride, int blockSize, int commandsPerTick)
     {
         _engine = engine;
         _stride = Math.Max(1, stride);
         _blockSize = blockSize;
+
+        // One more than the budget needs, so a producer that reaches the budget exactly is not refused by a rounding boundary. Clamped to the backstop.
+        _maxGenerations = Math.Clamp(((commandsPerTick + blockSize - 1) / blockSize) + 1, 1, GenerationCeiling);
+
+        // After _maxGenerations: Resize strides _bases by it.
         Resize(16);
     }
 
@@ -103,26 +138,37 @@ internal sealed class EntityKeyBlocks
     /// <summary>Keys one producer gets per generation.</summary>
     internal int BlockSize => _blockSize;
 
+    /// <summary>Generations one producer may take this tick. <c>MaxGenerations × BlockSize</c> is what a single producer can queue.</summary>
+    internal int MaxGenerations => _maxGenerations;
+
+    /// <summary>The most one producer can queue into one archetype in one tick — what <c>EntityCommandsPerTick</c> now actually means for a single chunk.</summary>
+    internal int MaxKeysPerProducerPerTick => _maxGenerations * _blockSize;
+
     /// <summary>
-    /// Derives the per-producer block from the declared per-tick command budget, then caps the product. The floor can win over the cap at a high chunk
-    /// count (64 chunks caps at 16, which is also the floor) and that is correct: many producers each spawning a little pay one extra generation, not a
-    /// weakened guarantee.
+    /// Derives the per-producer block from the declared per-tick command budget: the budget divided by the stride, floored, and never above the budget
+    /// itself.
     /// </summary>
+    /// <remarks>
+    /// The division by the stride is the useful part — it is the share a producer gets when every chunk is spawning, which is the case the striding is for.
+    /// What is NOT here any more is the <c>Stride × BlockSize ≤ 1024</c> product cap; see <see cref="DocumentedBurnPerGeneration"/> for why that cap was a
+    /// silent entity-losing limit rather than the protection it was documented as.
+    /// </remarks>
     internal static int DeriveBlockSize(int entityCommandsPerTick, int stride)
     {
         var s = Math.Max(1, stride);
-        var cap = Math.Max(MinBlockSize, KeyBlockBudgetPerTick / s);
-        return Math.Clamp(entityCommandsPerTick / s, MinBlockSize, cap);
+        return Math.Clamp(entityCommandsPerTick / s, MinBlockSize, Math.Max(MinBlockSize, entityCommandsPerTick));
     }
 
     private void Resize(int archetypeCount)
     {
-        // 8 cursors per 64-byte line, so pad each chunk's region to a multiple of 8 entries and no two chunks share a line.
+        // 8 longs per 64-byte line, so a region padded to a multiple of 8 never shares a line with the next chunk's.
         _archetypeStride = (Math.Max(8, archetypeCount) + 7) & ~7;
         _archetypes = new ArchetypeKeyGenerations[Math.Max(8, archetypeCount)];
-        _bases = new long[_archetypes.Length * MaxGenerationsPerTick];
-        _cursorGeneration = new int[_stride * _archetypeStride];
-        _cursorUsed = new int[_stride * _archetypeStride];
+
+        // Strided by the OPERATING generation count, not the backstop. At the ceiling this array was 4 096 x 256 longs = 8 MB, because the engine's routing
+        // table is a fixed 4 096 entries whatever the schema holds — and Reset cleared all of it every tick, which cost more than the work the feature does.
+        _bases = new long[_archetypes.Length * _maxGenerations];
+        _cursors = new long[_stride * _archetypeStride];
     }
 
     /// <summary>
@@ -137,13 +183,22 @@ internal sealed class EntityKeyBlocks
         }
     }
 
+    /// <summary>
+    /// Archetypes these tables need to cover: the registered high-water mark, not the routing table's fixed width.
+    /// </summary>
+    /// <remarks>
+    /// <c>DatabaseEngine._archetypeStates</c> is always <c>RoutingTableSize</c> entries — 4 096 — regardless of how many archetypes a schema declares, so
+    /// sizing from its <c>Length</c> made this feature's footprint a property of a constant rather than of the workload.
+    /// </remarks>
+    internal static int ArchetypesToCover(DatabaseEngine engine) => engine == null ? 16 : Math.Max(16, ArchetypeRegistry.MaxArchetypeId + 1);
+
     /// <summary>Clears the per-tick state. Serial, at tick start, beside the command buffer's own reset.</summary>
     internal void Reset()
     {
+        // _bases is deliberately NOT cleared: a base is only ever read for a generation that Published says exists, and Published is cleared here, so a
+        // stale base is unreachable. Clearing it was most of a megabytes-per-tick memset that bought nothing.
         Array.Clear(_archetypes);
-        Array.Clear(_bases);
-        Array.Clear(_cursorGeneration);
-        Array.Clear(_cursorUsed);
+        Array.Clear(_cursors);
     }
 
     /// <summary>
@@ -163,33 +218,50 @@ internal sealed class EntityKeyBlocks
             return -1;
         }
 
-        var cursor = chunkIndex * _archetypeStride + internalArchetypeId;
-        var generation = _cursorGeneration[cursor];
-        var used = _cursorUsed[cursor];
-
-        // Two independent questions, in this order. FIRST: does this cursor's generation have a published base at all? A cursor starts at (generation 0,
-        // used 0) whether or not anyone has published generation 0 yet, so "used == 0" does not answer it — the archetype's published count does.
-        if (Volatile.Read(ref _archetypes[internalArchetypeId].Published) <= generation && !TryEnsureGeneration(internalArchetypeId, generation))
+        // The archetype's own state has to exist before TryEnsureGeneration indexes it. Checked here rather than left to the caller: the bound above is on
+        // THIS class's tables, which a Resize floor can make wider than the engine's, and the method's contract is its own.
+        if (_engine?._archetypeStates == null || internalArchetypeId >= _engine._archetypeStates.Length)
         {
             return -1;
         }
 
-        // SECOND: does the run fit in what is left of the block? A request is never split across generations, so a SpawnMany that would straddle the
-        // boundary moves to a fresh block and leaves the tail unissued. That is what lets it fill a caller span with one contiguous run.
-        if (used + count > _blockSize)
+        var cursor = chunkIndex * _archetypeStride + internalArchetypeId;
+
+        while (true)
         {
-            generation++;
-            if (generation >= MaxGenerationsPerTick || !TryEnsureGeneration(internalArchetypeId, generation))
+            var packed = Volatile.Read(ref _cursors[cursor]);
+            var generation = (int)(packed >> 32);
+            var used = (int)packed;
+
+            // Two independent questions, in this order. FIRST: does this cursor's generation have a published base at all? A cursor starts at (generation 0,
+            // used 0) whether or not anyone has published generation 0 yet, so "used == 0" does not answer it — the archetype's published count does.
+            if (Volatile.Read(ref _archetypes[internalArchetypeId].Published) <= generation && !TryEnsureGeneration(internalArchetypeId, generation))
             {
                 return -1;
             }
 
-            _cursorGeneration[cursor] = generation;
-            used = 0;
-        }
+            // SECOND: does the run fit in what is left of the block? A request is never split across generations, so a SpawnMany that would straddle the
+            // boundary moves to a fresh block and leaves the tail unissued. That is what lets it fill a caller span with one contiguous run.
+            var first = used;
+            if (used + count > _blockSize)
+            {
+                generation++;
+                if (generation >= _maxGenerations || !TryEnsureGeneration(internalArchetypeId, generation))
+                {
+                    return -1;
+                }
 
-        _cursorUsed[cursor] = used + count;
-        return _bases[internalArchetypeId * MaxGenerationsPerTick + generation] + ((long)chunkIndex * _blockSize) + used;
+                first = 0;
+            }
+
+            // One CAS publishes the new (generation, used) pair. A loser retries and re-reads, so two concurrent producers on one cursor hand out disjoint
+            // runs rather than the same one.
+            var next = ((long)generation << 32) | (uint)(first + count);
+            if (Interlocked.CompareExchange(ref _cursors[cursor], next, packed) == packed)
+            {
+                return _bases[internalArchetypeId * _maxGenerations + generation] + ((long)chunkIndex * _blockSize) + first;
+            }
+        }
     }
 
     /// <summary>
@@ -238,7 +310,7 @@ internal sealed class EntityKeyBlocks
 
                     var span = (long)_stride * _blockSize;
                     var first = Interlocked.Add(ref state.NextEntityKey, span) - span + 1;
-                    _bases[internalArchetypeId * MaxGenerationsPerTick + generation] = first;
+                    _bases[internalArchetypeId * _maxGenerations + generation] = first;
 
                     // Release: the base must be visible before the count that advertises it.
                     Volatile.Write(ref arch.Published, generation + 1);
@@ -260,5 +332,5 @@ internal sealed class EntityKeyBlocks
 
     /// <summary>The base this archetype's generation <paramref name="generation"/> was published at. Tests only — it is what makes the id formula checkable.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal long BaseOf(int internalArchetypeId, int generation) => _bases[internalArchetypeId * MaxGenerationsPerTick + generation];
+    internal long BaseOf(int internalArchetypeId, int generation) => _bases[internalArchetypeId * _maxGenerations + generation];
 }

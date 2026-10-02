@@ -1219,6 +1219,18 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
             return false;
         }
 
+        // Every value must name a component this archetype HAS. Checked here because the apply cannot refuse: it is past the point where a caller could be
+        // told, so an unknown component id there is a throw on the tick driver that loses the whole tick's spawns. One wrong Comp<T>.Set is an ordinary
+        // mistake and belongs in the rejected count, not in a dead tick.
+        for (var v = 0; v < values.Length; v++)
+        {
+            if (!meta.TryGetSlot(values[v].ComponentTypeId, out _))
+            {
+                refusal = EntityCommandRefusal.BadArguments;
+                return false;
+            }
+        }
+
         routingId = RoutingIdOf(meta);
         return true;
     }

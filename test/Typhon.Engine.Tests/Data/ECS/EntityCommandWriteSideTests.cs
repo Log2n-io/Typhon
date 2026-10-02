@@ -473,11 +473,19 @@ class EntityCommandWriteSideTests : TestBase<EntityCommandWriteSideTests>
         using var runtime = QuietRuntime(dbe);
         var w = runtime.EntityCommands.GetWriter(0, 0);
 
-        // Warm the segment past its lazy allocation and past any growth the loop below could trigger.
-        for (var i = 0; i < 2048; i++)
+        // Fill to the growth ceiling, then Reset. Reset deliberately KEEPS the grown buffers — the high-water allocation is the point of growth — so the
+        // measured loop below runs against segments that cannot grow again.
+        //
+        // The earlier version warmed with 2 048 and measured without resetting, which passed for the wrong reason: the key-block cap was silently refusing
+        // every measured push, so of course nothing allocated. Once the cap was fixed the same loop grew the segment 2 048 -> 4 096 inside the measurement
+        // and reported 622 640 bytes — which is exactly the headers' 4 096 x 24 plus the payloads' 4 096 x 128. A zero from a test that is not exercising
+        // the path is worse than a red one.
+        for (var i = 0; i < 4096; i++)
         {
             w.Spawn<CmdCorpse>(CmdCorpse.Position.Set(new CmdPosition(i, 0)));
         }
+
+        runtime.EntityCommands.Reset();
 
         var before = GC.GetAllocatedBytesForCurrentThread();
         for (var i = 0; i < 512; i++)
@@ -558,5 +566,47 @@ class EntityCommandWriteSideTests : TestBase<EntityCommandWriteSideTests>
         }
 
         Assert.That(runtime.EntityCommands.RejectedCount, Is.EqualTo(10u), "every refusal is counted, not just the logged one");
+    }
+    /// <summary>
+    /// <b>One producer can queue the whole declared budget</b>, which is what <c>EntityCommandsPerTick</c> is supposed to mean and did not.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The regression this pins lost two thirds of a realistic burst silently. <c>DeriveBlockSize</c> capped a block at <c>1024 / stride</c>, so at
+    /// 4 workers (stride 8) a block was 128 keys; against the old eight-generation ceiling that made 1 024 the most any ONE chunk could queue in a tick,
+    /// whatever the budget said. A <c>CallbackSystem</c> is one chunk, so a 3 000-entity burst from one returned <see cref="EntityId.Null"/> 1 976 times.
+    /// It was found by counting entities in the map after a profiling run — 102 400 from 100 bursts of 3 000, exactly 100 x 1 024 — and NOT by the buffer's
+    /// own counters, which are per-tick and had been cleared by the time anything read them.
+    /// </para>
+    /// <para>
+    /// Asserted from one chunk on purpose. Spread over eight chunks the old code would have passed, which is why it survived: the cap only bites when the
+    /// producers are few, and a serial system is one producer.
+    /// </para>
+    /// </remarks>
+    [TestCase(3000)]
+    [TestCase(4096)]
+    public void OneProducerCanQueueTheWholeDeclaredBudget(int budget)
+    {
+        using var dbe = SetupEngine();
+        using var runtime = QuietRuntime(dbe, workerCount: 4, commandsPerTick: budget);
+        var w = runtime.EntityCommands.GetWriter(0, 0);
+
+        var accepted = 0;
+        for (var i = 0; i < budget; i++)
+        {
+            if (!w.Spawn<CmdCorpse>().IsNull)
+            {
+                accepted++;
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(runtime.EntityCommands.Keys.MaxKeysPerProducerPerTick, Is.GreaterThanOrEqualTo(budget),
+                "the key blocks must be able to cover the declared budget from a single chunk");
+            Assert.That(accepted, Is.EqualTo(budget),
+                $"a single producer queued {accepted} of a declared {budget}; the budget is the documented bound and must be the real one");
+            Assert.That(runtime.EntityCommands.OverflowCount, Is.Zero, "and nothing may be dropped inside the budget");
+        });
     }
 }

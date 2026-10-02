@@ -239,8 +239,8 @@ public sealed partial class EntityCommandBuffer
         // fence). A producer whose chunk index lands outside it is REFUSED and counted rather than wrapped — wrapping would hand two producers the same
         // key block, and duplicate entity ids would be both catastrophic and silent.
         var stride = Math.Max(2, 2 * Math.Max(1, workerCount));
-        _keys = new EntityKeyBlocks(_engine, stride, EntityKeyBlocks.DeriveBlockSize(_commandsPerTick, stride));
-        _keys.EnsureArchetypes(_engine?._archetypeStates?.Length ?? 16);
+        _keys = new EntityKeyBlocks(_engine, stride, EntityKeyBlocks.DeriveBlockSize(_commandsPerTick, stride), _commandsPerTick);
+        _keys.EnsureArchetypes(EntityKeyBlocks.ArchetypesToCover(_engine));
         EnsureRefusalTable();
     }
 
@@ -270,27 +270,30 @@ public sealed partial class EntityCommandBuffer
     /// <summary>Clears the per-tick state. Serial, at tick start. Grown buffers are deliberately kept — the high-water allocation is the point of growth.</summary>
     internal void Reset()
     {
-        if (Volatile.Read(ref _anyProduced) != 0)
+        // UNCONDITIONAL, and the gate that used to be here was a correctness bug rather than the saving it looked like. `_anyProduced` is raised only by a
+        // SUCCESSFUL append, so a tick that accepted nothing cleared nothing: RejectedCount and OverflowCount accumulated across ticks, which breaks the
+        // exactness the whole tolerate-and-count verdict rests on, and the once-per-tick refusal log became once-per-process. Worse, SpawnMany reserves its
+        // keys BEFORE appending, so a reserve-then-segment-full tick left the key cursors dirty and they crept until that archetype refused permanently.
+        //
+        // The cost of doing it always is now small because the tables are sized to the registered archetypes rather than to the routing table's fixed 4 096.
+        for (var i = 0; i < _slots.Length; i++)
         {
-            for (var i = 0; i < _slots.Length; i++)
-            {
-                _slots[i] = default;
-            }
-
-            _keys.Reset();
-            Array.Clear(_refusalLogged);
-            Volatile.Write(ref _anyProduced, 0);
+            _slots[i] = default;
         }
 
+        _keys.Reset();
+        Array.Clear(_refusalLogged);
+        Volatile.Write(ref _anyProduced, 0);
+
         // Cheap even on an idle tick, and the alternative is a producer meeting an archetype registered since bind and being refused for it.
-        _keys.EnsureArchetypes(_engine?._archetypeStates?.Length ?? 16);
+        _keys.EnsureArchetypes(EntityKeyBlocks.ArchetypesToCover(_engine));
         EnsureRefusalTable();
     }
 
     /// <summary>Sizes the refusal-dedup table to the archetypes plus the unknown bucket. Serial, from bind and tick start — never from a producer.</summary>
     private void EnsureRefusalTable()
     {
-        var needed = (_engine?._archetypeStates?.Length ?? 16) + 1;
+        var needed = EntityKeyBlocks.ArchetypesToCover(_engine) + 1;
         if (_refusalLogged == null || _refusalLogged.Length < needed)
         {
             _refusalLogged = new int[needed];
@@ -340,9 +343,20 @@ public sealed partial class EntityCommandBuffer
         var bit = 1 << (int)reason;
         if ((Interlocked.Or(ref _refusalLogged[bucket], bit) & bit) == 0)
         {
-            LogCommandRefused(DescribeArchetype(internalArchetypeId), reason.ToString());
+            LogCommandRefused(DescribeArchetype(internalArchetypeId), Describe(reason));
         }
     }
+
+    /// <summary>The reason's name, as a literal rather than <c>Enum.ToString</c>, which allocates on the one path that fires under load.</summary>
+    private static string Describe(EntityCommandRefusal reason) => reason switch
+    {
+        EntityCommandRefusal.ArchetypeNotRegistered => "ArchetypeNotRegistered",
+        EntityCommandRefusal.RealmRefused => "RealmRefused",
+        EntityCommandRefusal.BadArguments => "BadArguments",
+        EntityCommandRefusal.SegmentFull => "SegmentFull",
+        EntityCommandRefusal.KeyBlocksExhausted => "KeyBlocksExhausted",
+        _ => "Unknown",
+    };
 
     /// <summary>The archetype's name for a log line, or a stand-in when there is no usable id — never throws, and never allocates on the accepted path.</summary>
     private string DescribeArchetype(int internalArchetypeId)

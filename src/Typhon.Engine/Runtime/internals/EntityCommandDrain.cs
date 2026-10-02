@@ -78,9 +78,14 @@ internal sealed class EntityCommandDrain
 
         // Grouped by archetype, then by key within it. Archetype first because the spawn path resolves per-archetype state once per call; key second so a
         // run is contiguous, which is what lets one call cover many commands and what makes the applied order independent of which worker produced them.
-        _commands.Sort(static (a, b) => a.InternalArchetypeId != b.InternalArchetypeId
-            ? a.InternalArchetypeId.CompareTo(b.InternalArchetypeId)
-            : a.EntityKey.CompareTo(b.EntityKey));
+        // Spawns before destroys, which is the ordering the API promises — a destroy for an entity spawned this tick must find it. Destroys carry
+        // archetype -1, which would sort FIRST, so the key is the archetype id with destroys mapped past every real one.
+        _commands.Sort(static (a, b) =>
+        {
+            var ka = a.InternalArchetypeId < 0 ? int.MaxValue : a.InternalArchetypeId;
+            var kb = b.InternalArchetypeId < 0 ? int.MaxValue : b.InternalArchetypeId;
+            return ka != kb ? ka.CompareTo(kb) : a.EntityKey.CompareTo(b.EntityKey);
+        });
 
         using var tx = _engine.CreateQuickTransaction();
 
@@ -89,12 +94,25 @@ internal sealed class EntityCommandDrain
         {
             var archetype = _commands[start].InternalArchetypeId;
             var end = start + 1;
-            while (end < _commands.Count && _commands[end].InternalArchetypeId == archetype)
+            while (end < _commands.Count && (_commands[end].InternalArchetypeId < 0) == (archetype < 0)
+                   && _commands[end].InternalArchetypeId == archetype)
             {
                 end++;
             }
 
-            ApplyArchetype(tx, buffer, archetype, start, end);
+            // A destroy carries archetype id -1, because the producing side has only the target's ROUTING id and no reason to resolve an internal one. The
+            // sort puts that group first, and it must not go through ApplyArchetype: `(ushort)-1` is 65 535, which indexed the 4 096-entry archetype table
+            // and threw IndexOutOfRange on the tick driver — losing every spawn of the tick with it, since the throw escaped before Commit. Destroy was
+            // entirely non-functional, and the test that should have caught it asserted "not alive" and was satisfied by the whole transaction being lost.
+            if (archetype < 0)
+            {
+                ApplyDestroys(tx, start, end);
+            }
+            else
+            {
+                ApplyArchetype(tx, buffer, archetype, start, end);
+            }
+
             start = end;
         }
 
@@ -139,8 +157,19 @@ internal sealed class EntityCommandDrain
         }
     }
 
+    /// <summary>Applies the destroy group. Idempotent: a second command for the same id finds it already pending and does nothing.</summary>
+    private void ApplyDestroys(Transaction tx, int start, int end)
+    {
+        for (var c = start; c < end; c++)
+        {
+            tx.Destroy(EntityId.FromRawValue((ulong)_commands[c].EntityKey));
+        }
+
+        LastAppliedCommands += end - start;
+    }
+
     /// <summary>
-    /// Applies one archetype's run: every spawn in one allocate call, then the values, then the destroys.
+    /// Applies one archetype's run: every spawn in one allocate call, then the values.
     /// </summary>
     /// <remarks>
     /// Spawns before destroys, which is the ordering the API promises: a destroy queued for an entity spawned earlier in the same tick collapses the pair to
@@ -154,13 +183,11 @@ internal sealed class EntityCommandDrain
             return;
         }
 
+        // Every command in this run is a spawn: the destroy group is routed away by the caller.
         var entities = 0;
         for (var c = start; c < end; c++)
         {
-            if (_commands[c].Kind != EntityCommandKind.Destroy)
-            {
-                entities += _commands[c].Count;
-            }
+            entities += _commands[c].Count;
         }
 
         if (entities > 0)
@@ -174,11 +201,6 @@ internal sealed class EntityCommandDrain
             var n = 0;
             for (var c = start; c < end; c++)
             {
-                if (_commands[c].Kind == EntityCommandKind.Destroy)
-                {
-                    continue;
-                }
-
                 // A SpawnMany's run is contiguous by construction — the key allocator never splits a request across generations — so its keys expand here
                 // rather than being carried one per header.
                 for (var k = 0; k < _commands[c].Count; k++)
@@ -196,11 +218,6 @@ internal sealed class EntityCommandDrain
             for (var c = start; c < end; c++)
             {
                 ref var cmd = ref all[c];
-                if (cmd.Kind == EntityCommandKind.Destroy)
-                {
-                    continue;
-                }
-
                 for (var k = 0; k < cmd.Count; k++, written++)
                 {
                     // Every entity of a SpawnMany shares one payload run, which is the reason that kind exists.
@@ -212,15 +229,6 @@ internal sealed class EntityCommandDrain
             }
 
             LastAppliedEntities += entities;
-        }
-
-        for (var c = start; c < end; c++)
-        {
-            if (_commands[c].Kind == EntityCommandKind.Destroy)
-            {
-                // Idempotent: a second command for the same id, from any slot, finds it already pending and does nothing.
-                tx.Destroy(EntityId.FromRawValue((ulong)_commands[c].EntityKey));
-            }
         }
 
         LastAppliedCommands += end - start;

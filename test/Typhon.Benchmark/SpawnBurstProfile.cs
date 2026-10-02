@@ -85,6 +85,39 @@ static class SpawnBurstProfile
     private const int IdleTicks = 20;
     private const int Bursts = 100;
 
+    /// <summary>Live entities of the arm's archetype, read back through an ordinary query.</summary>
+    private static int CountEntities(DatabaseEngine dbe, int arm)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        var n = 0;
+        switch (arm)
+        {
+            case 0:
+                foreach (var _ in tx.Query<SbPlainMob>())
+                {
+                    n++;
+                }
+
+                break;
+            case 1:
+                foreach (var _ in tx.Query<SbMultiMob>())
+                {
+                    n++;
+                }
+
+                break;
+            default:
+                foreach (var _ in tx.Query<SbUniqMob>())
+                {
+                    n++;
+                }
+
+                break;
+        }
+
+        return n;
+    }
+
     /// <summary>Median of an unsorted list, or 0 when empty. Copies, because the caller's order carries the trend.</summary>
     private static double Median(List<double> values)
     {
@@ -117,12 +150,24 @@ static class SpawnBurstProfile
         Console.WriteLine($"strict mode: {CheckConfig.Enabled}");
         Console.WriteLine();
 
-        RunArm("plain  (no index)", 0);
-        RunArm("multi  (1 AllowMultiple)", 1);
-        RunArm("unique (1 unique)", 2);
+        Console.WriteLine("--- direct: ctx.Transaction.Spawn, the path a serial system uses today ---");
+        RunArm("plain  (no index)", 0, false);
+        RunArm("multi  (1 AllowMultiple)", 1, false);
+        RunArm("unique (1 unique)", 2, false);
+
+        Console.WriteLine("--- deferred: ctx.Commands.Spawn + the #1102 drain, queued and applied on the same tick ---");
+        RunArm("plain  (no index)", 0, true);
+        RunArm("multi  (1 AllowMultiple)", 1, true);
+        RunArm("unique (1 unique)", 2, true);
     }
 
-    private static void RunArm(string label, int arm)
+    /// <param name="label">Printed name of the schema arm.</param>
+    /// <param name="arm">0 = no index, 1 = one AllowMultiple, 2 = one unique.</param>
+    /// <param name="deferred">
+    /// When true the burst goes through <c>ctx.Commands.Spawn</c> and the #1102 drain instead of <c>ctx.Transaction.Spawn</c>. Both land on the SAME tick —
+    /// the drain runs before that tick's fence — so the burst tick's duration is directly comparable between the two.
+    /// </param>
+    private static void RunArm(string label, int arm, bool deferred)
     {
         // 1.5 GiB. Not more: the option refuses anything above 2 GiB minus a page, because the cache is one allocation sized in an int (ENG-13 / #945).
         var dcs = 1536L * 1024 * 1024;
@@ -135,7 +180,7 @@ static class SpawnBurstProfile
           .AddDeadlineWatchdog()
           .AddScopedManagedPagedMemoryMappedFile(options =>
           {
-              options.DatabaseName = $"SpawnBurstProfile_{arm}_{Environment.ProcessId}";
+              options.DatabaseName = $"SpawnBurstProfile_{arm}_{(deferred ? "d" : "s")}_{Environment.ProcessId}";
               options.DatabaseCacheSize = (ulong)dcs;
               options.PagesDebugPattern = false;
           })
@@ -171,19 +216,47 @@ static class SpawnBurstProfile
 
                 // The system's OWN transaction is used, so this is the cost a game system pays — not a side transaction's.
                 sw.Restart();
+                var cmds = ctx.Commands;
                 for (var i = 0; i < BurstSize; i++)
                 {
                     var k = key + i;
                     switch (arm)
                     {
                         case 0:
-                            ctx.Transaction.Spawn<SbPlainMob>(SbPlainMob.Data.Set(new SbPlain { CellId = i % 4, SpawnKey = k, Payload = i }));
+                            var p = SbPlainMob.Data.Set(new SbPlain { CellId = i % 4, SpawnKey = k, Payload = i });
+                            if (deferred)
+                            {
+                                cmds.Spawn<SbPlainMob>(p);
+                            }
+                            else
+                            {
+                                ctx.Transaction.Spawn<SbPlainMob>(p);
+                            }
+
                             break;
                         case 1:
-                            ctx.Transaction.Spawn<SbMultiMob>(SbMultiMob.Data.Set(new SbMulti { CellId = i % 4, SpawnKey = k, Payload = i }));
+                            var m = SbMultiMob.Data.Set(new SbMulti { CellId = i % 4, SpawnKey = k, Payload = i });
+                            if (deferred)
+                            {
+                                cmds.Spawn<SbMultiMob>(m);
+                            }
+                            else
+                            {
+                                ctx.Transaction.Spawn<SbMultiMob>(m);
+                            }
+
                             break;
                         default:
-                            ctx.Transaction.Spawn<SbUniqMob>(SbUniqMob.Data.Set(new SbUniq { CellId = i % 4, SpawnKey = k, Payload = i }));
+                            var u = SbUniqMob.Data.Set(new SbUniq { CellId = i % 4, SpawnKey = k, Payload = i });
+                            if (deferred)
+                            {
+                                cmds.Spawn<SbUniqMob>(u);
+                            }
+                            else
+                            {
+                                ctx.Transaction.Spawn<SbUniqMob>(u);
+                            }
+
                             break;
                     }
                 }
@@ -196,6 +269,9 @@ static class SpawnBurstProfile
             WorkerCount = 4,
             BaseTickRate = 500,
             AdaptiveFenceCost = false,
+            // Must exceed the burst: at the 4 096 default a 3 000-entity burst fits, but the margin is what stops a skewed slot dropping commands and
+            // turning this into a measurement of overflow handling.
+            EntityCommandsPerTick = 8192,
             // The ring has to outlast the run: at the default 1 024 the first ~1 100 ticks of a 2 105-tick run are evicted before anything reads them.
             TelemetryRingCapacity = 4096,
         });
@@ -241,6 +317,13 @@ static class SpawnBurstProfile
         runtime.Shutdown();
 
         Report(label, spawnUs, burstTicks, idleTicks, burstSystemUs, burstFlushMs);
+
+        // THE validity guard, and the deferred arm needs it more than the direct one: a drain that silently applied nothing would be the fastest arm here
+        // and completely wrong. Counted from the entity map, not from the buffer's own accounting, so the buffer cannot vouch for itself.
+        var expected = Bursts * BurstSize;
+        var live = CountEntities(dbe, arm);
+        Console.WriteLine($"  buffer: overflow={runtime.EntityCommands?.OverflowCount ?? 0} rejected={runtime.EntityCommands?.RejectedCount ?? 0}"
+            + $"   entities: {live:N0} of {expected:N0} expected{(live == expected ? "" : "   *** MISMATCH ***")}");
         dbe.Dispose();
         sp.Dispose();
     }

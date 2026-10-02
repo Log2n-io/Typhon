@@ -37,8 +37,14 @@ public unsafe struct ComponentValue
     /// It is a span because a <see cref="ComponentValue"/> is frequently an element of a managed array, where a <c>byte*</c> would be a pointer over GC
     /// data; <see cref="MemoryMarshal.CreateReadOnlySpan{T}"/> keeps the GC aware of it.
     /// </remarks>
-    internal ReadOnlySpan<byte> Payload =>
-        MemoryMarshal.CreateReadOnlySpan(ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in this)), HeaderSize), DataSize);
+    /// <remarks>
+    /// <b><c>readonly</c> on purpose:</b> <see cref="ComponentValue"/> cannot be a <c>readonly struct</c> (a <c>fixed</c> buffer is not), so without it
+    /// every access through an <c>in</c> parameter — which is how the spawn path passes one, per value written — emits a defensive 128-byte copy.
+    /// The length is clamped because a malformed <see cref="DataSize"/> would otherwise span past the inline buffer.
+    /// </remarks>
+    internal readonly ReadOnlySpan<byte> Payload =>
+        MemoryMarshal.CreateReadOnlySpan(ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in this)), HeaderSize),
+            Math.Min(DataSize, MaxPayloadSize));
 
     /// <summary>Bytes of header before the payload: the component type id, the data size and the alignment pad.</summary>
     internal const int HeaderSize = 12;
