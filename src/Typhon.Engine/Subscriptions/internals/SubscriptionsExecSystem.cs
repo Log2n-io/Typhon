@@ -303,6 +303,10 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
     internal static long PrologueGatherTicks;
     internal static long PrologueCount;
     internal static long ProjectBusyTicks;
+    // The blocks' own work — busy time less the claiming and the waits — and the column walk's share of it (13 § 4.1): a timestamp pair per block, and
+    // one per section walk inside it, so collected under phase timing only.
+    internal static long ProjectBlockTicks;
+    internal static long ProjectWalkTicks;
 
     /// <summary>The stage's parallel half, for one chunk of <paramref name="chunkCount"/>.</summary>
     internal static void Project(SubscriptionsContext ctx, int chunkIndex, int chunkCount)
@@ -403,6 +407,18 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
     private static void ProjectOne(CompiledProjectionPlan plan, int archetypeIndex, ArchetypeReplicationState state, int chunkIndex, ReplicationBlockHeader* block,
         ChunkBasedSegment<PersistentStore> persistent, ChunkBasedSegment<TransientStore> transient, ref ChunkAccessor<PersistentStore> persistentAccessor,
         ref ChunkAccessor<TransientStore> transientAccessor, uint tick, ReferenceResolver references)
+    {
+        var from = FrameAssembler.PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
+        ProjectBlock(plan, archetypeIndex, state, chunkIndex, block, persistent, transient, ref persistentAccessor, ref transientAccessor, tick, references);
+        if (from != 0L)
+        {
+            Interlocked.Add(ref ProjectBlockTicks, Stopwatch.GetTimestamp() - from);
+        }
+    }
+
+    private static void ProjectBlock(CompiledProjectionPlan plan, int archetypeIndex, ArchetypeReplicationState state, int chunkIndex,
+        ReplicationBlockHeader* block, ChunkBasedSegment<PersistentStore> persistent, ChunkBasedSegment<TransientStore> transient,
+        ref ChunkAccessor<PersistentStore> persistentAccessor, ref ChunkAccessor<TransientStore> transientAccessor, uint tick, ReferenceResolver references)
     {
         var chunkId = block->ChunkId;
         if (chunkId < 0)

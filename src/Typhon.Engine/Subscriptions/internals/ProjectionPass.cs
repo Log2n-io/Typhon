@@ -605,6 +605,7 @@ internal static unsafe class ProjectionPass
     private static ulong Quantize(ArchetypeReplicationState state, CompiledField[] fields, int rowBase, ArchetypeClusterInfo clusterLayout, byte* clusterBase,
         byte* transientBase, int slotCount, ulong slots, ulong* codes, ReferenceResolver references)
     {
+        var walkFrom = FrameAssembler.PhaseTimingEnabled ? Stopwatch.GetTimestamp() : 0L;
         var unresolved = 0UL;
         for (var i = 0; i < fields.Length; i++)
         {
@@ -625,6 +626,11 @@ internal static unsafe class ProjectionPass
                 // A declared narrowing that bit: counted per field, so "my balance shows 4 294 967 295" has a number behind it (13 § 2.3).
                 state.NoteClamps(rowBase + i, clamps);
             }
+        }
+
+        if (walkFrom != 0L)
+        {
+            Interlocked.Add(ref SubscriptionsProjectExecSystem.ProjectWalkTicks, Stopwatch.GetTimestamp() - walkFrom);
         }
 
         return unresolved;

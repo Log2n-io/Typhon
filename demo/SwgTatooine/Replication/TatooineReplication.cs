@@ -1709,7 +1709,8 @@ public static class TatooineReplication
             var pp = subs.ProjectPrologueMs;
             Console.Error.WriteLine(
                 $"  project: serial {pp.Prepare + pp.Drain + pp.Mark:F2} ms/tick (prepare {pp.Prepare:F2}, drain {pp.Drain:F2}, mark {pp.Mark:F2}), "
-                + $"parallel busy {pp.Busy:F2} ms/tick");
+                + $"parallel busy {pp.Busy:F2} ms/tick, blocks {subs.ProjectBlocksMs:F3} ms/tick, of which column walk {subs.ProjectWalkMs:F3} ms/tick "
+                + "(summed over workers)");
             var fb = subs.FrameBalance;
             Console.Error.WriteLine($"  frame balance: {fb.Effective:F1} effective workers, {fb.Efficiency * 100d:F0} % efficiency over {fb.Ticks} ticks");
             var ph = subs.FramePhases;
