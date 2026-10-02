@@ -35,6 +35,17 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     /// <summary>Diagnostic: total splits performed.</summary>
     internal long _splitCount;
 
+    // Insert-cost diagnostics (#1098). Both sit on paths that already allocate a chunk or rewrite a whole bucket chain, so one interlocked add beside them is
+    // not measurable. They are the two numbers that decide whether a parallel bulk insert can partition this map by bucket: a chained overflow chunk is
+    // bucket-local and therefore partition-safe, whereas a split rewrites the round-robin bucket `Next` — NOT the bucket being inserted into — plus the
+    // directory and the meta, so it crosses every partition at once. Nothing counted either.
+
+    /// <summary>Diagnostic: overflow chunks chained onto a full bucket. Bucket-local, so partition-safe.</summary>
+    internal long _overflowChunksChained;
+
+    /// <summary>Diagnostic: entries re-hashed and rewritten by <c>ExecuteSplit</c> — the O(batch) term in a bulk insert.</summary>
+    internal long _splitEntriesRehashed;
+
     /// <summary>Diagnostic: OLC read restarts due to version mismatch.</summary>
     internal long _olcRestarts;
 
@@ -460,6 +471,19 @@ internal abstract unsafe class PagedHashMapBase<TStore> where TStore : struct, I
     // ═══════════════════════════════════════════════════════════════════════
     // Test helpers (internal for InternalsVisibleTo)
     // ═══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Clear the insert-cost diagnostics so one burst can be counted in isolation from the engine's own start-up inserts (#1098). Reset only on a quiescent
+    /// map — the counters cannot be cleared atomically with respect to a live writer.
+    /// </summary>
+    internal void ResetDiagnostics()
+    {
+        Interlocked.Exchange(ref _splitCount, 0);
+        Interlocked.Exchange(ref _olcRestarts, 0);
+        Interlocked.Exchange(ref _writeLockFailures, 0);
+        Interlocked.Exchange(ref _overflowChunksChained, 0);
+        Interlocked.Exchange(ref _splitEntriesRehashed, 0);
+    }
 
     /// <summary>Test-accessible wrapper for <see cref="GetBucketChunkId"/>.</summary>
     internal int GetBucketChunkIdForTest(int bucketId, ref ChunkAccessor<TStore> accessor) => GetBucketChunkId(bucketId, ref accessor);

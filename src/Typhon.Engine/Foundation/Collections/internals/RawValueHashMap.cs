@@ -533,6 +533,7 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
             // accessor disposes — a checkpoint racing in that window can snap the zeroed content, fsync, drop DC→0 and let eviction reload zeros over our
             // subsequent writes.
             int overflowChunkId = Segment.AllocateChunk(changeSet, ref accessor);
+            Interlocked.Increment(ref _overflowChunksChained);
 
             byte* ovAddr = accessor.GetChunkAddress(overflowChunkId, true);
             ref var ovHeader = ref GetHeader(ovAddr);
@@ -1022,6 +1023,8 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
                     walkId = nextId;
                 }
+
+                Interlocked.Add(ref _splitEntriesRehashed, keepCount + moveCount);
 
                 // Rewrite old bucket
                 RewriteBucket(oldChunkId, keepKeys, keepValues, keepCount, ref accessor, changeSet);
