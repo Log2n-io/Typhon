@@ -102,6 +102,16 @@ GATED_PASSES = (
                              "TYPHON__PROFILER__SUBSCRIPTIONS__ENABLED": "true"},
      "telemetry subtrees the suite leaves off: spatial trace records (kinds 65-67), push-replication operator "
      "records (kinds 68-69) and concurrency tracing"),
+    # The mirror image of the pass above, and it exists for the same reason read backwards. The suite's own
+    # typhon.telemetry.json turns strict mode ON for every fixture, deliberately, so the converted user-facing guards
+    # actively catch misuse. The consequence is that NO test runs the configuration the Release NuGet ships, where
+    # CheckConfig.Enabled is a static readonly false and the JIT deletes every CheckConfig.Require. A guard whose
+    # ungated failure mode is a crash rather than silence is therefore untestable in this suite -- which is how #897
+    # lived: four spatial predicates NREd from engine internals on every default deployment, and the suite could not
+    # see it because the suite is never a default deployment. Env vars win over the json, so one variable inverts it.
+    ("C", "ChecksOffGated", {"TYPHON__CHECKS__ENABLED": "false"},
+     "strict mode OFF -- the configuration the Release NuGet ships, which this suite's typhon.telemetry.json turns ON "
+     "suite-wide, so a guard that must hold without strict mode is otherwise only ever tested with it on"),
 )
 
 # Categories that run in a pass of their own and must therefore not run in the shards.
