@@ -278,24 +278,6 @@ public readonly struct Codec : IEquatable<Codec>
     /// <returns>The codec.</returns>
     public static Codec Str(int maxBytes) => Bounded(CodecKind.Str, maxBytes, nameof(maxBytes));
 
-    /// <summary>Raw bytes with a <c>varu</c> length.</summary>
-    /// <param name="maxBytes">The largest encoded length accepted, above zero.</param>
-    /// <returns>The codec.</returns>
-    public static Codec Blob(int maxBytes) => Bounded(CodecKind.Blob, maxBytes, nameof(maxBytes));
-
-    /// <summary>Exactly <paramref name="n"/> raw bytes, with no length on the wire.</summary>
-    /// <param name="n">The byte count, above zero.</param>
-    /// <returns>The codec.</returns>
-    public static Codec Bytes(int n)
-    {
-        if (n <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(n), n, "Codec.Bytes(n) needs a positive byte count.");
-        }
-
-        return new Codec(new CatalogCodec { Kind = CodecKind.Bytes, N = n });
-    }
-
     /// <summary>
     /// The codec a replication attribute declares for a field of type <typeparamref name="TField"/> (design/Subscriptions/11 § 5): <paramref name="kind"/>
     /// through the factory of that name, validated as that factory validates it, or — for <see cref="CodecKind.Unknown"/> — the codec the type travels
@@ -307,7 +289,7 @@ public readonly struct Codec : IEquatable<Codec>
     /// <param name="min">A <c>Quant</c>'s lower bound.</param>
     /// <param name="max">A <c>Quant</c>'s upper bound.</param>
     /// <param name="scale">A <c>Vec2/3</c>'s step.</param>
-    /// <param name="maxBytes">A <c>Str</c> or <c>Blob</c>'s cap, or the length of <c>Bytes</c>.</param>
+    /// <param name="maxBytes">A <c>Str</c>'s cap.</param>
     /// <param name="saturate">Whether the codec clamps out-of-range values (<see cref="Saturate"/>).</param>
     /// <returns>The codec.</returns>
     [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
@@ -369,8 +351,6 @@ public readonly struct Codec : IEquatable<Codec>
             case CodecKind.Vec2: return Vec2(scale, RequiredBits(kind, bits));
             case CodecKind.Vec3: return Vec3(scale, RequiredBits(kind, bits));
             case CodecKind.Str: return Str(maxBytes);
-            case CodecKind.Blob: return Blob(maxBytes);
-            case CodecKind.Bytes: return Bytes(maxBytes);
             case CodecKind.Bits:
                 var packed = Bits(RequiredBits(kind, bits));
                 if (!fieldType.IsEnum)
@@ -387,12 +367,22 @@ public readonly struct Codec : IEquatable<Codec>
                 }
 
                 return new Codec(packed._catalog, fieldType, false);
+            case CodecKind.Bytes:
+            case CodecKind.Blob:
+            case CodecKind.List:
+                throw new NotSupportedException(NoSourceType(kind));
             default:
                 throw new NotSupportedException(
-                    $"CodecKind.{kind} cannot be declared by an attribute: it needs arguments one cannot carry (a list's element codec) or exists only " +
+                    $"CodecKind.{kind} cannot be declared by an attribute: it needs arguments one cannot carry (a collection's bound) or exists only " +
                     "inside a position. Declare the field in the builder call.");
         }
     }
+
+    // The protocol's raw-byte and list codecs have no engine source: no field type is a byte array, and a ComponentCollection<T> travels as coll (13 § 2.1).
+    // The built-in ClientRegion command carries its own list, built by the protocol.
+    private static string NoSourceType(CodecKind kind) =>
+        $"CodecKind.{kind} has no field type to carry: a component or message field is never a byte array, and a ComponentCollection<T> travels as " +
+        "Codec.Coll. Narrow the value into fields, or into a collection of elements.";
 
     private static int RequiredBits(CodecKind kind, int bits)
         => bits != 0 ? bits : throw new ArgumentException($"CodecKind.{kind} needs its width: set Bits on the attribute.", nameof(bits));
@@ -404,38 +394,6 @@ public readonly struct Codec : IEquatable<Codec>
     {
         CheckQuantizingBits(bits, nameof(bits));
         return bits;
-    }
-
-    /// <summary>A counted sequence of <paramref name="of"/>: a <c>varu</c> count, then that many elements.</summary>
-    /// <param name="of">The element codec.</param>
-    /// <param name="minCount">The fewest elements accepted.</param>
-    /// <param name="maxCount">The most elements accepted, at most 255.</param>
-    /// <returns>The codec.</returns>
-    public static Codec List(Codec of, int minCount, int maxCount)
-    {
-        if (!of.IsDeclared)
-        {
-            throw new ArgumentException("Codec.List needs an element codec.", nameof(of));
-        }
-
-        if (of.IsExact)
-        {
-            throw new ArgumentException("Codec.List needs a declared element codec: Codec.Exact resolves against a field's type, and an element has none.",
-                nameof(of));
-        }
-
-        if (of._catalog.Count > 1)
-        {
-            throw new ArgumentException($"A list element is one value: '{of}' carries a count (W33). Declare a list of the scalar instead.", nameof(of));
-        }
-
-        if (minCount < 0 || minCount > maxCount || maxCount > ProtocolConstants.MaxListCount)
-        {
-            throw new ArgumentOutOfRangeException(nameof(maxCount), maxCount,
-                $"Codec.List needs 0 <= minCount <= maxCount <= {ProtocolConstants.MaxListCount}.");
-        }
-
-        return new Codec(new CatalogCodec { Kind = CodecKind.List, Of = of._catalog, MinCount = minCount, MaxCount = maxCount });
     }
 
     /// <summary>
@@ -520,11 +478,9 @@ public readonly struct Codec : IEquatable<Codec>
         switch (_catalog.Kind)
         {
             case CodecKind.Bits:
-            case CodecKind.Bytes:
                 text.Append('{').Append(_catalog.N).Append('}');
                 break;
             case CodecKind.Str:
-            case CodecKind.Blob:
                 text.Append('{').Append(_catalog.MaxBytes).Append('}');
                 break;
             case CodecKind.Quant:
@@ -533,9 +489,6 @@ public readonly struct Codec : IEquatable<Codec>
             case CodecKind.Vec2:
             case CodecKind.Vec3:
                 text.Append('{').Append(_catalog.Scale).Append(',').Append(_catalog.Bits).Append('}');
-                break;
-            case CodecKind.List:
-                text.Append('{').Append(Element).Append(',').Append(_catalog.MinCount).Append("..").Append(_catalog.MaxCount).Append('}');
                 break;
             default:
                 if (_catalog.Bits != 0)
@@ -563,9 +516,6 @@ public readonly struct Codec : IEquatable<Codec>
 
         return text.ToString();
     }
-
-    /// <summary>The element codec of a list, or <c>default</c> when this is not a list.</summary>
-    public Codec Element => _catalog?.Of == null ? default : new Codec(_catalog.Of);
 
     /// <summary>Whether two codecs declare the same thing.</summary>
     /// <param name="other">The other codec.</param>

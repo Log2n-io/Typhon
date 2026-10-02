@@ -31,7 +31,7 @@ tick. A projection names only what travels, quantizes it to what the client can 
 
 **Codecs** (`Codec.X`): `Bool`, `U8`/`I8`/`U16`/`I16`/`U32`/`I32`, `U64`/`I64`, `VarUInt`/`VarInt`, `VarUInt64`/`VarInt64`, `F32`,
 `F64`, `F16`, `Quant(min, max, bits)`, `Unorm(bits)`, `Snorm(bits)`, `Angle(bits)`, `Bits(n)`, `Enum<T>(bits)`, `Vec2/Vec3(scale, bits)`,
-`EntityRef`, `Str`/`Blob`/`Bytes`, `List(of, min, max)`, `Coll(maxCount)`, `TickLo`, `Quat3`. **`Codec.Exact`** is the stored type's exact codec — `u64` for a
+`EntityRef`, `Str`, `Coll(maxCount)`, `TickLo`, `Quat3`. **`Codec.Exact`** is the stored type's exact codec — `u64` for a
 `ulong`, `f64` for a `double`, `f32 × 3` for a `Point3F`, `str{63}` for a `String64`, `entityRef` for an `EntityId` or an `EntityLink<T>`.
 `.Count(n)` repeats a scalar codec for a point, a quaternion, a box or a sphere,
 whose count the type also gives. `.Saturate()` clamps out-of-range values instead of refusing them. Quantizers take 8, 16, 24 or 32 bits. The

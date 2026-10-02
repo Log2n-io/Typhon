@@ -81,7 +81,7 @@ subs.Command<MoveTo>(c => c.Coalesce(CommandCoalesce.LatestPerSession).Rate(10, 
   declaration.
 - **Attributes cannot vary per archetype**: a component shared by two replicated archetypes projects the same way in both. When they should
   differ, declare one of them with the builder.
-- **Not expressible as attributes** (use the builder): `Computed`, `VelocityFrom`, `IgnoreTickDilation`, a `List` codec; a command's rate,
+- **Not expressible as attributes** (use the builder): `Computed`, `VelocityFrom`, `IgnoreTickDilation`, a `Coll` codec; a command's rate,
   roles and coalescing; an event's routing.
 - **Attributes are not schema**: the storage schema ignores them, so a codec change is never a migration.
 - The SWG demo declares its five archetypes by attributes; its catalog hash is identical to the builder-declared one.
