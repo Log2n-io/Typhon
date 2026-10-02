@@ -74,6 +74,9 @@ class ConcentratedSpawnBurstCountsTests : TestBase<ConcentratedSpawnBurstCountsT
     /// <summary>How many cells the burst lands in. Four is a small area at the demo's 64 m cell size, not a single degenerate cell.</summary>
     private const int CellCount = 4;
 
+    /// <summary>Splits the last <c>AdvanceHashStateFor</c> call performed, for the case that asserts the pre-advance moved them out of the burst.</summary>
+    private int AdvanceSplits;
+
     private readonly struct Counts
     {
         public readonly int Batch;
@@ -118,7 +121,7 @@ class ConcentratedSpawnBurstCountsTests : TestBase<ConcentratedSpawnBurstCountsT
     /// Spawns <paramref name="batch"/> mobs concentrated into <see cref="CellCount"/> cells and returns what the insert paths did. Counters are cleared AFTER
     /// archetype initialisation, so nothing the engine inserted while opening is attributed to the burst.
     /// </summary>
-    private Counts Measure(int batch, bool ascending)
+    private Counts Measure(int batch, bool ascending, int preSize = 0, int advance = 0)
     {
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<BurstMobData>();
@@ -131,6 +134,18 @@ class ConcentratedSpawnBurstCountsTests : TestBase<ConcentratedSpawnBurstCountsT
 
         var cellTree = (BTree<int, PersistentStore>)cluster.IndexSlots[0].Fields[0].Index;
         var keyTree = (BTree<int, PersistentStore>)cluster.IndexSlots[0].Fields[1].Index;
+
+        if (preSize > 0)
+        {
+            using var presizeEpoch = EpochGuard.Enter(dbe.EpochManager);
+            map.EnsureCapacity(preSize);
+        }
+
+        if (advance > 0)
+        {
+            using var advanceEpoch = EpochGuard.Enter(dbe.EpochManager);
+            AdvanceSplits = map.AdvanceHashStateFor(advance);
+        }
 
         cellTree.ResetDiagnostics();
         keyTree.ResetDiagnostics();
@@ -254,6 +269,73 @@ class ConcentratedSpawnBurstCountsTests : TestBase<ConcentratedSpawnBurstCountsT
             // not used as an array index.
             Assert.That(c.MapDistinctBucketsTouched, Is.GreaterThan(0));
             Assert.That(c.MapDistinctBucketsTouched, Is.LessThanOrEqualTo(c.MapBuckets));
+        });
+    }
+    /// <summary>
+    /// <b>Pre-sizing the EntityMap does NOT reduce its split count</b>, and this case exists because the opposite was asserted in a design note and
+    /// believed for a while.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <c>EnsureCapacity</c> pre-allocates the segment chunks and the bucket directory so that an organic split does not also trigger a page-level grow.
+    /// Its own summary says the rest out loud: it "does NOT advance the linear hash state — entry redistribution happens correctly via per-insert
+    /// <c>ExecuteSplit</c>". <c>ShouldSplit</c> reads the bucket count out of <c>PackedMeta</c>, which <c>EnsureCapacity</c> never touches, so every split
+    /// the load factor calls for still happens, still takes the global split lock, and still rehashes.
+    /// </para>
+    /// <para>
+    /// Measured identical in every figure — splits, buckets, entries rehashed, overflow chunks — which is why the assertion is equality against the
+    /// un-presized run rather than a bound. The consequence for #1100 is that getting structural change out of a parallel insert region needs the hash
+    /// state advanced up front, which is a new method; pre-sizing alone will not do it.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void PreSizingTheEntityMapDoesNotRemoveItsSplits()
+    {
+        var plain = Measure(3000, ascending: false);
+        var presized = Measure(3000, ascending: false, preSize: 4000);
+
+        TestContext.Out.WriteLine($"plain:    mapSplits={plain.MapSplits} buckets={plain.MapBuckets} rehashed={plain.MapEntriesRehashed} "
+            + $"overflow={plain.MapOverflowChained}");
+        TestContext.Out.WriteLine($"presized: mapSplits={presized.MapSplits} buckets={presized.MapBuckets} rehashed={presized.MapEntriesRehashed} "
+            + $"overflow={presized.MapOverflowChained}");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(plain.MapSplits, Is.GreaterThan(0), "precondition: the un-presized burst must split, or the comparison is vacuous");
+            Assert.That(presized.MapSplits, Is.EqualTo(plain.MapSplits),
+                "EnsureCapacity pre-allocates storage; it does not advance the hash state, so the split count is unchanged");
+            Assert.That(presized.MapEntriesRehashed, Is.EqualTo(plain.MapEntriesRehashed), "and the rehash work is unchanged with it");
+            Assert.That(presized.MapBuckets, Is.EqualTo(plain.MapBuckets), "and so is the bucket count the burst ends on");
+        });
+    }
+    /// <summary>
+    /// <b>#1100's premise, measured:</b> advancing the linear hash state before the burst moves every split out of it. This is what pre-sizing alone could
+    /// not do, and it is the whole justification for the pre-advance — a parallel insert region can be partitioned by bucket only when nothing inside it
+    /// changes the structure.
+    /// </summary>
+    /// <remarks>
+    /// The entries relocated are the same either way; linear-hash growth has to pay them. What moves is WHEN, and therefore whether the work is inside a
+    /// region that assumes disjoint buckets. The assertion is on the split count DURING the burst being zero, with the pre-advance's own count non-zero —
+    /// both, because a pre-advance that performed no splits would also leave zero in the burst and would prove nothing.
+    /// </remarks>
+    [Test]
+    public void AdvancingTheHashStateFirstMovesEverySplitOutOfTheBurst()
+    {
+        var plain = Measure(3000, ascending: false);
+        var advanced = Measure(3000, ascending: false, advance: 3000);
+        var movedOut = AdvanceSplits;
+
+        TestContext.Out.WriteLine($"plain: splits-in-burst={plain.MapSplits} rehashed={plain.MapEntriesRehashed}");
+        TestContext.Out.WriteLine($"advanced: splits-in-burst={advanced.MapSplits} rehashed={advanced.MapEntriesRehashed} pre-advance-splits={movedOut}");
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(plain.MapSplits, Is.GreaterThan(0), "precondition: the un-advanced burst splits, or there is nothing to move");
+            Assert.That(movedOut, Is.GreaterThan(0), "the pre-advance must actually have split something — otherwise the next assertion is vacuous");
+            Assert.That(advanced.MapSplits, Is.Zero,
+                "after the pre-advance the burst itself must perform NO split: that is the only property that makes a bucket partition safe");
+            Assert.That(advanced.MapBuckets, Is.GreaterThanOrEqualTo(plain.MapBuckets),
+                "and the map must end at least as wide — the growth happened, it just happened earlier");
         });
     }
 }
