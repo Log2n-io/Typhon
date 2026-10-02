@@ -311,6 +311,14 @@ internal static unsafe class ProjectionPass
         var quantizedBuffer = stackalloc byte[24];
         var quantizedPosition = new Span<byte>(quantizedBuffer, 24);
 
+        // A moving position is quantized for the whole block before the slots are visited: one pass over the column, the frame's constants and the spatial
+        // type resolved once rather than per slot and axis. Slot s's code is at s × positionBytes.
+        var positionCodes = stackalloc byte[position != null && positionBytes > 0 ? MaxSlots * positionBytes : 0];
+        if (position != null && positionBytes > 0)
+        {
+            QuantizePositions(position, frame, clusterBase, transientBase, clusterLayout, live, positionCodes, positionBytes);
+        }
+
         // ── The motion rule's per-block setup (P1-10) ────────────────────────────────────────────────────────────────────────────────────────────────────
         //
         // Everything the rule needs that is a property of the ARCHETYPE rather than of the entity: the tolerance and teleport thresholds pre-squared, the
@@ -384,7 +392,8 @@ internal static unsafe class ProjectionPass
             // ── Position: quantized, compared, stored; then the motion rule decides whether it becomes a SEGMENT (P1-10) ──────────────────────────────────
             if (position != null && positionBytes > 0)
             {
-                QuantizePosition(position, frame, clusterBase, transientBase, clusterLayout, slot, quantizedPosition);
+                var quantizedSlot = positionCodes + (slot * positionBytes);
+                var quantized = new ReadOnlySpan<byte>(quantizedSlot, positionBytes);
                 var stored = coldBytes + layout.PrevPositionOffsetInColdEntry;
                 var visibility = coldBytes + layout.VisibilityPositionOffsetInColdEntry;
                 if (push != null)
@@ -395,22 +404,22 @@ internal static unsafe class ProjectionPass
                         pushFlags |= PushEvent.HasOld;
                     }
 
-                    push.Decode(pushIndex, quantizedBuffer, out pushNewX, out pushNewY, out pushNewZ);
+                    push.Decode(pushIndex, quantizedSlot, out pushNewX, out pushNewY, out pushNewZ);
                     pushFlags |= PushEvent.HasNew;
                 }
-                var moved = initialize || !new ReadOnlySpan<byte>(stored, positionBytes).SequenceEqual(quantizedPosition[..positionBytes]);
+                var moved = initialize || !new ReadOnlySpan<byte>(stored, positionBytes).SequenceEqual(quantized);
                 var epochBefore = ownVisibility && motion.Enabled ? hotBytes[motion.SegmentOffset + motion.SegmentEpochOffset] : (byte)0;
 
                 // BEFORE the previous position is overwritten, because the rule's teleport and run-departure tests are about this tick's STEP, which only
                 // exists while both positions are still there. The rule owns the whole of the hot entry's segment region and the motion tick in
                 // GroupTicks[0]: a position that changed is not a segment, and stamping the tick for every change would send one to every client every tick,
                 // which is the traffic segments exist to remove.
-                MotionTracker.Update(in motion, hot, coldBytes, quantizedBuffer, velocityColumn, slot, initialize, tick, motionScratch, ref segmentsEmitted,
+                MotionTracker.Update(in motion, hot, coldBytes, quantizedSlot, velocityColumn, slot, initialize, tick, motionScratch, ref segmentsEmitted,
                     ref shadowSegments);
 
                 if (moved)
                 {
-                    quantizedPosition[..positionBytes].CopyTo(new Span<byte>(stored, positionBytes));
+                    quantized.CopyTo(new Span<byte>(stored, positionBytes));
                     hot->Flags |= FlagPositionChanged;
                 }
 
@@ -422,7 +431,7 @@ internal static unsafe class ProjectionPass
                     var teleported = motion.Enabled && hotBytes[motion.SegmentOffset + motion.SegmentEpochOffset] != epochBefore;
                     if (initialize || teleported || (dx * dx) + (dy * dy) + (dz * dz) > slackSquared)
                     {
-                        quantizedPosition[..positionBytes].CopyTo(new Span<byte>(visibility, positionBytes));
+                        quantized.CopyTo(new Span<byte>(visibility, positionBytes));
                     }
                     else
                     {
@@ -1183,6 +1192,104 @@ internal static unsafe class ProjectionPass
                 destination[(axis * bytes) + i] = (byte)(code >> (8 * i));
             }
         }
+    }
+
+    /// <summary>
+    /// Quantizes the position of every slot in <paramref name="slots"/> into <paramref name="codes"/>, slot s at s × <paramref name="bytesPerSlot"/>, giving
+    /// each the bytes <see cref="QuantizePosition"/> gives it: the same operations on the same values, with the frame's step taken from
+    /// <see cref="PositionFrame.Step"/> and the spatial type chosen once for the block. One division per axis remains — a product by 1/step would move the
+    /// last bit (W1).
+    /// </summary>
+    private static void QuantizePositions(CompiledPosition position, PositionFrame frame, byte* clusterBase, byte* transientBase,
+        ArchetypeClusterInfo clusterLayout, ulong slots, byte* codes, int bytesPerSlot)
+    {
+        var column = StoreFor(clusterLayout, transientBase, clusterBase, position.ComponentSlot) + position.ComponentOffsetInCluster
+            + position.FieldOffsetInComponent;
+        switch (position.SpatialFieldType)
+        {
+            case SpatialFieldType.AABB2F:
+            case SpatialFieldType.AABB3F:
+                QuantizePositions<BoxF>(position, frame, column, slots, codes, bytesPerSlot);
+                break;
+            case SpatialFieldType.AABB2D:
+            case SpatialFieldType.AABB3D:
+                QuantizePositions<BoxD>(position, frame, column, slots, codes, bytesPerSlot);
+                break;
+            case SpatialFieldType.BSphere2F:
+            case SpatialFieldType.BSphere3F:
+                QuantizePositions<PointF>(position, frame, column, slots, codes, bytesPerSlot);
+                break;
+            default:
+                QuantizePositions<PointD>(position, frame, column, slots, codes, bytesPerSlot);
+                break;
+        }
+    }
+
+    private static void QuantizePositions<TCentre>(CompiledPosition position, PositionFrame frame, byte* column, ulong slots, byte* codes, int bytesPerSlot)
+        where TCentre : struct, IPositionCentre
+    {
+        var dims = position.Dims;
+        var size = position.ComponentSize;
+        var axisBytes = frame.AxisBytes;
+        var top = WireMath.Pow2(frame.Bits) - 1;
+        double minX = frame.Min[0], minY = frame.Min[1], minZ = dims > 2 ? frame.Min[2] : 0d;
+        double stepX = frame.Step[0], stepY = frame.Step[1], stepZ = dims > 2 ? frame.Step[2] : 0d;
+        while (slots != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(slots);
+            slots &= slots - 1;
+            var value = column + (slot * size);
+            var destination = codes + (slot * bytesPerSlot);
+            WriteAxis(destination, axisBytes, WireMath.EncodeQuantWithStep(TCentre.Of(value, 0, dims), minX, stepX, top));
+            WriteAxis(destination + axisBytes, axisBytes, WireMath.EncodeQuantWithStep(TCentre.Of(value, 1, dims), minY, stepY, top));
+            if (dims > 2)
+            {
+                WriteAxis(destination + (2 * axisBytes), axisBytes, WireMath.EncodeQuantWithStep(TCentre.Of(value, 2, dims), minZ, stepZ, top));
+            }
+        }
+    }
+
+    // One axis's code, little-endian, in its byte width.
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void WriteAxis(byte* destination, int axisBytes, uint code)
+    {
+        for (var i = 0; i < axisBytes; i++)
+        {
+            destination[i] = (byte)(code >> (8 * i));
+        }
+    }
+
+    // What Centre computes for one spatial type, as a type parameter so a block's pass is specialized for its type rather than switching per slot and axis.
+    // The expressions are Centre's own, operand for operand: a box's sum is a float sum, widened after.
+    private interface IPositionCentre
+    {
+        static abstract double Of(byte* value, int axis, int dims);
+    }
+
+    private struct BoxF : IPositionCentre
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static double Of(byte* value, int axis, int dims) =>
+            (Unsafe.ReadUnaligned<float>(ref value[axis * 4]) + Unsafe.ReadUnaligned<float>(ref value[(dims + axis) * 4])) * 0.5d;
+    }
+
+    private struct BoxD : IPositionCentre
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static double Of(byte* value, int axis, int dims) =>
+            (Unsafe.ReadUnaligned<double>(ref value[axis * 8]) + Unsafe.ReadUnaligned<double>(ref value[(dims + axis) * 8])) * 0.5d;
+    }
+
+    private struct PointF : IPositionCentre
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static double Of(byte* value, int axis, int dims) => Unsafe.ReadUnaligned<float>(ref value[axis * 4]);
+    }
+
+    private struct PointD : IPositionCentre
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static double Of(byte* value, int axis, int dims) => Unsafe.ReadUnaligned<double>(ref value[axis * 8]);
     }
 
     /// <summary>The position an axis of a spatial value reports: a box's mid-point, or a sphere's centre.</summary>
