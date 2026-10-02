@@ -1168,6 +1168,86 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     }
 
     /// <summary>
+    /// The same three conditions as <see cref="RealmGridForEntry"/>, answered rather than thrown (#1099). For the deferred command path, which runs
+    /// inside a parallel chunk where a throw becomes a system failure and can cancel the rest of the tick.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a sibling of the throwing method and not a refactor of it: the three messages are that method's entire value, and a shared
+    /// classifier returning a reason code so both could build them would be more moving parts than the condition deserves. The pair is short enough to
+    /// read side by side, which is the property that keeps them from drifting. D-2 — validated paths throw, the fence never does — is why both exist.
+    /// </remarks>
+    internal bool CanEnterRealm(ushort realm, int archetypeId)
+    {
+        var r = _realms?.TryGet(realm);
+        return r != null && !r.Closing && r.IsCompatible(archetypeId);
+    }
+
+    /// <summary>
+    /// Whether a deferred spawn of <paramref name="meta"/> carrying <paramref name="values"/> can be queued, and the routing id it would carry (#1099).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The write-side half of decision D-2. <c>Transaction.Spawn</c> throws at the call for an unregistered archetype or an impossible realm, which is
+    /// right there and wrong here: <c>ctx.Commands.Spawn</c> is called from a parallel chunk. So the same two questions are asked at the same moment — at
+    /// the call that caused the problem, not at the drain — and answered with a refusal plus an exact counter instead of an exception.
+    /// </para>
+    /// <para>
+    /// Both checks are resolvable without a transaction, which is what makes this possible at all: registration is <c>_archetypeStates[id].EntityMap</c>,
+    /// and the realm key is readable straight out of the supplied <see cref="ComponentValue"/> span.
+    /// </para>
+    /// </remarks>
+    internal bool CanSpawnDeferred(ArchetypeMetadata meta, ReadOnlySpan<ComponentValue> values, out ushort routingId)
+    {
+        routingId = 0;
+        if (meta == null || (uint)meta.ArchetypeId >= (uint)_archetypeStates.Length)
+        {
+            return false;
+        }
+
+        var state = _archetypeStates[meta.ArchetypeId];
+        if (state?.EntityMap == null)
+        {
+            return false;
+        }
+
+        if (state.ClusterState is { SpatialSlot.HasRealmKey: true } keyed && !CanEnterRealm(DeferredSpawnRealm(meta, keyed, values), meta.ArchetypeId))
+        {
+            return false;
+        }
+
+        routingId = RoutingIdOf(meta);
+        return true;
+    }
+
+    /// <summary>
+    /// The realm a deferred spawn's values name, or 0 when they name none — the read half of <see cref="CanSpawnDeferred"/>, mirroring
+    /// <c>Transaction.ValidateSpawnRealm</c> without its throws.
+    /// </summary>
+    /// <remarks>
+    /// A realm-key value too short to hold the key reads as realm 0 rather than refusing. The throwing path treats that as an application error, and it
+    /// is — but here the realm check that follows is what decides, and a malformed value that names an impossible realm is refused by it with the right
+    /// counter. Refusing twice for one problem would make the two counters disagree about one command.
+    /// </remarks>
+    private static ushort DeferredSpawnRealm(ArchetypeMetadata meta, ArchetypeClusterState clusterState, ReadOnlySpan<ComponentValue> values)
+    {
+        ref readonly var ss = ref clusterState.SpatialSlot;
+        for (var v = 0; v < values.Length; v++)
+        {
+            if (!meta.TryGetSlot(values[v].ComponentTypeId, out var slot) || slot != ss.RealmKeySlot)
+            {
+                continue;
+            }
+
+            // A span over the value, not a pointer: the values can be backed by a managed array. The payload starts 12 bytes into a ComponentValue.
+            var payload = MemoryMarshal.CreateReadOnlySpan(ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in values[v])), 12),
+                values[v].DataSize);
+            return payload.Length < ss.RealmKeyOffset + sizeof(ushort) ? (ushort)0 : MemoryMarshal.Read<ushort>(payload.Slice(ss.RealmKeyOffset));
+        }
+
+        return 0;
+    }
+
+    /// <summary>
     /// The grid a spatial query in realm <paramref name="realm"/> walks. Throws when the realm is not registered: a query naming a realm that does not
     /// exist is an application error, never an empty answer. An archetype with no cluster in a registered realm answers empty.
     /// </summary>

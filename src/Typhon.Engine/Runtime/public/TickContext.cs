@@ -176,6 +176,29 @@ public struct TickContext
     public readonly EventWriter<T> Writer<T>(EventQueue<T> queue) => queue == null ? default : queue.GetWriter(WorkerId);
 
     /// <summary>
+    /// The tick's deferred entity commands, or null outside a database engine. Internal because <c>ctx.Commands</c> is the supported surface — a system
+    /// must not be able to reach another worker's segment.
+    /// </summary>
+    internal EntityCommandBuffer CommandBuffer { get; init; }
+
+    /// <summary>
+    /// Queues a spawn or a destroy from inside this chunk, without a transaction (#1099). Resolve it ONCE per system body and queue through it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The handle is bound to this context's worker slot and chunk index, so a producer cannot write another worker's segment and the ids it hands out do
+    /// not depend on which worker picked the chunk up. The returned <see cref="EntityId"/> is real and final; the entity becomes alive at the fence.
+    /// </para>
+    /// <para>
+    /// <see cref="EntityCommands.IsValid"/> is false in a lifecycle hook and in a scheduler running without a database engine, and every method on an
+    /// invalid handle is a no-op — the same shape as the <c>queue?.Push(...)</c> idiom <see cref="Writer{T}"/> keeps working for. It is not a property to
+    /// store: a <c>ref struct</c> cannot leave the stack, which is what makes the no-atomics design safe.
+    /// </para>
+    /// </remarks>
+    public readonly EntityCommands Commands =>
+        CommandBuffer == null || WorkerId == NonWorkerId ? default : CommandBuffer.GetWriter(WorkerId, ChunkIndex);
+
+    /// <summary>
     /// Debug-only guard that <see cref="WorkerId"/> is a usable worker slot on every context that reaches user system code (#860).
     /// </summary>
     /// <param name="slotCount"><see cref="DagScheduler.WorkerSlotCount"/> — worker threads plus the dispatcher slot.</param>
