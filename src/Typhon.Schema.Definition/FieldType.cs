@@ -176,6 +176,20 @@ public static class DatabaseSchemaExtensions
             return (FieldType.Long, FieldType.None);
         }
 
+        // A bare EntityId, same 8 bytes, also as Long. By full name for the same reason as above — EntityId lives in Typhon.Engine, which this assembly
+        // does not reference.
+        //
+        // WHY BOTH EXIST, because the obvious reading is that EntityLink<T> supersedes this. EntityLink<T> carries the target archetype in its type, which
+        // is what makes it a checkable foreign key, and it is the right choice whenever the target archetype is known. It cannot express a POLYMORPHIC
+        // reference, and those are real: the SWG demo's PlayerSession.Target resolves whatever netId a client sent and classifies the archetype afterwards,
+        // deliberately, so that "attack that cantina" produces a clean refusal rather than a type error. Before this mapping existed such a field returned
+        // None and was dropped from the schema without a word — present in the struct's bytes and readable from C#, but with no field id, so invisible to
+        // the Workbench, un-indexable, and absent from anything schema-driven. Three fields in the demo were in that state.
+        if (t.FullName == "Typhon.Engine.EntityId")
+        {
+            return (FieldType.Long, FieldType.None);
+        }
+
         return (FieldType.None, FieldType.None);
     }
 

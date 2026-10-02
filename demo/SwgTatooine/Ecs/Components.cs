@@ -506,7 +506,12 @@ public struct CreatureBrain
     /// because who a creature is fighting is behaviour a client renders, not scheduling.
     /// </para>
     /// </remarks>
-    [Field] public EntityId Target;
+    /// <remarks>
+    /// <b><c>EntityLink&lt;Player&gt;</c> and not a bare <see cref="EntityId"/>:</b> the only writer is the aggro query, which is
+    /// <c>ClusterSpatialQuery&lt;Player&gt;</c>, so the target is a player by construction. The typed link says so in the schema, which makes the field
+    /// indexable and foreign-key-checkable; the bare id did not and could not.
+    /// </remarks>
+    [Field] public EntityLink<Player> Target;
 
     /// <summary>Which <see cref="CreatureTemplates"/> entry this creature was spawned from — a womp rat, a bantha, a mission defender (S0-5).</summary>
     /// <remarks>
@@ -822,7 +827,7 @@ public struct Lair
     /// finished. Recording it is also what makes the completion branch mean something: before SWG-02 nothing wrote <see cref="LairVitals.Health"/> downward,
     /// so the branch never ran at all.
     /// </remarks>
-    [Field] public EntityId Owner;
+    [Field] public EntityLink<Player> Owner;
 }
 
 /// <summary>
