@@ -191,7 +191,7 @@ internal static unsafe class ProjectionPass
                 released++;
             }
 
-            ClearEntry(blockBytes, layout, slot);
+            ClearEntry(state, blockBytes, layout, slot);
         }
 
         var live = watched & occupancy;
@@ -230,7 +230,7 @@ internal static unsafe class ProjectionPass
                     released++;
                 }
 
-                ClearEntry(blockBytes, layout, slot);
+                ClearEntry(state, blockBytes, layout, slot);
                 initializing |= 1UL << slot;
                 continue;
             }
@@ -258,9 +258,11 @@ internal static unsafe class ProjectionPass
 
         // ── 4. Scratch, carved once per block ────────────────────────────────────────────────────────────────────────────────────────────────────────────
         var packBytes = MaxPackBytes(plan);
+        // Sized by what a section can put on the wire, not by what its entry stores: a wide section is encoded whole before it is compared (13 § 6.3).
         var stateBytes = plan.MaxStateBodyBytes;
-        var ownerBytes = plan.OwnerEntrySize;
+        var ownerBytes = plan.MaxOwnerBodyBytes;
         var enterBytes = plan.OnEnter.MaxBodyBytes;
+        var wideBodies = state.WideBodies;
         var scratch = arena.Scratch(packBytes + stateBytes + ownerBytes + enterBytes + 8);
         var pack = new Span<byte>(scratch, packBytes);
         var groupScratch = scratch + packBytes;
@@ -317,33 +319,35 @@ internal static unsafe class ProjectionPass
             var coldBytes = blockBytes + layout.ColdOffset + (slot * layout.ColdStride);
             var hot = (ReplicationHotEntry*)hotBytes;
             var initialize = (initializing & (1UL << slot)) != 0;
+            var takeIdentity = false;
 
             if (initialize)
             {
                 // An identity is taken only when the entry HAS none. The three causes of an initialization are not alike: a new or reused slot arrived here
                 // with its entry cleared and therefore needs one, while an entity that was simply unwatched for a tick never left and keeps the identity it
                 // had. Taking one unconditionally would strand the old number — live in the allocator, named by nothing — which is the leak AC-9 counts.
-                var netId = hot->NetId;
-                if (netId == NetIdAllocator.NoNetId)
+                //
+                // Checked here, TAKEN after the sections are stored: an archetype's wide bodies can fail to find room (13 § 6.2), and an identity taken
+                // before that would have to be given back — a release that only reaches the allocator next tick, so a lasting shortage would drain the
+                // lease for every other entity of the block.
+                if (hot->NetId == NetIdAllocator.NoNetId)
                 {
-                    netId = leases.Take(worker);
-                    if (netId == NetIdAllocator.NoNetId)
+                    if (!leases.HasAny(worker))
                     {
                         // The lease ran dry. The entity stays watched and its entry stays uninitialized, so the next tick — whose refill has seen this tick's
                         // demand — initializes it. Deferring an entity by a tick is the only failure available here that neither allocates on a worker nor
                         // hands two entities one identity; it is counted so a lease that is chronically too small is visible rather than inferred.
+                        leases.Take(worker);
                         state.NoteNetIdStarvation();
                         hub?.Repush(pushIndex, block->ChunkId, 1UL << slot);
                         continue;
                     }
 
-                    hot->NetId = netId;
-                    hot->Generation = state.NetIds.GenerationOf(netId);
+                    takeIdentity = true;
                 }
 
                 hot->Entity = EntityId.FromRaw(entityIds[slot]);
                 hot->Flags = FlagInitializedThisTick;
-                state.EntityIndex?.Bind(hot->NetId, hot->Entity);
             }
             else
             {
@@ -443,19 +447,79 @@ internal static unsafe class ProjectionPass
             }
 
             // ── Groups: encode, compare, stamp ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+            var text = new TextSource(state, clusterLayout, clusterBase, transientBase, slot);
+            var wideFailed = false;
             var changed = EncodeAndCompare(plan.Groups, fields, 0, codes, slot, pack, groupScratch, hotBytes + layout.PackedStateOffsetInHotEntry,
-                groupLength, groupOffset, hot, tick, initialize);
+                groupLength, groupOffset, hot, tick, initialize, in text, wideBodies, ref wideFailed);
 
+            var ownerChanged = 0;
             if (ownerFields.Length > 0)
             {
-                var ownerChanged = EncodeAndCompare(plan.OwnerGroups, ownerFields, fields.Length, codes, slot, pack, ownerScratch,
-                    blockBytes + layout.OwnerOffset + (slot * layout.OwnerEntrySize), ownerLength, ownerOffset, hot, tick, initialize, stampTicks: false);
-                hot->Flags |= (ushort)(ownerChanged << OwnerChangedMaskShift);
-                if (ownerChanged != 0)
+                ownerChanged = EncodeAndCompare(plan.OwnerGroups, ownerFields, fields.Length, codes, slot, pack, ownerScratch,
+                    blockBytes + layout.OwnerOffset + (slot * layout.OwnerEntrySize), ownerLength, ownerOffset, hot, tick, initialize, in text, wideBodies,
+                    ref wideFailed, stampTicks: false);
+            }
+
+            // ── The enter cache, before the event: a failure to store it has to be able to take the initialization back ───────────────────────────────
+            //
+            // Written at an initialization, and again for a described entity whose wide onEnter body is missing — an entry a pass left before storing
+            // it, which every later enter record would otherwise have nothing to copy.
+            if (layout.EnterBodyBytes > 0 && (initialize || (plan.OnEnter.Wide
+                    && Unsafe.ReadUnaligned<uint>(coldBytes + layout.EnterBodyOffsetInColdEntry + plan.OnEnter.StoredOffset) == 0)))
+            {
+                var onEnterLength = EncodeSection(fields, plan.OnEnter, codes, 0, slot, pack, new Span<byte>(enterScratch, enterBytes), in text);
+
+                // 03 § 5's body(onEnter). An onEnter field appears in no state record and no group body, so a session that first sees this entity on a later
+                // tick would otherwise have no enter body to be sent, and the frame stage would have to re-encode one per session from the columns.
+                // Zero-padded to the section's widest form, exactly as a stored group body is, so the frame stage recovers the real length by walking the
+                // section rather than by storing one — or, for a wide section, kept out of line with its length.
+                var cache = coldBytes + layout.EnterBodyOffsetInColdEntry + plan.OnEnter.StoredOffset;
+                if (plan.OnEnter.Wide)
                 {
-                    // To the sessions that control this entity, as a pending mask their next published frame's SELF carries (11 § 2.2).
-                    state.Self?.Notice(hot->Entity, ownerChanged);
+                    wideFailed |= !StoreWide(wideBodies, cache, new ReadOnlySpan<byte>(enterScratch, onEnterLength));
                 }
+                else
+                {
+                    var inline = new Span<byte>(cache, layout.EnterBodyBytes);
+                    inline.Clear();
+                    new ReadOnlySpan<byte>(enterScratch, onEnterLength).CopyTo(inline);
+                }
+            }
+
+            if (wideFailed)
+            {
+                // The arena's budget is spent (13 § 6.2). An entity already described keeps the bytes it had — the failed section was neither replaced nor
+                // stamped — and is pushed again next tick. A NEW one cannot be described at all, so its initialization is taken back whole, as a lease
+                // that ran dry would have left it: no identity, no event, no record, and tried again next tick.
+                state.NoteWideDeferral();
+                hub?.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                if (initialize)
+                {
+                    // No identity was taken yet, so there is none to give back.
+                    ClearEntry(state, blockBytes, layout, slot);
+                    continue;
+                }
+            }
+
+            if (initialize)
+            {
+                if (takeIdentity)
+                {
+                    // Cannot be refused: the lease was found non-empty above, and only this worker spends it.
+                    var netId = leases.Take(worker);
+                    hot->NetId = netId;
+                    hot->Generation = state.NetIds.GenerationOf(netId);
+                }
+
+                state.EntityIndex?.Bind(hot->NetId, hot->Entity);
+            }
+
+            if (ownerChanged != 0)
+            {
+                hot->Flags |= (ushort)(ownerChanged << OwnerChangedMaskShift);
+
+                // To the sessions that control this entity, as a pending mask their next published frame's SELF carries (11 § 2.2).
+                state.Self?.Notice(hot->Entity, ownerChanged);
             }
 
             if (push != null)
@@ -470,22 +534,8 @@ internal static unsafe class ProjectionPass
                 push.AddEvent(worker, pushIndex, block, slot, hot, hot->NetId, pushFlags, pushOldX, pushOldY, pushOldZ, pushNewX, pushNewY, pushNewZ);
             }
 
-            // ── The enter cache ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
             if (initialize)
             {
-                var onEnterLength = EncodeSection(fields, plan.OnEnter, codes, 0, slot, pack, new Span<byte>(enterScratch, enterBytes));
-
-                // 03 § 5's body(onEnter). An onEnter field appears in no state record and no group body, so a session that first sees this entity on a later
-                // tick would otherwise have no enter body to be sent, and the frame stage would have to re-encode one per session from the columns.
-                // Zero-padded to the section's widest form, exactly as a stored group body is, so the frame stage recovers the real length by walking the
-                // section rather than by storing one.
-                if (layout.EnterBodyBytes > 0)
-                {
-                    var cache = new Span<byte>(coldBytes + layout.EnterBodyOffsetInColdEntry, layout.EnterBodyBytes);
-                    cache.Clear();
-                    new ReadOnlySpan<byte>(enterScratch, onEnterLength).CopyTo(cache);
-                }
-
                 records++;
             }
             else if (changed != 0)
@@ -575,29 +625,48 @@ internal static unsafe class ProjectionPass
     /// </summary>
     /// <returns>The mask of groups whose body changed.</returns>
     private static int EncodeAndCompare(CompiledGroup[] groups, CompiledField[] fields, int rowBase, ulong* codes, int slot, Span<byte> pack, byte* scratch,
-        byte* stored, Span<int> lengths, Span<int> offsets, ReplicationHotEntry* hot, uint tick, bool initialize, bool stampTicks = true)
+        byte* stored, Span<int> lengths, Span<int> offsets, ReplicationHotEntry* hot, uint tick, bool initialize, in TextSource text, WideBodyArena wideBodies,
+        ref bool wideFailed, bool stampTicks = true)
     {
         var changed = 0;
         for (var g = 0; g < groups.Length; g++)
         {
             ref readonly var group = ref groups[g];
             var max = group.Section.MaxBodyBytes;
-            var at = offsets[g];
-            var destination = new Span<byte>(scratch + at, max);
+            var destination = new Span<byte>(scratch + offsets[g], max);
 
             // Zeroed BEFORE the encode, not after it: the padding is what makes the fixed-width comparison below exact, and clearing only the tail would
             // leave whatever the previous slot's longer body wrote there.
             destination.Clear();
-            var length = EncodeSection(fields, group.Section, codes, rowBase, slot, pack, destination);
+            var length = EncodeSection(fields, group.Section, codes, rowBase, slot, pack, destination, in text);
             lengths[g] = length;
 
-            var current = new Span<byte>(stored + at, max);
-            if (!initialize && destination.SequenceEqual(current))
+            var at = stored + group.Section.StoredOffset;
+            if (group.Section.Wide)
             {
-                continue;
+                // Out of line (13 § 6.3): compared on length and bytes, and replaced — re-allocated only when its size class changes — where they differ.
+                if (!initialize && WideEquals(wideBodies, at, destination[..length]))
+                {
+                    continue;
+                }
+
+                if (!StoreWide(wideBodies, at, destination[..length]))
+                {
+                    wideFailed = true;
+                    continue;
+                }
+            }
+            else
+            {
+                var current = new Span<byte>(at, max);
+                if (!initialize && destination.SequenceEqual(current))
+                {
+                    continue;
+                }
+
+                destination.CopyTo(current);
             }
 
-            destination.CopyTo(current);
             changed |= 1 << group.Bit;
             if (stampTicks && group.TickSlot >= 0)
             {
@@ -613,7 +682,7 @@ internal static unsafe class ProjectionPass
     /// </summary>
     /// <returns>Bytes written.</returns>
     private static int EncodeSection(CompiledField[] fields, in CompiledSection section, ulong* codes, int rowBase, int slot, Span<byte> pack,
-        Span<byte> destination)
+        Span<byte> destination, in TextSource text)
     {
         if (section.FieldCount == 0)
         {
@@ -640,10 +709,84 @@ internal static unsafe class ProjectionPass
         for (var i = section.PackedCount; i < section.FieldCount; i++)
         {
             var index = section.FirstField + i;
-            WriteCode(ref writer, fields[index], codes[((rowBase + index) * MaxSlots) + slot]);
+            ref readonly var field = ref fields[index];
+            if (field.Path == ColumnPath.Text)
+            {
+                if (text.Write(ref writer, field))
+                {
+                    // Cut at its cap, at a code point: counted on the field's row, beside the clamps (13 § 2.3).
+                    text.State.NoteClamps(rowBase + index, 1);
+                }
+
+                continue;
+            }
+
+            WriteCode(ref writer, field, codes[((rowBase + index) * MaxSlots) + slot]);
         }
 
         return writer.Position;
+    }
+
+    /// <summary>Whether a wide section's stored body is exactly <paramref name="body"/>: the same length, then the same bytes.</summary>
+    // A reference sits in block memory — native, engine-owned — at any alignment its region gives it: read and written unaligned, through the region
+    // pointer the pass already holds for the entry.
+    private static bool WideEquals(WideBodyArena arena, byte* reference, ReadOnlySpan<byte> body)
+    {
+        var handle = Unsafe.ReadUnaligned<uint>(reference);
+        var length = Unsafe.ReadUnaligned<uint>(reference + sizeof(uint));
+        return handle != 0 && length == (uint)body.Length && arena.Read(handle, length).SequenceEqual(body);
+    }
+
+    /// <summary>
+    /// Stores a wide section's body and its length through its reference; <see langword="false"/>, with the reference untouched, on exhaustion.
+    /// </summary>
+    private static bool StoreWide(WideBodyArena arena, byte* reference, ReadOnlySpan<byte> body)
+    {
+        var handle = Unsafe.ReadUnaligned<uint>(reference);
+        if (!arena.Store(ref handle, body))
+        {
+            return false;
+        }
+
+        Unsafe.WriteUnaligned(reference, handle);
+        Unsafe.WriteUnaligned(reference + sizeof(uint), (uint)body.Length);
+        return true;
+    }
+
+    /// <summary>
+    /// What a section encoder needs to read a text field (13 § 2.1): the slot's cluster, and the state that counts a truncation. Text has no code row — it
+    /// is read here, once per encode, straight from its column.
+    /// </summary>
+    private readonly struct TextSource
+    {
+        private readonly ArchetypeClusterInfo _layout;
+        private readonly byte* _clusterBase;
+        private readonly byte* _transientBase;
+        private readonly int _slot;
+
+        public TextSource(ArchetypeReplicationState state, ArchetypeClusterInfo layout, byte* clusterBase, byte* transientBase, int slot)
+        {
+            State = state;
+            _layout = layout;
+            _clusterBase = clusterBase;
+            _transientBase = transientBase;
+            _slot = slot;
+        }
+
+        public ArchetypeReplicationState State { get; }
+
+        /// <summary>Writes the slot's text as a <c>str</c>, cut to the codec's cap at a code point; <see langword="true"/> when it was cut.</summary>
+        public bool Write(ref WireWriter writer, in CompiledField field)
+        {
+            var at = StoreFor(_layout, _transientBase, _clusterBase, field.ComponentSlot) + field.ComponentOffsetInCluster + (_slot * field.ComponentSize)
+                + field.FieldOffsetInComponent;
+            var stored = new ReadOnlySpan<byte>(at, field.TextCapacity - 1);
+            var end = stored.IndexOf((byte)0);
+            var utf8 = end < 0 ? stored : stored[..end];
+            var cut = MessageText.ValidPrefix(utf8, field.Codec.MaxBytes);
+            writer.WriteStr(cut, field.Codec.MaxBytes);
+            return cut.Length < utf8.Length;
+        }
     }
 
     /// <summary>
@@ -774,8 +917,10 @@ internal static unsafe class ProjectionPass
     /// entity. Zeroing rather than merely re-stamping the identity is what makes SUB-09's "never survives slot reuse" true of the STATE and not only of the
     /// identity: a group body left behind would compare equal against the new entity's first projection and its change would go unsent.
     /// </remarks>
-    private static void ClearEntry(byte* blockBytes, in ReplicationBlockLayout layout, int slot)
+    private static void ClearEntry(ArchetypeReplicationState state, byte* blockBytes, in ReplicationBlockLayout layout, int slot)
     {
+        // The entry's wide bodies go back first: zeroing their references would leave them live with nothing naming them.
+        state.FreeWide(blockBytes, slot);
         NativeMemory.Clear(blockBytes + layout.HotOffset + (slot * layout.HotStride), (nuint)layout.HotStride);
         NativeMemory.Clear(blockBytes + layout.ColdOffset + (slot * layout.ColdStride), (nuint)layout.ColdStride);
         if (layout.OwnerEntrySize > 0)
@@ -1055,6 +1200,9 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
             lease.DepartedCount = 0;
         }
     }
+
+    /// <summary>Whether <paramref name="worker"/>'s lease holds an identity to spend, without spending it.</summary>
+    public bool HasAny(int worker) => _leases[worker].Count > 0;
 
     /// <summary>Spends one identity from the lease of <paramref name="worker"/>.</summary>
     /// <param name="worker">The chunk index.</param>

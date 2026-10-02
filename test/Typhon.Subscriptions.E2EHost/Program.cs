@@ -95,6 +95,7 @@ public static class Program
         var dbe = scope.ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<E2eBounds>();
         dbe.RegisterComponentFromAccessor<E2eState>();
+        dbe.RegisterComponentFromAccessor<E2eLabel>();
         dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
             worldMin: new Vector2(-WorldExtentM, -WorldExtentM),
             worldMax: new Vector2(WorldExtentM, WorldExtentM),
@@ -150,7 +151,9 @@ public static class Program
             .Field(E2eMover.State, x => x.Credits, Codec.Exact, name: "credits", group: "vitals")
             .Field(E2eMover.State, x => x.Debt, Codec.VarInt64, name: "debt", group: "vitals")
             .Field(E2eMover.State, x => x.Rate, Codec.Exact, name: "rate", group: "vitals")
-            .Field(E2eMover.State, x => x.Aim, Codec.Exact, name: "aim"));
+            .Field(E2eMover.State, x => x.Aim, Codec.Exact, name: "aim")
+            // Text (13 § 6): a wide group, stored out of line, re-sent whole when it changes.
+            .Field(E2eMover.Label, x => x.Name, Codec.Exact, name: "label", group: "tag"));
         subs.Static<E2eRock>(a => a
             .Position(E2eRock.Bounds)
             .Field(E2eRock.State, x => x.Template, Codec.U8, name: "kind"));
@@ -173,7 +176,10 @@ public static class Program
                     Credits = (1UL << 53) + 1 + (ulong)i, Debt = -(1L << 53) - i, Rate = 0.1 * (i + 1),
                     Aim = new Point3F { X = i, Y = -i, Z = 0.5f },
                 };
-                tx.Spawn<E2eMover>(E2eMover.Bounds.Set(in bounds), E2eMover.State.Set(in state));
+                // Every label is the same byte length, so a client's text arena reaches its high-water mark on the enter, whichever tick that is, and a
+                // rename never grows it — the native client's steady-state frames are asserted allocation-free.
+                var label = new E2eLabel { Name = Label(i, 0) };
+                tx.Spawn<E2eMover>(E2eMover.Bounds.Set(in bounds), E2eMover.State.Set(in state), E2eMover.Label.Set(in label));
             }
 
             for (var i = 0; i < RockCount; i++)
@@ -227,6 +233,7 @@ public static class Program
             var bounds = cluster.GetSpan(E2eMover.Bounds);
 #pragma warning restore TYPHON009
             var state = cluster.GetSpan(E2eMover.State);
+            var labels = cluster.GetSpan(E2eMover.Label);
             while (occupancy != 0)
             {
                 var slot = BitOperations.TrailingZeroCount(occupancy);
@@ -259,7 +266,12 @@ public static class Program
                         s.Rate *= 1.5;
                     }
 
-                    if (tick % 7 == 0 || tick % 5 == 0)
+                    if (tick % 11 == 0)
+                    {
+                        labels[slot].Name = Label(slot, tick);
+                    }
+
+                    if (tick % 7 == 0 || tick % 5 == 0 || tick % 11 == 0)
                     {
                         subs.Replicate(in cluster, slot);
                     }
@@ -267,6 +279,9 @@ public static class Program
             }
         }
     }
+
+    private static string Label(int index, long tick) =>
+        $"mover {index.ToString("D2", CultureInfo.InvariantCulture)} at tick {(tick % 1000).ToString("D3", CultureInfo.InvariantCulture)}, déjà vu";
 
     private static void Events(in TickContext ctx)
     {

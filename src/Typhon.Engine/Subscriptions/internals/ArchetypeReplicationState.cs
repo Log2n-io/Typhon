@@ -227,6 +227,117 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <summary>This archetype's plan index, for the push path's events.</summary>
     internal int PushArchetypeIndex;
 
+    /// <summary>Where a wide section's reference sits in an entry: which of the slot's three regions, and the byte offset inside it.</summary>
+    internal readonly struct WideRef
+    {
+        public const byte Hot = 0;
+        public const byte Cold = 1;
+        public const byte Owner = 2;
+
+        public byte Region { get; init; }
+
+        public int Offset { get; init; }
+    }
+
+    private WideRef[] _wideRefs = [];
+    private long _wideDeferrals;
+
+    /// <summary>
+    /// The archetype's out-of-line section bodies (13 § 6), or <see langword="null"/> when no section is wide — a scalar archetype pays nothing for it.
+    /// </summary>
+    internal WideBodyArena WideBodies { get; private set; }
+
+    /// <summary>
+    /// Wide bodies the projection could not store — the arena's budget was spent — so the entity kept the bytes it had (or, new, waited a tick). Zero in a
+    /// healthy run; non-zero says the budget is sized behind the text the archetype holds.
+    /// </summary>
+    public long WideDeferrals => Volatile.Read(ref _wideDeferrals);
+
+    /// <summary>Records one wide body the arena could not take.</summary>
+    internal void NoteWideDeferral() => Interlocked.Increment(ref _wideDeferrals);
+
+    /// <summary>
+    /// Creates the arena and records where each wide section's reference sits in an entry, when the plan has any. Once, when the plan is attached.
+    /// </summary>
+    /// <param name="plan">The archetype's compiled plan.</param>
+    /// <param name="allocator">Engine allocator, for the arena's slabs.</param>
+    /// <param name="options">Carries the budget the arena honours.</param>
+    public void AttachWideSections(CompiledProjectionPlan plan, IMemoryAllocator allocator, SubscriptionsOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        if (!plan.HasWideSections || WideBodies != null)
+        {
+            return;
+        }
+
+        var refs = new List<WideRef>();
+        if (plan.OnEnter.Wide)
+        {
+            refs.Add(new WideRef { Region = WideRef.Cold, Offset = Layout.EnterBodyOffsetInColdEntry + plan.OnEnter.StoredOffset });
+        }
+
+        foreach (var group in plan.Groups)
+        {
+            if (group.Section.Wide)
+            {
+                refs.Add(new WideRef { Region = WideRef.Hot, Offset = Layout.PackedStateOffsetInHotEntry + group.Section.StoredOffset });
+            }
+        }
+
+        foreach (var group in plan.OwnerGroups)
+        {
+            if (group.Section.Wide)
+            {
+                refs.Add(new WideRef { Region = WideRef.Owner, Offset = group.Section.StoredOffset });
+            }
+        }
+
+        _wideRefs = refs.ToArray();
+        WideBodies = new WideBodyArena($"{Id}.Wide", this, allocator, options.StatePoolBudgetBytes);
+    }
+
+    /// <summary>
+    /// Gives back the wide bodies a slot's entry holds and zeroes their references — every path that ENDS an entry calls this before clearing or
+    /// overwriting it; a path that MOVES one (a migration, a park) copies the references instead and must not.
+    /// </summary>
+    internal void FreeWide(byte* blockBytes, int slot)
+    {
+        var refs = _wideRefs;
+        if (refs.Length == 0)
+        {
+            return;
+        }
+
+        FreeWideAt(refs, blockBytes + Layout.HotOffset + (slot * Layout.HotStride), blockBytes + Layout.ColdOffset + (slot * Layout.ColdStride),
+            blockBytes + Layout.OwnerOffset + (slot * Layout.OwnerEntrySize));
+    }
+
+    /// <summary>As <see cref="FreeWide"/>, for a parked copy: its hot, cold and owner bytes back to back.</summary>
+    private void FreeWideParked(byte* bytes)
+    {
+        var refs = _wideRefs;
+        if (refs.Length != 0)
+        {
+            FreeWideAt(refs, bytes, bytes + Layout.HotStride, bytes + Layout.HotStride + Layout.ColdStride);
+        }
+    }
+
+    // The entry's regions are block or parked-list memory, native and engine-owned; the references are read and zeroed through the region pointers the
+    // callers already hold, unaligned, and the handles go back under one acquisition of the arena's lock.
+    private void FreeWideAt(WideRef[] refs, byte* hot, byte* cold, byte* owner)
+    {
+        Span<uint> handles = stackalloc uint[refs.Length];
+        for (var i = 0; i < refs.Length; i++)
+        {
+            var region = refs[i].Region == WideRef.Hot ? hot : refs[i].Region == WideRef.Cold ? cold : owner;
+            var reference = region + refs[i].Offset;
+            handles[i] = Unsafe.ReadUnaligned<uint>(reference);
+            Unsafe.WriteUnaligned(reference, 0UL);
+        }
+
+        WideBodies.Free(handles);
+    }
+
     /// <summary>One projection scratch per S1 chunk.</summary>
     public ProjectionScratchSet Scratch => _scratch;
 
@@ -377,6 +488,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                 Orphaned(source, coldSource, ((ReplicationHotEntry*)hotSource)->NetId, 3);
             }
 
+            FreeWide(srcBytes, srcSlot);
             ClearEntry(srcBytes, srcSlot);
             Interlocked.Increment(ref _entriesLeftRealm);
             return ReplicationMigrationOutcome.NothingToCarry;
@@ -394,6 +506,8 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                 }
             }
 
+            // The entry being overwritten ends here; the arriving one's bodies move with its references.
+            FreeWide(dstBytes, dstSlot);
             Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (dstSlot * Layout.HotStride), hotSource, (uint)Layout.HotStride);
             Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (dstSlot * Layout.ColdStride), coldSource, (uint)Layout.ColdStride);
 
@@ -416,10 +530,12 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return ReplicationMigrationOutcome.Carried;
         }
 
-        if (!Park(dstChunkId, dstSlot, hotSource, coldSource))
+        var ownerSource = Layout.OwnerEntrySize > 0 ? srcBytes + Layout.OwnerOffset + (srcSlot * Layout.OwnerEntrySize) : null;
+        if (!Park(dstChunkId, dstSlot, hotSource, coldSource, ownerSource))
         {
             // Counted as a DROP, not a park. Reporting it as parked would break the one identity that reveals the disposal window happening at all:
             // everything parked is either written by the drain or counted as dropped.
+            FreeWide(srcBytes, srcSlot);
             ClearEntry(srcBytes, srcSlot);
             return ReplicationMigrationOutcome.NothingToCarry;
         }
@@ -454,8 +570,13 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     /// <param name="slot">The destination slot.</param>
     /// <param name="hot">The hot entry's bytes.</param>
     /// <param name="cold">The cold entry's bytes.</param>
+    /// <param name="owner">The owner entry's bytes, or <see langword="null"/> when the archetype declares no owner fields.</param>
     /// <returns><see langword="false"/> when the entry could not be kept, which makes it a DROP rather than a park.</returns>
-    private bool Park(int chunkId, int slot, byte* hot, byte* cold)
+    /// <remarks>
+    /// The owner entry is parked with the rest. It was not, while the drain copied <see cref="ReplicationBlockLayout.OwnerEntrySize"/> bytes from past the
+    /// parked hot and cold ones — another entry's bytes, or past the list's buffer for the last one — and the entity's own owner state was lost.
+    /// </remarks>
+    private bool Park(int chunkId, int slot, byte* hot, byte* cold, byte* owner)
     {
         lock (_parkLock)
         {
@@ -468,8 +589,8 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                 return false;
             }
 
-            _parked ??= new ParkedEntryList(Layout.HotStride + Layout.ColdStride);
-            return _parked.Add(chunkId, slot, hot, Layout.HotStride, cold, Layout.ColdStride);
+            _parked ??= new ParkedEntryList(Layout.HotStride + Layout.ColdStride + Layout.OwnerEntrySize);
+            return _parked.Add(chunkId, slot, hot, Layout.HotStride, cold, Layout.ColdStride, owner, Layout.OwnerEntrySize);
         }
     }
 
@@ -535,6 +656,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     }
                 }
 
+                FreeWide(dstBytes, slot);
                 Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (slot * Layout.HotStride), bytes, (uint)Layout.HotStride);
                 Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (slot * Layout.ColdStride), bytes + Layout.HotStride, (uint)Layout.ColdStride);
                 if (Layout.OwnerEntrySize > 0)
@@ -565,6 +687,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     }
                 }
 
+                FreeWideParked(bytes);
                 Interlocked.Increment(ref _parkedDropped);
             }
         }
@@ -977,6 +1100,15 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         if (Push != null && (uint)chunkId < (uint)BlockByChunk.Length)
         {
             BlockByChunk[chunkId] = 0;
+        }
+
+        // A released block's entries end with it: their wide bodies go back before the block does, or they would stay live with nothing naming them.
+        if (_wideRefs.Length != 0)
+        {
+            for (var s = 0; s < Layout.SlotCount; s++)
+            {
+                FreeWide((byte*)block, s);
+            }
         }
 
         Pool.Return(block);

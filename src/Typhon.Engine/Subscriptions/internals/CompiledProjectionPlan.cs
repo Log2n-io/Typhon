@@ -48,6 +48,11 @@ internal enum ProjectionSourceType : byte
 
     /// <summary>An IEEE double.</summary>
     Double,
+
+    /// <summary>
+    /// Text: a <c>String64</c>, <c>String1024</c> or <c>Variant</c>, UTF-8 up to its first zero byte (13 § 2.1). Read by the section encoder.
+    /// </summary>
+    Text,
 }
 
 /// <summary>
@@ -178,6 +183,9 @@ internal readonly struct CompiledField
     /// <summary>For a <c>quat3</c> field, its four components' byte offsets inside the component, in wire order; <see langword="null"/> otherwise.</summary>
     public int[] ShapeOffsets { get; init; }
 
+    /// <summary>For a text field, its inline buffer's bytes (64 or 1 024); 0 otherwise. Its text is at most one byte less.</summary>
+    public int TextCapacity { get; init; }
+
     /// <inheritdoc/>
     public override string ToString() => $"{Name} @ +{ComponentOffsetInCluster}/{ComponentSize}+{FieldOffsetInComponent} as {Codec?.Type}";
 }
@@ -205,6 +213,24 @@ internal readonly struct CompiledSection
 
     /// <summary>The section's body size in bytes: its pack plus every byte-aligned field, an upper bound where a codec is variable-length.</summary>
     public int MaxBodyBytes { get; init; }
+
+    /// <summary>
+    /// Whether the section holds a <c>str</c> field (13 § 6.1): its body is stored out of line in the archetype's <see cref="WideBodyArena"/>, and the entry
+    /// keeps a reference to it. A scalar section is never wide, so a scalar archetype's layout is what it always was (E-9).
+    /// </summary>
+    public bool Wide { get; init; }
+
+    /// <summary>
+    /// The bytes the section takes in its entry region: <see cref="MaxBodyBytes"/>, zero-padded, for an inline section; <see cref="WideRefBytes"/> — a
+    /// <c>u32</c> handle and a <c>u32</c> length — for a wide one.
+    /// </summary>
+    public int StoredBytes => Wide ? WideRefBytes : MaxBodyBytes;
+
+    /// <summary>Where the section's stored bytes begin inside its region: the hot entry's state, the owner entry, or the cold entry's enter body.</summary>
+    public int StoredOffset { get; init; }
+
+    /// <summary>A wide section's reference: a <c>u32</c> arena handle, then the body's <c>u32</c> length.</summary>
+    public const int WideRefBytes = 8;
 }
 
 /// <summary>
@@ -396,9 +422,18 @@ internal sealed class CompiledProjectionPlan
     public int OwnerEntrySize { get; init; }
 
     /// <summary>
-    /// The widest state body the public groups can produce, which is what <see cref="ReplicationHotEntry.PackedState"/> has to hold.
+    /// The widest state body the public groups can produce on the wire — the bound a state record's frame space and the encode scratch are sized from. What
+    /// the hot entry reserves is smaller when a group is wide: <see cref="ReplicationBlockLayout.PackedStateBytes"/>.
     /// </summary>
     public int MaxStateBodyBytes { get; init; }
+
+    /// <summary>
+    /// The widest body the owner groups can produce on the wire, for the encode scratch; the owner entry reserves <see cref="OwnerEntrySize"/>.
+    /// </summary>
+    public int MaxOwnerBodyBytes { get; init; }
+
+    /// <summary>Whether any section of the archetype is wide, so its replication state holds a <see cref="WideBodyArena"/>.</summary>
+    public bool HasWideSections { get; init; }
 
     /// <summary>How many of the four <see cref="ReplicationHotEntry.GroupTicks"/> slots this archetype uses, the motion segment's included.</summary>
     public int TickSlotCount { get; init; }

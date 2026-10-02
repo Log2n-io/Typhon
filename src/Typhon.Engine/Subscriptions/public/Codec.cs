@@ -324,6 +324,14 @@ public readonly struct Codec : IEquatable<Codec>
         switch (kind)
         {
             case CodecKind.Unknown:
+                // An inline string is its text, capacity less its terminator (13 § 2.1). A message field resolves the same way, and the command and event
+                // binders refuse it there: messages carry text as Utf8Text, so a String64 in a message is an error caught at Start either way.
+                var textCapacity = CodecPairing.TextCapacityOf(fieldType);
+                if (textCapacity > 0)
+                {
+                    return Str(textCapacity - 1);
+                }
+
                 var byType = MessageContract.DefaultCodec(fieldType, out var enumType);
                 if (!byType.IsDeclared)
                 {

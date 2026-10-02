@@ -794,6 +794,17 @@ sealed class SessionReplica
         return store.Integers[plan.Ordinal].AsSpan(slot * plan.Components, plan.Components).ToArray();
     }
 
+    /// <summary>A text field's value for an entity the replica holds.</summary>
+    /// <param name="archetype">The archetype's wire index.</param>
+    /// <param name="netId">The entity.</param>
+    /// <param name="field">The field's wire name.</param>
+    /// <returns>The text.</returns>
+    public string Text(int archetype, uint netId, string field)
+    {
+        var (store, plan, slot) = Locate(archetype, netId, field);
+        return store.Texts[plan.Ordinal][slot];
+    }
+
     private (ArchetypeStore Store, FieldPlan Plan, int Slot) Locate(int archetype, uint netId, string field)
     {
         Assert.That(Store.TryLocate(netId, out var located, out var slot) && located == archetype, Is.True, $"the replica does not hold netId {netId}");

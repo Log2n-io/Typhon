@@ -166,6 +166,12 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             _frames.Engine = engine;
             _frames.Realm = Realm0Frame;
 
+            // A wide section's body is copied from its archetype's arena (13 § 6), which the replication state owns.
+            for (var a = 0; a < Plans.Length; a++)
+            {
+                _frames.EncodePlanOf(a).Arena = _replicationStates[a].WideBodies;
+            }
+
             // The push path (ADR-067): every archetype some profile observes is served by it.
             var observed = Profiles.ObservedArchetypes;
             var automatic = Profiles.AutomaticArchetypes;
@@ -1019,6 +1025,7 @@ internal sealed unsafe class SubscriptionsRuntime : ISubscriptionsHost, IDisposa
             // assuming one: a 10 Hz runtime left at the default would get a threshold six times too tight and a heartbeat six times too long.
             states[i].TickPeriodSeconds = NominalTickPeriodSeconds;
             states[i].SizeClampCounters(plan.Fields.Length + plan.OwnerFields.Length);
+            states[i].AttachWideSections(plan, engine.MemoryAllocator, Options);
             states[i].AttachTo(clusterState);
 
             // Narrowed HERE and nowhere else, because this is the only place a compiled plan and its cluster state are both in hand. Until this runs the

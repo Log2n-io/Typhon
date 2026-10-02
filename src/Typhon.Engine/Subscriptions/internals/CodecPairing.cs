@@ -31,6 +31,12 @@ internal enum ColumnPath : byte
 
     /// <summary>A quaternion into <c>quat3</c>: four components read into one 32-bit code (W8).</summary>
     Quaternion,
+
+    /// <summary>
+    /// A <see cref="String64"/>, <see cref="String1024"/> or <see cref="Variant"/> into <c>str</c>: its UTF-8 bytes, cut at a code point at the codec's
+    /// cap. No code row — the section encoder reads the column itself, and the section is wide (13 § 6).
+    /// </summary>
+    Text,
 }
 
 /// <summary>
@@ -184,10 +190,17 @@ internal static class CodecPairing
     {
         ArgumentNullException.ThrowIfNull(storedType);
         var fieldShape = FieldShape.Of(storedType);
-        shape = fieldShape?.Name ?? (storedType == typeof(char) ? "char" : null);
+        shape = fieldShape?.Name ?? (storedType == typeof(char) ? "char" : storedType == typeof(Variant) ? "variant" : null);
 
         if (codec.IsExact)
         {
+            // Text is its whole capacity less the terminator the string types keep (13 § 2.1): String64 and Variant str{63}, String1024 str{1023}.
+            var textCapacity = TextCapacityOf(storedType);
+            if (textCapacity > 0)
+            {
+                return codec.WithCatalog(new CatalogCodec { Kind = CodecKind.Str, MaxBytes = textCapacity - 1 });
+            }
+
             if (fieldShape != null)
             {
                 return codec.WithCatalog(new CatalogCodec { Kind = fieldShape.Element == typeof(double) ? CodecKind.F64 : CodecKind.F32, Count = fieldShape.Count });
@@ -287,6 +300,26 @@ internal static class CodecPairing
     {
         ArgumentNullException.ThrowIfNull(sourceType);
         ArgumentNullException.ThrowIfNull(codec);
+
+        var textCapacity = TextCapacityOf(sourceType);
+        if (textCapacity > 0)
+        {
+            if (codec.Kind != CodecKind.Str)
+            {
+                throw new InvalidOperationException(
+                    $"{where} pairs a {sourceType.Name} with {CodecTokens.ToToken(codec.Kind)}: text travels as str. Declare Codec.Exact, or " +
+                    $"Codec.Str(n) with n at most {textCapacity - 1} to send less of it (13 § 2.3).");
+            }
+
+            if (codec.MaxBytes > textCapacity - 1)
+            {
+                throw new InvalidOperationException(
+                    $"{where} declares Codec.Str({codec.MaxBytes}) on a {sourceType.Name}, which holds at most {textCapacity - 1} bytes of text: a cap above " +
+                    "what the field can hold promises clients bytes that never come. Declare Codec.Exact.");
+            }
+
+            return ColumnPath.Text;
+        }
 
         var shape = FieldShape.Of(sourceType);
         if (shape != null)
@@ -414,6 +447,12 @@ internal static class CodecPairing
             $"every value. Declare {Covering(type)} to send it exactly, or mark the narrowing explicit with .Saturate(): out-of-range values then clamp " +
             "to the codec's range and every clamp is counted.");
     }
+
+    /// <summary>
+    /// The inline buffer of a string field type — <see cref="String64"/> and <see cref="Variant"/> 64 bytes, <see cref="String1024"/> 1 024 — or 0 for any
+    /// other type. Its text is UTF-8 up to the first zero byte, at most one byte less than the buffer.
+    /// </summary>
+    public static int TextCapacityOf(Type type) => type == typeof(String64) || type == typeof(Variant) ? 64 : type == typeof(String1024) ? 1024 : 0;
 
     /// <summary>Whether a codec is one of the integer kinds this table judges.</summary>
     public static bool IsIntegerCodec(CodecKind kind) => kind

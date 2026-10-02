@@ -76,7 +76,7 @@ internal static class ProjectionCompiler
         for (var i = 0; i < plans.Length; i++)
         {
             var slack = VisibilitySlackOf(registry, registry.Archetypes[i].ArchetypeType, replicationCellM, visibilitySlackOverrideM);
-            plans[i] = CompileArchetype(registry.Archetypes[i], engine, nominalTickPeriodSeconds, largestTickMultiplier, slack);
+            plans[i] = CompileArchetype(registry.Archetypes[i], engine, nominalTickPeriodSeconds, largestTickMultiplier, slack, registry.Options.FrameBytes);
         }
 
         return plans;
@@ -173,7 +173,7 @@ internal static class ProjectionCompiler
     }
 
     private static CompiledProjectionPlan CompileArchetype(ArchetypeProjection projection, DatabaseEngine engine, double nominalTickPeriodSeconds,
-        int largestTickMultiplier, double visibilitySlackM)
+        int largestTickMultiplier, double visibilitySlackM, int frameBytes)
     {
         var meta = ResolveArchetype(projection);
         var layout = meta.ClusterLayout;
@@ -213,28 +213,56 @@ internal static class ProjectionCompiler
         var fields = BuildFields(projection, projection.Fields, groupNames, meta, layout, engine, projection.IsStatic);
         var ownerFields = BuildFields(projection, projection.OwnerFields, ownerGroupNames, meta, layout, engine, foldIntoEnter: false);
 
+        // Two sizes per section (13 § 6): what it can put on the wire, which sizes the encode scratch and a record's frame space, and what it takes in its
+        // entry — the same for an inline section, an 8-byte arena reference for a wide one. Only the second moves an offset, so a scalar archetype's
+        // entries are byte for byte what they were (E-9).
         var onEnter = SectionOf(fields, 0);
         var groups = new CompiledGroup[groupNames.Length];
         var stateBodyBytes = 0;
+        var storedStateBytes = 0;
         for (var g = 0; g < groupNames.Length; g++)
         {
-            var section = SectionOf(fields, g + 1);
+            var section = SectionOf(fields, g + 1) with { StoredOffset = storedStateBytes };
             groups[g] = new CompiledGroup { Name = groupNames[g], Bit = g, TickSlot = motionTickSlots + g, Section = section };
             stateBodyBytes += section.MaxBodyBytes;
+            storedStateBytes += section.StoredBytes;
         }
 
         var ownerGroups = new CompiledGroup[ownerGroupNames.Length];
         var ownerBodyBytes = 0;
+        var storedOwnerBytes = 0;
         for (var g = 0; g < ownerGroupNames.Length; g++)
         {
             // The owner section has its own bit space (W17): its groups start again at bit 0. They take NO hot-entry tick slot — those four belong to the
             // public groups and the motion segment, and owner data lives in the block's own owner entry, whose change tracking the projection pass defines.
-            var section = SectionOf(ownerFields, g + 1);
+            var section = SectionOf(ownerFields, g + 1) with { StoredOffset = storedOwnerBytes };
             ownerGroups[g] = new CompiledGroup { Name = ownerGroupNames[g], Bit = g, TickSlot = -1, Section = section };
             ownerBodyBytes += section.MaxBodyBytes;
+            storedOwnerBytes += section.StoredBytes;
         }
 
-        var ownerEntrySize = ownerBodyBytes == 0 ? 0 : (ownerBodyBytes + 7) & ~7;
+        var ownerEntrySize = storedOwnerBytes == 0 ? 0 : (storedOwnerBytes + 7) & ~7;
+
+        // A wide section's worst case has to fit one arena class and a quarter of a frame (13 § 6.3): a body that cannot be stored, or a record that can
+        // never be sent, is a declaration to refuse here rather than an entity silently missing at run time.
+        var wideLimit = Math.Min(WideBodyArena.MaxClassBytes, frameBytes / 4);
+        var hasWide = false;
+        foreach (var (section, name) in WideCandidates(onEnter, groups, ownerGroups))
+        {
+            if (!section.Wide)
+            {
+                continue;
+            }
+
+            hasWide = true;
+            if (section.MaxBodyBytes > wideLimit)
+            {
+                throw new InvalidOperationException(
+                    $"Archetype '{projection.Name}' declares the {name} section with up to {section.MaxBodyBytes} bytes of text and fields, above the " +
+                    $"{wideLimit} a wide section may reach (a quarter of the {frameBytes}-byte frame, at most {WideBodyArena.MaxClassBytes}). Lower a " +
+                    "Codec.Str cap, or split the text across groups.");
+            }
+        }
 
         // The block's entries are sized from what THIS archetype produces, not from a struct declaration. A moving archetype reserves its segment in the hot
         // entry and its previous position plus its run start in the cold one; a static or still archetype reserves neither, because there is nothing to
@@ -255,8 +283,8 @@ internal static class ProjectionCompiler
             headings = Math.Max(headings, field.HeadingPlusOne);
         }
 
-        var blockLayout = ReplicationBlockLayout.ForArchetype(layout.ClusterSize, moving ? position.SegmentBytes : 0, stateBodyBytes, quantizedPositionBytes,
-            runStartBytes, ownerEntrySize, enterPositionBytes, onEnter.MaxBodyBytes, headingBytes: 4 * headings);
+        var blockLayout = ReplicationBlockLayout.ForArchetype(layout.ClusterSize, moving ? position.SegmentBytes : 0, storedStateBytes, quantizedPositionBytes,
+            runStartBytes, ownerEntrySize, enterPositionBytes, onEnter.StoredBytes, headingBytes: 4 * headings);
 
         // v̂ (09 § 2) gets bytes of its own only for a mover with a slack; at zero it is the previous position.
         var slack = moving ? visibilitySlackM : 0d;
@@ -284,8 +312,25 @@ internal static class ProjectionCompiler
             VisibilitySlackM = slack,
             OwnerEntrySize = ownerEntrySize,
             MaxStateBodyBytes = stateBodyBytes,
+            MaxOwnerBodyBytes = ownerBodyBytes,
+            HasWideSections = hasWide,
             TickSlotCount = motionTickSlots + groupNames.Length,
         };
+    }
+
+    private static IEnumerable<(CompiledSection Section, string Name)> WideCandidates(CompiledSection onEnter, CompiledGroup[] groups,
+        CompiledGroup[] ownerGroups)
+    {
+        yield return (onEnter, "onEnter");
+        foreach (var group in groups)
+        {
+            yield return (group.Section, $"'{group.Name}' group's");
+        }
+
+        foreach (var group in ownerGroups)
+        {
+            yield return (group.Section, $"owner '{group.Name}' group's");
+        }
     }
 
     // ── Fields ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -354,7 +399,8 @@ internal static class ProjectionCompiler
         var definition = ResolveDefinition(meta, slot, engine);
         var source = ResolveField(projection, definition, field.SourceFieldName, field.Name);
         var shape = FieldShape.Of(source.DotNetType);
-        RefuseUnsupportedFieldCodec(projection, field, codec, shape != null);
+        var textCapacity = CodecPairing.TextCapacityOf(source.DotNetType);
+        RefuseUnsupportedFieldCodec(projection, field, codec, shape != null, textCapacity > 0);
 
         var ratioOffset = -1;
         if (field.MaxSourceFieldName != null)
@@ -389,8 +435,9 @@ internal static class ProjectionCompiler
                 $"Archetype '{projection.Name}' declares field '{field.Name}' with codec '{codec.Type}', which the column walk has no path for.");
         }
 
-        var sourceType = shape != null
-            ? (shape.Element == typeof(double) ? ProjectionSourceType.Double : ProjectionSourceType.Single)
+        // A Fraction over text reads two numbers that are not there: ResolveSourceType refuses it, naming the type.
+        var sourceType = textCapacity > 0 && ratioOffset < 0 ? ProjectionSourceType.Text
+            : shape != null ? (shape.Element == typeof(double) ? ProjectionSourceType.Double : ProjectionSourceType.Single)
             : ResolveSourceType(projection, field, source);
         var (intMin, intMax) = CodecPairing.ClampRange(codec);
         var headingTolerance = 0u;
@@ -444,6 +491,7 @@ internal static class ProjectionCompiler
             Owner = field.Owner,
             Shape = field.Shape,
             ComponentCount = 1,
+            TextCapacity = textCapacity,
         };
 
         if (shape == null || path == ColumnPath.Quaternion)
@@ -484,12 +532,15 @@ internal static class ProjectionCompiler
         var packedCount = 0;
         var bits = 0;
         var bytes = 0;
+        var wide = false;
         for (var i = 0; i < fields.Length; i++)
         {
             if (fields[i].Section != section)
             {
                 continue;
             }
+
+            wide |= fields[i].Path == ColumnPath.Text;
 
             if (first < 0)
             {
@@ -516,6 +567,7 @@ internal static class ProjectionCompiler
             PackedCount = packedCount,
             PackBytes = packBytes,
             MaxBodyBytes = count == 0 ? 0 : packBytes + bytes,
+            Wide = wide,
         };
     }
 
@@ -718,10 +770,16 @@ internal static class ProjectionCompiler
         return resolved;
     }
 
-    private static void RefuseUnsupportedFieldCodec(ArchetypeProjection projection, ProjectedField field, CatalogCodec codec, bool shape)
+    private static void RefuseUnsupportedFieldCodec(ArchetypeProjection projection, ProjectedField field, CatalogCodec codec, bool shape, bool text)
     {
         // A vector or quaternion codec carries a shape (W33): legal on a point or a quaternion, which CodecPairing.Resolve checked.
         if (shape && codec.Kind is CodecKind.Vec2 or CodecKind.Vec3 or CodecKind.Quat3)
+        {
+            return;
+        }
+
+        // Text on a string field: its section is wide, stored out of line (13 § 6). The pairing table judges the cap.
+        if (text && codec.Kind == CodecKind.Str)
         {
             return;
         }

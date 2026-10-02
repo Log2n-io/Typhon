@@ -651,7 +651,9 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
         return true;
     }
 
-    /// <summary>Mirrors the engine's <c>MessageContract.DefaultCodec</c>: the types with a codec of their own.</summary>
+    /// <summary>
+    /// Mirrors the engine's <c>Codec.Declared</c> for <c>CodecKind.Unknown</c>: the types with a codec of their own, inline strings included.
+    /// </summary>
     private static bool HasDefaultCodec(ITypeSymbol type)
     {
         if (type.TypeKind == TypeKind.Enum)
@@ -677,8 +679,12 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
         }
 
         var ns = type.ContainingNamespace?.ToDisplayString();
-        return (type.Name == "EntityId" && ns == "Typhon.Engine") || (ns == "Typhon.Schema.Definition" && ShapeTypes.Contains(type.Name));
+        return (type.Name == "EntityId" && ns == "Typhon.Engine")
+            || (ns == "Typhon.Schema.Definition" && (ShapeTypes.Contains(type.Name) || TextTypes.Contains(type.Name)));
     }
+
+    // The inline string types (13 § 2.1): each defaults to str of its capacity less its terminator.
+    private static readonly HashSet<string> TextTypes = ["String64", "String1024", "Variant"];
 
     // The fixed shapes the engine's FieldShape knows (W33): each defaults to a count of its element.
     private static readonly HashSet<string> ShapeTypes = new()

@@ -175,6 +175,9 @@ internal static class ProjectionColumnWalk
                 return 0;
             case ColumnPath.Quantizing:
                 break;
+            case ColumnPath.Text:
+                // No code: the section encoder reads text straight from the column into the wide body (13 § 6.3).
+                return 0;
             default:
                 throw new InvalidOperationException($"Field '{field.Name}' has no column path; the plan was not compiled.");
         }

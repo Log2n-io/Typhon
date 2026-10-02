@@ -1487,21 +1487,17 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
 
             var groups = new ArchetypeEncodePlan.SectionWalk[plan.Groups.Length];
             var tickSlots = new int[plan.Groups.Length];
-            var at = 0;
             for (var g = 0; g < plan.Groups.Length; g++)
             {
-                groups[g] = Walk(plan.Fields, plan.Groups[g].Section, at);
+                groups[g] = Walk(plan.Fields, plan.Groups[g].Section);
                 tickSlots[g] = plan.Groups[g].TickSlot;
-                at += plan.Groups[g].Section.MaxBodyBytes;
             }
 
             var ownerGroups = new ArchetypeEncodePlan.SectionWalk[plan.OwnerGroups.Length];
-            var ownerAt = 0;
             var ownerAll = 0;
             for (var g = 0; g < plan.OwnerGroups.Length; g++)
             {
-                ownerGroups[g] = Walk(plan.OwnerFields, plan.OwnerGroups[g].Section, ownerAt);
-                ownerAt += plan.OwnerGroups[g].Section.MaxBodyBytes;
+                ownerGroups[g] = Walk(plan.OwnerFields, plan.OwnerGroups[g].Section);
                 ownerAll |= 1 << g;
             }
 
@@ -1516,12 +1512,12 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
                 GroupCount = plan.Groups.Length,
                 GroupTickSlot = tickSlots,
                 MotionTickSlot = moving ? 0 : -1,
-                OnEnter = Walk(plan.Fields, plan.OnEnter, 0),
+                OnEnter = Walk(plan.Fields, plan.OnEnter),
                 Groups = groups,
                 OwnerGroups = ownerGroups,
                 OwnerAllMask = (byte)ownerAll,
-                MaxSelfBytes = 24 + ownerAt,
-                MaxEnterBytes = EntitiesEncoder.MaxGapBytes + enterPosBytes + layout.EnterBodyBytes + plan.MaxStateBodyBytes,
+                MaxSelfBytes = 24 + plan.MaxOwnerBodyBytes,
+                MaxEnterBytes = EntitiesEncoder.MaxGapBytes + enterPosBytes + plan.OnEnter.MaxBodyBytes + plan.MaxStateBodyBytes,
                 MaxSegmentBytes = EntitiesEncoder.MaxGapBytes + layout.SegmentBytes,
                 MaxStateBytes = EntitiesEncoder.MaxGapBytes + 1 + plan.MaxStateBodyBytes,
             };
@@ -1556,7 +1552,7 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
         return fallback;
     }
 
-    private static ArchetypeEncodePlan.SectionWalk Walk(CompiledField[] fields, in CompiledSection section, int offset)
+    private static ArchetypeEncodePlan.SectionWalk Walk(CompiledField[] fields, in CompiledSection section)
     {
         var aligned = section.FieldCount - section.PackedCount;
         var widths = new int[aligned];
@@ -1576,8 +1572,9 @@ internal sealed unsafe partial class FrameAssembler : IDisposable
             FixedBytes = variable ? -1 : fixedBytes,
             PackBytes = section.PackBytes,
             FieldBytes = widths,
-            Offset = offset,
+            Offset = section.StoredOffset,
             MaxBytes = section.MaxBodyBytes,
+            Wide = section.Wide,
         };
     }
 }

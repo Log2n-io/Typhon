@@ -262,6 +262,17 @@ public partial class Outer
 [Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"),
     Is.Empty);
 
+    /// <summary>An inline string's exact form is its text (13 § 2.1), so a bare <c>[Replicate]</c> on one is accepted too.</summary>
+    [Test]
+    public void AnInlineStringWithNoCodecTravelsAsItsText()
+        => Assert.That(Ids(@"
+[Component(""C"", 1)] public struct C
+{
+    [Field, Replicate] public Typhon.Schema.Definition.String64 Name; [Field, Replicate] public Typhon.Schema.Definition.String1024 Bio;
+}
+[Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"),
+    Is.Empty);
+
     [Test]
     public void AStructThatIsNoShapeWithNoCodecIsRefused()
         => Assert.That(Ids(@"

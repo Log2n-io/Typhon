@@ -68,11 +68,21 @@ public struct E2eState
     public Point3F Aim;
 }
 
+/// <summary>A mover's label: text in a group of its own, stored out of line (13 § 6), with a non-ASCII character in it.</summary>
+[Component("Typhon.E2E.Label", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct E2eLabel
+{
+    [Field]
+    public String64 Name;
+}
+
 [Archetype]
 public partial class E2eMover : Archetype<E2eMover>
 {
     public static readonly Comp<E2eBounds> Bounds = Register<E2eBounds>();
     public static readonly Comp<E2eState> State = Register<E2eState>();
+    public static readonly Comp<E2eLabel> Label = Register<E2eLabel>();
 }
 
 [Archetype]

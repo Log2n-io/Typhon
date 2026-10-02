@@ -252,6 +252,20 @@ int main(int argc, char** argv)
             Expect(movers.IntegerAt(credits, slot) > (std::uint64_t{1} << 53), "credits above 2^53");
             Expect(static_cast<std::int64_t>(movers.IntegerAt(debt, slot)) < -(std::int64_t{1} << 53), "debt below -2^53");
         }
+
+        // Text (13 § 6): every mover's label, out of a wide group, intact through its two-byte characters.
+        const int label = movers.FieldIndex("label");
+        Expect(label >= 0 && movers.Schema().fields[static_cast<std::size_t>(label)].kind == FieldKind::Text, "label is a text field");
+        for (const std::uint32_t slot : movers.Live())
+        {
+            if (label < 0)
+            {
+                break;
+            }
+
+            const std::string_view text = movers.TextAt(label, slot);
+            Expect(text.starts_with("mover ") && text.ends_with(", d\xC3\xA9j\xC3\xA0 vu"), "a mover's label, got '" + std::string(text) + "'");
+        }
     }
     else
     {
