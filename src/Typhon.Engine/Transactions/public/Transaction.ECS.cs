@@ -673,6 +673,153 @@ public unsafe partial class Transaction
     }
 
     /// <summary>
+    /// <see cref="SpawnBatchAllocate{TArch}"/> with the entity keys supplied by the caller rather than allocated here, and without the generic parameter
+    /// (#1102).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the keys come in.</b> <c>ctx.Commands.Spawn</c> hands the caller a final <see cref="EntityId"/> at the moment it is called, from a per-chunk
+    /// key block (#1099), so by the time the fence drains the buffer the keys are already issued and already in the caller's components. Allocating fresh
+    /// ones here would hand out a second identity for the same entity and break every reference the producing system stored.
+    /// </para>
+    /// <para>
+    /// <b>Why a span of keys and not a base plus a count.</b> The blocks are per (archetype, chunk), so one archetype's drained keys are contiguous within
+    /// a chunk's run and jump between runs. <c>baseKey + n</c> is true of <see cref="SpawnBatchAllocate{TArch}"/>'s own allocation and false of this one.
+    /// </para>
+    /// <para>
+    /// <b>Why non-generic.</b> The drain is type-erased — it holds <see cref="ComponentValue"/>, which carries a component type id, not a <c>T</c> — so it
+    /// cannot name <c>TArch</c>. The metadata it has is enough: this method uses nothing from the generic parameter that <paramref name="meta"/> does not
+    /// already carry.
+    /// </para>
+    /// <para>
+    /// Deliberately a sibling rather than a refactor: <see cref="SpawnBatchAllocate{TArch}"/> carries the #839 and #845 reasoning for what a Versioned slot
+    /// gets at allocation time, and the two bodies have to stay readable against each other.
+    /// </para>
+    /// </remarks>
+    /// <param name="meta">The archetype being spawned into. Must be registered with this database.</param>
+    /// <param name="entityKeys">The already-issued entity keys, one per entity.</param>
+    /// <param name="ids">Receives the entity ids. Must hold at least <paramref name="entityKeys"/>.Length.</param>
+    /// <returns>The base index into the spawn list, for <see cref="SpawnWriteValueRaw"/>.</returns>
+    internal int SpawnBatchAllocateRaw(ArchetypeMetadata meta, ReadOnlySpan<long> entityKeys, Span<EntityId> ids)
+    {
+        var count = entityKeys.Length;
+        if (count == 0)
+        {
+            return _spawnedEntities?.Count ?? 0;
+        }
+
+        EnsureMutable();
+        State = TransactionState.InProgress;
+        AssertThreadAffinity();
+
+        var engineState = _dbe._archetypeStates[meta.ArchetypeId];
+        var routingId = _dbe.RoutingIdOf(meta);
+
+        // No EmitEcsSpawnBatch range record here: the keys are not a range. The producing side already emitted per-command telemetry when the id was issued,
+        // which is also where a trace reader wants it — at the call that caused the spawn, not at the fence that applied it.
+        _spawnedEntities ??= new List<SpawnEntry>(count);
+        if (_spawnedEntities.Capacity < _spawnedEntities.Count + count)
+        {
+            _spawnedEntities.EnsureCapacity(_spawnedEntities.Count + count);
+        }
+
+        _spawnedEntityIndexStale = true;
+
+        var baseIndex = _spawnedEntities.Count;
+        CollectionsMarshal.SetCount(_spawnedEntities, baseIndex + count);
+        var writeSpan = CollectionsMarshal.AsSpan(_spawnedEntities).Slice(baseIndex);
+
+        for (var n = 0; n < count; n++)
+        {
+            var entityId = new EntityId(entityKeys[n], routingId);
+            ids[n] = entityId;
+
+            ref var entry = ref writeSpan[n];
+            entry.Id = entityId;
+            entry.EnabledBits = 0;
+
+            for (var slot = 0; slot < meta.ComponentCount; slot++)
+            {
+                var table = engineState.SlotToComponentTable[slot];
+                var isVersioned = table.StorageMode == StorageMode.Versioned;
+
+                // #839 / #845, as SpawnBatchAllocate: a Versioned slot gets no content chunk until something writes it, so a batch that writes two of five
+                // components allocates two chunks per entity rather than five.
+                entry.VerLoc[slot] = 0;
+                entry.Stage[slot] = isVersioned ? 0 : SpawnArena.Alloc(table.ComponentOverhead + table.ComponentStorageSize);
+            }
+
+            if ((n & 127) == 127)
+            {
+                _epochManager.RefreshScope();
+            }
+        }
+
+        CheckEpochRefresh();
+        return baseIndex;
+    }
+
+    /// <summary>
+    /// Writes one <see cref="ComponentValue"/> into one already-allocated spawn entry (#1102) — the type-erased counterpart of
+    /// <see cref="SpawnBatchWriteAll{T}"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>One value at a time, where the generic version writes one component across N entities.</b> That is the shape the drain has: a command carries its
+    /// own value set, so the buffer is array-of-structures per entity, not structure-of-arrays per component. Transposing it to feed the striding version
+    /// would cost a pass over the payloads and a scratch buffer to save a per-call resolve — which is worth doing when this shows up in a profile and not
+    /// before.
+    /// </para>
+    /// <para>
+    /// <b>The copy is span to pointer, and the direction matters.</b> The destination is a page-cache chunk or the transaction's native spawn arena, both
+    /// engine-owned. The source is a <see cref="ComponentValue"/> living in a managed array, read through a <c>ref</c>. No pointer is ever taken over the
+    /// managed side — the project rule with the <c>0x80131506</c> crash behind it.
+    /// </para>
+    /// </remarks>
+    /// <param name="entryIndex">Index into the spawn list, from <see cref="SpawnBatchAllocateRaw"/>.</param>
+    /// <param name="value">The component value to write. Its component type id selects the slot.</param>
+    internal void SpawnWriteValueRaw(int entryIndex, in ComponentValue value)
+    {
+        var span = CollectionsMarshal.AsSpan(_spawnedEntities);
+        ref var entry = ref span[entryIndex];
+        var meta = _dbe.GetMetaByRouting(entry.Id.ArchetypeId);
+        if (!meta.TryGetSlot(value.ComponentTypeId, out var slot))
+        {
+            // A value for a component this archetype does not have. Refused at the write rather than ignored: the producing side validated the archetype,
+            // so a stray component id here means the buffer or the drain disagreed about which archetype a command belonged to.
+            ThrowHelper.ThrowInvalidOp(
+                $"Component type {value.ComponentTypeId} is not part of archetype '{meta.ArchetypeType?.Name ?? meta.ArchetypeId.ToString()}', so a "
+                + "deferred spawn's value cannot be written to it.");
+        }
+
+        var engineState = _dbe._archetypeStates[meta.ArchetypeId];
+        var table = engineState.SlotToComponentTable[slot];
+        var isVersioned = table.StorageMode == StorageMode.Versioned;
+
+        // #845: the first write to a Versioned slot is what creates its content, exactly as in SpawnBatchWriteAll.
+        if (isVersioned && entry.VerLoc[slot] == 0)
+        {
+            entry.VerLoc[slot] = AllocateVersionedSlotContent(meta, table, slot, entry.Id, out var compRevChunkId);
+            entry.Rev[slot] = compRevChunkId;
+        }
+
+        byte* ptr;
+        if (isVersioned)
+        {
+            var info = GetComponentInfo(meta._slotToComponentType[slot]);
+            ptr = info.CompContentAccessor.GetChunkAddress(entry.VerLoc[slot], true);
+        }
+        else
+        {
+            ptr = SpawnArena.Resolve(entry.Stage[slot]);
+        }
+
+        var size = Math.Min(value.DataSize, table.ComponentStorageSize);
+        value.Payload[..size].CopyTo(new Span<byte>(ptr + table.ComponentOverhead, size));
+        entry.EnabledBits |= (ushort)(1 << slot);
+    }
+
+    /// <summary>
     /// Destroy a batch of entities. Single EnsureMutable check, pre-sized pending list.
     /// Cascade delete is applied per entity.
     /// </summary>

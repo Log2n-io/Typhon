@@ -28,6 +28,21 @@ public unsafe struct ComponentValue
     // 12 bytes header above, 112 bytes payload below, 4 bytes implicit tail padding = 128B total
     private fixed byte _data[MaxPayloadSize];
 
+    /// <summary>
+    /// This value's payload bytes, as a span over the inline buffer (#1102).
+    /// </summary>
+    /// <remarks>
+    /// <b>A span and not a pointer, and an accessor rather than the arithmetic repeated at each call site.</b> Two places already reached the payload by
+    /// adding a literal 12 to a reinterpreted <c>ref</c> — the header's width — and a third was about to. The offset belongs with the layout it comes from.
+    /// It is a span because a <see cref="ComponentValue"/> is frequently an element of a managed array, where a <c>byte*</c> would be a pointer over GC
+    /// data; <see cref="MemoryMarshal.CreateReadOnlySpan{T}"/> keeps the GC aware of it.
+    /// </remarks>
+    internal ReadOnlySpan<byte> Payload =>
+        MemoryMarshal.CreateReadOnlySpan(ref Unsafe.Add(ref Unsafe.As<ComponentValue, byte>(ref Unsafe.AsRef(in this)), HeaderSize), DataSize);
+
+    /// <summary>Bytes of header before the payload: the component type id, the data size and the alignment pad.</summary>
+    internal const int HeaderSize = 12;
+
     /// <summary>Create a ComponentValue from raw bytes. Used by reflection-based callers (Shell CLI).</summary>
     internal static ComponentValue CreateFromRaw(int componentTypeId, byte* data, int dataSize)
     {

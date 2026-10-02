@@ -71,6 +71,9 @@ public sealed partial class TyphonRuntime : IDisposable
     /// </summary>
     private readonly EntityCommandBuffer _entityCommands;
 
+    /// <summary>Applies <see cref="_entityCommands"/> once per tick, just before the fence. Null when there is no engine to spawn into.</summary>
+    private readonly EntityCommandDrain _entityCommandDrain;
+
     /// <summary>The replication track's tick-scoped context. Internal: the session count is written by ingress, and tests read its ordering journal.</summary>
     internal SubscriptionsContext SubscriptionsContextForTest => _subscriptionsContext;
 
@@ -185,6 +188,10 @@ public sealed partial class TyphonRuntime : IDisposable
     /// anything. Systems must queue through <c>ctx.Commands</c>, which binds the handle to their own worker slot.
     /// </remarks>
     public EntityCommandBuffer EntityCommands => _entityCommands;
+
+    /// <summary>Entities and commands the most recent drain applied — zero on a tick that queued nothing. Diagnostics and tests.</summary>
+    internal (int Entities, int Commands) LastEntityCommandsApplied =>
+        _entityCommandDrain == null ? (0, 0) : (_entityCommandDrain.LastAppliedEntities, _entityCommandDrain.LastAppliedCommands);
 
     /// <summary>The DAG scheduler driving tick execution.</summary>
     public DagScheduler Scheduler { get; }
@@ -329,6 +336,7 @@ public sealed partial class TyphonRuntime : IDisposable
             _entityCommands = new EntityCommandBuffer(engine, options.EntityCommandsPerTick);
             _entityCommands.BindWorkerSlots(scheduler.WorkerSlotCount, scheduler.WorkerCount);
             _entityCommands.Logger = logger;
+            _entityCommandDrain = new EntityCommandDrain(engine);
         }
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];
@@ -3049,6 +3057,20 @@ public sealed partial class TyphonRuntime : IDisposable
         // so no frame can carry both the leave of an identity's old holder and the enter of its new one — the wire applies leaves last, so such a frame would
         // land the leave on the entity that just entered. Once per tick, on the driver thread, before the track dispatches.
         _netIds.DrainQuarantine();
+
+        // Apply this tick's deferred entity commands (#1102). HERE, and the position is three separate decisions.
+        //
+        // Before the fence, because an entity queued this tick has to be cluster-slotted and index-visible by the time the fence's own phases run — the AABB
+        // refresh, the index merge, the spatial maintenance — or it is a tick late to all of them. Before FenceWindow.Open() specifically, so this is ordinary
+        // engine code holding an ordinary transaction: no licence taken, no invariant suspended, nothing to argue about under EW-01.
+        //
+        // On the tick driver rather than in the fence DAG, because the DAG has two arms. A drain inside it would have to be built into FenceExecBundle AND
+        // duplicated for hosts running with EnableParallelFence off; here one call serves both.
+        //
+        // Serially, which is a retreat from the ENG-01 design and is priced: about 1 us a spawn plus 0.2 us an indexed field, measured over a hundred
+        // 3 000-entity bursts, so the realistic mass-death burst is ~3 ms. Worth removing from the tick eventually, not worth new concurrency inside the
+        // B+Tree and the EntityMap to remove today.
+        _entityCommandDrain?.Apply(_entityCommands);
 
         try
         {
