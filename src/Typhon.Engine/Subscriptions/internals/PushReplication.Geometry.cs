@@ -1049,6 +1049,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
     // Per merge chunk, the aggregate deltas of the tick (09 § 8): the archetype, +1 or −1, and the point — applied serially at the index's finish.
     private AggregateDelta[][] _chunkAggDeltas = [];
+    // Per merge chunk, its aggregate deltas' count at chunk × CountStride: bumped per delta by chunks running side by side, so a line each.
     private int[] _chunkAggCount = [];
 
     private struct AggregateDelta
@@ -1184,7 +1185,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
                 for (var c = 0; c < _mergeChunks; c++)
                 {
                     var list = _chunkAggDeltas[c];
-                    for (var i = 0; i < _chunkAggCount[c]; i++)
+                    for (var i = 0; i < _chunkAggCount[c * CountStride]; i++)
                     {
                         ref var d = ref list[i];
                         foreach (var grid in Aggregates)
@@ -1424,7 +1425,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             Array.Resize(ref _chunkDeltas, k);
             Array.Resize(ref _chunkDeltaCount, k);
             Array.Resize(ref _chunkAggDeltas, k);
-            Array.Resize(ref _chunkAggCount, k);
+            Array.Resize(ref _chunkAggCount, k * CountStride);
         }
 
         if (_mergeKeyA.Length < k)
@@ -1445,7 +1446,7 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
             _chunkAggDeltas[c] ??= new AggregateDelta[16];
             _chunkCellCount[c] = 0;
             _chunkDeltaCount[c] = 0;
-            _chunkAggCount[c] = 0;
+            _chunkAggCount[c * CountStride] = 0;
         }
 
         _mergeChunks = k;
@@ -1455,14 +1456,14 @@ internal sealed unsafe partial class PushReplication<TEvent> : PushReplication w
 
     private void NoteAggregate(int chunk, int archetype, int delta, ulong key, float x, float y, float z)
     {
-        var count = _chunkAggCount[chunk];
+        var count = _chunkAggCount[chunk * CountStride];
         if (count == _chunkAggDeltas[chunk].Length)
         {
             Array.Resize(ref _chunkAggDeltas[chunk], count * 2);
         }
 
         _chunkAggDeltas[chunk][count] = new AggregateDelta { Key = key, Archetype = archetype, Delta = delta, X = x, Y = y, Z = z };
-        _chunkAggCount[chunk] = count + 1;
+        _chunkAggCount[chunk * CountStride] = count + 1;
     }
 
     private void NoteDelta(int chunk, ulong key, int delta, ref int count)

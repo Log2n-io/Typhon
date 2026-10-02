@@ -337,6 +337,10 @@ internal static unsafe class ProjectionPass
 
         var visited = 0;
         var records = 0;
+
+        // The slots this block pushes again next tick, marked once after the loop: the hub's repush words are shared by every worker, eight clusters to a
+        // line, so a mark per slot made workers on neighbouring clusters write the same line over and over.
+        var repush = 0UL;
         bits = live;
         while (bits != 0)
         {
@@ -368,7 +372,7 @@ internal static unsafe class ProjectionPass
                         // hands two entities one identity; it is counted so a lease that is chronically too small is visible rather than inferred.
                         leases.Take(worker);
                         state.NoteNetIdStarvation();
-                        hub?.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                        repush |= 1UL << slot;
                         continue;
                     }
 
@@ -446,7 +450,7 @@ internal static unsafe class ProjectionPass
                 // the one push a developer cannot be asked to make, because nothing the application writes marks a stop.
                 if (push != null && motion.Enabled && MotionTracker.IsExtrapolating(in motion, hotBytes))
                 {
-                    hub.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                    repush |= 1UL << slot;
                 }
             }
             else if (position != null && initialize && layout.EnterPositionBytes > 0)
@@ -498,7 +502,7 @@ internal static unsafe class ProjectionPass
             if (collections is { Unresolved: true })
             {
                 collectionUnresolved |= 1UL << slot;
-                hub?.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                repush |= 1UL << slot;
             }
 
             // ── The enter cache, before the event: a failure to store it has to be able to take the initialization back ───────────────────────────────
@@ -533,7 +537,7 @@ internal static unsafe class ProjectionPass
                 // stamped — and is pushed again next tick. A NEW one cannot be described at all, so its initialization is taken back whole, as a lease
                 // that ran dry would have left it: no identity, no event, no record, and tried again next tick.
                 state.NoteWideDeferral();
-                hub?.Repush(pushIndex, block->ChunkId, 1UL << slot);
+                repush |= 1UL << slot;
                 if (initialize)
                 {
                     // No identity was taken yet, so there is none to give back.
@@ -594,6 +598,11 @@ internal static unsafe class ProjectionPass
             {
                 records++;
             }
+        }
+
+        if (repush != 0)
+        {
+            hub?.Repush(pushIndex, block->ChunkId, repush);
         }
         // ── Arrivals, consumed ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
         //
