@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
@@ -57,6 +58,24 @@ class CmdLoot : Archetype<CmdLoot>
     public static readonly Comp<CmdOwner> Owner = Register<CmdOwner>();
 }
 
+/// <summary>Spatially indexed, so the "not visible to a spatial query" term of the validity contract can be asserted rather than asserted-by-analogy.</summary>
+[Component("Typhon.Test.Cmd.Bounds", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct CmdBounds
+{
+    [Field]
+    [SpatialIndex]
+    public AABB2F Bounds;
+
+    public CmdBounds(AABB2F bounds) => Bounds = bounds;
+}
+
+[Archetype]
+class CmdMob : Archetype<CmdMob>
+{
+    public static readonly Comp<CmdBounds> Bounds = Register<CmdBounds>();
+}
+
 #endregion
 
 /// <summary>
@@ -84,6 +103,13 @@ class EntityCommandWriteSideTests : TestBase<EntityCommandWriteSideTests>
         var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
         dbe.RegisterComponentFromAccessor<CmdPosition>();
         dbe.RegisterComponentFromAccessor<CmdOwner>();
+        dbe.RegisterComponentFromAccessor<CmdBounds>();
+
+        // CmdMob carries [SpatialIndex] and is cluster-eligible, which #230 Phase 3 Option B requires a grid for — before InitializeArchetypes, not after.
+        dbe.ConfigureSpatialGrid(SpatialGridConfig.Flat(
+            worldMin: new Vector2(0, 0),
+            worldMax: new Vector2(1024, 1024),
+            cellSize: 64f));
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -461,5 +487,76 @@ class EntityCommandWriteSideTests : TestBase<EntityCommandWriteSideTests>
 
         var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.That(allocated, Is.Zero, $"512 steady-state spawns allocated {allocated} bytes; the push path must not allocate");
+    }
+    /// <summary>
+    /// The spatial term of the validity contract, asserted against a real spatial index rather than inferred from the query case. A queued entity carries
+    /// a Bounds value that WOULD place it inside the box, so a hit here would mean the apply had leaked.
+    /// </summary>
+    [Test]
+    public void AQueuedSpawnIsNotVisibleToASpatialQuery()
+    {
+        using var dbe = SetupEngine();
+        using var runtime = QuietRuntime(dbe);
+
+        var box = new AABB2F { MinX = 0f, MinY = 0f, MaxX = 100f, MaxY = 100f };
+        var id = runtime.EntityCommands.GetWriter(0, 0).Spawn<CmdMob>(CmdMob.Bounds.Set(new CmdBounds(
+            new AABB2F { MinX = 10f, MinY = 10f, MaxX = 11f, MaxY = 11f })));
+        Assert.That(id.IsNull, Is.False, "precondition: the command was queued");
+
+        using var epoch = EpochGuard.Enter(dbe.EpochManager);
+        var e = dbe.ClusterSpatialQuery<CmdMob>().AABB(in box);
+        try
+        {
+            Assert.That(e.Count(), Is.Zero, "a queued spawn must not appear in a spatial query before the apply");
+        }
+        finally
+        {
+            e.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="EntityCommandBuffer.PeakDepth"/> is what a budget is sized against, so it must track the deepest the tick got rather than the depth at
+    /// the moment it is read.
+    /// </summary>
+    [Test]
+    public void PeakDepthTracksTheDeepestTheTickGot()
+    {
+        using var dbe = SetupEngine();
+        using var runtime = QuietRuntime(dbe);
+        var w = runtime.EntityCommands.GetWriter(0, 0);
+
+        for (var i = 0; i < 24; i++)
+        {
+            w.Spawn<CmdCorpse>();
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(runtime.EntityCommands.PeakDepth, Is.EqualTo(24));
+            Assert.That(runtime.EntityCommands.Count, Is.EqualTo(24), "and with no mid-tick drain it agrees with the live count");
+        });
+
+        runtime.EntityCommands.Reset();
+        Assert.That(runtime.EntityCommands.PeakDepth, Is.Zero, "the reset at tick start clears it");
+    }
+
+    /// <summary>
+    /// A refusal is logged ONCE per archetype and reason per tick, and counted every time. A system spawning into an unregistered archetype does it for
+    /// every entity it processes, so logging per call would be thousands of identical lines a tick; losing the exact count would be worse.
+    /// </summary>
+    [Test]
+    public void ARefusalIsLoggedOncePerTickButCountedEveryTime()
+    {
+        using var dbe = SetupEngine();
+        using var runtime = QuietRuntime(dbe);
+        var w = runtime.EntityCommands.GetWriter(0, 0);
+
+        for (var i = 0; i < 10; i++)
+        {
+            Assert.That(w.Spawn<SpawnUnregArch>().IsNull, Is.True);
+        }
+
+        Assert.That(runtime.EntityCommands.RejectedCount, Is.EqualTo(10u), "every refusal is counted, not just the logged one");
     }
 }

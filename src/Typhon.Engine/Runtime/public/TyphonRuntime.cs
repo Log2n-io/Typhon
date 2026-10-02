@@ -328,6 +328,7 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             _entityCommands = new EntityCommandBuffer(engine, options.EntityCommandsPerTick);
             _entityCommands.BindWorkerSlots(scheduler.WorkerSlotCount, scheduler.WorkerCount);
+            _entityCommands.Logger = logger;
         }
         _logger = logger ?? NullLogger.Instance;
         _systemTransactions = new Transaction[scheduler.AllSystemCount];

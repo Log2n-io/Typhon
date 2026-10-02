@@ -1,5 +1,8 @@
 using JetBrains.Annotations;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using System;
+using System.Globalization;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.Intrinsics.X86;
@@ -38,7 +41,7 @@ namespace Typhon.Engine;
 /// </para>
 /// </remarks>
 [PublicAPI]
-public sealed class EntityCommandBuffer
+public sealed partial class EntityCommandBuffer
 {
     /// <summary>Floor on a segment's allocation, matching <c>EventQueue</c>'s: below it, growth churns on trivially small bursts.</summary>
     private const int MinSegmentCapacity = 16;
@@ -64,6 +67,12 @@ public sealed class EntityCommandBuffer
 
     private EntityKeyBlocks _keys;
 
+    // One bit per (archetype, reason) already logged this tick. Index 0 is the "archetype unknown" bucket, so an archetype's bucket is id + 1. Touched
+    // only on a refusal, with one Interlocked.Or, and cleared by Reset.
+    private int[] _refusalLogged;
+
+    private ILogger _logger = NullLogger.Instance;
+
     internal EntityCommandBuffer(DatabaseEngine engine, int commandsPerTick)
     {
         if (commandsPerTick < 1)
@@ -73,6 +82,7 @@ public sealed class EntityCommandBuffer
 
         _engine = engine;
         _commandsPerTick = commandsPerTick;
+        _refusalLogged = new int[16];
         BindWorkerSlots(1, 1);
     }
 
@@ -149,6 +159,29 @@ public sealed class EntityCommandBuffer
         }
     }
 
+    /// <summary>
+    /// The deepest any one slot's segment got this tick, summed across slots — what to size <see cref="Capacity"/> against.
+    /// </summary>
+    /// <remarks>
+    /// A sum of per-slot high waters, which is the right figure HERE and would be wrong for an event queue: nothing drains this buffer mid-tick, so every
+    /// slot's peak is its end-of-tick depth and the sum is a real simultaneous total. <see cref="EventQueue{T}"/> cannot say that, which is why it stamps
+    /// a queue-level peak before draining instead.
+    /// </remarks>
+    public int PeakDepth
+    {
+        get
+        {
+            AcquireSegments();
+            var total = 0;
+            for (var i = 0; i < _slots.Length; i++)
+            {
+                total += _slots[i].PeakDepth;
+            }
+
+            return total;
+        }
+    }
+
     /// <summary>True when nothing has been queued this tick. O(1).</summary>
     public bool IsEmpty => Volatile.Read(ref _anyProduced) == 0;
 
@@ -158,6 +191,9 @@ public sealed class EntityCommandBuffer
     internal EntityKeyBlocks Keys => _keys;
 
     internal DatabaseEngine Engine => _engine;
+
+    /// <summary>The logger the refusal path writes through. Null resets to a no-op, so a buffer built outside a runtime never NREs.</summary>
+    internal ILogger Logger { set => _logger = value ?? NullLogger.Instance; }
 
     /// <summary>
     /// Acquire fence paired with the producers' plain segment stores — JIT-folded on x64, a load barrier on arm64. Necessary rather than
@@ -205,6 +241,7 @@ public sealed class EntityCommandBuffer
         var stride = Math.Max(2, 2 * Math.Max(1, workerCount));
         _keys = new EntityKeyBlocks(_engine, stride, EntityKeyBlocks.DeriveBlockSize(_commandsPerTick, stride));
         _keys.EnsureArchetypes(_engine?._archetypeStates?.Length ?? 16);
+        EnsureRefusalTable();
     }
 
     /// <summary>
@@ -241,11 +278,23 @@ public sealed class EntityCommandBuffer
             }
 
             _keys.Reset();
+            Array.Clear(_refusalLogged);
             Volatile.Write(ref _anyProduced, 0);
         }
 
         // Cheap even on an idle tick, and the alternative is a producer meeting an archetype registered since bind and being refused for it.
         _keys.EnsureArchetypes(_engine?._archetypeStates?.Length ?? 16);
+        EnsureRefusalTable();
+    }
+
+    /// <summary>Sizes the refusal-dedup table to the archetypes plus the unknown bucket. Serial, from bind and tick start — never from a producer.</summary>
+    private void EnsureRefusalTable()
+    {
+        var needed = (_engine?._archetypeStates?.Length ?? 16) + 1;
+        if (_refusalLogged == null || _refusalLogged.Length < needed)
+        {
+            _refusalLogged = new int[needed];
+        }
     }
 
     /// <summary>Raises the O(1) emptiness gate. Every writer stores the same value, so concurrent stores are benign.</summary>
@@ -257,6 +306,60 @@ public sealed class EntityCommandBuffer
             Volatile.Write(ref _anyProduced, 1);
         }
     }
+
+    /// <summary>
+    /// Records a refused command: counts it on the slot, and logs it ONCE per (archetype, reason) per tick.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the counters are not enough on their own.</b> A command that returns <see cref="EntityId.Null"/> is a lost game action, and the shapes that
+    /// cause one are mostly mistakes a developer can fix — an archetype never registered, a realm that cannot hold the entity. A number in a property is
+    /// no use to someone who does not already suspect the problem; a line naming the archetype and the reason is.
+    /// </para>
+    /// <para>
+    /// <b>Why once per tick.</b> The failure is per-tick systematic, not per-call interesting: a system spawning into an unregistered archetype does it for
+    /// every entity it processes, which at a few thousand entities a tick would be a log line per entity per tick forever. The dedup is one
+    /// <see cref="Interlocked.Or(ref int, int)"/> on a per-archetype mask, paid only on the refusal path, and the exact count stays available in
+    /// <see cref="RejectedCount"/> and <see cref="OverflowCount"/>.
+    /// </para>
+    /// </remarks>
+    internal void NoteRefusal(int workerSlot, int internalArchetypeId, EntityCommandRefusal reason)
+    {
+        ref var slot = ref _slots[workerSlot];
+        if (reason is EntityCommandRefusal.SegmentFull or EntityCommandRefusal.KeyBlocksExhausted)
+        {
+            slot.Overflow++;
+        }
+        else
+        {
+            slot.Rejected++;
+        }
+
+        // Slot 0 of the mask table is the "archetype unknown" bucket — a refusal for an unregistered archetype has no id to key on.
+        var bucket = (uint)internalArchetypeId < (uint)(_refusalLogged.Length - 1) ? internalArchetypeId + 1 : 0;
+        var bit = 1 << (int)reason;
+        if ((Interlocked.Or(ref _refusalLogged[bucket], bit) & bit) == 0)
+        {
+            LogCommandRefused(DescribeArchetype(internalArchetypeId), reason.ToString());
+        }
+    }
+
+    /// <summary>The archetype's name for a log line, or a stand-in when there is no usable id — never throws, and never allocates on the accepted path.</summary>
+    private string DescribeArchetype(int internalArchetypeId)
+    {
+        if ((uint)internalArchetypeId >= (uint)(_engine?._archetypeStates?.Length ?? 0))
+        {
+            return "<unregistered>";
+        }
+
+        var meta = ArchetypeRegistry.GetMetadata((ushort)internalArchetypeId);
+        return meta?.ArchetypeType?.Name ?? internalArchetypeId.ToString(CultureInfo.InvariantCulture);
+    }
+
+    [LoggerMessage(LogLevel.Warning,
+        "An entity command for archetype '{Archetype}' was refused ({Reason}); the command was NOT queued and the caller was given EntityId.Null. "
+        + "Exact counts for the tick are on EntityCommandBuffer.RejectedCount / OverflowCount. Logged once per archetype and reason per tick.")]
+    private partial void LogCommandRefused(string archetype, string reason);
 
     internal ref EntityCommandSegmentState SlotState(int workerSlot) => ref _slots[workerSlot];
 
@@ -288,7 +391,7 @@ public sealed class EntityCommandBuffer
         {
             if (headers.Length >= _commandsPerTick)
             {
-                slot.Overflow++;
+                // The count is NOT bumped here: the caller reports it through NoteRefusal, which also logs. Counting in both places doubled it.
                 return false;
             }
 
@@ -308,7 +411,6 @@ public sealed class EntityCommandBuffer
                 var ceiling = _commandsPerTick * MaxValuesPerCommand;
                 if (needed > ceiling)
                 {
-                    slot.Overflow++;
                     return false;
                 }
 

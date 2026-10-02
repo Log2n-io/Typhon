@@ -12,6 +12,7 @@ using System.Threading;
 using System.Reflection;
 using System.Linq.Expressions;
 using Typhon.Engine.internals;
+using Typhon.Engine.Internals;
 using Typhon.Schema.Definition;
 
 namespace Typhon.Engine;
@@ -1196,9 +1197,11 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
     /// and the realm key is readable straight out of the supplied <see cref="ComponentValue"/> span.
     /// </para>
     /// </remarks>
-    internal bool CanSpawnDeferred(ArchetypeMetadata meta, ReadOnlySpan<ComponentValue> values, out ushort routingId)
+    internal bool CanSpawnDeferred(ArchetypeMetadata meta, scoped ReadOnlySpan<ComponentValue> values, out ushort routingId,
+        out EntityCommandRefusal refusal)
     {
         routingId = 0;
+        refusal = EntityCommandRefusal.ArchetypeNotRegistered;
         if (meta == null || (uint)meta.ArchetypeId >= (uint)_archetypeStates.Length)
         {
             return false;
@@ -1212,6 +1215,7 @@ public partial class DatabaseEngine : ResourceNode, IMetricSource, IDebugPropert
 
         if (state.ClusterState is { SpatialSlot.HasRealmKey: true } keyed && !CanEnterRealm(DeferredSpawnRealm(meta, keyed, values), meta.ArchetypeId))
         {
+            refusal = EntityCommandRefusal.RealmRefused;
             return false;
         }
 

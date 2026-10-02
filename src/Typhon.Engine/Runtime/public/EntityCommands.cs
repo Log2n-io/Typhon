@@ -110,14 +110,15 @@ public ref struct EntityCommands
 
         if (values.Length > EntityCommandBuffer.MaxValuesPerCommand)
         {
-            _state.Rejected++;
+            _buffer.NoteRefusal(_slot, -1, EntityCommandRefusal.BadArguments);
             return 0;
         }
 
+        // The two questions split because they are different mistakes with different fixes, and the log line says which.
         var meta = Archetype<TArch>.Metadata;
-        if (!_buffer.Engine.CanSpawnDeferred(meta, values, out var routingId))
+        if (!_buffer.Engine.CanSpawnDeferred(meta, values, out var routingId, out var refusal))
         {
-            _state.Rejected++;
+            _buffer.NoteRefusal(_slot, meta?.ArchetypeId ?? -1, refusal);
             return 0;
         }
 
@@ -126,7 +127,7 @@ public ref struct EntityCommands
         {
             // Out of key blocks for this archetype this tick, or a chunk index outside the stride. Both are the engine declining, not the caller erring,
             // so both count as overflow — see the type's note on why a reported zero has to mean nothing was lost.
-            _state.Overflow++;
+            _buffer.NoteRefusal(_slot, meta.ArchetypeId, EntityCommandRefusal.KeyBlocksExhausted);
             return 0;
         }
 
@@ -161,7 +162,7 @@ public ref struct EntityCommands
 
         if (id.IsNull)
         {
-            _state.Rejected++;
+            _buffer.NoteRefusal(_slot, -1, EntityCommandRefusal.BadArguments);
             return false;
         }
 
@@ -186,6 +187,7 @@ public ref struct EntityCommands
         {
             if (!_buffer.TryReserveRoom(_slot, values.Length))
             {
+                _buffer.NoteRefusal(_slot, internalArchetypeId, EntityCommandRefusal.SegmentFull);
                 return false;
             }
 
@@ -214,6 +216,11 @@ public ref struct EntityCommands
 
         _state.Count = n + 1;
         _state.SpawnedEntities += count;
+        if (_state.Count > _state.PeakDepth)
+        {
+            _state.PeakDepth = _state.Count;
+        }
+
         if (n == 0)
         {
             // Raise the buffer's O(1) emptiness gate only on this segment's 0 -> 1 transition, as EventWriter does: doing it per command costs a volatile

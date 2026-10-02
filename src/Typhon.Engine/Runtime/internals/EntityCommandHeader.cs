@@ -2,6 +2,35 @@ using System.Runtime.InteropServices;
 
 namespace Typhon.Engine.Internals;
 
+/// <summary>
+/// Why an entity command was not queued (#1099). Each value is logged at most once per archetype per tick, and each is counted exactly.
+/// </summary>
+/// <remarks>
+/// The split between the two groups is the one an application acts on. A REJECTION is an impossible request — the archetype is not registered, the realm
+/// cannot hold the entity — and is almost always a bug to fix. An OVERFLOW is the engine out of room, which is a budget to raise. Collapsing them into one
+/// counter would make a tick that lost commands indistinguishable from a tick that was asked for nonsense.
+/// </remarks>
+internal enum EntityCommandRefusal
+{
+    /// <summary>The archetype is not registered with this database, or has no entity map — nothing to spawn into. A rejection.</summary>
+    ArchetypeNotRegistered = 0,
+
+    /// <summary>The realm the values name is unregistered, closing, or cannot hold this archetype. A rejection.</summary>
+    RealmRefused = 1,
+
+    /// <summary>More values than one command may carry, or a destination span shorter than the requested run. A rejection.</summary>
+    BadArguments = 2,
+
+    /// <summary>This slot's header or payload pool is at its growth ceiling. An overflow.</summary>
+    SegmentFull = 3,
+
+    /// <summary>
+    /// The archetype used its key-block generations for this tick, or the producer's chunk index fell outside the stride. An overflow — the engine
+    /// declining, not the caller erring.
+    /// </summary>
+    KeyBlocksExhausted = 4,
+}
+
 /// <summary>What one entry in a worker's entity-command segment asks the apply phase to do (#1099).</summary>
 internal enum EntityCommandKind : byte
 {

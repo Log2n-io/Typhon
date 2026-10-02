@@ -44,4 +44,16 @@ internal struct EntityCommandSegmentState
     /// <summary>Entities this slot's accepted spawns will create — the sum of every accepted header's <c>Count</c>. Cleared by <c>Reset</c>.</summary>
     [FieldOffset(16)]
     public int SpawnedEntities;
+
+    /// <summary>
+    /// High-water <see cref="Count"/> for this slot this tick. Cleared by <c>Reset</c>.
+    /// </summary>
+    /// <remarks>
+    /// Equal to <see cref="Count"/> as long as nothing drains mid-tick, which nothing does today — the apply runs once, at the fence. It is tracked
+    /// separately anyway because <see cref="EventQueue{T}"/> learned this the expensive way: its peak was a sum of per-slot maxima observed at unrelated
+    /// instants, and its partial-drain path never folded at all, under-reporting by 125x. Recording the slot's own high water keeps the figure meaningful
+    /// if a mid-tick drain is ever added, and costs one compare on a branch that already wrote two fields.
+    /// </remarks>
+    [FieldOffset(20)]
+    public int PeakDepth;
 }
