@@ -586,6 +586,15 @@ internal sealed class CommandRegistry
     /// <param name="components">The values the codec decodes to, which a multi-component struct's size is divided by.</param>
     internal static (CommandFieldElement Element, int Size) ElementOf(Type fieldType, string command, string wireField, int components = 1)
     {
+        // A client names an entity by the netId it holds, never by the server's EntityId: read as a number, its eight bytes would be a double's bit
+        // pattern written into an identity (an event resolves its references before it gets here).
+        if (CodecPairing.IsReference(fieldType))
+        {
+            throw new InvalidOperationException(
+                $"Command '{command}' field '{wireField}' reads a '{fieldType.Name}'. A client names an entity by the netId it holds: declare the field a " +
+                "uint with Codec.EntityRef and resolve it with Subscriptions.Commands.TryResolve (01 § 7).");
+        }
+
         var type = fieldType.IsEnum ? Enum.GetUnderlyingType(fieldType) : fieldType;
 
         if (type == typeof(sbyte))

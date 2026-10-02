@@ -37,6 +37,12 @@ internal enum ColumnPath : byte
     /// cap. No code row — the section encoder reads the column itself, and the section is wide (13 § 6).
     /// </summary>
     Text,
+
+    /// <summary>
+    /// An <see cref="EntityId"/> or an <c>EntityLink&lt;T&gt;</c> into <c>entityRef</c>: the code is the netId of the entity it names, resolved per slot by
+    /// the projection — 0 for none, or for a target with no identity yet (13 § 5). The exact integer path with a resolving reader.
+    /// </summary>
+    EntityRef,
 }
 
 /// <summary>
@@ -170,8 +176,8 @@ internal sealed class FieldShape
 /// </para>
 /// <para>
 /// One table for archetype fields, owner fields, onEnter fields, event fields and command fields: the registry runs it at declaration time, the projection
-/// compiler again at <c>Start</c> to choose the path. A codec the table does not judge — a position, text, bytes, a list, an <see cref="EntityId"/>
-/// reference — returns <see cref="ColumnPath.None"/> and is left to the checks that own it.
+/// compiler again at <c>Start</c> to choose the path. A codec the table does not judge — a position, bytes, a list, a message's <see cref="EntityId"/> —
+/// returns <see cref="ColumnPath.None"/> and is left to the checks that own it.
 /// </para>
 /// </remarks>
 internal static class CodecPairing
@@ -342,6 +348,20 @@ internal static class CodecPairing
         var type = enumType != null ? Enum.GetUnderlyingType(sourceType) : sourceType;
         var kind = codec.Kind;
 
+        // An entity's reference field (13 § 5): resolved to its target's netId, so it travels as entityRef and as nothing else — its bits are a routing id
+        // and a key, which mean nothing to a client. A message's EntityId is the event and command binders' to judge.
+        if (!message && IsReference(sourceType))
+        {
+            if (kind != CodecKind.EntityRef)
+            {
+                throw new InvalidOperationException(
+                    $"{where} pairs a {sourceType.Name} with {CodecTokens.ToToken(kind)}. An entity reference is a routing id and a key that mean nothing to " +
+                    "a client: it travels as entityRef, the netId of the entity it names. Declare Codec.EntityRef (or Codec.Exact).");
+            }
+
+            return ColumnPath.EntityRef;
+        }
+
         if (kind == CodecKind.EntityRef)
         {
             if (message && type == typeof(uint) && enumType == null)
@@ -453,6 +473,14 @@ internal static class CodecPairing
     /// other type. Its text is UTF-8 up to the first zero byte, at most one byte less than the buffer.
     /// </summary>
     public static int TextCapacityOf(Type type) => type == typeof(String64) || type == typeof(Variant) ? 64 : type == typeof(String1024) ? 1024 : 0;
+
+    /// <summary>Whether <paramref name="type"/> names an entity: an <see cref="EntityId"/>, or the <c>EntityLink&lt;T&gt;</c> that wraps one.</summary>
+    public static bool IsReference(Type type) =>
+        type == typeof(EntityId) || (type is { IsGenericType: true } && type.GetGenericTypeDefinition() == typeof(EntityLink<>));
+
+    /// <summary>The archetype an <c>EntityLink&lt;T&gt;</c> names, <c>T</c>; <see langword="null"/> for an <see cref="EntityId"/> or any other type.</summary>
+    public static Type ReferenceTarget(Type type) =>
+        type is { IsGenericType: true } && type.GetGenericTypeDefinition() == typeof(EntityLink<>) ? type.GenericTypeArguments[0] : null;
 
     /// <summary>Whether a codec is one of the integer kinds this table judges.</summary>
     public static bool IsIntegerCodec(CodecKind kind) => kind

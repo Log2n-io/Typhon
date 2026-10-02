@@ -29,6 +29,7 @@ namespace Typhon.Engine
     using Typhon.Protocol;
     public struct Comp<T> { }
     public struct EntityId { }
+    public readonly struct EntityLink<T> where T : class { }
     public abstract class Archetype<TSelf> where TSelf : Archetype<TSelf> { protected static Comp<T> Register<T>() => default; }
     public abstract class Archetype<TSelf, TParent> : Archetype<TSelf> where TSelf : Archetype<TSelf, TParent> where TParent : class { }
     public readonly struct Codec
@@ -269,6 +270,16 @@ public partial class Outer
 [Component(""C"", 1)] public struct C
 {
     [Field, Replicate] public Typhon.Schema.Definition.String64 Name; [Field, Replicate] public Typhon.Schema.Definition.String1024 Bio;
+}
+[Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"),
+    Is.Empty);
+
+    [Test]
+    public void AnEntityReferenceWithNoCodecTravelsAsEntityRef()
+        => Assert.That(Ids(@"
+[Component(""C"", 1)] public struct C
+{
+    [Field, Replicate] public EntityId Other; [Field, Replicate] public EntityLink<A> Target;
 }
 [Archetype, Replicated] public partial class A : Archetype<A> { public static readonly Comp<C> X = Register<C>(); }"),
     Is.Empty);

@@ -213,6 +213,10 @@ internal static class ProjectionCompiler
         var fields = BuildFields(projection, projection.Fields, groupNames, meta, layout, engine, projection.IsStatic);
         var ownerFields = BuildFields(projection, projection.OwnerFields, ownerGroupNames, meta, layout, engine, foldIntoEnter: false);
 
+        // Each reference keeps the netId it last resolved to in the cold entry, public fields first (13 § 5).
+        var references = NumberReferences(fields, 0);
+        references = NumberReferences(ownerFields, references);
+
         // Two sizes per section (13 § 6): what it can put on the wire, which sizes the encode scratch and a record's frame space, and what it takes in its
         // entry — the same for an inline section, an 8-byte arena reference for a wide one. Only the second moves an offset, so a scalar archetype's
         // entries are byte for byte what they were (E-9).
@@ -284,7 +288,7 @@ internal static class ProjectionCompiler
         }
 
         var blockLayout = ReplicationBlockLayout.ForArchetype(layout.ClusterSize, moving ? position.SegmentBytes : 0, storedStateBytes, quantizedPositionBytes,
-            runStartBytes, ownerEntrySize, enterPositionBytes, onEnter.StoredBytes, headingBytes: 4 * headings);
+            runStartBytes, ownerEntrySize, enterPositionBytes, onEnter.StoredBytes, headingBytes: 4 * headings, referenceBytes: 4 * references);
 
         // v̂ (09 § 2) gets bytes of its own only for a mover with a slack; at zero it is the previous position.
         var slack = moving ? visibilitySlackM : 0d;
@@ -314,8 +318,23 @@ internal static class ProjectionCompiler
             MaxStateBodyBytes = stateBodyBytes,
             MaxOwnerBodyBytes = ownerBodyBytes,
             HasWideSections = hasWide,
+            ReferenceCount = references,
             TickSlotCount = motionTickSlots + groupNames.Length,
         };
+    }
+
+    // Gives each reference field its slot in the cold entry's reference region, continuing from `next`; returns the next free slot.
+    private static int NumberReferences(CompiledField[] fields, int next)
+    {
+        for (var i = 0; i < fields.Length; i++)
+        {
+            if (fields[i].Path == ColumnPath.EntityRef)
+            {
+                fields[i] = fields[i] with { ReferenceSlot = next++ };
+            }
+        }
+
+        return next;
     }
 
     private static IEnumerable<(CompiledSection Section, string Name)> WideCandidates(CompiledSection onEnter, CompiledGroup[] groups,
@@ -435,8 +454,19 @@ internal static class ProjectionCompiler
                 $"Archetype '{projection.Name}' declares field '{field.Name}' with codec '{codec.Type}', which the column walk has no path for.");
         }
 
+        // A reference sent once is never corrected: an onEnter field — and a static archetype's, all of which fold into onEnter — reaches a client in its
+        // enter record only, so the netId it names would outlive its holder on every client that entered the entity (SUB-31). It belongs in a group.
+        if (path == ColumnPath.EntityRef && section == 0)
+        {
+            throw new InvalidOperationException(
+                $"Archetype '{projection.Name}' declares the reference '{field.Name}' {(projection.IsStatic ? "on a static archetype" : "OnEnter")}. A " +
+                "reference names its target's netId, and once that target is gone the netId is reissued: a field sent only on enter can never be told, so " +
+                "its clients would resolve it to whoever holds the number next (SUB-31). Declare it in a change group.");
+        }
+
         // A Fraction over text reads two numbers that are not there: ResolveSourceType refuses it, naming the type.
-        var sourceType = textCapacity > 0 && ratioOffset < 0 ? ProjectionSourceType.Text
+        var sourceType = path == ColumnPath.EntityRef ? ProjectionSourceType.Reference
+            : textCapacity > 0 && ratioOffset < 0 ? ProjectionSourceType.Text
             : shape != null ? (shape.Element == typeof(double) ? ProjectionSourceType.Double : ProjectionSourceType.Single)
             : ResolveSourceType(projection, field, source);
         var (intMin, intMax) = CodecPairing.ClampRange(codec);
@@ -492,6 +522,7 @@ internal static class ProjectionCompiler
             Shape = field.Shape,
             ComponentCount = 1,
             TextCapacity = textCapacity,
+            ReferenceTarget = path == ColumnPath.EntityRef ? CodecPairing.ReferenceTarget(source.DotNetType) : null,
         };
 
         if (shape == null || path == ColumnPath.Quaternion)

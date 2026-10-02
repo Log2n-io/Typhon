@@ -912,6 +912,26 @@ internal sealed unsafe class PushHub
         }
     }
 
+    /// <summary>
+    /// Marks slots of a cluster to be pushed by the coming <see cref="PrepareBlocks"/>: the referrers the reverse index re-pushes (13 § 5). Serial, at the
+    /// blocks step before the push set is collected; grows the list for a chunk the archetype has not been pushed in yet.
+    /// </summary>
+    public void RepushFromBlocksStep(int archetype, int chunkId, ulong slots)
+    {
+        if ((uint)archetype >= (uint)_repush.Length || chunkId < 0)
+        {
+            return;
+        }
+
+        ref var r = ref _repush[archetype];
+        if (chunkId >= r.Length)
+        {
+            Array.Resize(ref r, Math.Max(chunkId + 1, r.Length * 2));
+        }
+
+        r[chunkId] |= (long)slots;
+    }
+
     /// <summary>Marks slots of a cluster to be pushed again next tick. Called by the worker that owns the block — one writer per chunk.</summary>
     public void Repush(int archetype, int chunkId, ulong slots)
     {

@@ -679,7 +679,8 @@ public sealed class ReplicationGenerator : IIncrementalGenerator
         }
 
         var ns = type.ContainingNamespace?.ToDisplayString();
-        return (type.Name == "EntityId" && ns == "Typhon.Engine")
+        // An entity reference travels as entityRef: an EntityId, or the EntityLink<T> wrapping one (13 § 5).
+        return (ns == "Typhon.Engine" && (type.Name == "EntityId" || (type.Name == "EntityLink" && type is INamedTypeSymbol { Arity: 1 })))
             || (ns == "Typhon.Schema.Definition" && (ShapeTypes.Contains(type.Name) || TextTypes.Contains(type.Name)));
     }
 

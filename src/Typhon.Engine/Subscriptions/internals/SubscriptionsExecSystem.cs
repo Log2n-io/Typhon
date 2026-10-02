@@ -233,6 +233,10 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
             return 0;
         }
 
+        // The referrers of every identity released since the last step, pushed this tick so their references re-resolve before the number can be
+        // reissued (13 § 5, SUB-31). BEFORE the push set is collected, which takes them in with the repush list.
+        subs.References?.Step(states, subs.Hub);
+
         subs.Hub.PrepareBlocks(tick);
 
         // Owner routing (11 § 2.2): the reverse Control map the projection's chunks read, rebuilt only when a session's controlled entity changed.
@@ -288,6 +292,7 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
             states[i].BeginProjectTick(chunks);
         }
 
+        subs.References?.BeginTick(chunks);
         return chunks;
     }
 
@@ -346,6 +351,10 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
         var transient = clusterState.TransientSegment;
         var persistentAccessor = persistent != null ? persistent.CreateChunkAccessor() : default;
         var transientAccessor = transient != null ? transient.CreateChunkAccessor() : default;
+
+        // A reference reader for the worker's share, when the archetype projects one (13 § 5): its EntityMap accessors live as long as the share.
+        var references = plan.ReferenceCount > 0 ? state.References?.ResolverFor(chunkIndex) : null;
+        references?.Open();
         try
         {
             if (claim)
@@ -364,7 +373,8 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
                     var to = Math.Min(count, from + ProjectBatch);
                     for (var i = from; i < to; i++)
                     {
-                        ProjectOne(plan, archetypeIndex, state, chunkIndex, list[i], persistent, transient, ref persistentAccessor, ref transientAccessor, tick);
+                        ProjectOne(plan, archetypeIndex, state, chunkIndex, list[i], persistent, transient, ref persistentAccessor, ref transientAccessor, tick,
+                            references);
                     }
                 }
             }
@@ -372,12 +382,14 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
             {
                 for (var i = chunkIndex; i < count; i += chunkCount)
                 {
-                    ProjectOne(plan, archetypeIndex, state, chunkIndex, list[i], persistent, transient, ref persistentAccessor, ref transientAccessor, tick);
+                    ProjectOne(plan, archetypeIndex, state, chunkIndex, list[i], persistent, transient, ref persistentAccessor, ref transientAccessor, tick,
+                        references);
                 }
             }
         }
         finally
         {
+            references?.Close();
             persistentAccessor.Dispose();
             transientAccessor.Dispose();
         }
@@ -389,7 +401,7 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
     private static void ProjectOne(CompiledProjectionPlan plan, int archetypeIndex, ArchetypeReplicationState state, int chunkIndex, ReplicationBlockHeader* block,
         ChunkBasedSegment<PersistentStore> persistent, ChunkBasedSegment<TransientStore> transient, ref ChunkAccessor<PersistentStore> persistentAccessor,
-        ref ChunkAccessor<TransientStore> transientAccessor, uint tick)
+        ref ChunkAccessor<TransientStore> transientAccessor, uint tick, ReferenceResolver references)
     {
         var chunkId = block->ChunkId;
         if (chunkId < 0)
@@ -400,7 +412,7 @@ internal sealed unsafe class SubscriptionsProjectExecSystem : SubscriptionsExecS
 
         var clusterBase = persistent != null ? persistentAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
         var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
-        ProjectionPass.ProjectBlock(plan, archetypeIndex, state, chunkIndex, block, clusterBase, transientBase, tick);
+        ProjectionPass.ProjectBlock(plan, archetypeIndex, state, chunkIndex, block, clusterBase, transientBase, tick, references);
     }
 
     private static int WatchedBlocks(ArchetypeReplicationState[] states)

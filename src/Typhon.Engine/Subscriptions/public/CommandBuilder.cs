@@ -421,6 +421,22 @@ internal static class MessageContract
         enumTypes = new Dictionary<string, Type>(StringComparer.Ordinal);
 
         var members = FieldsOf(messageType);
+
+        // A client names an entity by the netId it holds, never by the server's EntityId (01 § 7): refused here, where the declaration is, rather than
+        // when the decoder is bound. An event's references are resolved on the way out, so only a command is refused.
+        if (what == "Command")
+        {
+            foreach (var (source, member) in members)
+            {
+                if (!ignored.Contains(source) && CodecPairing.IsReference(member.FieldType))
+                {
+                    throw new InvalidOperationException(
+                        $"Command '{name}' field '{messageType.Name}.{source}' is a '{member.FieldType.Name}'. A client names an entity by the netId it " +
+                        "holds: declare the field a uint with Codec.EntityRef and resolve it with Subscriptions.Commands.TryResolve (01 § 7).");
+                }
+            }
+        }
+
         var complete = new List<ProjectedField>(members.Count);
         var wireNames = new HashSet<string>(StringComparer.Ordinal);
         var bound = new HashSet<string>(StringComparer.Ordinal);
@@ -599,7 +615,8 @@ internal static class MessageContract
             return Codec.F64;
         }
 
-        if (fieldType == typeof(EntityId))
+        // An entity travels as the netId it is known by: an EntityId, or the EntityLink<T> that wraps one (13 § 5).
+        if (CodecPairing.IsReference(fieldType))
         {
             return Codec.EntityRef;
         }

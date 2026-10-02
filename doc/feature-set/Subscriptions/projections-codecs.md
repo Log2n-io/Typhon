@@ -32,7 +32,8 @@ tick. A projection names only what travels, quantizes it to what the client can 
 **Codecs** (`Codec.X`): `Bool`, `U8`/`I8`/`U16`/`I16`/`U32`/`I32`, `U64`/`I64`, `VarUInt`/`VarInt`, `VarUInt64`/`VarInt64`, `F32`,
 `F64`, `F16`, `Quant(min, max, bits)`, `Unorm(bits)`, `Snorm(bits)`, `Angle(bits)`, `Bits(n)`, `Enum<T>(bits)`, `Vec2/Vec3(scale, bits)`,
 `EntityRef`, `Str`/`Blob`/`Bytes`, `List(of, min, max)`, `TickLo`, `Quat3`. **`Codec.Exact`** is the stored type's exact codec — `u64` for a
-`ulong`, `f64` for a `double`, `f32 × 3` for a `Point3F`, `str{63}` for a `String64`. `.Count(n)` repeats a scalar codec for a point, a quaternion, a box or a sphere,
+`ulong`, `f64` for a `double`, `f32 × 3` for a `Point3F`, `str{63}` for a `String64`, `entityRef` for an `EntityId` or an `EntityLink<T>`.
+`.Count(n)` repeats a scalar codec for a point, a quaternion, a box or a sphere,
 whose count the type also gives. `.Saturate()` clamps out-of-range values instead of refusing them. Quantizers take 8, 16, 24 or 32 bits. The
 same arithmetic runs bit-exactly in the engine and the .NET, TypeScript and C SDKs.
 
@@ -61,6 +62,10 @@ The same declarations can be written as attributes on the data ([Replication by 
 - **Text on a field** (`String64`, as `Codec.Exact` or `Codec.Str(n)` with n ≤ 63) is cut at its cap on a character boundary, never inside one,
   and every cut is counted. A group holding text is stored out of line, so it costs the entity's hot entry 8 bytes whatever its length. A
   `String1024` cannot be in a replicated archetype — cluster storage needs eight entities to a page.
+- **A reference** (`EntityId` or `EntityLink<T>`, as `entityRef`) carries its target's netId, or 0 when the target is null, gone, or not
+  replicated. A target given its identity this tick is resolved the next one. When the target goes, every referrer sends 0 the following tick,
+  with no push from the application, long before the netId can be reissued. A reference in an `OnEnter` field or on a `Static` archetype is
+  refused, since it could never be corrected. So is an `EntityLink<T>` whose `T` no profile observes.
 - **At most 8 change groups** per section — the public fields, and the owner fields — because the group mask is a byte; up to **255
   replicated archetypes**.
 - **Components are read through the cluster layout** (SUB-01); a projection never reads storage any other way.

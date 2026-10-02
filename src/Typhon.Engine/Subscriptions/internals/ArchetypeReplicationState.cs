@@ -62,6 +62,10 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
     // The list being released, outside the lock; touched by the track alone, then kept as the next tick's empty list.
     private List<uint> _orphanedSpare = [];
+
+    // The orphaned identities whose referrers the reverse index has not re-pushed yet: each is taken once, by the next blocks step (13 § 5).
+    private List<uint> _orphanedForReferences = [];
+    private List<uint> _orphanedForReferencesSpare = [];
     private long _orphanReleaseFaults;
 
     private long _blocksProjected;
@@ -297,30 +301,66 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     }
 
     /// <summary>
-    /// Gives back the wide bodies a slot's entry holds and zeroes their references — every path that ENDS an entry calls this before clearing or
-    /// overwriting it; a path that MOVES one (a migration, a park) copies the references instead and must not.
+    /// What an entry holds outside its own bytes, given back: its wide bodies, and the reverse index's count of the entities its references name — every
+    /// path that ENDS an entry calls this before clearing or overwriting it; a path that MOVES one (a migration, a park) copies the entry instead and must
+    /// not.
     /// </summary>
-    internal void FreeWide(byte* blockBytes, int slot)
-    {
-        var refs = _wideRefs;
-        if (refs.Length == 0)
-        {
-            return;
-        }
+    /// <param name="blockBytes">The block.</param>
+    /// <param name="slot">The slot.</param>
+    /// <param name="worker">
+    /// The projection chunk ending it, whose reference log is its own; <c>-1</c> from the fence or the blocks step, which log under a lock.
+    /// </param>
+    internal void EndEntry(byte* blockBytes, int slot, int worker = -1) =>
+        EndEntryAt(blockBytes + Layout.HotOffset + (slot * Layout.HotStride), blockBytes + Layout.ColdOffset + (slot * Layout.ColdStride),
+            blockBytes + Layout.OwnerOffset + (slot * Layout.OwnerEntrySize), worker);
 
-        FreeWideAt(refs, blockBytes + Layout.HotOffset + (slot * Layout.HotStride), blockBytes + Layout.ColdOffset + (slot * Layout.ColdStride),
-            blockBytes + Layout.OwnerOffset + (slot * Layout.OwnerEntrySize));
-    }
+    /// <summary>As <see cref="EndEntry"/>, for a parked copy: its hot, cold and owner bytes back to back.</summary>
+    private void EndParkedEntry(byte* bytes) => EndEntryAt(bytes, bytes + Layout.HotStride, bytes + Layout.HotStride + Layout.ColdStride, -1);
 
-    /// <summary>As <see cref="FreeWide"/>, for a parked copy: its hot, cold and owner bytes back to back.</summary>
-    private void FreeWideParked(byte* bytes)
+    private void EndEntryAt(byte* hot, byte* cold, byte* owner, int worker)
     {
         var refs = _wideRefs;
         if (refs.Length != 0)
         {
-            FreeWideAt(refs, bytes, bytes + Layout.HotStride, bytes + Layout.HotStride + Layout.ColdStride);
+            FreeWideAt(refs, hot, cold, owner);
+        }
+
+        var references = References;
+        if (references == null || Layout.ReferenceBytes == 0)
+        {
+            return;
+        }
+
+        // The netIds this entry's references last named stop counting it as a referrer (13 § 5): without this, a long-lived target would keep every
+        // referrer that ever died while naming it, and the index would grow with churn rather than with what is live.
+        var referrer = ((ReplicationHotEntry*)hot)->Entity.RawValue;
+        var held = cold + Layout.ReferenceOffsetInColdEntry;
+        for (var at = 0; at < Layout.ReferenceBytes; at += sizeof(uint))
+        {
+            var netId = Unsafe.ReadUnaligned<uint>(held + at);
+            if (netId == NetIdAllocator.NoNetId)
+            {
+                continue;
+            }
+
+            if (worker >= 0)
+            {
+                references.Note(worker, netId, referrer, -1);
+            }
+            else
+            {
+                references.NoteShared(netId, referrer, -1);
+            }
+
+            Unsafe.WriteUnaligned(held + at, NetIdAllocator.NoNetId);
         }
     }
+
+    /// <summary>
+    /// The runtime's reverse index of references (13 § 5), when any replicated archetype projects one; <see langword="null"/> otherwise, and then nothing
+    /// here logs.
+    /// </summary>
+    internal ReferenceIndex References;
 
     // The entry's regions are block or parked-list memory, native and engine-owned; the references are read and zeroed through the region pointers the
     // callers already hold, unaligned, and the handles go back under one acquisition of the arena's lock.
@@ -488,7 +528,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                 Orphaned(source, coldSource, ((ReplicationHotEntry*)hotSource)->NetId, 3);
             }
 
-            FreeWide(srcBytes, srcSlot);
+            EndEntry(srcBytes, srcSlot);
             ClearEntry(srcBytes, srcSlot);
             Interlocked.Increment(ref _entriesLeftRealm);
             return ReplicationMigrationOutcome.NothingToCarry;
@@ -507,7 +547,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             }
 
             // The entry being overwritten ends here; the arriving one's bodies move with its references.
-            FreeWide(dstBytes, dstSlot);
+            EndEntry(dstBytes, dstSlot);
             Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (dstSlot * Layout.HotStride), hotSource, (uint)Layout.HotStride);
             Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (dstSlot * Layout.ColdStride), coldSource, (uint)Layout.ColdStride);
 
@@ -535,7 +575,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         {
             // Counted as a DROP, not a park. Reporting it as parked would break the one identity that reveals the disposal window happening at all:
             // everything parked is either written by the drain or counted as dropped.
-            FreeWide(srcBytes, srcSlot);
+            EndEntry(srcBytes, srcSlot);
             ClearEntry(srcBytes, srcSlot);
             return ReplicationMigrationOutcome.NothingToCarry;
         }
@@ -656,7 +696,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     }
                 }
 
-                FreeWide(dstBytes, slot);
+                EndEntry(dstBytes, slot);
                 Unsafe.CopyBlockUnaligned(dstBytes + Layout.HotOffset + (slot * Layout.HotStride), bytes, (uint)Layout.HotStride);
                 Unsafe.CopyBlockUnaligned(dstBytes + Layout.ColdOffset + (slot * Layout.ColdStride), bytes + Layout.HotStride, (uint)Layout.ColdStride);
                 if (Layout.OwnerEntrySize > 0)
@@ -687,7 +727,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     }
                 }
 
-                FreeWideParked(bytes);
+                EndParkedEntry(bytes);
                 Interlocked.Increment(ref _parkedDropped);
             }
         }
@@ -764,6 +804,12 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         lock (_orphanedLock)
         {
             _orphaned.Add(netId);
+
+            // The referrers of an orphaned identity are re-pushed at the next blocks step, like those of one the projection released (13 § 5).
+            if (References != null)
+            {
+                _orphanedForReferences.Add(netId);
+            }
         }
     }
 
@@ -828,6 +874,21 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
 
         ReleaseOrphaned();
         _netIdLeases.FlushReleases(NetIds);
+    }
+
+    /// <summary>
+    /// The identities orphaned since the last call, for the reverse index to re-push their referrers; the list is valid until the next call. Serial, at
+    /// the blocks step.
+    /// </summary>
+    internal List<uint> TakeOrphanedForReferences()
+    {
+        _orphanedForReferencesSpare.Clear();
+        lock (_orphanedLock)
+        {
+            (_orphanedForReferences, _orphanedForReferencesSpare) = (_orphanedForReferencesSpare, _orphanedForReferences);
+        }
+
+        return _orphanedForReferencesSpare;
     }
 
     /// <summary>Orphaned identities the allocator refused to release — already free. Zero when every orphan names a live identity once.</summary>
@@ -1102,12 +1163,13 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             BlockByChunk[chunkId] = 0;
         }
 
-        // A released block's entries end with it: their wide bodies go back before the block does, or they would stay live with nothing naming them.
-        if (_wideRefs.Length != 0)
+        // A released block's entries end with it: their wide bodies go back before the block does, or they would stay live with nothing naming them; and
+        // their references stop counting them as referrers.
+        if (_wideRefs.Length != 0 || (References != null && Layout.ReferenceBytes != 0))
         {
             for (var s = 0; s < Layout.SlotCount; s++)
             {
-                FreeWide((byte*)block, s);
+                EndEntry((byte*)block, s);
             }
         }
 

@@ -79,8 +79,12 @@ internal static unsafe class ProjectionPass
     /// The same cluster's base in the transient store, or <see langword="null"/> when the archetype has no transient component.
     /// </param>
     /// <param name="tick">The tick being projected.</param>
+    /// <param name="references">
+    /// The worker's reference reader, opened for its share, when the plan projects a reference field (13 § 5); <see langword="null"/> otherwise — a
+    /// reference then reads as 0.
+    /// </param>
     public static void ProjectBlock(CompiledProjectionPlan plan, int archetypeIndex, ArchetypeReplicationState state, int worker,
-        ReplicationBlockHeader* block, byte* clusterBase, byte* transientBase, uint tick)
+        ReplicationBlockHeader* block, byte* clusterBase, byte* transientBase, uint tick, ReferenceResolver references = null)
     {
         ArgumentNullException.ThrowIfNull(plan);
         ArgumentNullException.ThrowIfNull(state);
@@ -104,6 +108,8 @@ internal static unsafe class ProjectionPass
         // <b>The precondition, stated plainly:</b> an application that writes into a sleeping cluster through a path that raises no dirty bit
         // (`ClusterRef.GetSpan` outside a dispatched system) gets a stale entity here. That is not a new contract — the same write is already lost by the
         // WAL and already fails to wake the cluster, so it is a pre-existing requirement of using dormancy at all, not one replication introduces.
+        // A referrer encodes its targets' identities too, which change with no write to its cluster (13 § 5): a slot re-pushed for that — its target
+        // released, or not identified yet — is taken out of ProjectedWatchedMask by whoever re-pushed it, so the test below projects it even asleep.
         var clusterState = state.ClusterState;
         if (clusterState != null && clusterState.SleepingClusterCount > 0)
         {
@@ -191,7 +197,7 @@ internal static unsafe class ProjectionPass
                 released++;
             }
 
-            ClearEntry(state, blockBytes, layout, slot);
+            ClearEntry(state, blockBytes, layout, slot, worker);
         }
 
         var live = watched & occupancy;
@@ -230,7 +236,7 @@ internal static unsafe class ProjectionPass
                     released++;
                 }
 
-                ClearEntry(state, blockBytes, layout, slot);
+                ClearEntry(state, blockBytes, layout, slot, worker);
                 initializing |= 1UL << slot;
                 continue;
             }
@@ -253,8 +259,16 @@ internal static unsafe class ProjectionPass
         var ownerFields = plan.OwnerFields;
         var codeRows = fields.Length + ownerFields.Length;
         var codes = arena.Codes(Math.Max(1, codeRows) * MaxSlots);
-        Quantize(state, fields, 0, clusterLayout, clusterBase, transientBase, slotCount, live, codes);
-        Quantize(state, ownerFields, fields.Length, clusterLayout, clusterBase, transientBase, slotCount, live, codes);
+        var unresolved = Quantize(state, fields, 0, clusterLayout, clusterBase, transientBase, slotCount, live, codes, references);
+        unresolved |= Quantize(state, ownerFields, fields.Length, clusterLayout, clusterBase, transientBase, slotCount, live, codes, references);
+
+        // A reference to an entity that has no identity yet sends 0 this tick; its referrer is pushed again, and resolves once the target has one.
+        if (unresolved != 0)
+        {
+            hub?.Repush(pushIndex, block->ChunkId, unresolved);
+        }
+
+        var referenceIndex = plan.ReferenceCount > 0 ? state.References : null;
 
         // ── 4. Scratch, carved once per block ────────────────────────────────────────────────────────────────────────────────────────────────────────────
         var packBytes = MaxPackBytes(plan);
@@ -346,7 +360,9 @@ internal static unsafe class ProjectionPass
                     takeIdentity = true;
                 }
 
-                hot->Entity = EntityId.FromRaw(entityIds[slot]);
+                // Published with a release, after the zeroing that preceded it: a reference resolver on another worker that sees this entity must not see
+                // the netId of the entry's previous holder (13 § 5). The netId itself is written later, once the bodies are stored.
+                Volatile.Write(ref Unsafe.AsRef<long>(hot), entityIds[slot]);
                 hot->Flags = FlagInitializedThisTick;
             }
             else
@@ -496,7 +512,7 @@ internal static unsafe class ProjectionPass
                 if (initialize)
                 {
                     // No identity was taken yet, so there is none to give back.
-                    ClearEntry(state, blockBytes, layout, slot);
+                    ClearEntry(state, blockBytes, layout, slot, worker);
                     continue;
                 }
             }
@@ -512,6 +528,17 @@ internal static unsafe class ProjectionPass
                 }
 
                 state.EntityIndex?.Bind(hot->NetId, hot->Entity);
+            }
+
+            // What the entity's bodies now name: each reference that resolved differently moves its count in the reverse index (13 § 5). After the
+            // deferral above: an inline section is always stored, but a wide one may have kept the body it had, so on a deferral a reference in a wide
+            // section keeps its held netId until a pass stores it — the entity is pushed again meanwhile.
+            if (referenceIndex != null)
+            {
+                var held = coldBytes + layout.ReferenceOffsetInColdEntry;
+                var referrer = hot->Entity.RawValue;
+                NoteReferences(referenceIndex, worker, fields, plan.Groups, 0, codes, slot, held, referrer, wideFailed);
+                NoteReferences(referenceIndex, worker, ownerFields, plan.OwnerGroups, fields.Length, codes, slot, held, referrer, wideFailed);
             }
 
             if (ownerChanged != 0)
@@ -548,7 +575,9 @@ internal static unsafe class ProjectionPass
         // An entity carried in from another cluster since this block was last projected. Read above (pushArrived) to flag its event; cleared here.
         // Exchanged rather than read-then-cleared: the fence's migration slices are the other writer and they run in parallel with each other.
         Interlocked.Exchange(ref block->ArrivedSlots, 0UL);
-        block->ProjectedWatchedMask = watched;
+
+        // A referrer still waiting on its target's identity is "not projected" for the dormant skip, which then lets its re-push through.
+        block->ProjectedWatchedMask = watched & ~unresolved;
         block->ProjectedOccupancy = *(ulong*)clusterBase;
         state.NoteProjected(blocks: 1, slots: visited, records: records, releases: released);
         state.NoteSegments(segmentsEmitted, shadowSegments);
@@ -556,14 +585,22 @@ internal static unsafe class ProjectionPass
 
     // ── Column walk ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-    private static void Quantize(ArchetypeReplicationState state, CompiledField[] fields, int rowBase, ArchetypeClusterInfo clusterLayout, byte* clusterBase,
-        byte* transientBase, int slotCount, ulong slots, ulong* codes)
+    // Returns the slots whose reference named an entity with no identity yet.
+    private static ulong Quantize(ArchetypeReplicationState state, CompiledField[] fields, int rowBase, ArchetypeClusterInfo clusterLayout, byte* clusterBase,
+        byte* transientBase, int slotCount, ulong slots, ulong* codes, ReferenceResolver references)
     {
+        var unresolved = 0UL;
         for (var i = 0; i < fields.Length; i++)
         {
             // A packed field is read exactly like any other: it is packed on the WIRE, not absent from the projection.
             ref readonly var field = ref fields[i];
             var storeBase = StoreFor(clusterLayout, transientBase, clusterBase, field.ComponentSlot);
+            if (field.Path == ColumnPath.EntityRef)
+            {
+                unresolved |= Resolve(field, storeBase, slots, codes + ((rowBase + i) * MaxSlots), references);
+                continue;
+            }
+
             var column = new ReadOnlySpan<byte>(storeBase + field.ComponentOffsetInCluster, slotCount * field.ComponentSize);
             var row = new Span<ulong>(codes + ((rowBase + i) * MaxSlots), MaxSlots);
             var clamps = ProjectionColumnWalk.Quantize(field, ProjectionColumn.Over(column, field), slots, row);
@@ -572,6 +609,72 @@ internal static unsafe class ProjectionPass
                 // A declared narrowing that bit: counted per field, so "my balance shows 4 294 967 295" has a number behind it (13 § 2.3).
                 state.NoteClamps(rowBase + i, clamps);
             }
+        }
+
+        return unresolved;
+    }
+
+    /// <summary>
+    /// A reference column's codes: the netId each slot's <see cref="EntityId"/> names, through the worker's resolver (13 § 5). Returns the slots whose
+    /// target has no identity yet.
+    /// </summary>
+    private static ulong Resolve(in CompiledField field, byte* storeBase, ulong slots, ulong* row, ReferenceResolver references)
+    {
+        var unresolved = 0UL;
+        var column = storeBase + field.ComponentOffsetInCluster + field.FieldOffsetInComponent;
+        while (slots != 0)
+        {
+            var slot = BitOperations.TrailingZeroCount(slots);
+            slots &= slots - 1;
+            var target = EntityId.FromRaw(Unsafe.ReadUnaligned<long>(column + (slot * field.ComponentSize)));
+            var pending = false;
+            row[slot] = references?.Resolve(target, out pending) ?? NetIdAllocator.NoNetId;
+            if (pending)
+            {
+                unresolved |= 1UL << slot;
+            }
+        }
+
+        return unresolved;
+    }
+
+    /// <summary>
+    /// Compares each reference field's netId with the one the entry last held for it and logs the change to the reverse index: −1 for the netId the
+    /// bodies stop naming, +1 for the one they name now.
+    /// </summary>
+    private static void NoteReferences(ReferenceIndex index, int worker, CompiledField[] fields, CompiledGroup[] groups, int rowBase, ulong* codes, int slot,
+        byte* held, ulong referrer, bool skipWide)
+    {
+        for (var i = 0; i < fields.Length; i++)
+        {
+            ref readonly var field = ref fields[i];
+
+            // A reference is never in onEnter (refused at Start), so its group is its section's.
+            if (field.Path != ColumnPath.EntityRef || (skipWide && groups[field.GroupBit].Section.Wide))
+            {
+                continue;
+            }
+
+            // Cold-entry memory: native, engine-owned, at whatever alignment the regions before it leave.
+            var at = held + (field.ReferenceSlot * sizeof(uint));
+            var was = Unsafe.ReadUnaligned<uint>(at);
+            var now = (uint)codes[((rowBase + i) * MaxSlots) + slot];
+            if (was == now)
+            {
+                continue;
+            }
+
+            if (was != NetIdAllocator.NoNetId)
+            {
+                index.Note(worker, was, referrer, -1);
+            }
+
+            if (now != NetIdAllocator.NoNetId)
+            {
+                index.Note(worker, now, referrer, +1);
+            }
+
+            Unsafe.WriteUnaligned(at, now);
         }
     }
 
@@ -917,10 +1020,10 @@ internal static unsafe class ProjectionPass
     /// entity. Zeroing rather than merely re-stamping the identity is what makes SUB-09's "never survives slot reuse" true of the STATE and not only of the
     /// identity: a group body left behind would compare equal against the new entity's first projection and its change would go unsent.
     /// </remarks>
-    private static void ClearEntry(ArchetypeReplicationState state, byte* blockBytes, in ReplicationBlockLayout layout, int slot)
+    private static void ClearEntry(ArchetypeReplicationState state, byte* blockBytes, in ReplicationBlockLayout layout, int slot, int worker)
     {
-        // The entry's wide bodies go back first: zeroing their references would leave them live with nothing naming them.
-        state.FreeWide(blockBytes, slot);
+        // What the entry holds outside itself goes first — its wide bodies, its references' counts: zeroing it would leave them with nothing naming them.
+        state.EndEntry(blockBytes, slot, worker);
         NativeMemory.Clear(blockBytes + layout.HotOffset + (slot * layout.HotStride), (nuint)layout.HotStride);
         NativeMemory.Clear(blockBytes + layout.ColdOffset + (slot * layout.ColdStride), (nuint)layout.ColdStride);
         if (layout.OwnerEntrySize > 0)
@@ -1013,6 +1116,9 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         public DepartedEntity* Departed;
         public int DepartedCount;
         public int DepartedCapacity;
+
+        // Count when the lease was last filled: Ids[Count..CountAtBegin) are the identities spent since.
+        public int CountAtBegin;
     }
 
     /// <summary>An identity released this tick with the entity it named and its last position: an event of the tick may still name it (09 § 11).</summary>
@@ -1151,6 +1257,8 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         {
             ref var lease = ref _leases[i];
 
+            SettleSpent(allocator, ref lease);
+
             for (var r = 0; r < lease.ReleasedCount; r++)
             {
                 allocator.Release(lease.Released[r]);
@@ -1172,9 +1280,12 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
 
             while (lease.Count < wanted)
             {
-                lease.Ids[lease.Count++] = allocator.Allocate();
+                var netId = allocator.Allocate();
+                allocator.MarkLeased(netId);
+                lease.Ids[lease.Count++] = netId;
             }
 
+            lease.CountAtBegin = lease.Count;
             lease.Demand = 0;
             lease.Starved = 0;
         }
@@ -1191,6 +1302,7 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
         for (var i = 0; i < _count; i++)
         {
             ref var lease = ref _leases[i];
+            SettleSpent(allocator, ref lease);
             for (var r = 0; r < lease.ReleasedCount; r++)
             {
                 allocator.Release(lease.Released[r]);
@@ -1200,6 +1312,28 @@ internal sealed unsafe class NetIdLeaseSet : IDisposable
             lease.DepartedCount = 0;
         }
     }
+
+    // The identities spent since the last fill are entries' now, no longer out on a lease (NetIdAllocator.IsLeased). At the first blocks step after the
+    // projection that spent them, idle or not: a spent identity's bit left set past its release could be cleared later under another lease that was
+    // reissued it, and a reference to it would then resolve differently by worker order.
+    private static void SettleSpent(NetIdAllocator allocator, ref Lease lease)
+    {
+        for (var s = lease.Count; s < lease.CountAtBegin; s++)
+        {
+            allocator.MarkSpent(lease.Ids[s]);
+        }
+
+        lease.CountAtBegin = lease.Count;
+    }
+
+    /// <summary>
+    /// The identities <paramref name="worker"/>'s chunk released during the last projection, still queued for the allocator: what the blocks step re-pushes
+    /// the referrers of before <see cref="BeginTick"/> hands them over (13 § 5).
+    /// </summary>
+    public ReadOnlySpan<uint> PendingReleasesOf(int worker) =>
+        (uint)worker < (uint)_count && _leases[worker].Released != null
+            ? new ReadOnlySpan<uint>(_leases[worker].Released, _leases[worker].ReleasedCount)
+            : default;
 
     /// <summary>Whether <paramref name="worker"/>'s lease holds an identity to spend, without spending it.</summary>
     public bool HasAny(int worker) => _leases[worker].Count > 0;

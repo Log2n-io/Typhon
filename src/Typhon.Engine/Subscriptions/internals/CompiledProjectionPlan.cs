@@ -53,6 +53,9 @@ internal enum ProjectionSourceType : byte
     /// Text: a <c>String64</c>, <c>String1024</c> or <c>Variant</c>, UTF-8 up to its first zero byte (13 § 2.1). Read by the section encoder.
     /// </summary>
     Text,
+
+    /// <summary>An entity reference: an <see cref="EntityId"/> or an <c>EntityLink&lt;T&gt;</c>, eight bytes resolved to a netId (13 § 5).</summary>
+    Reference,
 }
 
 /// <summary>
@@ -185,6 +188,16 @@ internal readonly struct CompiledField
 
     /// <summary>For a text field, its inline buffer's bytes (64 or 1 024); 0 otherwise. Its text is at most one byte less.</summary>
     public int TextCapacity { get; init; }
+
+    /// <summary>
+    /// For a reference field, its index among the archetype's reference fields — public then owner — which is where the netId it last resolved to is kept
+    /// in the cold entry (<see cref="ReplicationBlockLayout.ReferenceOffsetInColdEntry"/>). Read only when <see cref="Path"/> is
+    /// <see cref="ColumnPath.EntityRef"/>.
+    /// </summary>
+    public int ReferenceSlot { get; init; }
+
+    /// <summary>For an <c>EntityLink&lt;T&gt;</c> field, <c>T</c>; <see langword="null"/> for an untyped <see cref="EntityId"/> and any other field.</summary>
+    public Type ReferenceTarget { get; init; }
 
     /// <inheritdoc/>
     public override string ToString() => $"{Name} @ +{ComponentOffsetInCluster}/{ComponentSize}+{FieldOffsetInComponent} as {Codec?.Type}";
@@ -434,6 +447,12 @@ internal sealed class CompiledProjectionPlan
 
     /// <summary>Whether any section of the archetype is wide, so its replication state holds a <see cref="WideBodyArena"/>.</summary>
     public bool HasWideSections { get; init; }
+
+    /// <summary>
+    /// How many reference fields the archetype projects, public and owner: each keeps the netId it last resolved to in the cold entry, which is what the
+    /// reverse index is fed from (13 § 5). Zero for an archetype with none, whose layout is what it always was.
+    /// </summary>
+    public int ReferenceCount { get; init; }
 
     /// <summary>How many of the four <see cref="ReplicationHotEntry.GroupTicks"/> slots this archetype uses, the motion segment's included.</summary>
     public int TickSlotCount { get; init; }

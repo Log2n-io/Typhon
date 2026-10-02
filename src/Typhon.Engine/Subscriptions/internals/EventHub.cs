@@ -583,7 +583,8 @@ internal sealed class EventHub
                 textWireCap: field.Codec.MaxBytes);
         }
 
-        if (member.FieldType == typeof(EntityId))
+        // An EntityLink<T> is the same eight bytes as the EntityId it wraps.
+        if (CodecPairing.IsReference(member.FieldType))
         {
             return new EventFieldBinding(field, offset, 1, CommandFieldElement.U64, sizeof(ulong), entity: true);
         }

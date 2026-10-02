@@ -178,6 +178,10 @@ internal static class ProjectionColumnWalk
             case ColumnPath.Text:
                 // No code: the section encoder reads text straight from the column into the wide body (13 § 6.3).
                 return 0;
+            case ColumnPath.EntityRef:
+                // Resolved by the projection, which holds what a column cannot: the target's entry and the identities taken this tick (13 § 5). A caller
+                // reaching here would leave the row as it found it.
+                throw new InvalidOperationException($"Field '{field.Name}' is a reference: the projection resolves it, not the column walk.");
             default:
                 throw new InvalidOperationException($"Field '{field.Name}' has no column path; the plan was not compiled.");
         }

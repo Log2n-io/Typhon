@@ -3,7 +3,7 @@
 | Field | Value |
 |-------|-------|
 | Status | Living |
-| Last Updated | 2026-09-25 |
+| Last Updated | 2026-10-02 |
 | Domain | Engine-owned replication: per-entity replication state, its storage, and what bounds its cost |
 
 > Invariants that keep replication cost tied to what changed, keep what a session holds exactly what its geometry names, and keep per-entity
@@ -1039,3 +1039,25 @@
     multiset of (identity, cell, secondary) against the runs' raw events; PushIndexTests.AnEmptyWorldIndexesNothingWhateverTheGrid.
     Falsifiability: PushIndexTests.AnIndexThatMisfilesSecondariesIsCaught. The cost clause is timed by the explicit
     PushIndexTests.AnEmptyWorldCostsTheSameWhateverTheCellSide, not in the gate; the never clause has no test.
+
+### SUB-31: A reference field never names, for longer than one tick, a netId whose holder is not the entity it was resolved from `[fatal][silent]`
+  invariant a reference field (an EntityId or EntityLink<T> in entityRef, 13 § 5) encodes its target's netId when the target is replicated, alive and
+    identified before the tick, and 0 otherwise; a target whose identity is taken during the tick reads 0 that tick, whichever worker projects it first
+    (NetIdAllocator.IsLeased), and its referrer is pushed again so it resolves the next
+  invariant when a netId is released — by the projection or as an orphan — every referrer whose cold entry names it is pushed at the next blocks step, so
+    it re-resolves (to 0, or to the target's new identity) in the tick after the release, long before the quarantine lets the netId be reissued
+  invariant the reverse index counts exactly what live entries name: a projection logs ±1 only where a resolution differs from the entry's held netId,
+    and every path that ends an entry (the projection's ClearEntry, a cross-realm move, a migration or drain overwrite, a dropped park, a released block)
+    logs its −1s
+  never declare a reference in an onEnter section or on a static archetype: sent once, it can never be corrected (refused at Start)
+  never replicate an EntityLink<T> whose T, and every archetype deriving from it, no profile observes (refused at Start)
+  scope: ReferenceIndex.Step, ReferenceIndex.Note, ReferenceIndex.NoteShared, ReferenceResolver.Resolve, ProjectionPass.ProjectBlock,
+    ArchetypeReplicationState.EndEntry, NetIdAllocator.IsLeased, NetIdLeaseSet.BeginTick, ReplicationBlockLayout.ReferenceOffsetInColdEntry
+  on_violation: silent. A reference left naming a released netId resolves, once the number is reissued, to whoever holds it next: a client draws a
+    sword in the wrong hand, a target lock on a stranger, with no error anywhere.
+  rationale: a stored body names a netId, and nothing else re-pushes the referrer when its target goes; a reverse index fed by changes keeps the cost
+    with the references that change, not with the archetype (SUB-13).
+  verified: ReferenceTests.UnderReuseNoFrameNamesAnotherHolder (a churning oracle with identities reissued every tick it can: in every frame a reference
+    names 0 or its own target, and one naming an identity nobody holds is fixed by the next frame — red when the reverse index's step is skipped),
+    ReferenceTests.ADestroyedTargetMakesEveryReferrerSendZeroWithinOneTick, ReferenceTests.AReferenceCarriesItsTargetsNetIdAndATargetIdentifiedThisTickResolvesTheNext,
+    ReferenceTests.TheIndexCountsExactlyWhatLiveEntriesNameAfterChurn, ReferenceTests.AReferenceOnEnterOrToAnArchetypeNobodyObservesIsRefused.

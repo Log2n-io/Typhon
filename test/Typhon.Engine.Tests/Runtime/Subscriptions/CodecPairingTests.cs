@@ -142,7 +142,8 @@ public class CodecPairingTests
             Assert.That(Classify(typeof(uint), Codec.EntityRef, message: true), Is.EqualTo(ColumnPath.None),
                 "a command carries the netId its client holds, as a uint (01 § 7)");
             Assert.Throws<InvalidOperationException>(() => Classify(typeof(int), Codec.EntityRef, message: true), "a netId is a uint");
-            Assert.That(Classify(typeof(EntityId), Codec.EntityRef), Is.EqualTo(ColumnPath.None), "an EntityId is not this table's to judge");
+            Assert.That(Classify(typeof(EntityId), Codec.EntityRef), Is.EqualTo(ColumnPath.EntityRef), "an entity's EntityId is resolved (13 § 5)");
+            Assert.That(Classify(typeof(EntityId), Codec.EntityRef, message: true), Is.EqualTo(ColumnPath.None), "a message's is its binder's");
         });
     }
 

@@ -568,7 +568,8 @@ sealed unsafe class FrameHarness : IDisposable
         var stamp = (uint)tick;
 
         // The runtime's order (SubscriptionsProjectExecSystem.BlocksStep): the push set and a block for every cluster in it, before the parked drain, so an
-        // entity that migrated into a cluster with no block lands in one this tick.
+        // entity that migrated into a cluster with no block lands in one this tick. The reverse index's step first: its referrers ride the repush list.
+        Subscriptions.References?.Step(states, Subscriptions.Hub);
         Subscriptions.Hub.PrepareBlocks(stamp);
         Subscriptions.Self?.Refresh(Sessions);
         for (var a = 0; a < states.Length; a++)
@@ -605,43 +606,65 @@ sealed unsafe class FrameHarness : IDisposable
         }
 
         var projected = 0;
+        var references = Subscriptions.References;
+        if (watched != 0)
+        {
+            references?.BeginTick(lists);
+        }
 
         using (EpochGuard.Enter(Engine.EpochManager))
         {
-            for (var a = 0; a < plans.Length; a++)
+            for (var w = 0; references != null && watched != 0 && w < lists; w++)
             {
-                var state = states[a];
-                var clusterState = state.ClusterState;
-                if (clusterState == null || state.WatchedBlocks.Count == 0)
-                {
-                    continue;
-                }
+                references.ResolverFor(w).Open();
+            }
 
-                // Both stores, as SubscriptionsProjectExecSystem.ProjectOne reads them: a transient-only archetype has no persistent segment at all.
-                var persistent = clusterState.ClusterSegment;
-                var transient = clusterState.TransientSegment;
-                var persistentAccessor = persistent != null ? persistent.CreateChunkAccessor() : default;
-                var transientAccessor = transient != null ? transient.CreateChunkAccessor() : default;
-                try
+            try
+            {
+                for (var a = 0; a < plans.Length; a++)
                 {
-                    for (var i = 0; i < state.WatchedBlocks.Count; i++)
+                    var state = states[a];
+                    var clusterState = state.ClusterState;
+                    if (clusterState == null || state.WatchedBlocks.Count == 0)
                     {
-                        var block = state.WatchedBlocks[i];
-                        var chunkId = block->ChunkId;
-                        if (chunkId < 0)
-                        {
-                            continue;
-                        }
+                        continue;
+                    }
 
-                        var clusterBase = persistent != null ? persistentAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
-                        var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
-                        ProjectionPass.ProjectBlock(plans[a], a, state, projected++ % lists, block, clusterBase, transientBase, stamp);
+                    // Both stores, as SubscriptionsProjectExecSystem.ProjectOne reads them: a transient-only archetype has no persistent segment at all.
+                    var persistent = clusterState.ClusterSegment;
+                    var transient = clusterState.TransientSegment;
+                    var persistentAccessor = persistent != null ? persistent.CreateChunkAccessor() : default;
+                    var transientAccessor = transient != null ? transient.CreateChunkAccessor() : default;
+                    try
+                    {
+                        for (var i = 0; i < state.WatchedBlocks.Count; i++)
+                        {
+                            var block = state.WatchedBlocks[i];
+                            var chunkId = block->ChunkId;
+                            if (chunkId < 0)
+                            {
+                                continue;
+                            }
+
+                            var clusterBase = persistent != null ? persistentAccessor.GetChunkAddress(chunkId) : transientAccessor.GetChunkAddress(chunkId);
+                            var transientBase = persistent != null && transient != null ? transientAccessor.GetChunkAddress(chunkId) : null;
+                            var worker = projected++ % lists;
+                            ProjectionPass.ProjectBlock(plans[a], a, state, worker, block, clusterBase, transientBase, stamp,
+                                plans[a].ReferenceCount > 0 ? references?.ResolverFor(worker) : null);
+                        }
+                    }
+                    finally
+                    {
+                        persistentAccessor.Dispose();
+                        transientAccessor.Dispose();
                     }
                 }
-                finally
+            }
+            finally
+            {
+                for (var w = 0; references != null && watched != 0 && w < lists; w++)
                 {
-                    persistentAccessor.Dispose();
-                    transientAccessor.Dispose();
+                    references.ResolverFor(w).Close();
                 }
             }
         }
