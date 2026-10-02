@@ -225,15 +225,20 @@ public class ExactPairingTests
         });
     }
 
-    /// <summary>A list element is one value with a codec of its own: <c>exact</c> has no field type to resolve against, and a count is refused.</summary>
+    /// <summary>
+    /// The protocol's raw-byte and list codecs have no engine source (13 § 2.1): no field is a byte array, and a collection travels as <c>coll</c>. An
+    /// attribute naming one is refused, saying so — before this, a command field declared <c>blob</c> decoded and was dropped without a word.
+    /// </summary>
     [Test]
-    public void AListElementIsOneDeclaredValue()
+    public void ACodecNoFieldTypeCarriesIsRefusedByTheAttributePath()
     {
         Assert.Multiple(() =>
         {
-            Assert.That(Assert.Throws<ArgumentException>(() => Codec.List(Codec.Exact, 0, 4)).Message, Does.Contain("Codec.Exact"));
-            Assert.That(Assert.Throws<ArgumentException>(() => Codec.List(Codec.U8.Count(3), 0, 4)).Message, Does.Contain("u8x3"));
-            Assert.That(Codec.List(Codec.U8, 0, 4).ToString(), Does.StartWith("list"), "a scalar element is the list it always was");
+            foreach (var kind in new[] { CodecKind.Bytes, CodecKind.Blob, CodecKind.List })
+            {
+                var refusal = Assert.Throws<NotSupportedException>(() => Codec.Declared<int>(kind, maxBytes: 16), kind.ToString());
+                Assert.That(refusal.Message, Does.Contain("no field type").And.Contain("Codec.Coll"), kind.ToString());
+            }
         });
     }
 

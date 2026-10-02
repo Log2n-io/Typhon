@@ -985,14 +985,13 @@ internal static class ProjectionCompiler
             case CodecKind.Vec2:
             case CodecKind.Vec3:
             case CodecKind.Quat3:
-            case CodecKind.Str:
-            case CodecKind.Blob:
-            case CodecKind.Bytes:
-            case CodecKind.List:
                 throw new InvalidOperationException(
-                    $"Archetype '{projection.Name}' declares field '{field.Name}' with codec '{codec.Type}', which carries more than one number or a " +
-                    "variable-length payload. The projection pass reads one scalar per column; the multi-component and length-prefixed walks are not built " +
-                    "yet. Narrow the field, or carry it as an event.");
+                    $"Archetype '{projection.Name}' declares field '{field.Name}' with codec '{codec.Type}', which carries a vector or a rotation: it fits " +
+                    "a point or a quaternion field (W33), and this field is neither. Declare a scalar codec, or make the field the shape it describes.");
+            case CodecKind.Str:
+                throw new InvalidOperationException(
+                    $"Archetype '{projection.Name}' declares field '{field.Name}' with codec '{codec.Type}', which carries text: it fits a fixed-capacity " +
+                    "text field (String64, String1024, Variant), and this field is not one. Declare a codec of the field's type.");
             default:
                 return;
         }
@@ -1052,8 +1051,7 @@ internal static class ProjectionCompiler
         CodecKind.Varu64 or CodecKind.Vari64 => 10,
         // One component's: a count field compiles to one sub-field per component (13 § 4).
         CodecKind.Quant or CodecKind.Unorm or CodecKind.Snorm or CodecKind.Angle or CodecKind.Vec2 or CodecKind.Vec3 => codec.Bits / 8,
-        CodecKind.Bytes => codec.N,
-        CodecKind.Str or CodecKind.Blob => 5 + codec.MaxBytes,
+        CodecKind.Str => 5 + codec.MaxBytes,
         _ => 0,
     };
 }
