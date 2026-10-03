@@ -1343,6 +1343,24 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
     sequence pairs, generation pairs bolted onto the counter — and every one either leaked or lost writes. The lesson is
     the rule: one field, one owner, one meaning.
 
+### PS-05a: A ChangeSet has one writer at a time; a transaction running beside its unit of work's others owns its own `[fatal]` `[silent]`
+  invariant a ChangeSet's tracking (a Dictionary and a List) is mutated by one thread at a time; hand-off between threads is legal, overlap is not
+            (ChangeSet.EnterMutation detects overlap and throws, #400)
+  invariant a Deferred or GroupCommit unit of work's shared ChangeSet serves only transactions that do not run concurrently: one transaction per
+            system per tick, on that system's thread
+  invariant a transaction that runs concurrently with others of its unit of work — the per-chunk transactions of a parallel QuerySystem that
+            WritesVersioned (ExecuteChunkWithTransaction) — is created by UnitOfWork.CreateConcurrentTransaction and owns its ChangeSet: rented at Init,
+            its marks released and the set returned to the pool at its Dispose (PS-05)
+  note owning loses nothing: the marks are dirty-page accounting only — the checkpoint writes the pages, never the unit of work (ADR-054), and the
+       page's writeback generation, not the counter, keeps unwritten bytes from eviction (PS-10). The fence's per-chunk ChangeSets are the same pattern
+  on_violation: silent under the default Isolate policy — concurrent chunks corrupt the shared set and fail ("ChangeSet concurrent mutation", and
+    downstream "not found in PK index" in Versioned copy-on-write); the failed chunks are drained, so the system processes a fraction of its entities
+    with nothing reported (#1116: 12 to 192 of 600 per tick)
+  scope: UnitOfWork.CreateConcurrentTransaction, Transaction.Init (ownChangeSet), Transaction.Dispose, TransactionChain.CreateTransaction,
+         TyphonRuntime.ExecuteChunkWithTransaction, ChangeSet.EnterMutation
+  verified: ParallelVersionedWriteTests (1, 4 and 8 workers, and a change-filtered dispatch: 600 entities, 16 chunks, every entity paid once per
+            dispatch over ten dispatches). Run against the per-chunk transaction taking the shared set: the three concurrent cases fail
+
 ### PS-10: A page's writeback debt is discharged only by a durable write `[fatal][silent]`
   invariant every path that modifies a page's bytes records it (MarkPageModified, or IncrementDirty which implies it)
   invariant WritebackGen != CapturedGen ⟺ the page holds bytes that are not on the data file
