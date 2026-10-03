@@ -515,7 +515,8 @@ descends from this one property.
   never a ChunkTable written from inside a chunk, or shared by two systems
   on_violation: silent — a chunk does the work of another chunk, or of an earlier dispatch: work done twice or skipped, with nothing raised
   scope: ChunkTable.cs (Reset), ChunkedCallbackSystem.cs, ChunkPlans.cs (Checked), LambdaChunkedSystem.cs (OnPrepare), Dag.cs (ChunkedSystem),
-         PushHub.cs (Plan, PlaceWorker, FoldFarChunk), TyphonRuntime.cs (PlanQueryChunks), QueryChunk.cs
+         PushHub.cs (Plan, PlaceWorker, FoldFarChunk), TyphonRuntime.cs (PlanQueryChunks), QueryChunk.cs,
+         FenceWorkPlan.cs (Build, FenceChunk), FenceExecSystem.cs (DispatchItem)
   verified: ChunkTableTests.TypedSystem_EachChunkRunsWithTheRecordItsDispatchWrote and
             ChunkTableTests.LambdaSystem_EachChunkRunsWithTheRecordItsDispatchWrote (60+ dispatches of 1-13 chunks on 4 workers, the count
             rising and falling; every chunk checks its record's dispatch, index and checksum, and every planned chunk runs once). Run against an
@@ -525,7 +526,10 @@ descends from this one property.
             its realm's chunk 0.
             QueryChunkPlanTests (change-filtered and Versioned parallel dispatches, 600 entities in 16 chunks: every entity to exactly one chunk, every tick)
             covers the runtime's own query plan (#1114) with ChunkClusterRangeTests on its cluster side; both fail when every record takes chunk 0's
-            share. Before #1114 no test covered the entity slices at all
+            share. Before #1114 no test covered the entity slices at all.
+            The parallel fence's plan (#1115) — each chunk's run of FenceWorkPlan.Items, and the item's plan position handed to DispatchItem — is
+            covered by PrepSliceEquivalenceTests' SlicedPrep_BuildsTheSameQueueAsTheUnslicedPath (2, 4 and 8 workers), which fail when every item of a chunk
+            is given the chunk's first position
 
 ## Module: RT — Epoch scope around system bodies
 
