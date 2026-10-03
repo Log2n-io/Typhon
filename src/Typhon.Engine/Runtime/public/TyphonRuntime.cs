@@ -137,6 +137,9 @@ public sealed partial class TyphonRuntime : IDisposable
     // length, never the live pair (CD-02).
     private readonly int[][] _dispatchClusterIds;
     private readonly int[] _dispatchClusterCount;
+    // Each parallel QuerySystem dispatch's per-chunk plan: what chunk i walks, written once by PlanQueryChunks on the preparing thread (CD-02, CD-03).
+    // [sysIdx], allocated on the system's first dispatch.
+    private readonly ChunkTable<QueryChunk>[] _queryPlans;
     // Issue #234: checkerboard two-phase dispatch. Phase tracking + Red/Black cluster buffers per system.
     // _checkerboardPhase: 0 = not checkerboard or reset, 1 = Red (phase A active), 2 = Black (phase B active).
     private readonly int[] _checkerboardPhase;
@@ -357,6 +360,7 @@ public sealed partial class TyphonRuntime : IDisposable
         _chunkTicksPerEntity = new double[scheduler.AllSystemCount];
         _dispatchClusterIds = new int[scheduler.AllSystemCount][];
         _dispatchClusterCount = new int[scheduler.AllSystemCount];
+        _queryPlans = new ChunkTable<QueryChunk>[scheduler.AllSystemCount];
         _systemAmortizationBuffers = new int[scheduler.AllSystemCount][];
         _systemRunCount = new long[scheduler.AllSystemCount];
         _systemStrided = new bool[scheduler.AllSystemCount];
@@ -2043,7 +2047,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var epochs = Engine?.EpochManager;
         if (epochs == null || Scheduler.Systems[sysIdx].ExplicitChunkCount > 0)
         {
-            return OnParallelQueryPrepareCore(sysIdx);
+            return PlanQueryChunks(sysIdx, OnParallelQueryPrepareCore(sysIdx));
         }
 
         // The prepare reads cluster pages — the change filter's dirty scan, the tier, sleep and descendant materializations — so it holds an epoch, as
@@ -2051,8 +2055,45 @@ public sealed partial class TyphonRuntime : IDisposable
         // inside another scope this is one atomic pair.
         using (EpochGuard.Enter(epochs))
         {
-            return OnParallelQueryPrepareCore(sysIdx);
+            return PlanQueryChunks(sysIdx, OnParallelQueryPrepareCore(sysIdx));
         }
+    }
+
+    /// <summary>
+    /// Writes what each of a parallel QuerySystem's <paramref name="chunks"/> walks into its plan, once, on the preparing thread: the one place a query
+    /// chunk's ranges are decided (CD-02, CD-03). A chunked callback has no entity context and no plan here.
+    /// </summary>
+    private int PlanQueryChunks(int sysIdx, int chunks)
+    {
+        if (chunks <= 0 || Scheduler.Systems[sysIdx].ExplicitChunkCount > 0)
+        {
+            return chunks;
+        }
+
+        // The lengths Prepare counted (CD-02): the cluster list it captured, and the entity list it materialized — empty on the paths that have none.
+        var clusters = _dispatchClusterCount[sysIdx];
+        var entities = _parallelEntityLists[sysIdx].Count;
+        var plan = _queryPlans[sysIdx] ??= new ChunkTable<QueryChunk>();
+        var records = plan.Reset(chunks);
+        for (var c = 0; c < chunks; c++)
+        {
+            ref var r = ref records[c];
+            (r.ClusterStart, r.ClusterEnd) = EqualShare(clusters, chunks, c);
+            var (entityStart, entityEnd) = EqualShare(entities, chunks, c);
+            r.EntityStart = entityStart;
+            r.EntityCount = entityEnd - entityStart;
+        }
+
+        return chunks;
+    }
+
+    /// <summary>Share <paramref name="index"/> of an equal split of <paramref name="length"/> into <paramref name="parts"/>, the first (length mod parts) one larger.</summary>
+    private static (int Start, int End) EqualShare(int length, int parts, int index)
+    {
+        var size = length / parts;
+        var remainder = length % parts;
+        var start = index * size + Math.Min(index, remainder);
+        return (start, start + size + (index < remainder ? 1 : 0));
     }
 
     private int OnParallelQueryPrepareCore(int sysIdx)
@@ -2388,19 +2429,6 @@ public sealed partial class TyphonRuntime : IDisposable
     }
 
     /// <summary>
-    /// The cluster range chunk <paramref name="chunkIndex"/> of <paramref name="totalChunks"/> walks: its share of an equal split of the list its dispatch
-    /// counted in Prepare, the first <c>clusters % totalChunks</c> chunks taking one cluster more. The ranges tile that list (CD-02).
-    /// </summary>
-    private void ChunkClusterRange(int sysIdx, int chunkIndex, int totalChunks, out int start, out int end)
-    {
-        var clusters = _dispatchClusterCount[sysIdx];
-        var size = clusters / totalChunks;
-        var remainder = clusters % totalChunks;
-        start = chunkIndex * size + Math.Min(chunkIndex, remainder);
-        end = start + size + (chunkIndex < remainder ? 1 : 0);
-    }
-
-    /// <summary>
     /// Chunk execution: dispatches to the appropriate path based on WritesVersioned.
     /// Non-Versioned: uses shared PointInTimeAccessor (no per-chunk Transaction).
     /// Versioned: creates a per-chunk Transaction (original fallback path).
@@ -2481,6 +2509,7 @@ public sealed partial class TyphonRuntime : IDisposable
         IReadOnlyCollection<EntityId> entities;
         int clusterStart = 0, clusterEnd = 0;
         int[] clusterIdArray = null;
+        ref var plan = ref _queryPlans[sysIdx][chunkIndex];
 
         // Change filter MUST take precedence over tier filter for the entities source.
         //   - Change-filtered: ctx.Entities = sliced materialized list (already tier-scoped upstream).
@@ -2492,26 +2521,20 @@ public sealed partial class TyphonRuntime : IDisposable
         {
             // Path 2 with optional tier scoping. The materialized list already contains only tier-scoped dirty entities
             // (tier scoping happens in BuildFilteredSingleTable → ScanClusterDirtyEntities).
-            var fullList = _parallelEntityLists[sysIdx];
-            var totalEntities = fullList.Count;
-            var baseSize = totalEntities / totalChunks;
-            var remainder = totalEntities % totalChunks;
-            var start = chunkIndex * baseSize + Math.Min(chunkIndex, remainder);
-            var count = baseSize + (chunkIndex < remainder ? 1 : 0);
-            entities = new PooledEntitySlice(fullList.BackingArray, start, count);
+            entities = new PooledEntitySlice(_parallelEntityLists[sysIdx].BackingArray, plan.EntityStart, plan.EntityCount);
 
             // ClusterIds: the list Prepare captured — the tier list when present, otherwise the archetype's ActiveClusterIds. Game systems iterating via
             // ctx.Accessor.GetClusterEnumerator(ctx.ClusterIds, ...) still get the correct cluster set.
             clusterIdArray = _dispatchClusterIds[sysIdx];
             if (clusterIdArray != null)
             {
-                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
+                (clusterStart, clusterEnd) = (plan.ClusterStart, plan.ClusterEnd);
             }
         }
         else if (tierIds != null)
         {
             // Tier-filtered, no change filter: walk the tier's clusters via ClusterRangeEntityView.
-            ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
+            (clusterStart, clusterEnd) = (plan.ClusterStart, plan.ClusterEnd);
             clusterIdArray = tierIds;
 
             var cs = _systemClusterStates[sysIdx];
@@ -2528,13 +2551,7 @@ public sealed partial class TyphonRuntime : IDisposable
             {
                 // Pure-Transient fallback: entity list was pre-materialized in PrepareFullNonVersioned (single-threaded) to avoid
                 // per-worker pool leak. Each worker slices the shared list by its chunk partition.
-                var entityList = _parallelEntityLists[sysIdx];
-                var totalEntities = entityList.Count;
-                var baseSize = totalEntities / totalChunks;
-                var remainder = totalEntities % totalChunks;
-                var start = chunkIndex * baseSize + Math.Min(chunkIndex, remainder);
-                var count = baseSize + (chunkIndex < remainder ? 1 : 0);
-                entities = new PooledEntitySlice(entityList.BackingArray, start, count);
+                entities = new PooledEntitySlice(_parallelEntityLists[sysIdx].BackingArray, plan.EntityStart, plan.EntityCount);
             }
         }
         else
@@ -2553,7 +2570,7 @@ public sealed partial class TyphonRuntime : IDisposable
             if (cs != null)
             {
                 clusterIdArray = _dispatchClusterIds[sysIdx];
-                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
+                (clusterStart, clusterEnd) = (plan.ClusterStart, plan.ClusterEnd);
             }
         }
 
@@ -2696,13 +2713,7 @@ public sealed partial class TyphonRuntime : IDisposable
     private void ExecuteChunkWithTransaction(int sysIdx, int chunkIndex, int totalChunks, int workerId)
     {
         var fullList = _parallelEntityLists[sysIdx];
-        var totalEntities = fullList.Count;
-
-        // Balanced partitioning: first `remainder` chunks get one extra entity
-        var baseSize = totalEntities / totalChunks;
-        var remainder = totalEntities % totalChunks;
-        var start = chunkIndex * baseSize + Math.Min(chunkIndex, remainder);
-        var count = baseSize + (chunkIndex < remainder ? 1 : 0);
+        ref var plan = ref _queryPlans[sysIdx][chunkIndex];
 
         TickContext.DebugValidateWorkerSlot(workerId, Scheduler.WorkerSlotCount, Scheduler.Systems[sysIdx].Name);
 
@@ -2711,7 +2722,7 @@ public sealed partial class TyphonRuntime : IDisposable
         var success = true;
         try
         {
-            var slice = new PooledEntitySlice(fullList.BackingArray, start, count);
+            var slice = new PooledEntitySlice(fullList.BackingArray, plan.EntityStart, plan.EntityCount);
             var sys = Scheduler.Systems[sysIdx];
             float amortizedDt = sys.CellAmortize > 0 ? _currentDeltaTime * sys.CellAmortize : _currentDeltaTime;
 
@@ -2722,7 +2733,7 @@ public sealed partial class TyphonRuntime : IDisposable
             var clusterIdArray = _dispatchClusterIds[sysIdx];
             if (clusterIdArray != null)
             {
-                ChunkClusterRange(sysIdx, chunkIndex, totalChunks, out clusterStart, out clusterEnd);
+                (clusterStart, clusterEnd) = (plan.ClusterStart, plan.ClusterEnd);
             }
 
             var ctx = new TickContext

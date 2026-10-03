@@ -485,7 +485,7 @@ descends from this one property.
 
 ### CD-02: A dispatch's chunks tile the cluster list Prepare counted `[fatal]` `[silent]`
   invariant the cluster ranges a parallel QuerySystem's chunks walk tile the list its dispatch splits exactly: chunk k of n walks its share of an
-            equal split (ChunkClusterRange), the first (length mod n) chunks taking one cluster more, so every cluster is walked by exactly one chunk
+            equal split (PlanQueryChunks, written once into the dispatch's per-chunk plan, CD-03), the first (length mod n) chunks taking one cluster more, so every cluster is walked by exactly one chunk
   invariant the list and its length are read once, in Prepare (OnParallelQueryPrepare), and every chunk walks that array and splits that length,
             never the live pair: a spawn can append to an archetype's list while the chunks run (AddToActiveList, under its latch), and chunks that
             read two lengths do not tile. An append leaves the array's first entries as they are, even when it moves the list to a larger array.
@@ -494,11 +494,11 @@ descends from this one property.
             of the length protects against)
   on_violation: silent: a cluster walked twice (its entities updated twice, its queries counted twice) or not at all (a tick of work skipped for
     its entities), with nothing raised
-  scope: TyphonRuntime.cs (OnParallelQueryPrepare, ChunkUnits, ChunkClusterRange, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction)
+  scope: TyphonRuntime.cs (OnParallelQueryPrepare, ChunkUnits, PlanQueryChunks, ExecuteChunkWithAccessor, ExecuteChunkWithTransaction)
   verified: ChunkClusterRangeTests.AListThatGrowsDuringTheDispatch_IsStillTiled (the first chunk spawns a new cluster before the next reads its
             range, on the accessor path and on the per-chunk Transaction path; against the code that split the live length it fails:
             "[0,18) [19,37)" for a list of 36 on both paths, the second chunk splitting the 37 clusters the spawn left). The change-filtered path reaches the
-            same ChunkClusterRange but no test drives it
+            same plan but no test drives it
   note: no RuleMutant. Putting the live read back on the chunk path would take a seam there; the verifier was run against the code that did it,
         and failed as quoted
 
@@ -515,14 +515,17 @@ descends from this one property.
   never a ChunkTable written from inside a chunk, or shared by two systems
   on_violation: silent — a chunk does the work of another chunk, or of an earlier dispatch: work done twice or skipped, with nothing raised
   scope: ChunkTable.cs (Reset), ChunkedCallbackSystem.cs, ChunkPlans.cs (Checked), LambdaChunkedSystem.cs (OnPrepare), Dag.cs (ChunkedSystem),
-         PushHub.cs (Plan, PlaceWorker, FoldFarChunk)
+         PushHub.cs (Plan, PlaceWorker, FoldFarChunk), TyphonRuntime.cs (PlanQueryChunks), QueryChunk.cs
   verified: ChunkTableTests.TypedSystem_EachChunkRunsWithTheRecordItsDispatchWrote and
             ChunkTableTests.LambdaSystem_EachChunkRunsWithTheRecordItsDispatchWrote (60+ dispatches of 1-13 chunks on 4 workers, the count
             rising and falling; every chunk checks its record's dispatch, index and checksum, and every planned chunk runs once). Run against an
             Execute that read record 0 for every chunk: the typed test and MinusOne_KeepsTheStaticCount fail.
             RealmReplicationTests.EveryServedRealmsIndexChunkReachesItsOwnRealmAndChunk covers the engine's first user, PushHub's realm plan (#1112):
             three served realms each merging in several chunks through the hub; it fails when every record names realm 0, and when every record names
-            its realm's chunk 0
+            its realm's chunk 0.
+            QueryChunkPlanTests (change-filtered and Versioned parallel dispatches, 600 entities in 16 chunks: every entity to exactly one chunk, every tick)
+            covers the runtime's own query plan (#1114) with ChunkClusterRangeTests on its cluster side; both fail when every record takes chunk 0's
+            share. Before #1114 no test covered the entity slices at all
 
 ## Module: RT — Epoch scope around system bodies
 
