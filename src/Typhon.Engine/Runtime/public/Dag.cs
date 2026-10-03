@@ -164,6 +164,40 @@ public sealed class Dag
         return this;
     }
 
+    /// <summary>
+    /// Registers a chunked system whose chunks each receive a typed record: <paramref name="prepare"/> sizes and fills a <see cref="ChunkTable{T}"/> and
+    /// returns the chunk count (0 skips, -1 keeps one chunk), then <paramref name="execute"/> runs once per chunk with that chunk's record. The lambda
+    /// form of <see cref="ChunkedCallbackSystem{TContext, TChunk}"/>: no ambient context, a lambda captures what it needs.
+    /// </summary>
+    public Dag ChunkedSystem<TChunk>(string name, ChunkPrepare<TChunk> prepare, ChunkExecute<TChunk> execute, string after = null, string[] afterAll = null,
+        SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, int tickDivisor = 1, int throttledTickDivisor = 1, bool canShed = false)
+        where TChunk : unmanaged
+    {
+        Track.Schedule.ThrowIfBuilt();
+        ArgumentNullException.ThrowIfNull(name);
+        ArgumentNullException.ThrowIfNull(prepare);
+        ArgumentNullException.ThrowIfNull(execute);
+
+        var system = new LambdaChunkedSystem<TChunk>(prepare, execute) { Name = name };
+        _registrations.Add(new SystemRegistration
+        {
+            Name = name,
+            Type = SystemType.CallbackSystem,
+            CallbackAction = ctx => Engine.CallbackSystem.InvokeExecute(system, ctx),
+            SystemInstance = system,
+            Priority = priority,
+            ShouldRun = shouldRun,
+            After = after,
+            AfterAll = afterAll,
+            TickDivisor = tickDivisor,
+            ThrottledTickDivisor = throttledTickDivisor,
+            CanShed = canShed,
+            Parallel = true,
+            ExplicitChunkCount = 1
+        });
+        return this;
+    }
+
     /// <summary>Registers a PipelineSystem — multi-worker chunk-parallel execution.</summary>
     public Dag PipelineSystem(string name, Action<int, int> chunkAction, int totalChunks, string after = null, string[] afterAll = null,
         SystemPriority priority = SystemPriority.Normal, Func<bool> shouldRun = null, Func<ViewBase> input = null, Type[] changeFilter = null,

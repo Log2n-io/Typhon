@@ -502,6 +502,24 @@ descends from this one property.
   note: no RuleMutant. Putting the live read back on the chunk path would take a seam there; the verifier was run against the code that did it,
         and failed as quoted
 
+### CD-03: A chunk runs with the record its own dispatch's prepare wrote `[fatal]` `[silent]`
+  invariant a typed chunked system's prepare (ChunkedCallbackSystem<TContext, TChunk>.Prepare, or a Dag.ChunkedSystem prepare lambda) sizes its
+            ChunkTable with Reset and writes every record BEFORE it returns; chunk c of that dispatch runs with record c and no other
+  invariant a ChunkTable is written only by prepare, and prepare runs only between dispatches: a dispatch's prepare starts after every chunk of
+            the previous dispatch of that system has completed (CompleteParallelDispatch), so no chunk reads a table being rewritten
+  invariant the records need no fence of their own: prepare's writes precede the release that publishes the claim word (OpenChunkClaims, CD-01)
+            and a chunk is reached only through an Interlocked claim on that word
+  invariant a dispatch never reads past what its prepare wrote: a prepare returning more chunks than records fails the system at prepare
+            (ChunkPlans.Checked), and a chunk whose index is not below the table's Count throws rather than reading a record left over from a
+            larger dispatch — including under -1, which keeps the static ChunkedParallel count and still needs that many records
+  never a ChunkTable written from inside a chunk, or shared by two systems
+  on_violation: silent — a chunk does the work of another chunk, or of an earlier dispatch: work done twice or skipped, with nothing raised
+  scope: ChunkTable.cs (Reset), ChunkedCallbackSystem.cs, ChunkPlans.cs (Checked), LambdaChunkedSystem.cs (OnPrepare), Dag.cs (ChunkedSystem)
+  verified: ChunkTableTests.TypedSystem_EachChunkRunsWithTheRecordItsDispatchWrote and
+            ChunkTableTests.LambdaSystem_EachChunkRunsWithTheRecordItsDispatchWrote (60+ dispatches of 1-13 chunks on 4 workers, the count
+            rising and falling; every chunk checks its record's dispatch, index and checksum, and every planned chunk runs once). Run against an
+            Execute that read record 0 for every chunk: the typed test and MinusOne_KeepsTheStaticCount fail
+
 ## Module: RT — Epoch scope around system bodies
 
 ### RT-01: Every system body runs inside an epoch scope, and must not block in it `[fatal]` `[silent]`
