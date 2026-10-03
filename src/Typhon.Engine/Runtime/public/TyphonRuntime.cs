@@ -2717,8 +2717,9 @@ public sealed partial class TyphonRuntime : IDisposable
 
         TickContext.DebugValidateWorkerSlot(workerId, Scheduler.WorkerSlotCount, Scheduler.Systems[sysIdx].Name);
 
-        // Create per-chunk Transaction on THIS worker thread (respects thread affinity)
-        var tx = _currentUow.CreateTransaction();
+        // Create per-chunk Transaction on THIS worker thread (respects thread affinity), with a ChangeSet of its own: the chunks of this dispatch run
+        // concurrently, and the UoW's shared ChangeSet is single-thread-affine (#1116).
+        var tx = _currentUow.CreateConcurrentTransaction();
         var success = true;
         try
         {

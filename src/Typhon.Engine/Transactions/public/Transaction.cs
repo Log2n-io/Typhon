@@ -185,7 +185,12 @@ public unsafe partial class Transaction : EntityAccessor
     /// <param name="uow">Owning unit of work, or <see langword="null"/> for the standalone path (UoW id 0).</param>
     /// <param name="readOnly">When <see langword="true"/>, no <see cref="ChangeSet"/> or UoW is allocated and all writes are forbidden.</param>
     /// <param name="discipline">Durability discipline applied to SingleVersion-layout writes for the transaction's lifetime.</param>
-    public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence)
+    /// <param name="ownChangeSet">
+    /// When <see langword="true"/>, the transaction makes and releases its own <see cref="ChangeSet"/> even inside a unit of work that has a shared one: for a
+    /// transaction that runs concurrently with others of the same unit of work, whose shared ChangeSet is single-thread-affine (#1116).
+    /// </param>
+    public void Init(DatabaseEngine dbe, long tsn, UnitOfWork uow = null, bool readOnly = false, CommitDiscipline discipline = CommitDiscipline.TickFence,
+        bool ownChangeSet = false)
     {
         // Residual risk: _dbe.MMF.CreateChangeSet allocates and could throw OOM in extreme conditions, dropping the span.
         // Per project policy this is acceptable for a hot per-tx path.
@@ -213,8 +218,13 @@ public unsafe partial class Transaction : EntityAccessor
         // Immediate mode it has none, so the transaction makes its own — and must therefore release it itself, which
         // Dispose now does. Nothing did before: every mark taken by every Immediate-mode transaction was stranded for the
         // life of the process, which is a far larger leak than the per-cycle drip #824 was opened for.
-        _ownsChangeSet = !readOnly && uow?.ChangeSet == null;
-        _changeSet = readOnly ? null : (uow?.ChangeSet ?? _dbe.MMF.CreateChangeSet());
+        //
+        // A transaction that runs beside others of its unit of work, on another thread, makes its own too (ownChangeSet): the shared one is a plain
+        // Dictionary and List, and two writers corrupt it (#400, #1116). Its marks are only dirty-page accounting — the checkpoint writes the pages, never
+        // the unit of work (ADR-054) — so a private ChangeSet released at dispose loses nothing, as the fence's per-chunk ChangeSets show.
+        _ownsChangeSet = !readOnly && (ownChangeSet || uow?.ChangeSet == null);
+        // Rented from the engine's pool and returned at dispose, so a per-chunk transaction allocates nothing in steady state.
+        _changeSet = readOnly ? null : _ownsChangeSet ? _dbe.MMF.RentChangeSet() : uow.ChangeSet;
         State = TransactionState.Created;
         TSN = tsn;
 
@@ -357,9 +367,11 @@ public unsafe partial class Transaction : EntityAccessor
         // Release the marks of a ChangeSet this transaction owns — after the flush and the deferred cleanups above, both of which may still dirty pages through
         // it. A shared UoW ChangeSet is NOT released here: its owner does that on its own dispose, and releasing another owner's marks is the over-release that
         // #385 was.
-        if (_ownsChangeSet)
+        if (_ownsChangeSet && _changeSet != null)
         {
-            _changeSet?.ReleaseDirtyMarks();
+            _changeSet.ReleaseDirtyMarks();
+            dbe.MMF.ReturnChangeSet(_changeSet);
+            _changeSet = null;
         }
         // Mark disposed BEFORE ExitEpochAndRemove: Remove() pools the object, and a lock-free
         // CreateTransaction can immediately dequeue and Init it (_isDisposed = false). If we set _isDisposed = true AFTER Remove returns, we'd overwrite the
