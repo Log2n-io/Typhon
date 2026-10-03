@@ -62,7 +62,7 @@ catch (PageCacheBackpressureTimeoutException ex)
 
 ## 🔗 Related
 
-- Sibling: [Epoch-Based Page Protection & Dirty-Page Tracking](epoch-dirty-tracking.md) — the four eviction-safety signals layered on top of this cache
+- Sibling: [Epoch-Based Page Protection & Dirty-Page Tracking](epoch-dirty-tracking.md) — the five eviction-safety signals layered on top of this cache
 - Sibling: [Page Integrity — CRC32C, Seqlock Snapshots & A/B Page Pairing](page-integrity.md) — CRC verification runs on every cold page load into this cache
 
 <!-- Overview: claude/overview/03-storage.md §3.1 (PagedMMF cache architecture) -->
