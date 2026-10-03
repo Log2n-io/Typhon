@@ -87,7 +87,7 @@ System.Exception
    ├─ SchemaValidationException             (Diff: SchemaDiff)
    ├─ SchemaMigrationException              (ComponentName, IReadOnlyList<MigrationFailure>)
    ├─ SchemaDowngradeException              (ComponentName, PersistedRevision, RuntimeRevision)
-   └─ InvalidAccessException                (sealed; DEBUG-only declared-access enforcement)
+   └─ InvalidAccessException                (sealed; opt-in declared-access enforcement)
 ```
 
 ### Base — `TyphonException`
@@ -169,7 +169,7 @@ Three exceptions, all direct subclasses of `TyphonException`:
 
 [`Errors/public/InvalidAccessException.cs`](https://github.com/Log2n-io/Typhon/blob/main/src/Typhon.Engine/Errors/public/InvalidAccessException.cs)
 
-`sealed class`. Thrown when a system tries to mutate a component it didn't declare via `SystemBuilder.Writes<T>()` / `SideWrites<T>()`. **DEBUG builds only** — the `SystemAccessValidator` compiles out in `RELEASE`. Indicates declaration drift; fix by adding the missing `Writes<T>` call. See [10-runtime](10-runtime.md) for the access-declaration model.
+`sealed class`. Thrown when a system tries to mutate a component it didn't declare via `SystemBuilder.Writes<T>()` / `SideWrites<T>()`. **Opt-in** — the `SystemAccessValidator` is compiled in all builds but gated by `Typhon:Checks:Enabled` **and** `Typhon:Checks:DeclaredAccess` (both default `false`); the JIT folds the gate away when disabled, so there is zero overhead on the `Write` path in production. Indicates declaration drift; fix by adding the missing `Writes<T>` call. See [10-runtime](10-runtime.md) for the access-declaration model.
 
 ---
 
