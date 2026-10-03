@@ -236,6 +236,86 @@ unsafe class RealmReplicationTests : TestBase<RealmReplicationTests>
         Assert.That(next == null || ((next.Flags & TickFlags.Reset) == 0 && !next.Calls.Contains("realm 0")), Is.True);
     }
 
+    /// <summary>
+    /// Three served realms, each merging its index in several chunks: the hub lays their chunks end to end, and every chunk must reach its own realm's
+    /// own chunk. A chunk sent to the wrong realm, or to the wrong chunk of the right one, leaves a realm's index short of its events.
+    /// </summary>
+    [Test]
+    [VerifiesRule("CD-03")]
+    public void EveryServedRealmsIndexChunkReachesItsOwnRealmAndChunk()
+    {
+        const int PerRealm = 1500;   // the merge splits at 512 entries a chunk
+        var dbe = ServiceProvider.GetRequiredService<DatabaseEngine>();
+        dbe.RegisterComponentFromAccessor<RealmPos>();
+        dbe.ConfigureRealms(4);
+        dbe.ConfigureSpatialGrid(Realm0Grid());
+        dbe.InitializeArchetypes();
+        for (ushort realm = 1; realm < 3; realm++)
+        {
+            dbe.Realms.Register(new RealmId(realm), new RealmConfig
+            {
+                Grid = Realm1Grid(), WhenUnobserved = RealmUnobserved.Simulate, UnobservedTickDivisor = 1,
+                Replication = new RealmReplicationConfig { CellM = 10 },
+            });
+        }
+
+        using var engine = dbe;
+        using var harness = CreateHarness(dbe);
+        harness.ProjectionWorkers = 4;
+        harness.IndexThroughHub = true;
+
+        var sessions = new SessionId[3];
+        for (ushort realm = 0; realm < 3; realm++)
+        {
+            SpawnSpread(dbe, realm, PerRealm, realm == 0 ? 0 : -40);
+            sessions[realm] = harness.OpenSessions(1, Profile)[0];
+            Assert.That(harness.Subscriptions.Commands.Enter(sessions[realm], new RealmId(realm)), Is.True);
+        }
+
+        var hub = harness.Subscriptions.Hub;
+        for (var tick = 0; tick < 20; tick++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            foreach (var session in sessions)
+            {
+                harness.Deliver(session);
+            }
+
+            foreach (var push in hub.Active)
+            {
+                Assert.That((push.IndexCells, push.IndexEntries), Is.EqualTo(push.IndexShapeForTest()),
+                    $"tick {tick}: a served realm's index disagrees with its events");
+            }
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(hub.Active.Length, Is.EqualTo(3), "precondition: three realms served");
+            foreach (var push in hub.Active)
+            {
+                Assert.That(push.MaxMergeChunks, Is.GreaterThan(1), "precondition: every realm merged in several chunks");
+                Assert.That(push.VerifyOccupancy(), Is.Zero);
+            }
+
+            foreach (var session in sessions)
+            {
+                Assert.That(Held(harness, session), Is.EqualTo(PerRealm), "each session holds its whole realm");
+            }
+        });
+    }
+
+    // Spread over a 80 m square from (origin, origin), so a realm occupies many cells and its merge has keys to split.
+    private static void SpawnSpread(DatabaseEngine dbe, ushort realm, int count, float origin)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        for (var i = 0; i < count; i++)
+        {
+            tx.Spawn<RealmUnit>(RealmUnit.Pos.Set(At(origin + 1 + (i * 7 % 78), origin + 1 + (i * 13 % 78), realm, i)));
+        }
+
+        tx.Commit();
+    }
+
     [Test]
     public void TheValidatorChecksOnlyClustersOfServedRealms()
     {

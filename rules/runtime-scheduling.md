@@ -514,11 +514,15 @@ descends from this one property.
             larger dispatch — including under -1, which keeps the static ChunkedParallel count and still needs that many records
   never a ChunkTable written from inside a chunk, or shared by two systems
   on_violation: silent — a chunk does the work of another chunk, or of an earlier dispatch: work done twice or skipped, with nothing raised
-  scope: ChunkTable.cs (Reset), ChunkedCallbackSystem.cs, ChunkPlans.cs (Checked), LambdaChunkedSystem.cs (OnPrepare), Dag.cs (ChunkedSystem)
+  scope: ChunkTable.cs (Reset), ChunkedCallbackSystem.cs, ChunkPlans.cs (Checked), LambdaChunkedSystem.cs (OnPrepare), Dag.cs (ChunkedSystem),
+         PushHub.cs (Plan, PlaceWorker, FoldFarChunk)
   verified: ChunkTableTests.TypedSystem_EachChunkRunsWithTheRecordItsDispatchWrote and
             ChunkTableTests.LambdaSystem_EachChunkRunsWithTheRecordItsDispatchWrote (60+ dispatches of 1-13 chunks on 4 workers, the count
             rising and falling; every chunk checks its record's dispatch, index and checksum, and every planned chunk runs once). Run against an
-            Execute that read record 0 for every chunk: the typed test and MinusOne_KeepsTheStaticCount fail
+            Execute that read record 0 for every chunk: the typed test and MinusOne_KeepsTheStaticCount fail.
+            RealmReplicationTests.EveryServedRealmsIndexChunkReachesItsOwnRealmAndChunk covers the engine's first user, PushHub's realm plan (#1112):
+            three served realms each merging in several chunks through the hub; it fails when every record names realm 0, and when every record names
+            its realm's chunk 0
 
 ## Module: RT — Epoch scope around system bodies
 
