@@ -18,13 +18,13 @@ Three shapes, picked by what the work looks like: **`CallbackSystem`** (non-enti
 - **[Scheduler & phases](xref:concept-scheduler)** — turns declared access into a safe execution graph.
 - **[View](xref:concept-view)** — a `QuerySystem`'s input set.
 - **[Transaction](xref:concept-transaction)** / **[PointInTimeAccessor](xref:concept-point-in-time-accessor)** — how a system touches data (transactional, or lock-free parallel reads).
-- **[TickContext](xref:concept-tick-context)** — the per-tick object `Execute` receives (transaction, accessor, entities, side-transactions).
+- **[TickContext](xref:concept-tick-context)** — the per-tick object `Execute` receives (transaction, accessor, entities, commands, side-transactions).
 
 ## In the API
 
 - [`CallbackSystem`](xref:Typhon.Engine.CallbackSystem) · [`QuerySystem`](xref:Typhon.Engine.QuerySystem) · [`PipelineSystem`](xref:Typhon.Engine.PipelineSystem) — the three bases.
 - [`SystemBuilder`](xref:Typhon.Engine.SystemBuilder) — the `Configure` builder ([`Reads`](xref:Typhon.Engine.SystemBuilder.Reads*)/[`Writes`](xref:Typhon.Engine.SystemBuilder.Writes*)/[`Input`](xref:Typhon.Engine.SystemBuilder.Input*)/[`Parallel`](xref:Typhon.Engine.SystemBuilder.Parallel*)/…).
-- [`TickContext`](xref:Typhon.Engine.TickContext) — what `Execute` receives ([`Transaction`](xref:Typhon.Engine.TickContext.Transaction) / [`Accessor`](xref:Typhon.Engine.TickContext.Accessor) / [`Entities`](xref:Typhon.Engine.TickContext.Entities) / [`DeltaTime`](xref:Typhon.Engine.TickContext.DeltaTime)).
+- [`TickContext`](xref:Typhon.Engine.TickContext) — what `Execute` receives ([`Transaction`](xref:Typhon.Engine.TickContext.Transaction) / [`Accessor`](xref:Typhon.Engine.TickContext.Accessor) / [`Entities`](xref:Typhon.Engine.TickContext.Entities) / [`DeltaTime`](xref:Typhon.Engine.TickContext.DeltaTime) / [`Commands`](xref:Typhon.Engine.TickContext.Commands)).
 
 ## Learn & use
 
