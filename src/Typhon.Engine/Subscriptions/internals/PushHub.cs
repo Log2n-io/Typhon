@@ -97,9 +97,9 @@ internal sealed unsafe class PushHub
     /// <b>Not exhaustive, and the gaps are named rather than implied.</b> Two of <see cref="PrepareBlocks"/>'s per-realm walks are guarded by a bootstrap
     /// condition, so counting them would make the steady-state figure vary with which realms happen to be re-pushing whole; they are guarded by the walk above
     /// them, which is counted. And the per-chunk stages are deliberately out: <see cref="CountWorkers"/> (per projection chunk), <see cref="PlaceWorker"/> and
-    /// <see cref="FoldFarChunk"/> (per index and far chunk, each through <see cref="Locate"/>). Those run on worker threads, so an increment there would be a
-    /// contended add on the measured path — measuring the counter instead of the work. <see cref="Locate"/> is a linear scan of the served set per chunk, so
-    /// its total is chunks × served realms; #1082 argues that matters an order of magnitude beyond anything measured.
+    /// <see cref="FoldFarChunk"/> (per index and far chunk). Those run on worker threads, so an increment there would be a contended add on the measured
+    /// path — measuring the counter instead of the work. Each finds its realm in O(1) from the record its plan wrote (#1082: it used to scan the served set
+    /// per chunk, chunks × served realms in all).
     /// </para>
     /// <para>
     /// A dozen adds against a tick that walks every served realm a dozen times: not a conditional counter, because a figure that exists only in Debug is a
@@ -458,9 +458,17 @@ internal sealed unsafe class PushHub
 
     // ══ The stages, over the served realms: one realm (the common case) calls straight through ════════════════════════════════════════════════════════
 
-    // Per stage, chunk i is served realm r's chunk (i − start[r]): the index merge's plan and the far fold's.
-    private int[] _indexStarts = new int[2];
-    private int[] _farStarts = new int[2];
+    // Per stage, chunk i's record names the served realm it belongs to and its index among that realm's chunks: the index merge's plan and the far fold's.
+    // Written by Plan on one thread before the stage's chunks are claimed, read by each chunk in O(1) (CD-03, #1082).
+    private readonly ChunkTable<RealmChunk> _indexPlan = new();
+    private readonly ChunkTable<RealmChunk> _farPlan = new();
+
+    /// <summary>Which served realm a stage's chunk belongs to, and which of that realm's own chunks it is.</summary>
+    private struct RealmChunk
+    {
+        public int Realm;
+        public int Local;
+    }
 
     /// <summary>A projection chunk's end: every served realm sorts the run it holds from this worker.</summary>
     internal void CountWorkers(int worker)
@@ -475,7 +483,7 @@ internal sealed unsafe class PushHub
     internal int BeginParallelIndex()
     {
         RealmPassSteps += _activeCount;
-        return _activeCount == 1 ? _active[0].BeginParallelIndex() : Plan(ref _indexStarts, static (r, _) => r.BeginParallelIndex(), 0);
+        return _activeCount == 1 ? _active[0].BeginParallelIndex() : Plan(_indexPlan, static (r, _) => r.BeginParallelIndex(), 0);
     }
 
     /// <summary>One chunk of the index merge.</summary>
@@ -487,11 +495,8 @@ internal sealed unsafe class PushHub
             return;
         }
 
-        var r = Locate(_indexStarts, chunk);
-        if (r >= 0)
-        {
-            _active[r].PlaceWorker(chunk - _indexStarts[r]);
-        }
+        ref var c = ref _indexPlan[chunk];
+        _active[c.Realm].PlaceWorker(c.Local);
     }
 
     /// <summary>Every served realm's index finished, then the far fold's plan over them — none without a session; its chunk count.</summary>
@@ -509,7 +514,7 @@ internal sealed unsafe class PushHub
         }
 
         RealmPassSteps += _activeCount;
-        return _activeCount == 1 ? _active[0].BeginFarFold(workers) : Plan(ref _farStarts, static (r, w) => r.BeginFarFold(w), workers);
+        return _activeCount == 1 ? _active[0].BeginFarFold(workers) : Plan(_farPlan, static (r, w) => r.BeginFarFold(w), workers);
     }
 
     /// <summary>One chunk of the far fold.</summary>
@@ -521,43 +526,43 @@ internal sealed unsafe class PushHub
             return;
         }
 
-        var r = Locate(_farStarts, chunk);
-        if (r >= 0)
-        {
-            _active[r].FoldFarChunk(chunk - _farStarts[r]);
-        }
+        ref var c = ref _farPlan[chunk];
+        _active[c.Realm].FoldFarChunk(c.Local);
     }
 
-    private int Plan(ref int[] starts, Func<PushReplication, int, int> prepare, int workers)
+    // Each served realm plans its own chunks, and their records are laid end to end, realm by realm. Two passes, because the table is sized before it is
+    // filled: the realms' counts first, then one record per chunk.
+    private int Plan(ChunkTable<RealmChunk> plan, Func<PushReplication, int, int> prepare, int workers)
     {
-        if (starts.Length < _activeCount + 1)
+        if (_realmChunks.Length < _activeCount)
         {
-            starts = new int[Math.Max(_activeCount + 1, starts.Length * 2)];
+            _realmChunks = new int[Math.Max(_activeCount, _realmChunks.Length * 2)];
         }
 
         var total = 0;
         for (var r = 0; r < _activeCount; r++)
         {
-            starts[r] = total;
-            total += prepare(_active[r], workers);
+            var chunks = prepare(_active[r], workers);
+            _realmChunks[r] = chunks;
+            total += chunks;
         }
 
-        starts[_activeCount] = total;
-        return total;
-    }
-
-    private int Locate(int[] starts, int chunk)
-    {
+        var records = plan.Reset(total);
+        var i = 0;
         for (var r = 0; r < _activeCount; r++)
         {
-            if (chunk < starts[r + 1])
+            for (var local = 0; local < _realmChunks[r]; local++, i++)
             {
-                return chunk >= starts[r] ? r : -1;
+                records[i].Realm = r;
+                records[i].Local = local;
             }
         }
 
-        return -1;
+        return total;
     }
+
+    // Plan's per-realm chunk counts, between its two passes.
+    private int[] _realmChunks = new int[2];
 
     /// <summary>The frame prologue's serial share, per served realm: the index built where its stage did not, and the occupied cells in order.</summary>
     internal void BuildIndexes()

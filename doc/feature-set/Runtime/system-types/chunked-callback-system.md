@@ -85,6 +85,36 @@ scheduler.RegisterContext(new SimContext(...));   // must run after Build(), bef
 scheduler.Start();
 ```
 
+Per-chunk records — when a chunk needs more than its index (which owner, which range), prepare writes one record per
+chunk and each chunk is handed its own:
+
+```csharp
+public struct RealmChunk { public int Realm; public int First; public int Count; }
+
+public sealed class RealmSweep : ChunkedCallbackSystem<SimContext, RealmChunk>
+{
+    protected override void Configure(SystemBuilder<SimContext> b) => b
+        .Name("RealmSweep")
+        .ChunkedParallel(chunkCount: 1);
+
+    // One thread, before any chunk is claimed: size the table, fill it, return the chunk count.
+    protected override int Prepare(SimContext ctx, ChunkTable<RealmChunk> plan)
+    {
+        var chunks = plan.Reset(ctx.ChunkCountForAllRealms());
+        ctx.FillChunks(chunks);
+        return chunks.Length;
+    }
+
+    // Chunk i runs with record i — no lookup from the index.
+    protected override void Execute(TickContext tick, ref RealmChunk chunk) => Sweep(chunk.Realm, chunk.First, chunk.Count);
+}
+
+// Lambda form, no subclass and no ambient context:
+dag.ChunkedSystem<RealmChunk>("RealmSweep",
+    prepare: plan => { var c = plan.Reset(n); /* fill c */ return n; },
+    execute: (tick, ref RealmChunk chunk) => Sweep(chunk.Realm, chunk.First, chunk.Count));
+```
+
 | Option | Default | Effect |
 |--------|---------|--------|
 | `b.ChunkedParallel(chunkCount)` | n/a (required) | Static chunk count; `Execute` runs this many times in parallel |
@@ -106,12 +136,17 @@ scheduler.Start();
   are not re-entered per chunk and must not block.
 - Each `Execute` invocation runs concurrently with the others for the same system — slicing must be
   partition-correct (no two chunk indices touching overlapping data); the runtime does not check for overlap.
+- With per-chunk records, prepare must `Reset` the `ChunkTable` to the chunk count it dispatches — also when it
+  returns `-1`. Returning more chunks than records fails the system at prepare; a chunk with no record throws rather
+  than reading a stale one. The record's size is yours: a cache line or less keeps it cheap. It arrives by `ref`, not `in`, so calling a member of a
+  non-`readonly` struct never makes a defensive copy; record *i* belongs to chunk *i* alone, so writing to it is harmless.
 - No `Transaction`, no `Accessor`, no `ctx.Entities` — this type is for plain memory/array work, not entity
   reads/writes. Use `QuerySystem.Parallel` when the work is per-entity.
 
 ## 🧪 Tests
 
 - [TypedContextSystemTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/TypedContextSystemTests.cs) — `ChunkedCallbackSystem<TContext>` binding via `RegisterContext`, typed `ShouldRun`/`Prepare` (skip/dispatch/-1 fallback), unbound-system `Start()` throw, untyped variant still works
+- [ChunkTableTests](https://github.com/Log2n-io/Typhon/blob/main/test/Typhon.Engine.Tests/Runtime/ChunkTableTests.cs) — per-chunk records reach their chunk across dispatches of changing size (class and lambda forms), `-1` with and without records, more chunks than records, zero
 
 ## 🔗 Related
 

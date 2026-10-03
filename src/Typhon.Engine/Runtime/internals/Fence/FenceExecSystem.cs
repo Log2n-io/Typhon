@@ -222,8 +222,9 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
             return;
         }
 
-        int start = plan.ChunkStart[k];
-        int count = plan.ChunkItemCnt[k];
+        ref var chunk = ref plan.Chunks[k];
+        int start = chunk.ItemStart;
+        int count = chunk.ItemCount;
         if (count == 0)
         {
             return;
@@ -244,7 +245,7 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
                 for (int i = 0; i < count; i++)
                 {
                     ref var item = ref plan.Items[start + i];
-                    long lsn = DispatchItem(k, in item, chunkCs);
+                    long lsn = DispatchItem(k, start + i, in item, chunkCs);
                     if (lsn > localHighest)
                     {
                         localHighest = lsn;
@@ -284,7 +285,7 @@ internal abstract class FencePhaseExecSystemBase : ChunkedCallbackSystem<FenceCo
         while (Interlocked.CompareExchange(ref _phaseEndTicks, t1, prevEnd) != prevEnd);
     }
 
-    protected abstract long DispatchItem(int chunkIndex, in FenceWorkItem item, ChangeSet changeSet);
+    protected abstract long DispatchItem(int chunkIndex, int itemIndex, in FenceWorkItem item, ChangeSet changeSet);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void ThrowOutsideFenceWindow(int chunkIndex) =>
@@ -314,9 +315,8 @@ internal sealed class FencePrepExecSystem : FencePhaseExecSystemBase
     // One crossing list per PrepSlice work item, pooled across ticks (#886 lead D): a slice files its list with the archetype and the tail drains and
     // clears it, so the list must outlive the chunk and cannot be per-worker. Indexed by the item's position in the plan, which is unique per tick.
     // Sized HERE, on the driver, before any worker runs — a worker growing a shared array while another indexes it is the race the dirty buffers'
-    // comment above warns about. The per-chunk cursor turns (chunk, i-th item) into that plan position without threading an index through DispatchItem.
+    // comment above warns about. DispatchItem is handed that plan position (itemIndex) by the chunk walking its record's run of the plan.
     private List<MigrationRequest>[] _crossingsPool = [];
-    private int[] _itemCursor = [];
 
     protected override int Prepare(FenceContext ctx)
     {
@@ -335,17 +335,10 @@ internal sealed class FencePrepExecSystem : FencePhaseExecSystemBase
             _crossingsPool[i] ??= [];
         }
 
-        if (_itemCursor.Length < chunkCount)
-        {
-            Array.Resize(ref _itemCursor, Math.Max(chunkCount, _itemCursor.Length * 2));
-        }
-
         return chunkCount;
     }
 
-    protected override void OnBeforeChunk(int chunkIndex) => _itemCursor[chunkIndex] = 0;
-
-    protected override long DispatchItem(int chunkIndex, in FenceWorkItem item, ChangeSet changeSet)
+    protected override long DispatchItem(int chunkIndex, int itemIndex, in FenceWorkItem item, ChangeSet changeSet)
     {
         switch (item.Kind)
         {
@@ -353,8 +346,7 @@ internal sealed class FencePrepExecSystem : FencePhaseExecSystemBase
                 Engine.PrepareArchetypeFence(ArchetypeRegistry.GetMetadata((ushort)item.TargetId), Context.TickNumber, changeSet);
                 return 0;
             case FenceWorkKind.PrepSlice:
-                var planIndex = PlanForTest.ChunkStart[chunkIndex] + _itemCursor[chunkIndex]++;
-                Engine.RunPrepSlice(ArchetypeRegistry.GetMetadata((ushort)item.TargetId), item.SliceStart, item.SliceCount, changeSet, _crossingsPool[planIndex]);
+                Engine.RunPrepSlice(ArchetypeRegistry.GetMetadata((ushort)item.TargetId), item.SliceStart, item.SliceCount, changeSet, _crossingsPool[itemIndex]);
                 return 0;
             default:
                 return 0;
@@ -460,7 +452,7 @@ internal sealed class FenceMigrateExecSystem : FencePhaseExecSystemBase
         return chunkCount;
     }
 
-    protected override long DispatchItem(int chunkIndex, in FenceWorkItem item, ChangeSet changeSet)
+    protected override long DispatchItem(int chunkIndex, int itemIndex, in FenceWorkItem item, ChangeSet changeSet)
     {
         if (item.Kind != FenceWorkKind.MigrationApply)
         {
@@ -780,7 +772,7 @@ internal sealed class FenceEntityMapUpdateExecSystem : FencePhaseExecSystemBase
         return base.Prepare(ctx);
     }
 
-    protected override long DispatchItem(int chunkIndex, in FenceWorkItem item, ChangeSet changeSet)
+    protected override long DispatchItem(int chunkIndex, int itemIndex, in FenceWorkItem item, ChangeSet changeSet)
     {
         if (item.Kind != FenceWorkKind.EntityMapUpdateSlice)
         {
@@ -883,7 +875,7 @@ internal sealed class FenceAabbRefreshExecSystem : FencePhaseExecSystemBase
         .ChunkedParallel(1)
         .After(FenceEntityMapUpdateExecSystem.SystemName);
 
-    protected override long DispatchItem(int chunkIndex, in FenceWorkItem item, ChangeSet changeSet)
+    protected override long DispatchItem(int chunkIndex, int itemIndex, in FenceWorkItem item, ChangeSet changeSet)
     {
         if (item.Kind != FenceWorkKind.AabbRefreshSlice)
         {
@@ -933,7 +925,7 @@ internal sealed class FenceFinalizeExecSystem : FencePhaseExecSystemBase
         return base.Prepare(ctx);
     }
 
-    protected override long DispatchItem(int chunkIndex, in FenceWorkItem item, ChangeSet changeSet) =>
+    protected override long DispatchItem(int chunkIndex, int itemIndex, in FenceWorkItem item, ChangeSet changeSet) =>
         item.Kind switch
         {
             FenceWorkKind.ArchetypeFinalize => Engine.FinalizeArchetypeFence(
@@ -1069,7 +1061,7 @@ internal sealed class FenceIndexMassUpdateExecSystem : FencePhaseExecSystemBase
         }
     }
 
-    protected override long DispatchItem(int chunkIndex, in FenceWorkItem item, ChangeSet changeSet)
+    protected override long DispatchItem(int chunkIndex, int itemIndex, in FenceWorkItem item, ChangeSet changeSet)
     {
         if (item.Kind != FenceWorkKind.IndexUpdateSlice)
         {

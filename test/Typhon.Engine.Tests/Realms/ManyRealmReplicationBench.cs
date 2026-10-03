@@ -70,7 +70,18 @@ class ManyRealmReplicationBench : TestBase<ManyRealmReplicationBench>
     [TestCase(250, true)]
     [TestCase(500, false)]
     [TestCase(500, true)]
-    public void ServingManyOneCellRealms(int realms, bool apart)
+    public void ServingManyOneCellRealms(int realms, bool apart) => Measure(realms, apart, indexThroughHub: false);
+
+    /// <summary>
+    /// The same realms with the index and far stages run through the hub, as the runtime runs them: every served realm's chunks laid end to end in one
+    /// plan. #1082 / #1112: each chunk used to find its realm by scanning the served set, about realms²/2 comparisons per stage per tick.
+    /// </summary>
+    [TestCase(250)]
+    [TestCase(1000)]
+    [TestCase(2000)]
+    public void IndexStagesThroughTheHub(int realms) => Measure(realms, apart: true, indexThroughHub: true);
+
+    private void Measure(int realms, bool apart, bool indexThroughHub)
     {
         const int Ticks = 200;
         using var dbe = SetupEngine(realms);
@@ -80,6 +91,7 @@ class ManyRealmReplicationBench : TestBase<ManyRealmReplicationBench>
             subs.Profile(World, p => p.World().Of<RealmUnit>());
         }, nameof(ServingManyOneCellRealms), replicationCellM: 16, maxSessions: realms + 8);
         harness.RunFence = true;
+        harness.IndexThroughHub = indexThroughHub;
 
         // One session and one entity per realm: in realm 1..N when N > 1, all in realm 0 for the one-realm baseline.
         var sessions = harness.OpenSessions(realms, World);
@@ -113,10 +125,12 @@ class ManyRealmReplicationBench : TestBase<ManyRealmReplicationBench>
         FrameAssembler.PhaseTimingEnabled = true;
         (double Ms, long Ticks) prologueFrom;
         (double Ms, long Ticks) prologueTo;
+        long hubFrom;
         Stopwatch watch;
         try
         {
             prologueFrom = harness.Subscriptions.Frames.PrologueTotal;
+            hubFrom = harness.HubIndexTicks;
             watch = Stopwatch.StartNew();
             for (var t = 0; t < Ticks; t++)
             {
@@ -140,7 +154,8 @@ class ManyRealmReplicationBench : TestBase<ManyRealmReplicationBench>
         var prologueUs = (prologueTo.Ms - prologueFrom.Ms) * 1000d / prologueTicks;
         TestContext.Out.WriteLine(
             $"D-7: {(apart ? realms : 1)} realm(s) served, {sessions.Length} session(s): {perTickUs:F1} µs per tick whole, " +
-            $"{prologueUs:F1} µs per tick in the frame prologue (serial) " +
+            $"{prologueUs:F1} µs per tick in the frame prologue (serial), " +
+            $"{(harness.HubIndexTicks - hubFrom) * 1_000_000d / Stopwatch.Frequency / Ticks:F1} µs per tick in the hub's index and far stages " +
             $"(harness: fence + track single-threaded, drain included)");
         Assert.That(harness.Subscriptions.Hub.Active.Length, Is.EqualTo(apart ? realms + 1 : 1), "every realm with a session is served");
     }

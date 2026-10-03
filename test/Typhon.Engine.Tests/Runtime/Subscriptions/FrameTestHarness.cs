@@ -144,6 +144,15 @@ sealed unsafe class FrameHarness : IDisposable
     public bool SerialIndex { get; set; }
 
     /// <summary>
+    /// Whether the push index and far-flush stages run through <see cref="PushHub"/> over every served realm, as the runtime's stages do, instead of on
+    /// realm 0's replication alone. The hub lays the realms' chunks end to end, so this is the only way a test reaches its per-chunk realm plan.
+    /// </summary>
+    public bool IndexThroughHub { get; set; }
+
+    /// <summary>Stopwatch ticks spent in the hub's index and far stages under <see cref="IndexThroughHub"/>: plans and chunks, nothing else.</summary>
+    public long HubIndexTicks { get; private set; }
+
+    /// <summary>
     /// Drains the identity quarantine at each tick's start, as the runtime does. Off by default, where no identity is ever reissued; on, a released netId
     /// comes back a tick later (the harness's quarantine is one tick), so a skipped session can meet its reuse inside the push log (SUB-06).
     /// </summary>
@@ -683,6 +692,12 @@ sealed unsafe class FrameHarness : IDisposable
             }
         }
 
+        if (IndexThroughHub)
+        {
+            RunHubIndex(lists, finish);
+            return;
+        }
+
         // The push index stage: sorted by the projection above, split into key ranges, then merged one range at a time.
         for (var w = 0; w < lists; w++)
         {
@@ -714,6 +729,44 @@ sealed unsafe class FrameHarness : IDisposable
         for (var c = 0; c < chunks; c++)
         {
             push.FoldFarChunk(c);
+        }
+    }
+
+    // The index and far stages as the runtime runs them (SubscriptionsPushIndexExecSystem, SubscriptionsPushFarExecSystem): one plan over every served
+    // realm, its chunks run concurrently.
+    private void RunHubIndex(int lists, bool finish)
+    {
+        var hub = Subscriptions.Hub;
+        for (var w = 0; w < lists; w++)
+        {
+            hub.CountWorkers(w);
+        }
+
+        var from = System.Diagnostics.Stopwatch.GetTimestamp();
+        var ranges = hub.BeginParallelIndex();
+        RunChunks(ranges, hub.PlaceWorker);
+        if (finish)
+        {
+            var chunks = hub.PrepareFar(2, Sessions.OpenCount > 0);
+            RunChunks(chunks, hub.FoldFarChunk);
+        }
+
+        HubIndexTicks += System.Diagnostics.Stopwatch.GetTimestamp() - from;
+    }
+
+    // Concurrently when ProjectionWorkers asks for it, on this thread otherwise: a single-threaded run is the one whose time measures the chunks rather
+    // than the thread pool.
+    private void RunChunks(int chunks, Action<int> chunk)
+    {
+        if (ProjectionWorkers > 1)
+        {
+            System.Threading.Tasks.Parallel.For(0, chunks, chunk);
+            return;
+        }
+
+        for (var c = 0; c < chunks; c++)
+        {
+            chunk(c);
         }
     }
 
