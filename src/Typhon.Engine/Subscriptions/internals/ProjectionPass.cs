@@ -66,6 +66,13 @@ internal static unsafe class ProjectionPass
     public const ushort FlagPositionChanged = 1 << 9;
 
     /// <summary>
+    /// <see cref="ReplicationHotEntry.Flags"/> bit 10, set by the migration hook rather than here: the entry was carried in from ANOTHER realm and still
+    /// describes the entity in that realm's frame. The next projection re-initializes it in this realm's frame and keeps its identity (SUB-09, #1081).
+    /// Every projection rewrites the flags, which is what clears it.
+    /// </summary>
+    public const ushort FlagRealmArrived = 1 << 10;
+
+    /// <summary>
     /// Projects one block's pushed slots: releases the identities of slots that stopped being occupied, (re-)initializes the entries that need it, compares
     /// every other pushed entity's projection with what it held, and records one push event per slot.
     /// </summary>
@@ -210,7 +217,9 @@ internal static unsafe class ProjectionPass
         // ── 2. Which entries have to be (re-)initialized ─────────────────────────────────────────────────────────────────────────────────────────────────
         //
         // Two causes, one answer: the entry does not describe the entity in the slot (a spawn, or a slot the engine reused), or it holds no identity.
+        // A third keeps its identity: an entry carried in from another realm (realmArrived).
         ulong initializing = 0;
+        ulong realmArrived = 0;
 
         var bits = live;
         while (bits != 0)
@@ -242,10 +251,16 @@ internal static unsafe class ProjectionPass
             }
 
             // An entity is projected only when pushed, so "not projected last tick" is its normal state and says nothing about what a client holds — the
-            // geometric known-set does. Only an entry with no identity is (re-)initialized.
+            // geometric known-set does. Only an entry with no identity is (re-)initialized — or one carried in from another realm, whose codes, v̂, enter
+            // bytes and segment are all in that realm's frame: re-initialized in this one, under the identity it already has (SUB-09, #1081).
             if (hot->NetId == NetIdAllocator.NoNetId)
             {
                 initializing |= 1UL << slot;
+            }
+            else if ((hot->Flags & FlagRealmArrived) != 0)
+            {
+                initializing |= 1UL << slot;
+                realmArrived |= 1UL << slot;
             }
         }
 
@@ -353,6 +368,7 @@ internal static unsafe class ProjectionPass
             var hot = (ReplicationHotEntry*)hotBytes;
             var initialize = (initializing & (1UL << slot)) != 0;
             var takeIdentity = false;
+            var keptIdentity = NetIdAllocator.NoNetId;
 
             if (initialize)
             {
@@ -363,7 +379,11 @@ internal static unsafe class ProjectionPass
                 // Checked here, TAKEN after the sections are stored: an archetype's wide bodies can fail to find room (13 § 6.2), and an identity taken
                 // before that would have to be given back — a release that only reaches the allocator next tick, so a lasting shortage would drain the
                 // lease for every other entity of the block.
-                if (hot->NetId == NetIdAllocator.NoNetId)
+                if (hot->NetId == NetIdAllocator.NoNetId && state.HasArrivals && state.TryTakeArrival((ulong)entityIds[slot], out keptIdentity))
+                {
+                    // The identity it had before it crossed into this realm (#1081): kept for it by the migration, taken here instead of a new one.
+                }
+                else if (hot->NetId == NetIdAllocator.NoNetId)
                 {
                     if (!leases.HasAny(worker))
                     {
@@ -412,6 +432,14 @@ internal static unsafe class ProjectionPass
                     pushFlags |= PushEvent.HasNew;
                 }
                 var moved = initialize || !new ReadOnlySpan<byte>(stored, positionBytes).SequenceEqual(quantized);
+
+                // A realm crossing is a teleport to the client that keeps the entity (03 § 2 step 3): the initialization emits its segment with the epoch the
+                // entry carries, so the epoch moves first — a client must not join the arrival's segment to the last one it had in the other realm.
+                if (motion.Enabled && (realmArrived & (1UL << slot)) != 0)
+                {
+                    hotBytes[motion.SegmentOffset + motion.SegmentEpochOffset]++;
+                }
+
                 var epochBefore = ownVisibility && motion.Enabled ? hotBytes[motion.SegmentOffset + motion.SegmentEpochOffset] : (byte)0;
 
                 // BEFORE the previous position is overwritten, because the rule's teleport and run-departure tests are about this tick's STEP, which only
@@ -540,7 +568,12 @@ internal static unsafe class ProjectionPass
                 repush |= 1UL << slot;
                 if (initialize)
                 {
-                    // No identity was taken yet, so there is none to give back.
+                    // No identity was taken yet, so there is none to give back — except one kept for a crossing, which goes back to wait for next tick.
+                    if (keptIdentity != NetIdAllocator.NoNetId)
+                    {
+                        state.ReturnArrival((ulong)entityIds[slot], keptIdentity);
+                    }
+
                     ClearEntry(state, blockBytes, layout, slot, worker);
                     continue;
                 }
@@ -554,6 +587,12 @@ internal static unsafe class ProjectionPass
                     var netId = leases.Take(worker);
                     hot->NetId = netId;
                     hot->Generation = state.NetIds.GenerationOf(netId);
+                }
+                else if (keptIdentity != NetIdAllocator.NoNetId)
+                {
+                    // Never released, so its generation is the one the entity's clients already hold.
+                    hot->NetId = keptIdentity;
+                    hot->Generation = state.NetIds.GenerationOf(keptIdentity);
                 }
 
                 state.EntityIndex?.Bind(hot->NetId, hot->Entity);

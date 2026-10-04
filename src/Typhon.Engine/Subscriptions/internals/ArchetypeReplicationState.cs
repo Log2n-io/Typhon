@@ -58,6 +58,17 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
     // tick N's fence or blocks step, moved aside at N's BeginProjectTick, released at N+1's. Locked: a fence's migration slices and a commit's inline block
     // release reach it from other threads.
     private readonly Lock _orphanedLock = new();
+
+    // Identities kept for entities that crossed into a realm whose destination cluster had no block yet (#1081): entity → (netId, blocks steps left). The
+    // projection that first gives such an entity an identity, in any cluster of any realm, takes this one instead of a new one; an unclaimed one is released
+    // when its steps run out. Keyed by entity, not by (cluster, slot): the entity may move again before its new realm has a block for it.
+    private readonly Lock _arrivalLock = new();
+    private readonly Dictionary<ulong, (uint NetId, int StepsLeft)> _arrivals = [];
+    private int _arrivalCount;
+
+    // How many blocks steps a kept identity waits to be claimed. A follower's switch activates the realm in the crossing tick's prologue and its blocks exist
+    // from the next blocks step, so one is what that path needs; the rest covers a realm served at a divided rate or a bootstrap spread over ticks.
+    private const int ArrivalSteps = 8;
     private List<uint> _orphaned = [];
     private List<uint> _orphanedPrevious = [];
 
@@ -669,22 +680,35 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return ReplicationMigrationOutcome.NothingToCarry;
         }
 
-        // A move across realms (R4.5). The entry is in the source realm's frame — its codes, its v̂ and its encoded bytes name places there — so it is not
-        // carried: the source realm's sessions are told the entity left (a leave in that realm, decoded with its frame), its identity goes back, and the
-        // destination initialises a fresh entry in its own frame the first time it is projected — an arrival like a spawn. A deviation from 03 § 2, which
-        // carries the identity across: re-issuing it costs a client nothing, since a session that follows the entity across switches with a RESET.
+        // A move across realms (03 § 2, SUB-09). The source realm's sessions are told the entity left — a leave filed in that realm and decoded with its
+        // frame — but its identity is KEPT: the entry is carried like any other, marked realm-arrived, and the destination's next projection re-initializes
+        // it in its own frame (codes, v̂, enter bytes, every group stamped, segment epoch bumped) under the same netId. A session following the entity
+        // across therefore sees its own entity keep its name, and so does every other entity that crosses.
+        //
+        // It used to orphan the entry and release the identity instead, on the premise that a follower's RESET made re-issuing it free. #1081 is the
+        // evidence it is not: the follower's client lost its own entity's identity at every door, and every crossing entity was renamed.
         var realms = _attachedTo != null ? Volatile.Read(ref _attachedTo.ClusterRealmMap) : null;
         if (realms != null && (uint)dstChunkId < (uint)realms.Length && realms[dstChunkId] != source->Realm)
         {
+            var crossing = (ReplicationHotEntry*)hotSource;
             if (Push != null)
             {
-                Orphaned(source, coldSource, ((ReplicationHotEntry*)hotSource)->NetId, 3);
+                LeftRealm(source, coldSource, crossing->NetId);
             }
 
-            EndEntry(srcBytes, srcSlot);
-            ClearEntry(srcBytes, srcSlot);
             Interlocked.Increment(ref _entriesLeftRealm);
-            return ReplicationMigrationOutcome.NothingToCarry;
+            if (!Directory.TryGetBlock(dstChunkId, out _))
+            {
+                // The destination realm has no block for it yet — typically the realm a follower is switching into, whose blocks exist from the next blocks
+                // step. The entry is in the wrong frame anyway and is re-initialized whatever happens, so it is not parked: only its identity is kept, by
+                // entity, for whichever projection describes it first.
+                KeepArrival(crossing->Entity.RawValue, crossing->NetId);
+                EndEntry(srcBytes, srcSlot);
+                ClearEntry(srcBytes, srcSlot);
+                return ReplicationMigrationOutcome.NothingToCarry;
+            }
+
+            crossing->Flags |= ProjectionPass.FlagRealmArrived;
         }
 
         if (Directory.TryGetBlock(dstChunkId, out var destination))
@@ -873,7 +897,8 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
                     var droppedId = ((ReplicationHotEntry*)bytes)->NetId;
                     if (droppedId != NetIdAllocator.NoNetId)
                     {
-                        // A parked entry never crossed realms (R4.5 leaves those before they park): its realm is its destination cluster's.
+                        // A parked entry never crossed realms — a crossing whose destination has no block keeps its identity instead of parking
+                        // (KeepArrival) — so its realm is its destination cluster's.
                         var map = _attachedTo == null ? null : Volatile.Read(ref _attachedTo.ClusterRealmMap);
                         var realm = map != null && (uint)chunkId < (uint)map.Length ? map[chunkId] : RealmId.Default.Value;
                         Orphaned(null, bytes + Layout.HotStride, droppedId, 2, realm);
@@ -923,6 +948,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         ObjectDisposedException.ThrowIf(_disposed, this);
         ProjectCursor[ProjectCursorSlot] = 0;
 
+        AgeArrivals();
         ReleaseOrphaned();
 
         // The cold estimate is the pushed slots' blocks, an upper bound on the identities this tick can need: an entity gets one only when its entry has none,
@@ -966,6 +992,110 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
         // block: its caller names the realm.
         var push = Push.Hub == null ? Push : Push.Hub.For(block == null ? parkedRealm : block->Realm);
         push?.Orphan(PushArchetypeIndex, block, cold, Layout, netId, cause);
+        ReleaseIdentity(netId);
+    }
+
+    /// <summary>
+    /// An entity left <paramref name="block"/>'s realm for another (03 § 2): that realm's sessions are told it left, decoded in that realm's frame, and its
+    /// identity is KEPT — the entry goes with the entity. Counted as a realm orphan (cause 3) on the source realm's replication.
+    /// </summary>
+    private void LeftRealm(ReplicationBlockHeader* block, byte* cold, uint netId)
+    {
+        var push = Push.Hub == null ? Push : Push.Hub.For(block->Realm);
+        push?.Orphan(PushArchetypeIndex, block, cold, Layout, netId, 3);
+    }
+
+    /// <summary>Keeps <paramref name="netId"/> for <paramref name="entity"/>, which crossed into a realm with no block for it yet (#1081). Fence slices, in parallel.</summary>
+    private void KeepArrival(ulong entity, uint netId)
+    {
+        if (netId == NetIdAllocator.NoNetId)
+        {
+            return;
+        }
+
+        lock (_arrivalLock)
+        {
+            // An entity crosses at most once per fence, so a second entry for it is a defect; the older identity is released rather than stranded.
+            if (_arrivals.Remove(entity, out var older))
+            {
+                ReleaseIdentity(older.NetId);
+            }
+
+            _arrivals[entity] = (netId, ArrivalSteps);
+            Volatile.Write(ref _arrivalCount, _arrivals.Count);
+        }
+    }
+
+    /// <summary>Whether any kept identity is waiting: the projection's lock-free check before it looks one up.</summary>
+    internal bool HasArrivals => Volatile.Read(ref _arrivalCount) != 0;
+
+    /// <summary>Takes the identity kept for <paramref name="entity"/>, if any. Projection chunks, in parallel.</summary>
+    internal bool TryTakeArrival(ulong entity, out uint netId)
+    {
+        lock (_arrivalLock)
+        {
+            if (_arrivals.Remove(entity, out var kept))
+            {
+                Volatile.Write(ref _arrivalCount, _arrivals.Count);
+                netId = kept.NetId;
+                return true;
+            }
+        }
+
+        netId = NetIdAllocator.NoNetId;
+        return false;
+    }
+
+    /// <summary>Puts back an identity a projection took but could not use (a deferred initialization), with the steps it had.</summary>
+    internal void ReturnArrival(ulong entity, uint netId)
+    {
+        lock (_arrivalLock)
+        {
+            _arrivals[entity] = (netId, ArrivalSteps);
+            Volatile.Write(ref _arrivalCount, _arrivals.Count);
+        }
+    }
+
+    /// <summary>Serial, at the blocks step: one step off every kept identity, and those whose steps ran out released — nobody claimed them.</summary>
+    private void AgeArrivals()
+    {
+        if (!HasArrivals)
+        {
+            return;
+        }
+
+        lock (_arrivalLock)
+        {
+            // Keys first, then the updates: a dictionary is not written while it is enumerated.
+            _arrivalScratch.Clear();
+            _arrivalScratch.AddRange(_arrivals.Keys);
+            foreach (var entity in _arrivalScratch)
+            {
+                var kept = _arrivals[entity];
+                if (kept.StepsLeft > 1)
+                {
+                    _arrivals[entity] = (kept.NetId, kept.StepsLeft - 1);
+                    continue;
+                }
+
+                _arrivals.Remove(entity);
+                ReleaseIdentity(kept.NetId);
+                Interlocked.Increment(ref _arrivalsExpired);
+            }
+
+            Volatile.Write(ref _arrivalCount, _arrivals.Count);
+        }
+    }
+
+    private long _arrivalsExpired;
+    private readonly List<ulong> _arrivalScratch = [];
+
+    /// <summary>Kept identities nobody claimed in time, released (#1081). Non-zero is an entity that crossed into a realm nobody entered.</summary>
+    public long ArrivalsExpired => Volatile.Read(ref _arrivalsExpired);
+
+    /// <summary>Hands an identity back at the next blocks step, and re-pushes its referrers then (13 § 5).</summary>
+    private void ReleaseIdentity(uint netId)
+    {
         lock (_orphanedLock)
         {
             _orphaned.Add(netId);
@@ -1037,6 +1167,7 @@ internal sealed unsafe class ArchetypeReplicationState : ResourceNode, IMemoryRe
             return;
         }
 
+        AgeArrivals();
         ReleaseOrphaned();
         _netIdLeases.FlushReleases(NetIds);
     }

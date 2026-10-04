@@ -538,6 +538,27 @@ sealed unsafe class FrameHarness : IDisposable
         return frames;
     }
 
+    /// <summary>Applies every ready frame to the session's replica, as <see cref="Deliver"/> does, and returns each one decoded into a call log.</summary>
+    /// <param name="session">The session.</param>
+    /// <returns>The logs, oldest first; empty when no frame was ready.</returns>
+    public List<FrameLog> DeliverLogged(SessionId session)
+    {
+        var replica = _replicas[session.Value];
+        ref var send = ref Assembler.SendStateOf(session.Slot);
+        var logs = new List<FrameLog>();
+        while (send.TryClaimFrame(Assembler.Gate.CommittedTick, out var frame))
+        {
+            var bytes = new ReadOnlySpan<byte>(frame.Bytes, frame.Length);
+            var log = new FrameLog();
+            log.Decode(bytes, CatalogPlan, Subscriptions.Realm0Frame);
+            logs.Add(log);
+            replica.Apply(bytes);
+            send.CompleteSend(frame.Sequence);
+        }
+
+        return logs;
+    }
+
     /// <summary>Claims one frame, decodes it into a call log and releases it.</summary>
     /// <param name="session">The session.</param>
     /// <returns>The log, or <see langword="null"/> when no frame was ready.</returns>
