@@ -2159,6 +2159,13 @@ internal sealed unsafe partial class ArchetypeClusterState
     internal ulong[] ClusterMigrationPendingSlots;
 
     /// <summary>
+    /// The pending slots this fence's drain TOOK from <see cref="ClusterMigrationPendingSlots"/>, per cluster: what the dirty-slot scan (step b) skips as
+    /// already handled, now that the drain zeroes the pending mask as it reads it (CC-02). Fence-private — written by the drain, read by the scan's slices,
+    /// reset by <see cref="ClearAabbRefreshBookkeeping"/>. Sized lazily by the drain.
+    /// </summary>
+    internal ulong[] ClusterMigrationTakenSlots = [];
+
+    /// <summary>
     /// Per-cluster destination cell key for the migration batch in <see cref="ClusterMigrationPendingSlots"/>. <c>-1</c> when no migration is pending.
     /// By cluster-coherence invariant, all flagged slots in a single cluster migrate to the same destination cell key (the first writer wins; conflicting
     /// writes are resolved at fence time by re-reading the slot's position). Indexed by clusterChunkId.
@@ -6055,6 +6062,23 @@ internal sealed unsafe partial class ArchetypeClusterState
     }
 
     /// <summary>
+    /// Flags a spatial write that did not go through <c>WriteSpatial</c> as the barrier would have: shrink axes, the slot's pending migration bit, the
+    /// cluster's process bit — in that order, which is the one <see cref="ClearAabbRefreshBookkeeping"/> relies on (pending before process bit).
+    /// </summary>
+    /// <remarks>
+    /// The dirty scan finds such a write on its own; a barrier-only archetype's fence runs none, so without this flag the move is never seen. Raised by
+    /// <c>Teleport</c> when it writes, and again by the commit that PUBLISHES a staged write (Commit discipline): a fence between the two consumes the first
+    /// flag against the old value and drops it, and only the second one carries the value that landed (CC-02).
+    /// </remarks>
+    internal void FlagOutOfBarrierSpatialWrite(int clusterChunkId, int slotIndex)
+    {
+        FlagShrinkAxes(clusterChunkId, 0x3F);
+        FlagMigration(clusterChunkId, 1UL << slotIndex, -1);
+        MigrationHint++;
+        SetClusterProcessBit(clusterChunkId);
+    }
+
+    /// <summary>
     /// Set <paramref name="clusterChunkId"/>'s bit in <see cref="ClusterProcessBitmap"/> — the signal the AABB refresh consumes (CA-02, CA-04).
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -8451,13 +8475,18 @@ internal sealed unsafe partial class ArchetypeClusterState
         return bitmap != null && (uint)wordIdx < (uint)bitmap.Length && (bitmap[wordIdx] & (1L << (chunkId & 63))) != 0;
     }
 
+    /// <summary>Test seam: runs at the top of <see cref="ClearAabbRefreshBookkeeping"/>, inside the fence, after the tick's flags were consumed.</summary>
+    internal Action BeforeBookkeepingClearProbe;
+
     /// <summary>
     /// Clear the write-time bookkeeping arrays (<see cref="ClusterProcessBitmap"/>, <see cref="ClusterMigrationPendingSlots"/>,
-    /// <see cref="ClusterShrinkPendingAxes"/>) for the next tick. Single-threaded — called once per archetype from
+    /// <see cref="ClusterShrinkPendingAxes"/>) for the next tick — only what this fence consumed (CC-02). Single-threaded — called once per archetype from
     /// <see cref="DatabaseEngine.FinalizeArchetypeFence"/> after all AABB slices finished.
     /// </summary>
     internal void ClearAabbRefreshBookkeeping()
     {
+        BeforeBookkeepingClearProbe?.Invoke();
+
         // BEFORE the early return, and that ordering is load-bearing: an archetype with no process bitmap still hands out spans, and a flag that is never
         // cleared turns one GetSpan call into an unconditional full walk for the rest of the process. Cleared here rather than at the top of Prep because
         // GetSpan is called by SYSTEMS, which run before the fence — clearing on entry would discard the very signal the refresh is meant to consume.
@@ -8487,31 +8516,66 @@ internal sealed unsafe partial class ArchetypeClusterState
         AabbMovedTicks++;
         AabbMovedActiveClusters += ActiveClusterCount;
 
+        // Only what this fence consumed is cleared. The drain TOOK each cluster's pending bits (DrainPreFlaggedMigrations), so a pending bit still here was
+        // set after it — by another thread's transaction committing while the fence ran, or by this fence's own outlier pass, which defers to the next
+        // tick. Such a cluster keeps its process bit, its destination hint and its shrink axes: zeroing them with plain stores, as this did, wiped a flag
+        // nobody had seen, and on a barrier-only archetype nothing else would ever find the move (CC-02).
+        //
+        // Ordered against a concurrent writer by the writer's own order — pending bits first (FlagMigration), process bit after (SetClusterProcessBit),
+        // both interlocked: the word is taken before the pending bits are read, so either the writer's pending bits are seen here and the process bit is
+        // put back, or they land after the read and the writer's own process bit lands after the take.
+        var pending = ClusterMigrationPendingSlots;
         for (var wordIdx = 0; wordIdx < ClusterProcessBitmap.Length; wordIdx++)
         {
-            var word = ClusterProcessBitmap[wordIdx];
+            var word = Interlocked.Exchange(ref ClusterProcessBitmap[wordIdx], 0L);
             if (word == 0)
             {
                 continue;
             }
 
+            var keep = 0L;
             while (word != 0)
             {
+                var bit = word & -word;
                 var chunkId = (wordIdx << 6) + BitOperations.TrailingZeroCount((ulong)word);
                 word &= word - 1;
-                if (ClusterMigrationPendingSlots != null && chunkId < ClusterMigrationPendingSlots.Length)
+                if (chunkId < ClusterMigrationTakenSlots.Length)
                 {
-                    ClusterMigrationPendingSlots[chunkId] = 0;
+                    ClusterMigrationTakenSlots[chunkId] = 0;
+                }
+
+                if (pending != null && chunkId < pending.Length)
+                {
+                    if (Volatile.Read(ref pending[chunkId]) != 0)
+                    {
+                        keep |= bit;
+                        continue;
+                    }
+
                     ClusterMigrationDestCellKeys[chunkId] = -1;
                 }
+
                 if (ClusterShrinkPendingAxes != null && chunkId < ClusterShrinkPendingAxes.Length)
                 {
                     ClusterShrinkPendingAxes[chunkId] = 0;
                 }
             }
-            ClusterProcessBitmap[wordIdx] = 0;
+
+            if (keep != 0)
+            {
+                Interlocked.Or(ref ClusterProcessBitmap[wordIdx], keep);
+                Interlocked.Increment(ref _flagsCarriedOver);
+            }
         }
     }
+
+    private long _flagsCarriedOver;
+
+    /// <summary>
+    /// Process-bitmap words whose clusters kept migration flags across a fence's clear because they were flagged after the fence consumed its own (CC-02):
+    /// another thread's write committed while the fence ran, or the fence's outlier pass deferring to the next tick. Cumulative.
+    /// </summary>
+    internal long FlagsCarriedOver => Volatile.Read(ref _flagsCarriedOver);
 
     /// <summary>
     /// Safety valve for the "Max Cluster AABB Extent" invariant from design doc 01-spatial-clusters.md (issue #230 Phase 3 closure of Phase 1 gap). Scans a
