@@ -16,9 +16,10 @@ namespace SwgTatooine.Tests;
 /// never applied.
 /// </para>
 /// <para>
-/// <b>The netId the client clicked is NOT the netId it ends up riding, and that is the point.</b> Anchoring re-sends the whole view, and netIds are allocated
-/// densely per view, so the subject arrives with a new one. The server names it in <c>SELF</c> — what <c>Control</c> is for — which is why the client can
-/// re-find its subject at all, and why these cases assert on <c>SELF</c>'s archetype and non-zero id rather than on an equality that would be false.
+/// <b>The client re-finds its subject through <c>SELF</c>, not through the netId it clicked.</b> Anchoring re-sends the whole view; netIds are global per
+/// database and stay with the entity — across clusters and, since #1081, across realms — so the subject keeps its id, but the client's store is rebuilt by
+/// the RESET and <c>SELF</c> (what <c>Control</c> is for) is the one block that names which entity is the subject. These cases assert on <c>SELF</c>'s
+/// archetype and non-zero id. (This paragraph used to say netIds were allocated densely per view, which was never the mechanism.)
 /// </para>
 /// </remarks>
 [TestFixture]

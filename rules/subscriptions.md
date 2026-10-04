@@ -221,6 +221,7 @@
   invariant the identity space is GLOBAL: a netId names at most one live entity across the whole database, never one per archetype
   never one netId held by two live entities at the same time
   never reissue an identity before its quarantine window has passed
+  invariant a realm change is not a release (03 § 2, #1081): an entity that crosses realms keeps its netId and its generation (SUB-09)
   never a Release of an identity that is already free or quarantined (it would thread the list to itself, after which every
     Allocate returns that same identity and LiveCount runs negative)
   invariant every identity an entry loses is released once: a vacated or reused slot's by the projection (queued in its lease, released at the next
@@ -270,11 +271,21 @@
     re-initialises — this is what catches slot reuse inside a LIVING cluster, which no move hook can see
   never a directory entry naming a block whose cluster has been freed
   never an entry inherited by a different entity through slot reuse or a recycled chunk id
+  invariant ∀ move of e across REALMS (03 § 2, #1081): the source realm's sessions are told e left (a leave filed in the source realm, decoded in its
+    frame) and e's netId is NOT released — the identity goes with the entity:
+    - destination cluster has a block → the entry is carried as for any move and marked FlagRealmArrived, and the destination's next projection
+      re-initializes it in the destination's frame (codes, v̂, enter bytes, every group stamped, motion epoch bumped) under the same netId;
+    - destination cluster has no block (typically a realm a follower is switching into) → the entry is ended and cleared, and the netId is KEPT BY
+      ENTITY (ArchetypeReplicationState.KeepArrival) for whichever projection first gives e an identity, in any cluster, which takes it instead of a new
+      one; unclaimed after ArrivalSteps blocks steps it is released. Keyed by entity, not (cluster, slot), because e may move again before its realm has
+      a block — a parked (cluster, slot) entry was tried and lost exactly that case
+  never a realm crossing that releases the identity of an entity still live (it renamed the entity for every client, its follower's included)
   scope: ReplicationDirectory.TryAdd, ReplicationDirectory.TryRemove, ReplicationBlockPool.TryRent,
     ReplicationBlockHeader.ChunkId, ReplicationHotEntry.Entity,
     ArchetypeReplicationState.MigrateEntry, ArchetypeReplicationState.DrainParkedEntries, ParkedEntryList.Add,
     ArchetypeReplicationState.TryReleaseBlock, ArchetypeReplicationState.ReleaseBlockForDrain,
-    ArchetypeReplicationState.AttachTo, ArchetypeClusterState.ReplicationState,
+    ArchetypeReplicationState.AttachTo, ArchetypeClusterState.ReplicationState, ArchetypeReplicationState.KeepArrival,
+    ArchetypeReplicationState.TryTakeArrival, ProjectionPass.FlagRealmArrived,
     ArchetypeClusterState.DrainPendingClusterFinalizations, ArchetypeClusterState.ReleaseSlot
   on_violation: hits into a cluster that inherited a recycled id find state describing the cluster that
     drained — a client is told about an entity that no longer exists, or told the wrong values for one that
@@ -297,6 +308,10 @@
   note the `[UNBUILT]` marker was dropped on 2026-09-18 when the move hook landed. The rule's second historically-missing item, the
     per-entry `EntityId` check on the read path, turned out to be present already (`ProjectionPass` compares `hot->Entity` with the slot's id,
     releases the identity and re-initialises on mismatch) — the note claiming it missing was stale.
+  verified (realms, #1081): RealmSessionTests.AFollowedEntityKeepsItsNetIdThroughARealmRoundTrip (follower, both legs, enters + SELF + replica) and
+    AnEntityThatCrossesLeavesItsRealmAndArrivesInTheOtherUnderTheSameNetId (bystander; destination watched and not). Mutants: releasing instead of
+    keeping fails both; releasing instead of carrying, and carrying without FlagRealmArrived, each fail the watched case. Demo scale:
+    SwgTatooine.Tests.RealmCrossingChecks.Portal_RoundTrip_NetIdStable, out of quarantine
   verified: MigrationIdentityTests.ANetIdAcrossAClusterChange, which asserted the OPPOSITE until the hook landed and was written inverted on
     purpose so that it would go red and force the edit; MigrationIdentityTests.TheEntryIsCarriedAcrossRatherThanReissued, which reads the
     migration counters because a netId that is unchanged is also what a LIFO allocator handing back what it just released would produce, so

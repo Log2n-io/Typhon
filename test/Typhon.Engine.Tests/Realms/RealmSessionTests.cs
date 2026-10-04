@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Numerics;
 using Microsoft.Extensions.DependencyInjection;
 using NUnit.Framework;
@@ -276,6 +277,117 @@ class RealmSessionTests : TestBase<RealmSessionTests>
             Assert.That(log.Calls[1], Is.EqualTo("realm 1"));
             Assert.That(harness.Subscriptions.Commands.RealmOf(session), Is.EqualTo(new RealmId(1)));
         });
+    }
+
+    /// <summary>
+    /// #1081: the session following its entity through a door, and back, names that entity by the same netId on both sides — in its enters and in its SELF
+    /// block. It used to be renamed at every crossing (5 runs out of 5 at demo scale): the migration released the identity and the arrival took a new one.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-09")]
+    public void AFollowedEntityKeepsItsNetIdThroughARealmRoundTrip()
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var session = harness.OpenSessions(1, Follow)[0];
+        var ids = Spawn(dbe, 0, 3);
+        Assert.That(harness.Sessions.SetControlled(session, ids[0]), Is.True);
+        Run(harness, session, 3);
+        var before = harness.NetIdOf(ids[0]);
+        Assert.That(before, Is.Not.Zero, "precondition: the entity has an identity");
+
+        foreach (var (realm, to) in new[] { ((ushort)1, At(0, 0, 1, 0)), ((ushort)0, At(5, 25, 0, 0)) })
+        {
+            Cross(dbe, ids[0], realm, to);
+            var logs = RunLogged(harness, session, 4);
+            Assert.Multiple(() =>
+            {
+                Assert.That(logs.Any(l => (l.Flags & TickFlags.Reset) != 0), Is.True, $"precondition: crossing into realm {realm} switches the session");
+                Assert.That(logs.SelectMany(l => l.Enters), Does.Contain(before), $"realm {realm}: the arrival names the entity by the identity it had");
+                Assert.That(logs.SelectMany(l => l.Selves).Where(s => s.NetId != 0).Select(s => s.NetId), Has.All.EqualTo(before),
+                    $"realm {realm}: SELF never names it by another");
+                Assert.That(harness.Replica(session).NetIds(UnitIdx(harness)), Does.Contain(before), $"realm {realm}: and the client holds it under it");
+            });
+        }
+    }
+
+    /// <summary>
+    /// An entity that crosses is a leave to the sessions of the realm it left and an arrival to those of the realm it entered — under ONE identity, not
+    /// only for the entity a session follows (03 § 2). Both realms' occupancy follows it. Two paths: the destination cluster already has a replication block
+    /// (another entity is there), so the entry is carried and re-initialized in place; or it has none, so only the identity is kept, for the first projection.
+    /// </summary>
+    [Test]
+    [VerifiesRule("SUB-09")]
+    public void AnEntityThatCrossesLeavesItsRealmAndArrivesInTheOtherUnderTheSameNetId([Values] bool destinationWatched)
+    {
+        using var dbe = SetupEngine();
+        using var harness = CreateHarness(dbe);
+        var inZero = harness.OpenSessions(1, World)[0];
+        var inOne = harness.OpenSessions(1, World)[0];
+        var commands = harness.Subscriptions.Commands;
+        Assert.That(commands.Enter(inZero, RealmId.Default), Is.True);
+        Assert.That(commands.Enter(inOne, new RealmId(1)), Is.True);
+        var ids = Spawn(dbe, 0, 3);
+        if (destinationWatched)
+        {
+            // Already where the crossing lands, so its cluster — and that cluster's block — exist before the crossing.
+            using var tx = dbe.CreateQuickTransaction();
+            tx.Spawn<RealmUnit>(RealmUnit.Pos.Set(At(0, 0, 1, 9)));
+            tx.Commit();
+        }
+
+        RunLogged(harness, inZero, inOne, 3);
+        var netId = harness.NetIdOf(ids[1]);
+        Assert.That(netId, Is.Not.Zero, "precondition: the entity has an identity");
+
+        Cross(dbe, ids[1], 1, At(0, 0, 1, 1));
+        var (left, arrived) = RunLogged(harness, inZero, inOne, 4);
+        Assert.Multiple(() =>
+        {
+            Assert.That(left.SelectMany(l => l.Leaves), Does.Contain(netId), "the realm it left is told it left");
+            Assert.That(arrived.SelectMany(l => l.Enters), Does.Contain(netId), "the realm it entered sees it arrive under the same identity");
+            Assert.That(harness.Replica(inZero).NetIds(UnitIdx(harness)), Does.Not.Contain(netId));
+            Assert.That(harness.Replica(inOne).NetIds(UnitIdx(harness)), Does.Contain(netId));
+            Assert.That(harness.Replica(inOne).NetIds(UnitIdx(harness)), Has.Length.EqualTo(destinationWatched ? 2 : 1));
+            foreach (var push in harness.Subscriptions.Hub.Active)
+            {
+                Assert.That(push.VerifyOccupancy(), Is.Zero, "every realm's occupancy agrees with a recount after the crossing");
+            }
+        });
+    }
+
+    private static int UnitIdx(FrameHarness harness) => harness.CatalogPlan.ArchetypeByName(nameof(RealmUnit)).Idx;
+
+    private static void Cross(DatabaseEngine dbe, EntityId entity, ushort realm, RealmPos to)
+    {
+        using var tx = dbe.CreateQuickTransaction();
+        tx.Teleport(entity, RealmUnit.Pos, new RealmId(realm), to);
+        tx.Commit();
+    }
+
+    private static List<FrameLog> RunLogged(FrameHarness harness, SessionId session, int ticks)
+    {
+        var logs = new List<FrameLog>();
+        for (var i = 0; i < ticks; i++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            logs.AddRange(harness.DeliverLogged(session));
+        }
+
+        return logs;
+    }
+
+    private static (List<FrameLog> A, List<FrameLog> B) RunLogged(FrameHarness harness, SessionId a, SessionId b, int ticks)
+    {
+        var (logsA, logsB) = (new List<FrameLog>(), new List<FrameLog>());
+        for (var i = 0; i < ticks; i++)
+        {
+            harness.RunTick(harness.Tick + 1);
+            logsA.AddRange(harness.DeliverLogged(a));
+            logsB.AddRange(harness.DeliverLogged(b));
+        }
+
+        return (logsA, logsB);
     }
 
     /// <summary>

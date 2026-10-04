@@ -286,29 +286,22 @@ public sealed class RealmCrossingChecks
     }
 
     /// <summary>
-    /// <c>Portal_RoundTrip_NetIdStable</c> — a player's own client keeps calling it by the same name across a door. <b>It does not (#1081).</b>
+    /// <c>Portal_RoundTrip_NetIdStable</c> — a player's own client keeps calling it by the same name across a door, and back.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Quarantined, asserting the contract rather than the behaviour.</b> #1060 names this check as a done-when; it fails, deterministically, 5 runs out of
-    /// 5, and at engine scale as well as here. A realm switch is a <c>RESET</c>, so the session's view is emptied, the entity leaves the only known-set holding
-    /// it, its global identity is released to the quarantine and the re-entry allocates a fresh one. That is right for an entity the session has really
-    /// lost and wrong for the entity it is ANCHORED TO, which the switch guarantees will be there on the other side.
+    /// #1060 names this check as a done-when. It was quarantined against #1081, failing 5 runs out of 5 (9006 became 8183): the cross-realm migration
+    /// released the entity's identity and the arrival took a new one, so everything a client keys on netId — interpolation, the camera's target, the
+    /// selection, per-entity UI — was lost per doorway. The identity now goes with the entity (03 § 2, SUB-09): carried with its entry when the destination
+    /// cluster has a block, kept by entity until the first projection claims it when it has none — which is the case here, the interior having no block
+    /// until the follower's switch activates it.
     /// </para>
     /// <para>
-    /// Written as the check #1060 asks for and left red against #1081, rather than weakened to assert what happens today: a test that asserted the
-    /// re-identification would make the defect a specification, and a check left unwritten would leave the done-when looking unexamined instead of examined and
-    /// failed. <c>[Category("Quarantine")]</c> keeps it out of the merge gate — which runs this project with <c>TestCategory!=Quarantine</c> — and it runs
-    /// <b>locally only</b>: the nightly filters the category out too (<c>nightly-suppressed.yml</c>), so nothing runs this until #1081 is picked up.
-    /// <c>QUARANTINE.md</c> carries its row, which is what makes it a register rather than a red test somebody has to remember.
-    /// </para>
-    /// <para>
-    /// <b>What it costs a client:</b> everything keyed on netId is lost per doorway — interpolation, the camera's target, the selection, per-entity UI. Its own
-    /// entity is recoverable from the <c>SELF</c> block, which is why this is survivable; anything else it was tracking is not.
+    /// <b>Shares an intermittent wait with <see cref="Switch_IsOneResetRealmFrame"/>.</b> "The client to be told it is in the interior" timed out in 5 of 30
+    /// runs on the code before #1081's fix and 3 of 30 after it in one session, and in none of 60 in another: load-dependent, cause not established yet.
     /// </para>
     /// </remarks>
     [Test]
-    [Category("Quarantine")]
     public void Portal_RoundTrip_NetIdStable()
     {
         using var sim = new TatooineSim(Config());
