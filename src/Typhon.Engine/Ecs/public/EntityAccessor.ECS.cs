@@ -230,12 +230,10 @@ public unsafe partial class EntityAccessor
             return;
         }
 
-        // The dirty scan finds this write; a barrier-only archetype's fence runs none, so the slot is flagged as the barrier would flag it. On a Versioned
-        // or Commit-discipline write the value lands at commit: commit before the next fence, or the fence finds the old key and drops this flag.
-        state.FlagShrinkAxes(mut._ref._clusterChunkId, 0x3F);
-        state.FlagMigration(mut._ref._clusterChunkId, 1UL << mut._ref._clusterSlotIndex, -1);
-        state.MigrationHint++;
-        state.SetClusterProcessBit(mut._ref._clusterChunkId);
+        // The dirty scan finds this write; a barrier-only archetype's fence runs none, so the slot is flagged as the barrier would flag it. On a
+        // Commit-discipline write the value lands at commit, and a fence in between consumes this flag against the old key — so the commit's publish
+        // flags the slot again (Transaction.PublishStagedEntry, CC-02).
+        state.FlagOutOfBarrierSpatialWrite(mut._ref._clusterChunkId, mut._ref._clusterSlotIndex);
     }
 
     /// <summary>Try to open an entity for reading. Returns false if the entity doesn't exist or isn't visible.</summary>

@@ -2390,6 +2390,15 @@ public unsafe partial class Transaction : EntityAccessor
         Unsafe.CopyBlockUnaligned(headPtr, staged, (uint)compSize);
         // Same as the Versioned publish above: compSlot is the component being published, so name it rather than falling back to "emit everything" (M31).
         clusterState.SetDirty(clusterChunkId, slotIndex, compSlot);
+
+        // A spatial value or a realm key landing NOW: flagged for the fence as the barrier would, after the memcpy, so a fence that consumes the flag reads
+        // the new value. The flag raised when the write was staged may already have been consumed against the old one (CC-02).
+        ref var spatial = ref clusterState.SpatialSlot;
+        if (spatial.HasSpatialIndex && spatial.FieldInfo.Mode == SpatialMode.Dynamic
+            && (compSlot == spatial.Slot || (spatial.HasRealmKey && compSlot == spatial.RealmKeySlot)))
+        {
+            clusterState.FlagOutOfBarrierSpatialWrite(clusterChunkId, slotIndex);
+        }
     }
 
     /// <summary>

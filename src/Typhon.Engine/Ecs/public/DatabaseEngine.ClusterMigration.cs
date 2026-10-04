@@ -237,6 +237,13 @@ public partial class DatabaseEngine
             return;
         }
 
+        if (clusterState.ClusterMigrationTakenSlots.Length < migrationPending.Length)
+        {
+            clusterState.ClusterMigrationTakenSlots = new ulong[migrationPending.Length];
+        }
+
+        var taken = clusterState.ClusterMigrationTakenSlots;
+
         ref var ss = ref clusterState.SpatialSlot;
         var layout = clusterState.Layout;
         var compSize = layout.ComponentSize(ss.Slot);
@@ -273,11 +280,16 @@ public partial class DatabaseEngine
                     continue;
                 }
 
-                var slotMask = migrationPending[chunkId];
+                // TAKEN, not read: the bits are zeroed in the same atomic step, so a slot another thread flags from here on — a transaction committing
+                // while this fence runs — stays flagged for the next fence instead of being wiped by this one's clear, unseen (CC-02).
+                var slotMask = Interlocked.Exchange(ref migrationPending[chunkId], 0UL);
                 if (slotMask == 0)
                 {
                     continue;
                 }
+
+                // What step (b)'s scan skips as handled: it used to read the pending mask itself, which is zero now.
+                taken[chunkId] |= slotMask;
 
                 var clusterRealm = clusterState.SpatialOfCluster(chunkId);
                 if (!ReferenceEquals(clusterRealm, realmSpatial))
@@ -394,7 +406,6 @@ public partial class DatabaseEngine
         //
         // For AntHill (all writes through WriteSpatial), step (b)'s per-slot work is fully masked out — the loop body becomes a popcount-and-skip,
         // which is fast even at 100k entities.
-        var migrationPending = clusterState.ClusterMigrationPendingSlots;
 
         // The span's slot count changes meaning for a barrier-only clean tick as of #939, and the change is deliberate: it used to be the popcount of the
         // occupancy words Prep had just written into a synthetic change list, and is now 0, because there is no longer a list and nothing is scanned. The
@@ -487,8 +498,9 @@ public partial class DatabaseEngine
                 }
 
                 var clusterChunkId = wordIdx;
-                // Mask out slots already handled by step (a).
-                var handledMask = (migrationPending != null && clusterChunkId < migrationPending.Length) ? migrationPending[clusterChunkId] : 0UL;
+                // Mask out slots already handled by step (a) — what its drain took, since it zeroes the pending mask as it reads it.
+                var takenSlots = clusterState.ClusterMigrationTakenSlots;
+                var handledMask = clusterChunkId < takenSlots.Length ? takenSlots[clusterChunkId] : 0UL;
                 var effective = (ulong)word & ~handledMask;
                 if (effective == 0)
                 {

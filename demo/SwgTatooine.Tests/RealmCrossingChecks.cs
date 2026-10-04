@@ -297,8 +297,11 @@ public sealed class RealmCrossingChecks
     /// until the follower's switch activates it.
     /// </para>
     /// <para>
-    /// <b>Shares an intermittent wait with <see cref="Switch_IsOneResetRealmFrame"/>.</b> "The client to be told it is in the interior" timed out in 5 of 30
-    /// runs on the code before #1081's fix and 3 of 30 after it in one session, and in none of 60 in another: load-dependent, cause not established yet.
+    /// <b>It used to time out now and then, with <see cref="Switch_IsOneResetRealmFrame"/>, and that was an engine bug.</b> "The client to be told it is in
+    /// the interior" timed out in about one run in seven under load: <see cref="MoveTo"/> commits its teleport from this thread while the world ticks, and
+    /// a fence in the wrong place either wiped the crossing's flag before reading it or consumed it against the old position before the commit landed. The
+    /// player's realm key then said the interior while the engine still filed it on the planet, so the session never followed. Fixed in the fence and the
+    /// commit's publish (rule CC-02, <c>ForeignWriteDuringFenceTests</c>); 25 of 25 under full CPU load since.
     /// </para>
     /// </remarks>
     [Test]

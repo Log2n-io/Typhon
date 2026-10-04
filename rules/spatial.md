@@ -1682,13 +1682,25 @@
     slot (CA-01) until it moves. A recovery or schema-migration claim (ClaimSlot) is cell-agnostic, so without the check
     a mixed-cell cluster survived until its entities were next written. The check is O(1) per cluster whose box fits
     the cell plus the band; only the others scan their slots (Realms P0.2)
+  invariant a write-time crossing flag is never lost to a fence it was not part of. The drain TAKES each cluster's pending
+    slots (Interlocked.Exchange), so ClearAabbRefreshBookkeeping clears only what this fence consumed: a pending bit still
+    set at the clear was raised after the drain — by a transaction committing on another thread while the fence ran — and
+    keeps its cluster's process bit, hint and shrink axes for the next fence. The dirty scan (step b) skips what the drain
+    took (ClusterMigrationTakenSlots). Writers order pending bit before process bit (FlagOutOfBarrierSpatialWrite), which
+    is what makes the clear's take-then-check sound
+  invariant a spatial or realm-key write that lands at COMMIT (Commit discipline) is flagged again when it is published
+    (Transaction.PublishStagedEntry): the flag Teleport raised when the write was staged may have been consumed by a fence
+    in between, against the old value. Without both, a barrier-only archetype — whose fence runs no dirty scan — never sees
+    the move: the realm key says the new realm, the cluster stays in the old one (the SWG demo's lost portal crossings)
   invariant CellClusterPool's per-cell (head, count) pair and its backing array are published and read in a fixed
     order (release: pool → head → entry → count; acquire: count → head → pool). A reader pairing a new count with
     an old head runs past its cell's segment into the next cell's, and a claim lands in a cluster of another cell
   scope: ArchetypeClusterState.AddClusterToPerCellIndex, ArchetypeClusterState.AddClusterToPerCellIndexLocked,
     ArchetypeClusterState.ClaimSlotInCell, ArchetypeClusterState.TryClaimPinnedSlot, ArchetypeClusterState.ClusterCellMap,
     DatabaseEngine.DrainPreFlaggedMigrations, CellClusterPool.GetClusters, CellClusterPool.AddCluster,
-    ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.FileForeignCellSlots
+    ArchetypeClusterState.RebuildSpatialStateFromData, ArchetypeClusterState.FileForeignCellSlots,
+    ArchetypeClusterState.ClearAabbRefreshBookkeeping, ArchetypeClusterState.ClusterMigrationTakenSlots,
+    ArchetypeClusterState.FlagOutOfBarrierSpatialWrite, Transaction.PublishStagedEntry
   verified: RecoverySpatialRebuildTests.MixedCellClusterFromRecoveryClaim_FiledAtRebuild_FixedAtFirstFence (the replay packs
     four cells into shared clusters; the rebuild files exactly the slots outside their cluster's cell and none survives the
     first fence). ClusterPlacementTests.ConcurrentSpawnsAndBoundGrowthKeepClustersInTheirCell — eight writers spawning
@@ -1696,7 +1708,11 @@
     occupied slot resolves to its cluster's mapped cell and the two cells count what was spawned (7 of 30 runs
     failed before the latch and the occupancy-before-publish ordering; about 1 cold launch in 10 before the drain
     re-derived the destination). ClusterMigrationTests.WriteSpatial_CrossAndReturnInOneTick_StaysInItsCell and
-    WriteSpatial_TwoCrossingsInOneTick_LandsWhereItIs pin the drain's decision with two writes, no race
+    WriteSpatial_TwoCrossingsInOneTick_LandsWhereItIs pin the drain's decision with two writes, no race. ForeignWriteDuringFenceTests: a
+    Teleport committed from another thread inside a fence's clear (BeforeBookkeepingClearProbe), and one whose Commit-discipline
+    commit straddles a fence, are both filed in their new realm by a later fence — on the dirty-scan and the barrier-only
+    paths. Before: both barrier-only cases left the entity in its old realm, deterministically; reading the pending mask
+    instead of taking it double-enqueued the dirty-scan path's crossings
   on_violation:
     an entity in a cluster mapped to another cell → invisible to its own cell's index → SQ-01 false negative,
       counters balanced
