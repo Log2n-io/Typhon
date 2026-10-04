@@ -310,6 +310,36 @@ public sealed class SimConfig
     /// </remarks>
     public bool Persist;
 
+    // ── Live profiling ──────────────────────────────────────────────────────────────────────────────────────────────
+    //
+    // These three are READ HERE and ACTED ON ELSEWHERE, which is unlike every other field in this class. The profiler's master gate is a static readonly bool
+    // in the engine, baked at assembly load, so the only layer that can still open it is the environment — and `ProfilerArgs`, called from `Program.Main`
+    // before any engine type is touched, is what writes it. They live in SimConfig anyway so that `--help` lists them and the strict parse accepts them from
+    // one declaration, as it does for every other flag (SWG-07).
+
+    /// <summary>
+    /// <c>--live</c>: the TCP port the profiler serves the Workbench on; 0 is off.
+    /// </summary>
+    /// <remarks>
+    /// Off by default, and the default matters: the exporter costs tick time and the numbers in this repository are taken without it. The engine binds it to
+    /// loopback unless <see cref="ProfilerBindAddress"/> says otherwise, so turning it on does not publish telemetry off-box.
+    /// </remarks>
+    public int ProfilerLivePort;
+
+    /// <summary>
+    /// <c>--profiler-bind</c>: the address <see cref="ProfilerLivePort"/> binds, or <see langword="null"/> for the engine's loopback default.
+    /// </summary>
+    /// <remarks>
+    /// There is no validation of the address here because the engine's own parser is the authority on what an address is
+    /// (<c>IPAddress.TryParse</c>, in <c>ProfilerLaunchConfig</c>), and it ignores one it cannot read — which leaves the loopback default, the safe direction.
+    /// </remarks>
+    public string ProfilerBindAddress;
+
+    /// <summary>
+    /// <c>--trace</c>: where to write the capture, or <see langword="null"/> for the database's own <c>profilings/</c> directory.
+    /// </summary>
+    public string ProfilerTracePath;
+
     /// <summary>Run the tick fence on the worker pool rather than serially on the tick driver.</summary>
     public bool ParallelFence = true;
 

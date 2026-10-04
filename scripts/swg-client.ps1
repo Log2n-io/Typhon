@@ -25,15 +25,29 @@
 .PARAMETER Rebuild
     Rebuild the client even when `dist` is already there.
 
+.PARAMETER Live
+    The TCP port to serve the profiler on, so the Workbench can attach while you watch the world. Omit for an
+    unprofiled run — and note that omitting it CLEARS the profiler variables rather than leaving them alone, because a
+    `$env:` assignment persists for a whole shell session and would otherwise keep profiling every later run in it.
+
+    It has to be set here rather than passed to the server, because the server cannot switch its own profiler on: the
+    engine's master gate is baked before `Main` runs. `demo/SwgTatooine/Sim/ProfilerArgs.cs` has the mechanism.
+
+.PARAMETER BindAddress
+    The address the profiler port binds. Loopback when unset — a routable address publishes your telemetry.
+
 .EXAMPLE
     ./scripts/swg-client.ps1
     ./scripts/swg-client.ps1 -Port 8090 -Pop 1.0
+    ./scripts/swg-client.ps1 -Live 9100          # then attach the Workbench to 127.0.0.1:9100
 #>
 [CmdletBinding()]
 param(
-    [int]    $Port      = 8080,
-    [double] $Pop       = 0.2,
-    [double] $GodRegion = 3000,
+    [int]    $Port        = 8080,
+    [double] $Pop         = 0.2,
+    [double] $GodRegion   = 3000,
+    [int]    $Live        = 0,
+    [string] $BindAddress,
     [switch] $Rebuild
 )
 
@@ -42,31 +56,51 @@ $root   = Split-Path -Parent $PSScriptRoot
 $client = Join-Path $root 'demo/SwgTatooine.Client'
 $exe    = Join-Path $root 'demo/SwgTatooine/bin/Release/net10.0/SwgTatooine.exe'
 
+# $ErrorActionPreference='Stop' does NOT cover a native command's exit code here: $PSNativeCommandUseErrorActionPreference
+# is False on PowerShell 7.6 by default, so npm and dotnet failures fall through and the stale exe runs. Checked by hand.
 if (-not (Test-Path (Join-Path $client 'node_modules'))) {
     Write-Host 'Installing client dependencies (npm ci)...' -ForegroundColor Cyan
     Push-Location $client
-    try { npm ci } finally { Pop-Location }
+    try { npm ci; if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" } } finally { Pop-Location }
 }
 
 if ($Rebuild -or -not (Test-Path (Join-Path $client 'dist/index.html'))) {
     Write-Host 'Building the client (vite build)...' -ForegroundColor Cyan
     Push-Location $client
-    try { npm run build } finally { Pop-Location }
+    try { npm run build; if ($LASTEXITCODE -ne 0) { throw "vite build failed with exit code $LASTEXITCODE" } } finally { Pop-Location }
 }
 
-if (-not (Test-Path $exe)) {
-    Write-Host 'Building the server (Release)...' -ForegroundColor Cyan
-    dotnet build (Join-Path $root 'demo/SwgTatooine/SwgTatooine.csproj') -c Release
-}
+# Always, not only when absent: see swg-serve.ps1. An edited source file otherwise runs as its old binary.
+Write-Host 'Building the server (Release)...' -ForegroundColor Cyan
+dotnet build (Join-Path $root 'demo/SwgTatooine/SwgTatooine.csproj') -c Release --nologo -v q
+if ($LASTEXITCODE -ne 0) { throw "server build failed with exit code $LASTEXITCODE" }
 
 # Its own database directory, created here: the demo VALIDATES --db-dir and refuses one that does not exist rather than
 # creating it. Under TEMP so nothing here competes with a measurement run's database.
-$db = Join-Path $env:TEMP "swg-client-$Port"
+$db = Join-Path ([System.IO.Path]::GetTempPath()) "swg-client-$Port"
 New-Item -ItemType Directory -Force $db | Out-Null
+
+# Set or clear, never leave alone — see -Live. The marker only changes the server's startup wording from "a variable you
+# may not know about" to "the launcher did this"; the engine never reads it.
+# All four, including TRACE and ENABLED, which this script never sets: the server treats either as a request, so a stale
+# one left by swg-serve.ps1 -Trace would keep this script's "unprofiled run" profiled.
+$env:TYPHON__PROFILER__LIVE = if ($Live -gt 0) { "$Live" } else { $null }
+$env:TYPHON__PROFILER__BINDADDRESS = if ($BindAddress) { $BindAddress } else { $null }
+$env:TYPHON__PROFILER__TRACE = $null
+$env:TYPHON__PROFILER__ENABLED = $null
+$env:TYPHON_SWG_PROFILER_LAUNCHER = if ($Live -gt 0) { 'scripts/swg-client.ps1 -Live' } else { $null }
 
 Write-Host ''
 Write-Host "  http://localhost:$Port" -ForegroundColor Green
 Write-Host "  http://localhost:$Port/?source=mock   (the browser-side mock, no engine)" -ForegroundColor DarkGray
+if ($Live -gt 0) {
+    $where = if ($BindAddress) { $BindAddress } else { '127.0.0.1' }
+    Write-Host "  profiler: attach the Workbench to ${where}:$Live" -ForegroundColor Yellow
+    if ($BindAddress -and $BindAddress -ne '127.0.0.1' -and $BindAddress -ne 'localhost') {
+        Write-Host "  WARNING: $BindAddress is not loopback - this publishes your telemetry, unauthenticated." -ForegroundColor Red
+    }
+}
 Write-Host ''
 
 & $exe --serve $Port --pop $Pop --god-region $GodRegion --db-dir $db
+exit $LASTEXITCODE

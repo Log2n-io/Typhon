@@ -161,6 +161,18 @@ public static class CommandLine
         c.ReportDirectory = r.Str("--report-dir", null, "where --sweep writes its report", "<path>");
         c.TickLogPath = r.Str("--tick-log", null, "write one line per tick here", "<path>");
 
+        // Declared so --help lists them, RejectUnknown accepts them and their values are range-checked from one place like every other flag (SWG-07) — and then
+        // REFUSED by Program when the profiler is not already on, because no host can switch its own profiler on: the engine's master gate is baked before Main
+        // runs. See ProfilerArgs for the mechanism and scripts/swg-serve.ps1 for the equivalent that works. A flag that is listed and refused with instructions
+        // beats both an unknown-flag error, which teaches nothing, and the silent no-op this started as.
+        r.Group("live profiling — set before the process starts; these flags only tell you how");
+        c.ProfilerLivePort = r.Int("--live", c.ProfilerLivePort, $"the Workbench's profiler port; refused in-process, use scripts/swg-serve.ps1 -Live "
+            + $"{ProfilerArgs.DefaultLivePort}", min: 0, max: 65535);
+        c.ProfilerBindAddress = r.Str("--profiler-bind", c.ProfilerBindAddress, "address the profiler port binds; loopback when unset, and a routable address "
+            + "publishes your telemetry", "<addr>");
+        c.ProfilerTracePath = r.Str("--trace", c.ProfilerTracePath, "write a .typhon-trace capture here instead of the database's profilings/ directory",
+            "<path>");
+
         r.Group("diagnostics — measurement only, and refused with --serve");
         c.Probe = r.Switch("--probe", "time port queries around shuttle arrivals");
         c.WorkProbe = r.Switch("--work-probe", "replay each awareness query and report the work it did");
