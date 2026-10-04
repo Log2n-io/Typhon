@@ -140,7 +140,7 @@ public sealed class SegmentGrowEpochPinTests
         // No SaveChanges, unlike BuildSegment: a transaction that grows a segment mid-commit has not checkpointed either,
         // and the measurement is of EpochHeld, which dirty state does not affect.
         var changeSet = pmmf.CreateChangeSet();
-        segment.Grow(segment.Length + GrowBy, true, changeSet);
+        segment.Grow(segment.Length + GrowBy, changeSet);
 
         AssertPinBudget(pmmf, segment.Length);
     }
@@ -169,7 +169,7 @@ public sealed class SegmentGrowEpochPinTests
 
             using var guard = EpochGuard.Enter(pmmf.EpochManager);
             var changeSet = pmmf.CreateChangeSet();
-            segment.Grow(segment.Length + GrowBy, true, changeSet);
+            segment.Grow(segment.Length + GrowBy, changeSet);
 
             // The removed post-condition, verbatim: prove a 10-page grow correct by re-reading all 1010 pages.
             segment.WalkForwardChainPageCount(guard.Epoch);
@@ -239,7 +239,7 @@ public sealed class SegmentGrowEpochPinTests
         {
             using var guard = EpochGuard.Enter(pmmf.EpochManager);
             var changeSet = pmmf.CreateChangeSet();
-            segment.Grow(segment.Length + GrowBy, true, changeSet);
+            segment.Grow(segment.Length + GrowBy, changeSet);
         });
 
         Assert.That(error.Message, Does.Contain("page[0]"),
@@ -303,7 +303,7 @@ public sealed class SegmentGrowEpochPinTests
             using (EpochGuard.Enter(pmmf.EpochManager))
             {
                 var changeSet = pmmf.CreateChangeSet();
-                segment.Grow(Math.Min(segment.Length + GrowStep, targetPages), true, changeSet);
+                segment.Grow(Math.Min(segment.Length + GrowStep, targetPages), changeSet);
                 changeSet.SaveChanges();
             }
         }

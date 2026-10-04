@@ -33,6 +33,18 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
     // tiny cache sets an explicit size under TestMode, which bypasses this floor.
     internal const int MinimumMemPageCount = 1024;
 
+    /// <summary>
+    /// Test-only: fill every page cache with <c>0xA5</c> the moment it is allocated. Set once per process, before any engine exists
+    /// (the test assembly's warm-up does it), and never changed afterwards.
+    /// </summary>
+    /// <remarks>
+    /// The cache block is not zeroed (PS-14): a page the engine does not read from disk is cleared when its slot is assigned, so the
+    /// block's initial content is undefined. A fresh multi-MiB allocation nevertheless reads zero on every supported platform, which
+    /// would hide any code that still relies on it. Poisoning makes "undefined" non-zero in every test engine, so such a dependency
+    /// fails instead of passing by accident.
+    /// </remarks>
+    internal static bool PoisonCacheForProcess;
+
     #region Events
 
     internal event EventHandler CreatingEvent;
@@ -462,8 +474,14 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
             LogSmallPageCache(Logger, cacheSize / (1024UL * 1024UL), RecommendedMinimumCacheSize / (1024UL * 1024UL));
         }
 
-        MemPages = memoryAllocator.AllocatePinned("PageCache", this, (int)cacheSize, true, 64);
+        // Not zeroed (PS-14): a page that is not read from disk is cleared when its slot is assigned, so nothing depends on the
+        // block's initial content, and a whole-block clear would make every page resident at startup.
+        MemPages = memoryAllocator.AllocatePinned("PageCache", this, (int)cacheSize, false, 64);
         _memPagesAddr = MemPages.DataAsPointer;
+        if (PoisonCacheForProcess)
+        {
+            NativeMemory.Fill(_memPagesAddr, (nuint)cacheSize, 0xA5);
+        }
 
         // Create the Memory Page info table
         MemPagesCount = (int)(cacheSize >> PageSizePow2);
@@ -1189,7 +1207,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         // Reset CRC verification flag — page is freshly loaded, needs re-verification
         _memPagesInfo[memPageIndex].CrcVerified = false;
 
-        // Load the page from disk, if it's stored there already. (won't be the case for new pages)
+        // Load the page from disk, if it's stored there already. (won't be the case for new pages, which AllocateMemoryPage has cleared)
         // The load is async and not part of the returned task but stored in the PageInfo.
         // MapReadOffset is identity for normal pages; for an A/B-paired page (CK-05 meta pair) it resolves the current slot.
         var pageOffset = MapReadOffset(filePageIndex);
@@ -1436,6 +1454,21 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 for (int j = 0; j < PageRawDataSize >> 2; j++, i++)
                 {
                     pageAddr[i] = (filePageIndex << 16) | j;
+                }
+            }
+
+            // PS-14: a page that is not read from disk reads as zero. Cleared HERE, before the GetOrAdd below publishes the slot: from that moment a
+            // concurrent request for the same file page finds it, takes it Allocating → Idle and uses it at once (RequestPageEpoch), and a new page
+            // has no read task for that requester to wait on. Clearing after publication could erase its first write. The seqlock counter goes to 0
+            // with the rest, the value TryAcquire already gave it.
+            // "Not read from disk" is sampled as late as possible, here; FetchPageToMemoryOnMiss samples again after publication to decide the read,
+            // as it always has. _fileSize only grows, so a page this sample finds on disk is read, and one it finds beyond EOF is either still new or
+            // is read over the clear — never cleared and then left unread.
+            if ((MapReadOffset(filePageIndex) + PageSize) > _fileSize)
+            {
+                unsafe
+                {
+                    NativeMemory.Clear(GetMemPageAddress(memPageIndex), PageSize);
                 }
             }
 

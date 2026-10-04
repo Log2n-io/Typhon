@@ -74,7 +74,7 @@ public sealed class TransientSegmentGrowthRegressionTests
             store.AllocatePages(ref initialPages, 0, null);
 
             var segment = new ChunkBasedSegment<TransientStore>(_epochManager, store, stride);
-            segment.Create(PageBlockType.None, StorageSegmentKind.Cluster, initialPages, false);
+            segment.Create(PageBlockType.None, StorageSegmentKind.Cluster, initialPages);
 
             // AllocateChunk(true) is the faulting path: snapshot store → grow segment → ClearChunk the new page via the
             // snapshot. Pre-fix, the allocation that crossed page 4 threw IndexOutOfRange inside ClearChunk.

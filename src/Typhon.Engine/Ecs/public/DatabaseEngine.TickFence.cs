@@ -424,7 +424,7 @@ public partial class DatabaseEngine
         Span<int> tsPages = stackalloc int[4];
         tsValue.AllocatePages(ref tsPages, 0, null);
         segment = new ChunkBasedSegment<TransientStore>(EpochManager, tsValue, stride);
-        segment.Create(PageBlockType.None, StorageSegmentKind.Cluster, tsPages, false);
+        segment.Create(PageBlockType.None, StorageSegmentKind.Cluster, tsPages);
     }
 
     /// <summary>

@@ -270,7 +270,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             SeedDirectoryPair(reservedMapPage, _occupancyNextReservedMapTwinPageIndex);
         }
 
-        _occupancySegment.CreateOrGrow(PageBlockType.OccupancyMap, pages, length - 1, ref _occupancyNextReservedMapPageIndex, true, changeSet);
+        _occupancySegment.CreateOrGrow(PageBlockType.OccupancyMap, pages, length - 1, ref _occupancyNextReservedMapPageIndex, changeSet);
         var oldCap = _occupancyMap.Capacity;
         _occupancyMap.Grow();
         // Phase 5: Storage:OccupancyMap:Grow event.
@@ -547,11 +547,11 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
         }
 
         // Directory-only root (v4): the occupancy segment spans two genesis pages — the directory root and its first data
-        // page (the L0 bitmap words). clear: true zeroes the data page so every page starts as Free.
+        // page (the L0 bitmap words). Create clears every data page in full (PS-14), so every page starts as Free.
         Span<int> ids = stackalloc int[2];
         ids[0] = rootPageIndex;
         ids[1] = firstDataPageIndex;
-        if (segment.Create(type, StorageSegmentKind.Occupancy, ids, true, cs) == false)
+        if (segment.Create(type, StorageSegmentKind.Occupancy, ids, cs) == false)
         {
             return null;
         }
@@ -610,7 +610,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             ThrowHelper.ThrowCorruption("ManagedPagedMMF", pages[0], "Segment root page already registered — duplicate allocation");
         }
 
-        if (!segment.Create(type, kind, pages, false, changeSet))
+        if (!segment.Create(type, kind, pages, changeSet))
         {
             return null;
         }
@@ -663,7 +663,7 @@ public partial class ManagedPagedMMF : PagedMMF, IMetricSource, IDebugProperties
             ThrowHelper.ThrowCorruption("ManagedPagedMMF", pages[0], "Segment root page already registered — duplicate allocation");
         }
 
-        if (!segment.Create(type, kind, pages, false, changeSet))
+        if (!segment.Create(type, kind, pages, changeSet))
         {
             return null;
         }

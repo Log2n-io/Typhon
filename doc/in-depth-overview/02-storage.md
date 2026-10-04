@@ -314,9 +314,9 @@ Called by the ECS path every 128 entity operations (`EpochRefreshInterval = 128`
 
 ### `EnsureDirtyAtLeast(2)` — the Grow → first-access race
 
-`ChunkBasedSegment.Grow` calls `_store.EnsureDirtyAtLeast(memPageIdx, 2)` for each newly allocated page (see `ChunkBasedSegment.cs:274`). Why 2 and not 1?
+`ChunkBasedSegment.GrowChunkCapacity` calls `_store.EnsureDirtyAtLeast(memPageIdx, 2)` for each newly allocated page (see `ChunkBasedSegment.cs:274`). Why 2 and not 1?
 
-The race: `base.Grow` registers the new page with a `ChangeSet`, which sets `DC = 1`. Between the moment `base.Grow` releases the page latch and the moment `ChunkBasedSegment.Grow` re-latches it to clear the bitmap, a checkpoint cycle can run: it snapshots zeros, writes them, calls `DecrementDirty`, and brings `DC` to 0 — making the page evictable before the caller (`AllocateChunk` → `GetChunkAddress`) has had a chance to establish `ACW > 0` protection.
+The race: `base.Grow` registers the new page with a `ChangeSet`, which sets `DC = 1`. Between the moment `base.Grow` releases the page latch and the moment `ChunkBasedSegment.GrowChunkCapacity` re-latches it to clear the bitmap, a checkpoint cycle can run: it snapshots zeros, writes them, calls `DecrementDirty`, and brings `DC` to 0 — making the page evictable before the caller (`AllocateChunk` → `GetChunkAddress`) has had a chance to establish `ACW > 0` protection.
 
 `EnsureDirtyAtLeast(memPageIdx, 2)` raises `DC` to at least 2 atomically. One checkpoint cycle decrements to 1; the page survives. The next caller's `MarkSlotDirty` arrives, raises `ACW > 0`, and from then on the page is in the normal write protection regime.
 
@@ -421,7 +421,7 @@ The Workbench's Database File Map (Module 15) reads the engine's storage state w
 | `DatabaseDirectory` | `Environment.CurrentDirectory` | Filesystem directory. Must exist. `DatabaseAbsoluteDirectory` returns the absolutized form. |
 | `DatabaseFileName` | `DatabaseName` (if unset) | Validated with the same rules, but no longer names any file: a database is the bundle directory `{DatabaseDirectory}/{DatabaseName}.typhon/`, and the paged data file inside it is always named `data` (no extension). |
 | `DatabaseCacheSize` | `256 MiB` (`DefaultDatabaseCacheSize`) | Total page cache bytes. Must be a multiple of `PageSize`, between `MinimumCacheSize` (8 MiB) and `MaximumCacheSize` (2 GiB minus one page). |
-| `PagesDebugPattern` | `false` | Fill newly-allocated pages with a debug pattern (development/testing). |
+| `PagesDebugPattern` | `false` | Fill a page-cache slot with a debug pattern when it is assigned. No longer observable: a page not read from disk is cleared right after ([PS-14](https://github.com/Log2n-io/Typhon/blob/main/rules/durability.md)), a page read from disk is overwritten. |
 | `BackpressureStrategyFactory` (internal) | `() => new WaitForIOStrategy()` | Test hook to substitute the backpressure strategy. |
 
 Also exposed: `EnsureFileDeleted()` (best-effort delete of the backing file + lock file; for tests), `IsValid` / `Validate(silent, out validation)` (returns the multi-line error string or throws).

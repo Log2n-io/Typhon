@@ -124,11 +124,11 @@ public class DirectoryPairTests
 
         // Each grow rewrites the root directory → re-persists it → alternates the slot and bumps the generation.
         var cs1 = mmf.CreateChangeSet();
-        seg.Grow(4, true, cs1);
+        seg.Grow(4, cs1);
         cs1.SaveChanges();                                     // persist #2: root → twin slot, gen 2
 
         var cs2 = mmf.CreateChangeSet();
-        seg.Grow(8, true, cs2);
+        seg.Grow(8, cs2);
         cs2.SaveChanges();                                     // persist #3: root → primary slot, gen 3
 
         var genPrimary = ReadSlotGeneration(mmf, root);
@@ -208,7 +208,7 @@ public class DirectoryPairTests
             twin = TwinOf(mmf, root);
 
             var cs1 = mmf.CreateChangeSet();
-            seg.Grow(5, true, cs1);
+            seg.Grow(5, cs1);
             cs1.SaveChanges();                                 // make both slots valid, then corrupt both
 
             mmf.WritePageDirect(root, GarbagePage());

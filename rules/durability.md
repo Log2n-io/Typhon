@@ -1325,7 +1325,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   never let the checkpoint, SavePages, or any writer touch DirtyCounter at all
   invariant at quiesce — no unit of work open, no checkpoint running — every page has DirtyCounter == 0
   scope: ChangeSet.AddByMemPageIndex / RegisterReDirty / ReleaseDirtyMarks / Reset, PagedMMF.DecrementDirtyByDelta,
-         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.Grow (its local set, released in a finally)
+         UnitOfWork.Dispose, Transaction.Dispose, EntityAccessor, ChunkBasedSegment.GrowChunkCapacity (its local set, released in a finally)
   verified: ChangeSetDirtyMarkConservationTests; SegmentGrowAtomicityTests.AChunkSegmentGrowThatThrows_StillReleasesItsLocalChangeSet (the
             throw path of a locally-created set), with its mutant AMarkLeftOnALocalChangeSet_IsRejected
   on_violation: under-release → page permanently unevictable, cache starves after tens of minutes (#824);
@@ -1458,7 +1458,7 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   scope: LogicalSegment.CreateOrGrow, LogicalSegment.Grow, PinForPublish, InitDataPages, FilledDirectoryPageCount, ReleaseUnpublished,
          IPageStore.ReleaseUnpublishedPages, ManagedPagedMMF.ReleaseUnpublishedPages, ManagedPagedMMF.PersistProtectedPage (re-checks a pair a
          failed grow may have just dropped), ManagedPagedMMF.GrowOccupancySegment (its reserved map page counts as consumed only once the grow
-         publishes), ChunkBasedSegment.Grow
+         publishes), ChunkBasedSegment.GrowChunkCapacity
   on_violation: a page-cache back-pressure timeout, or any other throw, mid-grow leaves the directory listing pages the segment never adopted
                 and the old tail linked into them. Nothing notices while the process runs, since the next grow rewrites both; if it stops first,
                 the shutdown checkpoint persists them and the next open's strict load throws "integrity check failed at Load" (measured:
@@ -1472,8 +1472,37 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
   note: releasing needs the page cache too, so it can fail in turn. That failure is recorded on the grow's exception, which is still the one
         thrown; the pages then leak, which corrupts nothing since nothing references them.
   note: not covered. A Create that throws part-way leaves its pages allocated and its segment registered with no page list (nothing
-        references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.Grow's own bookkeeping after `base.Grow` has published
+        references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.GrowChunkCapacity's own bookkeeping after `base.Grow` has published
         (bitmap clear, free-list splice) is not atomic either; nothing but a failed CreateOrGrow post-condition is known to throw there.
+
+### PS-14: A page the engine did not read from disk reads as zero before anyone can reach it `[silent]`
+  invariant ∀ slot assigned to a file page that is NOT loaded from the data file: all 8 192 bytes are zero before the slot is published in
+            the page directory — from that moment a concurrent request for the same file page can take it and write to it
+  invariant every page a segment is given is cleared in full before any of it is written, header included: each data page, the root and
+            every new map-extension page, including the one that holds only the terminating 0. Its page number may be reused from a deleted
+            segment, so the slot holds that page's bytes — resident, or read back from disk — and the slot clear above never runs for it
+  invariant two header counters survive that clear: the seqlock `ModificationCounter`, and `ChangeRevision`, so a reused page number's
+            revision never goes backwards (`PageSectorFooter` stamps each sector with its low 16 bits). Not claimed: that the next stamp
+            differs from every stale sector — a checkpoint bumps only its staging copy (CP-08), so the live revision can trail the disk's
+  invariant the page-cache block itself is never zeroed: a slot's content before it is first assigned is undefined
+  scope: PagedMMF.AllocateMemoryPageCore, PagedMMF.FetchPageToMemoryOnMiss, LogicalSegment.InitHeader, LogicalSegment.InitDataPages,
+         LogicalSegment.CreateOrGrow, PagedMMF.PoisonCacheForProcess
+  rationale: a slot handed to a new page holds its previous occupant's bytes, and two directory sites used to clear only the 192-byte
+    header before writing a few entries; data pages of a segment created without a clear got nothing. Whatever the caller does not
+    write survives — and the clear has to come before publication, because a new page has no read task a second requester would wait on.
+  on_violation: unrelated page content — component data, index keys, string-table bytes — reaches the data file inside a page's unwritten
+    part, and `StampPageForWrite` CRCs the whole page, so it reloads as valid content. A disclosure into the file, its backups and copies;
+    two logically identical databases differ byte for byte. Not `[fatal]`: no write is lost and no reader faults.
+  verified: PageInitialContentTests.ANewPageInANeverUsedSlot_ReadsAsZero [VerifiesRule] (the slot is poisoned, so a missing clear reads
+            0xA5, not zero) and ANewPageInARecycledSlot_ReadsAsZero (a slot that held a 0x5A page); SegmentPageInitialContentTests covers a
+            reused page number as a data page, as a root (in memory and reloaded from disk) and as the terminator-only map page, and
+            AReusedDataPage_KeepsItsChangeRevision the surviving revision. Each fails with its fix removed (#1126)
+  note: `PagedMMF.PoisonCacheForProcess`, set once by the test assembly, fills every test page cache with 0xA5 at allocation. A fresh
+        multi-MiB allocation reads zero on every supported platform, so without it a reader of undefined content would pass by accident.
+  note: the block is not zeroed so that a large cache does not become resident at startup; #945 builds on this.
+  note: known gaps, open. A page that IS read from disk is published before its read starts, so a concurrent requester can use the slot's
+        previous content; and the loser of a concurrent miss reads into the winner's slot (#1128). A directory pair's twin is never cleared,
+        and a reused twin's old image can win at open (#1129).
 
 ---
 

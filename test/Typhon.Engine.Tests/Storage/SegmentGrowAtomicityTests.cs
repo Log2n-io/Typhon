@@ -298,7 +298,7 @@ public sealed class SegmentGrowBackpressureTests
                 }
 
                 var changeSet = pmmf.CreateChangeSet();
-                Assert.Throws<PageCacheBackpressureTimeoutException>(() => segment.Grow(900, true, changeSet));
+                Assert.Throws<PageCacheBackpressureTimeoutException>(() => segment.Grow(900, changeSet));
                 changeSet.SaveChanges();
             }
 
@@ -375,7 +375,7 @@ internal static class SegmentGrowTestKit
         using (EpochGuard.Enter(pmmf.EpochManager))
         {
             var changeSet = pmmf.CreateChangeSet();
-            Assert.Throws<InjectedGrowFault>(() => segment.Grow(length, true, changeSet));
+            Assert.Throws<InjectedGrowFault>(() => segment.Grow(length, changeSet));
             changeSet.SaveChanges();
         }
     }
@@ -387,7 +387,7 @@ internal static class SegmentGrowTestKit
         using (EpochGuard.Enter(pmmf.EpochManager))
         {
             var changeSet = pmmf.CreateChangeSet();
-            segment.Grow(length, true, changeSet);
+            segment.Grow(length, changeSet);
             changeSet.SaveChanges();
         }
 
@@ -451,7 +451,7 @@ internal static class SegmentGrowTestKit
             using (EpochGuard.Enter(pmmf.EpochManager))
             {
                 var changeSet = pmmf.CreateChangeSet();
-                segment.Grow(Math.Min(segment.Length + BuildStep, pages), true, changeSet);
+                segment.Grow(Math.Min(segment.Length + BuildStep, pages), changeSet);
                 changeSet.SaveChanges();
             }
         }

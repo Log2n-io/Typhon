@@ -176,9 +176,9 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     // Segment lifecycle: Create, Load, Grow
     // ═══════════════════════════════════════════════════════════════════════
 
-    internal override bool Create(PageBlockType type, StorageSegmentKind kind, Span<int> filePageIndices, bool clear, ChangeSet changeSet = null)
+    internal override bool Create(PageBlockType type, StorageSegmentKind kind, Span<int> filePageIndices, ChangeSet changeSet = null)
     {
-        if (!base.Create(type, kind, filePageIndices, clear, changeSet))
+        if (!base.Create(type, kind, filePageIndices, changeSet))
         {
             return false;
         }
@@ -282,7 +282,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
     /// This method is thread-safe. It uses a lock to ensure only one thread grows the segment at a time.
     /// After growth, new pages are spliced into the forward linked list.
     /// </remarks>
-    private bool Grow(int minNewPageCount = 0, ChangeSet changeSet = null)
+    private bool GrowChunkCapacity(int minNewPageCount = 0, ChangeSet changeSet = null)
     {
         lock (_growLock)
         {
@@ -311,7 +311,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
             try
             {
                 // Grow the underlying logical segment (thread-safe, will allocate new pages)
-                base.Grow(newLength, true, effectiveChangeSet);
+                base.Grow(newLength, effectiveChangeSet);
 
                 // Clear the page metadata (bitmap) for newly allocated pages and protect against checkpoint race
                 {
@@ -406,7 +406,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
         while (ChunkCapacity < minChunkCount)
         {
             var pagesNeeded = 1 + ((minChunkCount - ChunkCountRootPage + ChunkCountPerPage - 1) / ChunkCountPerPage);
-            if (!Grow(pagesNeeded, changeSet))
+            if (!GrowChunkCapacity(pagesNeeded, changeSet))
             {
                 break;
             }
@@ -436,7 +436,7 @@ public class ChunkBasedSegment<TStore> : LogicalSegment<TStore> where TStore : s
                 return true; // Another thread grew while we waited
             }
 
-            return Grow(changeSet: changeSet);
+            return GrowChunkCapacity(changeSet: changeSet);
         }
     }
 
