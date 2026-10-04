@@ -8475,14 +8475,14 @@ internal sealed unsafe partial class ArchetypeClusterState
         return bitmap != null && (uint)wordIdx < (uint)bitmap.Length && (bitmap[wordIdx] & (1L << (chunkId & 63))) != 0;
     }
 
-    /// <summary>
-    /// Clear the write-time bookkeeping arrays (<see cref="ClusterProcessBitmap"/>, <see cref="ClusterMigrationPendingSlots"/>,
-    /// <see cref="ClusterShrinkPendingAxes"/>) for the next tick. Single-threaded — called once per archetype from
-    /// <see cref="DatabaseEngine.FinalizeArchetypeFence"/> after all AABB slices finished.
-    /// </summary>
     /// <summary>Test seam: runs at the top of <see cref="ClearAabbRefreshBookkeeping"/>, inside the fence, after the tick's flags were consumed.</summary>
     internal Action BeforeBookkeepingClearProbe;
 
+    /// <summary>
+    /// Clear the write-time bookkeeping arrays (<see cref="ClusterProcessBitmap"/>, <see cref="ClusterMigrationPendingSlots"/>,
+    /// <see cref="ClusterShrinkPendingAxes"/>) for the next tick — only what this fence consumed (CC-02). Single-threaded — called once per archetype from
+    /// <see cref="DatabaseEngine.FinalizeArchetypeFence"/> after all AABB slices finished.
+    /// </summary>
     internal void ClearAabbRefreshBookkeeping()
     {
         BeforeBookkeepingClearProbe?.Invoke();
