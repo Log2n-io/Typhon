@@ -3484,7 +3484,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
                 // Make sure the page to save is properly loaded first (wait for any pending IO read to complete).
                 WaitForPendingRead(curMemPageIndex, curPageInfo);
 
-                var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (curMemPageIndex * PageSize));
+                var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (curMemPageIndex * (long)PageSize));
                 ++headerAddr->ChangeRevision;
 
                 // Stamp identity + checksum over the updated page so the on-disk copy is self-consistent (CP-07 equivalent for SavePages)
@@ -3514,7 +3514,7 @@ public partial class PagedMMF : ResourceNode, IMemoryResource
         {
             WaitForPendingRead(curMemPageIndex, curPageInfo);
 
-            var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (curMemPageIndex * PageSize));
+            var headerAddr = (PageBaseHeader*)(memPageBaseAddr + (curMemPageIndex * (long)PageSize));
             ++headerAddr->ChangeRevision;
 
             StampPageForWrite(new Span<byte>((byte*)headerAddr, PageSize), curPageInfo.FilePageIndex);

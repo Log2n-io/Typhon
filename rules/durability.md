@@ -1563,6 +1563,29 @@ The 8-step checkpoint pipeline. Step ordering is load-bearing.
         references its root, so nothing is torn, but the pages leak). ChunkBasedSegment.GrowChunkCapacity's own bookkeeping after `base.Grow` has published
         (bitmap clear, free-list splice) is not atomic either; nothing but a failed CreateOrGrow post-condition is known to throw there.
 
+### PS-12: A mem-page's address is computed in 64 bits, never in `int` `[fatal]` `[silent]`
+  invariant ∀ expression of the form `memPagesBaseAddr + (memPageIndex × PageSize)`: the product is
+            evaluated as `long` — `memPageIndex * (long)PageSize` — never as `int × int`
+  invariant an `int` product is exact only while `memPageIndex < 262 144` (2 GiB ÷ 8 KiB), so a narrow
+            product is a LATENT defect whose trigger is the configured cache size, not the code path
+  scope: PagedMMF.SavePages, PagedMMF.GetMemPageAddress, PagedMMF.WritePagesForCheckpoint,
+         ChunkAccessor.GetMemPageIndexFromSlot
+  rationale: the page cache is one contiguous native block addressed as `base + index × PageSize`.
+    `PageSize` is an `int` constant and `MemPageIndex` is an `int` field, so their product is an `int`
+    unless one side is widened — and the compiler gives no warning for it. Past 262 143 pages the product
+    wraps negative, and `byte* + int` sign-extends, so the pointer lands up to 2 GiB BELOW the cache base,
+    in memory the engine does not own.
+  on_violation: a wild-pointer WRITE, not a read. Both `SavePages` sites do `++headerAddr->ChangeRevision`
+    — a 4-byte read-modify-write at the foreign address — and then `StampPageForWrite` over 8 KiB of it.
+    An access violation if that page is unmapped; silent heap corruption if it is mapped. This is the
+    structural write path: bootstrap, schema write, segment grow, v1 replay.
+  verified: PageCacheAddressArithmeticTests.AMemPageOffsetPastTwoGibIsComputedIn64Bits [VerifiesRule] —
+            asserts the offset for `memPageIndex` 262 144 is 2 147 483 648, and that the narrow `int`
+            product it replaced wraps to −2 147 483 648, so the test fails if the widening is removed
+  note: the cache-size validator (`PagedMMFOptions.Validate`, 2 GiB − 8 KiB) is what kept this
+        unreachable. It was fixed BEFORE the ceiling moved, deliberately: until then the validator was the
+        only thing standing between this expression and live heap corruption.
+
 ### PS-14: A page the engine did not read from disk reads as zero before anyone can reach it `[silent]`
   invariant ∀ slot assigned to a file page that is NOT loaded from the data file: all 8 192 bytes are zero before the slot is ready (PS-15)
             — its owner clears it after publishing it in the page directory, while no other thread may use it, so the "not on disk" decision
