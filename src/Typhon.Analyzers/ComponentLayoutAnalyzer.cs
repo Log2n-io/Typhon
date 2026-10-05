@@ -197,7 +197,18 @@ public class ComponentLayoutAnalyzer : DiagnosticAnalyzer
             return;
         }
 
-        // TYPHON011 first: when the two layouts disagree the component is unusable, and the padding advice would be advice about the wrong layout.
+        // TYPHON013 FIRST, and it does not return, because it is the only one of the three that is a correctness bound rather than advice: a component past the
+        // inline payload cannot be passed to Spawn at all. It was reported last, after the TYPHON011 block below — which RETURNS — so a component that was both
+        // marshal-divergent and oversized reported only the divergence, and fixing that revealed a second diagnostic the analyzer had already computed. The
+        // three are independent remedies: splitting an oversized component does not remove padding from either half, Pack almost never brings 132 bytes under
+        // 112, and neither has anything to do with a managed/marshalled disagreement.
+        if (managedLayout.Size > InlineSpawnPayloadBytes)
+        {
+            context.ReportDiagnostic(Diagnostic.Create(
+                InlineSpawnPayloadRule, type.Locations[0], type.Name, managedLayout.Size, InlineSpawnPayloadBytes));
+        }
+
+        // TYPHON011 next: when the two layouts disagree the component is unusable, and the padding advice would be advice about the wrong layout.
         var marshalled = new List<FieldPlacement>();
         if (TryComputeLayout(type, LayoutMode.Marshalled, packOverride: 0, marshalled, out var marshalledLayout) && marshalled.Count == managed.Count)
         {
@@ -234,15 +245,6 @@ public class ComponentLayoutAnalyzer : DiagnosticAnalyzer
                     managed[culprit].Size, managed[culprit].Offset, marshalled[culprit].Size, marshalled[culprit].Offset));
                 return;
             }
-        }
-
-        // TYPHON013 next, and it does NOT return: a component can be both too large to spawn inline and wasteful of padding, and the two remedies are
-        // independent - splitting it does not remove the padding from either half, and Pack almost never brings 132 bytes under 112. Reporting one and
-        // swallowing the other would mean fixing the first only to discover the second.
-        if (managedLayout.Size > InlineSpawnPayloadBytes)
-        {
-            context.ReportDiagnostic(Diagnostic.Create(
-                InlineSpawnPayloadRule, type.Locations[0], type.Name, managedLayout.Size, InlineSpawnPayloadBytes));
         }
 
         // What the struct would measure at the recommended Pack, which is the only honest baseline: comparing against the end of the last field would report

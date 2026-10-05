@@ -94,9 +94,32 @@ public unsafe struct ComponentValue
         return cv;
     }
 
+    /// <summary>Reads the payload back as <typeparamref name="T"/>.</summary>
+    /// <typeparam name="T">The component type the value was packed from.</typeparam>
+    /// <returns>The value.</returns>
+    /// <remarks>
+    /// <b>Two checks, and only one of them can be free — which is why they are not one check.</b> The read below is an
+    /// <c>Unsafe.ReadUnaligned&lt;T&gt;</c> of <c>sizeof(T)</c> bytes from <see cref="HeaderSize"/> into a 128-byte struct, so a
+    /// <typeparamref name="T"/> larger than <see cref="MaxPayloadSize"/> reads past the END of the struct — into the next element of a
+    /// <c>ComponentValue[]</c>, or past the stack slot. That bound is on <c>sizeof(T)</c> alone, a JIT-time constant for a concrete
+    /// <typeparamref name="T"/>, so it folds to nothing in every instantiation that fits and is ungated for the same reason
+    /// <see cref="Create{T}"/>'s is: #1140 was a guard that could not run, and a memory-safety bound behind a flag defaulted to off is not a
+    /// bound.
+    /// <para>
+    /// The EXACT match against <see cref="DataSize"/> stays gated, because it is a different kind of check and a different cost.
+    /// <c>DataSize</c> is a runtime field, so that comparison cannot fold: it is a load, a compare and a branch on a path that runs per
+    /// component per spawn. It catches reading a value back as the wrong same-sized type, which is a type-confusion bug rather than an
+    /// out-of-bounds one, and that is what strict mode is for.
+    /// </para>
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal T Read<T>() where T : unmanaged
     {
+        if (sizeof(T) > MaxPayloadSize)
+        {
+            ThrowHelper.ThrowComponentTooLargeToSpawnInline(typeof(T), sizeof(T), MaxPayloadSize);
+        }
+
         if (CheckConfig.Enabled && sizeof(T) != DataSize)
         {
             ThrowHelper.ThrowInvalidOp($"Read<{typeof(T).Name}> size {sizeof(T)} != stored DataSize {DataSize}");

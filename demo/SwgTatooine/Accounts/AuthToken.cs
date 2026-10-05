@@ -55,6 +55,33 @@ public static class AuthToken
     private static readonly (byte[] Bytes, bool FromEnvironment) Signing = ResolveKey();
 
     /// <summary>
+    /// Forces the signing key to be resolved, so a misconfigured one stops the server at start-up.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// <see cref="KeyVariable"/> is set but is not decodable, or is too short.
+    /// </exception>
+    /// <remarks>
+    /// <b>Needed because a static initialiser's throw does not arrive when the comment on <see cref="ResolveKey"/> says it does.</b>
+    /// <see cref="Signing"/> is a <c>static readonly</c>, so the CLR runs <see cref="ResolveKey"/> at FIRST USE of this type and wraps
+    /// anything it throws in a <see cref="TypeInitializationException"/>. "Must stop the server, not fall back to a random one" was
+    /// therefore true only by accident: the start-up banner happens to read <see cref="KeyIsPersistent"/>, and reordering that one line
+    /// would have moved the first failure into <c>Admit</c>, on a transport thread, as a wrapped exception, for the first client to
+    /// connect. Called explicitly from the serve path so the obligation is stated rather than inferred, and the original exception is
+    /// unwrapped so the operator reads the sentence that names the fix.
+    /// </remarks>
+    public static void EnsureConfigured()
+    {
+        try
+        {
+            _ = Signing;
+        }
+        catch (TypeInitializationException ex) when (ex.InnerException != null)
+        {
+            throw ex.InnerException;
+        }
+    }
+
+    /// <summary>
     /// Whether the signing key came from <see cref="KeyVariable"/> rather than being generated for this process.
     /// </summary>
     /// <remarks>
@@ -173,6 +200,9 @@ public static class AuthToken
         byte[] key;
         try
         {
+            // Ambiguous for a value that is valid as BOTH, which an even-length base64 string of only hex characters is: it is read as
+            // hex and yields a different key, stably and silently. Not resolved by guessing harder — it is resolved by generating keys
+            // the documented way (`openssl rand -base64 32`), whose output contains non-hex characters with overwhelming probability.
             key = text.Length % 2 == 0 && IsHex(text) ? Convert.FromHexString(text) : Convert.FromBase64String(text);
         }
         catch (FormatException ex)

@@ -55,6 +55,26 @@ public static partial class TatooineReplication
 
     private static ushort DefaultSpawnRealm;
 
+    /// <summary>
+    /// Refuses to start a server that cannot host characters.
+    /// </summary>
+    /// <exception cref="InvalidOperationException"><see cref="ConfigureAvatars"/> was never called.</exception>
+    /// <remarks>
+    /// <b>This is where <see cref="ConfigureAvatars"/>' claim that "a server that forgot this refuses to start" is actually made true.</b>
+    /// The check used to live inside the bind, on the tick, where the demo's <c>AbortTickAndStop</c> policy turned it into a server stop
+    /// triggered by whichever client happened to log in first. Start-up is both earlier and cheaper, and it fails the person who can fix
+    /// it rather than the people who were playing.
+    /// </remarks>
+    public static void ThrowIfAvatarsNotConfigured()
+    {
+        if (!AvatarsConfigured)
+        {
+            throw new InvalidOperationException(
+                "TatooineReplication.ConfigureAvatars was not called, so a login would have no account index and no spawn point. "
+                + "Call it before starting the runtime.");
+        }
+    }
+
     /// <summary>The index over <see cref="Character.Account"/>, resolved once. See <see cref="ConfigureAvatars"/>.</summary>
     private static IndexRef CharacterByAccount;
 
@@ -92,11 +112,13 @@ public static partial class TatooineReplication
     /// </remarks>
     private static readonly Dictionary<ulong, uint> SessionOfAccount = [];
 
+
     private static long _avatarsSpawned;
     private static long _avatarsDestroyed;
     private static long _charactersCreated;
     private static long _loginsRefusedDuplicate;
     private static long _loginsRefusedAnonymous;
+    private static long _loginsRefusedUnconfigured;
     private static long _locationsSaved;
 
     /// <summary>Avatars spawned by a login since the last reset.</summary>
@@ -113,6 +135,9 @@ public static partial class TatooineReplication
 
     /// <summary>Sessions refused because they reached the bind with no identity at all.</summary>
     public static long LoginsRefusedAnonymous => System.Threading.Interlocked.Read(ref _loginsRefusedAnonymous);
+
+    /// <summary>Logins refused because this process never called <see cref="ConfigureAvatars"/>.</summary>
+    public static long LoginsRefusedUnconfigured => System.Threading.Interlocked.Read(ref _loginsRefusedUnconfigured);
 
     /// <summary>Character positions written back since the last reset — logouts, plus A6's cadence when it lands.</summary>
     public static long LocationsSaved => System.Threading.Interlocked.Read(ref _locationsSaved);
@@ -133,7 +158,12 @@ public static partial class TatooineReplication
     /// instead of spawning everybody at the origin — which on this planet is empty desert, and is the kind of wrong that looks
     /// like a bug in the client.
     /// </remarks>
-    public static void ConfigureAvatars(DatabaseEngine dbe, Point3F spawn, ushort realm, int tickRateHz, double saveIntervalSeconds = DefaultSaveIntervalSeconds)
+    public static void ConfigureAvatars(
+        DatabaseEngine dbe,
+        Point3F spawn,
+        ushort realm,
+        int tickRateHz,
+        double saveIntervalSeconds = DefaultSaveIntervalSeconds)
     {
         ArgumentNullException.ThrowIfNull(dbe);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(tickRateHz);
@@ -147,7 +177,13 @@ public static partial class TatooineReplication
 
         // Rounded UP to one tick, so a cadence shorter than a tick saves every tick rather than every tick being skipped by an
         // interval of zero — which `% 0` would make a divide-by-zero rather than a fast path.
-        SaveIntervalTicks = saveIntervalSeconds <= 0d ? 0 : Math.Max(1, (int)Math.Round(saveIntervalSeconds * tickRateHz));
+        //
+        // Clamped as a DOUBLE before the cast, because a double-to-int conversion out of range is unspecified in an unchecked
+        // context: `--avatar-save-interval 1e9` produced int.MinValue, which Math.Max(1, …) then turned into 1, so asking for a
+        // save every thirty years saved every tick — the exact opposite, silently. int.MaxValue ticks is ~500 days at 50 Hz, which
+        // is "never" for any purpose this knob has.
+        var intervalTicks = Math.Round(saveIntervalSeconds * tickRateHz);
+        SaveIntervalTicks = saveIntervalSeconds <= 0d ? 0 : (int)Math.Clamp(intervalTicks, 1d, int.MaxValue);
         SaveIntervalSeconds = SaveIntervalTicks == 0 ? 0d : (double)SaveIntervalTicks / tickRateHz;
         AvatarsConfigured = true;
     }
@@ -251,19 +287,41 @@ public static partial class TatooineReplication
         {
             System.Threading.Interlocked.Increment(ref _loginsRefusedDuplicate);
             subs.Session(session).Kick(AccountAlreadyPlayingCloseCode, "that account is already playing");
+
+            // Safe to forget the identity on the way out, and it is worth saying why, because the kick is STAGED rather than
+            // immediate. The refused session cannot be reconsidered on a later tick: `SubscriptionsIngressExecSystem.BeginTick`
+            // applies last tick's requests — turning this Kick into a real close — BEFORE it publishes the open set, so the session is
+            // gone from `OpenSessions` by the time `WalkSessions` next runs and never re-enters `Unbound`.
             AccountOfSession.Remove(session.Value);
             return;
         }
 
         if (!AvatarsConfigured)
         {
-            // A programmer error, and loud: without ConfigureAvatars there is no account index to read and no spawn point to fall
-            // back on, so every login would silently create a second character at the origin.
-            throw new InvalidOperationException(
-                "TatooineReplication.ConfigureAvatars was not called, so a login has no account index and no spawn point. Call it before the runtime starts.");
+            // A programmer error, but NOT a throw: this runs inside the session system, and with SystemExceptionPolicy.AbortTickAndStop
+            // a throw here stopped the whole server on somebody's login — turning one misconfigured host into an outage for every
+            // session already playing. The configuration is checked where ConfigureAvatars' own doc says it is, at start-up
+            // (ThrowIfAvatarsNotConfigured, called from StartReplication), so reaching this is a host that drove replication without it.
+            // The session is kicked, which tells that one client the truth and leaves the tick alive.
+            System.Threading.Interlocked.Increment(ref _loginsRefusedUnconfigured);
+            subs.Session(session).Kick(NotAuthenticatedCloseCode, "this server is not configured to host characters");
+            return;
         }
 
-        var characters = tx.For<CharacterArch>();
+        // ── Read-or-create, on the TICK's transaction and deliberately not through CharacterStore ──────────────────────────────
+        //
+        // CharacterStore.ReadOrCreate is the same decision for an OFF-TICK caller: it opens its own transactions and catches the
+        // unique-index refusal, which is the shape A4 specifies. It cannot be used here, and the reason is the atomicity this method
+        // promises. A login reads or creates the character, spawns the avatar and hands the session control in ONE commit — the tick's.
+        // A nested read-or-create on its own transaction would commit separately, so a crash between the two would leave a character
+        // with no avatar, and the "or none of it happens" in this method's remarks would be false.
+        //
+        // The retry CharacterStore performs is also not implementable here, and not needed. Not implementable: a unique-index violation
+        // on a Versioned component surfaces at COMMIT, and this transaction is committed by the tick after every system has run, so a
+        // catch around the spawn below would never see it. Not needed: two logins for one account cannot both reach this point. The
+        // session system is serial, so there is one bind at a time, and the account guard above refuses the second session for an account
+        // that is already playing. That serialisation is the precondition — stated here because it is what makes the missing retry safe,
+        // and a change that makes binding parallel, or that allows one account two sessions, breaks it.
         if (!TryFindCharacter(tx, account, out var character, out var profile))
         {
             profile = new Character
@@ -287,7 +345,6 @@ public static partial class TatooineReplication
         subs.Session(session).Control(avatar);
 
         BoundPlayer[session.Value] = avatar;
-        BoundIds.Add(avatar);
         CharacterOfSession[session.Value] = character;
         SessionOfAccount[account.RawValue] = session.Value;
         AccountOfSession.Remove(session.Value);
@@ -297,7 +354,6 @@ public static partial class TatooineReplication
         // The same counter PossessPlayers incremented, deliberately: "this session now drives a body" is the fact every check and
         // every measurement was asking about, and renaming it would make a run before A5 and a run after it incomparable.
         System.Threading.Interlocked.Increment(ref _possessions);
-        _ = characters;
     }
 
     /// <summary>
@@ -366,6 +422,51 @@ public static partial class TatooineReplication
     }
 
     /// <summary>
+    /// Writes every live avatar's position back to its character, once, as the server stops.
+    /// </summary>
+    /// <param name="tick">The tick context.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>The cadence is a bound on what a CRASH costs; it was also, wrongly, the bound on what a graceful stop cost.</b> A6's
+    /// interval exists because a <c>kill -9</c> cannot be helped. An operator-initiated stop can: the avatars are still in the world
+    /// and the tick still has a transaction, so there is no reason for <c>RequestShutdown</c> to lose a single step of walking.
+    /// </para>
+    /// <para>
+    /// <b>Once.</b> A shutdown lasts several ticks while the kicks drain, and re-writing every character on each of them would turn a
+    /// stop into a burst of writes proportional to the number of ticks it takes to close the sockets.
+    /// </para>
+    /// </remarks>
+    private static void FlushAvatarsForShutdown(TickContext tick)
+    {
+        if (_shutdownFlushed || BoundPlayer.Count == 0)
+        {
+            return;
+        }
+
+        var tx = tick.Transaction;
+        if (tx == null)
+        {
+            return;
+        }
+
+        _shutdownFlushed = true;
+
+        // NOT disposed: the tick's transaction owns these, as everywhere else in this file.
+        var players = tx.For<Player>();
+        var characters = tx.For<CharacterArch>();
+        foreach (var (sessionValue, avatar) in BoundPlayer)
+        {
+            if (CharacterOfSession.TryGetValue(sessionValue, out var character))
+            {
+                SaveAvatarLocation(players, characters, avatar, character);
+            }
+        }
+    }
+
+    /// <summary>Whether <see cref="FlushAvatarsForShutdown"/> has run, so a multi-tick shutdown writes once.</summary>
+    private static bool _shutdownFlushed;
+
+    /// <summary>
     /// Saves and destroys the avatar of every session that is no longer open.
     /// </summary>
     /// <param name="tx">The tick's transaction.</param>
@@ -377,7 +478,16 @@ public static partial class TatooineReplication
     /// </remarks>
     private static void RetireAvatars(Transaction tx, ArchetypeAccessor<Player> players)
     {
-        if (BoundPlayer.Count == Seen.Count)
+        // Nothing to retire means every bound session is still open: BoundPlayer is a SUBSET of Seen. Counting alone cannot say
+        // that — one session leaving on the same tick as another arrives keeps both counts equal while the set membership has
+        // changed completely, and an earlier `BoundPlayer.Count == Seen.Count` returned early on exactly that tick. It left the
+        // departed session's avatar spatial and replicated, and its account hold standing, so a reconnect in the same tick as its
+        // own disconnect was refused 4103 — the one case the class remarks promise is handled.
+        //
+        // The subset test is still O(1), because WalkSessions already computed the difference the other way: Unbound is
+        // `Seen \ BoundPlayer`, so |Seen| = |Seen n BoundPlayer| + |Unbound|, and BoundPlayer is contained in Seen exactly when
+        // |BoundPlayer| = |Seen| - |Unbound|.
+        if (BoundPlayer.Count == Seen.Count - Unbound.Count)
         {
             return;
         }
@@ -413,7 +523,6 @@ public static partial class TatooineReplication
             tx.Destroy(avatar);
             System.Threading.Interlocked.Increment(ref _avatarsDestroyed);
 
-            BoundIds.Remove(avatar);
             BoundPlayer.Remove(sessionValue);
             CharacterOfSession.Remove(sessionValue);
             AccountOfSession.Remove(sessionValue);
@@ -598,6 +707,18 @@ public static partial class TatooineReplication
     /// </remarks>
     private static string DisplayNameFor(EntityId account) => "player_" + account.RawValue.ToString("x", System.Globalization.CultureInfo.InvariantCulture);
 
+    /// <summary>
+    /// How many sessions the avatar bookkeeping is tracking, by map: for the checks that a session leaves nothing behind.
+    /// </summary>
+    /// <remarks>
+    /// <b>Exposed because a leak here is invisible to every other observable.</b> The population census, the spawn and destroy
+    /// counters and the client's own view all come back to where they started while these dictionaries keep growing — the suite had a
+    /// twenty-round leak case that stayed green across exactly that. Read from the tick thread's own writes without a lock, which is
+    /// safe for the checks' purpose: every case reads it between ticks, after the thing it was waiting for.
+    /// </remarks>
+    public static (int Identities, int Bound, int Characters, int AccountHolds) SessionAccounting
+        => (AccountOfSession.Count, BoundPlayer.Count, CharacterOfSession.Count, SessionOfAccount.Count);
+
     /// <summary>Forgets every avatar binding. Called from <see cref="ResetSessionAccounting"/>.</summary>
     private static void ResetAvatarAccounting()
     {
@@ -610,7 +731,9 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _charactersCreated, 0);
         System.Threading.Interlocked.Exchange(ref _loginsRefusedDuplicate, 0);
         System.Threading.Interlocked.Exchange(ref _loginsRefusedAnonymous, 0);
+        System.Threading.Interlocked.Exchange(ref _loginsRefusedUnconfigured, 0);
         System.Threading.Interlocked.Exchange(ref _locationsSaved, 0);
+        _shutdownFlushed = false;
         AvatarsConfigured = false;
         SaveIntervalTicks = 0;
         SaveIntervalSeconds = 0d;

@@ -68,6 +68,13 @@ public static class CharacterStore
     /// lock. This is the same shape as <see cref="AccountStore.TrySignup"/> and for the same reason — see
     /// <see cref="Character.Account"/> for why the index is unique.
     /// </remarks>
+    /// <remarks>
+    /// <b>The OFF-TICK read-or-create. The login path has its own, and that is not an oversight.</b>
+    /// <c>TatooineReplication.BindOneAvatar</c> does the same thing on the TICK's transaction, because a login must read or create the
+    /// character, spawn the avatar and hand over control in one commit — see the comment there, which also explains why the
+    /// unique-index retry below cannot be reproduced in-tick and why nothing needs it to be. This overload is what a caller outside the
+    /// tick uses: an administrative tool, or a future <c>/characters</c> endpoint.
+    /// </remarks>
     public static bool ReadOrCreate(DatabaseEngine dbe, EntityId account, string displayName, in Point3F spawn, ushort realm,
         out EntityId character, out Character profile)
     {

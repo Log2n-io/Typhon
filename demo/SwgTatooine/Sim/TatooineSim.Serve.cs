@@ -63,6 +63,10 @@ public sealed partial class TatooineSim
     /// </remarks>
     public void StartReplication()
     {
+        // Before anything else, so a misconfigured SWG_AUTH_KEY stops the server here rather than surfacing as a wrapped
+        // TypeInitializationException inside the admission hook, on a transport thread, for the first client that connects.
+        Accounts.AuthToken.EnsureConfigured();
+
         BuildViews();
 
         _bridge = new SimBridge(_config, Map, Index)
@@ -128,6 +132,9 @@ public sealed partial class TatooineSim
         // costs. Stated as seconds and turned into ticks here, so the same number means the same thing at 10 Hz and at 50 Hz.
         TatooineReplication.ConfigureAvatars(
             Dbe, new Point3F { X = capital.X, Y = spawnY, Z = capital.Z }, 0, _config.TickRateHz, _config.AvatarSaveIntervalS);
+
+        // States the obligation rather than leaving it to the first login to discover. See ThrowIfAvatarsNotConfigured.
+        TatooineReplication.ThrowIfAvatarsNotConfigured();
         TatooineReplication.Declare(_runtime.Subscriptions, _config.SubscriptionsPushAutomatic);
         TatooineReplication.PlayerBudgetBytesPerSecond = _config.SessionBudgetBytesPerSecond;
 

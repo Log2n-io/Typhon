@@ -458,6 +458,45 @@ public struct Outer { public int C; public Inner I; }
     // =====================================================================
 
     /// <summary>
+    /// A component that is BOTH marshal-divergent and too large to spawn inline reports both, not just the divergence.
+    /// </summary>
+    /// <remarks>
+    /// TYPHON011's block returns, so whichever of the two ran second was swallowed. The size bound was the one being lost, and it is the
+    /// one that matters most: it is a correctness bound — such a component cannot be passed to <c>Spawn</c> at all — where the other two
+    /// are advice. Fixing the divergence used to reveal a second diagnostic the analyzer had already computed and discarded.
+    /// </remarks>
+    [Test]
+    public async Task AComponentThatIsBothDivergentAndOversizedReportsBoth()
+    {
+        // Two bools before an int is the divergence TwoBools_DivergeAndAreReported measures — managed B@1, marshalled B@4 — and the
+        // fifteen longs put the struct past 112 bytes. A single bool would NOT do: it pads to 4 either way, so no offset moves.
+        var source = Component(@"
+[Component(""T"", 1)]
+public struct BigAndDivergent
+{
+    public bool A;
+    public bool B;
+    public int C;
+    public long A0; public long A1; public long A2; public long A3; public long A4;
+    public long A5; public long A6; public long A7; public long A8; public long A9;
+    public long A10; public long A11; public long A12; public long A13; public long A14;
+}
+");
+
+        var divergence = await RunDivergenceAsync(source);
+        var oversized = await RunInlinePayloadAnalyzerAsync(source);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(divergence, Has.Length.EqualTo(1), "the marshal divergence must still be reported");
+            Assert.That(
+                oversized,
+                Has.Length.EqualTo(1),
+                "the inline-payload bound was swallowed by the divergence report, which returns");
+        });
+    }
+
+    /// <summary>
     /// The constant this analyzer compares against is the engine's, and nothing but this test holds the two copies together.
     /// </summary>
     /// <remarks>

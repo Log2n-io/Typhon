@@ -440,7 +440,22 @@ descends from this one property.
             it was a false positive on the engine's own guarantee -- see `verified:`.
   licences: (a) and (b) skip OLC version validation, the write latch and the B-link right-walk; their safety comes
             from slice boundaries snapped to leaf edges (FenceWorkItem.cs:35-36) and from the batch's bucket sort,
-            NOT from the window alone. (c) is plain stores against a per-axis CAS writer (ClusterRef.cs:819,
+            NOT from the window alone.
+            Detection gap (2026-10-05), stated rather than implied: the licence SPANS the serial prepare and the
+            parallel apply, but the detector is armed only across the apply. The boundaries are computed in
+            FenceExecSystem.PrepareArchetype (FenceExecSystem.cs:1054, tree.PartitionBulkEntries) and consumed much
+            later by DispatchItem (FenceExecSystem.cs:1091, ApplyBulkEntries -> UpdateValues -> RunBatch), which is
+            where EnterUnlatchedRewrite brackets. BTree._unlatchedRewriteDepth is therefore ZERO for the whole
+            prepare -> apply gap, so a foreign latched Add that splits a leaf in that gap relocates keys across a
+            boundary and NoteMutation says nothing. It is worse than undetected: ApplyBatch skips a routed-but-absent
+            key BECAUSE "under EW-01 no concurrent structural change can move it elsewhere"
+            (BTree.UpdateValues.cs:294-297), so the update is dropped with nothing raised. The pre-scoping detector
+            caught this case, because it armed every latched mutator for the whole window.
+            NOT fixed by narrowing further: spanning the bracket would mean a per-tree depth incremented on the
+            prepare thread and released after the last of W parallel slices, which is a cross-thread lifecycle in the
+            fence's hot path. It is a DETECTION gap and not a new hazard for a compliant application — EW-02 forbids
+            an off-tick thread from writing any component of an archetype with a spatial field, which is the only kind
+            of archetype whose index the fence bulk-rewrites. See `verified:` for what is and is not covered. (c) is plain stores against a per-axis CAS writer (ClusterRef.cs:819,
             ArchetypeClusterState.cs:9893-9900), and there the window is the ONLY thing ordering them.
             Scope correction (2026-10-05): the epoch guard is NOT among the licences — fence workers take guards
             (FenceExecSystem.cs:242,418,919,996) and the B+Tree / EntityMap mutators never took a per-operation one,
@@ -491,6 +506,17 @@ descends from this one property.
             gate runs Release, so a [Conditional("DEBUG")] guard is one the gate never executes), and scoped PER
             ENGINE off EpochManager rather than to a process-wide static — under the parallel fixtures a global would
             let one engine's fence indict another engine's legal write.
+            The ENGINE's own arming is pinned by
+            ExclusiveWindowTests.TheProductionBulkPathArmsTheDetector — every other case here arms the scope from the
+            test, so deleting EnterUnlatchedRewrite from BTree.RunBatch left all six of them green while the detector
+            went permanently silent (measured 2026-10-05). That case drives the real UpdateValues path against a
+            hammering foreign writer and asserts the window's own violation counter, which nothing but the production
+            bracket can raise.
+            verified: NOT COVERED — the prepare -> apply gap described under `licences:`, and the `never` clause on a
+            side transaction below, which the per-structure scoping also stopped detecting: a side transaction
+            committed after its creating system returns now reports nothing unless the fence happens to be mid-bulk on
+            that exact structure. Both need a detector that spans the window per tree rather than per call.
+            EnterBulkBatch — the EntityMap half of the scoping — has no test in either direction.
             Scoped per STRUCTURE since 2026-10-05: NoteMutation takes `unlatchedHere`, and a latched mutator passes
             its own per-instance depth (BTree._unlatchedRewriteDepth, RawValuePagedHashMap._bulkBatchDepth). A
             fence-thread mutation still sets ObservedFenceMutation unconditionally, so the anti-vacuity pairing is

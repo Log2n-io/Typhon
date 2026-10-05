@@ -708,7 +708,6 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _refusedUnauthenticated, 0);
         ResetAvatarAccounting();
         BoundPlayer.Clear();
-        BoundIds.Clear();
         Unbound.Clear();
         Seen.Clear();
         Retired.Clear();
@@ -1152,6 +1151,12 @@ public static partial class TatooineReplication
         var shutdown = _shutdownReason;
         if (shutdown != null)
         {
+            // A6's cadence bounds what a CRASH costs. A graceful stop should cost nothing, and it used to cost the same: this branch
+            // returns before the avatar binding, so the last thing a Ctrl-C did was kick everybody and leave up to a whole save
+            // interval of walking unwritten. Flushed once, on the first shutdown tick, while the avatars still exist — the kicks staged
+            // just below are applied by the next tick's prologue, so this is the last tick on which there is anything to read.
+            FlushAvatarsForShutdown(tick);
+
             foreach (var session in subs.OpenSessions)
             {
                 if (Kicked.Add(session))
@@ -1864,40 +1869,12 @@ public static partial class TatooineReplication
     // logging out and back in landed on whatever body happened to be unclaimed — the one thing "log in and be where you were"
     // cannot tolerate. Its replacement spawns a body for the session instead: TatooineReplication.Avatars.cs, BindAvatars.
     //
-    // What came with it and did NOT survive: the cluster walk looking for an unheld player, and BoundIds' job of telling a free
-    // player from a taken one across that walk. BoundIds is still written, because ControlledBy's scan and the measurement checks
-    // read "is this entity held by a session", but nothing searches for a gap in it any more.
+    // What came with it and did NOT survive: the cluster walk looking for an unheld player, and BoundIds — the set that told a
+    // free player from a taken one across that walk. BoundIds went with it. The comment here used to say it was "still written,
+    // because ControlledBy's scan and the measurement checks read it", which was not true of either: ControlledBy scans clusters
+    // for the possession mark and never touched the set, and no check referenced it. It was written in three places and read in
+    // none, which is the kind of residue that reads as load-bearing to the next person.
 
-    /// <summary>
-    /// Brings a player to a standstill with no half-finished activity, at both ends of a possession.
-    /// </summary>
-    /// <param name="player">The player, already opened for writing.</param>
-    /// <remarks>
-    /// <para>
-    /// <b>On CLAIM, because a mid-activity player would otherwise be frozen in it.</b> <c>PlayerThink</c> is what advances an activity and it now skips a
-    /// possessed player, so one claimed while <c>ToShuttle</c>, <c>AwaitingShuttle</c>, <c>ToPortal</c> or <c>Inside</c> would sit in that state for as long as
-    /// the client held it — and the systems that act on those states would act on it from outside the client's view. They now skip a possessed player too, but
-    /// leaving the state set would be leaving a trap for the next system that reads it.
-    /// </para>
-    /// <para>
-    /// <b>On RELEASE, because a stale activity outlives the session.</b> A player given back mid-intent would return to the simulation as <c>Travelling</c>
-    /// towards wherever its last client pointed it, with a timer of zero — which <c>PlayerThink</c> reads as "arrived, decide again", so this is belt to that
-    /// brace rather than load-bearing. What it does buy is that a released player is indistinguishable from one that was never possessed, which is the property
-    /// the measurement checks assert.
-    /// </para>
-    /// </remarks>
-    private static void Normalise(ref EntityRefMut player)
-    {
-        ref var state = ref player.Write(Player.State);
-        state.Activity = PlayerActivity.Idle;
-        state.ActivityTicks = 0;
-        state.ShuttleFrom = -1;
-        state.ShuttleDest = -1;
-
-        ref var move = ref player.Write(Player.Move);
-        move.VelX = 0f;
-        move.VelZ = 0f;
-    }
 
     // ── Intents (SWG-01) ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -2103,7 +2080,6 @@ public static partial class TatooineReplication
         if (!accessor.TryOpenMut(entity, out player))
         {
             BoundPlayer.Remove(session.Value);
-            BoundIds.Remove(entity);
             System.Threading.Interlocked.Increment(ref _intentsUnowned);
             player = default;
             return false;
@@ -2173,7 +2149,6 @@ public static partial class TatooineReplication
         System.Threading.Interlocked.Exchange(ref _possessions, 0);
         System.Threading.Interlocked.Exchange(ref _releases, 0);
         BoundPlayer.Clear();
-        BoundIds.Clear();
 
         // The rest of the statics a runtime leaves behind. _pushCommands in particular holds the LAST runtime's SubscriptionsCommands, so Replicate() from a
         // system of the next one would mark a slot in an object belonging to a disposed engine; the others make a second run in one process inherit the
@@ -2359,7 +2334,6 @@ public static partial class TatooineReplication
     private static readonly Dictionary<uint, EntityId> BoundPlayer = [];
 
     /// <summary>The players held by some session, so the walk can tell a free one from a taken one without searching.</summary>
-    private static readonly HashSet<EntityId> BoundIds = [];
 
     /// <summary>Scratch: the player sessions open this tick that hold no player yet.</summary>
     private static readonly List<SessionId> Unbound = [];

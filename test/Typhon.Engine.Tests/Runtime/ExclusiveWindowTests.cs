@@ -177,6 +177,121 @@ class ExclusiveWindowTests : TestBase<ExclusiveWindowTests>
     }
 
     /// <summary>
+    /// The PRODUCTION bulk path arms the detector — not just a scope a test opened for itself.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Every other case here arms the scope by hand, so the detector could be deleted from the engine and this fixture would stay
+    /// green.</b> <see cref="ForeignThreadMutatingAnIndexInsideTheWindow_IsCaught"/> calls <c>tree.EnterUnlatchedRewrite()</c> from the
+    /// test, and <c>LiveWorkload_TheFenceNeverSeesAForeignWriter</c> asserts <c>ObservedFenceMutation</c>, which
+    /// <see cref="ExclusiveWindow.NoteMutation"/> sets unconditionally — independent of whether anything is armed. Removing the
+    /// <c>EnterUnlatchedRewrite</c> from <c>BTree.RunBatch</c> was measured to leave all six cases passing while the detector went
+    /// permanently silent. This case is the one that fails for that, because the only thing that can arm the tree here is the engine.
+    /// </para>
+    /// <para>
+    /// <b>It cannot pass by luck.</b> A violation is reachable ONLY from inside the scope <c>RunBatch</c> opens, so if the engine stops
+    /// arming, no iteration can ever throw and the case fails. The loop is there for the other direction — the foreign thread has to
+    /// land inside a window the batch opens and closes — so it retries until it observes one rather than depending on a single
+    /// interleaving. A large batch over the whole key range keeps that window wide.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [RuleMutant("EW-01")]
+    [CancelAfter(30_000)]
+    public void TheProductionBulkPathArmsTheDetector()
+    {
+        OnFreshTree(static (tree, segment, epochManager) =>
+        {
+            var window = epochManager.FenceWindow;
+            window.ResetCounters();
+
+            using var open = window.Open();
+
+            // Every key in the tree, so RunBatch descends the whole structure and the armed window is as wide as the real fence's.
+            var updates = new BTreeValueUpdate<int>[TreeSize];
+            for (var i = 0; i < TreeSize; i++)
+            {
+                updates[i] = new BTreeValueUpdate<int>(i, i + 1);
+            }
+
+            // The foreign thread hammers a LATCHED Add until the detector has rejected one of them. Its own exception is NOT the
+            // observable: a race against an unlatched rewrite is exactly the corruption EW-01 exists to prevent, so the thread can
+            // also see a UniqueConstraintViolationException from a tree this test has deliberately damaged. Everything is swallowed
+            // and the window's own counter is what the case asserts on.
+            var hammering = true;
+            var foreign = new Thread(() =>
+            {
+                var depth = epochManager.EnterScope();
+                try
+                {
+                    var key = TreeSize + 1;
+                    while (Volatile.Read(ref hammering))
+                    {
+                        var accessor = segment.CreateChunkAccessor();
+                        try
+                        {
+                            tree.Add(key++, 1, ref accessor);
+                        }
+                        catch (Exception)
+                        {
+                            // Including the EW-01 refusal this case is here for. Counted by the window, not by us.
+                        }
+                        finally
+                        {
+                            accessor.Dispose();
+                        }
+                    }
+                }
+                finally
+                {
+                    epochManager.ExitScope(depth);
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "ew01-arming-foreign",
+            };
+
+            foreign.Start();
+            try
+            {
+                var deadline = DateTime.UtcNow.AddSeconds(10);
+                while (window.Violations == 0 && DateTime.UtcNow < deadline)
+                {
+                    var accessor = segment.CreateChunkAccessor();
+                    try
+                    {
+                        tree.UpdateValues(updates, ref accessor);
+                    }
+                    catch (Exception)
+                    {
+                        // The batch can also trip over a tree the foreign thread is damaging. Not this case's business.
+                    }
+                    finally
+                    {
+                        accessor.Dispose();
+                    }
+                }
+            }
+            finally
+            {
+                Volatile.Write(ref hammering, false);
+                foreign.Join(TimeSpan.FromSeconds(10));
+            }
+
+            Assert.That(
+                window.Violations,
+                Is.GreaterThan(0),
+                "no foreign write was ever rejected, so the engine's own bulk path never armed the detector");
+            Assert.That(window.FirstViolationSite, Is.EqualTo("BTree.Add"));
+            Assert.That(
+                window.FirstViolationThreadId,
+                Is.Not.EqualTo(Environment.CurrentManagedThreadId),
+                "the offender must be reported as the OTHER thread");
+        });
+    }
+
+    /// <summary>
     /// A foreign latched write to a tree the fence is NOT rewriting unlatched is legal, even with the window wide open.
     /// </summary>
     /// <remarks>

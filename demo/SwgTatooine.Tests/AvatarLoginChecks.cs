@@ -418,9 +418,233 @@ internal sealed class AvatarLoginChecks
         Assert.That(final, Is.Not.EqualTo(EntityId.Null), "the account could not log in again, so a binding leaked");
     }
 
+    /// <summary>
+    /// A client that drops and reconnects with no tick in between is bound, not refused — which is what the release-before-bind
+    /// ordering exists for, and what counting sessions instead of comparing them silently broke.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The close and the open have to reach ONE tick, and this is the shape that makes them.</b> Every other case in this fixture
+    /// waits for the destroy and then ticks, so the two halves always land in different drains and the bug is invisible: the suite had
+    /// a leak case doing twenty rounds of exactly that and it stayed green. Here nothing is waited for between the close and the
+    /// connect, so the next <c>BeginTick</c> drains both events, and <c>Seen</c> loses one member while gaining another.
+    /// </para>
+    /// <para>
+    /// <b>Why rounds rather than one attempt.</b> A free-running runtime may still tick between the two calls, which makes any single
+    /// round the harmless interleaving. Twelve rounds against the same account make the same-tick landing certain enough to be a
+    /// regression test, and each round asserts the thing that must hold in BOTH interleavings — so no round is flaky, and the case
+    /// fails only if the same-tick one is handled wrongly. Measured against the old guard, it fails on the first or second round.
+    /// </para>
+    /// <para>
+    /// The account is the SAME one throughout, because the damage is the account hold: the dead session's hold was never dropped, so
+    /// the reconnect was refused <c>4103</c> — "that account is already playing", by its own corpse.
+    /// </para>
+    /// </remarks>
+    [Test]
+    [CancelAfter(180_000)]
+    public void AReconnectInTheSameTickAsItsOwnDisconnectIsBound()
+    {
+        const int rounds = 12;
+
+        using var sim = Start(Config(saveIntervalS: 0d));
+        var account = AnAccount(0x5007);
+        var (link, _) = LogIn(sim, account);
+
+        for (var round = 0; round < rounds; round++)
+        {
+            // No wait between these two: that is the whole point of the case.
+            link.Close(CloseCodes.Normal, "dropped");
+            var next = _harness.Connect(TatooineReplication.PlayerKind, account);
+
+            SessionHarness.Until(
+                () => next.Closed != null || TatooineReplication.ControlledBy(sim.Dbe, next.Session) != EntityId.Null,
+                $"round {round}'s reconnect to be bound or refused");
+
+            Assert.That(
+                next.Closed,
+                Is.Null,
+                $"round {round}: the reconnect was refused {next.Closed?.Code} — the dead session had not released the account");
+
+            link = next;
+        }
+
+        // And the population is back to one body for one account, so neither the bind nor the retire double-counted.
+        Assert.Multiple(() =>
+        {
+            Assert.That(Census(sim).Human, Is.EqualTo(1), "exactly one avatar must be driven by a session");
+            Assert.That(TatooineReplication.AvatarsSpawned - TatooineReplication.AvatarsDestroyed, Is.EqualTo(1));
+            Assert.That(TatooineReplication.CharactersCreated, Is.EqualTo(1), "one account has one character however often it reconnects");
+        });
+    }
+
+    /// <summary>
+    /// A second session for one account is refused ONCE, with the duplicate code, and is not then refused again as anonymous.
+    /// </summary>
+    /// <remarks>
+    /// <b>A kick takes a tick to land, which is what made this a double refusal.</b> The refused session is still open on the next
+    /// tick and still has no avatar, so the bind reconsiders it — and because the duplicate path dropped its identity on the way out,
+    /// the second pass found none and sent <c>4102</c> "log in again" on top of the <c>4103</c> it had already sent. The advice was
+    /// wrong (the token was perfectly good) and <c>LoginsRefusedAnonymous</c> counted an authenticated session.
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ASecondSessionForOneAccountIsRefusedOnceAsADuplicate()
+    {
+        using var sim = Start(Config(saveIntervalS: 0d));
+        var account = AnAccount(0x5008);
+        var (first, _) = LogIn(sim, account);
+
+        var second = _harness.Connect(TatooineReplication.PlayerKind, account);
+        SessionHarness.Until(() => second.Closed != null, "the duplicate session to be refused");
+
+        // Several more ticks: this is the window in which the second refusal used to arrive.
+        _harness.Ticks(6);
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(second.Closed?.Code, Is.EqualTo(TatooineReplication.AccountAlreadyPlayingCloseCode));
+            Assert.That(TatooineReplication.LoginsRefusedDuplicate, Is.EqualTo(1), "the duplicate must be counted once");
+            Assert.That(
+                TatooineReplication.LoginsRefusedAnonymous,
+                Is.Zero,
+                "the refused session must never be reconsidered as anonymous — the staged kick closes it before the next walk");
+            Assert.That(first.Closed, Is.Null, "the incumbent must be untouched");
+            Assert.That(Census(sim).Human, Is.EqualTo(1), "the duplicate must not have been given a body");
+        });
+    }
+
+    /// <summary>
+    /// A session that opens and closes without ever being bound leaves nothing behind in the avatar bookkeeping.
+    /// </summary>
+    /// <remarks>
+    /// <b>The one leak the fixture's other leak case cannot see.</b> <c>RetireAvatars</c> walks the sessions that HAVE avatars, so a
+    /// session that never got one was never swept: its <c>AccountOfSession</c> entry — made the moment the session opened — stayed for
+    /// the life of the process. Every other observable comes back to where it started, which is why twenty rounds of login-and-logout
+    /// never caught it. This case connects clients that go away before a bind can happen and asserts the dictionaries directly.
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    public void ASessionThatClosesBeforeItIsBoundLeavesNothingBehind()
+    {
+        const int rounds = 15;
+
+        using var sim = Start(Config(saveIntervalS: 0d));
+        _ = sim;
+
+        for (var round = 0; round < rounds; round++)
+        {
+            // Connected and dropped with no tick in between, so the bind never sees it as anything but gone.
+            var link = _harness.Connect(TatooineReplication.PlayerKind);
+            link.Close(CloseCodes.Normal, "changed my mind");
+        }
+
+        _harness.Ticks(6);
+
+        var accounting = TatooineReplication.SessionAccounting;
+        Assert.Multiple(() =>
+        {
+            Assert.That(accounting.Identities, Is.Zero, "an identity was kept for a session that is gone");
+            Assert.That(accounting.Bound, Is.Zero);
+            Assert.That(accounting.Characters, Is.Zero);
+            Assert.That(accounting.AccountHolds, Is.Zero, "an account hold outlived the session that took it");
+        });
+    }
+
     // =======================================================================
     // A6 - the cadence, and what a kill -9 costs
     // =======================================================================
+
+    /// <summary>
+    /// A reopened database comes back with no avatars, so a login does not find a second body already wearing its character.
+    /// </summary>
+    /// <remarks>
+    /// <b><c>Player</c> is <c>ClusterDurability.Checkpoint</c>, which is why this is worth asserting rather than assuming.</b> A run
+    /// killed with avatars in the world could plausibly checkpoint them, and nothing sweeps <c>ControllerKind.Human</c> bodies at open —
+    /// so the failure this guards against is a reopen that starts with bodies owned by session ids that no longer exist, in the spatial
+    /// grid for ever, with the next login spawning a SECOND body for the same character. Measured: it does not happen, the reopened
+    /// population is the simulation's own crowd and nothing else, and one login yields exactly one driven body. Pinned because the
+    /// durability setting that makes it a question is still there.
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    public void AReopenedDatabaseHasNoOrphanedAvatars()
+    {
+        var account = AnAccount(0x500A);
+
+        using (var first = Start(Config(persist: true, saveIntervalS: 0d)))
+        {
+            LogIn(first, account);
+            Assert.That(Census(first).Human, Is.EqualTo(1), "the first run must have an avatar to orphan");
+            _harness.Ticks(8);
+            _harness.Release();
+
+            // No logout and no shutdown: dropped the way a kill -9 drops it, with the avatar still in the world.
+        }
+
+        using var second = Start(Config(persist: true, saveIntervalS: 0d));
+        Assert.That(second.Reopened, Is.True, "the second run did not reopen the first's database");
+        _harness.Ticks(4);
+
+        var reopened = Census(second);
+        Assert.That(reopened.Human, Is.Zero, "the reopened run came back with an avatar owned by a session that no longer exists");
+
+        // And the character gets ONE body, not a second one beside a survivor. Whether the CHARACTER itself survived is not asserted
+        // here and must not be: this case runs with the cadence off and too few ticks to reach a checkpoint, so the character row may
+        // legitimately be gone. AKillWithNoLogoutCostsAtMostTheCadence is the case that owns character survival.
+        var (_, againAvatar) = LogIn(second, account, expectedBindings: 1);
+        var afterLogin = Census(second);
+        Assert.Multiple(() =>
+        {
+            Assert.That(againAvatar, Is.Not.EqualTo(EntityId.Null), "the account could not log in after the reopen");
+            Assert.That(afterLogin.Human, Is.EqualTo(1), "exactly one body may be driven by the one session");
+            Assert.That(afterLogin.Total, Is.EqualTo(reopened.Total + 1), "the login must have added exactly one body");
+        });
+    }
+
+    /// <summary>
+    /// A graceful shutdown writes every live avatar's position, so stopping the server costs no walking at all.
+    /// </summary>
+    /// <remarks>
+    /// <b>A6's cadence bounds what a <c>kill -9</c> costs, and it was wrongly also the bound on an operator's stop.</b> The shutdown
+    /// branch kicks every session and returns before the avatar binding, so the last save before a Ctrl-C was whatever the cadence had
+    /// last done — up to a full interval of movement thrown away on the one path where nothing had to be lost. The interval here is
+    /// long enough that the cadence cannot be what writes the position: if it is saved, the shutdown saved it.
+    /// </remarks>
+    [Test]
+    [CancelAfter(60_000)]
+    public void AGracefulShutdownSavesEveryAvatarsPosition()
+    {
+        // Far longer than this case runs, so a cadence save is impossible and only the shutdown can account for a write.
+        using var sim = Start(Config(saveIntervalS: 3_600d));
+        var account = AnAccount(0x5009);
+        var (link, avatar) = LogIn(sim, account);
+
+        var spawned = Saved(sim, account);
+
+        // Move the avatar somewhere the saved position is not, and wait until the world agrees it is there.
+        link.SendCommand("MoveTo", ClientSays.MoveTo(spawned.X + 60f, spawned.Z + 60f));
+        SessionHarness.Until(
+            () =>
+            {
+                var now = Where(sim, avatar);
+                return Math.Abs(now.X - spawned.X) > 5f || Math.Abs(now.Z - spawned.Z) > 5f;
+            },
+            "the avatar to walk away from where it spawned");
+
+        var walked = Where(sim, avatar);
+        Assert.That(Saved(sim, account).X, Is.EqualTo(spawned.X).Within(0.01f), "the cadence must not have saved anything yet");
+
+        TatooineReplication.RequestShutdown("test stop");
+        _harness.Ticks(4);
+
+        var saved = Saved(sim, account);
+        Assert.Multiple(() =>
+        {
+            Assert.That(saved.X, Is.EqualTo(walked.X).Within(1.5f), "the shutdown did not write the avatar's position back");
+            Assert.That(saved.Z, Is.EqualTo(walked.Z).Within(1.5f));
+            Assert.That(saved.SavedTicks, Is.GreaterThan(spawned.SavedTicks), "the character's save stamp did not move");
+        });
+    }
 
     /// <summary>Reads a character's saved position through the account index.</summary>
     /// <param name="sim">The server.</param>

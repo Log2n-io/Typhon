@@ -278,6 +278,68 @@ internal sealed class AuthRateLimiterChecks
         Assert.That(limiter.TrackedKeys, Is.LessThanOrEqualTo(64), "the table grew past its bound");
     }
 
+    /// <summary>
+    /// Flooding the table with other keys does not give an exhausted key its allowance back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The property <see cref="TheTableIsBounded"/> asserts the bound but not this, and this was the one that was false.</b> A
+    /// recreated bucket starts at full capacity, so evicting an EXHAUSTED bucket hands its key a fresh allowance. The name key is
+    /// whatever the client sent, which made the attack cheap and direct: exhaust the victim's name, then flood the table with more
+    /// than <c>maxTrackedKeys</c> other names until the victim's bucket is the one eviction chooses. Before the fix the victim's
+    /// next attempt was granted, and repeating it gives unbounded guessing against one account.
+    /// </para>
+    /// <para>
+    /// The refill interval is an hour, so nothing here comes back by the clock: every grant after the first must be eviction's.
+    /// </para>
+    /// </remarks>
+    [Test]
+    public void FloodingTheTableDoesNotRefundAnExhaustedKey()
+    {
+        const int maxKeys = 32;
+        var limiter = new AuthRateLimiter(1, TimeSpan.FromHours(1), maxKeys);
+
+        // The victim's one attempt, and its refusal.
+        Assert.That(limiter.TryTake("name:leia"), Is.True);
+        Assert.That(limiter.TryTake("name:leia"), Is.False, "the capacity is one, so the second attempt must be refused");
+
+        // Many times the table's bound, so eviction runs repeatedly and the victim's bucket is the oldest for most of it.
+        for (var i = 0; i < maxKeys * 20; i++)
+        {
+            limiter.TryTake($"name:flood{i}");
+        }
+
+        Assert.Multiple(() =>
+        {
+            Assert.That(
+                limiter.TryTake("name:leia"),
+                Is.False,
+                "the exhausted key was given a fresh bucket by eviction, which is unbounded guessing against one account");
+            Assert.That(limiter.TrackedKeys, Is.LessThanOrEqualTo(maxKeys), "the table grew past its bound");
+        });
+    }
+
+    /// <summary>A key the table has no room for is refused rather than admitted.</summary>
+    /// <remarks>
+    /// The other side of the eviction rule: if every tracked bucket still owes something, there is nothing safe to drop, and a
+    /// limiter that cannot track a key must not assume the key has an allowance. Fails closed, which costs new logins during a
+    /// flood and is the right direction for a limiter.
+    /// </remarks>
+    [Test]
+    public void AKeyTheTableHasNoRoomForIsRefused()
+    {
+        const int maxKeys = 8;
+        var limiter = new AuthRateLimiter(1, TimeSpan.FromHours(1), maxKeys);
+
+        // Capacity one, so every one of these spends its bucket dry and none of them is evictable.
+        for (var i = 0; i < maxKeys; i++)
+        {
+            Assert.That(limiter.TryTake($"name:holder{i}"), Is.True);
+        }
+
+        Assert.That(limiter.TryTake("name:newcomer"), Is.False, "a key with nowhere to live must not be granted an attempt");
+    }
+
     /// <summary>Concurrent attempts never hand out more than the capacity.</summary>
     /// <remarks>
     /// The bucket is read and charged in two passes, so a lost update here would mean the burst is larger than configured under

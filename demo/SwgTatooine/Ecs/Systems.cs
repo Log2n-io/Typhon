@@ -625,7 +625,19 @@ internal sealed class PlayerSessionSystem : CallbackSystem
         .Writes<PlayerControl>()
         .Writes<PlayerMotion>()
         .Writes<PlayerState>()
-        .Reads<PlayerPlacement>();
+
+        // Since A5 this system SPAWNS and DESTROYS avatars, so it writes every component of the archetype and not only the three an
+        // intent touches. `PlayerPlacement` was declared as a read, which was provably wrong the moment `SpawnAvatar` set
+        // `Player.Bounds` — and `DV-01` throws on the tick for an undeclared write, so the whole set has to be here rather than
+        // whichever members a reader notices.
+        .Writes<PlayerPlacement>()
+        .Writes<PlayerVitals>()
+        .Writes<PlayerSession>()
+        .Writes<PlayerRealm>()
+        .Writes<Inventory>()
+
+        // A6 saves the avatar's position onto its character, and a first login creates the character, both on this tick.
+        .Writes<Character>();
 
     protected override void Execute(TickContext ctx) => TatooineReplication.SessionTick(ctx);
 }

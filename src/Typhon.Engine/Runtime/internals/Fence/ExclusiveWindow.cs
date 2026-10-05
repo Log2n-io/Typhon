@@ -168,6 +168,51 @@ internal sealed class ExclusiveWindow
         Violation(site);
     }
 
+    /// <summary>
+    /// Reports a mutation whose "is this structure unlatched" answer is a counter the caller owns.
+    /// </summary>
+    /// <param name="site">Call-site name, a literal at every call.</param>
+    /// <param name="unlatchedDepth">The structure's own unlatched-rewrite depth, read only if the window is open.</param>
+    /// <remarks>
+    /// <b>By <c>ref</c> so the depth is not READ when the window is closed, which is almost always.</b> A caller that passed
+    /// <c>Volatile.Read(ref depth) != 0</c> evaluated the argument first, so every latched mutation paid that load to hand it to a
+    /// method whose first act is to return — one load more than the unconditional call it replaced, on the engine's hottest index
+    /// path. Taking the counter instead of the answer moves it after the early-out.
+    /// </remarks>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal void NoteMutation(string site, ref int unlatchedDepth)
+    {
+        if (Volatile.Read(ref _depth) == 0)
+        {
+            return;
+        }
+
+        NoteMutationSlow(site, Volatile.Read(ref unlatchedDepth) != 0);
+    }
+
+    /// <summary>The open-window half of <see cref="NoteMutation(string, ref int)"/>, kept out of line so the fast path stays small.</summary>
+    /// <param name="site">Call-site name.</param>
+    /// <param name="unlatchedHere">Whether the fence has dropped this structure's protocol right now.</param>
+    private void NoteMutationSlow(string site, bool unlatchedHere)
+    {
+        if (FenceThreadDepth > 0)
+        {
+            if (!Volatile.Read(ref _sawFenceMutation))
+            {
+                Volatile.Write(ref _sawFenceMutation, true);
+            }
+
+            return;
+        }
+
+        if (!unlatchedHere)
+        {
+            return;
+        }
+
+        Violation(site);
+    }
+
     /// <remarks>
     /// Counted before it throws. The throw is what <c>EW-01</c>'s <c>[fatal]</c> asks for — the alternative is silent structural corruption that the B+Tree
     /// validators find much later or a query answers wrongly and nothing finds at all — but a foreign thread is exactly the kind of place an exception gets

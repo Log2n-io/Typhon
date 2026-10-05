@@ -172,10 +172,6 @@ internal static unsafe class FkReverseLookup
     }
 
     /// <summary>
-    /// Phase 2: one archetype's own FK tree. Values are packed <c>ClusterLocation</c>s (<c>clusterChunkId * 64 + slotIndex</c>), so the entity PK comes from
-    /// the cluster's own entity-id array rather than from a chunk header.
-    /// </summary>
-    /// <summary>
     /// Resolves one cluster location to its entity id and hands it to the action.
     /// </summary>
     /// <param name="clusterLocation">The index entry's value: <c>chunkId * 64 + slot</c>.</param>
@@ -214,6 +210,10 @@ internal static unsafe class FkReverseLookup
         return action.Process(sourcePK, meta);
     }
 
+    /// <summary>
+    /// Phase 2: one archetype's own FK tree. Values are packed <c>ClusterLocation</c>s (<c>clusterChunkId * 64 + slotIndex</c>), so the entity PK comes from
+    /// the cluster's own entity-id array rather than from a chunk header.
+    /// </summary>
     private static bool ScanClusterArchetype<TAction>(DatabaseEngine dbe, ArchetypeMetadata meta, int componentSlot, int fkFieldOrdinal, long targetPK,
         ref TAction action) where TAction : struct, IFkSourceAction
     {

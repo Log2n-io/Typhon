@@ -1,5 +1,6 @@
 using System;
 using System.Security.Cryptography;
+using System.Threading;
 using System.Text;
 
 namespace SwgTatooine.Accounts;
@@ -42,11 +43,26 @@ public static class PasswordHash
     /// Work factor for new hashes. Stored with every hash, so raising this does not invalidate existing accounts.
     /// </summary>
     /// <remarks>
-    /// OWASP's 2023 floor for PBKDF2-SHA256 is 600 000; this is that. It costs roughly a few hundred microseconds of one
-    /// core per login, which is paid on a Kestrel thread and never on the tick — the number is allowed to be large
-    /// precisely because it is nowhere near the simulation.
+    /// OWASP's 2023 floor for PBKDF2-SHA256 is 600 000; this is that.
+    /// <para>
+    /// <b>It costs about 50 ms of one core, not "a few hundred microseconds" as this said until it was measured.</b> Three runs on a
+    /// 7950X: 51.3, 51.0 and 53.0 ms. That is a 150-fold difference from the figure that was here, and the figure was load-bearing —
+    /// it was the stated reason this may be called synchronously on a Kestrel thread. At 50 ms it still must not run on the tick, but
+    /// it is no longer free: a request that reaches the KDF spends a twentieth of a second of a core that the simulation on this same
+    /// process also wants, which is why <see cref="Gate"/> exists.
+    /// </para>
     /// </remarks>
     public const int DefaultIterations = 600_000;
+
+    /// <summary>
+    /// How many password derivations may run at once across this process.
+    /// </summary>
+    /// <remarks>
+    /// A quarter of the cores, at least one. See <see cref="Derive"/> for why there is a bound at all: the limiter's buckets are
+    /// per-key and cannot bound the number of distinct keys attempting at once, so without this the only ceiling on KDF CPU is the
+    /// thread pool's. Static and process-wide on purpose — the thing being protected is the process.
+    /// </remarks>
+    private static readonly SemaphoreSlim Gate = new(Math.Max(1, Environment.ProcessorCount / 4));
 
     /// <summary>The shortest password accepted.</summary>
     /// <remarks>
@@ -134,15 +150,26 @@ public static class PasswordHash
     {
         // UTF-8, named rather than left to the platform: a password with an accent in it must hash the same on the dev box
         // and on the Linux server, and Encoding.Default has been a different thing on each in living memory.
-        var bytes = Encoding.UTF8.GetByteCount(password) <= 512 ? stackalloc byte[512] : new byte[Encoding.UTF8.GetByteCount(password)];
+        //
+        // Sized from MaximumPasswordLength rather than measured twice: the longest accepted password is 256 characters and the longest
+        // a character encodes to is 4 bytes, so 1 KiB can never be exceeded by an input that got this far, and the heap path this used
+        // to fall back to is gone. That path mattered because the plaintext's bytes are zeroed below: a heap buffer may be copied by
+        // the GC before that happens, leaving a plaintext password in memory nothing can reach to clear.
+        Span<byte> bytes = stackalloc byte[MaximumPasswordLength * 4];
         var written = Encoding.UTF8.GetBytes(password, bytes);
 
+        // Bounded concurrency, because a login is 50 ms of a core and this process also runs a simulation. The rate limiter's caps are
+        // all PER KEY, so they bound how fast one address or one name may try and say nothing about how many distinct ones may be
+        // trying at once — which is exactly the shape of a load that turns authentication into a tick-rate problem. A quarter of the
+        // cores leaves the simulation the rest; the cost is that logins queue under that load, which is the right thing to give up.
+        Gate.Wait();
         try
         {
             Rfc2898DeriveBytes.Pbkdf2(bytes[..written], salt, destination, iterations, HashAlgorithmName.SHA256);
         }
         finally
         {
+            Gate.Release();
             // The plaintext's bytes do not outlive the derivation. The string itself is the CLR's to manage and cannot be
             // cleared, which is why nothing here keeps one.
             CryptographicOperations.ZeroMemory(bytes[..written]);

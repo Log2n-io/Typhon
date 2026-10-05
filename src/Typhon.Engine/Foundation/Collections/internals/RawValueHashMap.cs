@@ -73,9 +73,13 @@ unsafe partial class RawValuePagedHashMap<TKey, TStore> : PagedHashMapBase<TStor
 
     /// <summary>Reports a latched mutation, which only threatens a bulk batch that is in flight on this map.</summary>
     /// <param name="site">Call-site name, a literal at every call.</param>
+    /// <remarks>
+    /// The depth goes in by <c>ref</c> so it is not read when the window is closed — see
+    /// <c>ExclusiveWindow.NoteMutation(string, ref int)</c>.
+    /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void NoteLatchedMutation(string site)
-        => _fenceWindow?.NoteMutation(site, Volatile.Read(ref _bulkBatchDepth) != 0);
+        => _fenceWindow?.NoteMutation(site, ref _bulkBatchDepth);
 
     /// <summary>Marks a bulk batch as in flight on this map for the life of the returned scope.</summary>
     internal BulkBatchScope EnterBulkBatch() => new BulkBatchScope(this);

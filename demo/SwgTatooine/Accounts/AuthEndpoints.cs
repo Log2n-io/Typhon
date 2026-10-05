@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -206,11 +207,41 @@ public static class AuthEndpoints
     /// allowance per request by changing a header — the limit then protects nothing. Phase I's deployment terminates TLS at the
     /// instance, so the socket's address IS the client's; when a load balancer goes in front, this is the line that has to
     /// change, together with <c>ForwardedHeadersOptions.KnownProxies</c>.
+    /// <para>
+    /// <b>Keyed on the PREFIX rather than the exact address, because one client has more than one of them.</b> A single address was
+    /// a bound on IPv4 and no bound at all on IPv6: the smallest allocation a residential line or a VPS gets is a routed /64, which
+    /// is 2^64 source addresses that all belong to the same person and each of which produced a bucket of its own. Keying on /64
+    /// makes the per-address limit mean "per client" again. IPv4 is keyed on /24 for the same reason at a coarser scale — a /24 is
+    /// the smallest block that is routed as a unit — which does mean a shared NAT counts as one client; the per-NAME key is what
+    /// keeps that from locking anybody out, since an attacker exhausting the address key cannot also exhaust a stranger's name.
+    /// </para>
     /// </remarks>
     private static string AddressKey(HttpContext context)
     {
         var address = context?.Connection?.RemoteIpAddress;
-        return address == null ? null : "ip:" + address;
+        if (address == null)
+        {
+            return null;
+        }
+
+        // IPv4-mapped v6 ("::ffff:1.2.3.4") is the shape Kestrel hands back on a dual-stack socket, so it has to be unwrapped or
+        // every v4 client would be keyed as a v6 /64 and the two paths would disagree about what an address is.
+        if (address.IsIPv4MappedToIPv6)
+        {
+            address = address.MapToIPv4();
+        }
+
+        Span<byte> octets = stackalloc byte[16];
+        if (!address.TryWriteBytes(octets, out var written))
+        {
+            // Cannot happen for either family at 16 bytes, and if it ever did, keying on the whole address is the safe fallback.
+            return "ip:" + address;
+        }
+
+        var kept = written == 4 ? 3 : 8;
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"ip/{kept}:{Convert.ToHexString(octets[..kept])}");
     }
 
     /// <summary>

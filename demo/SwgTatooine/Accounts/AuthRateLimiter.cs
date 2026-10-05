@@ -93,7 +93,9 @@ public sealed class AuthRateLimiter
     /// <summary>
     /// Takes one attempt from every key's bucket, or refuses and charges nothing.
     /// </summary>
-    /// <param name="keys">The keys this attempt is counted against — the client address and the account name. <see langword="null"/> entries are ignored.</param>
+    /// <param name="keys">
+    /// The keys this attempt is counted against — the client address and the account name. <see langword="null"/> entries are ignored.
+    /// </param>
     /// <returns><see langword="true"/> when the attempt may proceed.</returns>
     /// <remarks>
     /// <b>All-or-nothing: if any bucket is empty, none is charged.</b> Charging the address for an attempt the name's bucket
@@ -114,7 +116,14 @@ public sealed class AuthRateLimiter
             // be empty costs nothing but the clock reading it already deserved.
             foreach (var key in keys)
             {
-                if (key != null && !Bucketed(key, now).Refill(now, _capacity, _refillTicks).HasToken)
+                if (key == null)
+                {
+                    continue;
+                }
+
+                // A null bucket is a table with no room and nothing safe to evict — see Bucketed. Refused, like an empty one.
+                var bucket = Bucketed(key, now);
+                if (bucket == null || !bucket.Refill(now, _capacity, _refillTicks).HasToken)
                 {
                     return false;
                 }
@@ -164,9 +173,11 @@ public sealed class AuthRateLimiter
             return existing;
         }
 
-        if (_buckets.Count >= _maxKeys)
+        if (_buckets.Count >= _maxKeys && !Evict())
         {
-            Evict();
+            // The table is full of buckets that all still owe something, so there is no room for this key and no safe way to make
+            // room. Refused rather than admitted: a limiter that cannot track a key must not pretend the key has an allowance.
+            return null;
         }
 
         var fresh = new Bucket(_capacity, now);
@@ -175,32 +186,52 @@ public sealed class AuthRateLimiter
     }
 
     /// <summary>
-    /// Drops the least recently touched tenth of the table. Caller holds the lock.
+    /// Drops up to a tenth of the table, taking only buckets that owe nothing. Caller holds the lock.
     /// </summary>
+    /// <returns>Whether anything was dropped, and so whether there is room for another key.</returns>
     /// <remarks>
-    /// A tenth rather than one entry, so the scan's cost is amortised instead of being paid on every insert once the table is
-    /// full. An evicted key gets a full bucket and is limited again from there, so eviction can forgive an attempt but never
-    /// grant one.
+    /// <para>
+    /// <b>Only a FULL bucket may be evicted, and the previous rule — least recently touched — was a way through the per-name
+    /// limit.</b> A recreated bucket starts at <c>_capacity</c>, so dropping an EXHAUSTED one hands its key a fresh allowance.
+    /// The name key is whatever the client sent, so the attack was direct and cheap: exhaust the victim's name, flood the table
+    /// with more than <c>_maxKeys</c> other names until the victim's bucket is the oldest, let it be evicted, and the next attempt
+    /// on that name starts from ten again. Repeat for unbounded guessing against one account. The class comment claimed eviction
+    /// "can forgive an attempt but never grant one"; that is now true, because a bucket at full capacity is the one bucket whose
+    /// removal loses no information.
+    /// </para>
+    /// <para>
+    /// <b>No sort any more, because there is nothing to order.</b> Full buckets are interchangeable — each says only "this key has
+    /// spent nothing" — so the first ones found are as good as the oldest. That turns an O(n log n) pass with two full-table
+    /// allocations, run inside the single lock every authentication attempt takes, into one allocation-free scan that stops as soon
+    /// as it has room.
+    /// </para>
     /// </remarks>
-    private void Evict()
+    private bool Evict()
     {
-        var keys = new string[_buckets.Count];
-        var stamps = new long[_buckets.Count];
-        var i = 0;
+        var target = Math.Max(1, _buckets.Count / 10);
+        _evicting.Clear();
         foreach (var pair in _buckets)
         {
-            keys[i] = pair.Key;
-            stamps[i] = pair.Value.LastTouched;
-            i++;
+            if (pair.Value.OwesNothing(_capacity))
+            {
+                _evicting.Add(pair.Key);
+                if (_evicting.Count >= target)
+                {
+                    break;
+                }
+            }
         }
 
-        Array.Sort(stamps, keys);
-        var drop = Math.Max(1, keys.Length / 10);
-        for (var j = 0; j < drop && j < keys.Length; j++)
+        for (var i = 0; i < _evicting.Count; i++)
         {
-            _buckets.Remove(keys[j]);
+            _buckets.Remove(_evicting[i]);
         }
+
+        return _evicting.Count > 0;
     }
+
+    /// <summary>Scratch for <see cref="Evict"/>: the keys to drop, collected before the dictionary is written. Lock-held.</summary>
+    private readonly List<string> _evicting = [];
 
     /// <summary>
     /// One key's allowance: a token count and the timestamp it was last refilled from.
@@ -226,6 +257,17 @@ public sealed class AuthRateLimiter
 
         /// <summary>Whether at least one token is in hand, as of the last <see cref="Refill"/>.</summary>
         internal bool HasToken => _tokens >= 1d;
+
+        /// <summary>
+        /// Whether this bucket has spent nothing, so forgetting it would forgive nothing.
+        /// </summary>
+        /// <param name="capacity">The limiter's capacity, which a bucket that owes nothing still holds in full.</param>
+        /// <returns>Whether it is safe to evict.</returns>
+        /// <remarks>
+        /// Read without refilling on purpose: a bucket that has spent something and would refill to full by now is still a bucket
+        /// whose key has been seen recently, and keeping it costs one entry. Being conservative here is the safe direction.
+        /// </remarks>
+        internal bool OwesNothing(int capacity) => _tokens >= capacity;
 
         /// <summary>Adds whatever time has earned since the last touch, and returns this bucket so a caller can chain the test.</summary>
         /// <param name="now">The attempt's timestamp.</param>

@@ -1278,7 +1278,7 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// <remarks>
     /// <para>
     /// <b>This is what makes the EW-01 detector precise, and the imprecision it replaces was rejecting correct code.</b> The window is per ENGINE: it says "a
-    /// fence is running somewhere", and <see cref="ExclusiveWindow.NoteMutation"/> is handed a call-site string and nothing else, so it could not tell whether
+    /// fence is running somewhere", and <c>ExclusiveWindow.NoteMutation</c> is handed a call-site string and nothing else, so it could not tell whether
     /// the fence was touching the caller's tree. Every latched mutator was armed, so an off-tick commit — a <c>StorageMode.Versioned</c>, non-spatial
     /// entity's perfectly ordinary indexed write — threw, although it runs the full OLC protocol and the fence was nowhere near its tree.
     /// </para>
@@ -1300,11 +1300,14 @@ internal abstract partial class BTree<TKey, TStore> : BTreeBase<TStore> where TK
     /// </summary>
     /// <param name="site">Call-site name, a literal at every call.</param>
     /// <remarks>
-    /// Two relaxed field reads and a not-taken branch in the overwhelmingly common case, which is what the unconditional call cost before.
+    /// <b>ONE relaxed field read and a not-taken branch when the window is closed, which is what the unconditional call cost before.</b>
+    /// The depth goes in by <c>ref</c> rather than as a computed <c>bool</c> precisely so that it is not read on that path: an argument is
+    /// evaluated before the call, so passing the answer made every latched mutation load this tree's depth only for
+    /// <c>ExclusiveWindow.NoteMutation(string, ref int)</c> to return without looking at it.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void NoteLatchedMutation(string site)
-        => _fenceWindow?.NoteMutation(site, Volatile.Read(ref _unlatchedRewriteDepth) != 0);
+        => _fenceWindow?.NoteMutation(site, ref _unlatchedRewriteDepth);
 
     /// <summary>Marks this tree as under the fence's unlatched bulk rewrite for the life of the returned scope.</summary>
     /// <returns>A scope that clears the mark.</returns>
