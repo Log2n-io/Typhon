@@ -2051,7 +2051,12 @@ public unsafe partial class Transaction : EntityAccessor
         _clusterCommitMapAccessor = es.EntityMap.Segment.CreateChunkAccessor();
         _clusterCommitContentAccessor = contentSegment.CreateChunkAccessor();
         _clusterCommitContentSegment = contentSegment;
-        _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+        // The publish writes through this accessor — the committed Versioned HEAD (PublishClusterVersionedSlot), a Commit-discipline staged value
+        // (PublishStagedEntry) and an AllowMultiple element id (ReconcileClusterIndexAndViews) — so it registers its pages with the transaction's ChangeSet,
+        // like the index accessors below (AP-04). It had none: MarkSlotDirty then only toggled ActiveChunkWriters, the page never owed a write, and nothing
+        // ever wrote it — not the checkpoint, not the close's flush, not the fence (#559 stopped emitting Versioned slots). A clean reopen then trusted the
+        // stale HEAD (CS-03) and Path-B scans returned the old value while point reads, which walk the chain, returned the new one (#1159).
+        _clusterCommitClusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor(_changeSet);
         _clusterCommitIndexAccessor = clusterState.IndexSegment?.CreateChunkAccessor(_changeSet) ?? default;
         _clusterCommitIndexAccessorS64 = clusterState.IndexSegmentString64?.CreateChunkAccessor(_changeSet) ?? default;
         _clusterCommitArchId = archId;

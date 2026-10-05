@@ -205,6 +205,26 @@ landed in P1.1 #395 (commit pipeline reorder, 2026-06-13); AP-10..13 landed in P
           Tracked: **#396** (to be done with the P2 cluster-durability rework)
   on_violation: partial publish with no compensation (TXW-8 class)
 
+### AP-04: Every byte a publish writes is owed to the disk `[fatal]` `[silent]`
+  invariant ∀ page p a commit writes through its cluster accessor — in PUBLISH the Versioned HEAD copy into the cluster slot and a
+            Commit-discipline staged value, in PREPARE an AllowMultiple element id: after the write, p owes a writeback
+            (WritebackGen ≠ CapturedGen) until a durable write discharges it
+  invariant the commit's cluster accessor carries the transaction's ChangeSet, like its index accessors
+  note a dirty write through an accessor WITHOUT a ChangeSet owes nothing, and that is by design for the in-place SingleVersion writes made
+       through the transaction's own cluster accessor: their durability is the tick fence's (cluster-page-durability.md). Making every such
+       write owe its page at write time was tried and rejected — the page is then collected while the writer still holds it, and checkpoint
+       cycles gate on it (CommittedDisciplineRecoveryTests turned red). The publish is different: it runs after the append, as the last act
+       of a commit nothing else will make durable
+  rationale: the cluster accessor had no ChangeSet, so marking a slot dirty only toggled ActiveChunkWriters. The page owed nothing: no
+             checkpoint and no close wrote it, the cache could evict it and reload the old bytes, and the fence does not help — it
+             stopped emitting Versioned slots in #559. A clean reopen then trusted the stale HEAD (CS-03): Path-B scans and bulk
+             iteration returned the old value while point reads, which walk the chain, returned the new one (#1159)
+  scope: Transaction.EnsureClusterCommitAccessors, Transaction.PublishClusterVersionedSlot, Transaction.PublishStagedEntry
+  on_violation: a committed update vanishes from the cluster slot across a clean reopen or an eviction — silently, while the revision
+                chain and the index keep the new value
+  verified: VersionedPublishDurabilityTests.AVersionedUpdate_OnACleanPage_IsWrittenAndSurvivesACleanReopen [VerifiesRule];
+            mutant VersionedPublishDurabilityTests.APublishThroughAnAccessorWithoutAChangeSet_LeavesThePageClean [RuleMutant]
+
 ### AP-10: Single apply routine `[fatal]`
   invariant recovery mutates engine state only via the RecoveryApplier ops → the engine's normal write paths
   scope: RecoveryApplier.cs (ApplySpawnedEntity / ApplyDestroyToExisting / ApplySetEnabledBitsToExisting
@@ -1742,6 +1762,8 @@ of the LSN value).
   invariant trusted ⇒ skip RebuildVersionedHeadFromChain (persisted cluster-slot HEADs are current)
   invariant ¬trusted ⇒ rebuild runs exactly as before (the crash-window repair path is preserved)
   scope: DatabaseEngine.InitializeArchetypes, ArchetypeClusterState.RebuildVersionedHeadFromChain
+  requires AP-04 — "the flag says clean, therefore the HEADs are current" holds only if every published HEAD owes its page a write;
+    before #1159 a Versioned update on a page nothing else had dirtied was never written, and this rule trusted it
   on_violation: skipping when not provably clean → stale HEAD served from the cluster slot
 
 ---
