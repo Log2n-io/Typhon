@@ -72,6 +72,7 @@ internal sealed class SendPump : IDisposable
     private long _pongsSent;
     private int _activePumps;
     private int _disposed;
+    private int _quiesceTimeoutMs = QuiesceTimeoutMs;
 
     // Send-path telemetry, collected only while FrameAssembler.PhaseTimingEnabled is set: the driver's wake walk, the thread pool's delay before a woken pump
     // runs, and each link send's duration split by whether it completed synchronously. Stopwatch ticks.
@@ -137,6 +138,10 @@ internal sealed class SendPump : IDisposable
 
     /// <summary>Pumps that had not come back when <see cref="Dispose"/> gave up waiting. Non-zero is a transport that does not honour a close.</summary>
     public int PumpsStillRunningAtDispose { get; private set; }
+
+    /// <summary>Tests only: shortens the quiesce, so a case that needs it to time out does not spend five seconds getting there.</summary>
+    /// <param name="milliseconds">The new bound.</param>
+    internal void SetQuiesceTimeoutForTest(int milliseconds) => _quiesceTimeoutMs = milliseconds;
 
     /// <summary>
     /// The send path as measured while phase timing is on: driver wake time and sessions woken per publish, mean pool delay from publish to a pump starting,
@@ -629,7 +634,7 @@ internal sealed class SendPump : IDisposable
     /// <returns>The send.</returns>
     /// <remarks>
     /// The bytes are this pump's own per-slot buffer, not a frame-pool block, so no <c>BeginSend</c> is taken: the buffer lives until <see cref="Dispose"/>,
-    /// which waits for every pump first. A failed send closes the session exactly as a failed frame does.
+    /// which waits for every pump first and leaves it allocated when one outlives the wait. A failed send closes the session exactly as a failed frame does.
     /// </remarks>
     private async ValueTask TryPongAsync(int slot)
     {
@@ -782,26 +787,32 @@ internal sealed class SendPump : IDisposable
             }
         }
 
-        // Quiesce before anything a running pump reads is freed. A pump holds a pointer into pool memory for the duration of one send, and the pool is the
-        // assembler's to dispose — so returning from here with a pump still inside SendAsync would free the bytes under a socket.
+        // Quiesce before anything a running pump reads is freed. A pump lends a link pool memory, or its own PONG buffer, for the duration of one send; the
+        // wait is what lets an ordinary teardown free both, and the count taken when it ends is what keeps them when it gives up.
         var spin = new SpinWait();
-        var deadline = Environment.TickCount64 + QuiesceTimeoutMs;
+        var deadline = Environment.TickCount64 + _quiesceTimeoutMs;
         while (Volatile.Read(ref _activePumps) > 0 && Environment.TickCount64 < deadline)
         {
             spin.SpinOnce();
         }
 
         // Bounded, and the overrun is recorded rather than waited out: a link that never returns from a write is a transport defect, and blocking the
-        // runtime's disposal for it forever turns that defect into a hang with no diagnosis. What remains is a pump holding a pointer into a pool the
-        // assembler is about to free, so the count is worth surfacing to whoever reads the teardown.
+        // runtime's disposal for it forever turns that defect into a hang with no diagnosis. What remains is a pump still inside a send, and the count is what
+        // tells the assembler to keep its frame slabs (#1006).
         PumpsStillRunningAtDispose = Volatile.Read(ref _activePumps);
 
-        for (var i = 0; i < _buffers.Length; i++)
+        // The same rule for this object's own memory (#1006): a send's message is the link's until its task ends, whichever way. A PONG's buffer is a
+        // native allocation, so releasing it under a parked send frees what the socket is about to read; a frame's view only points into the pool, but
+        // releasing it leaves a kept slab behind a zero-length view, and the send faults mid-write. Past the deadline nothing is released: a bounded leak.
+        if (PumpsStillRunningAtDispose == 0)
         {
-            _buffers[i]?.Release();
-            _buffers[i] = null;
-            _pongBuffers[i]?.Release();
-            _pongBuffers[i] = null;
+            for (var i = 0; i < _buffers.Length; i++)
+            {
+                _buffers[i]?.Release();
+                _buffers[i] = null;
+                _pongBuffers[i]?.Release();
+                _pongBuffers[i] = null;
+            }
         }
 
         _stopping.Dispose();

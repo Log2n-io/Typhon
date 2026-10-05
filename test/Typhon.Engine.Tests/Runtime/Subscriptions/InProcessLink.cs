@@ -105,6 +105,16 @@ internal sealed class InProcessLink : ISubscriptionLink
     public int StalledSends => Volatile.Read(ref _stalledSends);
 
     /// <summary>
+    /// The message the last parked send was handed, kept as the memory itself rather than a copy — a parked send still owns it, so a test can check the
+    /// engine left it alive (#1006). Readable once <see cref="WaitForStalledSend"/> has returned <see langword="true"/>.
+    /// </summary>
+    /// <remarks>
+    /// Owned by the link only while the send is parked. After <see cref="FaultStalledSends"/> it is the engine's again, and reading it then is a check of
+    /// what the engine did with it — released or not — never a read the link is entitled to.
+    /// </remarks>
+    public ReadOnlyMemory<byte> StalledMessage { get; private set; }
+
+    /// <summary>
     /// Parks every later send until <see cref="FaultStalledSends"/>, ignoring the cancellation token.
     /// </summary>
     /// <remarks>
@@ -147,7 +157,9 @@ internal sealed class InProcessLink : ISubscriptionLink
         var stall = Volatile.Read(ref _stall);
         if (stall != null)
         {
-            // Before the in-flight bookkeeping: this send never completes, so counting it there would report an overlap that never happened.
+            // Before the in-flight bookkeeping: this send never completes, so counting it there would report an overlap that never happened. The message
+            // is stored before the count, whose interlocked increment publishes it to a reader that saw the count move.
+            StalledMessage = message;
             Interlocked.Increment(ref _stalledSends);
             return new ValueTask(stall.Task);
         }
