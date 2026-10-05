@@ -276,6 +276,7 @@ public sealed partial class TatooineSim : IDisposable
         // keeps it clear of the fence's unlatched fast paths (EW-02 in rules/runtime-scheduling.md).
         Dbe.RegisterComponentFromAccessor<Account>();
         Dbe.RegisterComponentFromAccessor<AccountSecret>();
+        Dbe.RegisterComponentFromAccessor<Character>();
 
         // SWG's coordinates are centred on the planet: -8192..+8192 on each axis at the real size. Keeping the origin in
         // the middle rather than at a corner is not cosmetic — every authentic coordinate in the map data is expressed

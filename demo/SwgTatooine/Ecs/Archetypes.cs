@@ -159,3 +159,26 @@ public partial class AccountArch : Archetype<AccountArch>
     /// <summary>The password credential, kept apart so no read of <see cref="Identity"/> carries it.</summary>
     public static readonly Comp<AccountSecret> Secret = Register<AccountSecret>();
 }
+
+/// <summary>
+/// A character. The persistent presence an account logs into, and the second non-spatial archetype here.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>No placement component, for the same reason <see cref="AccountArch"/> has none</b> — and here the reason is sharper. An
+/// offline character must NOT sit in the spatial index: it has a last-known position, which is a memory of where a body was, not
+/// a body. Giving this a placement would put every character who ever logged in into the grid forever, where queries would walk
+/// them and replication would consider serving them.
+/// </para>
+/// <para>
+/// <b>The body is <see cref="Player"/>, spawned at login and destroyed at logout (A5).</b> The link runs this way round —
+/// character to account by <see cref="Character.Account"/>, avatar to character by the session binding — because the avatar is
+/// the transient half and a durable row should not point at one.
+/// </para>
+/// </remarks>
+[Archetype(1, "Characters")]
+public partial class CharacterArch : Archetype<CharacterArch>
+{
+    /// <summary>The character itself: name, wallet, and where it was last seen.</summary>
+    public static readonly Comp<Character> Profile = Register<Character>();
+}

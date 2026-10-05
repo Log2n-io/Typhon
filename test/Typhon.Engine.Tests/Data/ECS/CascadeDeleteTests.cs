@@ -149,6 +149,35 @@ class ClusterPart : Archetype<ClusterPart>
     public static readonly Comp<PartData> Part = Register<PartData>();
 }
 
+/// <summary>
+/// A one-to-one child: the FK index is UNIQUE, which every other fixture in this file is not.
+/// </summary>
+/// <remarks>
+/// <b>The shape nothing here covered, and the cascade threw on it.</b> Every `OnParentDelete` fixture above declares
+/// <c>AllowMultiple = true</c>, so <c>FkReverseLookup.ScanClusterArchetype</c>'s unconditional call to
+/// <c>EnumerateRangeMultiple</c> — which REFUSES a unique index — was never reached with one. A profile row keyed on its owner is
+/// the natural use of a unique FK: one character per account, one settings row per user. Destroying the parent threw
+/// <c>InvalidOperationException</c> out of <c>FindCascadeChildren</c> instead of cascading, so the relationship was unusable.
+/// Found from the SWG demo's <c>Character</c>, whose index is unique precisely so read-or-create cannot race.
+/// </remarks>
+[Component("Typhon.Test.ECS.ProfileData", 1, StorageMode = StorageMode.SingleVersion)]
+[StructLayout(LayoutKind.Sequential)]
+struct ProfileData
+{
+    [Index(OnParentDelete = CascadeAction.Delete)]
+    public EntityLink<ClusterBag> Owner;
+
+    public int Setting;
+    public int _pad;
+}
+
+/// <summary>Cluster-backed one-to-one child of <see cref="ClusterBag"/>, reached through a UNIQUE FK index.</summary>
+[Archetype]
+class ClusterProfile : Archetype<ClusterProfile>
+{
+    public static readonly Comp<ProfileData> Profile = Register<ProfileData>();
+}
+
 // [NonParallelizable] removed (#514 Phase 3): it was an incomplete mitigation for the cascade-diamond registry race (Face B).
 // The cascade graph is now built once under the registration lock inside ArchetypeRegistry.Freeze, so these fixtures are parallel-safe.
 class CascadeDeleteTests : TestBase<CascadeDeleteTests>
@@ -172,6 +201,7 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
         dbe.RegisterComponentFromAccessor<ItemTagData>();
         dbe.RegisterComponentFromAccessor<ItemAuditData>();
         dbe.RegisterComponentFromAccessor<PartData>();
+        dbe.RegisterComponentFromAccessor<ProfileData>();
         dbe.InitializeArchetypes();
         return dbe;
     }
@@ -809,5 +839,120 @@ class CascadeDeleteTests : TestBase<CascadeDeleteTests>
         var itemMeta = ArchetypeRegistry.GetMetadata<ClusterItem>();
         Assert.That(itemMeta._cascadeTargets, Is.Not.Null.And.Count.EqualTo(1), "the cluster-backed child is itself a parent");
         Assert.That(itemMeta._cascadeTargets[0].ChildArchetypeId, Is.EqualTo(ArchetypeRegistry.GetMetadata<ClusterPart>().ArchetypeId));
+    }
+
+    // =======================================================================
+    // A UNIQUE FK index — the one-to-one shape, which used to throw
+    // =======================================================================
+
+    /// <summary>
+    /// Destroying a parent cascades to a child found through a UNIQUE FK index, rather than throwing.
+    /// </summary>
+    /// <remarks>
+    /// <b>The failure this pins was not a missed child; it was an exception out of <c>Destroy</c>.</b>
+    /// <c>FkReverseLookup.ScanClusterArchetype</c> walked every FK index with <c>EnumerateRangeMultiple</c>, and that method refuses
+    /// a unique index by design — the two enumerators are not interchangeable and each throws on the other's index. So the parent's
+    /// own destroy failed, taking the transaction with it, for any one-to-one relationship declaring a cascade.
+    /// </remarks>
+    [Test]
+    public void Destroy_ParentWithUniqueFkChild_CascadesRatherThanThrowing()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId bagId, profileId, survivorBagId, survivorProfileId;
+        using (var t1 = dbe.CreateQuickTransaction())
+        {
+            var bag = new ClusterBagData { Capacity = 1 };
+            bagId = t1.Spawn<ClusterBag>(ClusterBag.Bag.Set(in bag));
+            survivorBagId = t1.Spawn<ClusterBag>(ClusterBag.Bag.Set(in bag));
+
+            var profile = new ProfileData { Owner = bagId, Setting = 42 };
+            profileId = t1.Spawn<ClusterProfile>(ClusterProfile.Profile.Set(in profile));
+
+            // A second parent with its own child, so a cascade that matched too widely would be caught rather than looking correct.
+            var survivorProfile = new ProfileData { Owner = survivorBagId, Setting = 7 };
+            survivorProfileId = t1.Spawn<ClusterProfile>(ClusterProfile.Profile.Set(in survivorProfile));
+            t1.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        using (var t2 = dbe.CreateQuickTransaction())
+        {
+            Assert.DoesNotThrow(() => t2.Destroy(bagId), "a unique FK index must not make the parent's own destroy throw");
+            Assert.That(t2.TryOpen(profileId, out _), Is.False, "the one-to-one child must be cascade-destroyed");
+            Assert.That(t2.TryOpen(survivorProfileId, out _), Is.True, "and another parent's child must be untouched");
+            t2.Commit();
+        }
+
+        dbe.WriteTickFence(2);
+
+        using var t3 = dbe.CreateQuickTransaction();
+        Assert.Multiple(() =>
+        {
+            Assert.That(t3.TryOpen(bagId, out _), Is.False);
+            Assert.That(t3.TryOpen(profileId, out _), Is.False);
+            Assert.That(t3.TryOpen(survivorBagId, out _), Is.True);
+            Assert.That(t3.TryOpen(survivorProfileId, out _), Is.True);
+        });
+    }
+
+    /// <summary>A parent with no unique-FK child destroys cleanly, which is the empty-range half of the same walk.</summary>
+    [Test]
+    public void Destroy_ParentWithNoUniqueFkChild_NoError()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId bagId;
+        using (var t1 = dbe.CreateQuickTransaction())
+        {
+            var bag = new ClusterBagData { Capacity = 1 };
+            bagId = t1.Spawn<ClusterBag>(ClusterBag.Bag.Set(in bag));
+            t1.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        using var t2 = dbe.CreateQuickTransaction();
+        Assert.DoesNotThrow(() => t2.Destroy(bagId));
+        Assert.That(t2.TryOpen(bagId, out _), Is.False);
+    }
+
+    /// <summary>
+    /// Both index kinds cascade from one parent in one destroy.
+    /// </summary>
+    /// <remarks>
+    /// <c>ClusterBag</c> is the parent of an <c>AllowMultiple</c> child (<see cref="ClusterItem"/>) and a unique one
+    /// (<see cref="ClusterProfile"/>), so this exercises both branches of the scan in a single walk — which is where a fix that
+    /// handled one and broke the other would show up.
+    /// </remarks>
+    [Test]
+    public void Destroy_ParentWithBothIndexKinds_CascadesToAll()
+    {
+        using var dbe = SetupEngine();
+
+        EntityId bagId, itemId, profileId;
+        using (var t1 = dbe.CreateQuickTransaction())
+        {
+            var bag = new ClusterBagData { Capacity = 3 };
+            bagId = t1.Spawn<ClusterBag>(ClusterBag.Bag.Set(in bag));
+
+            var item = new SvItemData { Owner = bagId, Weight = 2 };
+            itemId = t1.Spawn<ClusterItem>(ClusterItem.Item.Set(in item));
+
+            var profile = new ProfileData { Owner = bagId, Setting = 9 };
+            profileId = t1.Spawn<ClusterProfile>(ClusterProfile.Profile.Set(in profile));
+            t1.Commit();
+        }
+
+        dbe.WriteTickFence(1);
+
+        using var t2 = dbe.CreateQuickTransaction();
+        Assert.DoesNotThrow(() => t2.Destroy(bagId));
+        Assert.Multiple(() =>
+        {
+            Assert.That(t2.TryOpen(itemId, out _), Is.False, "the AllowMultiple child must still cascade");
+            Assert.That(t2.TryOpen(profileId, out _), Is.False, "and the unique one must cascade too");
+        });
     }
 }

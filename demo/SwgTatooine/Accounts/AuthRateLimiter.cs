@@ -1,5 +1,5 @@
 using System;
-using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 
 namespace SwgTatooine.Accounts;
@@ -17,6 +17,18 @@ namespace SwgTatooine.Accounts;
 /// <b>A token bucket, not a fixed window.</b> A fixed window lets an attacker fire the whole allowance in the last millisecond
 /// of one window and again in the first of the next — double the intended rate, at the worst possible moment. A bucket refills
 /// continuously, so the long-run rate is the rate and the burst is exactly <see cref="Capacity"/>.
+/// </para>
+/// <para>
+/// <b>ONE lock for the whole limiter, and the first version's cleverness was a bug.</b> That version gave each bucket its own
+/// lock and took an attempt in two passes — peek every key, then charge every key — so that a refusal on one key charged
+/// nothing. Between the two passes other threads peeked too: with a capacity of 10 and 500 concurrent attempts it granted 25,
+/// which its own test caught. Check-then-act is not made atomic by locking the parts. The whole attempt is now one critical
+/// section, which is also what makes the all-or-nothing property true rather than merely intended.
+/// </para>
+/// <para>
+/// <b>The contention does not matter here, and claiming otherwise is what caused the bug.</b> Every caller of this is about to
+/// spend a few hundred microseconds in PBKDF2. A global lock held for two dictionary lookups and two floating-point updates is
+/// three or four orders of magnitude below that, and there is no version of this endpoint where the limiter is the bottleneck.
 /// </para>
 /// <para>
 /// <b>In-process, and that is a stated limit rather than an oversight.</b> Two server instances behind a load balancer each
@@ -46,7 +58,8 @@ public sealed class AuthRateLimiter
     /// <summary>The most keys tracked before the least recently touched are evicted.</summary>
     public const int MaxTrackedKeys = 20_000;
 
-    private readonly ConcurrentDictionary<string, Bucket> _buckets = new(StringComparer.Ordinal);
+    private readonly object _gate = new();
+    private readonly Dictionary<string, Bucket> _buckets = new(StringComparer.Ordinal);
     private readonly int _capacity;
     private readonly long _refillTicks;
     private readonly int _maxKeys;
@@ -78,48 +91,73 @@ public sealed class AuthRateLimiter
     }
 
     /// <summary>
-    /// Takes one attempt from every key's bucket, or refuses.
+    /// Takes one attempt from every key's bucket, or refuses and charges nothing.
     /// </summary>
-    /// <param name="keys">The keys this attempt is counted against — the client address and the account name.</param>
+    /// <param name="keys">The keys this attempt is counted against — the client address and the account name. <see langword="null"/> entries are ignored.</param>
     /// <returns><see langword="true"/> when the attempt may proceed.</returns>
     /// <remarks>
     /// <b>All-or-nothing: if any bucket is empty, none is charged.</b> Charging the address for an attempt the name's bucket
     /// refused would let one exhausted name burn an address's whole allowance, which is a denial of service against everybody
-    /// behind that address.
+    /// behind that address. The whole decision happens under one lock, so the refill, the test and the charge are a single
+    /// atomic step and no concurrent attempt can observe the gap — which is where the first version granted two and a half
+    /// times its capacity.
     /// </remarks>
     public bool TryTake(params ReadOnlySpan<string> keys)
     {
-        // Peek first, charge second. Two passes over at most two keys, which is cheaper than being wrong.
+        // One timestamp for the whole attempt, so each key is judged at the same instant and two keys cannot refill by
+        // different amounts within one call.
         var now = Stopwatch.GetTimestamp();
-        foreach (var key in keys)
-        {
-            if (key != null && !Bucketed(key).HasToken(now, _capacity, _refillTicks))
-            {
-                return false;
-            }
-        }
 
-        foreach (var key in keys)
+        lock (_gate)
         {
-            if (key != null)
+            // Resolve and refill every key first. Refilling is not a charge, so doing it for a key whose sibling turns out to
+            // be empty costs nothing but the clock reading it already deserved.
+            foreach (var key in keys)
             {
-                Bucketed(key).Take(now, _capacity, _refillTicks);
+                if (key != null && !Bucketed(key, now).Refill(now, _capacity, _refillTicks).HasToken)
+                {
+                    return false;
+                }
             }
-        }
 
-        return true;
+            foreach (var key in keys)
+            {
+                if (key != null)
+                {
+                    _buckets[key].Spend();
+                }
+            }
+
+            return true;
+        }
     }
 
     /// <summary>How many keys are currently tracked. For a test and for the stats endpoint; not a decision input.</summary>
-    public int TrackedKeys => _buckets.Count;
+    public int TrackedKeys
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _buckets.Count;
+            }
+        }
+    }
 
     /// <summary>Forgets every bucket. For a fixture that must not inherit another's refusals.</summary>
-    public void Reset() => _buckets.Clear();
+    public void Reset()
+    {
+        lock (_gate)
+        {
+            _buckets.Clear();
+        }
+    }
 
-    /// <summary>Finds or makes a key's bucket, evicting first if the table is at its bound.</summary>
+    /// <summary>Finds or makes a key's bucket, evicting first if the table is at its bound. Caller holds the lock.</summary>
     /// <param name="key">The key.</param>
+    /// <param name="now">The attempt's timestamp, which a fresh bucket starts from.</param>
     /// <returns>Its bucket.</returns>
-    private Bucket Bucketed(string key)
+    private Bucket Bucketed(string key, long now)
     {
         if (_buckets.TryGetValue(key, out var existing))
         {
@@ -131,89 +169,82 @@ public sealed class AuthRateLimiter
             Evict();
         }
 
-        return _buckets.GetOrAdd(key, _ => new Bucket(_capacity));
+        var fresh = new Bucket(_capacity, now);
+        _buckets[key] = fresh;
+        return fresh;
     }
 
     /// <summary>
-    /// Drops the least recently touched tenth of the table.
+    /// Drops the least recently touched tenth of the table. Caller holds the lock.
     /// </summary>
     /// <remarks>
     /// A tenth rather than one entry, so the scan's cost is amortised instead of being paid on every insert once the table is
-    /// full. Nothing here is exact — a concurrent touch can make an entry look older than it is — and it does not need to be:
-    /// an evicted key gets a full bucket and is limited again from there.
+    /// full. An evicted key gets a full bucket and is limited again from there, so eviction can forgive an attempt but never
+    /// grant one.
     /// </remarks>
     private void Evict()
     {
-        var snapshot = _buckets.ToArray();
-        Array.Sort(snapshot, static (a, b) => a.Value.LastTouched.CompareTo(b.Value.LastTouched));
-        var drop = Math.Max(1, snapshot.Length / 10);
-        for (var i = 0; i < drop && i < snapshot.Length; i++)
+        var keys = new string[_buckets.Count];
+        var stamps = new long[_buckets.Count];
+        var i = 0;
+        foreach (var pair in _buckets)
         {
-            _buckets.TryRemove(snapshot[i].Key, out _);
+            keys[i] = pair.Key;
+            stamps[i] = pair.Value.LastTouched;
+            i++;
+        }
+
+        Array.Sort(stamps, keys);
+        var drop = Math.Max(1, keys.Length / 10);
+        for (var j = 0; j < drop && j < keys.Length; j++)
+        {
+            _buckets.Remove(keys[j]);
         }
     }
 
-    /// <summary>One key's allowance: a token count and the timestamp it was last refilled from.</summary>
+    /// <summary>
+    /// One key's allowance: a token count and the timestamp it was last refilled from.
+    /// </summary>
     /// <remarks>
-    /// A class rather than a struct because it is mutated in place under its own lock while living in a
-    /// <see cref="ConcurrentDictionary{TKey,TValue}"/>, where a struct value would be replaced rather than updated and two
-    /// concurrent attempts could both read a full bucket.
+    /// <b>No lock of its own, deliberately.</b> Every method here is called with the limiter's single lock held, which is the
+    /// only thing that makes an attempt atomic across two keys. Giving a bucket its own lock is what the first version did, and
+    /// it made each step atomic while leaving the decision as a whole racy.
     /// </remarks>
     private sealed class Bucket
     {
-        private readonly object _gate = new();
         private double _tokens;
         private long _stamp;
 
-        internal Bucket(int capacity)
+        internal Bucket(int capacity, long now)
         {
             _tokens = capacity;
-            _stamp = Stopwatch.GetTimestamp();
+            _stamp = now;
         }
 
-        /// <summary>When this bucket was last read or charged, for eviction order.</summary>
-        internal long LastTouched => System.Threading.Volatile.Read(ref _stamp);
+        /// <summary>When this bucket was last refilled, for eviction order.</summary>
+        internal long LastTouched => _stamp;
 
-        /// <summary>Whether a token is available now, refilling first.</summary>
-        /// <param name="now">The caller's timestamp, so every key in one attempt is judged at one instant.</param>
+        /// <summary>Whether at least one token is in hand, as of the last <see cref="Refill"/>.</summary>
+        internal bool HasToken => _tokens >= 1d;
+
+        /// <summary>Adds whatever time has earned since the last touch, and returns this bucket so a caller can chain the test.</summary>
+        /// <param name="now">The attempt's timestamp.</param>
         /// <param name="capacity">The ceiling.</param>
         /// <param name="refillTicks">Stopwatch ticks per token.</param>
-        /// <returns><see langword="true"/> when at least one token is in hand.</returns>
-        internal bool HasToken(long now, int capacity, long refillTicks)
-        {
-            lock (_gate)
-            {
-                Refill(now, capacity, refillTicks);
-                return _tokens >= 1d;
-            }
-        }
-
-        /// <summary>Spends one token, never going below zero.</summary>
-        /// <param name="now">The caller's timestamp.</param>
-        /// <param name="capacity">The ceiling.</param>
-        /// <param name="refillTicks">Stopwatch ticks per token.</param>
-        internal void Take(long now, int capacity, long refillTicks)
-        {
-            lock (_gate)
-            {
-                Refill(now, capacity, refillTicks);
-                _tokens = Math.Max(0d, _tokens - 1d);
-            }
-        }
-
-        /// <summary>Adds whatever time has earned since the last touch. Caller holds the lock.</summary>
-        /// <param name="now">The caller's timestamp.</param>
-        /// <param name="capacity">The ceiling.</param>
-        /// <param name="refillTicks">Stopwatch ticks per token.</param>
-        private void Refill(long now, int capacity, long refillTicks)
+        /// <returns>This bucket.</returns>
+        internal Bucket Refill(long now, int capacity, long refillTicks)
         {
             var elapsed = now - _stamp;
             if (elapsed > 0)
             {
                 _tokens = Math.Min(capacity, _tokens + ((double)elapsed / refillTicks));
+                _stamp = now;
             }
 
-            System.Threading.Volatile.Write(ref _stamp, now);
+            return this;
         }
+
+        /// <summary>Spends one token. Only called after <see cref="HasToken"/> was true under the same lock.</summary>
+        internal void Spend() => _tokens -= 1d;
     }
 }

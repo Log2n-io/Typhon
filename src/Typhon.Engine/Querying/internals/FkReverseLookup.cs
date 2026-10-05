@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using Typhon.Schema.Definition;
@@ -175,6 +175,45 @@ internal static unsafe class FkReverseLookup
     /// Phase 2: one archetype's own FK tree. Values are packed <c>ClusterLocation</c>s (<c>clusterChunkId * 64 + slotIndex</c>), so the entity PK comes from
     /// the cluster's own entity-id array rather than from a chunk header.
     /// </summary>
+    /// <summary>
+    /// Resolves one cluster location to its entity id and hands it to the action.
+    /// </summary>
+    /// <param name="clusterLocation">The index entry's value: <c>chunkId * 64 + slot</c>.</param>
+    /// <param name="clusterAccessor">The archetype's cluster accessor, already open.</param>
+    /// <param name="layout">The archetype's cluster layout, for the entity-id array's offset.</param>
+    /// <param name="meta">The archetype, passed through to the action.</param>
+    /// <param name="fkInSlot">Whether the FK component is SingleVersion, so its value lives in the cluster slot and can be re-read.</param>
+    /// <param name="fkOffset">Byte offset of the FK field within a cluster chunk's component array.</param>
+    /// <param name="fkStride">Size of the FK's component, the stride of that array.</param>
+    /// <param name="targetPK">The target the scan is looking for, re-checked against the slot.</param>
+    /// <param name="action">The caller's action.</param>
+    /// <returns>What the action returned: <see langword="false"/> to stop the scan. A stale entry is skipped as <see langword="true"/>.</returns>
+    /// <remarks>
+    /// Shared by the unique and AllowMultiple branches above, which differ only in how they walk the index. Keeping the resolution in
+    /// one place is what stops the two from disagreeing about where an entity id lives — a cluster FK reads it from the cluster's own
+    /// entity-id array rather than from a chunk header, and that is easy to get subtly wrong twice.
+    ///
+    /// The staleness re-check is the other half, and belongs here for the same reason: the AllowMultiple branch copies a key's values
+    /// and releases their buffer before the action runs (IXS-10), so a slot may have been released or taken by another entity since the
+    /// copy. A SingleVersion slot is re-read against the target, as <c>IndexEntityEnumerator</c> does, because its destroy releases the
+    /// slot at once; a Versioned slot is released only by the entity cleanup, past every snapshot the destroy could hide from.
+    /// </remarks>
+    private static bool ProcessClusterLocation<TAction>(int clusterLocation, ref ChunkAccessor<PersistentStore> clusterAccessor,
+        in ArchetypeClusterInfo layout, ArchetypeMetadata meta, bool fkInSlot, int fkOffset, int fkStride, long targetPK, ref TAction action)
+        where TAction : struct, IFkSourceAction
+    {
+        var slot = clusterLocation & 0x3F;
+        var clusterBase = clusterAccessor.GetChunkAddress(clusterLocation >> 6);
+        var sourcePK = *(long*)(clusterBase + layout.EntityIdsOffset + slot * 8);
+        if ((*(ulong*)clusterBase & (1UL << slot)) == 0 || sourcePK == 0
+            || (fkInSlot && *(long*)(clusterBase + fkOffset + slot * fkStride) != targetPK))
+        {
+            return true;   // released since the copy, or another entity's now
+        }
+
+        return action.Process(sourcePK, meta);
+    }
+
     private static bool ScanClusterArchetype<TAction>(DatabaseEngine dbe, ArchetypeMetadata meta, int componentSlot, int fkFieldOrdinal, long targetPK,
         ref TAction action) where TAction : struct, IFkSourceAction
     {
@@ -202,47 +241,67 @@ internal static unsafe class FkReverseLookup
 
         var layout = clusterState.Layout;
         var clusterAccessor = clusterState.ClusterSegment.CreateChunkAccessor();
+
+        // A SingleVersion slot is re-checked against the target by ProcessClusterLocation; these are what it needs to do it.
+        var fkInSlot = dbe._archetypeStates[meta.ArchetypeId].SlotToComponentTable[componentSlot].StorageMode == StorageMode.SingleVersion;
+        var fkOffset = layout.ComponentOffset(componentSlot) + ixSlot.Fields[fkFieldOrdinal].FieldOffset;
+        var fkStride = layout.ComponentSize(componentSlot);
         try
         {
-            // The key's values are copied and its buffer released before the action runs: an action that reads an entity walks its chain, and a chain
-            // walk under the buffer's lock waited on a publish that held the chain and waited on the buffer (IXS-10).
-            var values = Array.Empty<int>();
-            // A SingleVersion slot is re-checked against the target, as IndexEntityEnumerator does: its destroy releases the slot at once, and a spawn may
-            // have taken it after the copy. A Versioned slot is released only by the entity cleanup, past every snapshot the destroy could hide from.
-            var fkInSlot = dbe._archetypeStates[meta.ArchetypeId].SlotToComponentTable[componentSlot].StorageMode == StorageMode.SingleVersion;
-            var fkOffset = layout.ComponentOffset(componentSlot) + ixSlot.Fields[fkFieldOrdinal].FieldOffset;
-            var fkStride = layout.ComponentSize(componentSlot);
-            var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
-            try
+            // The two enumerators are not interchangeable and each REFUSES the other's index: EnumerateRangeMultiple throws on a unique
+            // index and EnumerateRange throws on an AllowMultiple one. This used to call the multiple form unconditionally, so a UNIQUE
+            // foreign key made the parent's Destroy throw out of FindCascadeChildren instead of cascading — the cascade was unusable for
+            // a one-to-one relationship, which is the shape a profile row keyed on its owner has. Found from the SWG demo's Character,
+            // whose [Index] on EntityLink<AccountArch> is unique precisely so read-or-create cannot race.
+            if (fkIndex.AllowMultiple)
             {
-                while (enumerator.MoveNextKey())
+                // The key's values are copied and its buffer released before the action runs: an action that reads an entity walks its chain, and a chain
+                // walk under the buffer's lock waited on a publish that held the chain and waited on the buffer (IXS-10).
+                var values = Array.Empty<int>();
+                var enumerator = fkIndex.EnumerateRangeMultiple(targetPK, targetPK);
+                try
                 {
-                    var count = enumerator.DrainCurrentKey(ref values);
-                    for (var j = 0; j < count; j++)
+                    while (enumerator.MoveNextKey())
                     {
-                        var clusterLocation = values[j];
-                        var slot = clusterLocation & 0x3F;
-                        var clusterBase = clusterAccessor.GetChunkAddress(clusterLocation >> 6);
-                        var sourcePK = *(long*)(clusterBase + layout.EntityIdsOffset + slot * 8);
-                        if ((*(ulong*)clusterBase & (1UL << slot)) == 0 || sourcePK == 0
-                            || (fkInSlot && *(long*)(clusterBase + fkOffset + slot * fkStride) != targetPK))
+                        var count = enumerator.DrainCurrentKey(ref values);
+                        for (var j = 0; j < count; j++)
                         {
-                            continue;   // released since the copy, or another entity's now
+                            if (!ProcessClusterLocation(values[j], ref clusterAccessor, in layout, meta, fkInSlot, fkOffset, fkStride, targetPK,
+                                    ref action))
+                            {
+                                return false;
+                            }
                         }
-
-                        if (!action.Process(sourcePK, meta))
+                    }
+                }
+                finally
+                {
+                    enumerator.Dispose();
+                    if (values.Length > 0)
+                    {
+                        System.Buffers.ArrayPool<int>.Shared.Return(values);
+                    }
+                }
+            }
+            else
+            {
+                // A unique index holds at most ONE entry for the key, so this loop runs 0 or 1 times. It is still a range enumeration
+                // rather than a point lookup because that is the API shape, and min == max makes it the same descent.
+                var enumerator = fkIndex.EnumerateRange(targetPK, targetPK);
+                try
+                {
+                    while (enumerator.MoveNext())
+                    {
+                        if (!ProcessClusterLocation(enumerator.Current.Value, ref clusterAccessor, in layout, meta, fkInSlot, fkOffset, fkStride,
+                                targetPK, ref action))
                         {
                             return false;
                         }
                     }
                 }
-            }
-            finally
-            {
-                enumerator.Dispose();
-                if (values.Length > 0)
+                finally
                 {
-                    System.Buffers.ArrayPool<int>.Shared.Return(values);
+                    enumerator.Dispose();
                 }
             }
         }
