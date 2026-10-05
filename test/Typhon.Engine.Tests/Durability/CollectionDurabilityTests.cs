@@ -702,6 +702,7 @@ internal sealed class CollectionDurabilityTests
                 using var cca = tx.CreateComponentCollectionAccessor(ref unsaved);
             }
 
+            // Not a transient TyphonException, so the cycle is classified FATAL and the wait returns at once; a transient one would cost the 5 s timeout.
             dbe.CheckpointManager.InFlightCommitFloor = static () => throw new InvalidOperationException("staged: the cycle fails after its cycle-start hook");
             Assert.That(dbe.CheckpointManager.ForceCheckpointAndWait(TimeSpan.FromSeconds(5)), Is.False, "the staged cycle must not cover anything");
 
