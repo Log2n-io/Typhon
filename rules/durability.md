@@ -447,17 +447,27 @@ CK-08 (flush-only cycles) are later increments.
           deferred work (e.g. EntityMap bucket pages) — page ownership is final only afterwards. The corrected bitmap is held
           dirty (DC > 0 ⇒ never evicted stale) and consolidated by the next checkpoint / clean shutdown; a re-crash before that
           simply re-derives (idempotent — `owned` depends only on persisted segment directories)
-  scope: `DatabaseEngine.RederiveOccupancyOnCrash` (call site after `SealRecovery`), `BuildOwnedPageBitmap`,
-         `ManagedPagedMMF.RederiveOccupancy`, `BitmapL3.OverwriteFromDerived` + `RecomputeSummariesFromL0`. Gated on
-         `WalFilesPresentAtOpen`; replaces FPI repair of occupancy pages (kills STO-5 / STO-11 class once FPI is retired in D)
+  scope: `DatabaseEngine.RederiveOccupancyOnCrash` (call site after `SealRecovery`), `BuildOwnedPageBitmap` and its
+         persisted walk (`ClaimPersistedSegment`, `ClaimDirectoryTwin`), `ManagedPagedMMF.RederiveOccupancy`,
+         `BitmapL3.OverwriteFromDerived` + `RecomputeSummariesFromL0`. Gated on `WalFilesPresentAtOpen`; replaces FPI repair of
+         occupancy pages (kills STO-5 / STO-11 class once FPI is retired in D)
   on_violation: a torn / stale occupancy page survives recovery → a clear bit over a live page double-allocates it (data
                 corruption), or a stale set bit leaks the page forever
+  note (2026-10-05, #850): the occupancy reserves and the CK-05 twins (both walks) are claimed up to the bitmap's extent, not
+        the file's page count. Both are bit-set when handed out and written only on first use, so a fresh one legitimately
+        sits past the written end of the file; bounding them by it dropped them, and the wholesale adoption wrote them free
+        while the metadata still named them. Segment pages, directory-map extensions and the reserved roots stay bounded by
+        the file.
   verified: TornOccupancyPage_WithFpiDisabled_RecoversViaRederive (FPI off + torn checkpointed occupancy page ⇒
             `RunStorageIntegrityCheck` reports 0 orphans / 0 phantoms; `LastOpenOccupancyRederiveWordsChanged > 0` genuineness)
             [VerifiesRule]; OwnedBitmapIsIdenticalWithAndWithoutSchema (#771 — the file-only property itself: the derived
             `owned` set is bit-identical with and without the schema registered) [VerifiesRule];
-            RederiveRefusesWhenAPersistedSpiCannotBeAccounted (a partial reconstruction refuses and leaves the bitmap
-            untouched); CleanShutdownReopenDoesNotRederive (the heal does not run on the clean path)
+            CrashRederiveKeepsTheUnwrittenReserveAndTwinsOwned (#850 — after a hard crash, the occupancy data reserve and a
+            directory twin both past the written end stay allocated through the re-derive; genuineness: the re-derive reclaims
+            a leaked page) [VerifiesRule], falsified for each half by Mutant_ARederiveClippedToTheWrittenEndIsCaught [RuleMutant];
+            UnwrittenTwinsAreOwnedWithAndWithoutSchema (#850 — the registered and the persisted walk each claim a twin past the
+            written end) [VerifiesRule]; RederiveRefusesWhenAPersistedSpiCannotBeAccounted (a partial reconstruction refuses
+            and leaves the bitmap untouched); CleanShutdownReopenDoesNotRederive (the heal does not run on the clean path)
 
 ### CK-10: A checkpoint persists the per-archetype segment pointers it consolidates `[fatal]` `[silent]`
   invariant a checkpoint that consolidates a cluster / EntityMap / per-archetype-index segment's DATA pages into the data file MUST
