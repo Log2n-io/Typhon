@@ -32,15 +32,19 @@ class SeqlockCounterSlotReuseTests
         dbe.RegisterComponentFromAccessor<ItemData>();
     }
 
-    // Quarantined against #892: red on main, ~4 runs in 10, and its own docstring's claim that it has no timing dependence is what the issue disproves.
-    // The nightly still runs the category, which is where a known-red test is supposed to be observed; the merge gate does not, so it does not teach
-    // everyone to read a red gate as normal. Un-quarantine with the fix, not before.
+    // The red runs (#892, up to 9 in 10) were never this test's invariant: they were CreateOrGrow's chain post-condition reading a slot the checkpoint
+    // thread had just handed to another page, and reporting that page's header as a lost write (#840). SegmentPostConditionReadTests stages that
+    // interleaving deterministically.
+    // Still quarantined against #892: with that fixed, 12 repetitions in one process fail 3 runs in 5 on a 5 s 'PageCache/SlotReady' timeout.
+    // PagedMMF.TryAcquire, entering a slot whose owner is still preparing it, withdraws SlotReady, backs off, and writes its stale "not ready" back over
+    // the owner's "ready", so the slot never becomes ready. The odd-seqlock invariant held on every iteration. Un-quarantine once that is fixed.
     [Test]
     [Category("Quarantine")]
     public void SlotReuseUnderCachePressure_LeavesNoQuiescentPageWithOddSeqlock()
     {
         // Pre-fix the invariant violation reproduced on a fraction of builds; loop so a regression is caught reliably. Each build overflows the min cache
-        // (forcing the eviction/reuse path), then asserts the invariant directly — no timing dependence, so the test is deterministic once the fix holds.
+        // (forcing the eviction/reuse path), then asserts the invariant directly. Which slots get reused depends on the checkpoint thread's timing, so a
+        // run exercises a different interleaving each time; what is asserted does not depend on it.
         var baseDir = Path.Combine(Path.GetTempPath(), "Typhon.Tests", nameof(SeqlockCounterSlotReuseTests));
         Directory.CreateDirectory(baseDir);
 

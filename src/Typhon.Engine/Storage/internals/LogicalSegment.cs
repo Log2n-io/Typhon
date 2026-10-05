@@ -86,6 +86,17 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     internal Action<int> GrowStepProbe;
 
     /// <summary>
+    /// Test hook: runs when <see cref="PinForCheck"/> holds a page a check is about to read (CreateOrGrow's post-condition, or another caller of
+    /// <see cref="VerifyDirectoryAgainst"/>), with that page's file page index. Null in production.
+    /// </summary>
+    internal Action<int> PostConditionReadProbe;
+
+    /// <summary>
+    /// Test hook: runs inside <see cref="PinForCheck"/> between its first lookup and its slot reference, with the file page index. Null in production.
+    /// </summary>
+    internal Action<int> PostConditionPinGapProbe;
+
+    /// <summary>
     /// The segment's runtime role, persisted in the root-page <see cref="LogicalSegmentHeader"/>. Set at <c>Create</c>, restored at <c>Load</c>.
     /// Consumed by the Database File Map (Module 15) so every allocated page classifies without context-derived ownership.
     /// </summary>
@@ -219,6 +230,56 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
         _store.IncrementSlotRefCount(memPageIndex);
         _store.UnlatchPageExclusive(memPageIndex);
         return memPageIndex;
+    }
+
+    /// <summary>
+    /// Faults <paramref name="filePageIndex"/> in for a post-condition read and holds its slot with a slot reference, so what the check reads is that
+    /// page. The caller drops the reference with <see cref="IPageStore.DecrementSlotRefCount"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The epoch tag alone does not hold the slot, for the reason PS-09 gives for the grow's latches: the grow tags with a bare <c>GlobalEpoch</c>
+    /// snapshot, and when the caller has no epoch scope of its own (segment creation from <c>InitializeArchetypes</c> or schema registration) nothing
+    /// keeps <c>MinActiveEpoch</c> below it. The checkpoint thread reclaimed a just-faulted slot between the fetch and the read, and the check reported
+    /// the next occupant's header as a lost chain write (#840, #892). The tag is still taken, so a caller that does hold a scope keeps its pin (EP-01).
+    /// </para>
+    /// <para>
+    /// Holding the slot takes a second lookup: the reference is a full fence, and <c>TryAcquire</c> withdraws <c>SlotReady</c> and fences before it
+    /// re-checks the reference (PS-15). A reclaim that misses the reference is therefore seen by the lookup, which then resolves the page to another
+    /// slot. Resolving to the same one proves the slot holds this page now, with the reference already in place, so no reclaim can follow.
+    /// </para>
+    /// </remarks>
+    private int PinForCheck(int filePageIndex, long epoch)
+    {
+        const int maxAttempts = 64;
+        for (var attempt = 0; ; attempt++)
+        {
+            _store.RequestPageEpoch(filePageIndex, epoch, out var memPageIndex);
+            PostConditionPinGapProbe?.Invoke(filePageIndex);
+            _store.IncrementSlotRefCount(memPageIndex);
+            try
+            {
+                _store.RequestPageEpoch(filePageIndex, epoch, out var check);
+                if (check == memPageIndex)
+                {
+                    PostConditionReadProbe?.Invoke(filePageIndex);
+                    return memPageIndex;
+                }
+            }
+            catch
+            {
+                // The second lookup can fail like any fetch (a CRC failure, a lock or back-pressure timeout): the reference must not outlive it.
+                _store.DecrementSlotRefCount(memPageIndex);
+                throw;
+            }
+            _store.DecrementSlotRefCount(memPageIndex);
+
+            if (attempt >= maxAttempts)
+            {
+                throw new InvalidOperationException(
+                    $"LogicalSegment post-condition could not hold file page {filePageIndex} after {maxAttempts} attempts (page-cache slot contention).");
+            }
+        }
     }
 
     /// <summary>
@@ -934,9 +995,9 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
     /// </summary>
     private bool ChainLinkMatches(long epoch, int[] pages, int index, out int actualNext)
     {
-        _store.RequestPageEpoch(pages[index], epoch, out var memPageIndex);
-        var page = _store.GetPage(memPageIndex);
-        actualNext = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+        var memPageIndex = PinForCheck(pages[index], epoch);
+        actualNext = _store.GetPage(memPageIndex).StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextRawDataPBID;
+        _store.DecrementSlotRefCount(memPageIndex);
         return actualNext == (((index + 1) < pages.Length) ? pages[index + 1] : 0);
     }
 
@@ -962,41 +1023,54 @@ public class LogicalSegment<TStore> : IDisposable where TStore : struct, IPageSt
             return 0;
         }
 
-        var rootIndex = RootPageIndex;
-        _store.RequestPageEpoch(rootIndex, epoch, out var memPageIndex);
-        var page = _store.GetPage(memPageIndex);
-
-        var matched = 0;
-        var rd = page.RawDataReadOnly<int>(0, RootHeaderIndexSectionCount);
-        var maxIndicesForPage = RootHeaderIndexSectionCount;
-        var i = 0;
-        while (matched < expected.Length)
+        // Each directory page is held while it is read (PinForCheck) and released before the next one is fetched; memPageIndex is -1 in between, so a
+        // throw from that fetch does not release the previous page twice.
+        var memPageIndex = PinForCheck(RootPageIndex, epoch);
+        try
         {
-            if (i == maxIndicesForPage)
+            var page = _store.GetPage(memPageIndex);
+
+            var matched = 0;
+            var rd = page.RawDataReadOnly<int>(0, RootHeaderIndexSectionCount);
+            var maxIndicesForPage = RootHeaderIndexSectionCount;
+            var i = 0;
+            while (matched < expected.Length)
             {
-                ref var lsh = ref page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset);
-                if (lsh.LogicalSegmentNextMapPBID == 0)
+                if (i == maxIndicesForPage)
                 {
-                    // Map-page chain truncated before the expected entry count — caller's assertion will fire.
+                    var nextMap = page.StructAt<LogicalSegmentHeader>(LogicalSegmentHeader.Offset).LogicalSegmentNextMapPBID;
+                    if (nextMap == 0)
+                    {
+                        // Map-page chain truncated before the expected entry count — caller's assertion will fire.
+                        return matched;
+                    }
+                    _store.DecrementSlotRefCount(memPageIndex);
+                    memPageIndex = -1;
+                    memPageIndex = PinForCheck(nextMap, epoch);
+                    page = _store.GetPage(memPageIndex);
+                    rd = page.RawDataReadOnly<int>(0, NextHeadersIndexSectionCount);
+                    i = 0;
+                    maxIndicesForPage = NextHeadersIndexSectionCount;
+                }
+
+                if (rd[i] != expected[matched])
+                {
+                    // Persisted directory entry diverged from in-memory page list — caller's assertion will fire with the
+                    // diff. Stop here so we return the count of consecutive matching entries (useful for diagnosis).
                     return matched;
                 }
-                _store.RequestPageEpoch(lsh.LogicalSegmentNextMapPBID, epoch, out memPageIndex);
-                page = _store.GetPage(memPageIndex);
-                rd = page.RawDataReadOnly<int>(0, NextHeadersIndexSectionCount);
-                i = 0;
-                maxIndicesForPage = NextHeadersIndexSectionCount;
+                matched++;
+                i++;
             }
-
-            if (rd[i] != expected[matched])
-            {
-                // Persisted directory entry diverged from in-memory page list — caller's assertion will fire with the
-                // diff. Stop here so we return the count of consecutive matching entries (useful for diagnosis).
-                return matched;
-            }
-            matched++;
-            i++;
+            return matched;
         }
-        return matched;
+        finally
+        {
+            if (memPageIndex >= 0)
+            {
+                _store.DecrementSlotRefCount(memPageIndex);
+            }
+        }
     }
 
     /// <summary>

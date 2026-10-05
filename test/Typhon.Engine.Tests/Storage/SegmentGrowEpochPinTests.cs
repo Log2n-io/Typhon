@@ -45,7 +45,8 @@ namespace Typhon.Engine.Tests;
 /// contention, and marking this fixture would only move it into the same serial phase. It is deliberately absent.
 /// </para>
 /// <para>
-/// The underlying defect is real and untouched by any of this: it reproduces on an unmodified engine at the same rate.
+/// The underlying defect was real and untouched by any of this: the chain check read a slot it did not hold, which the checkpoint thread could hand
+/// to another page between the fetch and the read (#892, <c>SegmentPostConditionReadTests</c>).
 /// </para>
 /// </remarks>
 public sealed class SegmentGrowEpochPinTests
